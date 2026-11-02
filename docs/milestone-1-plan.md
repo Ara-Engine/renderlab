@@ -10,7 +10,7 @@ Two existing crates, a mesh shader, focused GPU tests, viewer interaction checks
 
 The installed poteto-mode routes this cross-cutting task to figure-it-out. Apply how for grounding, architect/arena for alternative resource designs, and show-me-your-work for a committed decision log. Use benchmark-checklist before accepting timings. Apply deslop before each commit and independent review before declaring completion.
 
-Confirmed model roles use GPT-6.1 Sol for routine implementation and exploration, Astra for hardest implementation, and Opus 5.5 for judgment/review. Design panels use all three. Budget is large (xhigh). Exact model IDs and provider-specific effort options are in the user's pstack-models.mdc; delegates receive them explicitly because T3 does not automatically apply Cursor rules.
+Confirmed model roles use GPT-6.1 Sol for routine implementation and exploration, Astra for hardest implementation, and Opus 5.5 for hillclimb and selected judgment/review. Islam trusts Opus more but wants to conserve its usage. Sol and Astra generate design candidates; Opus provides one consolidated design review and a final acceptance/trail review. Avoid routing routine documentation or repeated small fixes to Opus. Budget is large (xhigh). Exact model IDs and provider-specific effort options are in the user's pstack-models.mdc; delegates receive them explicitly because T3 does not automatically apply Cursor rules.
 
 ## Units and gates
 
