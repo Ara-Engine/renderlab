@@ -16,7 +16,7 @@ The quality multiplier needs an agreed operational definition. One candidate is 
 
 Future comparisons must name the Unreal version, content, hardware, internal/output resolution, reconstruction, enabled effects, quality settings, and timing method. Measure the complete rendering workload, including geometry, materials, visibility, lighting, updates, and required preparation. Report CPU and GPU costs and memory separately. The intended success is the higher accepted quality at the performance target in the same configuration. Separate fast and high-quality configurations do not establish that combined result. Representative workloads must be agreed before making an engine-wide claim; a tiny fixture cannot establish it.
 
-This direction does not expand the currently authorized Milestone 1. M1 establishes the correctness and cost measurements needed to test future approaches. Discuss later rendering layers before implementing them.
+M1 established the correctness and cost measurements needed to test future approaches. Islam has now explicitly authorized M2-M4, including investigation and implementation of justified improvements beyond Nanite. The working scope and acceptance gates are in [milestones-2-4.md](milestones-2-4.md). Stop after M4; the remaining proposed roadmap is not implementation authorization.
 
 ## Milestone 0: development environment (complete)
 

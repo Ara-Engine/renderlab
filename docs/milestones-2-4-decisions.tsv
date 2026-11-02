@@ -1,0 +1,2 @@
+time	phase	decision	reason	evidence	status
+2026-11-02	authorization	Implement M2-M4 and investigate justified Nanite improvements	Islam explicitly requested these milestones; M1 stop boundary is superseded through M4 only	docs/milestones-2-4.md	Grounding and research starting; no M2-M4 implementation claimed
