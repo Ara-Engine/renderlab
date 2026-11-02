@@ -1,0 +1,13 @@
+[package]
+name = "renderlab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+
