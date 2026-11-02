@@ -1,6 +1,6 @@
 # Milestone 1 execution plan
 
-Status: framing and architectural grounding. Implementation has not started.
+Status: design selected after independent Opus review. Implementation is starting against m1-design.md.
 
 ## Scope and completion
 
