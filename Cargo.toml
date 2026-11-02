@@ -6,6 +6,11 @@ publish = false
 
 [workspace]
 resolver = "3"
+members = ["viewer"]
+
+[dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+pollster = "0.4"
 
 [profile.dev]
 debug = "line-tables-only"
