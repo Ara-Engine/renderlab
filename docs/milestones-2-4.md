@@ -32,3 +32,5 @@ Each milestone keeps last-valid shader recovery, responsive resizing/minimizatio
 Largest risks are feature-preserving hierarchy construction, avoiding cracks across selected detail levels, reliable streaming fallback without hidden waits, and retaining fast builds while adding import/cooking support. No particular new dependency or algorithm is selected yet. Research and design should resolve those risks rather than produce a general engine architecture.
 
 The decision trail is `milestones-2-4-decisions.tsv`. Raw measurements/captures stay ignored. Each checkpoint records exact source/binary identity, build profile, hardware, content, resolution, quality, validation/layer settings and contention. Development latency and optimized rendering throughput remain separate measurements.
+
+The selected implementation contract and reconciled pstack review are recorded in [m2-m4-design.md](m2-m4-design.md). M2 starts with independently tested bounds/clipping, then persistent instance storage and image-equivalent batching before enabling culling.

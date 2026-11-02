@@ -3,6 +3,8 @@
 mod mesh;
 mod observe;
 mod renderer;
+#[cfg(test)]
+mod visibility;
 
 pub use glam::{Mat4, Vec3};
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData, Vertex};
