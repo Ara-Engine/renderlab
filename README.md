@@ -15,7 +15,7 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 
-Milestone 1 is complete. Milestone 2 adds persistent instance collections, ordered batching and conservative visibility; see [its verification record](docs/milestone-2.md). No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing and GI remain future work. The single-sample grid visibly aliases at a distance.
+Milestones 1 and 2 are complete on the recorded Windows/Vulkan host. Milestone 2 adds persistent instance collections, ordered batching and conservative visibility; see [its verification record](docs/milestone-2.md). No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing and GI remain future work. The single-sample grid visibly aliases at a distance.
 
 ## Verify
 
