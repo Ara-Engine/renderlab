@@ -27,85 +27,119 @@ impl Aabb {
     }
 }
 
-/// Conservative homogeneous clipping; uncertain arithmetic keeps the object visible.
-/// The shader must evaluate camera * model * the original bounded vertex position.
-pub(crate) fn may_be_visible(clip: &Mat4, model: &Mat4, bounds: &Aabb) -> bool {
-    let clip = clip.to_cols_array_2d();
-    let model = model.to_cols_array_2d();
-    let inputs = clip
-        .iter()
-        .flatten()
-        .chain(model.iter().flatten())
-        .chain(&bounds.min)
-        .chain(&bounds.max);
+fn magnitude<'a>(inputs: impl Iterator<Item = &'a f32>) -> f64 {
     let mut magnitude = 1.0_f64;
     for &value in inputs {
         if !value.is_finite() {
-            return true;
+            return f64::INFINITY;
         }
         magnitude = magnitude.max(f64::from(value).abs());
     }
-    if 128.0 * magnitude.powi(3) >= f64::from(f32::MAX) {
-        return true;
-    }
-    let mut center = [0.0; 4];
-    let mut extent = [0.0; 4];
-    let mut absolute_position = [0.0; 4];
-    for axis in 0..3 {
-        let low = f64::from(bounds.min[axis]);
-        let high = f64::from(bounds.max[axis]);
-        center[axis] = (low + high) * 0.5;
-        extent[axis] = (high - low) * 0.5;
-        absolute_position[axis] = low.abs().max(high.abs());
-    }
-    center[3] = 1.0;
-    absolute_position[3] = 1.0;
+    magnitude
+}
 
-    let mut absolute_world = [0.0; 4];
-    for (row, value) in absolute_world.iter_mut().enumerate() {
-        *value = (0..4)
-            .map(|col| f64::from(model[col][row]).abs() * absolute_position[col])
-            .sum();
+pub(crate) struct HomogeneousWorldBounds {
+    center: [f64; 4],
+    extent: [f64; 4],
+    absolute: [f64; 4],
+    magnitude: f64,
+}
+impl HomogeneousWorldBounds {
+    pub fn new(model: &Mat4, bounds: &Aabb) -> Self {
+        let model = model.to_cols_array_2d();
+        let mut center = [0.0; 4];
+        let mut extent = [0.0; 4];
+        let mut absolute = [0.0; 4];
+        for axis in 0..3 {
+            let low = f64::from(bounds.min[axis]);
+            let high = f64::from(bounds.max[axis]);
+            center[axis] = (low + high) * 0.5;
+            extent[axis] = (high - low) * 0.5;
+            absolute[axis] = low.abs().max(high.abs());
+        }
+        center[3] = 1.0;
+        absolute[3] = 1.0;
+        Self {
+            center: std::array::from_fn(|row| {
+                (0..4)
+                    .map(|col| f64::from(model[col][row]) * center[col])
+                    .sum()
+            }),
+            extent: std::array::from_fn(|row| {
+                (0..4)
+                    .map(|col| f64::from(model[col][row]).abs() * extent[col])
+                    .sum()
+            }),
+            absolute: std::array::from_fn(|row| {
+                (0..4)
+                    .map(|col| f64::from(model[col][row]).abs() * absolute[col])
+                    .sum()
+            }),
+            magnitude: magnitude(model.iter().flatten().chain(&bounds.min).chain(&bounds.max)),
+        }
     }
-    let mut absolute_clip = [0.0; 4];
-    let mut product = [[0.0; 4]; 4]; // Row-major f64 composition.
-    for row in 0..4 {
-        absolute_clip[row] = (0..4)
-            .map(|col| f64::from(clip[col][row]).abs() * absolute_world[col])
-            .sum();
-        for (col, value) in product[row].iter_mut().enumerate() {
-            *value = (0..4)
-                .map(|k| f64::from(clip[k][row]) * f64::from(model[col][k]))
+}
+
+pub(crate) struct ClipVolume {
+    planes: [[f64; 4]; 6],
+    error_weights: [[f64; 4]; 6],
+    magnitude: f64,
+}
+impl ClipVolume {
+    pub fn new(clip: &Mat4) -> Self {
+        let clip = clip.to_cols_array_2d();
+        Self {
+            planes: std::array::from_fn(|plane| {
+                std::array::from_fn(|col| {
+                    if plane == 4 {
+                        f64::from(clip[col][2])
+                    } else {
+                        let sign = if plane % 2 == 0 { 1.0 } else { -1.0 };
+                        f64::from(clip[col][3]) + sign * f64::from(clip[col][plane / 2])
+                    }
+                })
+            }),
+            error_weights: std::array::from_fn(|plane| {
+                std::array::from_fn(|col| {
+                    if plane == 4 {
+                        f64::from(clip[col][2]).abs()
+                    } else {
+                        f64::from(clip[col][3]).abs() + f64::from(clip[col][plane / 2]).abs()
+                    }
+                })
+            }),
+            magnitude: magnitude(clip.iter().flatten()),
+        }
+    }
+    pub fn may_be_visible(&self, bounds: &HomogeneousWorldBounds) -> bool {
+        let magnitude = self.magnitude.max(bounds.magnitude);
+        if 128.0 * magnitude.powi(3) >= f64::from(f32::MAX) {
+            return true;
+        }
+        // Allow faithful rounding/reassociation and amplified subnormal flushing.
+        // Derivation and falsification contract: docs/m2-m4-design.md, Visibility and reload.
+        const RELATIVE: f64 = 1.0 / 32768.0;
+        let absolute = f64::from(f32::MIN_POSITIVE) * 256.0 * magnitude.powi(2);
+        for (plane, weights) in self.planes.iter().zip(&self.error_weights) {
+            let maximum: f64 = (0..4)
+                .map(|axis| {
+                    plane[axis] * bounds.center[axis] + plane[axis].abs() * bounds.extent[axis]
+                })
                 .sum();
-        }
-    }
-
-    // Allow faithful rounding/reassociation and amplified subnormal flushing.
-    // Derivation and falsification contract: docs/m2-m4-design.md, Visibility and reload.
-    const RELATIVE: f64 = 1.0 / 32768.0;
-    let absolute = f64::from(f32::MIN_POSITIVE) * 256.0 * magnitude.powi(2);
-    for plane in 0..6 {
-        let mut coefficients = [0.0; 4];
-        let envelope;
-        if plane == 4 {
-            coefficients = product[2];
-            envelope = absolute_clip[2];
-        } else {
-            let axis = plane / 2;
-            let sign = if plane % 2 == 0 { 1.0 } else { -1.0 };
-            for (col, value) in coefficients.iter_mut().enumerate() {
-                *value = product[3][col] + sign * product[axis][col];
+            let envelope: f64 = (0..4)
+                .map(|axis| weights[axis] * bounds.absolute[axis])
+                .sum();
+            if maximum + RELATIVE * envelope + absolute < 0.0 {
+                return false;
             }
-            envelope = absolute_clip[3] + absolute_clip[axis];
         }
-        let maximum: f64 = (0..4)
-            .map(|axis| coefficients[axis] * center[axis] + coefficients[axis].abs() * extent[axis])
-            .sum();
-        if maximum + RELATIVE * envelope + absolute < 0.0 {
-            return false;
-        }
+        true
     }
-    true
+}
+
+#[cfg(test)]
+fn may_be_visible(clip: &Mat4, model: &Mat4, bounds: &Aabb) -> bool {
+    ClipVolume::new(clip).may_be_visible(&HomogeneousWorldBounds::new(model, bounds))
 }
 
 #[cfg(test)]

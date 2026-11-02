@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 if ($Runs -lt 1) { throw 'Runs must be positive' }
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 Push-Location $root
-$run = Join-Path $root ('measurements/m1-dev-loop/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$run = Join-Path $root ('measurements/dev-loop/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $run -Force | Out-Null
 $utf8 = [Text.UTF8Encoding]::new($false)
 $rustPath = Join-Path $root 'src/renderer.rs'
@@ -25,6 +25,7 @@ $results = [ordered]@{
     binaries = [ordered]@{}
     vulkan_implicit_layer_path = $env:VK_IMPLICIT_LAYER_PATH
     success = $false
+    source_hashes = @(Get-FileHash -Path (@('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml') + @(Get-ChildItem src,viewer/src,shaders -Recurse -File | Select-Object -ExpandProperty FullName)) -Algorithm SHA256 | Select-Object Path,Hash)
 }
 function Assert-Quiet {
     if (Test-Path 'D:/AraBuild/render-v3/quiet-window.lock') { throw 'Quiet-window lock present. Review its owner before running.' }
@@ -115,7 +116,7 @@ try {
     } finally { $hasher.Dispose() }
     & nvidia-smi --query-gpu=name,driver_version,utilization.gpu,memory.used --format=csv | Set-Content "$run/gpu-before.csv"
     Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Id, ProcessName, CPU, WorkingSet64 | ConvertTo-Json | Set-Content "$run/processes-before.json"
-    if ($Cold) { Build 'clean-target' @('--target-dir', "target/m1-clean-$([Guid]::NewGuid().ToString('N'))") }
+    if ($Cold) { Build 'clean-target' @('--target-dir', "target/dev-loop-clean-$([Guid]::NewGuid().ToString('N'))") }
     Build 'prepare'
     1..$Runs | ForEach-Object { Build "noop-$_" }
     $editClock = [Diagnostics.Stopwatch]::StartNew()

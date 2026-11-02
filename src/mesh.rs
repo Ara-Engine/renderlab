@@ -1,4 +1,4 @@
-use crate::{Error, Mat4, Vec3, observe::Owned};
+use crate::{Error, Instances, Mat4, Vec3, Visibility, observe::Owned, visibility::Aabb};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
@@ -14,26 +14,33 @@ pub struct MeshData<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    pub max_draws: u32,
+    /// Maximum slots per instance collection, not the number of frame draws.
+    pub max_instances: u32,
     pub max_mesh_bytes: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_draws: 1024,
+            max_instances: 1024,
             max_mesh_bytes: 64 * 1024 * 1024,
         }
     }
 }
 impl Limits {
     pub(crate) fn validate(self, device: &wgpu::Limits) -> Result<(), Error> {
-        if self.max_draws == 0
-            || u64::from(self.max_draws) * 64 > device.max_buffer_size
+        if self.max_instances == 0
+            || u64::from(self.max_instances) * 64 > device.max_buffer_size
+            || u64::from(self.max_instances) * 64 > device.max_storage_buffer_binding_size
+            || device.max_storage_buffers_per_shader_stage < 1
+            || device.max_bind_groups < 2
+            || device.max_vertex_buffers < 2
+            || device.max_vertex_attributes < 3
+            || device.max_vertex_buffer_array_stride < 24
             || self.max_mesh_bytes == 0
             || self.max_mesh_bytes > device.max_buffer_size
         {
             return Err(Error::InvalidInput(
-                "draw/mesh limits must be nonzero and fit device buffers",
+                "instance/mesh limits must fit device buffers and vertex-stage bindings",
             ));
         }
         Ok(())
@@ -45,10 +52,27 @@ pub struct Mesh {
     pub(crate) vertex: Owned<wgpu::Buffer>,
     pub(crate) index: Owned<wgpu::Buffer>,
     pub(crate) index_count: u32,
+    pub(crate) bounds: Aabb,
 }
 pub struct Draw<'a> {
-    pub mesh: &'a Mesh,
-    pub model: Mat4,
+    pub(crate) mesh: &'a Mesh,
+    pub(crate) instances: &'a mut Instances,
+    pub(crate) visibility: Visibility,
+}
+impl<'a> Draw<'a> {
+    pub fn new(mesh: &'a Mesh, instances: &'a mut Instances) -> Self {
+        Self {
+            mesh,
+            instances,
+            visibility: Visibility::Frustum,
+        }
+    }
+    /// Frustum assumes camera * model * original bounded vertex positions.
+    /// Use Unculled for position-changing shaders; layout validation cannot check this contract.
+    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
+        self.visibility = visibility;
+        self
+    }
 }
 
 impl MeshData<'_> {

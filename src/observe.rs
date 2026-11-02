@@ -15,6 +15,11 @@ pub struct UploadBytes {
     pub geometry: u64,
     pub models: u64,
     pub camera: u64,
+    /// Initial transform publication, separate from later model edits.
+    pub instances: u64,
+    pub visible_ids: u64,
+    pub model_writes: u64,
+    pub visible_id_writes: u64,
     pub write_calls: u64,
 }
 impl UploadBytes {
@@ -22,13 +27,20 @@ impl UploadBytes {
         self.geometry += other.geometry;
         self.models += other.models;
         self.camera += other.camera;
+        self.instances += other.instances;
+        self.visible_ids += other.visible_ids;
+        self.model_writes += other.model_writes;
+        self.visible_id_writes += other.visible_id_writes;
         self.write_calls += other.write_calls;
     }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuFrame {
+    /// Input validation and camera preparation. Visibility and byte packing are separate.
     pub preparation: Duration,
+    pub visibility: Duration,
+    pub packing: Duration,
     pub upload: Duration,
     pub encode: Duration,
     pub submit: Duration,
@@ -41,6 +53,20 @@ pub struct FrameReport {
     pub cpu: CpuFrame,
     pub uploads: UploadBytes,
     pub timed: bool,
+    pub scene: SceneCounts,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SceneCounts {
+    pub collections: u64,
+    pub total_instances: u64,
+    pub visible_instances: u64,
+    pub submitted_instances: u64,
+    pub draws: u64,
+    pub triangles: u64,
+    pub cull_full_tests: u64,
+    pub cull_partial_tests: u64,
+    /// CPU capacity retained for transform-derived visibility bounds, separate from GPU memory.
+    pub visibility_cache_bytes: u64,
 }
 #[derive(Debug)]
 pub struct ReloadReport {

@@ -1,4 +1,4 @@
-use renderlab::{Camera, Draw, Mat4, Mesh, MeshData, Vec3, Vertex};
+use renderlab::{Camera, Instances, Mat4, Mesh, MeshData, Vec3, Vertex};
 
 pub const INDICES: [u32; 36] = [
     0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2,
@@ -46,6 +46,7 @@ pub struct Scene {
     pub translation: Vec3,
     pub phase: f32,
     pub animated: bool,
+    pub close_view: bool,
 }
 impl Default for Scene {
     fn default() -> Self {
@@ -55,16 +56,24 @@ impl Default for Scene {
             translation: Vec3::ZERO,
             phase: 0.0,
             animated: false,
+            close_view: false,
         }
     }
 }
 impl Scene {
-    pub fn camera(&self) -> Camera {
+    pub fn camera(&self, count: u32) -> Camera {
+        let distance = if count > 2 && self.close_view {
+            12.0
+        } else if count > 2 {
+            (count as f32).sqrt().ceil() * 1.8
+        } else {
+            5.0
+        };
         let eye = Vec3::new(
             self.yaw.sin() * self.elevation.cos(),
             self.elevation.sin(),
             self.yaw.cos() * self.elevation.cos(),
-        ) * 5.0
+        ) * distance
             + self.translation;
         Camera::look_at(
             eye,
@@ -72,27 +81,18 @@ impl Scene {
             Vec3::Y,
             55.0_f32.to_radians(),
             0.1,
-            100.0,
+            distance + 100.0,
         )
         .unwrap()
     }
-    pub fn draws<'a>(&self, meshes: &'a [Mesh]) -> [Draw<'a>; 3] {
-        [
-            Draw {
-                mesh: &meshes[0],
-                model: Mat4::from_translation(Vec3::new(-0.65, 0.0, 0.25))
-                    * Mat4::from_rotation_y(self.phase),
-            },
-            Draw {
-                mesh: &meshes[0],
-                model: Mat4::from_translation(Vec3::new(0.8, -0.1, -0.2))
-                    * Mat4::from_scale(Vec3::splat(0.8)),
-            },
-            Draw {
-                mesh: &meshes[1],
-                model: Mat4::IDENTITY,
-            },
-        ]
+    pub fn first_model(&self, count: u32) -> Mat4 {
+        if count > 2 {
+            let side = (count as f32).sqrt().ceil();
+            Mat4::from_translation(Vec3::new(-(side - 1.0) * 0.75, -(side - 1.0) * 0.75, 0.0))
+                * Mat4::from_rotation_y(self.phase)
+        } else {
+            Mat4::from_translation(Vec3::new(-0.65, 0.0, 0.25)) * Mat4::from_rotation_y(self.phase)
+        }
     }
 }
 pub fn upload_next(
@@ -115,6 +115,42 @@ pub fn upload_next(
         && let Some(mesh) = renderer.try_upload_mesh(&data)?
     {
         meshes.push(mesh);
+    }
+    Ok(())
+}
+
+pub fn upload_instances_next(
+    renderer: &mut renderlab::Renderer,
+    instances: &mut Vec<Instances>,
+    count: u32,
+) -> Result<(), renderlab::Error> {
+    let models = if instances.is_empty() {
+        if count > 2 {
+            let side = (count as f32).sqrt().ceil() as u32;
+            let center = (side - 1) as f32 * 0.75;
+            (0..count)
+                .map(|i| {
+                    Mat4::from_translation(Vec3::new(
+                        (i % side) as f32 * 1.5 - center,
+                        (i / side) as f32 * 1.5 - center,
+                        0.0,
+                    ))
+                })
+                .collect()
+        } else {
+            vec![
+                Scene::default().first_model(count),
+                Mat4::from_translation(Vec3::new(0.8, -0.1, -0.2))
+                    * Mat4::from_scale(Vec3::splat(0.8)),
+            ]
+        }
+    } else {
+        vec![Mat4::IDENTITY]
+    };
+    if instances.len() < 2
+        && let Some(collection) = renderer.try_upload_instances(&models)?
+    {
+        instances.push(collection);
     }
     Ok(())
 }

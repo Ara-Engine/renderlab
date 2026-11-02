@@ -1,6 +1,7 @@
-//! Offscreen scale baseline: `cargo run --release --example scene-scale -- 10000 120 wide`.
-//! Use `narrow` for a mostly offscreen scene; append `--validate` for Vulkan validation.
-use renderlab::{Camera, Draw, Events, Limits, Mat4, MeshData, Renderer, Vec3, Vertex, wgpu};
+use renderlab::{
+    Camera, Draw, Events, Instances, Limits, Mat4, Mesh, MeshData, Renderer, Vec3, Vertex,
+    Visibility, wgpu,
+};
 use std::time::{Duration, Instant};
 
 #[path = "../support/validation.rs"]
@@ -15,15 +16,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = args.first().map_or(Ok(1000), |s| s.parse::<u32>())?;
     let frames = args.get(1).map_or(Ok(120), |s| s.parse::<u64>())?;
     let case = args.get(2).map_or("wide", String::as_str);
-    if count == 0
-        || frames <= WARMUP
-        || !matches!(case, "wide" | "narrow")
-        || args.len() > 4
-        || args.get(3).is_some_and(|s| s != "--validate")
-    {
+    if count == 0 || frames <= WARMUP || !matches!(case, "wide" | "narrow") {
         return Err("expected: [positive count] [frames > 20] [wide|narrow] [--validate]".into());
     }
-    let validate = args.get(3).is_some_and(|s| s == "--validate");
+    let mut validate = false;
+    let mut visibility = Visibility::Frustum;
+    let mut motion = "static";
+    let mut geometry = "single";
+    for arg in args.iter().skip(3) {
+        match arg.as_str() {
+            "--validate" => validate = true,
+            "--unculled" => visibility = Visibility::Unculled,
+            "--frustum" => visibility = Visibility::Frustum,
+            value if value.starts_with("--motion=") => motion = &value[9..],
+            value if value.starts_with("--geometry=") => geometry = &value[11..],
+            _ => return Err(format!("unknown option: {arg}").into()),
+        }
+    }
+    if !matches!(motion, "static" | "camera" | "sparse" | "contiguous")
+        || !matches!(geometry, "single" | "grouped" | "alternating")
+    {
+        return Err("expected --motion=static|camera|sparse|contiguous --geometry=single|grouped|alternating".into());
+    }
     let _validation = validation::begin(validate);
     if std::path::Path::new("D:/AraBuild/render-v3/quiet-window.lock").exists() {
         return Err("another GPU measurement owns the quiet window".into());
@@ -39,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
     eprintln!(
-        "scene_scale version=1 adapter={:?} debug_build={} validation={validate} count={count} case={case} frames={frames} warmup={WARMUP} size={WIDTH}x{HEIGHT} samples=1 presentation=none",
+        "scene_scale version=2 motion={motion} geometry={geometry} visibility={visibility:?} seed=0 adapter={:?} debug_build={} validation={validate} count={count} case={case} frames={frames} warmup={WARMUP} size={WIDTH}x{HEIGHT} samples=1 presentation=none",
         adapter.get_info(),
         cfg!(debug_assertions)
     );
@@ -66,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         queue,
         wgpu::TextureFormat::Rgba8Unorm,
         Limits {
-            max_draws: count,
+            max_instances: count,
             ..Limits::default()
         },
         include_str!("../shaders/scene.wgsl"),
@@ -89,31 +103,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3,
         1, 2, 6, 1, 6, 5,
     ];
-    let mesh = renderer
-        .try_upload_mesh(&MeshData {
-            vertices: &vertices,
-            indices: &indices,
-        })?
-        .ok_or("initial upload unexpectedly busy")?;
+    let setup_start = Instant::now();
+    let mut meshes = vec![upload_mesh(&mut renderer, &vertices, &indices)?];
+    if geometry != "single" {
+        meshes.push(upload_mesh(&mut renderer, &vertices[..3], &[0, 1, 2])?);
+    }
+    let geometry_setup = setup_start.elapsed();
     let scene_start = Instant::now();
     let side = (count as f64).sqrt().ceil() as u32;
     let center = (side - 1) as f32 * 0.75;
-    let draws: Vec<_> = (0..count)
-        .map(|i| Draw {
-            mesh: &mesh,
-            model: Mat4::from_translation(Vec3::new(
-                (i % side) as f32 * 1.5 - center,
-                (i / side) as f32 * 1.5 - center,
-                0.0,
-            )),
-        })
-        .collect();
+    let base_model = |i: u32| {
+        Mat4::from_translation(Vec3::new(
+            (i % side) as f32 * 1.5 - center,
+            (i / side) as f32 * 1.5 - center,
+            0.0,
+        ))
+    };
+    let mut collections: Vec<(usize, Instances)> = Vec::new();
+    let mut instance_setup = Duration::ZERO;
+    let mut add = |mesh: usize, models: Vec<Mat4>| -> Result<(), Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let instances = upload_instances(&mut renderer, &models)?;
+        instance_setup += start.elapsed();
+        collections.push((mesh, instances));
+        Ok(())
+    };
+    match geometry {
+        "single" => add(0, (0..count).map(base_model).collect())?,
+        "grouped" => {
+            add(0, (0..count).step_by(2).map(base_model).collect())?;
+            if count > 1 {
+                add(1, (1..count).step_by(2).map(base_model).collect())?;
+            }
+        }
+        _ => {
+            for i in 0..count {
+                add((i % 2) as usize, vec![base_model(i)])?;
+            }
+        }
+    }
     let distance = if case == "wide" {
         side as f32 * 1.8
     } else {
         12.0
     };
-    let camera = Camera::look_at(
+    let mut camera = Camera::look_at(
         Vec3::new(0.0, 0.0, distance),
         Vec3::ZERO,
         Vec3::Y,
@@ -121,7 +155,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0.1,
         distance + 100.0,
     )?;
-    eprintln!("scene_setup_ms={:.6}", millis(scene_start.elapsed()));
+    eprintln!(
+        "scene_setup_ms={:.6} geometry_setup_ms={:.6} instance_upload_admission_ms={:.6} collections={} matrix_bytes={} id_capacity_bytes={}",
+        millis(scene_start.elapsed()),
+        millis(geometry_setup),
+        millis(instance_setup),
+        collections.len(),
+        u64::from(count) * 64,
+        u64::from(count) * 4
+    );
 
     let mut rows = Vec::with_capacity(frames as usize);
     let mut gpu = vec![None; frames as usize];
@@ -129,15 +171,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut busy_cpu = Duration::ZERO;
     let mut poll_cpu = Duration::ZERO;
     let mut backpressure = Duration::ZERO;
+    let mut caller_cpu = Duration::ZERO;
+    let mut prepared_frame = None;
     let mut interval_start = Instant::now();
     let deadline = interval_start + Duration::from_secs(180);
     while accepted < frames {
         let events = renderer.poll()?;
         poll_cpu += events.poll_cpu;
         collect_gpu(events, &mut gpu);
+        let caller_start = Instant::now();
+        if prepared_frame != Some(accepted) {
+            let phase = accepted as f32 * 0.03;
+            if motion == "camera" {
+                let x = phase.sin() * side as f32 * 0.4;
+                camera = Camera::look_at(
+                    Vec3::new(x, 0.0, distance),
+                    Vec3::new(x, 0.0, 0.0),
+                    Vec3::Y,
+                    50.0_f32.to_radians(),
+                    0.1,
+                    distance + 100.0,
+                )?;
+            } else if motion != "static" {
+                for edit in 0..count.div_ceil(100) {
+                    let global = if motion == "sparse" {
+                        (edit * 100 + accepted as u32 % 100) % count
+                    } else {
+                        edit
+                    };
+                    let (collection, slot) = match geometry {
+                        "single" => (0, global),
+                        "grouped" => ((global % 2) as usize, global / 2),
+                        _ => (global as usize, 0),
+                    };
+                    collections[collection].1.set(
+                        slot as usize,
+                        base_model(global)
+                            * Mat4::from_translation(Vec3::new(0.0, 0.0, phase.sin() * 0.2)),
+                    )?;
+                }
+            }
+            prepared_frame = Some(accepted);
+        }
+        let mut draws: Vec<_> = collections
+            .iter_mut()
+            .map(|(mesh, instances)| {
+                Draw::new(&meshes[*mesh], instances).with_visibility(visibility)
+            })
+            .collect();
+        caller_cpu += caller_start.elapsed();
         let start = Instant::now();
-        if let Some(report) = renderer.try_render(&color, &camera, &draws)? {
+        if let Some(report) = renderer.try_render(&color, &camera, &mut draws)? {
             let render_cpu = start.elapsed();
+            let accounting_start = Instant::now();
+            let stats = renderer.stats();
+            let accounting_cpu = accounting_start.elapsed();
             rows.push((
                 report,
                 render_cpu,
@@ -145,8 +233,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 poll_cpu,
                 backpressure,
                 interval_start.elapsed(),
+                caller_cpu,
+                stats,
+                accounting_cpu,
             ));
             accepted += 1;
+            caller_cpu = Duration::ZERO;
             busy_cpu = Duration::ZERO;
             poll_cpu = Duration::ZERO;
             backpressure = Duration::ZERO;
@@ -173,16 +265,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_micros(100));
     }
     println!(
-        "frame,measured,render_cpu_ms,prepare_ms,upload_ms,encode_ms,submit_ms,render_poll_ms,external_poll_ms,busy_cpu_ms,backpressure_sleep_ms,admission_interval_ms,gpu_mesh_ms,geometry_bytes,model_bytes,camera_bytes,writes"
+        "frame,measured,render_cpu_ms,prepare_ms,upload_ms,encode_ms,submit_ms,render_poll_ms,external_poll_ms,busy_cpu_ms,backpressure_sleep_ms,admission_interval_ms,gpu_mesh_ms,geometry_bytes,model_bytes,camera_bytes,writes,caller_cpu_ms,visibility_ms,packing_ms,collections,total_instances,visible_instances,submitted_instances,draws,triangles,cull_full_tests,cull_partial_tests,instance_creation_bytes,visible_id_bytes,model_writes,id_writes,persistent_created,pipeline_attempts,hal_buffer_bytes,allocator_allocated_bytes,accounting_cpu_ms,visibility_cache_bytes"
     );
-    for (report, render_cpu, busy, poll, sleep, interval) in rows {
+    for (report, render_cpu, busy, poll, sleep, interval, caller, stats, accounting) in rows {
         let measured = report.frame.0 > WARMUP;
         let sample = gpu[(report.frame.0 - 1) as usize].ok_or("missing GPU sample")?;
-        if measured && report.uploads != renderlab::UploadBytes::default() {
+        if measured && motion == "static" && report.uploads != renderlab::UploadBytes::default() {
             return Err("static measured frame uploaded data".into());
         }
         println!(
-            "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{}",
+            "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{}",
             report.frame.0,
             measured,
             millis(render_cpu),
@@ -199,7 +291,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             report.uploads.geometry,
             report.uploads.models,
             report.uploads.camera,
-            report.uploads.write_calls
+            report.uploads.write_calls,
+            millis(caller),
+            millis(report.cpu.visibility),
+            millis(report.cpu.packing),
+            report.scene.collections,
+            report.scene.total_instances,
+            report.scene.visible_instances,
+            report.scene.submitted_instances,
+            report.scene.draws,
+            report.scene.triangles,
+            report.scene.cull_full_tests,
+            report.scene.cull_partial_tests,
+            report.uploads.instances,
+            report.uploads.visible_ids,
+            report.uploads.model_writes,
+            report.uploads.visible_id_writes,
+            stats.ownership.created(),
+            stats.pipelines.attempts,
+            stats.hal.buffer_bytes,
+            stats.allocator.map_or(0, |a| a.allocated_bytes),
+            millis(accounting),
+            report.scene.visibility_cache_bytes
         );
     }
     let stats = renderer.stats();
@@ -218,4 +331,38 @@ fn collect_gpu(events: Events, samples: &mut [Option<Duration>]) {
 
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn upload_mesh(
+    renderer: &mut Renderer,
+    vertices: &[Vertex],
+    indices: &[u32],
+) -> Result<Mesh, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        renderer.poll()?;
+        if let Some(mesh) = renderer.try_upload_mesh(&MeshData { vertices, indices })? {
+            return Ok(mesh);
+        }
+        if Instant::now() >= deadline {
+            return Err("mesh upload admission timeout".into());
+        }
+        std::thread::yield_now();
+    }
+}
+fn upload_instances(
+    renderer: &mut Renderer,
+    models: &[Mat4],
+) -> Result<Instances, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        renderer.poll()?;
+        if let Some(instances) = renderer.try_upload_instances(models)? {
+            return Ok(instances);
+        }
+        if Instant::now() >= deadline {
+            return Err("instance upload admission timeout".into());
+        }
+        std::thread::yield_now();
+    }
 }

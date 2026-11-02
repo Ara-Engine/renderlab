@@ -2,7 +2,7 @@ mod fixture;
 #[path = "../../support/validation.rs"]
 mod validation;
 use fixture::Scene;
-use renderlab::{FrameId, Limits, Mesh, Renderer, Revision, wgpu};
+use renderlab::{Draw, FrameId, Instances, Limits, Mesh, Renderer, Revision, Visibility, wgpu};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -17,7 +17,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const TITLE: &str = "Renderlab | arrows orbit | WASD translate | R reset | Space motion | Esc exit";
+const TITLE: &str =
+    "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | Esc exit";
 struct Options {
     shader: PathBuf,
     frames: Option<u64>,
@@ -25,6 +26,7 @@ struct Options {
     timestamps: bool,
     log_frames: bool,
     validate: bool,
+    instances: u32,
 }
 impl Options {
     fn parse() -> Result<Self, String> {
@@ -35,10 +37,18 @@ impl Options {
             timestamps: true,
             log_frames: false,
             validate: false,
+            instances: 2,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--instances" => {
+                    options.instances = args
+                        .next()
+                        .ok_or("missing --instances value")?
+                        .parse()
+                        .map_err(|_| "invalid instances count")?
+                }
                 "--frames" => {
                     options.frames = Some(
                         args.next()
@@ -63,7 +73,9 @@ impl Options {
                 _ => return Err(format!("unknown argument {arg}")),
             }
         }
-        if options.frames == Some(0) || options.seconds.is_some_and(|s| !s.is_finite() || s <= 0.0)
+        if options.instances < 2
+            || options.frames == Some(0)
+            || options.seconds.is_some_and(|s| !s.is_finite() || s <= 0.0)
         {
             return Err("limits must be positive".into());
         }
@@ -100,11 +112,14 @@ struct View {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
     meshes: Vec<Mesh>,
+    instances: Vec<Instances>,
+    visibility: Visibility,
     scene: Scene,
     keys: HashSet<KeyCode>,
     input_stamp: Option<Instant>,
     applied_input_stamp: Option<Instant>,
     source: String,
+    shader_rejected: bool,
     shader_check: Instant,
     markers: VecDeque<Marker>,
     last: Instant,
@@ -164,7 +179,16 @@ impl View {
             .ok_or("surface has no sRGB format")?;
         config.present_mode = wgpu::PresentMode::Fifo;
         let source = std::fs::read_to_string(&options.shader)?;
-        let renderer = Renderer::new(device, queue, config.format, Limits::default(), &source)?;
+        let renderer = Renderer::new(
+            device,
+            queue,
+            config.format,
+            Limits {
+                max_instances: options.instances.max(1024),
+                ..Limits::default()
+            },
+            &source,
+        )?;
         eprintln!(
             "timing_status={:?} measurement_definition=m1_async_not_m0",
             renderer.stats().timing
@@ -175,11 +199,14 @@ impl View {
             config,
             renderer,
             meshes: Vec::new(),
+            instances: Vec::new(),
+            visibility: Visibility::Frustum,
             scene: Scene::default(),
             keys: HashSet::new(),
             input_stamp: None,
             applied_input_stamp: None,
             source,
+            shader_rejected: false,
             shader_check: Instant::now(),
             markers: VecDeque::from([Marker {
                 revision: Revision(1),
@@ -236,6 +263,13 @@ impl View {
         if self.meshes.len() < 2 {
             fixture::upload_next(&mut self.renderer, &mut self.meshes)?;
         }
+        if self.meshes.len() == 2 && self.instances.len() < 2 {
+            fixture::upload_instances_next(
+                &mut self.renderer,
+                &mut self.instances,
+                options.instances,
+            )?;
+        }
         if self.shader_check.elapsed() >= Duration::from_millis(50) {
             self.shader_check = Instant::now();
             if let Ok(source) = std::fs::read_to_string(&options.shader)
@@ -250,6 +284,7 @@ impl View {
                     .unwrap_or_default();
                 match self.renderer.reload(&self.source) {
                     Ok(report) => {
+                        self.shader_rejected = false;
                         eprintln!(
                             "reload_compile_ms={:.3} revision={}",
                             report.compile.as_secs_f64() * 1000.0,
@@ -273,6 +308,7 @@ impl View {
                         diagnostic,
                         compile,
                     }) => {
+                        self.shader_rejected = true;
                         eprintln!(
                             "reload_rejected compile_ms={:.3} diagnostic={diagnostic}",
                             compile.as_secs_f64() * 1000.0
@@ -308,6 +344,7 @@ impl View {
             || self.size.height == 0
             || self.occluded
             || self.meshes.len() < 2
+            || self.instances.len() < 2
         {
             return Ok(());
         }
@@ -351,12 +388,49 @@ impl View {
                 return Err("surface validation failed; restart required".into());
             }
         };
-        let report = self.renderer.try_render(
-            &frame.texture,
-            &self.scene.camera(),
-            &self.scene.draws(&self.meshes),
-        )?;
+        let caller_start = Instant::now();
+        self.instances[0].set(0, self.scene.first_model(options.instances))?;
+        let (cubes, triangle) = self.instances.split_at_mut(1);
+        let mut draws = [
+            Draw::new(&self.meshes[0], &mut cubes[0]).with_visibility(self.visibility),
+            Draw::new(&self.meshes[1], &mut triangle[0]).with_visibility(self.visibility),
+        ];
+        let camera = self.scene.camera(options.instances);
+        let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.0;
+        let render_start = Instant::now();
+        let report = self
+            .renderer
+            .try_render(&frame.texture, &camera, &mut draws)?;
+        let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
+        if options.log_frames {
+            eprintln!(
+                "caller_ms={caller_ms:.4} render_whole_ms={render_ms:.4} accepted={}",
+                report.is_some()
+            );
+        }
         if let Some(report) = report {
+            self.window.set_title(&format!(
+                "{TITLE} | {:?} visible {}/{}{}",
+                self.visibility,
+                report.scene.visible_instances,
+                report.scene.total_instances,
+                if self.shader_rejected {
+                    " | shader rejected; last valid pipeline active"
+                } else {
+                    ""
+                }
+            ));
+            if options.log_frames {
+                eprintln!(
+                    "visibility_ms={:.4} packing_ms={:.4} visible_ids_bytes={} model_writes={} id_writes={} scene={:?}",
+                    report.cpu.visibility.as_secs_f64() * 1000.0,
+                    report.cpu.packing.as_secs_f64() * 1000.0,
+                    report.uploads.visible_ids,
+                    report.uploads.model_writes,
+                    report.uploads.visible_id_writes,
+                    report.scene
+                );
+            }
             self.window.pre_present_notify();
             let present = Instant::now();
             self.renderer.present(frame)?;
@@ -453,6 +527,14 @@ impl ApplicationHandler for App {
                             match key {
                                 KeyCode::Escape => events.exit(),
                                 KeyCode::Space => view.scene.animated = !view.scene.animated,
+                                KeyCode::KeyN => view.scene.close_view = !view.scene.close_view,
+                                KeyCode::KeyC => {
+                                    view.visibility = if view.visibility == Visibility::Frustum {
+                                        Visibility::Unculled
+                                    } else {
+                                        Visibility::Frustum
+                                    }
+                                }
                                 KeyCode::KeyR => view.scene = Scene::default(),
                                 _ => {}
                             }

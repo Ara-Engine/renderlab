@@ -1,12 +1,14 @@
-//! Persistent indexed meshes with bounded submissions. Windowing belongs to the caller.
+//! Persistent indexed meshes and transform collections with bounded submissions.
+//! Draw order, then ascending instance slot, defines equal-depth winners. Windowing belongs to the caller.
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
+mod instances;
 mod mesh;
 mod observe;
 mod renderer;
-#[cfg(test)]
 mod visibility;
 
 pub use glam::{Mat4, Vec3};
+pub use instances::{Instances, Visibility};
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData, Vertex};
 pub use observe::*;
 pub use renderer::Renderer;

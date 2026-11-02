@@ -8,13 +8,14 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 - Arrow keys: camera orbit/elevation. WASD: translate the camera and its look-at point.
 - Space: animate the first cube. R: reset. Escape: exit.
+- `--instances 10000` opens a repeated-cube grid. C toggles conservative culling; N switches between overview and near view. The title reports visible instances.
 - Edit `shaders/scene.wgsl` while running. The viewer checks content every 50 ms. Syntax or pipeline-layout errors appear in the terminal/title; the last valid pipeline keeps rendering. Save a correction to recover.
 - An optional first argument or `--shader PATH` specifies a different shader path. The default uses the source checkout path, so this is currently a developer tool, not a distributable application.
 - `--frames N` or `--seconds N` bounds a run. `--log-frames` prints CPU phases, GPU pass samples, uploads, and presentation-call costs. `--no-timestamps` exercises rendering without GPU timing.
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 
-Milestone 1 is complete on the recorded Windows/Vulkan host. No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing, GI, and scalable scene systems remain outside this foundation milestone.
+Milestone 1 is complete. Milestone 2 adds persistent instance collections, ordered batching and conservative visibility; see [its verification record](docs/milestone-2.md). No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing and GI remain future work. The single-sample grid visibly aliases at a distance.
 
 ## Verify
 
@@ -22,9 +23,9 @@ Milestone 1 is complete on the recorded Windows/Vulkan host. No GUI toolkit, ass
 
 `cargo clippy --workspace --all-targets -- -D warnings`
 
-`cargo test -p renderlab -- --ignored --test-threads=1` explicitly runs the three Vulkan GPU tests, writing full-frame PPM captures into ignored `captures/m1/`. They cover depth, reload recovery, persistent uploads, asynchronous timing, faults, and replacement under in-flight work. Ordinary `cargo test` runs CPU validation and skips these hardware-dependent tests.
+`cargo test -p renderlab -- --ignored --test-threads=1` explicitly runs five Vulkan GPU tests, writing full-frame PPM captures into ignored `captures/m2/`. They cover exact color/depth equivalence against per-slot draws, conservative visibility/cache updates, reload recovery, persistent uploads, timing, faults and in-flight replacement. Ordinary `cargo test` runs CPU validation and skips these hardware-dependent tests.
 
-`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1-check.ps1` records formatting, workspace checks, Clippy, and CPU tests. Add `-Gpu` for the GPU suite, which requires the Khronos validation layer and fails on HAL errors. The viewer reports diagnostics too; `--validate` makes layer availability and clean diagnostics mandatory at exit. GPU tests and viewer runs compete with other GPU applications, so coordinate them with foreground use.
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m2-check.ps1` records formatting, workspace checks, Clippy, CPU tests and source/binary identity. Add `-Gpu` for the serialized GPU suite, which requires the Khronos validation layer and fails on HAL errors. The viewer reports diagnostics too; `--validate` makes layer availability and clean diagnostics mandatory at exit. GPU tests and viewer runs compete with other GPU applications, so coordinate them with foreground use.
 
 The recorded final validation run isolated stale overlay registrations with a process-local `VK_IMPLICIT_LAYER_PATH` pointing at an empty directory. See the evidence record for exact environment and reproduction details. Normal runs use the host's Vulkan loader configuration.
 

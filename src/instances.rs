@@ -1,0 +1,395 @@
+use crate::{
+    Error, Mat4,
+    mesh::matrix_bytes,
+    observe::Owned,
+    visibility::{Aabb, ClipVolume, HomogeneousWorldBounds},
+};
+use std::{ops::Range, sync::Arc};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// Requires the shader's camera * model * original mesh position contract.
+    #[default]
+    Frustum,
+    Unculled,
+}
+
+/// Fixed, nonempty transform slots. Owns its buffers, without retaining any mesh borrow.
+/// Pending edits survive backpressure. Dropping releases ownership; wgpu retains submitted uses.
+pub struct Instances {
+    pub(crate) renderer: Arc<()>,
+    pub(crate) state: InstanceState,
+    pub(crate) transforms: Owned<wgpu::Buffer>,
+    pub(crate) id_buffer: Owned<wgpu::Buffer>,
+    pub(crate) bind: Owned<wgpu::BindGroup>,
+}
+impl Instances {
+    pub fn len(&self) -> usize {
+        self.state.models.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.state.models.is_empty()
+    }
+    /// No GPU work. Bit-identical edits are no-ops. A -> B -> A stays dirty until submission.
+    pub fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
+        self.state.set(slot, model)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct VisibilityKey {
+    clip: [u8; 64],
+    bounds: [u32; 6],
+    mode: Visibility,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct VisibilityUpdate {
+    pub changed_id_span: Option<Range<usize>>,
+    pub full_tests: u64,
+    pub partial_tests: u64,
+}
+
+pub(crate) struct InstanceState {
+    pub models: Vec<Mat4>,
+    dirty: Vec<u64>,
+    pub dirty_count: usize,
+    visible: Vec<u64>,
+    pub ids: Vec<u32>,
+    key: Option<VisibilityKey>,
+    transformed_bounds: Vec<HomogeneousWorldBounds>,
+}
+impl InstanceState {
+    pub fn validate(models: &[Mat4], max_instances: u32) -> Result<(), Error> {
+        if models.is_empty()
+            || models.len() > max_instances as usize
+            || models.iter().any(|m| !m.is_finite())
+        {
+            return Err(Error::InvalidInput(
+                "instances must be nonempty, finite and fit max_instances",
+            ));
+        }
+        Ok(())
+    }
+    pub fn new(models: &[Mat4]) -> Self {
+        Self {
+            models: models.to_vec(),
+            dirty: vec![0; models.len().div_ceil(64)],
+            dirty_count: 0,
+            visible: vec![u64::MAX; models.len().div_ceil(64)],
+            ids: (0..models.len() as u32).collect(),
+            key: None,
+            transformed_bounds: Vec::new(),
+        }
+    }
+    fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
+        if slot >= self.models.len() || !model.is_finite() {
+            return Err(Error::InvalidInput(
+                "instance slot outside collection or nonfinite model",
+            ));
+        }
+        if self.models[slot].to_cols_array().map(f32::to_bits)
+            == model.to_cols_array().map(f32::to_bits)
+        {
+            return Ok(());
+        }
+        self.models[slot] = model;
+        let bit = 1 << (slot % 64);
+        if self.dirty[slot / 64] & bit == 0 {
+            self.dirty[slot / 64] |= bit;
+            self.dirty_count += 1;
+        }
+        Ok(())
+    }
+    pub fn dirty_runs(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        let mut slots = self
+            .dirty
+            .iter()
+            .enumerate()
+            .flat_map(|(word, &bits)| {
+                let mut bits = bits;
+                std::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some(word * 64 + bit)
+                })
+            })
+            .peekable();
+        std::iter::from_fn(move || {
+            let start = slots.next()?;
+            let mut end = start + 1;
+            while slots.peek() == Some(&end) {
+                slots.next();
+                end += 1;
+            }
+            Some(start..end)
+        })
+    }
+    pub fn clear_dirty(&mut self) {
+        if self.dirty_count > 0 {
+            self.dirty.fill(0);
+            self.dirty_count = 0;
+        }
+    }
+    pub fn visibility_cache_bytes(&self) -> usize {
+        self.transformed_bounds.capacity() * std::mem::size_of::<HomogeneousWorldBounds>()
+    }
+    pub fn visibility(&mut self, clip: Mat4, bounds: Aabb, mode: Visibility) -> VisibilityUpdate {
+        let key = VisibilityKey {
+            clip: matrix_bytes(clip),
+            bounds: [
+                bounds.min[0],
+                bounds.min[1],
+                bounds.min[2],
+                bounds.max[0],
+                bounds.max[1],
+                bounds.max[2],
+            ]
+            .map(f32::to_bits),
+            mode,
+        };
+        let full = self.key.as_ref() != Some(&key);
+        if !full && self.dirty_count == 0 {
+            return VisibilityUpdate::default();
+        }
+        let rebuild_bounds = self
+            .key
+            .as_ref()
+            .is_none_or(|old| old.bounds != key.bounds || old.mode == Visibility::Unculled);
+        if mode == Visibility::Frustum {
+            self.transformed_bounds
+                .reserve(self.models.len() - self.transformed_bounds.len());
+        }
+        let volume = ClipVolume::new(&clip);
+        let mut changed = false;
+        let mut tests = 0;
+        for word in 0..self.visible.len() {
+            let mut slots = if full { u64::MAX } else { self.dirty[word] };
+            while slots != 0 {
+                let bit = slots.trailing_zeros() as usize;
+                slots &= slots - 1;
+                let slot = word * 64 + bit;
+                if slot >= self.models.len() {
+                    break;
+                }
+                let visible = mode == Visibility::Unculled || {
+                    if rebuild_bounds || self.dirty[word] & (1 << bit) != 0 {
+                        let transformed = HomogeneousWorldBounds::new(&self.models[slot], &bounds);
+                        if slot == self.transformed_bounds.len() {
+                            self.transformed_bounds.push(transformed);
+                        } else {
+                            self.transformed_bounds[slot] = transformed;
+                        }
+                    }
+                    tests += 1;
+                    volume.may_be_visible(&self.transformed_bounds[slot])
+                };
+                let mask = 1 << bit;
+                changed |= (self.visible[word] & mask != 0) != visible;
+                if visible {
+                    self.visible[word] |= mask;
+                } else {
+                    self.visible[word] &= !mask;
+                }
+            }
+        }
+        self.key = Some(key);
+        let span = changed.then(|| self.rebuild_ids()).flatten();
+        VisibilityUpdate {
+            changed_id_span: span,
+            full_tests: if full { tests } else { 0 },
+            partial_tests: if full { 0 } else { tests },
+        }
+    }
+    fn rebuild_ids(&mut self) -> Option<Range<usize>> {
+        let mut count = 0;
+        let mut first = None;
+        let mut last = 0;
+        for slot in 0..self.models.len() {
+            if self.visible[slot / 64] & (1 << (slot % 64)) == 0 {
+                continue;
+            }
+            let id = slot as u32;
+            if self.ids.get(count) != Some(&id) {
+                first.get_or_insert(count);
+                last = count + 1;
+                if count < self.ids.len() {
+                    self.ids[count] = id;
+                } else {
+                    self.ids.push(id);
+                }
+            }
+            count += 1;
+        }
+        self.ids.truncate(count);
+        first.map(|first| first..last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Vec3;
+    const BOUNDS: Aabb = Aabb {
+        min: [-0.1; 3],
+        max: [0.1; 3],
+    };
+    #[test]
+    fn edits_validate_before_mutation_and_coalesce_across_words() {
+        assert!(InstanceState::validate(&[], 128).is_err());
+        assert!(InstanceState::validate(&[Mat4::from_cols_array(&[f32::NAN; 16])], 128).is_err());
+        assert!(InstanceState::validate(&[Mat4::IDENTITY; 129], 128).is_err());
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 128]);
+        assert!(s.set(128, Mat4::IDENTITY).is_err());
+        assert!(
+            s.set(0, Mat4::from_cols_array(&[f32::INFINITY; 16]))
+                .is_err()
+        );
+        s.set(0, Mat4::IDENTITY).unwrap();
+        assert_eq!(s.dirty_count, 0);
+        for slot in [1, 63, 64, 65, 127] {
+            s.set(slot, Mat4::from_translation(Vec3::X)).unwrap();
+        }
+        s.set(1, Mat4::IDENTITY).unwrap();
+        assert_eq!(s.dirty_count, 5);
+        assert_eq!(s.dirty_runs().collect::<Vec<_>>(), [1..2, 63..66, 127..128]);
+        s.clear_dirty();
+        assert_eq!(s.dirty_runs().count(), 0);
+        let mut negative_zero = Mat4::IDENTITY.to_cols_array();
+        negative_zero[1] = -0.0;
+        s.set(0, Mat4::from_cols_array(&negative_zero)).unwrap();
+        assert_eq!(s.dirty_count, 1);
+    }
+    #[test]
+    fn cache_partial_tests_and_id_shrink_empty_reexpansion() {
+        let outside = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.5));
+        let inside = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5));
+        let mut s = InstanceState::new(&[inside, outside, inside]);
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum),
+            VisibilityUpdate {
+                changed_id_span: Some(1..2),
+                full_tests: 3,
+                partial_tests: 0
+            }
+        );
+        assert_eq!(s.ids, [0, 2]);
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum),
+            VisibilityUpdate::default()
+        );
+        s.set(2, outside).unwrap();
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum),
+            VisibilityUpdate {
+                partial_tests: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(s.ids, [0]);
+        s.clear_dirty();
+        s.set(0, outside).unwrap();
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum),
+            VisibilityUpdate {
+                partial_tests: 1,
+                ..Default::default()
+            }
+        );
+        assert!(s.ids.is_empty());
+        s.clear_dirty();
+        s.set(1, inside).unwrap();
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum),
+            VisibilityUpdate {
+                changed_id_span: Some(0..1),
+                full_tests: 0,
+                partial_tests: 1
+            }
+        );
+        assert_eq!(s.ids, [1]);
+        s.clear_dirty();
+        assert_eq!(
+            s.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Unculled),
+            VisibilityUpdate {
+                changed_id_span: Some(0..3),
+                full_tests: 0,
+                partial_tests: 0
+            }
+        );
+        assert_eq!(s.ids, [0, 1, 2]);
+    }
+
+    #[test]
+    fn transformed_cache_tracks_camera_mesh_and_unculled_edits() {
+        let mut state = InstanceState::new(&[Mat4::IDENTITY]);
+        state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum);
+        assert_eq!(state.ids, [0]);
+        let capacity = state.visibility_cache_bytes();
+        let shifted = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        state.visibility(shifted, BOUNDS, Visibility::Frustum);
+        assert!(state.ids.is_empty());
+        assert_eq!(state.visibility_cache_bytes(), capacity);
+        let larger = Aabb {
+            min: [-20.0; 3],
+            max: [20.0; 3],
+        };
+        state.visibility(shifted, larger, Visibility::Frustum);
+        assert_eq!(state.ids, [0]);
+        state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Unculled);
+        state.set(0, shifted).unwrap();
+        state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Unculled);
+        state.clear_dirty();
+        state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Frustum);
+        assert!(state.ids.is_empty());
+    }
+
+    #[test]
+    fn changed_id_spans_publish_the_correct_prefix_across_many_edits() {
+        let mut state = InstanceState::new(&[Mat4::IDENTITY; 193]);
+        let mut published: Vec<u32> = (0..193).collect();
+        let mut expected_visible = [true; 193];
+        let mut seed = 0x7218_ace1_u32;
+        for frame in 0..256 {
+            for _ in 0..7 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let slot = seed as usize % expected_visible.len();
+                expected_visible[slot] = !expected_visible[slot];
+                state
+                    .set(
+                        slot,
+                        Mat4::from_translation(Vec3::new(
+                            if expected_visible[slot] { 0.0 } else { 10.0 },
+                            0.0,
+                            0.5,
+                        )),
+                    )
+                    .unwrap();
+            }
+            let mode = if frame % 17 == 0 {
+                Visibility::Unculled
+            } else {
+                Visibility::Frustum
+            };
+            let update = state.visibility(Mat4::IDENTITY, BOUNDS, mode);
+            if let Some(span) = update.changed_id_span {
+                published[span.clone()].copy_from_slice(&state.ids[span]);
+            }
+            let expected: Vec<_> = expected_visible
+                .iter()
+                .enumerate()
+                .filter(|(_, visible)| **visible || mode == Visibility::Unculled)
+                .map(|(slot, _)| slot as u32)
+                .collect();
+            assert_eq!(&published[..state.ids.len()], expected, "frame={frame}");
+            state.clear_dirty();
+            assert_eq!(
+                state.visibility(Mat4::IDENTITY, BOUNDS, mode),
+                VisibilityUpdate::default()
+            );
+        }
+    }
+}
