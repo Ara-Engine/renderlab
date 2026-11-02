@@ -12,5 +12,4 @@ Read `docs/brief.md` before implementation. Read `docs/research/industry-renderi
 - Use Astra or Opus for implementation if delegation is explicitly authorized. Ordinary work should stay with one agent.
 - Historical Ara plans are evidence, not inherited architectural decisions. Record proposals and measured reasons before choosing an approach.
 - Keep captures and generated measurements in ignored directories. Do not import private assets or third-party source without checking redistribution rights and preserving attribution.
-- The user authorized local project setup and continuation in a new thread. Public hosting and a license have not yet been selected.
-
+- Public repository: https://github.com/Ara-Engine/renderlab. The project license remains undecided; Ara integration is still deferred.

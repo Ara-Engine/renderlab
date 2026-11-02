@@ -59,4 +59,3 @@ fn sample_scene(ro: vec3f, rd: vec3f) -> vec3f {
     }}
     return vec4f(color,1);
 }
-

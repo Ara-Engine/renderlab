@@ -6,7 +6,7 @@ Islam wants a separate, public Rust rendering library/engine on this PC, useful 
 
 The immediate motivation is unacceptable iteration speed in the large engine. Treat development latency as a product feature: immediate parameter changes, shader edits without Rust rebuilds, short incremental Rust rebuilds, and prepared scene assets reused across launches.
 
-The public name is undecided; Renderlab is a reversible working name. The repository is local, with no remote or selected public license. This bootstrap makes no rendering or performance claims.
+The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-1.md for the working viewer and measured development loop.
 
 ## First working milestone
 

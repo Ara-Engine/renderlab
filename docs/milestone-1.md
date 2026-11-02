@@ -25,3 +25,25 @@ Reload compiles synchronously on the event thread, briefly pausing it. File poll
 All timings are development builds, not GPU frame timings. Host: Windows x86_64, Ryzen 7 7800X3D, RTX 4070 SUPER, NVIDIA 617.14, rustc 1.96.0 (ac68faa20), Vulkan, 960x640 sRGB/FIFO. Two Cargo jobs, incremental enabled, line-table debug information. Default scene and quality above. No exclusive GPU window was taken: no active Ara quiet-window lock existed, but browsers, T3, desktop compositor and NVIDIA overlay were active. A pre-run GPU utilization snapshot was 40%; contention is uncontrolled.
 
 Cold means a fresh Cargo target directory with registry downloads already cached and OS/driver caches warm, not a reboot or cold disk. No-op includes Cargo process overhead. Incremental changes an actual library default and rebuilds/relinks the viewer. Startup runs from main() through first GPU completion and presentation call; it excludes OS process creation. Shader latency starts at the file modification timestamp and includes polling, validation, compilation, GPU completion and the presentation call. Neither measures photons/scanout; these are image-ready/present proxies. External process-start-to-log measurements are upper bounds with polling overhead.
+
+## Results (2026-11-02)
+
+Measured implementation: `d3d3f234d3379f0499c64554a77f8ddb6b95aba1`. Documentation/script updates do not change the renderer. Final warm run: `measurements/20261102-191912/results.json`; clean build: `measurements/clean-build.json` and `.log`.
+
+| Operation | Observed wall time | Samples / interpretation |
+|---|---:|---|
+| Clean-target dev compile | 23.286 s | One run, registry and OS caches warm; Cargo reported 23.06 s |
+| No-op build | 0.334–0.337 s | Three runs; median 0.336 s including Cargo invocation |
+| Representative library edit + viewer rebuild | 1.509 s | One run, default camera yaw 0.35 ? 0.36 |
+| Rust edit ? running viewer's first-present log | 2.566 s | One run; includes build, process launch and external log polling |
+| Startup main() ? GPU complete + present | 624–652 ms | Three runs: 651.857, 624.148, 639.558; median 639.558 |
+| Shader file write ? GPU complete + present | 43–81 ms | Three runs: 80.575, 72.126, 43.055; median 72.126 |
+| Shader validation/pipeline creation alone | 26–31 ms | Same three reloads: 27.941, 30.833, 26.159 |
+
+Initial exploratory startup was 949.663 ms; initial live color reload was 66.729 ms. Keep these rather than calling the later warm sample universally representative. Initial dependency compilation failed after 37.00 s on API mismatches; the accepted clean-target number above comes from a successful fresh-target rebuild after fixes. A discarded harness used Start-Process -Wait for Cargo and added coarse wait overhead (about one second on no-op); the final script invokes Cargo directly. Raw failed/discarded runs remain ignored, not silently presented as successful samples.
+
+Provisional regression thresholds for this fixture on this host: warm startup under 1 s, shader-to-present under 100 ms, representative Rust rebuild under 2 s. These are evidence-based local checks, not p99 guarantees or production budgets. More repetitions and contention control are needed before tightening them. GPU frame time has deliberately not been inferred from these values or measured in an unoptimized build.
+
+Reproduce with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-dev-loop.ps1`, optionally `-Cold`. Run while nobody is editing this checkout: the script temporarily changes a library default and shader color, restores exact source bytes in finally, closes its viewer processes, and writes logs to ignored measurements/. The script checks the historical Ara quiet-window lock but does not take an exclusive GPU measurement window.
+
+Verified final contact sheet: `captures/contact-sheet.png` (camera, lighting, roughness, transparency endpoints, displacement and shader color). Actual failed-reload window capture: `captures/live-window.png`. These artifacts are local/ignored; reproduce the GPU captures with the explicit test command in README.
