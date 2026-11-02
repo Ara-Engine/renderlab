@@ -1,6 +1,8 @@
 # Milestone 1 execution plan
 
-Status: design selected after independent Opus review. Implementation is starting against m1-design.md.
+Status: implementation returned and undergoing root review. CPU checks and an earlier GPU acceptance run passed. Final interaction, measurement, and independent acceptance gates remain open. See [the M1 evidence record](milestone-1.md).
+
+Current execution constraint: Islam is playing Valorant. Coding and light CPU checks continue; viewer launches, UI automation, GPU tests/stress/benchmarks and heavy timing builds are deferred until he says he is done playing. Deferred acceptance gates remain unverified. Preserve the foreground game and do not capture it.
 
 ## Scope and completion
 

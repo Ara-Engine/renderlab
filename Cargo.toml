@@ -9,8 +9,9 @@ resolver = "3"
 members = ["viewer"]
 
 [dependencies]
-wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"] }
 pollster = "0.4"
+glam = "0.30.10"
 
 [profile.dev]
 debug = "line-tables-only"
