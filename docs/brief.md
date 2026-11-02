@@ -8,6 +8,16 @@ The immediate motivation is unacceptable iteration speed in the large engine. Tr
 
 The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
 
+## Long-term quality and performance target
+
+Islam wants the complete renderer to exceed Unreal in image quality and performance, aiming for 2-5 times better quality and 10 times the rendering performance together. This is the project ambition, not a demonstrated result or a feasibility guarantee. Development latency remains a separate product requirement.
+
+The quality multiplier needs an agreed operational definition. One candidate is 2-5 times lower error against high-quality reference images, supplemented by full-frame inspection and explicit silhouette, shadow, transparency, and motion-stability checks. Lower numerical error alone does not establish perceptual quality. This candidate metric has not yet been selected.
+
+Future comparisons must name the Unreal version, content, hardware, internal/output resolution, reconstruction, enabled effects, quality settings, and timing method. Measure the complete rendering workload, including geometry, materials, visibility, lighting, updates, and required preparation. Report CPU and GPU costs and memory separately. The intended success is the higher accepted quality at the performance target in the same configuration. Separate fast and high-quality configurations do not establish that combined result. Representative workloads must be agreed before making an engine-wide claim; a tiny fixture cannot establish it.
+
+This direction does not expand the currently authorized Milestone 1. M1 establishes the correctness and cost measurements needed to test future approaches. Discuss later rendering layers before implementing them.
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.

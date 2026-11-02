@@ -59,7 +59,7 @@ Work from foundations upward, one layer at a time, discussing the next step with
 
 Materials, direct illumination, shadows, indirect light, reflections, transparency and image reconstruction remain future topics. Their exact milestone boundaries and algorithms have not been agreed. Do not present a fabricated fixed roadmap or automatically advance into them. Deferral sets build order, not permanent feature cuts.
 
-The long-term ambition includes excellent quality and performance, but no claim that this design beats Lumen or any production renderer has been demonstrated. Islam specifically noticed rough/jittery cube/model silhouettes, overly dark/hard shadows and pixelated shadow edges. Judge complete images and motion, not only region-average lighting scores. When lighting arrives, evaluate shadow softness, darkness, edges and stability explicitly alongside cost.
+Islam subsequently set the long-term ambition at 2-5 times Unreal's image quality and 10 times its rendering performance together. See brief.md for the comparison requirements and unresolved definition of the quality multiplier. No claim that this design beats Lumen or any production renderer has been demonstrated. Islam specifically noticed rough/jittery cube/model silhouettes, overly dark/hard shadows and pixelated shadow edges. Judge complete images and motion, not only region-average lighting scores. When lighting arrives, evaluate shadow softness, darkness, edges and stability explicitly alongside cost.
 
 ## Evidence before optimization
 
