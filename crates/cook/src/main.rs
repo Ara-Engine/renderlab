@@ -7,6 +7,26 @@ use std::{env, path::Path, process::ExitCode};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["m4-register", directory] => renderlab_cook::virtual_fixtures::register(Path::new(directory))?,
+        ["m4-cook", source, cache, manifest] | ["m4-cook", source, cache, manifest, "--triangles64"] => {
+            use renderlab_cook::{virtual_cache,virtual_cook};
+            let settings=virtual_cook::Settings {max_triangles:if args.len()==5 {64}else{128}};
+            let result=virtual_cache::cook_file(Path::new(source),Path::new(cache),Path::new(manifest),settings,renderlab_asset::virtual_mesh::VirtualLimits::default())?;
+            let loaded=result.loaded;let r=result.report;let c=loaded.counts;
+            let mut roots=std::collections::BTreeSet::new();let mut root_clusters=0;
+            for mesh in &loaded.package.meshes {for g in mesh.terminal_groups() {for cluster in &mesh.clusters[mesh.groups[g.index()].clusters.range(mesh.clusters.len())?] {roots.insert(cluster.page);root_clusters+=1;}}}
+            let stats=r.statistics.map(|s|json!({"source_vertices":s.source_vertices,"source_indices":s.source_indices,"packed_vertices":s.packed_vertices,"packed_indices":s.packed_indices,"unique_referenced_source_vertices":s.unique_referenced_source_vertices,"duplicated_vertex_records":s.packed_vertices-s.unique_referenced_source_vertices,"locked_subset_boundary_vertices":s.source_boundary_vertices_locked,"copied_callback_index_bytes":s.copied_callback_index_bytes,"peak_single_primitive_attribute_bytes":s.peak_single_primitive_attribute_bytes}));
+            println!("{}",json!({"key":loaded.key,"package_sha256":loaded.package_sha256,"source_sha256":hash_hex(&std::fs::read(source)?),"cache_hit":r.cache_hit,"miss_reason":r.miss_reason,"source_bytes":r.source_bytes,"metadata_file_bytes":loaded.metadata_file_bytes,"counts":{"groups":c.groups,"clusters":c.clusters,"pages":c.pages,"payload_bytes":c.payload_bytes,"disk_page_bytes":c.disk_page_bytes,"disk_padding_bytes":c.disk_page_bytes-c.payload_bytes,"metadata_host_bytes":c.metadata_host_bytes,"minimum_cover_clusters":root_clusters,"pinned_root_pages":roots.len(),"pinned_root_bytes":roots.len()*65536,"normal_pool_bytes":(8usize<<20).max((roots.len()+4)*65536)},"cooking":stats,"timings_us":{"prepare":r.prepare_us,"verify":r.verify_us,"total":r.total_us}}));
+        },
+        ["m4-inspect", cache, manifest] => {
+            let loaded=renderlab_cook::virtual_cache::load_manifest(Path::new(cache),Path::new(manifest),renderlab_asset::virtual_mesh::VirtualLimits::default())?;
+            println!("{}",json!({"key":loaded.key,"package_sha256":loaded.package_sha256,"groups":loaded.counts.groups,"clusters":loaded.counts.clusters,"pages":loaded.counts.pages,"metadata_host_bytes":loaded.counts.metadata_host_bytes}));
+        },
+        ["m4-prove", cache, manifest, kind] if ["closed","open"].contains(kind) => {
+            let cache=Path::new(cache);let loaded=renderlab_cook::virtual_cache::load_manifest(cache,Path::new(manifest),renderlab_asset::virtual_mesh::VirtualLimits::default())?;
+            let pages=loaded.package.pages.iter().map(|p|renderlab_cook::virtual_cache::load_page(cache,p)).collect::<Result<Vec<_>,_>>()?;
+            println!("{}",renderlab_cook::virtual_proof::prove(&loaded.package,&pages,*kind=="closed",false)?);
+        },
         ["fixtures",directory]=> {
             fixtures::generate(Path::new(directory))?;
             for (name,bytes) in fixtures::sources()? { println!("{}",json!({"source":name,"bytes":bytes.len(),"sha256":hash_hex(&bytes)})); }

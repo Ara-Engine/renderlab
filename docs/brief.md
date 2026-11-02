@@ -18,9 +18,11 @@ Future comparisons must name the Unreal version, content, hardware, internal/out
 
 M1 established the correctness and cost measurements needed to test future approaches. Islam has now explicitly authorized M2-M4, including investigation and implementation of justified improvements beyond Nanite. The working scope and acceptance gates are in [milestones-2-4.md](milestones-2-4.md). Stop after M4; the remaining proposed roadmap is not implementation authorization.
 
-M2's persistent instancing and conservative visibility are complete, with root verification and independent Opus acceptance. [Milestone 2](milestone-2.md) records full-image/depth, in-flight replacement, actual viewer, paired performance and development-loop evidence, including corrected oracle-coverage limits, single-sample aliasing and expensive sparse updates. M3 assets/materials is next, followed by M4 bounded virtual geometry.
+M2's persistent instancing and conservative visibility are complete, with root verification and independent Opus acceptance. [Milestone 2](milestone-2.md) records full-image/depth, in-flight replacement, actual viewer, paired performance and development-loop evidence, including corrected oracle-coverage limits, single-sample aliasing and expensive sparse updates.
 
 M3's prepared assets, isolated cooker, material rendering and 1x/4x AA are complete after independent Opus review and a verified sampler correction. [Milestone 3](milestone-3.md) records images, resource stress, live interaction, development latency and carried limitations. M4's bounded virtual geometry follows [its execution plan](milestone-4-plan.md).
+
+M4 Unit A is accepted: registered dense fixtures, clustered immutable pages, bounded metadata and CPU proofs of legal cuts. [Milestone 4](milestone-4.md) records the fixed content/camera hashes, independently reproduced checks and cooking costs. GPU streaming, retirement accounting, moving-image quality and M4 acceptance remain pending.
 
 ## Milestone 0: development environment (complete)
 

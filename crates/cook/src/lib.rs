@@ -3,6 +3,10 @@ mod cache;
 pub mod fixtures;
 mod import;
 mod mip;
+pub mod virtual_cache;
+pub mod virtual_cook;
+pub mod virtual_fixtures;
+pub mod virtual_proof;
 
 pub use cache::{CookReport, CookResult, LoadedAsset, cook_file, hash_hex, load_manifest};
 pub use import::{CookLimits, MissingNormals, Settings, prepare};

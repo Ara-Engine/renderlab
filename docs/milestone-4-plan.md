@@ -29,6 +29,8 @@ Unit A acceptance is CPU/cooker evidence only: deterministic cached preparation 
 
 ## Unit B: runtime and resource lifetimes
 
+Unit A is accepted with root reproduction recorded in [milestone-4.md](milestone-4.md), including the fixed registered content and camera hashes. The blocking proof/cooking phase is complete. Unit B remains one coupled implementation stream: page state, submission completion and cluster draw ranges share ownership invariants. Root owns independent verification and publication; a fresh Sol implementation owner handles the runtime migration. CPU state-machine checks precede offscreen GPU integration and real IO/retirement stress; root then verifies live interaction and Unit C measurements.
+
 Caller-owned virtual geometry shares demand/residency per asset; cuts are per instance. Integrate page-local cluster draw ranges with the existing material/instance path and ordinary hardware rasterization. Preserve M3's optional 4x AA, shader recovery and library/window separation. Virtual geometry may declare a supported affine transform domain; it must not silently weaken raw M2/M3 APIs.
 
 Use explicit bounded page states for queued read, ready bytes, admitted upload, resident and retiring work. File reads happen off the render thread. Failed or corrupt reads retain fallback, report errors and avoid unbounded retries. Demand order is deterministic at a fixed view; selected or demanded pages are not self-evicted. Publish legal cuts from currently usable pages. Ordinary frames never wait for IO or GPU completion.

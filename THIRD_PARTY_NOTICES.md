@@ -15,3 +15,7 @@ All 32 registry packages newly added to Cargo.lock have their packaged notices c
 - Zlib: zlib-rs 0.6.8. This is resolved in Cargo.lock but is not enabled in the current Windows cooker tree.
 
 These packages are registry dependencies, not vendored library source. Copyright and permission text remains verbatim in the copied files. No Renderlab or fixture license is assigned by these selections.
+
+M4 Unit A adds cooker-only `meshopt = 0.7.0` (archive checksum in Cargo.lock), which packages meshoptimizer 1.3 and its clusterLOD example. The wrapper declares MIT OR Apache-2.0, but its crate archive omits the root license files. MIT is selected using the exact packaged source commit's [LICENSE-MIT](https://raw.githubusercontent.com/gwihlidal/meshopt-rs/67c589e166a41be6f7e1e41360ecd7cb02f0b9c9/LICENSE-MIT), preserved verbatim in `third-party/licenses/meshopt-0.7.0/`. Both packaged upstream MIT notice blocks are also preserved there. No Unreal/Ara source or third-party artwork was copied.
+
+The only newly resolved packages are meshopt 0.7.0 and float-cmp 0.10.0 (MIT). Its packaged notice is preserved. The cooker now activates the existing lockfile's C++ build tools cc 1.11.0, find-msvc-tools 0.1.15 and shlex 2.0.1 (MIT selected from MIT OR Apache-2.0); their packaged notices are preserved too. `third-party/m4-license-audit.json` records exact archive and notice checksums and distinguishes new resolution from newly used build dependencies. Optional bindgen is disabled. Runtime/viewer dependency checks include build edges and exclude these cooker additions.

@@ -14,13 +14,13 @@ const ALGORITHM: &[u8] =
 const MANIFEST_LIMIT: usize = 1 << 20;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-fn hash(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 pub fn hash_hex(bytes: &[u8]) -> String {
     hex(&hash(bytes))
 }
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
@@ -71,7 +71,10 @@ pub(crate) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn atomic_publish(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+pub(crate) fn atomic_publish(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -99,7 +102,7 @@ fn atomic_publish(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> R
     result
 }
 
-fn immutable_entry(path: &Path, bytes: &[u8]) -> Result<bool> {
+pub(crate) fn immutable_entry(path: &Path, bytes: &[u8]) -> Result<bool> {
     if read_bounded(path, bytes.len()).is_ok_and(|existing| existing == bytes) {
         return Ok(true);
     }

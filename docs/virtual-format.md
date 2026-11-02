@@ -1,0 +1,36 @@
+# Virtual prepared boundary, version 1
+
+Unit A supplies CPU preparation and selection, not runtime streaming or M4 acceptance. `renderlab_asset::virtual_mesh` has no dependencies, GPU types or importer. M3 RLA1 is unchanged and remains the full-detail image reference. A virtual package never embeds source geometry in its resources.
+
+`Package` owns `VirtualMesh` records, global `Page` records, placements, and an M3 `Asset` containing only shared materials/textures. Each mesh owns topologically ordered replacement `Group` records and contiguous `Cluster` records. Newtypes distinguish GroupId, ClusterId and PageId. Groups store upstream accumulated simplified sphere/error and depth. A group's clusters are the fine representation; incoming clusters whose `refined` names it are all shards of its coarse representation. `None` marks original geometry. Terminal groups are identified by error exactly finite f32::MAX, including shallow stuck groups. The optional upstream spatial forest is not stored or confused with replacement ancestry.
+
+A cluster records owner, optional refined group, culling sphere/error, material, global page ID and a u32 index-array span. Cluster bounds do not supply monotone selection error. A page stores vertices, indices, actual payload length and SHA-256 of its entire zero-padded 65,536-byte file. Layout is 48-byte M3 vertices, then u32 indices addressing that page's vertex array, then zero padding. Several clusters draw ranges of the same page buffers. Page padding is disk/logical page storage, separately reported from payload. Buffer alignment, staging and retirement charges belong to runtime integration.
+
+## Binary metadata
+
+All integers are little-endian u32 except the noted u64. Floats preserve IEEE f32 bits. No native padding or compression exists.
+
+| Record | Fields in order |
+| --- | --- |
+| Package header | `RLV\0`, version 1, mesh count, placement count, page count, resource byte count |
+| Resources | Exact RLA1 resource bytes; mesh/placement counts must be zero |
+| Mesh | Group count, cluster count, all groups, all clusters |
+| Group (32 bytes) | Depth, simplified bounds (center XYZ/radius/error), cluster offset/count |
+| Cluster (44 bytes) | Owner, refined (`0xffffffff` = original), bounds, material, page, index offset/count |
+| Placement (68 bytes) | Mesh, column-major 16-float affine transform |
+| Page (44 bytes) | Vertex count, index count, payload length, digest[32] |
+| Current/key manifest (80 bytes) | `RVM\0`, version 1, key[32], package digest[32], package file length u64 |
+
+Cache locations are `virtual-v1/{keys,packages,pages}/<sha256>`. No manifest-controlled arbitrary paths exist. The metadata's materials/textures use the original role/sampler/mip codec. Page files can be read independently after metadata admission. `decode_page(page, bytes, actual_sha256)` requires the caller to calculate SHA-256 of the actual entire file. The dependency-free asset crate compares that digest, validates exact size/zero padding, finite vertices, normals, colors and local indices. It does not implement cryptography. The cooker uses pinned sha2; Unit B must wire hashing before availability publication.
+
+Decode caps counts and charges metadata/container storage before allocation, checks resource decode limits independently, then validates aggregate metadata plus validation scratch. Defaults are 65,536 groups, 131,072 clusters, 8,192 pages, 8 MiB metadata/validation scratch and 512 MiB disk page geometry. Unchanged M3 resource/input limits still apply. Checks reject truncation, trailing bytes, nonfinite/negative spheres/errors, cyclic/unordered/depth-inconsistent links, nonmonotone group errors/bounds, wrong terminal markers, unowned clusters, bad materials/pages/placements, overflowing/out-of-range/overlapping/uncovered page index spans and inconsistent payload counts. Counts report element storage, not allocator capacity or process RSS. Texture decoding retains M3's separate allocation allowance; the runtime's 64 MiB texture policy is a later admission gate.
+
+## Pure cuts and demand
+
+`select(mesh, projected_errors, threshold, published_pages, SelectionBudget)` rebuilds a per-mesh, per-instance cut from every terminal group. Scalars must be nonnegative and monotone from refined groups to owners; positive infinity is permitted, NaN/negative infinity are rejected. Every terminal error must exceed the finite nonnegative threshold. Projection belongs to runtime: a tested example uses error / max(distance - radius, positive near) times half the viewport height and cot(fov/2), followed by a topological maximum over incoming errors. Unit A tests positive uniform scale, very near and inside-sphere cases. This approximation does not guarantee one-pixel image error. Unit B must declare and verify supported affine scale/near/normal/winding behavior independently.
+
+An active group replaces all incoming coarse shards. To refine a group, selection propagates activation through every owner, computes the final cut, and checks output/page capacity before publication. A transaction needs only its final-cover pages and pinned root pages. Intermediate pages removed by that same atomic transition are neither required nor requested. The logical geometry capacity conservatively charges current cut pages plus the proposed final cover plus pinned fallback. Runtime will additionally charge staging/retired allocations and other instances/assets; this local scalar budget is not a complete GPU admission algorithm.
+
+`Selection` returns `Cut` (active groups, cluster IDs, selected page IDs), `Demand` (required final-cover/root pages and their unavailable subset), `QualityDebt` (unresolved groups, maximum denied projected error and reasons), plus work counters. Missing final pages stop the first feasible transaction and retain the current complete cut. Candidate, output and page exhaustion also retain complete coverage. A pool or output cap below the terminal minimum, or unavailable root pages, rejects admission. Demand order is deterministic. Runtime should union page demand across instances/assets while retaining per-instance cuts, share page charges, and prevent selected/demanded pages from self-eviction.
+
+The initial CPU selector deliberately scans cluster metadata and sorts page sets for every candidate closure: bounded O(candidates × clusters × log(clusters)), with candidates clamped to group count and output capacities clamped to actual cluster count. Unlimited tests never allocate from usize::MAX. Scratch admission is `32 * groups + 48 * clusters` bytes, a conservative element-allocation envelope excluding caller-owned metadata/errors/availability, allocator overhead and proof-harness memory. This is an auditable CPU baseline, not a performance claim or a finished runtime traversal strategy.

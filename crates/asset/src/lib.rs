@@ -1,5 +1,6 @@
 //! Owned prepared assets. No GPU, window, importer, codecs or math crate.
 mod binary;
+pub mod virtual_mesh;
 
 pub use binary::{SCHEMA_VERSION, decode, encode, encode_mesh};
 use std::fmt;
