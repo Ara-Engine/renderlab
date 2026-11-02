@@ -13,3 +13,5 @@ Read `docs/brief.md` before implementation. Read `docs/research/industry-renderi
 - Historical Ara plans are evidence, not inherited architectural decisions. Record proposals and measured reasons before choosing an approach.
 - Keep captures and generated measurements in ignored directories. Do not import private assets or third-party source without checking redistribution rights and preserving attribution.
 - Public repository: https://github.com/Ara-Engine/renderlab. The project license remains undecided; Ara integration is still deferred.
+- Commit and push validated checkpoints to the configured remote routinely; the user has authorized this. Report the pushed SHA and any failed push. Never force-push or include another agent's uncommitted work.
+- Current sequencing: milestone 1 is complete. Discuss rendering foundations with Islam one layer at a time before choosing the next implementation milestone; do not automatically advance into mesh loading or advanced lighting.
