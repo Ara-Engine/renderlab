@@ -1,4 +1,6 @@
 mod fixture;
+#[path = "../../support/validation.rs"]
+mod validation;
 use fixture::Scene;
 use renderlab::{FrameId, Limits, Mesh, Renderer, Revision, wgpu};
 use std::{
@@ -22,6 +24,7 @@ struct Options {
     seconds: Option<f64>,
     timestamps: bool,
     log_frames: bool,
+    validate: bool,
 }
 impl Options {
     fn parse() -> Result<Self, String> {
@@ -31,6 +34,7 @@ impl Options {
             seconds: None,
             timestamps: true,
             log_frames: false,
+            validate: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -54,6 +58,7 @@ impl Options {
                 "--shader" => options.shader = args.next().ok_or("missing shader path")?.into(),
                 "--no-timestamps" => options.timestamps = false,
                 "--log-frames" => options.log_frames = true,
+                "--validate" => options.validate = true,
                 _ if !arg.starts_with('-') => options.shader = arg.into(),
                 _ => return Err(format!("unknown argument {arg}")),
             }
@@ -501,6 +506,7 @@ impl ApplicationHandler for App {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let options = Options::parse()?;
+    let _validation = validation::begin(options.validate);
     let mut app = App {
         view: None,
         start,

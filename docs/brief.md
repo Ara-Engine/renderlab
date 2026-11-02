@@ -22,7 +22,9 @@ This direction does not expand the currently authorized Milestone 1. M1 establis
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.
 
-## Milestone 1: reliable, measurable GPU foundation (authorized)
+## Milestone 1: reliable, measurable GPU foundation (complete)
+
+Completed and verified on Windows/Vulkan. [The M1 record](milestone-1.md) contains validation-layer evidence, live-window checks, measurements, review corrections and accepted limitations. The scope below records its contract; later layers still require discussion and authorization.
 
 Follow the scope and acceptance in [project-handoff.md](project-handoff.md). Use the installed pstack workflow with the confirmed large reasoning budget and GPT-6.1 Sol, Astra, and Opus 5.5. This thread owns implementation and decisions directly with Islam.
 

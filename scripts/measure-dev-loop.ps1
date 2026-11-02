@@ -22,6 +22,8 @@ $results = [ordered]@{
     scene = 'two indexed cubes and a triangle; Depth32Float; one sample; 960x640 initial window'
     builds = [ordered]@{}
     launches = @()
+    binaries = [ordered]@{}
+    vulkan_implicit_layer_path = $env:VK_IMPLICIT_LAYER_PATH
     success = $false
 }
 function Assert-Quiet {
@@ -86,6 +88,7 @@ function Wait-Log([string]$Path, [string]$Pattern) {
 }
 function Launch([string]$Name) {
     Assert-Quiet
+    $results.binaries[$Name] = (Get-FileHash target/debug/renderlab-viewer.exe -Algorithm SHA256).Hash
     $script:viewer = Start-Process target/debug/renderlab-viewer.exe -ArgumentList @('--seconds', '25') -WindowStyle Hidden -PassThru -RedirectStandardOutput "$run/$Name.stdout.log" -RedirectStandardError "$run/$Name.log"
     $null = $script:viewer.Handle
 }

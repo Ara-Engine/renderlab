@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../support/validation.rs"]
+mod validation;
 use std::{
     fs,
     io::Write,
@@ -173,6 +175,7 @@ fn cpu_boundaries_and_projection() {
 #[test]
 #[ignore = "Vulkan GPU; sequential full-image and upload/timing acceptance"]
 fn gpu_images_uploads_reload_and_timing() {
+    let _validation = validation::begin(true);
     let mut r = renderer(true);
     let red = triangle([1.0, 0.0, 0.0]);
     let blue = triangle([0.0, 0.0, 1.0]);
@@ -403,6 +406,7 @@ fn gpu_images_uploads_reload_and_timing() {
 #[test]
 #[ignore = "Vulkan GPU; optional timestamps and foreign-device fault injection"]
 fn gpu_disabled_timing_and_foreign_device_fault() {
+    let _validation = validation::begin(true);
     let mut r = renderer(false);
     let vertices = triangle([0.2, 0.8, 0.3]);
     let mesh = upload(&mut r, &vertices, &INDICES);
@@ -494,6 +498,7 @@ impl HighWater {
 #[test]
 #[ignore = "Vulkan GPU; 2176 replacement frames, no per-frame waits or captures"]
 fn gpu_replacement_stress() {
+    let _validation = validation::begin(true);
     let mut r = renderer(true);
     fs::create_dir_all("measurements/m1-implementation").unwrap();
     let mut log = fs::File::create("measurements/m1-implementation/stress.csv").unwrap();

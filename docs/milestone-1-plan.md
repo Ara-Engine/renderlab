@@ -1,8 +1,8 @@
 # Milestone 1 execution plan
 
-Status: implementation returned and undergoing root review. CPU checks and an earlier GPU acceptance run passed. Final interaction, measurement, and independent acceptance gates remain open. See [the M1 evidence record](milestone-1.md).
+Status: complete. Implementation, GPU/window acceptance, development measurements, and Opus review corrections are verified. See [the M1 evidence record](milestone-1.md) for scope and limitations.
 
-Current execution constraint: Islam is playing Valorant. Coding and light CPU checks continue; viewer launches, UI automation, GPU tests/stress/benchmarks and heavy timing builds are deferred until he says he is done playing. Deferred acceptance gates remain unverified. Preserve the foreground game and do not capture it.
+Islam explicitly ended the gameplay hold. Final GPU and window runs captured Khronos validation diagnostics with zero errors under a process-local loader configuration excluding broken implicit overlay registrations. No machine settings changed. Stop here until Islam authorizes the next layer.
 
 ## Scope and completion
 

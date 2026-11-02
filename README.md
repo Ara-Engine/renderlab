@@ -14,7 +14,7 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 
-Milestone 1 is implemented but acceptance is still in progress. No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing, GI, and scalable scene systems remain outside this foundation milestone.
+Milestone 1 is complete on the recorded Windows/Vulkan host. No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is included. Lighting, shadows, transparency, antialiasing, GI, and scalable scene systems remain outside this foundation milestone.
 
 ## Verify
 
@@ -24,7 +24,9 @@ Milestone 1 is implemented but acceptance is still in progress. No GUI toolkit, 
 
 `cargo test -p renderlab -- --ignored --test-threads=1` explicitly runs the three Vulkan GPU tests, writing full-frame PPM captures into ignored `captures/m1/`. They cover depth, reload recovery, persistent uploads, asynchronous timing, faults, and replacement under in-flight work. Ordinary `cargo test` runs CPU validation and skips these hardware-dependent tests.
 
-`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1-check.ps1` records formatting, workspace checks, Clippy, and CPU tests. Add `-Gpu` for the GPU suite. GPU tests and viewer runs compete with other GPU applications; current project guidance defers them during Islam's gaming session.
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1-check.ps1` records formatting, workspace checks, Clippy, and CPU tests. Add `-Gpu` for the GPU suite, which requires the Khronos validation layer and fails on HAL errors. The viewer reports diagnostics too; `--validate` makes layer availability and clean diagnostics mandatory at exit. GPU tests and viewer runs compete with other GPU applications, so coordinate them with foreground use.
+
+The recorded final validation run isolated stale overlay registrations with a process-local `VK_IMPLICIT_LAYER_PATH` pointing at an empty directory. See the evidence record for exact environment and reproduction details. Normal runs use the host's Vulkan loader configuration.
 
 See [the Milestone 0 record](docs/milestone-0.md), [Milestone 1 evidence and open gates](docs/milestone-1.md), [brief](docs/brief.md), and [rendering research](docs/research/industry-rendering-costs.md). Fast development builds use two compiler jobs, incremental compilation, and line-table debug info. They are not optimized GPU benchmarks.
 

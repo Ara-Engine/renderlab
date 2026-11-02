@@ -1184,6 +1184,7 @@ name = "renderlab"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "log",
  "pollster",
  "wgpu",
 ]
@@ -1192,6 +1193,7 @@ dependencies = [
 name = "renderlab-viewer"
 version = "0.1.0"
 dependencies = [
+ "log",
  "pollster",
  "renderlab",
  "winit",

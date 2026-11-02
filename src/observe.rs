@@ -190,6 +190,7 @@ pub struct HalStats {
     pub query_sets: isize,
     pub buffer_bytes: isize,
     pub texture_bytes: isize,
+    /// Raw backend counter, not maintained by wgpu 30 Vulkan; use allocator bytes there.
     pub memory_allocations: isize,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

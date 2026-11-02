@@ -8,3 +8,4 @@ publish = false
 renderlab = { path = ".." }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 pollster = "0.4"
+log = "0.4"
