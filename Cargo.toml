@@ -6,7 +6,7 @@ publish = false
 
 [workspace]
 resolver = "3"
-members = ["viewer"]
+members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"] }

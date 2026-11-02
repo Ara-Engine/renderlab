@@ -1,0 +1,359 @@
+use crate::*;
+
+pub const SCHEMA_VERSION: u32 = 1;
+const MAGIC: &[u8; 4] = b"RLA\0";
+
+struct Writer(Vec<u8>);
+impl Writer {
+    fn u32(&mut self, v: u32) {
+        self.0.extend(v.to_le_bytes());
+    }
+    fn count(&mut self, v: usize) -> Result<()> {
+        self.u32(v.try_into().map_err(|_| Error("u32 count overflow"))?);
+        Ok(())
+    }
+    fn floats(&mut self, v: &[f32]) {
+        for f in v {
+            self.u32(f.to_bits());
+        }
+    }
+    fn mesh(&mut self, mesh: &Mesh) -> Result<()> {
+        self.count(mesh.primitives.len())?;
+        for p in &mesh.primitives {
+            self.u32(p.material);
+            self.count(p.vertices.len())?;
+            self.count(p.indices.len())?;
+            for v in &p.vertices {
+                self.floats(&v.position);
+                self.floats(&v.normal);
+                self.floats(&v.uv);
+                self.floats(&v.color);
+            }
+            for &i in &p.indices {
+                self.u32(i);
+            }
+        }
+        Ok(())
+    }
+    fn reference(&mut self, reference: Option<(u32, Sampler)>) {
+        let Some((index, s)) = reference else {
+            self.u32(0);
+            return;
+        };
+        self.u32(1);
+        self.u32(index);
+        let wrap = |w| match w {
+            Wrap::Clamp => 0,
+            Wrap::Mirror => 1,
+            Wrap::Repeat => 2,
+        };
+        let filter = |f| match f {
+            Filter::Nearest => 0,
+            Filter::Linear => 1,
+        };
+        self.u32(wrap(s.wrap_u));
+        self.u32(wrap(s.wrap_v));
+        self.u32(filter(s.mag));
+        self.u32(filter(s.min));
+        self.u32(match s.mipmap {
+            MipmapFilter::None => 0,
+            MipmapFilter::Nearest => 1,
+            MipmapFilter::Linear => 2,
+        });
+    }
+}
+
+/// Deterministic little-endian format, independent of Rust's struct layout.
+pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
+    asset.validate(limits)?;
+    let mut w = Writer(MAGIC.to_vec());
+    w.u32(SCHEMA_VERSION);
+    for n in [
+        asset.meshes.len(),
+        asset.placements.len(),
+        asset.materials.len(),
+        asset.textures.len(),
+    ] {
+        w.count(n)?;
+    }
+    for mesh in &asset.meshes {
+        w.mesh(mesh)?;
+    }
+    for p in &asset.placements {
+        w.u32(p.mesh);
+        for column in &p.transform {
+            w.floats(column);
+        }
+    }
+    for m in &asset.materials {
+        w.floats(&m.base_color);
+        w.floats(&[m.metallic, m.roughness]);
+        w.u32(u32::from(m.double_sided));
+        w.reference(m.base_color_texture.map(|t| (t.texture, t.sampler)));
+        w.reference(m.metallic_roughness_texture.map(|t| (t.texture, t.sampler)));
+    }
+    for t in &asset.textures {
+        w.u32(match t.role {
+            TextureRole::BaseColorSrgb => 0,
+            TextureRole::MetallicRoughnessLinear => 1,
+        });
+        w.count(t.mips.len())?;
+        for m in &t.mips {
+            w.u32(m.width);
+            w.u32(m.height);
+            w.count(m.rgba8.len())?;
+            w.0.extend(&m.rgba8);
+        }
+    }
+    cap(w.0.len(), limits.max_file_bytes, "prepared file byte limit")?;
+    Ok(w.0)
+}
+
+/// Stable geometry sidecar identity. Placements and textures are excluded.
+pub fn encode_mesh(mesh: &Mesh, limits: Limits) -> Result<Vec<u8>> {
+    validate_mesh(mesh, &mut Counts::default(), limits)?;
+    let mut w = Writer(b"RLG\0".to_vec());
+    w.u32(SCHEMA_VERSION);
+    w.mesh(mesh)?;
+    cap(w.0.len(), limits.max_file_bytes, "geometry file byte limit")?;
+    Ok(w.0)
+}
+
+struct Reader<'a> {
+    data: &'a [u8],
+    decoded: usize,
+    limits: Limits,
+}
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let (head, tail) = self
+            .data
+            .split_at_checked(n)
+            .ok_or(Error("truncated prepared asset"))?;
+        self.data = tail;
+        Ok(head)
+    }
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn count(&mut self, max: usize, min_bytes: usize, allocation: usize) -> Result<usize> {
+        let n = self.u32()? as usize;
+        cap(n, max, "prepared count limit")?;
+        cap(
+            product(n, min_bytes)?,
+            self.data.len(),
+            "truncated prepared count",
+        )?;
+        add(&mut self.decoded, product(n, allocation)?)?;
+        cap(
+            self.decoded,
+            self.limits.max_decoded_bytes,
+            "decoded byte limit",
+        )?;
+        Ok(n)
+    }
+    fn floats<const N: usize>(&mut self) -> Result<[f32; N]> {
+        let mut result = [0.0; N];
+        for v in &mut result {
+            *v = f32::from_bits(self.u32()?);
+            if !v.is_finite() {
+                return Err(Error("nonfinite prepared scalar"));
+            }
+        }
+        Ok(result)
+    }
+    fn boolean(&mut self) -> Result<bool> {
+        match self.u32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error("invalid boolean")),
+        }
+    }
+    fn reference(&mut self) -> Result<Option<(u32, Sampler)>> {
+        if !self.boolean()? {
+            return Ok(None);
+        }
+        let index = self.u32()?;
+        fn wrap(r: &mut Reader<'_>) -> Result<Wrap> {
+            match r.u32()? {
+                0 => Ok(Wrap::Clamp),
+                1 => Ok(Wrap::Mirror),
+                2 => Ok(Wrap::Repeat),
+                _ => Err(Error("invalid wrap")),
+            }
+        }
+        fn filter(r: &mut Reader<'_>) -> Result<Filter> {
+            match r.u32()? {
+                0 => Ok(Filter::Nearest),
+                1 => Ok(Filter::Linear),
+                _ => Err(Error("invalid filter")),
+            }
+        }
+        Ok(Some((
+            index,
+            Sampler {
+                wrap_u: wrap(self)?,
+                wrap_v: wrap(self)?,
+                mag: filter(self)?,
+                min: filter(self)?,
+                mipmap: match self.u32()? {
+                    0 => MipmapFilter::None,
+                    1 => MipmapFilter::Nearest,
+                    2 => MipmapFilter::Linear,
+                    _ => return Err(Error("invalid mip filter")),
+                },
+            },
+        )))
+    }
+}
+
+/// Decode with checked spans and aggregate budgets before every allocation.
+pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
+    cap(
+        bytes.len(),
+        limits.max_file_bytes,
+        "prepared file byte limit",
+    )?;
+    let mut r = Reader {
+        data: bytes,
+        decoded: 0,
+        limits,
+    };
+    if r.take(4)? != MAGIC || r.u32()? != SCHEMA_VERSION {
+        return Err(Error("unknown prepared schema"));
+    }
+    let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
+    let placements = r.count(limits.max_placements, 68, std::mem::size_of::<Placement>())?;
+    let materials = r.count(limits.max_materials, 36, std::mem::size_of::<Material>())?;
+    let textures = r.count(limits.max_textures, 8, std::mem::size_of::<Texture>())?;
+    let mut a = Asset {
+        meshes: Vec::with_capacity(meshes),
+        placements: Vec::with_capacity(placements),
+        materials: Vec::with_capacity(materials),
+        textures: Vec::with_capacity(textures),
+    };
+    let (mut primitives, mut vertices, mut indices) = (0, 0, 0);
+    for _ in 0..meshes {
+        let count = r.count(
+            limits.max_primitives.saturating_sub(primitives),
+            12,
+            std::mem::size_of::<Primitive>(),
+        )?;
+        add(&mut primitives, count)?;
+        let mut mesh = Mesh {
+            primitives: Vec::with_capacity(count),
+        };
+        for _ in 0..count {
+            let material = r.u32()?;
+            let nv = r.count(limits.max_vertices.saturating_sub(vertices), 48, 48)?;
+            let ni = r.count(limits.max_indices.saturating_sub(indices), 4, 4)?;
+            add(&mut vertices, nv)?;
+            add(&mut indices, ni)?;
+            cap(
+                product(nv, 48)?
+                    .checked_add(product(ni, 4)?)
+                    .ok_or(Error("size overflow"))?,
+                r.data.len(),
+                "truncated primitive",
+            )?;
+            let mut p = Primitive {
+                vertices: Vec::with_capacity(nv),
+                indices: Vec::with_capacity(ni),
+                material,
+            };
+            for _ in 0..nv {
+                p.vertices.push(Vertex {
+                    position: r.floats()?,
+                    normal: r.floats()?,
+                    uv: r.floats()?,
+                    color: r.floats()?,
+                });
+            }
+            for _ in 0..ni {
+                let i = r.u32()?;
+                if i as usize >= nv {
+                    return Err(Error("invalid vertex index"));
+                }
+                p.indices.push(i);
+            }
+            mesh.primitives.push(p);
+        }
+        a.meshes.push(mesh);
+    }
+    for _ in 0..placements {
+        let mesh = r.u32()?;
+        a.placements.push(Placement {
+            mesh,
+            transform: [r.floats()?, r.floats()?, r.floats()?, r.floats()?],
+        });
+    }
+    for _ in 0..materials {
+        let base_color = r.floats()?;
+        let [metallic, roughness] = r.floats()?;
+        let double_sided = r.boolean()?;
+        let base_color_texture = r
+            .reference()?
+            .map(|(texture, sampler)| BaseColorTexture { texture, sampler });
+        let metallic_roughness_texture = r
+            .reference()?
+            .map(|(texture, sampler)| MetallicRoughnessTexture { texture, sampler });
+        a.materials.push(Material {
+            base_color,
+            metallic,
+            roughness,
+            double_sided,
+            base_color_texture,
+            metallic_roughness_texture,
+        });
+    }
+    for _ in 0..textures {
+        let role = match r.u32()? {
+            0 => TextureRole::BaseColorSrgb,
+            1 => TextureRole::MetallicRoughnessLinear,
+            _ => return Err(Error("invalid texture role")),
+        };
+        let n = r.count(32, 12, std::mem::size_of::<Mip>())?;
+        if n == 0 {
+            return Err(Error("empty mip chain"));
+        }
+        let mut t = Texture {
+            role,
+            mips: Vec::with_capacity(n),
+        };
+        let mut expected = None;
+        for _ in 0..n {
+            let (w, h) = (r.u32()?, r.u32()?);
+            if w == 0 || h == 0 || w > limits.max_dimension || h > limits.max_dimension {
+                return Err(Error("texture dimension limit"));
+            }
+            if let Some(pair) = expected
+                && pair != (w, h)
+            {
+                return Err(Error("invalid mip dimensions"));
+            }
+            if w == 1 && h == 1 && t.mips.len() + 1 != n {
+                return Err(Error("mips after 1x1"));
+            }
+            if t.mips.len() + 1 == n && (w != 1 || h != 1) {
+                return Err(Error("incomplete mip chain"));
+            }
+            let size = product(product(w as usize, h as usize)?, 4)?;
+            let length = r.count(size, 1, 1)?;
+            if size != length {
+                return Err(Error("invalid mip byte count"));
+            }
+            t.mips.push(Mip {
+                width: w,
+                height: h,
+                rgba8: r.take(size)?.to_vec(),
+            });
+            expected = Some(((w / 2).max(1), (h / 2).max(1)));
+        }
+        a.textures.push(t);
+    }
+    if !r.data.is_empty() {
+        return Err(Error("trailing prepared bytes"));
+    }
+    a.validate(limits)?;
+    Ok(a)
+}

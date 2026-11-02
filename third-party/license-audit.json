@@ -1,0 +1,556 @@
+[
+  {
+    "name": "adler2",
+    "version": "2.0.1",
+    "license": "0BSD OR MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-0BSD",
+        "sha256": "861399f8c21c042b110517e76dc6b63a2b334276c8cf17412fc3c8908ca8dc17",
+        "first_line": "Copyright (C) Jonas Schievink <jonasschievink@gmail.com>"
+      },
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "first_line": "Permission is hereby granted, free of charge, to any"
+      }
+    ]
+  },
+  {
+    "name": "block-buffer",
+    "version": "0.10.4",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "d5c22aa3118d240e877ad41c5d9fa232f9c77d757d4aac0c2f943afc0a95e0ef",
+        "first_line": "Copyright (c) 2018-2019 The RustCrypto Project Developers"
+      }
+    ]
+  },
+  {
+    "name": "byteorder",
+    "version": "1.5.0",
+    "license": "Unlicense OR MIT",
+    "files": [
+      {
+        "name": "COPYING",
+        "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+        "first_line": "This project is dual-licensed under the Unlicense and MIT licenses."
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+        "first_line": "The MIT License (MIT)"
+      }
+    ]
+  },
+  {
+    "name": "byteorder-lite",
+    "version": "0.1.0",
+    "license": "Unlicense OR MIT",
+    "files": [
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+        "first_line": "The MIT License (MIT)"
+      }
+    ]
+  },
+  {
+    "name": "cpufeatures",
+    "version": "0.2.17",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985",
+        "first_line": "Copyright (c) 2020-2025 The RustCrypto Project Developers"
+      }
+    ]
+  },
+  {
+    "name": "crc32fast",
+    "version": "1.5.4",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+        "first_line": "                                 Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "61d383b05b87d78f94d2937e2580cce47226d17823c0430fbcad09596537efcf",
+        "first_line": "MIT License"
+      }
+    ]
+  },
+  {
+    "name": "crypto-common",
+    "version": "0.1.7",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "3521672491a3479422d5fe1aca6645dd2984090f85da6e5205abfb18fb7a6897",
+        "first_line": "Copyright (c) 2021 RustCrypto Developers"
+      }
+    ]
+  },
+  {
+    "name": "digest",
+    "version": "0.10.7",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba",
+        "first_line": "Copyright (c) 2017 Artyom Pavlov"
+      }
+    ]
+  },
+  {
+    "name": "fdeflate",
+    "version": "0.3.7",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+        "first_line": ""
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "c77a4cf9da729987d0fe7ccd811e3bd27393914ddf3d23467c18cc22954513b3",
+        "first_line": "MIT License"
+      }
+    ]
+  },
+  {
+    "name": "flate2",
+    "version": "1.1.10",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "025436edff4cfcdde17a5811fdea78892d8482efd1abdec5a17872d07a4f2112",
+        "first_line": "Copyright (c) 2014-2026 Alex Crichton"
+      }
+    ]
+  },
+  {
+    "name": "generic-array",
+    "version": "0.14.7",
+    "license": "MIT",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583",
+        "first_line": "The MIT License (MIT)"
+      }
+    ]
+  },
+  {
+    "name": "gltf",
+    "version": "1.4.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "0e6c282dfcb08a031c37b8f851fe5813fad63612e88a29dbe5121d727d67bbf2",
+        "first_line": "Copyright (c) 2017 The gltf Library Developers"
+      }
+    ]
+  },
+  {
+    "name": "gltf-derive",
+    "version": "1.4.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "f71fd5946d6674af304514dc7b3b4272aa9117052dd347fb3a9dc9679f33d95f",
+        "first_line": ""
+      }
+    ]
+  },
+  {
+    "name": "gltf-json",
+    "version": "1.4.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "0e6c282dfcb08a031c37b8f851fe5813fad63612e88a29dbe5121d727d67bbf2",
+        "first_line": "Copyright (c) 2017 The gltf Library Developers"
+      }
+    ]
+  },
+  {
+    "name": "image",
+    "version": "0.25.10",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+        "first_line": ""
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "c77a4cf9da729987d0fe7ccd811e3bd27393914ddf3d23467c18cc22954513b3",
+        "first_line": "MIT License"
+      }
+    ]
+  },
+  {
+    "name": "inflections",
+    "version": "1.1.1",
+    "license": "MIT",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "fe5c9498374de7953275f83f35565b289f377ceab4a28d04c7da87723e02a372",
+        "first_line": "Copyright (c) 2016 Caleb Meredith"
+      }
+    ]
+  },
+  {
+    "name": "itoa",
+    "version": "1.0.18",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "first_line": "Permission is hereby granted, free of charge, to any"
+      }
+    ]
+  },
+  {
+    "name": "lazy_static",
+    "version": "1.5.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "first_line": "Permission is hereby granted, free of charge, to any"
+      }
+    ]
+  },
+  {
+    "name": "miniz_oxide",
+    "version": "0.8.9",
+    "license": "MIT OR Zlib OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-APACHE.md",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+        "first_line": ""
+      },
+      {
+        "name": "LICENSE-MIT.md",
+        "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-ZLIB.md",
+        "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39",
+        "first_line": "Copyright 2013-2014 RAD Game Tools and Valve Software"
+      }
+    ]
+  },
+  {
+    "name": "miniz_oxide",
+    "version": "0.9.1",
+    "license": "MIT OR Zlib OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-APACHE.md",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+        "first_line": ""
+      },
+      {
+        "name": "LICENSE-MIT.md",
+        "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-ZLIB.md",
+        "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39",
+        "first_line": "Copyright 2013-2014 RAD Game Tools and Valve Software"
+      }
+    ]
+  },
+  {
+    "name": "moxcms",
+    "version": "0.8.1",
+    "license": "BSD-3-Clause OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE.md",
+        "sha256": "90bf2d659c43045111b65c733ab2a6d4cbcb422a098368c8c58a9ba3db4ed0c5",
+        "first_line": "                                 Apache License"
+      },
+      {
+        "name": "LICENSE.md",
+        "sha256": "2aa92cada6431e75615e3fe6cb1a9082c98f777d48ae1c087c0da0e37f7b8bff",
+        "first_line": "Copyright (c) Radzivon Bartoshyk. All rights reserved."
+      }
+    ]
+  },
+  {
+    "name": "png",
+    "version": "0.18.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "eaf40297c75da471f7cda1f3458e8d91b4b2ec866e609527a13acfa93b638652",
+        "first_line": "Copyright (c) 2015 nwin"
+      }
+    ]
+  },
+  {
+    "name": "pxfm",
+    "version": "0.1.30",
+    "license": "BSD-3-Clause OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE.md",
+        "sha256": "90bf2d659c43045111b65c733ab2a6d4cbcb422a098368c8c58a9ba3db4ed0c5",
+        "first_line": "                                 Apache License"
+      },
+      {
+        "name": "LICENSE.md",
+        "sha256": "2aa92cada6431e75615e3fe6cb1a9082c98f777d48ae1c087c0da0e37f7b8bff",
+        "first_line": "Copyright (c) Radzivon Bartoshyk. All rights reserved."
+      }
+    ]
+  },
+  {
+    "name": "serde_json",
+    "version": "1.0.149",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "first_line": "Permission is hereby granted, free of charge, to any"
+      }
+    ]
+  },
+  {
+    "name": "sha2",
+    "version": "0.10.9",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1",
+        "first_line": "Copyright (c) 2006-2009 Graydon Hoare"
+      }
+    ]
+  },
+  {
+    "name": "simd-adler32",
+    "version": "0.3.10",
+    "license": "MIT",
+    "files": [
+      {
+        "name": "LICENSE.md",
+        "sha256": "42a35170233e83e18856792e748de4c1ce4a63b2afce9a370c89ef3fe23f9f2d",
+        "first_line": "MIT License"
+      }
+    ]
+  },
+  {
+    "name": "typenum",
+    "version": "1.20.1",
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a",
+        "first_line": "MIT OR Apache-2.0"
+      },
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f",
+        "first_line": "The MIT License (MIT)"
+      }
+    ]
+  },
+  {
+    "name": "version_check",
+    "version": "0.9.5",
+    "license": "MIT/Apache-2.0",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+        "first_line": "                              Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e",
+        "first_line": "The MIT License (MIT)"
+      }
+    ]
+  },
+  {
+    "name": "zlib-rs",
+    "version": "0.6.8",
+    "license": "Zlib",
+    "files": [
+      {
+        "name": "LICENSE",
+        "sha256": "e72111c52b7d96ebe25348dee19f0744f444d3c95ae6b1ecb6ccaecc5bce05ba",
+        "first_line": "(C) 2024 Trifecta Tech Foundation "
+      }
+    ]
+  },
+  {
+    "name": "zmij",
+    "version": "1.0.23",
+    "license": "MIT",
+    "files": [
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "first_line": "Permission is hereby granted, free of charge, to any"
+      }
+    ]
+  },
+  {
+    "name": "zune-core",
+    "version": "0.5.3",
+    "license": "MIT OR Apache-2.0 OR Zlib",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "first_line": "                                 Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "d30047bca3b516639339a3c279bb84c3483124fb5a9dafe3c75056a85090e745",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-ZLIB",
+        "sha256": "d201d14804d3bcd3b944147173175e4abfbd838b7c8069b6bd3452496bf13e6c",
+        "first_line": "zlib License"
+      }
+    ]
+  },
+  {
+    "name": "zune-jpeg",
+    "version": "0.5.15",
+    "license": "MIT OR Apache-2.0 OR Zlib",
+    "files": [
+      {
+        "name": "LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "first_line": "                                 Apache License"
+      },
+      {
+        "name": "LICENSE-MIT",
+        "sha256": "d30047bca3b516639339a3c279bb84c3483124fb5a9dafe3c75056a85090e745",
+        "first_line": "MIT License"
+      },
+      {
+        "name": "LICENSE-ZLIB",
+        "sha256": "d201d14804d3bcd3b944147173175e4abfbd838b7c8069b6bd3452496bf13e6c",
+        "first_line": "zlib License"
+      }
+    ]
+  }
+]

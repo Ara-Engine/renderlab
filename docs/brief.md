@@ -20,6 +20,8 @@ M1 established the correctness and cost measurements needed to test future appro
 
 M2's persistent instancing and conservative visibility are complete, with root verification and independent Opus acceptance. [Milestone 2](milestone-2.md) records full-image/depth, in-flight replacement, actual viewer, paired performance and development-loop evidence, including corrected oracle-coverage limits, single-sample aliasing and expensive sparse updates. M3 assets/materials is next, followed by M4 bounded virtual geometry.
 
+M3's [prepared-format/cooker unit](milestone-3.md) is CPU-verified. Material rendering, viewer asset loading and measured basic antialiasing remain in progress under [the M3 execution contract](milestone-3-plan.md).
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.
