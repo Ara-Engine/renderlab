@@ -9,6 +9,7 @@ resolver = "3"
 members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
+renderlab-asset = { path = "crates/asset" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"] }
 pollster = "0.4"
 glam = "0.30.10"

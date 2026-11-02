@@ -13,6 +13,11 @@ pub struct Revision(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UploadBytes {
     pub geometry: u64,
+    pub textures: u64,
+    pub texture_writes: u64,
+    pub materials: u64,
+    pub normals: u64,
+    pub view_settings: u64,
     pub models: u64,
     pub camera: u64,
     /// Initial transform publication, separate from later model edits.
@@ -25,6 +30,11 @@ pub struct UploadBytes {
 impl UploadBytes {
     pub(crate) fn add(&mut self, other: Self) {
         self.geometry += other.geometry;
+        self.textures += other.textures;
+        self.texture_writes += other.texture_writes;
+        self.materials += other.materials;
+        self.normals += other.normals;
+        self.view_settings += other.view_settings;
         self.models += other.models;
         self.camera += other.camera;
         self.instances += other.instances;
@@ -67,6 +77,9 @@ pub struct SceneCounts {
     pub cull_partial_tests: u64,
     /// CPU capacity retained for transform-derived visibility bounds, separate from GPU memory.
     pub visibility_cache_bytes: u64,
+    /// Retained inverse-transpose CPU capacity and persistent GPU storage.
+    pub normal_cache_bytes: u64,
+    pub normal_gpu_bytes: u64,
 }
 #[derive(Debug)]
 pub struct ReloadReport {
@@ -86,7 +99,8 @@ pub struct Completion {
 pub struct GpuSample {
     pub frame: FrameId,
     pub revision: Revision,
-    /// Only the mesh render pass. Excludes uploads, resolve, acquire and present.
+    /// Render-pass boundary timestamps, including material shading and configured samples.
+    /// Excludes uploads, timestamp-query resolve, acquire and present. Attachment resolve is not isolated.
     pub mesh_pass: Duration,
 }
 #[derive(Debug, Default)]
@@ -126,8 +140,9 @@ pub enum ResourceKind {
     RenderPipeline,
     ShaderModule,
     QuerySet,
+    Sampler,
 }
-const RESOURCE_KINDS: usize = 9;
+const RESOURCE_KINDS: usize = 10;
 
 /// Renderlab ownership only. No driver residency claim. Caller-owned colors are excluded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -135,6 +150,13 @@ pub struct Ownership {
     pub persistent: [Count; RESOURCE_KINDS],
     /// Borrowed color attachment views are intentionally short-lived.
     pub attachment_views: Count,
+    /// Byte counts by purpose. Includes caller resources while owned; excludes driver retention.
+    pub texture_bytes: Count,
+    pub material_bytes: Count,
+    pub target_bytes: Count,
+    pub material_creations: u64,
+    pub texture_creations: u64,
+    pub target_creations: u64,
 }
 impl Ownership {
     pub fn get(&self, kind: ResourceKind) -> Count {
@@ -148,6 +170,23 @@ impl Ownership {
 #[derive(Clone, Default)]
 pub(crate) struct Ledger(Arc<Mutex<Ownership>>);
 impl Ledger {
+    pub fn allocate(&self, kind: AllocationKind, bytes: u64) -> Allocation {
+        let mut ledger = self.0.lock().unwrap();
+        match kind {
+            AllocationKind::Texture => ledger.texture_creations += 1,
+            AllocationKind::Material => ledger.material_creations += 1,
+            AllocationKind::Target => ledger.target_creations += 1,
+        }
+        let count = allocation_count(&mut ledger, kind);
+        count.created += bytes;
+        count.live += bytes;
+        count.peak = count.peak.max(count.live);
+        Allocation {
+            ledger: self.clone(),
+            kind,
+            bytes,
+        }
+    }
     pub fn own<T>(&self, resource: T, kind: ResourceKind) -> Owned<T> {
         let mut ledger = self.0.lock().unwrap();
         let count = &mut ledger.persistent[kind as usize];
@@ -174,6 +213,32 @@ impl Ledger {
     }
     pub fn snapshot(&self) -> Ownership {
         self.0.lock().unwrap().clone()
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) enum AllocationKind {
+    Texture,
+    Material,
+    Target,
+}
+fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count {
+    match kind {
+        AllocationKind::Texture => &mut ledger.texture_bytes,
+        AllocationKind::Material => &mut ledger.material_bytes,
+        AllocationKind::Target => &mut ledger.target_bytes,
+    }
+}
+pub(crate) struct Allocation {
+    ledger: Ledger,
+    kind: AllocationKind,
+    bytes: u64,
+}
+impl Drop for Allocation {
+    fn drop(&mut self) {
+        let mut ledger = self.ledger.0.lock().unwrap();
+        let count = allocation_count(&mut ledger, self.kind);
+        count.live -= self.bytes;
+        count.dropped += self.bytes;
     }
 }
 pub(crate) struct Owned<T> {

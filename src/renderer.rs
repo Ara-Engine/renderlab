@@ -1,7 +1,7 @@
 use crate::{
     instances::InstanceState,
     mesh::matrix_bytes,
-    observe::{EventQueue, Ledger, Observation, Owned},
+    observe::{Allocation, AllocationKind, EventQueue, Ledger, Observation, Owned},
     visibility::Aabb,
     *,
 };
@@ -12,9 +12,9 @@ use std::{
 
 const FLIGHTS: usize = 3;
 const CLEAR_COLOR: [f64; 3] = [0.018, 0.025, 0.04];
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![2 => Uint32];
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
 
 type MapResult = Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>;
 struct Flight {
@@ -53,7 +53,15 @@ impl Renderer {
     pub(crate) fn test_reference(&mut self, enabled: bool) {
         self.reference_draws = enabled;
     }
+    pub(crate) fn test_capture_color(&mut self, color: &wgpu::Texture) -> Vec<u8> {
+        self.test_readback(color, false)
+    }
     pub(crate) fn test_capture_full(&mut self, color: &wgpu::Texture) -> (Vec<u8>, Vec<u8>) {
+        assert_eq!(
+            self.options.samples,
+            SampleCount::One,
+            "multisample depth cannot be copied"
+        );
         let rgba = self.test_readback(color, false);
         let depth = self.depth.as_ref().unwrap().texture.clone();
         (rgba, self.test_readback(&depth, true))
@@ -180,6 +188,20 @@ impl Renderer {
                 .is_none()
         );
         assert!(self.try_upload_mesh(data).unwrap().is_none());
+        let texture_data = asset::Texture {
+            role: asset::TextureRole::BaseColorSrgb,
+            mips: vec![asset::Mip {
+                width: 1,
+                height: 1,
+                rgba8: vec![128; 4],
+            }],
+        };
+        assert!(self.try_upload_texture(&texture_data).unwrap().is_none());
+        assert!(
+            self.try_create_material(&MaterialDescriptor::default())
+                .unwrap()
+                .is_none()
+        );
         assert!(
             self.try_render(color, camera, &mut [Draw::new(mesh, instances)])
                 .unwrap()
@@ -202,6 +224,7 @@ impl Renderer {
             .unwrap()
             .unwrap();
         assert_eq!(report.uploads.models, 64);
+        assert_eq!(report.uploads.normals, 64);
         assert_eq!(report.uploads.model_writes, 1);
         assert_eq!(instances.state.dirty_count, 0);
     }
@@ -218,6 +241,7 @@ struct Timing {
 struct Depth {
     texture: Owned<wgpu::Texture>,
     view: Owned<wgpu::TextureView>,
+    _allocation: Allocation,
 }
 
 /// One queue submission owner, three flights, and one depth texture keyed by color extent.
@@ -226,6 +250,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
+    options: RendererOptions,
     limits: Limits,
     fault: Arc<OnceLock<Fault>>,
     ledger: Ledger,
@@ -234,11 +259,15 @@ pub struct Renderer {
     bind: Owned<wgpu::BindGroup>,
     uniform: Owned<wgpu::Buffer>,
     instance_bindings: Owned<wgpu::BindGroupLayout>,
+    material_bindings: Owned<wgpu::BindGroupLayout>,
+    default_material: Option<Material>,
     identity: Arc<()>,
     #[cfg(test)]
     reference_draws: bool,
     pipeline: Owned<wgpu::RenderPipeline>,
     depth: Option<Depth>,
+    msaa: Option<Depth>,
+    view_mode: ViewMode,
     camera_shadow: Option<[u8; 64]>,
     scratch: Vec<u8>,
     slots: [Slot; FLIGHTS],
@@ -286,6 +315,47 @@ impl Renderer {
         limits: Limits,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        Self::new_with_options(
+            device,
+            queue,
+            color_format,
+            limits,
+            RendererOptions::default(),
+            wgsl,
+        )
+    }
+    pub fn new_with_options(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        limits: Limits,
+        options: RendererOptions,
+        wgsl: &str,
+    ) -> Result<Self, Error> {
+        for format in [color_format, wgpu::TextureFormat::Depth32Float] {
+            let features = format.guaranteed_format_features(device.features());
+            if !features
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+                || !features
+                    .flags
+                    .sample_count_supported(options.samples as u32)
+            {
+                return Err(Error::InvalidInput(
+                    "unsupported render target format/sample configuration",
+                ));
+            }
+        }
+        if options.samples == SampleCount::Four
+            && !color_format
+                .guaranteed_format_features(device.features())
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+        {
+            return Err(Error::InvalidInput(
+                "color format does not support multisample resolve",
+            ));
+        }
         let fault = Arc::new(OnceLock::new());
         let errors = fault.clone();
         device.on_uncaptured_error(Arc::new(move |error| {
@@ -301,7 +371,7 @@ impl Renderer {
         let uniform = ledger.own(
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("camera"),
-                size: 64,
+                size: 80,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -312,11 +382,11 @@ impl Renderer {
                 label: Some("fixed camera ABI"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(64),
+                        min_binding_size: wgpu::BufferSize::new(80),
                     },
                     count: None,
                 }],
@@ -337,8 +407,8 @@ impl Renderer {
         let instance_bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fixed instance ABI"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -346,14 +416,55 @@ impl Renderer {
                         min_binding_size: wgpu::BufferSize::new(64),
                     },
                     count: None,
-                }],
+                }),
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(32),
+            },
+            count: None,
+        }];
+        for binding in [1, 3] {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+        }
+        for binding in [2, 4] {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let material_bindings = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fixed material ABI"),
+                entries: &entries,
             }),
             ResourceKind::BindGroupLayout,
         );
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fixed mesh ABI"),
-                bind_group_layouts: &[Some(&bindings), Some(&instance_bindings)],
+                bind_group_layouts: &[
+                    Some(&bindings),
+                    Some(&instance_bindings),
+                    Some(&material_bindings),
+                ],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -397,7 +508,14 @@ impl Renderer {
             return Err(Error::Fault(Fault(error.to_string())));
         }
         let scopes = OperationScopes::new(&device);
-        let pipeline = Self::compile(&device, &ledger, &layout, color_format, wgsl);
+        let pipeline = Self::compile(
+            &device,
+            &ledger,
+            &layout,
+            color_format,
+            options.samples,
+            wgsl,
+        );
         if let Some(error) = scopes.finish() {
             return Err(match error {
                 wgpu::Error::Validation { .. } => Error::Shader(error.to_string()),
@@ -407,10 +525,11 @@ impl Renderer {
         if let Some(error) = fault.get() {
             return Err(Error::Fault(error.clone()));
         }
-        Ok(Self {
+        let mut renderer = Self {
             device,
             queue,
             format: color_format,
+            options,
             limits,
             fault,
             ledger,
@@ -419,11 +538,15 @@ impl Renderer {
             bind,
             uniform,
             instance_bindings,
+            material_bindings,
+            default_material: None,
             identity: Arc::new(()),
             #[cfg(test)]
             reference_draws: false,
             pipeline,
             depth: None,
+            msaa: None,
+            view_mode: ViewMode::BaseColor,
             camera_shadow: None,
             scratch: Vec::new(),
             slots,
@@ -450,7 +573,40 @@ impl Renderer {
             busy_uploads: 0,
             busy_frames: 0,
             upload_cpu: CpuFrame::default(),
-        })
+        };
+        // The initial defaults share one immediately submitted flight.
+        let scopes = OperationScopes::new(&renderer.device);
+        let defaults: [Texture; 2] = [
+            asset::TextureRole::BaseColorSrgb,
+            asset::TextureRole::MetallicRoughnessLinear,
+        ]
+        .map(|role| {
+            renderer.create_texture(
+                &asset::Texture {
+                    role,
+                    mips: vec![asset::Mip {
+                        width: 1,
+                        height: 1,
+                        rgba8: vec![255; 4],
+                    }],
+                },
+                4,
+            )
+        });
+        let material = renderer.create_material(
+            &MaterialDescriptor {
+                double_sided: true,
+                ..Default::default()
+            },
+            &defaults,
+        );
+        if let Some(error) = scopes.finish() {
+            return Err(renderer.fail(error.to_string()));
+        }
+        renderer.submit_upload(renderer.free_slot().unwrap());
+        renderer.default_material = Some(material);
+        renderer.check_fault()?;
+        Ok(renderer)
     }
 
     fn compile(
@@ -458,6 +614,7 @@ impl Renderer {
         ledger: &Ledger,
         layout: &wgpu::PipelineLayout,
         format: wgpu::TextureFormat,
+        samples: SampleCount,
         source: &str,
     ) -> Owned<wgpu::RenderPipeline> {
         let shader = ledger.own(
@@ -477,7 +634,7 @@ impl Renderer {
                     compilation_options: Default::default(),
                     buffers: &[
                         Some(wgpu::VertexBufferLayout {
-                            array_stride: 24,
+                            array_stride: 48,
                             step_mode: wgpu::VertexStepMode::Vertex,
                             attributes: &VERTEX_ATTRIBUTES,
                         }),
@@ -505,7 +662,10 @@ impl Renderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState {
+                    count: samples as u32,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             }),
@@ -531,7 +691,14 @@ impl Renderer {
         let start = Instant::now();
         self.pipelines.attempts += 1;
         let scopes = OperationScopes::new(&self.device);
-        let candidate = Self::compile(&self.device, &self.ledger, &self.layout, self.format, wgsl);
+        let candidate = Self::compile(
+            &self.device,
+            &self.ledger,
+            &self.layout,
+            self.format,
+            self.options.samples,
+            wgsl,
+        );
         let error = scopes.finish();
         let compile = start.elapsed();
         if let Some(error) = error {
@@ -586,7 +753,21 @@ impl Renderer {
         let pack_start = Instant::now();
         let mut bytes = Vec::with_capacity((sizes.0 + sizes.1) as usize);
         for vertex in data.vertices {
-            for value in vertex.position.into_iter().chain(vertex.color) {
+            let normal = glam::DVec3::new(
+                vertex.normal[0].into(),
+                vertex.normal[1].into(),
+                vertex.normal[2].into(),
+            )
+            .normalize()
+            .as_vec3()
+            .to_array();
+            for value in vertex
+                .position
+                .into_iter()
+                .chain(normal)
+                .chain(vertex.uv)
+                .chain(vertex.color)
+            {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
@@ -656,6 +837,7 @@ impl Renderer {
         };
         self.check_fault()?;
         Ok(Some(Mesh {
+            renderer: self.identity.clone(),
             vertex,
             index,
             index_count: data.indices.len() as u32,
@@ -693,6 +875,15 @@ impl Renderer {
             }),
             ResourceKind::Buffer,
         );
+        let normals = self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("normal transforms"),
+                size: models.len() as u64 * 64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
         let id_buffer = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("visible instance IDs"),
@@ -706,10 +897,16 @@ impl Renderer {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("instances"),
                 layout: &self.instance_bindings,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: transforms.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: transforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: normals.as_entire_binding(),
+                    },
+                ],
             }),
             ResourceKind::BindGroup,
         );
@@ -721,6 +918,15 @@ impl Renderer {
         let mut upload = upload_start.elapsed();
         let pack_start = Instant::now();
         self.scratch.clear();
+        for normal in &state.normals {
+            self.scratch.extend_from_slice(&normal.bytes());
+        }
+        let packing = packing + pack_start.elapsed();
+        let upload_start = Instant::now();
+        self.queue.write_buffer(&normals, 0, &self.scratch);
+        upload += upload_start.elapsed();
+        let pack_start = Instant::now();
+        self.scratch.clear();
         for &id in &state.ids {
             self.scratch.extend_from_slice(&id.to_ne_bytes());
         }
@@ -729,9 +935,10 @@ impl Renderer {
         self.queue.write_buffer(&id_buffer, 0, &self.scratch);
         self.uploads.add(UploadBytes {
             instances: models.len() as u64 * 64,
+            normals: models.len() as u64 * 64,
             visible_ids: models.len() as u64 * 4,
             visible_id_writes: 1,
-            write_calls: 2,
+            write_calls: 3,
             ..Default::default()
         });
         upload += upload_start.elapsed();
@@ -767,9 +974,228 @@ impl Renderer {
             renderer: self.identity.clone(),
             state,
             transforms,
+            normals,
             id_buffer,
             bind,
         }))
+    }
+
+    fn submit_upload(&mut self, slot: usize) {
+        let done = Arc::new(OnceLock::new());
+        let callback = done.clone();
+        let submitted_at = Instant::now();
+        self.queue.submit([]);
+        self.queue.on_submitted_work_done(move || {
+            let _ = callback.set(());
+        });
+        self.submissions += 1;
+        self.record_flight(
+            slot,
+            Flight {
+                done,
+                mapped: None,
+                submission: self.submissions,
+                frame: None,
+                revision: self.revision,
+                submitted_at,
+            },
+        );
+    }
+    /// Complete prepared mip chain, role-correct storage, bounded immediate submission.
+    pub fn try_upload_texture(&mut self, data: &asset::Texture) -> Result<Option<Texture>, Error> {
+        self.check_fault()?;
+        let started = Instant::now();
+        let bytes = crate::material::validate_texture(
+            data,
+            self.device.limits().max_texture_dimension_2d,
+            self.limits.max_texture_bytes,
+        )?;
+        let preparation = started.elapsed();
+        let poll = self.collect()?;
+        if self.occupied() >= FLIGHTS - 1 {
+            self.busy_uploads += 1;
+            return Ok(None);
+        }
+        let slot = self.free_slot().unwrap();
+        let started = Instant::now();
+        let scopes = OperationScopes::new(&self.device);
+        let texture = self.create_texture(data, bytes);
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        self.submit_upload(slot);
+        self.upload_cpu = CpuFrame {
+            preparation,
+            poll,
+            upload: started.elapsed(),
+            ..Default::default()
+        };
+        self.check_fault()?;
+        Ok(Some(texture))
+    }
+    fn create_texture(&mut self, data: &asset::Texture, bytes: u64) -> Texture {
+        let first = &data.mips[0];
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("immutable material texture"),
+                size: wgpu::Extent3d {
+                    width: first.width,
+                    height: first.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: data.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: match data.role {
+                    asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+                    asset::TextureRole::MetallicRoughnessLinear => wgpu::TextureFormat::Rgba8Unorm,
+                },
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(
+            texture.create_view(&Default::default()),
+            ResourceKind::TextureView,
+        );
+        for (level, mip) in data.mips.iter().enumerate() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    mip_level: level as u32,
+                    ..texture.as_image_copy()
+                },
+                &mip.rgba8,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(mip.width * 4),
+                    rows_per_image: Some(mip.height),
+                },
+                wgpu::Extent3d {
+                    width: mip.width,
+                    height: mip.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.uploads.textures += mip.rgba8.len() as u64;
+            self.uploads.texture_writes += 1;
+            self.uploads.write_calls += 1;
+        }
+        Texture(Arc::new(crate::material::TextureInner {
+            renderer: self.identity.clone(),
+            role: data.role,
+            _texture: texture,
+            view,
+            _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+        }))
+    }
+    pub fn try_create_material(
+        &mut self,
+        data: &MaterialDescriptor<'_>,
+    ) -> Result<Option<Material>, Error> {
+        self.check_fault()?;
+        let start = Instant::now();
+        data.validate(&self.identity)?;
+        let preparation = start.elapsed();
+        let poll = self.collect()?;
+        if self.occupied() >= FLIGHTS - 1 {
+            self.busy_uploads += 1;
+            return Ok(None);
+        }
+        let slot = self.free_slot().unwrap();
+        let start = Instant::now();
+        let scopes = OperationScopes::new(&self.device);
+        let defaults = self.default_material.as_ref().unwrap()._textures.clone();
+        let material = self.create_material(data, &defaults);
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        self.submit_upload(slot);
+        self.upload_cpu = CpuFrame {
+            preparation,
+            poll,
+            upload: start.elapsed(),
+            ..Default::default()
+        };
+        self.check_fault()?;
+        Ok(Some(material))
+    }
+    fn create_material(
+        &mut self,
+        data: &MaterialDescriptor<'_>,
+        defaults: &[Texture; 2],
+    ) -> Material {
+        let textures = [
+            data.base_color_texture
+                .map_or(&defaults[0], |t| t.texture)
+                .clone(),
+            data.metallic_roughness_texture
+                .map_or(&defaults[1], |t| t.texture)
+                .clone(),
+        ];
+        let samplers = [
+            data.base_color_texture
+                .map_or(asset::Sampler::default(), |t| t.sampler),
+            data.metallic_roughness_texture
+                .map_or(asset::Sampler::default(), |t| t.sampler),
+        ]
+        .map(|s| {
+            self.ledger.own(
+                self.device
+                    .create_sampler(&crate::material::sampler_descriptor(s)),
+                ResourceKind::Sampler,
+            )
+        });
+        let uniform = self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("immutable material factors"),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
+        let bind = self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("material"),
+                layout: &self.material_bindings,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&textures[0].0.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&samplers[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&textures[1].0.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&samplers[1]),
+                    },
+                ],
+            }),
+            ResourceKind::BindGroup,
+        );
+        self.queue.write_buffer(&uniform, 0, &data.bytes());
+        self.uploads.materials += 32;
+        self.uploads.write_calls += 1;
+        Material {
+            renderer: self.identity.clone(),
+            double_sided: data.double_sided,
+            bind,
+            _uniform: uniform,
+            _samplers: samplers,
+            _textures: textures,
+            _allocation: self.ledger.allocate(AllocationKind::Material, 32),
+        }
     }
 
     fn validate_color(&self, color: &wgpu::Texture) -> Result<(), Error> {
@@ -797,14 +1223,36 @@ impl Renderer {
         camera: &Camera,
         draws: &mut [Draw<'_>],
     ) -> Result<Option<FrameReport>, Error> {
+        self.try_render_view(color, camera, draws, ViewMode::BaseColor)
+    }
+    pub fn try_render_view(
+        &mut self,
+        color: &wgpu::Texture,
+        camera: &Camera,
+        draws: &mut [Draw<'_>],
+        view_mode: ViewMode,
+    ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
         let preparation_start = Instant::now();
         self.validate_color(color)?;
-        if draws
-            .iter()
-            .any(|draw| !Arc::ptr_eq(&self.identity, &draw.instances.renderer))
-        {
-            return Err(Error::InvalidInput("instances belong to another renderer"));
+        if draws.iter().any(|draw| {
+            !Arc::ptr_eq(&self.identity, &draw.instances.renderer)
+                || !Arc::ptr_eq(&self.identity, &draw.mesh.renderer)
+                || draw
+                    .material
+                    .is_some_and(|m| !Arc::ptr_eq(&self.identity, &m.renderer))
+        }) {
+            return Err(Error::InvalidInput(
+                "draw resource belongs to another renderer",
+            ));
+        }
+        if draws.iter().any(|draw| {
+            (view_mode == ViewMode::Normal || draw.material.is_some_and(|m| !m.double_sided))
+                && draw.instances.state.invalid_normals > 0
+        }) {
+            return Err(Error::InvalidInput(
+                "normal view and single-sided materials require nonsingular affine transforms with max-element condition estimate <= 1e4",
+            ));
         }
         let matrix = camera.matrix(color.width(), color.height());
         if !matrix.is_finite() {
@@ -828,6 +1276,15 @@ impl Renderer {
             let start = Instant::now();
             self.queue.write_buffer(&self.uniform, 0, &camera_bytes);
             uploads.camera = 64;
+            uploads.write_calls += 1;
+            upload += start.elapsed();
+        }
+        if self.view_mode != view_mode {
+            let mut bytes = [0; 16];
+            bytes[..4].copy_from_slice(&(view_mode as u32).to_ne_bytes());
+            let start = Instant::now();
+            self.queue.write_buffer(&self.uniform, 64, &bytes);
+            uploads.view_settings = 16;
             uploads.write_calls += 1;
             upload += start.elapsed();
         }
@@ -871,6 +1328,21 @@ impl Renderer {
                         &self.scratch,
                     );
                     uploads.models += self.scratch.len() as u64;
+                    upload += start.elapsed();
+                    let start = Instant::now();
+                    self.scratch.clear();
+                    for normal in &instances.state.normals[span.clone()] {
+                        self.scratch.extend_from_slice(&normal.bytes());
+                    }
+                    packing += start.elapsed();
+                    let start = Instant::now();
+                    self.queue.write_buffer(
+                        &instances.normals,
+                        span.start as u64 * 64,
+                        &self.scratch,
+                    );
+                    uploads.normals += self.scratch.len() as u64;
+                    uploads.write_calls += 1;
                     uploads.model_writes += 1;
                     uploads.write_calls += 1;
                     upload += start.elapsed();
@@ -878,6 +1350,10 @@ impl Renderer {
                 instances.state.clear_dirty();
             }
             scene.collections += 1;
+            scene.normal_cache_bytes += (instances.state.normals.capacity()
+                * std::mem::size_of::<crate::normal::NormalTransform>())
+                as u64;
+            scene.normal_gpu_bytes += instances.normals.size();
             scene.visibility_cache_bytes += instances.state.visibility_cache_bytes() as u64;
             scene.total_instances += instances.len() as u64;
             let visible = instances.state.ids.len() as u64;
@@ -898,11 +1374,11 @@ impl Renderer {
                     label: Some("depth"),
                     size: color.size(),
                     mip_level_count: 1,
-                    sample_count: 1,
+                    sample_count: self.options.samples as u32,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | if cfg!(test) {
+                        | if cfg!(test) && self.options.samples == SampleCount::One {
                             wgpu::TextureUsages::COPY_SRC
                         } else {
                             wgpu::TextureUsages::empty()
@@ -915,7 +1391,47 @@ impl Renderer {
                 texture.create_view(&Default::default()),
                 ResourceKind::TextureView,
             );
-            self.depth = Some(Depth { texture, view });
+            let bytes = u64::from(color.width())
+                * u64::from(color.height())
+                * 4
+                * self.options.samples as u64;
+            self.depth = Some(Depth {
+                texture,
+                view,
+                _allocation: self.ledger.allocate(AllocationKind::Target, bytes),
+            });
+            self.msaa = if self.options.samples == SampleCount::Four {
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("MSAA color"),
+                        size: color.size(),
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: self.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&Default::default()),
+                    ResourceKind::TextureView,
+                );
+                Some(Depth {
+                    texture,
+                    view,
+                    _allocation: self.ledger.allocate(
+                        AllocationKind::Target,
+                        u64::from(color.width())
+                            * u64::from(color.height())
+                            * 4
+                            * u64::from(self.format.block_copy_size(None).unwrap()),
+                    ),
+                })
+            } else {
+                None
+            };
         }
         self.check_fault()?;
         let view = self
@@ -970,9 +1486,9 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: self.msaa.as_ref().map_or(&*view, |t| &*t.view),
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.msaa.as_ref().map(|_| &*view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: CLEAR_COLOR[0],
@@ -1010,6 +1526,14 @@ impl Renderer {
                     continue;
                 }
                 pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                pass.set_bind_group(
+                    2,
+                    &*draw
+                        .material
+                        .unwrap_or(self.default_material.as_ref().unwrap())
+                        .bind,
+                    &[],
+                );
                 pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                 pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
@@ -1073,6 +1597,7 @@ impl Renderer {
         );
         self.check_fault()?;
         self.camera_shadow = Some(camera_bytes);
+        self.view_mode = view_mode;
         Ok(Some(FrameReport {
             frame,
             revision: self.revision,

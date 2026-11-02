@@ -11,8 +11,12 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SOURCE: &str = include_str!("../shaders/scene.wgsl");
 const INDICES: [u32; 3] = [0, 1, 2];
 fn triangle(color: [f32; 3]) -> [Vertex; 3] {
-    [[-1.0, -0.8, 0.0], [1.0, -0.8, 0.0], [0.0, 1.0, 0.0]]
-        .map(|position| Vertex { position, color })
+    [[-1.0, -0.8, 0.0], [1.0, -0.8, 0.0], [0.0, 1.0, 0.0]].map(|position| Vertex {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
+        color: [color[0], color[1], color[2], 1.0],
+    })
 }
 fn camera(x: f32) -> Camera {
     Camera::look_at(
@@ -98,9 +102,17 @@ fn render(
         std::thread::yield_now();
     }
 }
+fn evidence_dir() -> std::path::PathBuf {
+    std::env::var_os("RENDERLAB_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "measurements/m3-implementation/manual".into())
+}
+fn compat_captures() -> std::path::PathBuf {
+    evidence_dir().join("m2-captures")
+}
 fn save(name: &str, width: u32, height: u32, rgb: &[u8]) {
-    fs::create_dir_all("captures/m2").unwrap();
-    let mut file = fs::File::create(format!("captures/m2/{name}.ppm")).unwrap();
+    fs::create_dir_all(compat_captures()).unwrap();
+    let mut file = fs::File::create(compat_captures().join(format!("{name}.ppm"))).unwrap();
     write!(file, "P6\n{width} {height}\n255\n").unwrap();
     file.write_all(rgb).unwrap();
 }
@@ -130,8 +142,12 @@ fn save_full(name: &str, width: u32, height: u32, image: &(Vec<u8>, Vec<u8>)) {
         .flat_map(|p| p[..3].iter().copied())
         .collect();
     save(name, width, height, &rgb);
-    fs::write(format!("captures/m2/{name}.rgba8"), &image.0).unwrap();
-    fs::write(format!("captures/m2/{name}.depth32float"), &image.1).unwrap();
+    fs::write(compat_captures().join(format!("{name}.rgba8")), &image.0).unwrap();
+    fs::write(
+        compat_captures().join(format!("{name}.depth32float")),
+        &image.1,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -180,7 +196,7 @@ fn cpu_boundaries_and_projection() {
         }
         .validate(Limits::default())
         .unwrap(),
-        (72, 12)
+        (144, 12)
     );
     assert!(
         Limits {
@@ -215,7 +231,8 @@ fn cpu_boundaries_and_projection() {
         assert!(
             Limits {
                 max_instances: 1,
-                max_mesh_bytes: 1
+                max_mesh_bytes: 1,
+                ..Limits::default()
             }
             .validate(&device_limits)
             .is_err()
@@ -395,8 +412,9 @@ fn gpu_images_uploads_reload_and_timing() {
             report.uploads,
             UploadBytes {
                 models: 64,
+                normals: 64,
                 model_writes: 1,
-                write_calls: 1,
+                write_calls: 2,
                 ..Default::default()
             }
         );
@@ -505,7 +523,9 @@ fn gpu_batched_culling_oracle() {
     ]
     .map(|position| Vertex {
         position,
-        color: position.map(|p| p + 0.5),
+        color: [position[0] + 0.5, position[1] + 0.5, position[2] + 0.5, 1.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     });
     let indices = [
         0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3,
@@ -567,18 +587,18 @@ fn gpu_batched_culling_oracle() {
         );
     }
     let mut models = Vec::new();
-    for y in -8..=8 {
+    for y in -8_i32..=8 {
         for x in -8..=8 {
             models.push(Mat4::from_translation(Vec3::new(
                 x as f32 * 1.5,
                 y as f32 * 1.5,
-                0.0,
+                ((x + y).rem_euclid(5)) as f32 * -0.4,
             )));
         }
     }
     let crosses_near_and_eye = Mat4::from_translation(Vec3::new(0.0, 0.0, 3.9));
     let behind_eye_touching_w_zero = Mat4::from_translation(Vec3::new(0.0, 0.0, 4.5));
-    models.extend([
+    let special_models = [
         Mat4::from_scale(Vec3::new(-1.0, 0.5, 2.0)),
         Mat4::from_scale(Vec3::new(1.0, 0.0, 0.5)),
         Mat4::from_cols_array(&[
@@ -593,7 +613,16 @@ fn gpu_batched_culling_oracle() {
         Mat4::from_cols_array(&[
             1e-8, 0.0, 0.0, 0.0, 0.0, 1e-8, 0.0, 0.0, 0.0, 0.0, 1e-8, 0.0, 0.0, 0.0, 0.0, 1e-8,
         ]),
-    ]);
+    ];
+    let mut special = instances(&mut r, &special_models);
+    assert_oracle(
+        &mut r,
+        &color,
+        &camera(0.0),
+        &mesh,
+        &mut special,
+        "oracle-isolated-near-w",
+    );
     let mut collection = instances(&mut r, &models);
     for (label, eye, target, fov) in [
         (
@@ -602,7 +631,7 @@ fn gpu_batched_culling_oracle() {
             Vec3::ZERO,
             60.0_f32,
         ),
-        ("oracle-narrow", Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, 15.0),
+        ("oracle-narrow", Vec3::new(0.0, 0.0, 16.0), Vec3::ZERO, 30.0),
         (
             "oracle-offscreen",
             Vec3::new(100.0, 0.0, 4.0),
@@ -638,15 +667,60 @@ fn gpu_batched_culling_oracle() {
             &format!("oracle-update-cut-{i}"),
         );
     }
+    collection.set(0, models[0]).unwrap();
     let portrait = target(r.device(), 359, 641);
+    let grid_camera = Camera::look_at(
+        Vec3::new(0.0, 0.0, 20.0),
+        Vec3::ZERO,
+        Vec3::Y,
+        55_f32.to_radians(),
+        0.1,
+        100.0,
+    )
+    .unwrap();
     assert_oracle(
         &mut r,
         &portrait,
-        &camera(0.0),
+        &grid_camera,
         &mesh,
         &mut collection,
         "oracle-portrait-resize",
     );
+    let portrait_image = r.test_capture_full(&portrait);
+    let depths: std::collections::HashSet<u32> = portrait_image
+        .1
+        .chunks_exact(4)
+        .map(|p| u32::from_ne_bytes(p.try_into().unwrap()))
+        .filter(|p| *p != 1_f32.to_bits())
+        .collect();
+    assert!(depths.len() > 4, "portrait grid must cover varied depths");
+    let mut ties = instances(
+        &mut r,
+        &[Mat4::IDENTITY, Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))],
+    );
+    assert_oracle(
+        &mut r,
+        &color,
+        &camera(0.0),
+        &mesh,
+        &mut ties,
+        "oracle-within-collection-tie",
+    );
+    let first = r.test_capture_full(&color);
+    ties.set(0, Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .unwrap();
+    ties.set(1, Mat4::IDENTITY).unwrap();
+    assert_oracle(
+        &mut r,
+        &color,
+        &camera(0.0),
+        &mesh,
+        &mut ties,
+        "oracle-within-collection-tie-reversed",
+    );
+    let reversed = r.test_capture_full(&color);
+    assert_ne!(first.0, reversed.0);
+    assert_eq!(first.1, reversed.1);
     let triangle = upload(&mut r, &triangle([1.0, 0.2, 0.1]), &INDICES);
     let mesh_bounds_change = render(
         &mut r,
@@ -808,10 +882,11 @@ fn gpu_visibility_cache_publication() {
             report.uploads,
             UploadBytes {
                 models: 64,
+                normals: 64,
                 model_writes: 1,
                 visible_ids: id_bytes,
                 visible_id_writes: u64::from(id_bytes > 0),
-                write_calls: 1 + u64::from(id_bytes > 0),
+                write_calls: 2 + u64::from(id_bytes > 0),
                 ..Default::default()
             }
         );
@@ -891,8 +966,8 @@ impl HighWater {
 fn gpu_replacement_stress() {
     let _validation = validation::begin(true);
     let mut r = renderer(true);
-    fs::create_dir_all("measurements/m2-implementation").unwrap();
-    let mut log = fs::File::create("measurements/m2-implementation/stress.csv").unwrap();
+    fs::create_dir_all(evidence_dir()).unwrap();
+    let mut log = fs::File::create(evidence_dir().join("stress.csv")).unwrap();
     writeln!(log, "frame,wave,incomplete_after_poll,hal_buffers,app_buffers,hal_textures,app_depth_textures,hal_views,hal_pipelines,buffer_bytes,texture_bytes,allocated_bytes,reserved_bytes,flights,peak_flights,retained_overlap").unwrap();
     let vertices = triangle([0.8, 0.3, 0.1]);
     let indices: Vec<u32> = INDICES.into_iter().cycle().take(2048 * 3).collect();
@@ -996,8 +1071,7 @@ fn gpu_replacement_stress() {
     let final_image = r.test_capture_full(&color);
     save_full("stress-final", color.width(), color.height(), &final_image);
     assert!(final_image.0.chunks_exact(4).any(|rgba| rgba[0] > 100));
-    let mut summary =
-        fs::File::create("measurements/m2-implementation/stress-summary.txt").unwrap();
+    let mut summary = fs::File::create(evidence_dir().join("stress-summary.txt")).unwrap();
     writeln!(summary, "admitted_frames=2176 warmup=64 waves=3 frames_per_wave=704 collections=1 instances=48 draws=1 triangles_per_instance=2048 extent=512_or_513x384 samples=1\nno_per_frame_waits=true configure_calls=0 per_frame_captures=0\nincomplete_prior_draws_after_poll={incomplete_observations:?}\nretained_overlap={overlap:?}\nretained_buffer_peak_above_backend_baseline={retained_peak}\npeak_flights={peak_flights}\nwaves={waves:#?}\nsetup={setup:#?}\nfinal_drain={drained:#?}\nexternal_driver_memory=not_measured\nhal_texture_object_count=unreliable_upstream_wgpu30_vulkan_missing_creation_increment\ntiming_is_stress_not_production_perf=true").unwrap();
     writeln!(summary, "replacement_policy=alternating_mesh_and_instances\nmesh_replacement_overlap={mesh_overlap:?}\ninstance_replacement_overlap={instance_overlap:?}").unwrap();
     eprintln!(
@@ -1125,9 +1199,13 @@ fn assert_adjacent_slot_write(
         report.uploads,
         UploadBytes {
             models: 128,
+            normals: 128,
             model_writes: 1,
-            write_calls: 1,
+            write_calls: 2,
             ..Default::default()
         }
     );
 }
+
+#[path = "material_tests.rs"]
+mod materials;

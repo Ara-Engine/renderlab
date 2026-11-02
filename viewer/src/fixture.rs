@@ -20,22 +20,31 @@ pub fn cube() -> [Vertex; 8] {
             0.25 + (position[0] + 0.5) * 0.7,
             0.15 + (position[1] + 0.5) * 0.65,
             0.12 + (position[2] + 0.5) * 0.7,
+            1.0,
         ],
         position,
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     })
 }
 pub const TRIANGLE: [Vertex; 3] = [
     Vertex {
         position: [-1.5, -0.8, -1.2],
-        color: [0.1, 0.8, 0.35],
+        color: [0.1, 0.8, 0.35, 1.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     },
     Vertex {
         position: [1.5, -0.8, -1.2],
-        color: [0.15, 0.35, 0.95],
+        color: [0.15, 0.35, 0.95, 1.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     },
     Vertex {
         position: [0.0, 1.4, -1.2],
-        color: [0.95, 0.7, 0.12],
+        color: [0.95, 0.7, 0.12, 1.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     },
 ];
 

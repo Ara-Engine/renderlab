@@ -1399,6 +1399,7 @@ dependencies = [
  "glam",
  "log",
  "pollster",
+ "renderlab-asset",
  "wgpu",
 ]
 

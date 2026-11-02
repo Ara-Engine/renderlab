@@ -1,4 +1,4 @@
-﻿param([switch]$Cold, [int]$Runs = 5)
+﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1')
 $ErrorActionPreference = 'Stop'
 if ($Runs -lt 1) { throw 'Runs must be positive' }
 $root = (Resolve-Path "$PSScriptRoot/..").Path
@@ -19,7 +19,10 @@ $results = [ordered]@{
     diff = (git diff --stat | Out-String)
     profile = 'dev'
     cargo_jobs = 2
-    scene = 'two indexed cubes and a triangle; Depth32Float; one sample; 960x640 initial window'
+    scene = $(if ($Asset) { 'prepared asset; opaque unlit; Depth32Float; 960x640 initial window' } else { 'two indexed cubes and a triangle; Depth32Float; 960x640 initial window' })
+    samples = [int]$Samples
+    asset = $(if ($Asset) { (Resolve-Path $Asset).Path } else { $null })
+    asset_sha256 = $(if ($Asset) { (Get-FileHash $Asset -Algorithm SHA256).Hash } else { $null })
     builds = [ordered]@{}
     launches = @()
     binaries = [ordered]@{}
@@ -28,6 +31,7 @@ $results = [ordered]@{
     source_hashes = @(Get-FileHash -Path (@('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml') + @(Get-ChildItem src,viewer/src,shaders -Recurse -File | Select-Object -ExpandProperty FullName)) -Algorithm SHA256 | Select-Object Path,Hash)
 }
 function Assert-Quiet {
+    if (Get-Process -Name 'VALORANT*' -ErrorAction SilentlyContinue) { throw 'Gameplay process present; interactive measurements deferred.' }
     if (Test-Path 'D:/AraBuild/render-v3/quiet-window.lock') { throw 'Quiet-window lock present. Review its owner before running.' }
 }
 function Read-Bytes([IO.FileStream]$Stream) {
@@ -90,7 +94,9 @@ function Wait-Log([string]$Path, [string]$Pattern) {
 function Launch([string]$Name) {
     Assert-Quiet
     $results.binaries[$Name] = (Get-FileHash target/debug/renderlab-viewer.exe -Algorithm SHA256).Hash
-    $script:viewer = Start-Process target/debug/renderlab-viewer.exe -ArgumentList @('--seconds', '25') -WindowStyle Hidden -PassThru -RedirectStandardOutput "$run/$Name.stdout.log" -RedirectStandardError "$run/$Name.log"
+    $viewerArguments = @('--seconds', '25', '--samples', $Samples, '--validate')
+    if ($Asset) { $viewerArguments += @('--asset', ('"' + $results.asset + '"')) }
+    $script:viewer = Start-Process target/debug/renderlab-viewer.exe -ArgumentList $viewerArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$run/$Name.stdout.log" -RedirectStandardError "$run/$Name.log"
     $null = $script:viewer.Handle
 }
 function Close-Viewer {

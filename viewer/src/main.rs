@@ -1,8 +1,12 @@
 mod fixture;
+mod prepared;
 #[path = "../../support/validation.rs"]
 mod validation;
 use fixture::Scene;
-use renderlab::{Draw, FrameId, Instances, Limits, Mesh, Renderer, Revision, Visibility, wgpu};
+use renderlab::{
+    Draw, FrameId, Instances, Limits, Mesh, Renderer, RendererOptions, Revision, SampleCount,
+    ViewMode, Visibility, wgpu,
+};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -17,8 +21,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const TITLE: &str =
-    "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | Esc exit";
+const TITLE: &str = "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | 1-4 views | Esc exit";
 struct Options {
     shader: PathBuf,
     frames: Option<u64>,
@@ -27,6 +30,9 @@ struct Options {
     log_frames: bool,
     validate: bool,
     instances: u32,
+    asset: Option<PathBuf>,
+    samples: SampleCount,
+    view: ViewMode,
 }
 impl Options {
     fn parse() -> Result<Self, String> {
@@ -38,10 +44,32 @@ impl Options {
             log_frames: false,
             validate: false,
             instances: 2,
+            asset: None,
+            samples: SampleCount::One,
+            view: ViewMode::BaseColor,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--asset" => {
+                    options.asset = Some(args.next().ok_or("missing prepared asset path")?.into())
+                }
+                "--samples" => {
+                    options.samples = match args.next().as_deref() {
+                        Some("1") => SampleCount::One,
+                        Some("4") => SampleCount::Four,
+                        _ => return Err("--samples requires 1 or 4".into()),
+                    }
+                }
+                "--view" => {
+                    options.view = match args.next().as_deref() {
+                        Some("color") => ViewMode::BaseColor,
+                        Some("normal") => ViewMode::Normal,
+                        Some("metallic") => ViewMode::Metallic,
+                        Some("roughness") => ViewMode::Roughness,
+                        _ => return Err("--view requires color|normal|metallic|roughness".into()),
+                    }
+                }
                 "--instances" => {
                     options.instances = args
                         .next()
@@ -112,6 +140,9 @@ struct View {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
     meshes: Vec<Mesh>,
+    asset: Option<prepared::Prepared>,
+    view_mode: ViewMode,
+    title: String,
     instances: Vec<Instances>,
     visibility: Visibility,
     scene: Scene,
@@ -131,11 +162,22 @@ struct View {
     finish_at: Option<Instant>,
 }
 impl View {
+    fn set_title(&mut self, title: String) {
+        if self.title != title {
+            self.window.set_title(&title);
+            self.title = title;
+        }
+    }
     fn create(
         events: &ActiveEventLoop,
         options: &Options,
         start: Instant,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let asset = options
+            .asset
+            .as_deref()
+            .map(prepared::Prepared::load)
+            .transpose()?;
         let window = Arc::new(
             events.create_window(
                 Window::default_attributes()
@@ -154,8 +196,15 @@ impl View {
             ..Default::default()
         }))?;
         eprintln!(
-            "adapter={:?} scene=two_cubes_triangle quality=single_sample_depth32float profile=dev_or_selected_cargo_profile",
-            adapter.get_info()
+            "adapter={:?} scene={} samples={} quality=unlit_depth32float debug_build={}",
+            adapter.get_info(),
+            if options.asset.is_some() {
+                "prepared_asset"
+            } else {
+                "cubes_triangle"
+            },
+            options.samples as u32,
+            cfg!(debug_assertions)
         );
         let required_features = if options.timestamps {
             adapter.features() & wgpu::Features::TIMESTAMP_QUERY
@@ -179,13 +228,19 @@ impl View {
             .ok_or("surface has no sRGB format")?;
         config.present_mode = wgpu::PresentMode::Fifo;
         let source = std::fs::read_to_string(&options.shader)?;
-        let renderer = Renderer::new(
+        let renderer = Renderer::new_with_options(
             device,
             queue,
             config.format,
             Limits {
-                max_instances: options.instances.max(1024),
+                max_instances: options
+                    .instances
+                    .max(1024)
+                    .max(asset.as_ref().map_or(1, |a| a.max_instances())),
                 ..Limits::default()
+            },
+            RendererOptions {
+                samples: options.samples,
             },
             &source,
         )?;
@@ -199,6 +254,9 @@ impl View {
             config,
             renderer,
             meshes: Vec::new(),
+            asset,
+            view_mode: options.view,
+            title: TITLE.into(),
             instances: Vec::new(),
             visibility: Visibility::Frustum,
             scene: Scene::default(),
@@ -260,10 +318,13 @@ impl View {
             }
             return Ok(false);
         }
-        if self.meshes.len() < 2 {
+        if let Some(asset) = &mut self.asset {
+            asset.advance(&mut self.renderer)?;
+        }
+        if self.asset.is_none() && self.meshes.len() < 2 {
             fixture::upload_next(&mut self.renderer, &mut self.meshes)?;
         }
-        if self.meshes.len() == 2 && self.instances.len() < 2 {
+        if self.asset.is_none() && self.meshes.len() == 2 && self.instances.len() < 2 {
             fixture::upload_instances_next(
                 &mut self.renderer,
                 &mut self.instances,
@@ -302,7 +363,7 @@ impl View {
                             presented: false,
                             completed: false,
                         });
-                        self.window.set_title(TITLE);
+                        self.set_title(TITLE.into());
                     }
                     Err(renderlab::ReloadError::Rejected {
                         diagnostic,
@@ -313,7 +374,7 @@ impl View {
                             "reload_rejected compile_ms={:.3} diagnostic={diagnostic}",
                             compile.as_secs_f64() * 1000.0
                         );
-                        self.window.set_title("Renderlab | shader rejected; last valid pipeline active | see terminal");
+                        self.set_title("Renderlab | shader rejected; last valid pipeline active | see terminal".into());
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -343,8 +404,12 @@ impl View {
             || self.size.width == 0
             || self.size.height == 0
             || self.occluded
-            || self.meshes.len() < 2
-            || self.instances.len() < 2
+            || self
+                .asset
+                .as_ref()
+                .map_or(self.meshes.len() < 2 || self.instances.len() < 2, |a| {
+                    !a.ready()
+                })
         {
             return Ok(());
         }
@@ -389,18 +454,33 @@ impl View {
             }
         };
         let caller_start = Instant::now();
-        self.instances[0].set(0, self.scene.first_model(options.instances))?;
-        let (cubes, triangle) = self.instances.split_at_mut(1);
-        let mut draws = [
-            Draw::new(&self.meshes[0], &mut cubes[0]).with_visibility(self.visibility),
-            Draw::new(&self.meshes[1], &mut triangle[0]).with_visibility(self.visibility),
-        ];
-        let camera = self.scene.camera(options.instances);
+        let (camera, mut draws) = if let Some(asset) = &mut self.asset {
+            asset.animate(self.scene.phase)?;
+            let camera = asset.camera(
+                self.scene.yaw,
+                self.scene.elevation,
+                self.scene.translation,
+                self.scene.close_view,
+                self.config.width as f32 / self.config.height as f32,
+            )?;
+            (camera, asset.draws(self.visibility))
+        } else {
+            self.instances[0].set(0, self.scene.first_model(options.instances))?;
+            let (cubes, triangle) = self.instances.split_at_mut(1);
+            (
+                self.scene.camera(options.instances),
+                vec![
+                    Draw::new(&self.meshes[0], &mut cubes[0]).with_visibility(self.visibility),
+                    Draw::new(&self.meshes[1], &mut triangle[0]).with_visibility(self.visibility),
+                ],
+            )
+        };
         let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.0;
         let render_start = Instant::now();
-        let report = self
-            .renderer
-            .try_render(&frame.texture, &camera, &mut draws)?;
+        let report =
+            self.renderer
+                .try_render_view(&frame.texture, &camera, &mut draws, self.view_mode)?;
+        drop(draws);
         let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
         if options.log_frames {
             eprintln!(
@@ -409,8 +489,10 @@ impl View {
             );
         }
         if let Some(report) = report {
-            self.window.set_title(&format!(
-                "{TITLE} | {:?} visible {}/{}{}",
+            self.set_title(format!(
+                "{TITLE} | {:?} {}x {:?} visible {}/{}{}",
+                self.view_mode,
+                options.samples as u32,
                 self.visibility,
                 report.scene.visible_instances,
                 report.scene.total_instances,
@@ -535,6 +617,10 @@ impl ApplicationHandler for App {
                                         Visibility::Frustum
                                     }
                                 }
+                                KeyCode::Digit1 => view.view_mode = ViewMode::BaseColor,
+                                KeyCode::Digit2 => view.view_mode = ViewMode::Normal,
+                                KeyCode::Digit3 => view.view_mode = ViewMode::Metallic,
+                                KeyCode::Digit4 => view.view_mode = ViewMode::Roughness,
                                 KeyCode::KeyR => view.scene = Scene::default(),
                                 _ => {}
                             }

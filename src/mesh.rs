@@ -1,11 +1,6 @@
 use crate::{Error, Instances, Mat4, Vec3, Visibility, observe::Owned, visibility::Aabb};
 
-#[derive(Clone, Copy, Debug)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    /// Linear RGB.
-    pub color: [f32; 3],
-}
+pub use renderlab_asset::Vertex;
 
 pub struct MeshData<'a> {
     pub vertices: &'a [Vertex],
@@ -17,12 +12,15 @@ pub struct Limits {
     /// Maximum slots per instance collection, not the number of frame draws.
     pub max_instances: u32,
     pub max_mesh_bytes: u64,
+    /// Per immutable texture upload, including every prepared mip.
+    pub max_texture_bytes: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             max_instances: 1024,
             max_mesh_bytes: 64 * 1024 * 1024,
+            max_texture_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -31,11 +29,14 @@ impl Limits {
         if self.max_instances == 0
             || u64::from(self.max_instances) * 64 > device.max_buffer_size
             || u64::from(self.max_instances) * 64 > device.max_storage_buffer_binding_size
-            || device.max_storage_buffers_per_shader_stage < 1
-            || device.max_bind_groups < 2
+            || device.max_storage_buffers_per_shader_stage < 2
+            || device.max_bind_groups < 3
             || device.max_vertex_buffers < 2
-            || device.max_vertex_attributes < 3
-            || device.max_vertex_buffer_array_stride < 24
+            || device.max_vertex_attributes < 5
+            || device.max_vertex_buffer_array_stride < 48
+            || device.max_sampled_textures_per_shader_stage < 2
+            || device.max_samplers_per_shader_stage < 2
+            || self.max_texture_bytes == 0
             || self.max_mesh_bytes == 0
             || self.max_mesh_bytes > device.max_buffer_size
         {
@@ -49,6 +50,7 @@ impl Limits {
 
 /// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
+    pub(crate) renderer: std::sync::Arc<()>,
     pub(crate) vertex: Owned<wgpu::Buffer>,
     pub(crate) index: Owned<wgpu::Buffer>,
     pub(crate) index_count: u32,
@@ -58,6 +60,7 @@ pub struct Draw<'a> {
     pub(crate) mesh: &'a Mesh,
     pub(crate) instances: &'a mut Instances,
     pub(crate) visibility: Visibility,
+    pub(crate) material: Option<&'a crate::Material>,
 }
 impl<'a> Draw<'a> {
     pub fn new(mesh: &'a Mesh, instances: &'a mut Instances) -> Self {
@@ -65,7 +68,13 @@ impl<'a> Draw<'a> {
             mesh,
             instances,
             visibility: Visibility::Frustum,
+            material: None,
         }
+    }
+    /// Omission uses linear vertex color with a white, double-sided default material.
+    pub fn with_material(mut self, material: &'a crate::Material) -> Self {
+        self.material = Some(material);
+        self
     }
     /// Frustum assumes camera * model * original bounded vertex positions.
     /// Use Unculled for position-changing shaders; layout validation cannot check this contract.
@@ -86,7 +95,7 @@ impl MeshData<'_> {
                 "mesh needs vertices and a nonempty u32 triangle list",
             ));
         }
-        let vertex_bytes = (self.vertices.len() as u64).checked_mul(24);
+        let vertex_bytes = (self.vertices.len() as u64).checked_mul(48);
         let index_bytes = (self.indices.len() as u64).checked_mul(4);
         let (Some(vertex_bytes), Some(index_bytes)) = (vertex_bytes, index_bytes) else {
             return Err(Error::InvalidInput("mesh byte count overflow"));
@@ -104,12 +113,22 @@ impl MeshData<'_> {
         {
             return Err(Error::InvalidInput("mesh index outside vertices"));
         }
+        if self.vertices.iter().any(|v| {
+            v.position
+                .iter()
+                .chain(&v.normal)
+                .chain(&v.uv)
+                .chain(&v.color)
+                .any(|x| !x.is_finite())
+        }) {
+            return Err(Error::InvalidInput("vertex attributes must be finite"));
+        }
         if self
             .vertices
             .iter()
-            .any(|v| v.position.iter().chain(&v.color).any(|x| !x.is_finite()))
+            .any(|v| v.normal.iter().all(|n| *n == 0.0))
         {
-            return Err(Error::InvalidInput("vertex position/color must be finite"));
+            return Err(Error::InvalidInput("vertex normal must be nonzero"));
         }
         Ok((vertex_bytes, index_bytes))
     }

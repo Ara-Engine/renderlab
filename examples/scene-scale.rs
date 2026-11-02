@@ -97,7 +97,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]
     .map(|position| Vertex {
         position,
-        color: position.map(|p| 0.5 + p * 0.7),
+        color: [
+            0.5 + position[0] * 0.7,
+            0.5 + position[1] * 0.7,
+            0.5 + position[2] * 0.7,
+            1.0,
+        ],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0; 2],
     });
     let indices = [
         0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3,

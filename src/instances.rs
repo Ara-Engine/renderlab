@@ -19,6 +19,7 @@ pub enum Visibility {
 pub struct Instances {
     pub(crate) renderer: Arc<()>,
     pub(crate) state: InstanceState,
+    pub(crate) normals: Owned<wgpu::Buffer>,
     pub(crate) transforms: Owned<wgpu::Buffer>,
     pub(crate) id_buffer: Owned<wgpu::Buffer>,
     pub(crate) bind: Owned<wgpu::BindGroup>,
@@ -52,6 +53,8 @@ pub(crate) struct VisibilityUpdate {
 
 pub(crate) struct InstanceState {
     pub models: Vec<Mat4>,
+    pub normals: Vec<crate::normal::NormalTransform>,
+    pub invalid_normals: usize,
     dirty: Vec<u64>,
     pub dirty_count: usize,
     visible: Vec<u64>,
@@ -72,8 +75,16 @@ impl InstanceState {
         Ok(())
     }
     pub fn new(models: &[Mat4]) -> Self {
+        let normals: Vec<_> = models
+            .iter()
+            .copied()
+            .map(crate::normal::NormalTransform::new)
+            .collect();
+        let invalid_normals = normals.iter().filter(|n| !n.valid()).count();
         Self {
             models: models.to_vec(),
+            normals,
+            invalid_normals,
             dirty: vec![0; models.len().div_ceil(64)],
             dirty_count: 0,
             visible: vec![u64::MAX; models.len().div_ceil(64)],
@@ -93,6 +104,10 @@ impl InstanceState {
         {
             return Ok(());
         }
+        let normal = crate::normal::NormalTransform::new(model);
+        self.invalid_normals -= usize::from(!self.normals[slot].valid());
+        self.invalid_normals += usize::from(!normal.valid());
+        self.normals[slot] = normal;
         self.models[slot] = model;
         let bit = 1 << (slot % 64);
         if self.dirty[slot / 64] & bit == 0 {
@@ -139,7 +154,11 @@ impl InstanceState {
     }
     pub fn visibility(&mut self, clip: Mat4, bounds: Aabb, mode: Visibility) -> VisibilityUpdate {
         let key = VisibilityKey {
-            clip: matrix_bytes(clip),
+            clip: if mode == Visibility::Unculled {
+                [0; 64]
+            } else {
+                matrix_bytes(clip)
+            },
             bounds: [
                 bounds.min[0],
                 bounds.min[1],
@@ -152,7 +171,7 @@ impl InstanceState {
             mode,
         };
         let full = self.key.as_ref() != Some(&key);
-        if !full && self.dirty_count == 0 {
+        if !full && (self.dirty_count == 0 || mode == Visibility::Unculled) {
             return VisibilityUpdate::default();
         }
         let rebuild_bounds = self

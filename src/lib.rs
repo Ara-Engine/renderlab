@@ -1,17 +1,25 @@
 //! Persistent indexed meshes and transform collections with bounded submissions.
 //! Draw order, then ascending instance slot, defines equal-depth winners. Windowing belongs to the caller.
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
+#[cfg(test)]
+extern crate self as renderlab;
 mod instances;
+mod material;
 mod mesh;
+mod normal;
 mod observe;
 mod renderer;
 mod visibility;
 
 pub use glam::{Mat4, Vec3};
 pub use instances::{Instances, Visibility};
-pub use mesh::{Camera, Draw, Limits, Mesh, MeshData, Vertex};
+pub use material::{
+    Material, MaterialDescriptor, RendererOptions, SampleCount, Texture, TextureBinding, ViewMode,
+};
+pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
 pub use renderer::Renderer;
+pub use renderlab_asset::{self as asset, Vertex};
 pub use wgpu;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
