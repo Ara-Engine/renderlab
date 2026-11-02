@@ -33,6 +33,23 @@ All values below are per-frame medians in milliseconds, 40 measured frames each.
 
 Encoding dominates this development-build workload. Static frames satisfy the zero-upload assertions, yet still incur model scanning/packing and one indexed draw per instance. The narrow view has no application culling and therefore still pays that CPU work. This motivates testing batching and visibility; it does not predict optimized speedups or establish a comparison with Unreal/Nanite. GPU clock state and contention were uncontrolled, so small GPU differences between camera cases have no attributed cause.
 
+## Optimized baseline follow-up
+
+The same source and fixture were subsequently built with `cargo build --release --example scene-scale -j2` at `7aea535cf63044bd1cce1fbfc0c5d2e45727198b`. Cargo reported 48.51 s for this first release-profile build with dependencies/registry already available; it is not a repeated clean-build latency study. Executable SHA-256 is `4AA00C40F0906B3BBCEEB52B36F0FEA7BBB97AFA1CC127B09D52074C05D619D6`. Raw results and hashes are under `measurements/m2-baseline/release/`.
+
+Same 60 frames, 20 warmup, 960x640 target, timestamp/counters settings and disabled validation during timing. Pre-run snapshots were 4-12% GPU use and 1,707-1,711 MiB global GPU memory; shared-desktop contention and clocks remain uncontrolled. A separate optimized 100k narrow run with validation explicitly enabled completed 25 frames with positive Khronos activation and zero errors. All timed runs collected every sample without drops/failures and satisfied the static zero-upload assertion. Peak flights were two except the 1k narrow run, which reached three and recorded one Busy call. All final drains reached zero flights.
+
+| Instances | Camera | Renderer CPU | Preparation | Encoding | GPU mesh pass |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1,000 | Wide | 0.253 | 0.004 | 0.216 | 0.015360 |
+| 1,000 | Narrow | 0.257 | 0.004 | 0.218 | 0.017408 |
+| 10,000 | Wide | 2.318 | 0.040 | 2.153 | 0.103424 |
+| 10,000 | Narrow | 2.396 | 0.040 | 2.268 | 0.103424 |
+| 100,000 | Wide | 23.035 | 0.395 | 22.056 | 1.044992 |
+| 100,000 | Narrow | 23.406 | 0.411 | 22.402 | 1.047552 |
+
+Values are medians in milliseconds. Encoding remains the largest measured CPU component in optimized builds. These are baseline results, not M2 improvements. Development/release runs were not interleaved; do not attribute the GPU-time difference to Rust optimization, since the shader is unchanged and GPU clocks/contention were not controlled. Preserve both executables (`final/scene-scale-dev.exe`, `release/scene-scale-release.exe`) so the original code can be rerun alongside M2 under the same conditions.
+
 ## Reproduction and limits
 
 ```powershell
@@ -44,6 +61,6 @@ target/debug/examples/scene-scale.exe 10000 60 narrow
 target/debug/examples/scene-scale.exe 100000 60 wide
 ```
 
-Create that empty ignored directory first on a fresh checkout. Run both wide and narrow for each count. The same fixture supports an optimized build with `cargo run --release --example scene-scale -- 100000 120 wide`; no release result is claimed here. Check current GPU ownership/load before reproducing.
+Create that empty ignored directory first on a fresh checkout. Run both wide and narrow for each count. Use `cargo build --release --example scene-scale -j2`, then run `target/release/examples/scene-scale.exe 100000 60 wide` for the corresponding optimized case. Check current GPU ownership/load before reproducing.
 
 Formatting and workspace/all-target Clippy with warnings denied pass. This harness does not capture images or prove culling equivalence, motion, material quality, streaming, or M2 completion. M2 still needs its selected implementation, full-image/reference checks, actual interaction, optimized paired measurements, memory/churn analysis and development-loop verification. Shader reload and renderer source are unchanged by this checkpoint.
