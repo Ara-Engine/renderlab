@@ -21,7 +21,7 @@ No GUI toolkit, asset importer, ECS, external shader compiler, or Ara source is 
 
 `cargo test -p renderlab -- --ignored` explicitly runs the Vulkan GPU test, writing full-frame PPM captures into ignored `captures/`. It verifies failed syntax/binding reloads preserve the exact image, recovery works, and each scene parameter changes the image. Ordinary `cargo test` skips this hardware-dependent test.
 
-See [the milestone record](docs/milestone-1.md), [brief](docs/brief.md), and [rendering research](docs/research/industry-rendering-costs.md). Fast development builds use two compiler jobs, incremental compilation, and line-table debug info. They are not optimized GPU benchmarks.
+See [the Milestone 0 record](docs/milestone-0.md), [brief](docs/brief.md), and [rendering research](docs/research/industry-rendering-costs.md). Fast development builds use two compiler jobs, incremental compilation, and line-table debug info. They are not optimized GPU benchmarks.
 
 
 Development timing: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-dev-loop.ps1` (add `-Cold` for a fresh target). It temporarily edits and restores source files; run without concurrent edits in this checkout. Measurements and captures remain ignored.

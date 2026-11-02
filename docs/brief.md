@@ -6,17 +6,21 @@ Islam wants a separate, public Rust rendering library/engine on this PC, useful 
 
 The immediate motivation is unacceptable iteration speed in the large engine. Treat development latency as a product feature: immediate parameter changes, shader edits without Rust rebuilds, short incremental Rust rebuilds, and prepared scene assets reused across launches.
 
-The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-1.md for the working viewer and measured development loop.
+The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
 
-## First working milestone
+## Milestone 0: development environment (complete)
 
-Start from this small repository. Select and explain a minimal backend/tooling approach based on dependency weight, shader iteration, validation and intended renderer capabilities. Reuse selected proven infrastructure only where it actually improves this project's goals; do not copy the engine wholesale.
+The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.
 
-Implement a small persistent viewer and a visible scene. Establish editable camera/material/light parameters and a shader reload path that retains the last valid pipeline on compile failure. Exercise the same library code from the viewer. Avoid speculative APIs for engine integrations.
+## Milestone 1: reliable, measurable GPU foundation (authorized)
 
-Measure cold compile, no-op compile, a representative incremental Rust edit, shader edit-to-visible-image and startup-to-image. Record actual timings and circumstances; establish targets from evidence rather than promising instantaneous compilation. Separate optimized GPU timing from the quick development loop. Build/run of this first milestone is part of the authorized continuation.
+Follow the scope and acceptance in [project-handoff.md](project-handoff.md). Use the installed pstack workflow with the confirmed large reasoning budget and GPT-6.1 Sol, Astra, and Opus 5.5. This thread owns implementation and decisions directly with Islam.
 
-Before expanding to GI/reflections, use the industry research to explain what work existing renderers avoid, share, cache or amortize. Assess geometry/material costs as well as lighting. Preserve the user's image-quality concerns: clean model silhouettes, correct shadow softness and darkness, smooth shadow edges and stability in motion.
+Implement real triangles/cubes, camera and depth, owned persistent GPU resources, transform-only movement, safe in-flight replacement, responsive resize/minimize and shader recovery. Measure CPU preparation, GPU execution, acquisition/presentation and waits separately. Account for uploads, allocations and pipeline creation without forcing per-frame GPU completion waits.
+
+Verify complete images, occlusion, movement, resize, failed reload and correction. Stress resource replacement with work in flight. Distinguish owned resource counters from driver memory. Remeasure practical development latency on the recorded build and host. Push validated checkpoints as Snowy7 without rewriting history.
+
+No importer, Nanite/virtual geometry, GI, advanced lighting or Ara integration belongs in this milestone. Do not auto-advance beyond it. The execution record is [milestone-1-plan.md](milestone-1-plan.md).
 
 ## Historical context and lessons
 

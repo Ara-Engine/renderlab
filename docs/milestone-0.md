@@ -1,4 +1,6 @@
-# First working milestone
+# Milestone 0: development environment
+
+This report was originally numbered Milestone 1. Islam renamed that completed work Milestone 0. Historical measurements are preserved; identity-only history correction changed commit IDs without changing code trees. The measured implementation d3d3f23 now corresponds to 82e9549.
 
 ## Decision
 
@@ -33,12 +35,12 @@ Measured implementation: `d3d3f234d3379f0499c64554a77f8ddb6b95aba1`. Documentati
 | Operation | Observed wall time | Samples / interpretation |
 |---|---:|---|
 | Clean-target dev compile | 23.286 s | One run, registry and OS caches warm; Cargo reported 23.06 s |
-| No-op build | 0.334–0.337 s | Three runs; median 0.336 s including Cargo invocation |
+| No-op build | 0.334ï¿½0.337 s | Three runs; median 0.336 s including Cargo invocation |
 | Representative library edit + viewer rebuild | 1.509 s | One run, default camera yaw 0.35 ? 0.36 |
 | Rust edit ? running viewer's first-present log | 2.566 s | One run; includes build, process launch and external log polling |
-| Startup main() ? GPU complete + present | 624–652 ms | Three runs: 651.857, 624.148, 639.558; median 639.558 |
-| Shader file write ? GPU complete + present | 43–81 ms | Three runs: 80.575, 72.126, 43.055; median 72.126 |
-| Shader validation/pipeline creation alone | 26–31 ms | Same three reloads: 27.941, 30.833, 26.159 |
+| Startup main() ? GPU complete + present | 624ï¿½652 ms | Three runs: 651.857, 624.148, 639.558; median 639.558 |
+| Shader file write ? GPU complete + present | 43ï¿½81 ms | Three runs: 80.575, 72.126, 43.055; median 72.126 |
+| Shader validation/pipeline creation alone | 26ï¿½31 ms | Same three reloads: 27.941, 30.833, 26.159 |
 
 Initial exploratory startup was 949.663 ms; initial live color reload was 66.729 ms. Keep these rather than calling the later warm sample universally representative. Initial dependency compilation failed after 37.00 s on API mismatches; the accepted clean-target number above comes from a successful fresh-target rebuild after fixes. A discarded harness used Start-Process -Wait for Cargo and added coarse wait overhead (about one second on no-op); the final script invokes Cargo directly. Raw failed/discarded runs remain ignored, not silently presented as successful samples.
 
