@@ -449,6 +449,58 @@ fn sampler_mips(
         ViewMode::BaseColor,
     );
     close(&image[center..], [srgb(0.5); 3]);
+    let mut minified_vertices = swatch_vertices([0.0; 2]);
+    for vertex in &mut minified_vertices {
+        vertex.uv = [
+            vertex.position[0] * 1000.0 + 0.5,
+            vertex.position[1] * 1000.0 + 0.5,
+        ];
+    }
+    let minified = upload(r, &minified_vertices, &[0, 1, 2, 0, 2, 3]);
+    for (mag, min) in [
+        (Filter::Linear, Filter::Nearest),
+        (Filter::Nearest, Filter::Linear),
+    ] {
+        let m = material(
+            r,
+            &MaterialDescriptor {
+                base_color_texture: Some(TextureBinding {
+                    texture: &tex,
+                    sampler: Sampler {
+                        mag,
+                        min,
+                        mipmap: MipmapFilter::None,
+                        ..Default::default()
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+        let image = pixels(
+            r,
+            color,
+            cam,
+            &mut [Draw::new(&minified, inst).with_material(&m)],
+            ViewMode::BaseColor,
+        );
+        save_color(
+            &format!("no-mips-min-{min:?}-mag-{mag:?}"),
+            color.width(),
+            color.height(),
+            &image,
+        );
+        if min == Filter::Nearest {
+            assert!(
+                [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]]
+                    .iter()
+                    .any(|texel| image[center..center + 3] == texel[..]),
+                "minified nearest must select a base texel: {:?}",
+                &image[center..center + 3]
+            );
+        } else {
+            close(&image[center..], [srgb(0.5); 3]);
+        }
+    }
     data.mips = vec![
         Mip {
             width: 4,

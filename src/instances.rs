@@ -359,6 +359,10 @@ mod tests {
         state.visibility(shifted, larger, Visibility::Frustum);
         assert_eq!(state.ids, [0]);
         state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Unculled);
+        assert_eq!(
+            state.visibility(shifted, BOUNDS, Visibility::Unculled),
+            VisibilityUpdate::default()
+        );
         state.set(0, shifted).unwrap();
         state.visibility(Mat4::IDENTITY, BOUNDS, Visibility::Unculled);
         state.clear_dirty();

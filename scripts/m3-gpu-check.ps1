@@ -36,7 +36,7 @@ function Run-Cargo([string]$Name, [string[]]$Arguments) {
     Write-Output "$Name passed"
 }
 function Source-Hashes {
-    $sources = @('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml', 'scripts/m3-gpu-check.ps1') + @(Get-ChildItem src,viewer/src,shaders,examples,support,crates/asset,crates/cook -Recurse -File | Select-Object -ExpandProperty FullName)
+    $sources = @('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'viewer/Cargo.toml', 'scripts/m3-gpu-check.ps1', 'scripts/measure-dev-loop.ps1') + @(Get-ChildItem src,viewer/src,shaders,examples,support,crates/asset,crates/cook -Recurse -File | Select-Object -ExpandProperty FullName)
     Get-FileHash -Path $sources -Algorithm SHA256 | Sort-Object Path | Select-Object Path,Hash
 }
 try {

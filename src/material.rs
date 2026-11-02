@@ -179,7 +179,8 @@ pub(crate) fn sampler_descriptor(s: Sampler) -> wgpu::SamplerDescriptor<'static>
             _ => wgpu::MipmapFilterMode::Nearest,
         },
         lod_max_clamp: if s.mipmap == MipmapFilter::None {
-            0.0
+            // Vulkan chooses min/mag after LOD clamping; 0.25 still selects base mip.
+            0.25
         } else {
             32.0
         },

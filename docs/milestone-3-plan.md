@@ -1,6 +1,6 @@
 # M3 execution: prepared assets, materials and basic antialiasing
 
-Authorized by Islam's M2-M4 request. M2 closed at `23b2dc9b016ec7035c9df7081754d160d5e07198`. This specializes the already reviewed [M3 boundary](m2-m4-design.md), not a new engine architecture. M3 is not complete. Pstack feature implementation uses Sol at xhigh; root owns verification and publication. Keep the project license undecided.
+Authorized by Islam's M2-M4 request. M2 closed at `23b2dc9b016ec7035c9df7081754d160d5e07198`. This specializes the already reviewed [M3 boundary](m2-m4-design.md), not a new engine architecture. M3 is complete; [its record](milestone-3.md) contains independent review, the sampler correction and final verification. Pstack feature implementation used Sol at xhigh; root owns verification and publication. Keep the project license undecided.
 
 ## Throughput and ownership
 

@@ -83,5 +83,7 @@ mod tests {
             assert!(!NormalTransform::new(m).valid());
         }
         assert!(NormalTransform::new(Mat4::from_scale(Vec3::splat(1e-20))).valid());
+        assert!(NormalTransform::new(Mat4::from_scale(Vec3::new(1e4, 1.0, 1.0))).valid());
+        assert!(!NormalTransform::new(Mat4::from_scale(Vec3::new(1e4 + 1.0, 1.0, 1.0))).valid());
     }
 }

@@ -244,8 +244,9 @@ struct Depth {
     _allocation: Allocation,
 }
 
-/// One queue submission owner, three flights, and one depth texture keyed by color extent.
-/// Alternating target sizes recreates depth. Separate renderers suit independent target streams.
+/// One queue submission owner, three flights, and extent-matched depth/MSAA color targets.
+/// Use an sRGB output format for encoded base color; linear targets retain linear values.
+/// Alternating target sizes recreates attachments. Separate renderers suit independent streams.
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,

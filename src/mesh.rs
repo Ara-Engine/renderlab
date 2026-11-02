@@ -2,6 +2,7 @@ use crate::{Error, Instances, Mat4, Vec3, Visibility, observe::Owned, visibility
 
 pub use renderlab_asset::Vertex;
 
+/// Finite vertex attributes with nonzero normals, including for the raw unlit path.
 pub struct MeshData<'a> {
     pub vertices: &'a [Vertex],
     pub indices: &'a [u32],
