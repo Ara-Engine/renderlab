@@ -374,6 +374,43 @@ fn atomic_closure_does_not_require_unrequested_intermediate_pages() {
     assert_eq!(missing.demand.required_pages, vec![PageId(0), PageId(2)]);
 }
 
+// A transaction is judged on its complete cut: replaced shards free their pages before new
+// clusters are charged, and the output cap outranks the geometry budget as the denial reason.
+#[test]
+fn capacity_denial_judges_the_complete_transition() {
+    let chain = graph(&[&[None], &[Some(0)], &[Some(1)]]);
+    // Page 1 never arrives, so the g1 plan is not published and only the plan charges it.
+    // Refining g0 replaces that page; the page-2 pin plus page 0 fits exactly two pages.
+    let fits = select(
+        &chain,
+        &[2., 3., f64::INFINITY],
+        1.,
+        &[true, false, true],
+        SelectionBudget {
+            geometry_bytes: 2 * PAGE_BYTES,
+            ..budget()
+        },
+    )
+    .unwrap();
+    assert_eq!(fits.cut.clusters, [ClusterId(0)]);
+    assert!(fits.debt.reasons.is_empty());
+    let split = graph(&[&[None, None], &[Some(0)]]);
+    let both = select(
+        &split,
+        &[2., f64::INFINITY],
+        1.,
+        &[true; 3],
+        SelectionBudget {
+            geometry_bytes: PAGE_BYTES,
+            max_clusters: 1,
+            ..budget()
+        },
+    )
+    .unwrap();
+    assert_eq!(both.cut.clusters, [ClusterId(2)]);
+    assert_eq!(both.debt.reasons, [DebtReason::OutputCapacity]);
+}
+
 #[test]
 fn virtual_codec_rejects_bad_counts_cycles_references_and_domains() {
     let m = graph(&[&[None], &[Some(0)]]);

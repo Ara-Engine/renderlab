@@ -13,6 +13,33 @@ pub(super) enum Track {
     Publication,
 }
 
+/// The caps that deny a transaction. `clusters` is already limited to the mesh's cluster count.
+#[derive(Clone, Copy)]
+pub(super) struct Capacity {
+    pub clusters: usize,
+    pub geometry_bytes: usize,
+}
+impl Capacity {
+    /// Output before geometry; `geometry` false leaves only the output cap to decide.
+    fn denial(self, clusters: usize, charged: usize, geometry: bool) -> Result<Option<DebtReason>> {
+        Ok(if clusters > self.clusters {
+            Some(DebtReason::OutputCapacity)
+        } else if geometry && product(charged, PAGE_BYTES)? > self.geometry_bytes {
+            Some(DebtReason::GeometryCapacity)
+        } else {
+            None
+        })
+    }
+}
+
+/// During additions the cut and charge only grow, so a denial seen there is final. Geometry may
+/// decide only when the output cap provably holds for the completed transaction.
+#[derive(Clone, Copy)]
+struct Stop {
+    capacity: Capacity,
+    geometry: bool,
+}
+
 /// CSR of the clusters whose `refined` names each group, in ascending cluster order.
 /// Immutable after construction; a prepared package retains one per mesh.
 #[derive(Debug)]
@@ -77,6 +104,12 @@ pub(super) struct State<'a> {
     deltas: Vec<(PageId, bool)>,
     pub charged: usize,
     pub visits: usize,
+    /// Profile only: `visits` when the current proposal first added an unavailable cut page.
+    #[cfg(feature = "selection-profile")]
+    pub witness: Option<usize>,
+    /// Profile only: the current proposal's denial was decided before all additions.
+    #[cfg(feature = "selection-profile")]
+    pub stopped: bool,
 }
 
 impl<'a> State<'a> {
@@ -131,7 +164,16 @@ impl<'a> State<'a> {
             // The initial cover scan. Proposal/publication count each closure/boundary record
             // read below. Rollback replays pages without cluster reads.
             visits: mesh.clusters.len(),
+            #[cfg(feature = "selection-profile")]
+            witness: None,
+            #[cfg(feature = "selection-profile")]
+            stopped: false,
         }
+    }
+
+    #[cfg(feature = "selection-profile")]
+    pub fn closure(&self) -> &[u32] {
+        &self.journal
     }
 
     fn cover(&self, track: Track) -> &Cover {
@@ -178,13 +220,28 @@ impl<'a> State<'a> {
         self.journal.push(g as u32);
     }
 
-    pub fn propose(&mut self, seed: usize, track: Track) {
+    /// Activates `seed`'s owner closure on `track` and returns the transaction's capacity denial;
+    /// the caller rolls back any denial. Removals are applied first, after which additions only
+    /// grow the cut and its page charge, so additions stop once the denial and reason are certain.
+    pub fn propose(
+        &mut self,
+        seed: usize,
+        track: Track,
+        capacity: Capacity,
+    ) -> Result<Option<DebtReason>> {
         self.journal.clear();
         self.deltas.clear();
+        #[cfg(feature = "selection-profile")]
+        {
+            self.witness = None;
+            self.stopped = false;
+        }
         self.mark(seed, track);
+        let mut closure_clusters = 0;
         let mut cursor = 0;
         while cursor < self.journal.len() {
             let g = self.journal[cursor] as usize;
+            closure_clusters += self.mesh.groups[g].clusters.count as usize;
             for i in self.incoming.offsets[g]..self.incoming.offsets[g + 1] {
                 self.visits += 1;
                 let owner = self.mesh.clusters[self.incoming.links[i] as usize]
@@ -196,26 +253,28 @@ impl<'a> State<'a> {
             }
             cursor += 1;
         }
-        self.apply_boundary(track);
+        self.remove_replaced(track);
+        // Additions are closure clusters, and no cut exceeds the mesh. When even that bound fits
+        // the output cap, only the geometry charge can deny this transaction.
+        let geometry = (self.cover(track).clusters + closure_clusters)
+            .min(self.mesh.clusters.len())
+            <= capacity.clusters;
+        if let Some(reason) = self.add_uncovered(track, Some(Stop { capacity, geometry }))? {
+            #[cfg(feature = "selection-profile")]
+            {
+                self.stopped = true;
+            }
+            return Ok(Some(reason));
+        }
+        capacity.denial(self.cover(track).clusters, self.charged, true)
     }
 
-    fn apply_boundary(&mut self, track: Track) {
-        // All flags describe the final closure. Only its boundary changes the cut.
-        // Internal coarse shards never enter page accounting, even temporarily.
+    // All flags describe the final closure. Only its boundary changes the cut, and internal
+    // coarse shards never enter page accounting, even temporarily. Delta order does not change
+    // the final references, missing pages or charge.
+    fn remove_replaced(&mut self, track: Track) {
         for i in 0..self.journal.len() {
             let g = self.journal[i] as usize;
-            let span = self.mesh.groups[g].clusters;
-            for id in span.offset as usize..(span.offset + span.count) as usize {
-                self.visits += 1;
-                let c = &self.mesh.clusters[id];
-                if c.refined
-                    .is_none_or(|r| !self.cover(track).active[r.index()])
-                {
-                    let page = c.page;
-                    self.deltas.push((page, true));
-                    self.page_delta(page, true, track);
-                }
-            }
             for link in self.incoming.offsets[g]..self.incoming.offsets[g + 1] {
                 self.visits += 1;
                 let c = &self.mesh.clusters[self.incoming.links[link] as usize];
@@ -226,6 +285,37 @@ impl<'a> State<'a> {
                 }
             }
         }
+    }
+
+    /// Returns a denial only when `stop` proves it before every addition is applied.
+    fn add_uncovered(&mut self, track: Track, stop: Option<Stop>) -> Result<Option<DebtReason>> {
+        for i in 0..self.journal.len() {
+            let g = self.journal[i] as usize;
+            let span = self.mesh.groups[g].clusters;
+            for id in span.offset as usize..(span.offset + span.count) as usize {
+                self.visits += 1;
+                let c = &self.mesh.clusters[id];
+                if c.refined
+                    .is_none_or(|r| !self.cover(track).active[r.index()])
+                {
+                    let (page, charged) = (c.page, self.charged);
+                    self.deltas.push((page, true));
+                    self.page_delta(page, true, track);
+                    #[cfg(feature = "selection-profile")]
+                    if self.witness.is_none() && !self.available[page.index()] {
+                        self.witness = Some(self.visits);
+                    }
+                    if let Some(Stop { capacity, geometry }) = stop
+                        && (self.charged > charged || !geometry)
+                        && let Some(reason) =
+                            capacity.denial(self.cover(track).clusters, self.charged, geometry)?
+                    {
+                        return Ok(Some(reason));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn rollback(&mut self, track: Track) {
@@ -251,7 +341,7 @@ impl<'a> State<'a> {
 
     /// The admitted plan is available and fits; synchronizing removes transition pages.
     /// Filter the gap because independent publication can already have activated some groups.
-    pub fn publish_plan(&mut self) {
+    pub fn publish_plan(&mut self) -> Result<()> {
         debug_assert_eq!(self.planned.missing, 0);
         self.journal.clear();
         self.deltas.clear();
@@ -261,8 +351,10 @@ impl<'a> State<'a> {
                 self.mark(g, Track::Publication);
             }
         }
-        self.apply_boundary(Track::Publication);
+        self.remove_replaced(Track::Publication);
+        self.add_uncovered(Track::Publication, None)?;
         self.accept(Track::Publication);
         self.gap.clear();
+        Ok(())
     }
 }

@@ -54,6 +54,7 @@ pub struct Selection {
     pub debt: QualityDebt,
     pub candidates: usize,
     /// Cluster predicate/link/shard touches. Excludes validation, scalar/group/page scans and sorting.
+    /// A denied transaction stops touching additions once its capacity denial is certain.
     /// The preserved scan oracle counts only whole cut/closure scans, a subset of these touches.
     pub cluster_visits: usize,
     pub scratch_bound_bytes: usize,
@@ -400,6 +401,12 @@ fn select_internal(
     #[cfg(feature = "selection-profile")]
     let sorted_ns = profile.elapsed().as_nanos();
     use incremental::Track;
+    let capacity = incremental::Capacity {
+        clusters: budget.max_clusters.min(c),
+        geometry_bytes: budget.geometry_bytes,
+    };
+    #[cfg(feature = "selection-profile")]
+    let mut attribution = Attribution::new(n);
     for seed in order {
         let seed = seed as usize;
         if state.published.active[seed] || projected_errors[seed] <= threshold {
@@ -411,37 +418,51 @@ fn select_internal(
         }
         candidates += 1;
         if !state.planned.active[seed] {
-            state.propose(seed, Track::Plan);
-            let denial = if state.planned.clusters > budget.max_clusters.min(c) {
-                Some(DebtReason::OutputCapacity)
-            } else if product(state.charged, PAGE_BYTES)? > budget.geometry_bytes {
-                Some(DebtReason::GeometryCapacity)
-            } else {
-                None
-            };
+            #[cfg(feature = "selection-profile")]
+            let (start, visits) = (std::time::Instant::now(), state.visits);
+            let denial = state.propose(seed, Track::Plan, capacity)?;
+            #[cfg(feature = "selection-profile")]
+            attribution.plan.record(&state, visits, denial.is_some());
             if let Some(reason) = denial {
                 if !reasons.contains(&reason) {
                     reasons.push(reason);
                 }
                 state.rollback(Track::Plan);
+                #[cfg(feature = "selection-profile")]
+                {
+                    attribution.plan.ns += start.elapsed().as_nanos();
+                }
                 continue;
             }
             state.accept(Track::Plan);
+            #[cfg(feature = "selection-profile")]
+            {
+                attribution.plan.ns += start.elapsed().as_nanos();
+            }
         }
         if state.planned.missing == 0 {
-            state.publish_plan();
+            #[cfg(feature = "selection-profile")]
+            let (start, visits) = (std::time::Instant::now(), state.visits);
+            state.publish_plan()?;
+            #[cfg(feature = "selection-profile")]
+            {
+                attribution.sync.record(&state, visits, false);
+                attribution.sync.ns += start.elapsed().as_nanos();
+            }
             continue;
         }
         // Publication is a separate transaction inside the admitted plan. Its complete cut
         // must be resident; it cannot introduce IO demand or bypass transition accounting.
-        state.propose(seed, Track::Publication);
-        let denial = if state.published.clusters > budget.max_clusters.min(c) {
-            Some(DebtReason::OutputCapacity)
-        } else if product(state.charged, PAGE_BYTES)? > budget.geometry_bytes {
-            Some(DebtReason::GeometryCapacity)
-        } else {
-            None
-        };
+        #[cfg(feature = "selection-profile")]
+        let (start, visits, settled) = (
+            std::time::Instant::now(),
+            state.visits,
+            reasons.contains(&DebtReason::OutputCapacity)
+                && reasons.contains(&DebtReason::GeometryCapacity),
+        );
+        let denial = state.propose(seed, Track::Publication, capacity)?;
+        #[cfg(feature = "selection-profile")]
+        attribution.publication(&state, visits, denial, settled);
         if let Some(reason) = denial
             && !reasons.contains(&reason)
         {
@@ -451,6 +472,10 @@ fn select_internal(
             state.rollback(Track::Publication);
         } else {
             state.accept(Track::Publication);
+        }
+        #[cfg(feature = "selection-profile")]
+        {
+            attribution.publish.ns += start.elapsed().as_nanos();
         }
     }
     #[cfg(feature = "selection-profile")]
@@ -515,7 +540,7 @@ fn select_internal(
     };
     #[cfg(feature = "selection-profile")]
     eprintln!(
-        "selection_profile initial={} prepared={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={}",
+        "selection_profile initial={} prepared={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={} {}",
         initial.is_some(),
         matches!(metadata, Metadata::Prepared(_)),
         candidates,
@@ -524,7 +549,105 @@ fn select_internal(
         indexed_ns - admitted_ns,
         sorted_ns - indexed_ns,
         proposed_ns - sorted_ns,
-        profile.elapsed().as_nanos() - proposed_ns
+        profile.elapsed().as_nanos() - proposed_ns,
+        attribution.line()
     );
     Ok(selection)
+}
+
+/// Profile-only split of proposal work: per transaction kind, attempts, rejections, denials
+/// decided before all additions (`stopped`), closure groups, cluster touches and elapsed time.
+/// Rejected publications also record why they failed, whether both capacity reasons were already
+/// recorded (`settled`), the touches before the first unavailable added cut page, and how many
+/// distinct groups their closures covered.
+#[cfg(feature = "selection-profile")]
+#[derive(Default)]
+struct Transactions {
+    attempts: usize,
+    rejected: usize,
+    stopped: usize,
+    groups: usize,
+    visits: usize,
+    ns: u128,
+}
+#[cfg(feature = "selection-profile")]
+impl Transactions {
+    fn record(&mut self, state: &incremental::State<'_>, before: usize, rejected: bool) {
+        self.attempts += 1;
+        self.rejected += usize::from(rejected);
+        self.stopped += usize::from(rejected && state.stopped);
+        self.groups += state.closure().len();
+        self.visits += state.visits - before;
+    }
+    fn line(&self, name: &str) -> String {
+        format!(
+            "{name}_attempts={} {name}_rejected={} {name}_stopped={} {name}_groups={} {name}_visits={} {name}_ns={}",
+            self.attempts, self.rejected, self.stopped, self.groups, self.visits, self.ns
+        )
+    }
+}
+#[cfg(feature = "selection-profile")]
+struct Attribution {
+    plan: Transactions,
+    sync: Transactions,
+    publish: Transactions,
+    missing_only: usize,
+    capacity: usize,
+    settled: usize,
+    witnessed: usize,
+    witness_visits: usize,
+    covered: Vec<bool>,
+}
+#[cfg(feature = "selection-profile")]
+impl Attribution {
+    fn new(groups: usize) -> Self {
+        Self {
+            plan: Transactions::default(),
+            sync: Transactions::default(),
+            publish: Transactions::default(),
+            missing_only: 0,
+            capacity: 0,
+            settled: 0,
+            witnessed: 0,
+            witness_visits: 0,
+            covered: vec![false; groups],
+        }
+    }
+    fn publication(
+        &mut self,
+        state: &incremental::State<'_>,
+        before: usize,
+        denial: Option<DebtReason>,
+        settled: bool,
+    ) {
+        let rejected = denial.is_some() || state.published.missing != 0;
+        self.publish.record(state, before, rejected);
+        if !rejected {
+            return;
+        }
+        self.capacity += usize::from(denial.is_some());
+        self.missing_only += usize::from(denial.is_none());
+        self.settled += usize::from(settled);
+        if let Some(at) = state.witness {
+            self.witnessed += 1;
+            self.witness_visits += at - before;
+        }
+        for &g in state.closure() {
+            self.covered[g as usize] = true;
+        }
+    }
+    fn line(&self) -> String {
+        format!(
+            "{} {} {} publish_missing_only={} publish_capacity={} publish_settled={} publish_witnessed={} publish_witness_visits={} publish_distinct_groups={}",
+            self.plan.line("plan"),
+            self.sync.line("sync"),
+            self.publish.line("publish"),
+            self.missing_only,
+            self.capacity,
+            self.settled,
+            self.witnessed,
+            self.witness_visits,
+            self.covered.iter().filter(|v| **v).count()
+        )
+    }
 }
