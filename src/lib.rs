@@ -10,6 +10,7 @@ mod mesh;
 mod normal;
 mod observe;
 mod renderer;
+mod shadow_plan;
 pub mod virtual_geometry;
 mod visibility;
 
