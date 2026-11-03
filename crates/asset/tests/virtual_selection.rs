@@ -1012,6 +1012,68 @@ fn selection_charges_page_scratch_before_allocation() {
 }
 
 #[test]
+fn publication_owner_witness_preserves_capacity_and_later_refinement() {
+    // Group 0 needs inactive owner 1. Its replacement can either expose a missing sibling
+    // (page 2), or remove the owner's missing coarse shard (page 1) from the final cut.
+    let mesh = graph(&[&[None], &[Some(0), None], &[Some(1)]]);
+    let errors = [10., 20., f64::INFINITY];
+    let root = select(
+        &mesh,
+        &errors,
+        1.,
+        &[true; 4],
+        SelectionBudget {
+            max_candidates: 0,
+            ..budget()
+        },
+    )
+    .unwrap()
+    .cut;
+    for available in [
+        [true, true, true, true],
+        [true, false, true, true],
+        [true, true, false, true],
+        [true, false, false, true],
+    ] {
+        for max_candidates in [0, 1, 2, usize::MAX] {
+            for max_clusters in 1..=4 {
+                for geometry_pages in 1..=4 {
+                    for initial in [None, Some(&root)] {
+                        let b = SelectionBudget {
+                            max_candidates,
+                            max_clusters,
+                            geometry_bytes: geometry_pages * PAGE_BYTES,
+                            ..budget()
+                        };
+                        let actual = match initial {
+                            Some(cut) => {
+                                select_from_cut(&mesh, &errors, 1., &available, b, &[], cut)
+                            }
+                            None => select(&mesh, &errors, 1., &available, b),
+                        };
+                        assert_equivalent(
+                            &actual,
+                            policy_result(policy::select(
+                                &mesh,
+                                &errors,
+                                1.,
+                                &available,
+                                b,
+                                &[],
+                                initial,
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let refined = select(&mesh, &errors, 1., &[true, false, true, true], budget()).unwrap();
+    assert_eq!(refined.cut.clusters, vec![ClusterId(0), ClusterId(2)]);
+    assert_eq!(refined.debt.unresolved_groups, 0);
+}
+
+#[test]
 fn prepared_package_validates_once_and_charges_its_index_before_allocation() {
     // In a chain the retained index plus build cursor outgrows validation scratch, so the
     // smallest admitting budget is set by the index charge rather than by validation.

@@ -179,24 +179,50 @@ impl<'a> State<'a> {
 
     /// A publication is a subset of the admitted plan. It cannot replace a shard that
     /// the plan itself still needs. Skip its closure only when capacity cannot deny it,
-    /// so the ordinary path still reports every possible capacity reason.
+    /// so the ordinary transaction still reports every possible capacity reason.
     pub fn publication_blocked(&mut self, seed: usize, capacity: Capacity) -> bool {
         if capacity.clusters < self.mesh.clusters.len()
             || self.all_pages > capacity.geometry_bytes / PAGE_BYTES
         {
             return false;
         }
-        let span = self.mesh.groups[seed].clusters;
-        for id in span.offset as usize..(span.offset + span.count) as usize {
-            self.visits += 1;
-            let c = &self.mesh.clusters[id];
-            if !self.available[c.page.index()]
-                && c.refined.is_none_or(|r| !self.planned.active[r.index()])
-            {
-                return true;
+        // Every inactive owner in the publication closure must become active too. A missing
+        // boundary page in the final plan is therefore a witness for the whole publication;
+        // a publication inside that plan cannot refine away this boundary. No cut changes yet.
+        self.journal.clear();
+        self.journal.push(seed as u32);
+        self.proposal[seed] = true;
+        let mut blocked = false;
+        let mut cursor = 0;
+        'closure: while cursor < self.journal.len() {
+            let g = self.journal[cursor] as usize;
+            let span = self.mesh.groups[g].clusters;
+            for id in span.offset as usize..(span.offset + span.count) as usize {
+                self.visits += 1;
+                let c = &self.mesh.clusters[id];
+                if !self.available[c.page.index()]
+                    && c.refined.is_none_or(|r| !self.planned.active[r.index()])
+                {
+                    blocked = true;
+                    break 'closure;
+                }
             }
+            for i in self.incoming.offsets[g]..self.incoming.offsets[g + 1] {
+                self.visits += 1;
+                let owner = self.mesh.clusters[self.incoming.links[i] as usize]
+                    .owner
+                    .index();
+                if !self.published.active[owner] && !self.proposal[owner] {
+                    self.proposal[owner] = true;
+                    self.journal.push(owner as u32);
+                }
+            }
+            cursor += 1;
         }
-        false
+        for &g in &self.journal {
+            self.proposal[g as usize] = false;
+        }
+        blocked
     }
 
     #[cfg(feature = "selection-profile")]
