@@ -156,6 +156,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -234,7 +235,9 @@ impl Renderer {
         }
         let preparation_start = Instant::now();
         let matrix = camera.matrix(color.width(), color.height());
-        if !matrix.is_finite() {
+        if !matrix.is_finite()
+            || (view_mode == ViewMode::Lit && !camera.view().inverse().w_axis.is_finite())
+        {
             return Err(Error::InvalidInput("virtual camera projection overflow"));
         }
         let preparation = preparation_start.elapsed();
@@ -247,22 +250,6 @@ impl Renderer {
         let mut uploads = UploadBytes::default();
         let mut packing = Duration::ZERO;
         let mut upload = Duration::ZERO;
-        if self.camera_shadow != Some(camera_bytes) {
-            let start = Instant::now();
-            self.queue.write_buffer(&self.uniform, 0, &camera_bytes);
-            uploads.camera = 64;
-            uploads.write_calls += 1;
-            upload += start.elapsed();
-        }
-        if self.view_mode != view_mode {
-            let mut bytes = [0; 16];
-            bytes[..4].copy_from_slice(&(view_mode as u32).to_ne_bytes());
-            let start = Instant::now();
-            self.queue.write_buffer(&self.uniform, 64, &bytes);
-            uploads.view_settings = 16;
-            uploads.write_calls += 1;
-            upload += start.elapsed();
-        }
         let instances = scene.instances.as_mut().unwrap();
         self.upload_instance_edits(instances, &mut uploads, &mut packing, &mut upload);
         let mut prepared: Vec<PreparedDraw<'_>> =
@@ -318,6 +305,7 @@ impl Renderer {
         let result = self.submit_prepared(
             color,
             camera_bytes,
+            camera,
             view_mode,
             &prepared,
             slot,
@@ -345,7 +333,22 @@ impl Renderer {
         Ok(result)
     }
 }
-/// Explicit asynchronous RGBA8 evidence readback. Separate from ordinary frames and geometry pools.
+/// Identity of the stored image when the copy was enqueued. HDR is exposed linear
+/// RGBA16F (little endian), after MSAA resolve. Saturated resolved texels do not
+/// detect every saturated sample at 4x; use captures below saturation for radiance parity.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureInfo {
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+    pub samples: SampleCount,
+    pub pre_exposure: Option<f32>,
+    pub frame: FrameId,
+    pub revision: Revision,
+    pub shader_sha256: [u8; 32],
+    pub lighting_sha256: Option<[u8; 32]>,
+}
+/// Explicit asynchronous image evidence readback. Separate from ordinary frames and geometry pools.
 pub struct Capture {
     buffer: Owned<wgpu::Buffer>,
     mapped: MapResult,
@@ -353,8 +356,13 @@ pub struct Capture {
     height: u32,
     row: u32,
     consumed: bool,
+    bytes_per_texel: u32,
+    info: CaptureInfo,
 }
 impl Capture {
+    pub fn info(&self) -> CaptureInfo {
+        self.info
+    }
     pub fn try_read(&mut self) -> Result<Option<Vec<u8>>, Error> {
         if self.consumed {
             return Err(Error::InvalidInput("capture already consumed"));
@@ -369,9 +377,11 @@ impl Capture {
             .buffer
             .get_mapped_range(..)
             .map_err(|e| Error::Shader(e.to_string()))?;
-        let mut rgba = Vec::with_capacity((self.width * self.height * 4) as usize);
+        let mut rgba = Vec::with_capacity(
+            self.width as usize * self.height as usize * self.bytes_per_texel as usize,
+        );
         for row in view.chunks_exact(self.row as usize) {
-            rgba.extend_from_slice(&row[..self.width as usize * 4]);
+            rgba.extend_from_slice(&row[..self.width as usize * self.bytes_per_texel as usize]);
         }
         drop(view);
         self.buffer.unmap();
@@ -391,11 +401,54 @@ impl Renderer {
         {
             return Err(Error::InvalidInput("capture requires RGBA8 COPY_SRC color"));
         }
+        let info = CaptureInfo {
+            width: color.width(),
+            height: color.height(),
+            format: color.format(),
+            samples: self.options.samples,
+            pre_exposure: None,
+            frame: FrameId(self.frames),
+            revision: self.revision,
+            shader_sha256: self.shader_hash,
+            lighting_sha256: None,
+        };
+        self.capture_texture(color, info)
+    }
+    /// Copy the last admitted Lit image without a window or surface. A subsequent
+    /// diagnostic frame does not overwrite it; metadata keeps its original identity.
+    pub fn try_capture_hdr(&mut self) -> Result<Option<Capture>, Error> {
+        self.check_fault()?;
+        let hdr = self
+            .lighting
+            .hdr
+            .as_ref()
+            .filter(|h| h.frame.0 > 0)
+            .ok_or(Error::InvalidInput("no admitted Lit image to capture"))?;
+        let color = hdr.resolved.texture.clone();
+        let info = CaptureInfo {
+            width: color.width(),
+            height: color.height(),
+            format: color.format(),
+            samples: self.options.samples,
+            pre_exposure: Some(hdr.exposure),
+            frame: hdr.frame,
+            revision: hdr.revision,
+            shader_sha256: hdr.shader_hash,
+            lighting_sha256: Some(hdr.lighting_hash),
+        };
+        self.capture_texture(&color, info)
+    }
+    fn capture_texture(
+        &mut self,
+        color: &wgpu::Texture,
+        info: CaptureInfo,
+    ) -> Result<Option<Capture>, Error> {
         self.collect()?;
         let Some(slot) = self.free_slot() else {
             return Ok(None);
         };
-        let row = (color.width() * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        let bytes_per_texel = color.format().block_copy_size(None).unwrap();
+        let row = (color.width() * bytes_per_texel).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -437,6 +490,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -450,6 +504,8 @@ impl Renderer {
             height: color.height(),
             row,
             consumed: false,
+            bytes_per_texel,
+            info,
         }))
     }
 }

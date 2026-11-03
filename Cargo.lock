@@ -1419,6 +1419,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "log",
+ "png",
  "pollster",
  "renderlab-asset",
  "serde",
@@ -1448,6 +1449,7 @@ name = "renderlab-viewer"
 version = "0.1.0"
 dependencies = [
  "log",
+ "png",
  "pollster",
  "renderlab",
  "serde",

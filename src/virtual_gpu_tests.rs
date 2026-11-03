@@ -456,6 +456,39 @@ fn gpu_virtual_ranges_reference_and_settled() {
             std::thread::yield_now();
         }
         assert_eq!(normal, r.test_capture_color(&color));
+        r.set_lighting(&Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(-0.2, 0., -1.),
+                lux: [100.; 3],
+            }],
+            environment: [1.; 3],
+            exposure_stops: -5.,
+        })
+        .unwrap();
+        loop {
+            if r.try_render_virtual(&color, &cam, &mut a, &mut scene, ViewMode::Lit)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let lit = r.test_capture_color(&color);
+        let lit_hdr = super::lighting_tests::hdr(&mut r);
+        loop {
+            if r.try_render_view(&color, &cam, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(lit, r.test_capture_color(&color));
+        assert_eq!(lit_hdr, super::lighting_tests::hdr(&mut r));
         virtual_frame(&mut r, &color, &cam, &mut a, &mut scene);
         let before = a.stats().clone();
         let r_before = r.stats().uploads;

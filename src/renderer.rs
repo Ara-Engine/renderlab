@@ -1,3 +1,7 @@
+#[path = "lighting_gpu.rs"]
+mod lighting_gpu;
+use lighting_gpu::LightingGpu;
+use sha2::{Digest, Sha256};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -36,6 +40,7 @@ fn changed<'a, T>(slot: &mut Option<&'a T>, next: &'a T) -> bool {
 pub(crate) struct Flight {
     done: Arc<OnceLock<()>>,
     mapped: Option<MapResult>,
+    lit: bool,
     submission: u64,
     frame: Option<FrameId>,
     revision: Revision,
@@ -134,6 +139,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -158,6 +164,7 @@ impl Renderer {
         self.slots[0].flight = Some(Flight {
             done,
             mapped: Some(mapped),
+            lit: false,
             submission: self.submissions,
             frame: Some(FrameId(self.frames)),
             revision: self.revision,
@@ -181,6 +188,7 @@ impl Renderer {
             slot.flight = Some(Flight {
                 done: Arc::new(OnceLock::new()),
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -245,6 +253,11 @@ impl Renderer {
         assert_eq!(instances.state.dirty_count, 0);
     }
 }
+struct Pipelines {
+    diagnostic: Owned<wgpu::RenderPipeline>,
+    lit: Owned<wgpu::RenderPipeline>,
+    present: Owned<wgpu::RenderPipeline>,
+}
 struct Slot {
     readback: Option<Owned<wgpu::Buffer>>,
     flight: Option<Flight>,
@@ -281,7 +294,9 @@ pub struct Renderer {
     identity: Arc<()>,
     #[cfg(test)]
     reference_draws: bool,
-    pipeline: Owned<wgpu::RenderPipeline>,
+    pipeline: Pipelines,
+    shader_hash: [u8; 32],
+    lighting: LightingGpu,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -353,7 +368,11 @@ impl Renderer {
         if !(1..=16).contains(&options.anisotropy_clamp) {
             return Err(Error::InvalidInput("anisotropy_clamp must be in 1..=16"));
         }
-        for format in [color_format, wgpu::TextureFormat::Depth32Float] {
+        for format in [
+            color_format,
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureFormat::Rgba16Float,
+        ] {
             let features = format.guaranteed_format_features(device.features());
             if !features
                 .allowed_usages
@@ -368,10 +387,13 @@ impl Renderer {
             }
         }
         if options.samples == SampleCount::Four
-            && !color_format
-                .guaranteed_format_features(device.features())
-                .flags
-                .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+            && [color_format, wgpu::TextureFormat::Rgba16Float]
+                .into_iter()
+                .any(|f| {
+                    !f.guaranteed_format_features(device.features())
+                        .flags
+                        .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+                })
         {
             return Err(Error::InvalidInput(
                 "color format does not support multisample resolve",
@@ -490,13 +512,19 @@ impl Renderer {
             }),
             ResourceKind::PipelineLayout,
         );
+        let lighting = LightingGpu::new(
+            &device,
+            &queue,
+            &ledger,
+            [&bindings, &instance_bindings, &material_bindings],
+        );
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
                 device.create_query_set(&wgpu::QuerySetDescriptor {
                     label: Some("three flights"),
                     ty: wgpu::QueryType::Timestamp,
-                    count: (FLIGHTS * 2) as u32,
+                    count: (FLIGHTS * 4) as u32,
                 }),
                 ResourceKind::QuerySet,
             ),
@@ -516,7 +544,7 @@ impl Renderer {
                 ledger.own(
                     device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("flight timestamps"),
-                        size: 16,
+                        size: 32,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -533,6 +561,7 @@ impl Renderer {
             &device,
             &ledger,
             &layout,
+            &lighting,
             color_format,
             options.samples,
             wgsl,
@@ -565,6 +594,8 @@ impl Renderer {
             #[cfg(test)]
             reference_draws: false,
             pipeline,
+            shader_hash: Sha256::digest(wgsl.as_bytes()).into(),
+            lighting,
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -587,7 +618,11 @@ impl Renderer {
                 successes: 1,
                 installations: 1,
             },
-            uploads: UploadBytes::default(),
+            uploads: UploadBytes {
+                lut: crate::lighting::DFG.len() as u64,
+                write_calls: 1,
+                ..Default::default()
+            },
             submissions: 0,
             completed_submission: 0,
             frames: 0,
@@ -635,10 +670,11 @@ impl Renderer {
         device: &wgpu::Device,
         ledger: &Ledger,
         layout: &wgpu::PipelineLayout,
+        lighting: &LightingGpu,
         format: wgpu::TextureFormat,
         samples: SampleCount,
         source: &str,
-    ) -> Owned<wgpu::RenderPipeline> {
+    ) -> Pipelines {
         let shader = ledger.own(
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("live mesh shader"),
@@ -646,53 +682,86 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        ledger.own(
+        let mesh = |layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, entry| {
+            ledger.own(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mesh"),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 48,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &VERTEX_ATTRIBUTES,
+                            }),
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 4,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &MODEL_ATTRIBUTES,
+                            }),
+                        ],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(format.into())],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: samples as u32,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                }),
+                ResourceKind::RenderPipeline,
+            )
+        };
+        let diagnostic = mesh(layout, format, "fs");
+        let lit = mesh(&lighting.layout, wgpu::TextureFormat::Rgba16Float, "fs_lit");
+        let present = ledger.own(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("mesh"),
-                layout: Some(layout),
+                label: Some("HDR presentation"),
+                layout: Some(&lighting.present_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("vs"),
+                    entry_point: Some("vs_present"),
                     compilation_options: Default::default(),
-                    buffers: &[
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 48,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &VERTEX_ATTRIBUTES,
-                        }),
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 4,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &MODEL_ATTRIBUTES,
-                        }),
-                    ],
+                    buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs"),
+                    entry_point: Some("fs_present"),
                     compilation_options: Default::default(),
                     targets: &[Some(format.into())],
                 }),
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: samples as u32,
-                    ..Default::default()
-                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
                 multiview_mask: None,
                 cache: None,
             }),
             ResourceKind::RenderPipeline,
-        )
+        );
+        Pipelines {
+            diagnostic,
+            lit,
+            present,
+        }
     }
 
     pub(crate) fn check_fault(&self) -> Result<(), Error> {
@@ -717,6 +786,7 @@ impl Renderer {
             &self.device,
             &self.ledger,
             &self.layout,
+            &self.lighting,
             self.format,
             self.options.samples,
             wgsl,
@@ -740,6 +810,7 @@ impl Renderer {
             return Err(ReloadError::Fault(fault.clone()));
         }
         self.pipeline = candidate;
+        self.shader_hash = Sha256::digest(wgsl.as_bytes()).into();
         self.revision.0 += 1;
         self.pipelines.installations += 1;
         Ok(ReloadReport {
@@ -844,6 +915,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -977,6 +1049,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1016,6 +1089,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped: None,
+                lit: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1272,15 +1346,18 @@ impl Renderer {
             ));
         }
         if draws.iter().any(|draw| {
-            (view_mode == ViewMode::Normal || draw.material.is_some_and(|m| !m.double_sided))
+            (matches!(view_mode, ViewMode::Normal | ViewMode::Lit)
+                || draw.material.is_some_and(|m| !m.double_sided))
                 && draw.instances.state.invalid_normals > 0
         }) {
             return Err(Error::InvalidInput(
-                "normal view and single-sided materials require nonsingular affine transforms with max-element condition estimate <= 1e4",
+                "normal/lit views and single-sided materials require nonsingular affine transforms with max-element condition estimate <= 1e4",
             ));
         }
         let matrix = camera.matrix(color.width(), color.height());
-        if !matrix.is_finite() {
+        if !matrix.is_finite()
+            || (view_mode == ViewMode::Lit && !camera.view().inverse().w_axis.is_finite())
+        {
             return Err(Error::InvalidInput(
                 "camera aspect produces nonfinite projection",
             ));
@@ -1297,22 +1374,6 @@ impl Renderer {
         let mut visibility = Duration::ZERO;
         let mut packing = Duration::ZERO;
         let mut upload = Duration::ZERO;
-        if self.camera_shadow != Some(camera_bytes) {
-            let start = Instant::now();
-            self.queue.write_buffer(&self.uniform, 0, &camera_bytes);
-            uploads.camera = 64;
-            uploads.write_calls += 1;
-            upload += start.elapsed();
-        }
-        if self.view_mode != view_mode {
-            let mut bytes = [0; 16];
-            bytes[..4].copy_from_slice(&(view_mode as u32).to_ne_bytes());
-            let start = Instant::now();
-            self.queue.write_buffer(&self.uniform, 64, &bytes);
-            uploads.view_settings = 16;
-            uploads.write_calls += 1;
-            upload += start.elapsed();
-        }
         for draw in draws.iter_mut() {
             let instances = &mut draw.instances;
             let start = Instant::now();
@@ -1417,6 +1478,7 @@ impl Renderer {
         self.submit_prepared(
             color,
             camera_bytes,
+            camera,
             view_mode,
             &prepared,
             slot,
@@ -1481,13 +1543,33 @@ impl Renderer {
         &mut self,
         color: &wgpu::Texture,
         camera_bytes: [u8; 64],
+        camera: &Camera,
         view_mode: ViewMode,
         draws: &[PreparedDraw<'_>],
         slot: usize,
-        uploads: UploadBytes,
+        mut uploads: UploadBytes,
         scene: SceneCounts,
-        cpu: CpuFrame,
+        mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
+        // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
+        let start = Instant::now();
+        if self.camera_shadow != Some(camera_bytes) {
+            self.queue.write_buffer(&self.uniform, 0, &camera_bytes);
+            uploads.camera = 64;
+            uploads.write_calls += 1;
+        }
+        if self.view_mode != view_mode {
+            let mut bytes = [0; 16];
+            bytes[..4].copy_from_slice(&(view_mode as u32).to_ne_bytes());
+            self.queue.write_buffer(&self.uniform, 64, &bytes);
+            uploads.view_settings = 16;
+            uploads.write_calls += 1;
+        }
+        let lit = view_mode == ViewMode::Lit;
+        if lit {
+            self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
+        }
+        cpu.upload += start.elapsed();
         self.uploads.add(uploads);
         let encode_start = Instant::now();
         if self
@@ -1559,6 +1641,9 @@ impl Renderer {
                 None
             };
         }
+        if lit {
+            self.ensure_hdr(color);
+        }
         self.check_fault()?;
         let view = self
             .ledger
@@ -1575,24 +1660,36 @@ impl Renderer {
                 .filter(|_| timed)
                 .map(|timing| wgpu::RenderPassTimestampWrites {
                     query_set: &timing.queries,
-                    beginning_of_pass_write_index: Some(slot as u32 * 2),
-                    end_of_pass_write_index: Some(slot as u32 * 2 + 1),
+                    beginning_of_pass_write_index: Some(slot as u32 * 4),
+                    end_of_pass_write_index: Some(slot as u32 * 4 + 1),
                 });
+        let hdr = self.lighting.hdr.as_ref().filter(|_| lit);
+        let msaa = if lit {
+            hdr.and_then(|h| h.msaa.as_ref())
+        } else {
+            self.msaa.as_ref()
+        };
+        let resolved = hdr.map_or(&*view, |h| &*h.resolved.view);
+        let clear = if lit { self.lit_clear() } else { CLEAR_COLOR };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.msaa.as_ref().map_or(&*view, |t| &*t.view),
+                    view: msaa.map_or(resolved, |t| &*t.view),
                     depth_slice: None,
-                    resolve_target: self.msaa.as_ref().map(|_| &*view),
+                    resolve_target: msaa.map(|_| resolved),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: CLEAR_COLOR[0],
-                            g: CLEAR_COLOR[1],
-                            b: CLEAR_COLOR[2],
+                            r: clear[0],
+                            g: clear[1],
+                            b: clear[2],
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: if lit && msaa.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1606,7 +1703,14 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(if lit {
+                &self.pipeline.lit
+            } else {
+                &self.pipeline.diagnostic
+            });
+            if lit {
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+            }
             pass.set_bind_group(0, &*self.bind, &[]);
             // Pass state persists across draws, so unchanged state is never re-encoded.
             let (mut instances, mut material, mut ids, mut mesh) = (None, None, None, None);
@@ -1640,17 +1744,48 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
+        if let Some(hdr) = hdr {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("HDR present pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                timestamp_writes: self.timing.as_ref().filter(|_| timed).map(|t| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set: &t.queries,
+                        beginning_of_pass_write_index: Some(slot as u32 * 4 + 2),
+                        end_of_pass_write_index: Some(slot as u32 * 4 + 3),
+                    }
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline.present);
+            pass.set_bind_group(0, &*hdr.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
         let mapped = if timed {
             let timing = self.timing.as_ref().unwrap();
             let readback = self.slots[slot].readback.as_ref().unwrap();
             let offset = slot as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
             encoder.resolve_query_set(
                 &timing.queries,
-                slot as u32 * 2..slot as u32 * 2 + 2,
+                slot as u32 * 4..slot as u32 * 4 + if lit { 4 } else { 2 },
                 &timing.resolve,
                 offset,
             );
-            encoder.copy_buffer_to_buffer(&timing.resolve, offset, readback, 0, 16);
+            encoder.copy_buffer_to_buffer(
+                &timing.resolve,
+                offset,
+                readback,
+                0,
+                if lit { 32 } else { 16 },
+            );
             let mapped = Arc::new(OnceLock::new());
             let callback = mapped.clone();
             encoder.map_buffer_on_submit(readback, wgpu::MapMode::Read, .., move |result| {
@@ -1680,6 +1815,7 @@ impl Renderer {
             Flight {
                 done,
                 mapped,
+                lit,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
@@ -1687,6 +1823,9 @@ impl Renderer {
             },
         );
         self.check_fault()?;
+        if lit {
+            self.stamp_hdr(frame);
+        }
         self.camera_shadow = Some(camera_bytes);
         self.view_mode = view_mode;
         Ok(Some(FrameReport {
@@ -1730,11 +1869,21 @@ impl Renderer {
                         let result = readback.get_mapped_range(..).map(|view| {
                             let begin = u64::from_ne_bytes(view[..8].try_into().unwrap());
                             let end = u64::from_ne_bytes(view[8..16].try_into().unwrap());
-                            (begin, end)
+                            let present = if flight.lit {
+                                Some((
+                                    u64::from_ne_bytes(view[16..24].try_into().unwrap()),
+                                    u64::from_ne_bytes(view[24..32].try_into().unwrap()),
+                                ))
+                            } else {
+                                None
+                            };
+                            (begin, end, present)
                         });
                         readback.unmap();
                         match result {
-                            Ok((begin, end)) if end >= begin => {
+                            Ok((begin, end, present))
+                                if end >= begin && present.is_none_or(|(a, b)| b >= a) =>
+                            {
                                 let seconds = (end - begin) as f64
                                     * f64::from(self.timing.as_ref().unwrap().period)
                                     * 1e-9;
@@ -1743,6 +1892,15 @@ impl Renderer {
                                         frame: flight.frame.unwrap(),
                                         revision: flight.revision,
                                         mesh_pass,
+                                        present_pass: present.map(|(a, b)| {
+                                            Duration::from_secs_f64(
+                                                (b - a) as f64
+                                                    * f64::from(
+                                                        self.timing.as_ref().unwrap().period,
+                                                    )
+                                                    * 1e-9,
+                                            )
+                                        }),
                                     });
                                 } else {
                                     self.timing_status = TimingStatus::Disabled {
@@ -1780,6 +1938,7 @@ impl Renderer {
                 gpu,
             });
         }
+        self.lighting.collect(self.completed_submission);
         self.check_fault()?;
         Ok(start.elapsed())
     }
@@ -1844,4 +2003,4 @@ impl Renderer {
 
 #[path = "virtual_gpu.rs"]
 mod virtual_gpu;
-pub use virtual_gpu::Capture;
+pub use virtual_gpu::{Capture, CaptureInfo};

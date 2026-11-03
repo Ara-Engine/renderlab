@@ -1,4 +1,4 @@
-﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1', [string]$VirtualManifest = '', [string]$Cache = 'measurements/m4-cook/root-unit-a/cache', [string]$Cameras = '', [string]$Limits = '', [ValidateRange(1, 16)][int]$Anisotropy = 1)
+﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1', [string]$VirtualManifest = '', [string]$Cache = 'measurements/m4-cook/root-unit-a/cache', [string]$Cameras = '', [string]$Limits = '', [ValidateRange(1, 16)][int]$Anisotropy = 1, [ValidateSet('color','lit')][string]$View = 'color', [string]$Lighting = '', [switch]$AllowContention, [switch]$Background)
 $ErrorActionPreference = 'Stop'
 if ($Runs -lt 1) { throw 'Runs must be positive' }
 if ($Asset -and $VirtualManifest) { throw 'Choose an asset or a virtual manifest' }
@@ -36,11 +36,14 @@ $results = [ordered]@{
     launches = @()
     binaries = [ordered]@{}
     vulkan_implicit_layer_path = $env:VK_IMPLICIT_LAYER_PATH
+    view = $View
+    lighting = $Lighting
+    gameplay_contention_allowed = [bool]$AllowContention
     success = $false
     source_hashes = @(Get-FileHash -Path (@('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml', '.cargo/config.toml', 'scripts/measure-dev-loop.ps1') + @(Get-ChildItem src,viewer/src,shaders,crates/asset/src,support,examples/m4 -Recurse -File | Select-Object -ExpandProperty FullName)) -Algorithm SHA256 | Select-Object Path,Hash)
 }
 function Assert-Quiet {
-    if (Get-Process -Name 'VALORANT*' -ErrorAction SilentlyContinue) { throw 'Gameplay process present; interactive measurements deferred.' }
+    if (!$AllowContention -and (Get-Process -Name 'VALORANT*' -ErrorAction SilentlyContinue)) { throw 'Gameplay process present; interactive measurements deferred.' }
     if (Test-Path 'D:/AraBuild/render-v3/quiet-window.lock') { throw 'Quiet-window lock present. Review its owner before running.' }
 }
 function Read-Bytes([IO.FileStream]$Stream) {
@@ -103,7 +106,9 @@ function Wait-Log([string]$Path, [string]$Pattern) {
 function Launch([string]$Name) {
     Assert-Quiet
     $results.binaries[$Name] = (Get-FileHash target/debug/renderlab-viewer.exe -Algorithm SHA256).Hash
-    $viewerArguments = @('--seconds', '25', '--samples', $Samples, '--anisotropy', $Anisotropy, '--validate')
+    $viewerArguments = @('--view', $View, '--seconds', '25', '--samples', $Samples, '--anisotropy', $Anisotropy, '--validate')
+    if ($Background) { $viewerArguments += '--background' }
+    if ($Lighting) { $viewerArguments += @('--lighting', ('"' + (Resolve-Path $Lighting).Path + '"')) }
     if ($Limits) { $viewerArguments += @('--limits', ('"' + $results.limits + '"')) }
     if ($Asset) { $viewerArguments += @('--asset', ('"' + $results.asset + '"')) }
     if ($VirtualManifest) { $viewerArguments += @('--virtual-manifest', ('"' + $results.virtual_manifest + '"'), '--cache', ('"' + $results.cache + '"')) }

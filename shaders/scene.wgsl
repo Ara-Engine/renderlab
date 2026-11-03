@@ -25,16 +25,19 @@ struct VertexOutput {
     @location(1) uv: vec2<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) @interpolate(flat) winding:f32,
+    @location(4) world:vec3<f32>,
 };
 fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
-    return normalize(n/max(scale,1e-30));
+    let scaled=n/max(scale,1e-30);
+    return scaled*inverseSqrt(max(dot(scaled,scaled),1e-30));
 }
 @vertex fn vs(input: VertexInput) -> VertexOutput {
     let model = models[input.slot];
     let normal = normals[input.slot];
     var output: VertexOutput;
     output.position = camera.view_projection * model * vec4<f32>(input.position, 1.0);
+    output.world = (model * vec4<f32>(input.position, 1.0)).xyz;
     output.color = input.color;
     output.uv = input.uv;
     output.normal = unit_normal(mat3x3<f32>(normal.x.xyz,normal.y.xyz,normal.z.xyz)*unit_normal(input.normal));
@@ -54,4 +57,103 @@ fn unit_normal(n:vec3<f32>) -> vec3<f32> {
         default: {}
     }
     return vec4<f32>(result,1.0);
+}
+
+// Group 0-2 retain the diagnostic ABI. Only fs_lit uses group 3.
+struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32 };
+struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
+@group(3) @binding(0) var<uniform> lighting:LightingUniform;
+@group(3) @binding(1) var<storage,read> lights:array<Light>;
+@group(3) @binding(2) var dfg:texture_2d<f32>;
+@group(3) @binding(3) var dfg_sampler:sampler;
+// Presentation uses its own layout and entry points in this same atomic module.
+@group(0) @binding(1) var exposed_hdr:texture_2d<f32>;
+const PI:f32=3.141592653589793;
+// Multiply in f32 mantissa/exponent form so large physical units paired with
+// small exposure (or the reverse) do not overflow before a finite exposed result.
+// All contributions are nonnegative: saturating each exposed contribution and
+// their sum at the storage ceiling equals saturating the final exposed sum.
+fn exposed_product(a:vec3<f32>, b:vec3<f32>) -> vec3<f32> {
+    let ap=frexp(a);
+    let bp=frexp(b);
+    let ep=frexp(vec3<f32>(lighting.exposure));
+    let mantissa=ap.fract*bp.fract*ep.fract;
+    // Three nonzero mantissas have product >= 1/8; exponent >=20 is
+    // already above 65504. The low clamp is below binary16's minimum.
+    let exponent=clamp(ap.exp+bp.exp+ep.exp,vec3<i32>(-126),vec3<i32>(20));
+    return min(ldexp(mantissa,exponent),vec3<f32>(65504.0));
+}
+fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32) -> vec3<f32> {
+    let nl=max(dot(n,l),0.0);
+    let nv=max(dot(n,v),1e-7);
+    if dot(l+v,l+v)<1e-20 {return base*((1.0-metal)/PI)*nl;}
+    let h=unit_normal(l+v);
+    let nh=max(dot(n,h),0.0);
+    let vh=clamp(dot(v,h),0.0,1.0);
+    let alpha=max(rough*rough,1e-4);
+    let a2=alpha*alpha;
+    // |N x H|^2 + alpha^2 (N dot H)^2 preserves the peak at alpha=1e-4 in f32.
+    let c=cross(n,h);
+    let denom=max(dot(c,c)+a2*nh*nh,1e-20);
+    let d=a2/(PI*denom*denom);
+    let visibility=0.5/max(nl*sqrt(a2+(1.0-a2)*nv*nv)+nv*sqrt(a2+(1.0-a2)*nl*nl),1e-20);
+    let f0=mix(vec3<f32>(0.04),base,metal);
+    let fresnel=f0+(vec3<f32>(1.0)-f0)*pow(1.0-vh,5.0);
+    // Declared initial diffuse model: plain nonmetallic Lambert.
+    return (base*((1.0-metal)/PI)+d*visibility*fresnel)*nl;
+}
+@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
+    let source_front=front==(input.winding>0.0);
+    // Derivatives evaluated uniformly before any source-winding discard.
+    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));
+    let sampled=textureSample(base_color,base_sampler,input.uv);
+    let mr=textureSample(metallic_roughness,mr_sampler,input.uv);
+    if material.double_sided==0u && !source_front { discard; }
+    var n=unit_normal(input.normal);
+    if dot(n,n)<0.5 { n=geometric; }
+    if dot(n,n)<0.5 { n=vec3<f32>(0.0,0.0,1.0); }
+    if material.double_sided!=0u && !source_front { n=-n; }
+    var v=unit_normal(lighting.eye-input.world);
+    if dot(v,v)<0.5 { v=n; }
+    let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
+    let metal=clamp(material.metallic*mr.b,0.0,1.0);
+    let rough=clamp(material.roughness*mr.g,0.0,1.0);
+    let uv=(vec2<f32>(clamp(dot(n,v),0.0,1.0),rough)*127.0+vec2<f32>(0.5))/128.0;
+    let ab=textureSample(dfg,dfg_sampler,uv).rg;
+    let f0=mix(vec3<f32>(0.04),base,metal);
+    var exposed=exposed_product(lighting.environment,base*(1.0-metal)+f0*ab.x+vec3<f32>(ab.y));
+    for(var i=0u;i<lighting.count;i+=1u) {
+        let light=lights[i];
+        var l=-light.travel_outer.xyz;
+        var attenuation=1.0;
+        if light.kind.x!=0u {
+            // Scale coordinates before subtraction, avoiding overflow for opposite finite inputs.
+            let half_delta=light.position_range.xyz*0.5-input.world*0.5;
+            let scale=max(max(abs(half_delta.x),abs(half_delta.y)),abs(half_delta.z));
+            l=unit_normal(half_delta);
+            let scaled=half_delta/max(scale,1e-30);
+            let distance=scale*min(2.0*sqrt(dot(scaled,scaled)),1e37/max(scale,1.0));
+            let inverse=1.0/max(distance,0.01);
+            attenuation=inverse*inverse;
+            if light.position_range.w>0.0 {
+                let ratio=min(distance/light.position_range.w,1.0);
+                let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
+                attenuation*=window*window;
+            }
+            if light.kind.x==2u {
+                let cone=clamp((dot(-l,light.travel_outer.xyz)-light.travel_outer.w)/max(light.rgb_inner.w-light.travel_outer.w,1e-4),0.0,1.0);
+                attenuation*=cone*cone;
+            }
+        }
+        exposed=min(exposed+exposed_product(light.rgb_inner.xyz,brdf(n,v,l,base,metal,rough)*attenuation),vec3<f32>(65504.0));
+    }
+    return vec4<f32>(exposed,1.0);
+}
+@vertex fn vs_present(@builtin(vertex_index) id:u32) -> @builtin(position) vec4<f32> {
+    let xy=vec2<f32>(f32((id<<1u)&2u),f32(id&2u));
+    return vec4<f32>(xy*2.0-vec2<f32>(1.0),0.0,1.0);
+}
+@fragment fn fs_present(@builtin(position) position:vec4<f32>) -> @location(0) vec4<f32> {
+    let value=textureLoad(exposed_hdr,vec2<i32>(position.xy),0).rgb;
+    return vec4<f32>(value/(vec3<f32>(1.0)+value),1.0);
 }

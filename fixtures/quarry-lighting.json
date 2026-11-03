@@ -1,0 +1,7 @@
+{
+  "lights": [
+    { "type": "directional", "travel": [-0.4, -0.8, -0.3], "lux": [1000.0, 950.0, 850.0] }
+  ],
+  "environment": [30.0, 35.0, 45.0],
+  "exposure_stops": -8.0
+}

@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
-/// Diagnostics show stored material data and world-space authored normals, without lighting.
+/// Modes 0-3 show stored material data/authored normals. Lit adds direct and constant-environment illumination.
 pub enum ViewMode {
     #[default]
     BaseColor,
     Normal,
     Metallic,
     Roughness,
+    Lit = 4,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]

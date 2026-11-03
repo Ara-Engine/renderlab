@@ -13,6 +13,11 @@ pub struct Revision(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UploadBytes {
     pub geometry: u64,
+    pub lights: u64,
+    pub lighting: u64,
+    pub light_writes: u64,
+    pub lighting_writes: u64,
+    pub lut: u64,
     pub textures: u64,
     pub texture_writes: u64,
     pub materials: u64,
@@ -30,6 +35,11 @@ pub struct UploadBytes {
 impl UploadBytes {
     pub(crate) fn add(&mut self, other: Self) {
         self.geometry += other.geometry;
+        self.lights += other.lights;
+        self.lighting += other.lighting;
+        self.light_writes += other.light_writes;
+        self.lighting_writes += other.lighting_writes;
+        self.lut += other.lut;
         self.textures += other.textures;
         self.texture_writes += other.texture_writes;
         self.materials += other.materials;
@@ -102,6 +112,8 @@ pub struct GpuSample {
     /// Render-pass boundary timestamps, including material shading and configured samples.
     /// Excludes uploads, timestamp-query resolve, acquire and present. Attachment resolve is not isolated.
     pub mesh_pass: Duration,
+    /// Separate HDR presentation pass boundaries; excludes acquire/present and uploads.
+    pub present_pass: Option<Duration>,
 }
 #[derive(Debug, Default)]
 pub struct Events {
@@ -154,6 +166,10 @@ pub struct Ownership {
     pub texture_bytes: Count,
     pub material_bytes: Count,
     pub target_bytes: Count,
+    pub light_bytes: Count,
+    pub lut_bytes: Count,
+    pub light_creations: u64,
+    pub lut_creations: u64,
     pub material_creations: u64,
     pub texture_creations: u64,
     pub target_creations: u64,
@@ -176,6 +192,8 @@ impl Ledger {
             AllocationKind::Texture => ledger.texture_creations += 1,
             AllocationKind::Material => ledger.material_creations += 1,
             AllocationKind::Target => ledger.target_creations += 1,
+            AllocationKind::Light => ledger.light_creations += 1,
+            AllocationKind::Lut => ledger.lut_creations += 1,
         }
         let count = allocation_count(&mut ledger, kind);
         count.created += bytes;
@@ -220,12 +238,16 @@ pub(crate) enum AllocationKind {
     Texture,
     Material,
     Target,
+    Light,
+    Lut,
 }
 fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count {
     match kind {
         AllocationKind::Texture => &mut ledger.texture_bytes,
         AllocationKind::Material => &mut ledger.material_bytes,
         AllocationKind::Target => &mut ledger.target_bytes,
+        AllocationKind::Light => &mut ledger.light_bytes,
+        AllocationKind::Lut => &mut ledger.lut_bytes,
     }
 }
 pub(crate) struct Allocation {
@@ -349,4 +371,17 @@ impl EventQueue {
         }
         events
     }
+}
+
+/// Owned lighting generations, not physical driver residency. Replaced resources stay
+/// charged until the submission that last used them has completed.
+#[derive(Clone, Copy, Debug)]
+pub struct LightingStats {
+    pub max_lights: u32,
+    pub lights: u32,
+    pub buffer_generation: u64,
+    pub target_generation: u64,
+    pub retained_light_generations: usize,
+    pub retained_target_generations: usize,
+    pub lut_bytes: u64,
 }

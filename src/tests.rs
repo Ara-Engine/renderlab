@@ -1113,7 +1113,7 @@ fn gpu_replacement_stress() {
     assert_eq!(drained.hal.buffers, setup.hal.buffers);
     assert_eq!(drained.hal.texture_bytes, setup.hal.texture_bytes);
     assert_eq!(drained.hal.texture_views, setup.hal.texture_views);
-    assert_eq!(drained.hal.render_pipelines, 1);
+    assert_eq!(drained.hal.render_pipelines, setup.hal.render_pipelines);
     assert_eq!(drained.timing_failures, 0);
     assert!(
         drained.allocator.is_some(),
@@ -1214,3 +1214,6 @@ mod materials;
 
 #[path = "virtual_gpu_tests.rs"]
 mod virtual_pages;
+
+#[path = "lighting_tests.rs"]
+mod lighting_tests;

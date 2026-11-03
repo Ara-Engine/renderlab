@@ -30,6 +30,8 @@ On 2026-11-03 Islam explicitly authorized using one of his local scan packs, fix
 
 The [real quarry result](scan-results.md) now renders twelve scans and 13,034,903 source triangles with 4K textures, 4x MSAA and measured anisotropic filtering. The interactive local demo defaults to full resident geometry because this scene fits and that path is much cheaper on the CPU. Quality, native resize/reload and development-loop evidence are recorded there. Adaptive streaming remains available, but its moving CPU target is unmet; the historical driver-stall cause remains unproven. Do not describe the fast full-resident path as solving arbitrary-world streaming or the remaining visual layers.
 
+M5-A is accepted as partial M5: direct physical lights, constant environment, exposed HDR/MSAA, editable settings and atomic shader reload are verified on the fixture and quarry. [The checkpoint record](milestone-5a.md) includes independent review, final-source GPU checks, contended costs and development-loop limits. Normal maps, spatial environment maps, direct shadows and the matched Unreal comparison remain open.
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.

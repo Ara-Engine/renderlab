@@ -26,6 +26,8 @@ param(
     [ValidateRange(1, 2147483647)][int]$UploadsPerTick = 64,
     [string]$VariantDirectory = 'measurements/quarry-tuning/demo',
     [string]$Binary,
+    [switch]$Lit,
+    [string]$Lighting = 'fixtures/quarry-lighting.json',
     [switch]$Build,
     [switch]$Validate,
     [switch]$Progressive,
@@ -70,6 +72,7 @@ try {
     }
     $viewerArgs = @('--limits', $effectiveLimits, '--cameras', $effectiveCameras,
         '--shader', (Join-Path $repo 'shaders/scene.wgsl'), '--samples', "$Samples", '--anisotropy', "$Anisotropy")
+    if ($Lit) { $viewerArgs += @('--view', 'lit', '--lighting', $Lighting) }
     if ($CameraMode -eq 'interactive') { $viewerArgs += '--interactive-camera' }
     if ($QualityMode -eq 'full') { $viewerArgs += @('--asset', $Asset) }
     else { $viewerArgs += @('--virtual-manifest', $Manifest, '--cache', $Cache) }

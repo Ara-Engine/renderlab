@@ -6,6 +6,10 @@ use renderlab::asset;
 #[path = "../../examples/m4/cameras.rs"]
 mod cameras;
 mod fixture;
+#[path = "../../support/hdr_files.rs"]
+mod hdr_files;
+#[path = "../../support/lighting_settings.rs"]
+mod lighting_settings;
 mod prepared;
 mod surface_probe;
 use renderlab::virtual_geometry::{
@@ -32,7 +36,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const TITLE: &str = "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | 1-4 views | Esc exit";
+const TITLE: &str = "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | 1-5 views | Esc exit";
 const RETRY_INTERVAL: Duration = Duration::from_millis(8);
 
 struct PendingResize {
@@ -53,12 +57,15 @@ impl PendingResize {
 struct Options {
     policy: policy::Policy,
     shader: PathBuf,
+    lighting: Option<PathBuf>,
+    capture_hdr: Option<PathBuf>,
     frames: Option<u64>,
     seconds: Option<f64>,
     timestamps: bool,
     log_frames: bool,
     trace_surface: bool,
     validate: bool,
+    background: bool,
     instances: u32,
     asset: Option<PathBuf>,
     virtual_manifest: Option<PathBuf>,
@@ -77,6 +84,8 @@ impl Options {
         let stream = runtime_policy::stream(&policy)?;
         let mut options = Self {
             policy,
+            lighting: None,
+            capture_hdr: None,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
             frames: None,
             seconds: None,
@@ -84,6 +93,7 @@ impl Options {
             log_frames: false,
             trace_surface: false,
             validate: false,
+            background: false,
             instances: 2,
             asset: None,
             virtual_manifest: None,
@@ -172,7 +182,12 @@ impl Options {
                         Some("normal") => ViewMode::Normal,
                         Some("metallic") => ViewMode::Metallic,
                         Some("roughness") => ViewMode::Roughness,
-                        _ => return Err("--view requires color|normal|metallic|roughness".into()),
+                        Some("lit") => ViewMode::Lit,
+                        _ => {
+                            return Err(
+                                "--view requires color|normal|metallic|roughness|lit".into()
+                            );
+                        }
                     }
                 }
                 "--instances" => {
@@ -198,11 +213,19 @@ impl Options {
                             .map_err(|_| "invalid seconds")?,
                     )
                 }
+                "--lighting" => {
+                    options.lighting = Some(args.next().ok_or("missing lighting JSON")?.into())
+                }
+                "--capture-hdr" => {
+                    options.capture_hdr =
+                        Some(args.next().ok_or("missing HDR output prefix")?.into())
+                }
                 "--shader" => options.shader = args.next().ok_or("missing shader path")?.into(),
                 "--no-timestamps" => options.timestamps = false,
                 "--log-frames" => options.log_frames = true,
                 "--trace-surface" => options.trace_surface = true,
                 "--validate" => options.validate = true,
+                "--background" => options.background = true,
                 _ if !arg.starts_with('-') => options.shader = arg.into(),
                 _ => return Err(format!("unknown argument {arg}")),
             }
@@ -215,6 +238,9 @@ impl Options {
             || options.seconds.is_some_and(|s| !s.is_finite() || s <= 0.0)
         {
             return Err("limits must be positive".into());
+        }
+        if options.capture_hdr.is_some() && options.view != ViewMode::Lit {
+            return Err("--capture-hdr requires --view lit".into());
         }
         options.stream.validate().map_err(|e| e.to_string())?;
         Ok(options)
@@ -266,6 +292,9 @@ struct View {
     source: String,
     shader_rejected: bool,
     shader_check: Instant,
+    lighting_file: lighting_settings::LightingFile,
+    hdr_capture: Option<renderlab::Capture>,
+    hdr_written: bool,
     markers: VecDeque<Marker>,
     last: Instant,
     pending_size: Option<PendingResize>,
@@ -331,6 +360,7 @@ impl View {
             events.create_window(
                 Window::default_attributes()
                     .with_title(TITLE)
+                    .with_active(!options.background)
                     .with_inner_size(winit::dpi::PhysicalSize::new(
                         cameras.as_ref().map_or(960, |c| c.frames[0].width),
                         cameras.as_ref().map_or(640, |c| c.frames[0].height),
@@ -353,7 +383,7 @@ impl View {
             ..Default::default()
         }))?;
         eprintln!(
-            "adapter={:?} scene={} samples={} quality=unlit_depth32float debug_build={}",
+            "adapter={:?} scene={} samples={} view={:?} quality={} debug_build={}",
             adapter.get_info(),
             if options.virtual_manifest.is_some() {
                 "virtual_asset"
@@ -363,6 +393,12 @@ impl View {
                 "cubes_triangle"
             },
             options.samples as u32,
+            options.view,
+            if options.view == ViewMode::Lit {
+                "unshadowed_GGX_Lambert_constant_environment_exposed_RGBA16F_resolve_Reinhard_no_normal_maps_no_GI"
+            } else {
+                "unlit_depth32float"
+            },
             cfg!(debug_assertions)
         );
         let required_features = if options.timestamps {
@@ -401,7 +437,7 @@ impl View {
             "effective_limits {}",
             runtime_policy::json(&options.policy, options.stream, renderer_limits)
         );
-        let renderer = Renderer::new_with_options(
+        let mut renderer = Renderer::new_with_options(
             device,
             queue,
             config.format,
@@ -412,6 +448,11 @@ impl View {
             },
             &source,
         )?;
+        renderer.set_lighting(&lighting_settings::default_lighting())?;
+        let mut lighting_file = lighting_settings::LightingFile::default();
+        if let Some(path) = &options.lighting {
+            lighting_file.poll(path, &mut renderer);
+        }
         eprintln!(
             "timing_status={:?} measurement_definition=m1_async_not_m0",
             renderer.stats().timing
@@ -444,6 +485,9 @@ impl View {
             source,
             shader_rejected: false,
             shader_check: Instant::now(),
+            lighting_file,
+            hdr_capture: None,
+            hdr_written: false,
             markers: VecDeque::from([Marker {
                 revision: Revision(1),
                 origin: start,
@@ -483,6 +527,14 @@ impl View {
         }
         if options.log_frames {
             for sample in events.gpu {
+                if let Some(present) = sample.present_pass {
+                    eprintln!(
+                        "gpu_hdr_present_pass_ms={:.6} frame={} revision={} boundary=present_pass_only_excludes_acquire_present_uploads",
+                        present.as_secs_f64() * 1e3,
+                        sample.frame.0,
+                        sample.revision.0
+                    );
+                }
                 eprintln!(
                     "gpu_mesh_pass_ms={:.6} frame={} revision={}",
                     sample.mesh_pass.as_secs_f64() * 1000.0,
@@ -495,6 +547,19 @@ impl View {
             }
         }
         self.markers.retain(|m| !m.completed || !m.presented);
+        if let Some(capture) = &mut self.hdr_capture {
+            let info = capture.info();
+            if let Some(bytes) = capture.try_read()? {
+                hdr_files::write(
+                    options.capture_hdr.as_ref().unwrap(),
+                    info,
+                    &bytes,
+                    serde_json::json!({"shader_path":options.shader,"lighting_path":options.lighting,"asset_path":options.asset}),
+                )?;
+                self.hdr_capture = None;
+                self.hdr_written = true;
+            }
+        }
         if let Some(finish) = self.finish_at {
             if self.renderer.stats().flights == 0 {
                 return Ok(true);
@@ -526,6 +591,9 @@ impl View {
         }
         if self.shader_check.elapsed() >= Duration::from_millis(50) {
             self.shader_check = Instant::now();
+            if let Some(path) = &options.lighting {
+                self.lighting_file.poll(path, &mut self.renderer);
+            }
             if let Ok(source) = std::fs::read_to_string(&options.shader)
                 && source != self.source
             {
@@ -921,6 +989,20 @@ impl View {
             );
         }
         if let Some(report) = report {
+            if options.capture_hdr.is_some()
+                && !self.hdr_written
+                && self.hdr_capture.is_none()
+                && self.view_mode == ViewMode::Lit
+            {
+                self.hdr_capture = self.renderer.try_capture_hdr()?;
+            }
+            if options.log_frames {
+                eprintln!(
+                    "lighting_stats={:?} lighting_uploads={:?}",
+                    self.renderer.lighting_stats(),
+                    report.uploads
+                );
+            }
             self.set_title(format!(
                 "{TITLE} | {:?} {}x {:?} visible {}/{}{}",
                 self.view_mode,
@@ -988,7 +1070,9 @@ impl View {
                     report.uploads.write_calls
                 );
             }
-            if options.frames.is_some_and(|count| self.presented >= count) {
+            if options.frames.is_some_and(|count| self.presented >= count)
+                && (options.capture_hdr.is_none() || self.hdr_written)
+            {
                 self.finish_at = Some(Instant::now());
             }
         } else {
@@ -1063,6 +1147,7 @@ impl ApplicationHandler for App {
                                 KeyCode::Digit2 => view.view_mode = ViewMode::Normal,
                                 KeyCode::Digit3 => view.view_mode = ViewMode::Metallic,
                                 KeyCode::Digit4 => view.view_mode = ViewMode::Roughness,
+                                KeyCode::Digit5 => view.view_mode = ViewMode::Lit,
                                 KeyCode::KeyR => view.scene = Scene::default(),
                                 _ => {}
                             }

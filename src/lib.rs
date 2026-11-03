@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate self as renderlab;
 mod instances;
+mod lighting;
 mod material;
 mod mesh;
 mod normal;
@@ -14,13 +15,14 @@ mod visibility;
 
 pub use glam::{Mat4, Vec3};
 pub use instances::{Instances, Visibility};
+pub use lighting::{Light, Lighting, decode_f16};
 pub use material::{
     Material, MaterialDescriptor, RendererOptions, SampleCount, Texture, TextureBinding, ViewMode,
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
-pub use renderer::Capture;
 pub use renderer::Renderer;
+pub use renderer::{Capture, CaptureInfo};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use wgpu;
 
