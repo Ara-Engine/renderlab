@@ -18,6 +18,7 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
         return Err("never time with selection-shadow".into());
     }
     let asset = VirtualAsset::open(&o.cache, &o.manifest, o.stream)?;
+    startup(o, &asset)?;
     let mut rows = BufWriter::new(fs::File::create(o.output.join("selection.csv"))?);
     writeln!(
         rows,
@@ -36,7 +37,11 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
         guard()?;
         let pose = &cameras.frames[frame];
         for (slot, placement) in asset.package().placements.iter().enumerate() {
-            let mesh = &asset.package().meshes[placement.mesh as usize];
+            let prepared = asset
+                .package()
+                .mesh(placement.mesh as usize)
+                .ok_or("placement mesh outside package")?;
+            let mesh = prepared.mesh();
             let errors = project_errors(
                 mesh,
                 &pose.camera()?,
@@ -91,20 +96,20 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                     let identity = format!("{:x}", Sha256::digest(&encoded));
                     snapshots.write_all(&encoded)?;
                     snapshots.write_all(b"\n")?;
-                    let call = |old| {
-                        if old {
-                            return policy::select(
-                                mesh,
-                                &errors,
-                                o.stream.error_pixels,
-                                &available,
-                                b,
-                                protected,
-                                from_cut.then_some(&initial),
-                            );
-                        }
-                        let result = if from_cut {
-                            select_from_cut(
+                    let call = |side| {
+                        let result = match side {
+                            Side::Reference => {
+                                return policy::select(
+                                    mesh,
+                                    &errors,
+                                    o.stream.error_pixels,
+                                    &available,
+                                    b,
+                                    protected,
+                                    from_cut.then_some(&initial),
+                                );
+                            }
+                            Side::Checked if from_cut => select_from_cut(
                                 mesh,
                                 &errors,
                                 o.stream.error_pixels,
@@ -112,26 +117,35 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                                 b,
                                 protected,
                                 &initial,
-                            )
-                        } else {
-                            select_with_protected(
+                            ),
+                            Side::Checked => select_with_protected(
                                 mesh,
                                 &errors,
                                 o.stream.error_pixels,
                                 &available,
                                 b,
                                 protected,
-                            )
+                            ),
+                            Side::Prepared => prepared.select(
+                                &errors,
+                                o.stream.error_pixels,
+                                &available,
+                                b,
+                                protected,
+                                from_cut.then_some(&initial),
+                            ),
                         };
                         result.map_err(|e| Error::InvalidInput(e.0))
                     };
-                    // Warm both sides and verify before timing. All input creation/projection/hash work is outside.
-                    let a = call(false)?;
-                    let z = call(true)?;
-                    assert_eq!(
-                        (&a.cut, &a.demand, &a.debt, a.candidates),
-                        (&z.cut, &z.demand, &z.debt, z.candidates)
-                    );
+                    // Warm every side and verify before timing. All input creation/projection/hash work is outside.
+                    let a = call(Side::Checked)?;
+                    for side in [Side::Reference, Side::Prepared] {
+                        let z = call(side)?;
+                        assert_eq!(
+                            (&a.cut, &a.demand, &a.debt, a.candidates),
+                            (&z.cut, &z.demand, &z.debt, z.candidates)
+                        );
+                    }
                     let output = format!(
                         "{:x}",
                         Sha256::digest(
@@ -140,13 +154,13 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                         )
                     );
                     for repeat in 0..o.repeats {
-                        for old in if repeat % 2 == 0 {
-                            [true, false]
-                        } else {
-                            [false, true]
-                        } {
+                        let mut order = [Side::Reference, Side::Checked, Side::Prepared];
+                        if repeat % 2 == 1 {
+                            order.reverse();
+                        }
+                        for side in order {
                             let start = Instant::now();
-                            let result = std::hint::black_box(call(old));
+                            let result = std::hint::black_box(call(side));
                             let ns = start.elapsed().as_nanos();
                             let s = result?;
                             assert_eq!(
@@ -157,7 +171,7 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                                 rows,
                                 "{frame},{slot},{},{from_cut},{repeat},{},{ns},{},{},{},{},0,{identity},{output}",
                                 if all { "all" } else { "roots" },
-                                if old { "reference" } else { "incremental" },
+                                side.label(),
                                 s.cluster_visits,
                                 s.candidates,
                                 s.cut.clusters.len(),
@@ -171,5 +185,63 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
     }
     rows.flush()?;
     snapshots.flush()?;
+    Ok(())
+}
+
+#[cfg(feature = "selection-oracle")]
+#[derive(Clone, Copy)]
+enum Side {
+    Reference,
+    Checked,
+    Prepared,
+}
+#[cfg(feature = "selection-oracle")]
+impl Side {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Checked => "incremental",
+            Self::Prepared => "prepared",
+        }
+    }
+}
+
+/// One-time admission cost, outside the per-frame metric: the whole metadata bootstrap, plain
+/// validation (the earlier admission work) and validation plus index preparation, alternated.
+#[cfg(feature = "selection-oracle")]
+fn startup(o: &Options, admitted: &VirtualAsset) -> Result<(), Box<dyn std::error::Error>> {
+    use asset::virtual_mesh::{Package, PreparedPackage, VirtualLimits};
+    let mut out = BufWriter::new(fs::File::create(o.output.join("startup.csv"))?);
+    writeln!(out, "repeat,step,ns,index_bytes,metadata_bytes")?;
+    for repeat in 0..o.repeats {
+        let start = Instant::now();
+        let opened = std::hint::black_box(VirtualAsset::open(&o.cache, &o.manifest, o.stream)?);
+        let ns = start.elapsed().as_nanos();
+        writeln!(
+            out,
+            "{repeat},open,{ns},{},{}",
+            opened.package().index_bytes(),
+            opened.stats().metadata_bytes
+        )?;
+        drop(opened);
+        let mut prepare_first = repeat % 2 == 1;
+        for _ in 0..2 {
+            let copy = Package::clone(admitted.package());
+            if prepare_first {
+                let start = Instant::now();
+                let prepared =
+                    std::hint::black_box(PreparedPackage::new(copy, VirtualLimits::default())?);
+                let ns = start.elapsed().as_nanos();
+                writeln!(out, "{repeat},prepare,{ns},{},0", prepared.index_bytes())?;
+            } else {
+                let start = Instant::now();
+                std::hint::black_box(copy.validate(VirtualLimits::default())?);
+                let ns = start.elapsed().as_nanos();
+                writeln!(out, "{repeat},validate,{ns},0,0")?;
+            }
+            prepare_first = !prepare_first;
+        }
+    }
+    out.flush()?;
     Ok(())
 }

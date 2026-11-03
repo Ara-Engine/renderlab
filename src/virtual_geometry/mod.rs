@@ -14,8 +14,8 @@ pub enum SelectorMode {
 pub(crate) mod tests;
 use crate::{Camera, Error, Instances, Mat4, Material, Renderer, Texture, asset};
 use asset::virtual_mesh::{
-    PAGE_BYTES, Package, Page, PageGeometry, PageId, Selection, SelectionBudget, VirtualLimits,
-    VirtualMesh, decode_page, select_from_cut, select_with_protected,
+    PAGE_BYTES, Package, Page, PageGeometry, PageId, PreparedMesh, PreparedPackage, Selection,
+    SelectionBudget, VirtualLimits, VirtualMesh, decode_page,
 };
 use io::PageIo;
 pub use projection::{project_errors, validate_transform};
@@ -199,7 +199,7 @@ impl Drop for SceneLease {
     }
 }
 pub struct VirtualAsset {
-    pub(crate) package: Package,
+    pub(crate) package: PreparedPackage,
     pub(crate) states: Vec<PageState>,
     io: PageIo,
     roots: Vec<PageId>,
@@ -273,14 +273,13 @@ impl VirtualAsset {
         )
         .map_err(Into::into)
     }
-    /// Validates and admits metadata before starting any read or GPU allocation.
+    /// Validates, indexes and admits metadata once, before starting any read or GPU allocation.
     pub fn new(
         package: Package,
         page_directory: PathBuf,
         options: StreamOptions,
     ) -> Result<Self, Error> {
-        let _counts = package
-            .validate(VirtualLimits::default())
+        let package = PreparedPackage::new(package, VirtualLimits::default())
             .map_err(|e| Error::InvalidInput(e.0))?;
         if !options.error_pixels.is_finite()
             || options.error_pixels < 0.
@@ -338,6 +337,7 @@ impl VirtualAsset {
                 .map(|t| t.mips.capacity() * std::mem::size_of::<asset::Mip>())
                 .sum::<usize>();
         let metadata_bytes = metadata_owned
+            + package.index_bytes()
             + package.pages.len() * std::mem::size_of::<PageState>()
             + roots.capacity() * 4
             + 4096;
@@ -374,7 +374,7 @@ impl VirtualAsset {
             })),
         })
     }
-    pub fn package(&self) -> &Package {
+    pub fn package(&self) -> &PreparedPackage {
         &self.package
     }
     pub fn options(&self) -> StreamOptions {
@@ -739,7 +739,7 @@ fn retain_missing_demand(
 #[allow(clippy::too_many_arguments)]
 fn run_selector(
     selector: SelectorMode,
-    mesh: &VirtualMesh,
+    mesh: PreparedMesh<'_>,
     errors: &[f64],
     threshold: f64,
     available: &[bool],
@@ -747,23 +747,30 @@ fn run_selector(
     protected: &[PageId],
     initial: Option<&asset::virtual_mesh::Cut>,
 ) -> Result<Selection, Error> {
-    let result = match (selector, initial) {
-        (SelectorMode::Baseline, Some(cut)) => {
-            select_from_cut(mesh, errors, threshold, available, budget, protected, cut)
-                .map_err(|e| Error::InvalidInput(e.0))
-        }
-        (SelectorMode::Baseline, None) => {
-            select_with_protected(mesh, errors, threshold, available, budget, protected)
-                .map_err(|e| Error::InvalidInput(e.0))
-        }
-        (SelectorMode::SimpleReference, cut) => {
-            reference::select(mesh, errors, threshold, available, budget, protected, cut)
-        }
+    let result = match selector {
+        SelectorMode::Baseline => mesh
+            .select(errors, threshold, available, budget, protected, initial)
+            .map_err(|e| Error::InvalidInput(e.0)),
+        SelectorMode::SimpleReference => reference::select(
+            mesh.mesh(),
+            errors,
+            threshold,
+            available,
+            budget,
+            protected,
+            initial,
+        ),
     };
     #[cfg(feature = "selection-shadow")]
     {
         let old = reference::select(
-            mesh, errors, threshold, available, budget, protected, initial,
+            mesh.mesh(),
+            errors,
+            threshold,
+            available,
+            budget,
+            protected,
+            initial,
         );
         assert_eq!(result.is_ok(), old.is_ok(), "shadow error mismatch");
         if let (Ok(new), Ok(old)) = (&result, old) {
@@ -999,7 +1006,10 @@ impl VirtualScene {
         drop(registry);
         let mut selections = Vec::with_capacity(self.len());
         for (slot, &id) in self.meshes.iter().enumerate() {
-            let mesh = &asset.package.meshes[id as usize];
+            let prepared = asset.package.mesh(id as usize).ok_or(Error::InvalidInput(
+                "virtual placement mesh outside package",
+            ))?;
+            let mesh = prepared.mesh();
             // Same-view queries only refine. Preserve the actual output already owned by later slots.
             reserved_left -= if same_view {
                 self.selections
@@ -1037,7 +1047,7 @@ impl VirtualScene {
             };
             let mut selection = run_selector(
                 asset.options.selector,
-                mesh,
+                prepared,
                 &errors,
                 asset.options.error_pixels,
                 available,
@@ -1077,7 +1087,7 @@ impl VirtualScene {
                     if budget.max_candidates > 0 {
                         let mut incremental = run_selector(
                             asset.options.selector,
-                            mesh,
+                            prepared,
                             &errors,
                             asset.options.error_pixels,
                             available,

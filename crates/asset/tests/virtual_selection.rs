@@ -246,6 +246,7 @@ fn equal_infinite_errors_balance_coarse_levels_before_fine_detail() {
 
 #[test]
 fn exhaustive_small_dags_availability_capacity_and_upstream_rule() {
+    prepared_comparisons();
     let graphs = [
         graph(&[&[None], &[Some(0)], &[Some(1)]]),
         graph(&[&[None], &[None], &[Some(0), Some(1)], &[Some(0)]]),
@@ -342,8 +343,10 @@ fn exhaustive_small_dags_availability_capacity_and_upstream_rule() {
             }
         }
     }
-    println!("exhaustive DAG availability/capacity cases: {cases}");
+    let prepared = prepared_comparisons();
+    println!("exhaustive DAG availability/capacity cases: {cases} prepared_comparisons={prepared}");
     assert!(cases > 10_000);
+    assert!(prepared > cases);
 }
 
 #[test]
@@ -444,6 +447,7 @@ fn virtual_codec_rejects_bad_counts_cycles_references_and_domains() {
 }
 #[test]
 fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
+    prepared_comparisons();
     let graphs = [
         graph(&[&[None], &[Some(0)], &[Some(1)]]),
         graph(&[&[None], &[None], &[Some(0), Some(1)], &[Some(0)]]),
@@ -547,7 +551,9 @@ fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
         }
     }
     assert!(checked > 1000);
-    println!("current_cut_checked={checked}");
+    let prepared = prepared_comparisons();
+    println!("current_cut_checked={checked} prepared_comparisons={prepared}");
+    assert!(prepared > checked);
 }
 
 fn assert_equivalent(
@@ -562,6 +568,80 @@ fn assert_equivalent(
         assert_eq!(a.candidates, b.candidates);
     }
 }
+
+thread_local! {
+    static PREPARED_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Wraps a test mesh as a valid one-mesh package when every page is covered by its clusters.
+fn prepare(mesh: &VirtualMesh, pages: usize) -> Option<PreparedPackage> {
+    let mut indices = vec![0u32; pages];
+    for c in &mesh.clusters {
+        *indices.get_mut(c.page.index())? += c.indices.count;
+    }
+    let package = Package {
+        pages: indices
+            .into_iter()
+            .map(|indices| Page {
+                vertices: 1,
+                indices,
+                payload_bytes: 48 + 4 * indices,
+                sha256: [0; 32],
+            })
+            .collect(),
+        meshes: vec![mesh.clone()],
+        placements: vec![],
+        resources: Asset {
+            materials: vec![Material::default()],
+            ..Asset::default()
+        },
+    };
+    PreparedPackage::new(package, VirtualLimits::default()).ok()
+}
+/// The prepared view must reproduce the checked result exactly, including admission errors.
+#[allow(clippy::too_many_arguments)]
+fn assert_prepared(
+    checked: &renderlab_asset::Result<Selection>,
+    mesh: &VirtualMesh,
+    errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+    initial: Option<&Cut>,
+) {
+    let Some(package) = prepare(mesh, available.len()) else {
+        return;
+    };
+    let prepared = package
+        .mesh(0)
+        .unwrap()
+        .select(errors, threshold, available, budget, protected, initial);
+    match (checked, &prepared) {
+        (Ok(a), Ok(b)) => assert_eq!(
+            (
+                &a.cut,
+                &a.demand,
+                &a.debt,
+                a.candidates,
+                a.scratch_bound_bytes
+            ),
+            (
+                &b.cut,
+                &b.demand,
+                &b.debt,
+                b.candidates,
+                b.scratch_bound_bytes
+            )
+        ),
+        (Err(a), Err(b)) => assert_eq!(a.0, b.0),
+        _ => panic!("prepared admission disagreement: checked={checked:?} prepared={prepared:?}"),
+    }
+    PREPARED_COMPARISONS.with(|n| n.set(n.get() + 1));
+}
+fn prepared_comparisons() -> usize {
+    PREPARED_COMPARISONS.with(|n| n.replace(0))
+}
+
 fn select(
     mesh: &VirtualMesh,
     errors: &[f64],
@@ -570,6 +650,16 @@ fn select(
     budget: SelectionBudget,
 ) -> renderlab_asset::Result<Selection> {
     let actual = renderlab_asset::virtual_mesh::select(mesh, errors, threshold, available, budget);
+    assert_prepared(
+        &actual,
+        mesh,
+        errors,
+        threshold,
+        available,
+        budget,
+        &[],
+        None,
+    );
     assert_equivalent(
         &actual,
         policy_result(policy::select(
@@ -596,6 +686,16 @@ fn select_from_cut(
     let actual = renderlab_asset::virtual_mesh::select_from_cut(
         mesh, errors, threshold, available, budget, protected, initial,
     );
+    assert_prepared(
+        &actual,
+        mesh,
+        errors,
+        threshold,
+        available,
+        budget,
+        protected,
+        Some(initial),
+    );
     assert_equivalent(
         &actual,
         policy_result(policy::select(
@@ -613,6 +713,7 @@ fn select_from_cut(
 
 #[test]
 fn seeded_shared_page_dags_match_independent_two_track_policy() {
+    prepared_comparisons();
     let mut seed = 0xfbe75c1a9b234d01u64;
     let mut draw = |limit: usize| {
         seed ^= seed << 13;
@@ -685,6 +786,7 @@ fn seeded_shared_page_dags_match_independent_two_track_policy() {
             ..budget()
         };
         let actual = select_with_protected(&mesh, &errors, 1., &available, b, &protected);
+        assert_prepared(&actual, &mesh, &errors, 1., &available, b, &protected, None);
         assert_equivalent(
             &actual,
             policy_result(policy::select(
@@ -758,7 +860,11 @@ fn seeded_shared_page_dags_match_independent_two_track_policy() {
             assert!(charge.len() * PAGE_BYTES <= b.geometry_bytes);
         }
     }
-    println!("seeded DAGs=6000 root+initial cases=12000 seed=fbe75c1a9b234d01");
+    let prepared = prepared_comparisons();
+    println!(
+        "seeded DAGs=6000 root+initial cases=12000 seed=fbe75c1a9b234d01 prepared_comparisons={prepared}"
+    );
+    assert!(prepared > 6000);
 }
 
 #[test]
@@ -814,4 +920,77 @@ fn selection_charges_page_scratch_before_allocation() {
     )
     .unwrap();
     assert_eq!(result.scratch_bound_bytes, expected);
+}
+
+#[test]
+fn prepared_package_validates_once_and_charges_its_index_before_allocation() {
+    // In a chain the retained index plus build cursor outgrows validation scratch, so the
+    // smallest admitting budget is set by the index charge rather than by validation.
+    let chain = graph(&[&[None], &[Some(0)], &[Some(1)], &[Some(2)]]);
+    let raw = Package::clone(&prepare(&chain, chain.clusters.len()).unwrap());
+    let limits = |max_metadata_bytes| VirtualLimits {
+        max_metadata_bytes,
+        ..VirtualLimits::default()
+    };
+    let validated = (0..).find(|&b| raw.validate(limits(b)).is_ok()).unwrap();
+    let admitted = (validated..)
+        .find(|&b| PreparedPackage::new(raw.clone(), limits(b)).is_ok())
+        .unwrap();
+    assert!(admitted > validated);
+    assert_eq!(
+        PreparedPackage::new(raw.clone(), limits(admitted - 1))
+            .unwrap_err()
+            .0,
+        "prepared selection index budget"
+    );
+    let prepared = PreparedPackage::new(raw.clone(), limits(admitted)).unwrap();
+    let host = raw
+        .validate(limits(usize::MAX))
+        .unwrap()
+        .metadata_host_bytes;
+    assert!(prepared.index_bytes() > 0 && host + prepared.index_bytes() <= admitted);
+    assert_eq!(*prepared, raw);
+
+    let mut cyclic = raw.clone();
+    cyclic.meshes[0].clusters[1].refined = Some(GroupId(1));
+    assert_eq!(
+        PreparedPackage::new(cyclic.clone(), VirtualLimits::default())
+            .unwrap_err()
+            .0,
+        cyclic.validate(VirtualLimits::default()).unwrap_err().0
+    );
+
+    assert!(prepared.mesh(1).is_none());
+    let view = prepared.mesh(0).unwrap();
+    let errors = [2., 3., 4., f64::INFINITY];
+    let all = vec![true; raw.pages.len()];
+    let checked =
+        renderlab_asset::virtual_mesh::select(&chain, &errors, 1., &all, budget()).unwrap();
+    let selected = view.select(&errors, 1., &all, budget(), &[], None).unwrap();
+    assert_eq!(
+        (&selected.cut, &selected.demand, &selected.debt),
+        (&checked.cut, &checked.demand, &checked.debt)
+    );
+    // Only the per-call CSR passes disappear from the touch count.
+    assert_eq!(
+        checked.cluster_visits,
+        selected.cluster_visits + 2 * chain.clusters.len()
+    );
+    for wrong in [&all[..3], &[true; 5][..]] {
+        assert_eq!(
+            view.select(&errors, 1., wrong, budget(), &[], None)
+                .unwrap_err()
+                .0,
+            "availability must cover exactly the prepared package pages"
+        );
+    }
+    // Per-view scalar domains are still checked on every prepared call.
+    assert!(
+        view.select(&[2., 3., 4., 1.], 1., &all, budget(), &[], None)
+            .is_err()
+    );
+    assert!(
+        view.select(&[5., 3., 4., f64::INFINITY], 1., &all, budget(), &[], None)
+            .is_err()
+    );
 }

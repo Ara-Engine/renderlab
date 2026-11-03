@@ -1,5 +1,6 @@
 //! Immutable virtual geometry; group ancestry and IO pages are separate domains.
-//! Raw records must pass `Package::validate` before use. Selection revalidates its mesh.
+//! Raw records must pass `Package::validate` before use. Checked selection revalidates its
+//! mesh on every call; `PreparedPackage` validates and indexes once for repeated selection.
 mod codec;
 mod selection;
 use crate::{Asset, Error, Limits, Placement, Result, Vertex, add, cap, product, valid_transform};
@@ -7,8 +8,8 @@ pub use codec::{decode, decode_page, encode};
 #[cfg(feature = "selection-oracle")]
 pub use selection::oracle as selection_oracle;
 pub use selection::{
-    Cut, DebtReason, Demand, QualityDebt, Selection, SelectionBudget, select, select_from_cut,
-    select_with_protected,
+    Cut, DebtReason, Demand, PreparedMesh, PreparedPackage, QualityDebt, Selection,
+    SelectionBudget, select, select_from_cut, select_with_protected,
 };
 
 pub const VERSION: u32 = 1;

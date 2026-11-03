@@ -89,6 +89,116 @@ fn charged_pages(page_count: usize, sets: &[&[PageId]]) -> usize {
     seen.into_iter().filter(|v| *v).count()
 }
 
+/// A package validated once for repeated selection, owning each mesh's incoming-link index.
+/// Only shared access exists, so neither the metadata nor its index can change afterwards.
+///
+/// ```compile_fail
+/// fn mutate(prepared: &mut renderlab_asset::virtual_mesh::PreparedPackage) {
+///     prepared.meshes.clear();
+/// }
+/// ```
+#[derive(Debug)]
+pub struct PreparedPackage {
+    package: Package,
+    incoming: Vec<incremental::Incoming>,
+}
+impl PreparedPackage {
+    /// Applies `Package::validate`, then charges the retained indices and one build cursor
+    /// together with the package's element metadata against `max_metadata_bytes` before
+    /// allocating them. Validation scratch is released before the indices are built.
+    pub fn new(package: Package, limits: VirtualLimits) -> Result<Self> {
+        let counts = package.validate(limits)?;
+        let mut retained = product(
+            package.meshes.len(),
+            std::mem::size_of::<incremental::Incoming>(),
+        )?;
+        let mut cursor = 0;
+        for mesh in &package.meshes {
+            let (index, build) = incremental::Incoming::charge(mesh)?;
+            add(&mut retained, index)?;
+            cursor = cursor.max(build);
+        }
+        let mut peak = counts.metadata_host_bytes;
+        add(&mut peak, retained)?;
+        add(&mut peak, cursor)?;
+        cap(
+            peak,
+            limits.max_metadata_bytes,
+            "prepared selection index budget",
+        )?;
+        let incoming = package
+            .meshes
+            .iter()
+            .map(incremental::Incoming::new)
+            .collect();
+        Ok(Self { package, incoming })
+    }
+    pub fn mesh(&self, mesh: usize) -> Option<PreparedMesh<'_>> {
+        Some(PreparedMesh {
+            mesh: self.package.meshes.get(mesh)?,
+            incoming: &self.incoming[mesh],
+            pages: self.package.pages.len(),
+        })
+    }
+    /// Actual retained index capacity, excluding the package's own metadata.
+    pub fn index_bytes(&self) -> usize {
+        self.incoming.capacity() * std::mem::size_of::<incremental::Incoming>()
+            + self
+                .incoming
+                .iter()
+                .map(incremental::Incoming::bytes)
+                .sum::<usize>()
+    }
+}
+impl std::ops::Deref for PreparedPackage {
+    type Target = Package;
+    fn deref(&self) -> &Package {
+        &self.package
+    }
+}
+
+/// One mesh of a `PreparedPackage`. Selection through it skips structural validation and the
+/// per-call incoming index; every per-view input is still checked.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedMesh<'a> {
+    mesh: &'a VirtualMesh,
+    incoming: &'a incremental::Incoming,
+    pages: usize,
+}
+impl<'a> PreparedMesh<'a> {
+    pub fn mesh(self) -> &'a VirtualMesh {
+        self.mesh
+    }
+    /// The policy and outputs of `select_with_protected` (`initial` = None) or
+    /// `select_from_cut`. `available` must have exactly one entry per package page.
+    pub fn select(
+        self,
+        projected_errors: &[f64],
+        threshold: f64,
+        available: &[bool],
+        budget: SelectionBudget,
+        protected: &[PageId],
+        initial: Option<&Cut>,
+    ) -> Result<Selection> {
+        select_internal(
+            Metadata::Prepared(self),
+            projected_errors,
+            threshold,
+            available,
+            budget,
+            protected,
+            initial,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Metadata<'a> {
+    /// Arbitrary caller metadata: validated and indexed for this call only.
+    Checked(&'a VirtualMesh),
+    Prepared(PreparedMesh<'a>),
+}
+
 /// Rebuild from all terminal groups over published availability; never publish half a group.
 /// Errors must be nonnegative, finite (or +infinity), and monotone over every owner edge.
 /// Projection and conservative transform/near handling belong to the caller, not this scalar API.
@@ -113,7 +223,7 @@ pub fn select_with_protected(
     protected: &[PageId],
 ) -> Result<Selection> {
     select_internal(
-        mesh,
+        Metadata::Checked(mesh),
         projected_errors,
         threshold,
         available,
@@ -135,7 +245,7 @@ pub fn select_from_cut(
     initial: &Cut,
 ) -> Result<Selection> {
     select_internal(
-        mesh,
+        Metadata::Checked(mesh),
         projected_errors,
         threshold,
         available,
@@ -145,7 +255,7 @@ pub fn select_from_cut(
     )
 }
 fn select_internal(
-    mesh: &VirtualMesh,
+    metadata: Metadata<'_>,
     projected_errors: &[f64],
     threshold: f64,
     available: &[bool],
@@ -155,6 +265,10 @@ fn select_internal(
 ) -> Result<Selection> {
     #[cfg(feature = "selection-profile")]
     let profile = std::time::Instant::now();
+    let mesh = match metadata {
+        Metadata::Checked(mesh) => mesh,
+        Metadata::Prepared(prepared) => prepared.mesh,
+    };
     if protected.iter().any(|p| p.index() >= available.len()) {
         return Err(Error("protected page outside package"));
     }
@@ -170,16 +284,24 @@ fn select_internal(
         budget.max_scratch_bytes,
         "selection scratch capacity",
     )?;
-    mesh.validate(
-        available.len(),
-        usize::MAX,
-        VirtualLimits {
-            max_groups: n,
-            max_clusters: c,
-            max_metadata_bytes: budget.max_scratch_bytes,
-            ..VirtualLimits::default()
-        },
-    )?;
+    match metadata {
+        Metadata::Checked(_) => mesh.validate(
+            available.len(),
+            usize::MAX,
+            VirtualLimits {
+                max_groups: n,
+                max_clusters: c,
+                max_metadata_bytes: budget.max_scratch_bytes,
+                ..VirtualLimits::default()
+            },
+        )?,
+        Metadata::Prepared(prepared) if available.len() != prepared.pages => {
+            return Err(Error(
+                "availability must cover exactly the prepared package pages",
+            ));
+        }
+        Metadata::Prepared(_) => {}
+    }
     if projected_errors.len() != n
         || !threshold.is_finite()
         || threshold < 0.
@@ -251,7 +373,15 @@ fn select_internal(
     drop(selected);
     #[cfg(feature = "selection-profile")]
     let admitted_ns = profile.elapsed().as_nanos();
-    let mut state = incremental::State::new(mesh, available, active, &pinned, protected);
+    let checked;
+    let (incoming, index_visits) = match metadata {
+        Metadata::Prepared(prepared) => (prepared.incoming, 0),
+        Metadata::Checked(_) => {
+            checked = incremental::Incoming::new(mesh);
+            (&checked, 2 * c)
+        }
+    };
+    let mut state = incremental::State::new(mesh, incoming, available, active, &pinned, protected);
     #[cfg(feature = "selection-profile")]
     let indexed_ns = profile.elapsed().as_nanos();
     let mut reasons = vec![];
@@ -342,7 +472,8 @@ fn select_internal(
     // Count cluster predicate/link/shard touches, excluding the unchanged boundary validator,
     // scalar error checks, group/page scans and sorting. The scan oracle counts only cut/closure
     // scans, a subset of these operations, so an old/new ratio is a conservative work reduction.
-    let visits = state.visits + c * if initial.is_some() { 4 } else { 2 };
+    // A prepared index adds no per-call CSR passes.
+    let visits = state.visits + index_visits + c * if initial.is_some() { 4 } else { 2 };
     if !requested.is_empty() {
         reasons.push(DebtReason::MissingPages);
     }
@@ -384,8 +515,9 @@ fn select_internal(
     };
     #[cfg(feature = "selection-profile")]
     eprintln!(
-        "selection_profile initial={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={}",
+        "selection_profile initial={} prepared={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={}",
         initial.is_some(),
+        matches!(metadata, Metadata::Prepared(_)),
         candidates,
         domain_ns,
         admitted_ns - domain_ns,

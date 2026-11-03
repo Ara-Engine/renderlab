@@ -13,12 +13,61 @@ pub(super) enum Track {
     Publication,
 }
 
-/// One call owns all indices and journals. No mutable selection state survives the call.
+/// CSR of the clusters whose `refined` names each group, in ascending cluster order.
+/// Immutable after construction; a prepared package retains one per mesh.
+#[derive(Debug)]
+pub(super) struct Incoming {
+    offsets: Vec<usize>,
+    links: Vec<u32>,
+}
+
+impl Incoming {
+    /// Retained bytes and the transient build cursor bytes, known before allocating either.
+    pub fn charge(mesh: &VirtualMesh) -> Result<(usize, usize)> {
+        let links = mesh.clusters.iter().filter(|c| c.refined.is_some()).count();
+        let offsets = product(mesh.groups.len() + 1, std::mem::size_of::<usize>())?;
+        let retained = offsets
+            .checked_add(product(links, std::mem::size_of::<u32>())?)
+            .ok_or(Error("incoming index overflow"))?;
+        Ok((
+            retained,
+            product(mesh.groups.len(), std::mem::size_of::<usize>())?,
+        ))
+    }
+
+    pub fn new(mesh: &VirtualMesh) -> Self {
+        let n = mesh.groups.len();
+        let mut offsets = vec![0; n + 1];
+        for c in &mesh.clusters {
+            if let Some(r) = c.refined {
+                offsets[r.index() + 1] += 1;
+            }
+        }
+        for g in 0..n {
+            offsets[g + 1] += offsets[g];
+        }
+        let mut links = vec![0; offsets[n]];
+        let mut cursor = offsets[..n].to_vec();
+        for (id, c) in mesh.clusters.iter().enumerate() {
+            if let Some(r) = c.refined {
+                links[cursor[r.index()]] = id as u32;
+                cursor[r.index()] += 1;
+            }
+        }
+        Self { offsets, links }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<usize>()
+            + self.links.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
+/// One call owns its covers and journals. No mutable selection state survives the call.
 pub(super) struct State<'a> {
     mesh: &'a VirtualMesh,
     available: &'a [bool],
-    offsets: Vec<usize>,
-    incoming: Vec<u32>,
+    incoming: &'a Incoming,
     fixed: Vec<bool>,
     pub planned: Cover,
     pub published: Cover,
@@ -33,30 +82,13 @@ pub(super) struct State<'a> {
 impl<'a> State<'a> {
     pub fn new(
         mesh: &'a VirtualMesh,
+        incoming: &'a Incoming,
         available: &'a [bool],
         active: Vec<bool>,
         pinned: &[PageId],
         protected: &[PageId],
     ) -> Self {
         let n = mesh.groups.len();
-        let mut offsets = vec![0; n + 1];
-        for c in &mesh.clusters {
-            if let Some(r) = c.refined {
-                offsets[r.index() + 1] += 1;
-            }
-        }
-        for g in 0..n {
-            offsets[g + 1] += offsets[g];
-        }
-        let mut incoming = vec![0; offsets[n]];
-        let mut cursor = offsets[..n].to_vec();
-        for (id, c) in mesh.clusters.iter().enumerate() {
-            if let Some(r) = c.refined {
-                incoming[cursor[r.index()]] = id as u32;
-                cursor[r.index()] += 1;
-            }
-        }
-        drop(cursor);
         let mut refs = vec![0; available.len()];
         let mut clusters = 0;
         for c in &mesh.clusters {
@@ -77,7 +109,6 @@ impl<'a> State<'a> {
         Self {
             mesh,
             available,
-            offsets,
             incoming,
             fixed,
             published: Cover {
@@ -97,9 +128,9 @@ impl<'a> State<'a> {
             proposal: vec![false; n],
             deltas: Vec::with_capacity(mesh.clusters.len()),
             charged,
-            // Two CSR passes and the initial cover scan. Proposal/publication count each
-            // closure/boundary record read below. Rollback replays pages without cluster reads.
-            visits: mesh.clusters.len() * 3,
+            // The initial cover scan. Proposal/publication count each closure/boundary record
+            // read below. Rollback replays pages without cluster reads.
+            visits: mesh.clusters.len(),
         }
     }
 
@@ -154,9 +185,11 @@ impl<'a> State<'a> {
         let mut cursor = 0;
         while cursor < self.journal.len() {
             let g = self.journal[cursor] as usize;
-            for i in self.offsets[g]..self.offsets[g + 1] {
+            for i in self.incoming.offsets[g]..self.incoming.offsets[g + 1] {
                 self.visits += 1;
-                let owner = self.mesh.clusters[self.incoming[i] as usize].owner.index();
+                let owner = self.mesh.clusters[self.incoming.links[i] as usize]
+                    .owner
+                    .index();
                 if !self.cover(track).active[owner] {
                     self.mark(owner, track);
                 }
@@ -183,9 +216,9 @@ impl<'a> State<'a> {
                     self.page_delta(page, true, track);
                 }
             }
-            for link in self.offsets[g]..self.offsets[g + 1] {
+            for link in self.incoming.offsets[g]..self.incoming.offsets[g + 1] {
                 self.visits += 1;
-                let c = &self.mesh.clusters[self.incoming[link] as usize];
+                let c = &self.mesh.clusters[self.incoming.links[link] as usize];
                 if self.cover(track).active[c.owner.index()] && !self.proposal[c.owner.index()] {
                     let page = c.page;
                     self.deltas.push((page, false));
