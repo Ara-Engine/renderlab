@@ -707,6 +707,217 @@ fn forced_candidate_motion_reports_retained_cut_liveness() {
 }
 
 #[test]
+fn moving_resident_root_prefix_cannot_starve_retained_refinement() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (p, _) = fixture(4);
+        let mut a = VirtualAsset::new(
+            p,
+            directory("resident-prefix"),
+            StreamOptions {
+                max_candidates: 1,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        let mut available = [false, true, true, true];
+        for _ in 0..8 {
+            scene
+                .select(&mut a, &available, &camera(22.), 1080)
+                .unwrap();
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+        assert!(scene.selections()[0].demand.requested_pages.is_empty());
+        let mut requested = false;
+        for frame in 0..4 {
+            scene
+                .select(&mut a, &available, &camera(21. - frame as f32 * 0.01), 1080)
+                .unwrap();
+            let s = &scene.selections()[0];
+            println!(
+                "resident-prefix frame={frame} candidates={} debt={} requested={:?} cut={:?}",
+                s.candidates, s.debt.unresolved_groups, s.demand.requested_pages, s.cut.pages
+            );
+            assert!(s.candidates <= 1);
+            if s.demand.requested_pages.contains(&PageId(0)) {
+                requested = true;
+                available[0] = true;
+                a.revision += 1;
+            }
+        }
+        assert!(
+            requested,
+            "resident coarse prefix consumed every moving allowance"
+        );
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        // Stop immediately on the retained turn at a far view. Its owed root query
+        // must still coarsen without another camera change or availability event.
+        drop(scene);
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        for _ in 0..8 {
+            scene
+                .select(&mut a, &available, &camera(22.), 1080)
+                .unwrap();
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+        scene
+            .select(&mut a, &available, &camera(21.), 1080)
+            .unwrap();
+        scene
+            .select(&mut a, &available, &camera(4000.), 1080)
+            .unwrap();
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+        scene
+            .select(&mut a, &available, &camera(4000.), 1080)
+            .unwrap();
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(3)]);
+        let before = a.stats().selection_runs;
+        for _ in 0..300 {
+            scene
+                .select(&mut a, &available, &camera(4000.), 1080)
+                .unwrap();
+        }
+        assert_eq!(a.stats().selection_runs, before);
+        for frame in 0..12 {
+            scene
+                .select(&mut a, &available, &camera(21. - frame as f32 * 0.01), 1080)
+                .unwrap();
+            assert!(a.stats().candidates <= 1);
+        }
+        assert_eq!(
+            scene.selections()[0].cut.pages,
+            [PageId(0)],
+            "near revisit pinned the far cover"
+        );
+    }
+}
+
+#[test]
+fn capped_root_rebuild_releases_redundant_detail_and_refines_its_new_cover() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (p, _) = fixture(4);
+        let mut a = VirtualAsset::new(
+            p,
+            directory("coarsen-revisit"),
+            StreamOptions {
+                max_candidates: 1,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        for _ in 0..12 {
+            scene.select(&mut a, &[true; 4], &camera(4.), 1080).unwrap();
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        for frame in 0..12 {
+            scene
+                .select(
+                    &mut a,
+                    &[true; 4],
+                    &camera(22. + frame as f32 * 0.001),
+                    1080,
+                )
+                .unwrap();
+            assert!(a.stats().candidates <= 1);
+        }
+        println!(
+            "capped-coarsening cut={:?} debt={}",
+            scene.selections()[0].cut.pages,
+            scene.selections()[0].debt.unresolved_groups
+        );
+        assert_eq!(
+            scene.selections()[0].cut.pages,
+            [PageId(1)],
+            "resolved fine cut pinned redundant detail across capped root rebuilds"
+        );
+        for frame in 0..12 {
+            scene
+                .select(
+                    &mut a,
+                    &[true; 4],
+                    &camera(21. - frame as f32 * 0.001),
+                    1080,
+                )
+                .unwrap();
+            assert!(a.stats().candidates <= 1);
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+    }
+}
+
+#[test]
+fn bounded_turns_leave_unattainable_debt_quiet() {
+    for output_limited in [false, true] {
+        let (mut p, _) = fixture(if output_limited { 2 } else { 3 });
+        if output_limited {
+            p.meshes[0].clusters.pop();
+            p.meshes[0].clusters[2].indices.count = 6;
+            p.meshes[0].groups[1].clusters.count = 1;
+        }
+        let mut a = VirtualAsset::new(
+            p,
+            directory("unattainable-progress"),
+            StreamOptions {
+                max_candidates: 1,
+                max_clusters: if output_limited { 1 } else { 8 },
+                geometry_bytes: if output_limited {
+                    8 << 20
+                } else {
+                    3 * PAGE_BYTES
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        let available = if output_limited {
+            vec![false, true]
+        } else {
+            vec![false, true, true]
+        };
+        for frame in 0..8 {
+            scene
+                .select(&mut a, &available, &camera(4. + frame as f32 * 0.01), 1080)
+                .unwrap();
+            assert!(a.stats().candidates <= 1);
+            assert!(scene.selections()[0].demand.requested_pages.is_empty());
+            assert!(
+                scene.selections()[0]
+                    .cut
+                    .pages
+                    .iter()
+                    .all(|p| available[p.index()])
+            );
+        }
+        for _ in 0..4 {
+            scene
+                .select(&mut a, &available, &camera(4.07), 1080)
+                .unwrap();
+        }
+        assert!(
+            scene.selections()[0]
+                .debt
+                .reasons
+                .contains(&if output_limited {
+                    DebtReason::OutputCapacity
+                } else {
+                    DebtReason::GeometryCapacity
+                })
+        );
+        let before = a.stats().selection_runs;
+        for _ in 0..300 {
+            scene
+                .select(&mut a, &available, &camera(4.07), 1080)
+                .unwrap();
+        }
+        assert_eq!(a.stats().selection_runs, before);
+    }
+}
+
+#[test]
 fn capped_view_change_preserves_root_final_demand_with_multiple_placements() {
     for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
         let (p, _) = fixture(4);
@@ -734,6 +945,14 @@ fn capped_view_change_preserves_root_final_demand_with_multiple_placements() {
             ],
         )
         .unwrap();
+        let mut other = VirtualScene::new(
+            &a,
+            &[VirtualPlacement {
+                mesh: 0,
+                transform: Mat4::from_translation(Vec3::new(100000., 0., 0.)),
+            }],
+        )
+        .unwrap();
         // Establish a finer resident cover, then remove an obsolete intermediate page.
         let mut available = [false, true, true, true];
         for _ in 0..8 {
@@ -753,9 +972,37 @@ fn capped_view_change_preserves_root_final_demand_with_multiple_placements() {
                 .unwrap();
             let s = &scene.selections()[0];
             assert_eq!(s.cut.pages, [PageId(1)]);
-            assert_eq!(s.demand.requested_pages, [PageId(2)]);
+            assert_eq!(
+                s.demand.requested_pages,
+                [PageId(if frame == 0 { 2 } else { 0 })]
+            );
             assert!(a.stats().candidates <= 1);
             assert!(scene.protected.len() * PAGE_BYTES <= a.options.geometry_bytes - PAGE_BYTES);
+            other
+                .select(
+                    &mut a,
+                    &available,
+                    &camera(4. + frame as f32 * 0.01 + 0.01),
+                    1080,
+                )
+                .unwrap();
+            assert!(a.stats().candidates <= 1);
+            assert_eq!(a.stats().cut_clusters, 6);
+            assert_eq!(other.selections()[0].cut.clusters.len(), 2);
+            let registry = a.registry.lock().unwrap();
+            assert!(
+                registry
+                    .scenes
+                    .iter()
+                    .map(|e| e.output_reservation)
+                    .sum::<usize>()
+                    <= a.options.max_clusters
+            );
+            let mut union = vec![];
+            for entry in &registry.scenes {
+                union_into(&mut union, &entry.protected);
+            }
+            assert!(union.len() * PAGE_BYTES <= a.options.geometry_bytes - PAGE_BYTES);
         }
         // On a fresh fixed view the retained path receives the full allowance, requests
         // only final detail, publishes it and then stays cached for 300 CPU frames.

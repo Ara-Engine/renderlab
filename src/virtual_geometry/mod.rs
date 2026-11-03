@@ -234,7 +234,15 @@ pub struct VirtualScene {
     protected: Vec<PageId>,
     key: Option<SelectionKey>,
     continue_selection: bool,
+    query_turns: Vec<QueryTurn>,
     transforms: u64,
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum QueryTurn {
+    #[default]
+    Ordinary,
+    Refine,
+    Rebuild,
 }
 fn roots(package: &Package) -> Vec<PageId> {
     let mut out = Vec::new();
@@ -697,7 +705,7 @@ fn retain_better_cut(
     true
 }
 
-// Keep an already admitted final plan when a capped retained query has no useful demand.
+// Keep an already admitted final plan across a bounded query turn.
 // Recheck the union against its actual publication: independent refinement can add pages.
 fn retain_missing_demand(
     demand: &asset::virtual_mesh::Demand,
@@ -707,7 +715,6 @@ fn retain_missing_demand(
     geometry_bytes: usize,
 ) -> bool {
     if next.debt.unresolved_groups == 0
-        || !next.demand.requested_pages.is_empty()
         || demand.required_pages.iter().all(|p| available[p.index()])
     {
         return false;
@@ -834,7 +841,8 @@ impl VirtualScene {
             .max()
             .unwrap_or(0)
             + asset.package.pages.len() * 32
-            + 256;
+            + 256
+            + std::mem::size_of::<QueryTurn>();
         let output = asset.options.max_clusters.min(
             placements
                 .iter()
@@ -889,6 +897,7 @@ impl VirtualScene {
             protected: asset.roots.clone(),
             key: None,
             continue_selection: false,
+            query_turns: vec![QueryTurn::Ordinary; placements.len()],
             transforms: 0,
         })
     }
@@ -986,6 +995,7 @@ impl VirtualScene {
         let mut output = 0;
         let mut reserved_output = 0;
         let mut candidates = 0;
+        let mut scheduled_query = false;
         let mut protected = asset.roots.clone();
         // Charge the last published cover while planning its replacement. Otherwise a
         // root-rebuilt proposal can evict the better cover we are trying to retain and
@@ -1030,11 +1040,6 @@ impl VirtualScene {
             let errors = project_errors(mesh, camera, self.models()[slot], height)?;
             asset.stats.projection += start.elapsed();
             let start = Instant::now();
-            let initial = self
-                .selections
-                .get(slot)
-                .filter(|_| same_view)
-                .map(|s| &s.cut);
             let budget = SelectionBudget {
                 // Reserve staging before planning any resident transition.
                 geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
@@ -1044,6 +1049,28 @@ impl VirtualScene {
                     .saturating_sub(candidates + other_candidates),
                 max_clusters: output_budget,
                 max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
+            };
+            let rebuild_turn = self.query_turns[slot] == QueryTurn::Rebuild;
+            let refine_turn = self.query_turns[slot] == QueryTurn::Refine
+                && budget.max_candidates > 0
+                && self.selections.get(slot).is_some_and(|s| {
+                    s.cut.clusters.len() <= output_budget
+                        && s.cut.pages.iter().all(|p| available[p.index()])
+                });
+            let initial = self
+                .selections
+                .get(slot)
+                .filter(|_| {
+                    refine_turn || (same_view && self.query_turns[slot] != QueryTurn::Rebuild)
+                })
+                .map(|s| &s.cut);
+            // A retained turn owes one root revisit even if motion stops immediately.
+            // Otherwise a now-unnecessary fine cover could remain cached forever.
+            self.query_turns[slot] = if refine_turn && !same_view {
+                scheduled_query = true;
+                QueryTurn::Rebuild
+            } else {
+                QueryTurn::Ordinary
             };
             let mut selection = run_selector(
                 asset.options.selector,
@@ -1056,7 +1083,23 @@ impl VirtualScene {
                 initial,
             )?;
             asset.stats.selection_calls += 1;
+            let coarsen = initial.is_none()
+                && budget.max_candidates > 0
+                && selection.candidates == budget.max_candidates
+                && selection
+                    .debt
+                    .reasons
+                    .contains(&asset::virtual_mesh::DebtReason::CandidateCapacity)
+                && self.selections.get(slot).is_some_and(|s| {
+                    s.cut
+                        .active_groups
+                        .iter()
+                        .any(|g| errors[g.index()] <= asset.options.error_pixels)
+                });
             if initial.is_none()
+                // A capped root prefix can have more debt than redundant old detail.
+                // Publish that complete fallback once, then refine it on the owed turn.
+                && !coarsen
                 && retain_better_cut(
                     self.selections.get(slot),
                     &mut selection,
@@ -1096,21 +1139,26 @@ impl VirtualScene {
                             Some(&selection.cut),
                         )?;
                         asset.stats.selection_calls += 1;
-                        retain_missing_demand(
-                            &selection.demand,
-                            &mut incremental,
-                            available,
-                            &protected,
-                            budget.geometry_bytes,
-                        );
+                        if incremental.demand.requested_pages.is_empty() {
+                            retain_missing_demand(
+                                &selection.demand,
+                                &mut incremental,
+                                available,
+                                &protected,
+                                budget.geometry_bytes,
+                            );
+                        }
                         incremental.candidates += spent;
                         incremental.cluster_visits += visits;
                         selection = incremental;
                     }
-                    // A tiny moving allowance can revisit an already resident root prefix.
-                    // Keep the previous final plan until it arrives, rather than losing all
-                    // IO progress at each view change. This only reuses admitted demand.
-                    if let Some(previous) = self.selections.get(slot) {
+                    // A root revisit must not cancel the preceding refinement's IO.
+                    // Carry one admitted final plan, never a union of competing plans.
+                    if let Some(previous) = self
+                        .selections
+                        .get(slot)
+                        .filter(|_| rebuild_turn || selection.demand.requested_pages.is_empty())
+                    {
                         retain_missing_demand(
                             &previous.demand,
                             &mut selection,
@@ -1120,6 +1168,19 @@ impl VirtualScene {
                         );
                     }
                 }
+            }
+            if initial.is_none()
+                && budget.max_candidates > 0
+                && selection.candidates == budget.max_candidates
+                && selection
+                    .debt
+                    .reasons
+                    .contains(&asset::virtual_mesh::DebtReason::CandidateCapacity)
+            {
+                // Even a newly published root prefix needs a refinement turn. Repeating
+                // that same capped root query on every changed view cannot advance it.
+                self.query_turns[slot] = QueryTurn::Refine;
+                scheduled_query |= rebuild_turn;
             }
             asset.stats.selection += start.elapsed();
             output += selection.cut.clusters.len();
@@ -1131,16 +1192,17 @@ impl VirtualScene {
         }
         // Resume capped work only after a useful publication or a new view. A stalled
         // missing/capacity-denied proposal stays cached until availability changes.
-        self.continue_selection = selections.iter().any(|s| {
-            s.debt
-                .reasons
-                .contains(&asset::virtual_mesh::DebtReason::CandidateCapacity)
-        }) && (!same_view
-            || self
-                .selections
-                .iter()
-                .map(|s| &s.cut)
-                .ne(selections.iter().map(|s| &s.cut)));
+        self.continue_selection = scheduled_query
+            || (selections.iter().any(|s| {
+                s.debt
+                    .reasons
+                    .contains(&asset::virtual_mesh::DebtReason::CandidateCapacity)
+            }) && (!same_view
+                || self
+                    .selections
+                    .iter()
+                    .map(|s| &s.cut)
+                    .ne(selections.iter().map(|s| &s.cut))));
         self.selections = selections;
         // Store this scene's own pages; other scenes' demands are unioned at admission time.
         let mut own = asset.roots.clone();

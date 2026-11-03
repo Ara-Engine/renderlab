@@ -648,3 +648,159 @@ fn gpu_virtual_registered_pressure_quiescence() {
     let reference = r.test_capture_color(&color);
     assert_registered_image(&pixels, &reference, 1920, 1080);
 }
+
+#[test]
+#[ignore = "Vulkan GPU; one-candidate moving progress with actual delayed reads, failure and repair"]
+fn gpu_virtual_one_candidate_motion_progress_and_failed_read() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let color = target(r.device(), 1920, 1080);
+    let camera_at = |distance| {
+        Camera::look_at(
+            Vec3::new(0., 0., distance),
+            Vec3::ZERO,
+            Vec3::Y,
+            1.,
+            0.05,
+            10000.,
+        )
+        .unwrap()
+    };
+    for fail in [false, true] {
+        let (package, blobs) = fixture(4);
+        let dir = directory("gpu-moving-progress");
+        for (i, (page, blob)) in package.pages.iter().zip(&blobs).enumerate() {
+            if !fail || i != 0 {
+                fs::write(
+                    dir.join(
+                        page.sha256
+                            .iter()
+                            .map(|v| format!("{v:02x}"))
+                            .collect::<String>(),
+                    ),
+                    blob,
+                )
+                .unwrap();
+            }
+        }
+        let detail_path = dir.join(
+            package.pages[0]
+                .sha256
+                .iter()
+                .map(|v| format!("{v:02x}"))
+                .collect::<String>(),
+        );
+        let mut a = VirtualAsset::new(
+            package,
+            dir,
+            StreamOptions {
+                max_candidates: 1,
+                io_delay: Duration::from_millis(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        for _ in 0..120 {
+            virtual_frame(&mut r, &color, &camera_at(22.), &mut a, &mut scene);
+            if scene.selections()[0].cut.pages == [PageId(1)] {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+        assert!(scene.selections()[0].demand.requested_pages.is_empty());
+        let mut ticks = 0;
+        for tick in 0..120 {
+            virtual_frame(
+                &mut r,
+                &color,
+                &camera_at(21. - tick as f32 * 0.001),
+                &mut a,
+                &mut scene,
+            );
+            ticks = tick + 1;
+            assert!(a.stats().candidates <= 1);
+            assert!(a.stats().geometry_peak <= a.options().geometry_bytes);
+            assert!(
+                scene.selections()[0]
+                    .cut
+                    .pages
+                    .iter()
+                    .all(|p| a.status(*p) == Some(PageStatus::Resident))
+            );
+            if (fail && a.failure(PageId(0)).is_some())
+                || scene.selections()[0].cut.pages == [PageId(0)]
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if fail {
+            assert!(
+                a.failure(PageId(0)).is_some(),
+                "moving query never read missing detail"
+            );
+            assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+            let reads = a.stats().reads;
+            for tick in 0..30 {
+                virtual_frame(
+                    &mut r,
+                    &color,
+                    &camera_at(20. - tick as f32 * 0.001),
+                    &mut a,
+                    &mut scene,
+                );
+            }
+            assert_eq!(
+                a.stats().reads,
+                reads,
+                "failed page retried without explicit repair"
+            );
+            fs::write(detail_path, &blobs[0]).unwrap();
+            a.retry(PageId(0)).unwrap();
+            for tick in 0..120 {
+                virtual_frame(
+                    &mut r,
+                    &color,
+                    &camera_at(20. - tick as f32 * 0.001),
+                    &mut a,
+                    &mut scene,
+                );
+                if scene.selections()[0].cut.pages == [PageId(0)] {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        for _ in 0..4 {
+            virtual_frame(&mut r, &color, &camera_at(22.), &mut a, &mut scene);
+        }
+        assert_eq!(
+            scene.selections()[0].cut.pages,
+            [PageId(1)],
+            "capped root rebuild pinned unnecessary fine detail"
+        );
+        for _ in 0..8 {
+            virtual_frame(&mut r, &color, &camera_at(21.), &mut a, &mut scene);
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        for _ in 0..4 {
+            virtual_frame(&mut r, &color, &camera_at(4000.), &mut a, &mut scene);
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(3)]);
+        let before = a.stats().clone();
+        for _ in 0..300 {
+            virtual_frame(&mut r, &color, &camera_at(4000.), &mut a, &mut scene);
+        }
+        assert_eq!(a.stats().reads, before.reads);
+        assert_eq!(a.stats().uploads, before.uploads);
+        assert_eq!(a.stats().selection_runs, before.selection_runs);
+        eprintln!(
+            "m4_one_candidate_progress fail={fail} moving_ticks={ticks} reads={} uploads={} quiet=300",
+            a.stats().reads,
+            a.stats().uploads
+        );
+    }
+}
