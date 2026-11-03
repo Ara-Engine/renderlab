@@ -1,3 +1,5 @@
+#[path = "environment_gpu.rs"]
+mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 use lighting_gpu::LightingGpu;
@@ -308,6 +310,7 @@ pub struct Renderer {
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
+    environment: crate::environment::EnvironmentState,
     shadows: ShadowState,
     depth: Option<Depth>,
     msaa: Option<Depth>,
@@ -422,9 +425,10 @@ impl Renderer {
         });
         limits.validate(&device.limits())?;
         let device_limits = device.limits();
-        if device_limits.max_bind_groups < 4
+        if device_limits.max_texture_array_layers < 6
+            || device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 5
+            || device_limits.max_sampled_textures_per_shader_stage < 7
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(
@@ -620,6 +624,7 @@ impl Renderer {
             pipeline,
             shader_hash: Sha256::digest(wgsl.as_bytes()).into(),
             lighting,
+            environment: Default::default(),
             shadows,
             depth: None,
             msaa: None,
@@ -645,7 +650,8 @@ impl Renderer {
             },
             uploads: UploadBytes {
                 lut: crate::lighting::DFG.len() as u64,
-                write_calls: 1,
+                environment: 48,
+                write_calls: 2,
                 ..Default::default()
             },
             submissions: 0,
@@ -2238,6 +2244,9 @@ impl Renderer {
             });
         }
         self.lighting.collect(self.completed_submission);
+        self.environment
+            .uploading
+            .retain(|(last, _)| *last > self.completed_submission);
         self.shadows.collect(self.completed_submission);
         self.check_fault()?;
         Ok(start.elapsed())

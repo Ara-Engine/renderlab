@@ -3,6 +3,8 @@ use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
+    environment_generation: u64,
+    _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
     _allocation: Allocation,
@@ -28,6 +30,7 @@ pub(super) struct LightingGpu {
     _dfg: Owned<wgpu::Texture>,
     _dfg_allocation: Allocation,
     sampler: Owned<wgpu::Sampler>,
+    dummy_environment: crate::environment::EnvironmentCube,
     active: Option<LightBuffer>,
     retired: Vec<(u64, LightBuffer)>,
     pub retired_hdr: Vec<(u64, Hdr)>,
@@ -35,7 +38,7 @@ pub(super) struct LightingGpu {
     pub(super) pending: PackedLighting,
     pub(super) source_lights: Vec<Light>,
     published: Vec<u8>,
-    uniform_shadow: Option<[u8; 32]>,
+    uniform_shadow: Option<[u8; 48]>,
     pub max: u32,
     pub generation: u64,
     pub target_generation: u64,
@@ -50,7 +53,7 @@ impl LightingGpu {
         let uniform = ledger.own(
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("lighting eye/count/environment/exposure"),
-                size: 32,
+                size: 48,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -66,7 +69,7 @@ impl LightingGpu {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(32),
+                            min_binding_size: wgpu::BufferSize::new(48),
                         },
                         count: None,
                     },
@@ -81,6 +84,8 @@ impl LightingGpu {
                         count: None,
                     },
                     texture_entry(2),
+                    cube_entry(6),
+                    cube_entry(7),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -175,10 +180,12 @@ impl LightingGpu {
                 label: Some("DFG bilinear clamp"),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
             ResourceKind::Sampler,
         );
+        let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
         let limits = device.limits();
         Self {
             bindings,
@@ -186,11 +193,12 @@ impl LightingGpu {
             present_bindings,
             present_layout,
             uniform,
-            _uniform_allocation: ledger.allocate(AllocationKind::Light, 32),
+            _uniform_allocation: ledger.allocate(AllocationKind::Light, 48),
             dfg_view,
             _dfg: dfg,
             _dfg_allocation: ledger.allocate(AllocationKind::Lut, DFG.len() as u64),
             sampler,
+            dummy_environment,
             active: None,
             retired: vec![],
             retired_hdr: vec![],
@@ -344,6 +352,7 @@ impl Renderer {
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
+                || active.environment_generation != self.environment.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -360,6 +369,28 @@ impl Renderer {
                     label: Some("lighting"),
                     layout: &state.bindings,
                     entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.environment
+                                    .selected
+                                    .as_ref()
+                                    .map_or(&state.dummy_environment.view, |map| {
+                                        &map.0.diffuse.view
+                                    }),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.environment
+                                    .selected
+                                    .as_ref()
+                                    .map_or(&state.dummy_environment.view, |map| {
+                                        &map.0.specular.view
+                                    }),
+                            ),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 0,
                             resource: state.uniform.as_entire_binding(),
@@ -392,6 +423,8 @@ impl Renderer {
             );
             let next = LightBuffer {
                 shadow_generation: self.shadows.stats.resource_generation,
+                environment_generation: self.environment.generation,
+                _environment: self.environment.selected.clone(),
                 buffer,
                 bind,
                 _allocation: self.ledger.allocate(AllocationKind::Light, needed),
@@ -415,7 +448,9 @@ impl Renderer {
         if state.published != state.pending.records {
             state.published.clone_from(&state.pending.records);
         }
-        let uniform = state.pending.uniform(eye);
+        let mut uniform = [0; 48];
+        uniform[..32].copy_from_slice(&state.pending.uniform(eye));
+        uniform[32..].copy_from_slice(&self.environment.uniform());
         if let Some(span) = dirty_span(
             state.uniform_shadow.as_ref().map_or(&[], |b| b.as_slice()),
             &uniform,
@@ -513,10 +548,24 @@ impl Renderer {
             let mut hash = Sha256::new();
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));
+            hash.update(self.environment.uniform());
+            if let Some(map) = &self.environment.selected {
+                hash.update(map.0.hash);
+            }
             if self.shadows.settings.enabled() {
                 hash.update(self.shadows.published_hash);
             }
             hdr.lighting_hash = hash.finalize().into();
         }
     }
+}
+
+fn cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    let mut entry = texture_entry(binding);
+    entry.ty = wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        view_dimension: wgpu::TextureViewDimension::Cube,
+        multisampled: false,
+    };
+    entry
 }

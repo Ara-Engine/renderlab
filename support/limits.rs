@@ -10,6 +10,16 @@ pub struct Policy {
 }
 const SCHEMA: &[(&str, &[&str])] = &[
     (
+        "environment",
+        &[
+            "max_dimension",
+            "max_texels",
+            "max_payload_bytes",
+            "max_map_bytes",
+            "max_owned_bytes",
+        ],
+    ),
+    (
         "cook",
         &[
             "source_bytes",
@@ -105,7 +115,10 @@ impl Policy {
                 .iter()
                 .find(|(s, _)| s == section)
                 .ok_or_else(|| format!("unknown limits field {section}"))?;
-            let uncapped = matches!(section.as_str(), "cook" | "prepared" | "virtual" | "viewer");
+            let uncapped = matches!(
+                section.as_str(),
+                "cook" | "prepared" | "virtual" | "viewer" | "environment"
+            );
             if uncapped && value == "unlimited" {
                 continue;
             }

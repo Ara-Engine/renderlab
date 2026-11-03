@@ -5,6 +5,8 @@ mod runtime_policy;
 use renderlab::asset;
 #[path = "../../examples/m4/cameras.rs"]
 mod cameras;
+#[path = "../../support/environment_controls.rs"]
+mod environment_settings;
 mod fixture;
 #[path = "../../support/hdr_files.rs"]
 mod hdr_files;
@@ -58,6 +60,8 @@ struct Options {
     policy: policy::Policy,
     shader: PathBuf,
     lighting: Option<PathBuf>,
+    environment: Option<PathBuf>,
+    environment_settings: Option<PathBuf>,
     capture_hdr: Option<PathBuf>,
     frames: Option<u64>,
     seconds: Option<f64>,
@@ -85,6 +89,8 @@ impl Options {
         let mut options = Self {
             policy,
             lighting: None,
+            environment: None,
+            environment_settings: None,
             capture_hdr: None,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
             frames: None,
@@ -213,6 +219,16 @@ impl Options {
                             .map_err(|_| "invalid seconds")?,
                     )
                 }
+                "--environment" => {
+                    options.environment = Some(args.next().ok_or("missing RLE1 path")?.into())
+                }
+                "--environment-settings" => {
+                    options.environment_settings = Some(
+                        args.next()
+                            .ok_or("missing environment settings JSON")?
+                            .into(),
+                    )
+                }
                 "--lighting" => {
                     options.lighting = Some(args.next().ok_or("missing lighting JSON")?.into())
                 }
@@ -293,6 +309,7 @@ struct View {
     shader_rejected: bool,
     shader_check: Instant,
     lighting_file: lighting_settings::LightingFile,
+    environment_file: environment_settings::EnvironmentFile,
     hdr_capture: Option<renderlab::Capture>,
     hdr_written: bool,
     markers: VecDeque<Marker>,
@@ -395,17 +412,18 @@ impl View {
             options.samples as u32,
             options.view,
             if options.view == ViewMode::Lit {
-                "GGX_Lambert_constant_environment_optional_hard_shadows_exposed_RGBA16F_resolve_Reinhard_no_normal_maps_no_GI"
+                "GGX_Lambert_constant_or_RLE1_environment_optional_normal_maps_hard_shadows_exposed_RGBA16F_resolve_Reinhard_no_GI"
             } else {
                 "unlit_depth32float"
             },
             cfg!(debug_assertions)
         );
-        let required_features = if options.timestamps {
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
-        } else {
-            wgpu::Features::empty()
-        };
+        let required_features = (adapter.features() & wgpu::Features::FLOAT32_FILTERABLE)
+            | if options.timestamps {
+                adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features,
@@ -449,6 +467,41 @@ impl View {
             &source,
         )?;
         renderer.set_lighting(&lighting_settings::default_lighting())?;
+        let mut environment_file = environment_settings::EnvironmentFile::load(
+            options.environment.as_deref(),
+            &renderer,
+            asset::environment::Limits {
+                max_dimension: options
+                    .policy
+                    .dimension("environment", "max_dimension", 4096),
+                max_texels: options
+                    .policy
+                    .size("environment", "max_texels", 64 * 1024 * 1024)
+                    as u64,
+                max_payload_bytes: options.policy.size(
+                    "environment",
+                    "max_payload_bytes",
+                    768 * 1024 * 1024,
+                ) as u64,
+            },
+        )?;
+        renderer.set_environment_limits(renderlab::EnvironmentLimits {
+            max_dimension: options
+                .policy
+                .dimension("environment", "max_dimension", 2048),
+            max_map_bytes: options
+                .policy
+                .size("environment", "max_map_bytes", 128 * 1024 * 1024)
+                as u64,
+            max_owned_bytes: options.policy.size(
+                "environment",
+                "max_owned_bytes",
+                384 * 1024 * 1024,
+            ) as u64,
+        })?;
+        if let Some(path) = &options.environment_settings {
+            environment_file.poll(path, &mut renderer);
+        }
         let mut lighting_file = lighting_settings::LightingFile::default();
         if let Some(path) = &options.lighting {
             lighting_file.poll(path, &mut renderer);
@@ -486,6 +539,7 @@ impl View {
             shader_rejected: false,
             shader_check: Instant::now(),
             lighting_file,
+            environment_file,
             hdr_capture: None,
             hdr_written: false,
             markers: VecDeque::from([Marker {
@@ -597,8 +651,12 @@ impl View {
                 )?;
             }
         }
+        self.environment_file.advance(&mut self.renderer)?;
         if self.shader_check.elapsed() >= Duration::from_millis(50) {
             self.shader_check = Instant::now();
+            if let Some(path) = &options.environment_settings {
+                self.environment_file.poll(path, &mut self.renderer);
+            }
             if let Some(path) = &options.lighting {
                 self.lighting_file.poll(path, &mut self.renderer);
             }

@@ -12,6 +12,7 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UploadBytes {
+    pub environment: u64,
     pub shadows: u64,
     pub geometry: u64,
     pub lights: u64,
@@ -35,6 +36,7 @@ pub struct UploadBytes {
 }
 impl UploadBytes {
     pub(crate) fn add(&mut self, other: Self) {
+        self.environment += other.environment;
         self.shadows += other.shadows;
         self.geometry += other.geometry;
         self.lights += other.lights;
@@ -175,6 +177,8 @@ pub struct Ownership {
     /// Borrowed color attachment views are intentionally short-lived.
     pub attachment_views: Count,
     /// Byte counts by purpose. Includes caller resources while owned; excludes driver retention.
+    pub environment_bytes: Count,
+    pub environment_creations: u64,
     pub texture_bytes: Count,
     pub material_bytes: Count,
     pub target_bytes: Count,
@@ -203,6 +207,7 @@ impl Ledger {
     pub fn allocate(&self, kind: AllocationKind, bytes: u64) -> Allocation {
         let mut ledger = self.0.lock().unwrap();
         match kind {
+            AllocationKind::Environment => ledger.environment_creations += 1,
             AllocationKind::Texture => ledger.texture_creations += 1,
             AllocationKind::Material => ledger.material_creations += 1,
             AllocationKind::Target => ledger.target_creations += 1,
@@ -250,6 +255,7 @@ impl Ledger {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum AllocationKind {
+    Environment,
     Texture,
     Material,
     Target,
@@ -259,6 +265,7 @@ pub(crate) enum AllocationKind {
 }
 fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count {
     match kind {
+        AllocationKind::Environment => &mut ledger.environment_bytes,
         AllocationKind::Texture => &mut ledger.texture_bytes,
         AllocationKind::Material => &mut ledger.material_bytes,
         AllocationKind::Target => &mut ledger.target_bytes,

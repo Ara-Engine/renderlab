@@ -81,12 +81,14 @@ fn vertex_output(input: VertexInput) -> VertexOutput {
 }
 
 // Only fs_lit uses group 3.
-struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32 };
+struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32, map:vec4<f32> };
 struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
 @group(3) @binding(1) var<storage,read> lights:array<Light>;
 @group(3) @binding(2) var dfg:texture_2d<f32>;
 @group(3) @binding(3) var dfg_sampler:sampler;
+@group(3) @binding(6) var environment_diffuse:texture_cube<f32>;
+@group(3) @binding(7) var environment_specular:texture_cube<f32>;
 struct ShadowView {
     world_to_clip:mat4x4<f32>,
     // Directional camera-depth interval or local radial interval; normalized and world bias.
@@ -180,6 +182,19 @@ fn exposed_product(a:vec3<f32>, b:vec3<f32>) -> vec3<f32> {
     let exponent=clamp(ap.exp+bp.exp+ep.exp,vec3<i32>(-126),vec3<i32>(20));
     return min(ldexp(mantissa,exponent),vec3<f32>(65504.0));
 }
+// Metadata and caller yaw both move source to world. Sample with the inverse +Y rotation.
+fn environment_direction(world:vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(lighting.map.x*world.x-lighting.map.y*world.z,world.y,lighting.map.y*world.x+lighting.map.x*world.z);
+}
+fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
+    let a=frexp(energy);
+    let b=frexp(response);
+    let e=frexp(vec3<f32>(lighting.exposure));
+    let i=frexp(vec3<f32>(lighting.map.z));
+    // Four nonzero mantissas have product >= 1/16. Keep dim values until final 16f storage.
+    let exponent=clamp(a.exp+b.exp+e.exp+i.exp,vec3<i32>(-126),vec3<i32>(21));
+    return min(ldexp(a.fract*b.fract*e.fract*i.fract,exponent),vec3<f32>(65504.0));
+}
 fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32) -> vec3<f32> {
     let nl=max(dot(n,l),0.0);
     let nv=max(dot(n,v),1e-7);
@@ -194,7 +209,7 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
     let denom=max(dot(c,c)+a2*nh*nh,1e-20);
     let d=a2/(PI*denom*denom);
     let visibility=0.5/max(nl*sqrt(a2+(1.0-a2)*nv*nv)+nv*sqrt(a2+(1.0-a2)*nl*nl),1e-20);
-    let f0=mix(vec3<f32>(0.04),base,metal);
+    let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
     let fresnel=f0+(vec3<f32>(1.0)-f0)*pow(1.0-vh,5.0);
     // Declared initial diffuse model: plain nonmetallic Lambert.
     return (base*((1.0-metal)/PI)+d*visibility*fresnel)*nl;
@@ -239,8 +254,15 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
     let rough=clamp(material.roughness*mr.g,0.0,1.0);
     let uv=(vec2<f32>(clamp(dot(n,v),0.0,1.0),rough)*127.0+vec2<f32>(0.5))/128.0;
     let ab=textureSample(dfg,dfg_sampler,uv).rg;
-    let f0=mix(vec3<f32>(0.04),base,metal);
+    let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
     var exposed=exposed_product(lighting.environment,base*(1.0-metal)+f0*ab.x+vec3<f32>(ab.y));
+    if lighting.map.w>0.0 {
+        let irradiance=textureSampleLevel(environment_diffuse,dfg_sampler,environment_direction(n),0.0).rgb;
+        let reflected=reflect(-v,n);
+        let radiance=textureSampleLevel(environment_specular,dfg_sampler,environment_direction(reflected),rough*(lighting.map.w-1.0)).rgb;
+        exposed=min(environment_product(irradiance,base*((1.0-metal)/PI))+
+            environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
+    }
     for(var i=0u;i<lighting.count;i+=1u) {
         let light=lights[i];
         var l=-light.travel_outer.xyz;

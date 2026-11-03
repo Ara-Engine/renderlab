@@ -3,6 +3,7 @@
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+mod environment;
 mod instances;
 mod lighting;
 mod material;
@@ -15,6 +16,7 @@ mod shadows;
 pub mod virtual_geometry;
 mod visibility;
 
+pub use environment::{EnvironmentLimits, EnvironmentMap, EnvironmentParameters};
 pub use glam::{Mat4, Vec3};
 pub use instances::{Instances, Visibility};
 pub use lighting::{Light, Lighting, decode_f16};

@@ -91,7 +91,7 @@ fn lighting_validation_and_packing() {
 // Independent midpoint product quadrature over GGX's inverse CDF and azimuth.
 // Unlike preparation this has no radical-inverse sequence. Two resolutions check
 // convergence independently of finite LUT/interpolation/half precision errors.
-fn integrate_dfg(nv: f64, r: f64, nu: usize, np: usize) -> [f64; 2] {
+pub(super) fn integrate_dfg(nv: f64, r: f64, nu: usize, np: usize) -> [f64; 2] {
     let a = r.powi(2).max(1e-4);
     let a2 = a * a;
     let mut sum = [0.; 2];
@@ -283,7 +283,7 @@ fn gpu_lit_edits_and_bundle_recovery() {
     }
     r.test_drain("light generations");
     assert_eq!(r.lighting_stats().retained_light_generations, 0);
-    assert_eq!(r.stats().ownership.light_bytes.live, 64 * 64 + 32);
+    assert_eq!(r.stats().ownership.light_bytes.live, 64 * 64 + 48);
     let generation = r.lighting_stats().target_generation;
     let other = target(r.device(), 145, 113);
     for color in [&other, &t] {

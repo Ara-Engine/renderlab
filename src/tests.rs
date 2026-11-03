@@ -1226,3 +1226,6 @@ mod shadow_tests;
 
 #[path = "normal_map_tests.rs"]
 mod normal_maps;
+
+#[path = "environment_tests.rs"]
+mod environment_tests;

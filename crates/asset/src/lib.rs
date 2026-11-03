@@ -1,5 +1,6 @@
 //! Owned prepared assets. No GPU, window, importer, codecs or math crate.
 mod binary;
+pub mod environment;
 pub mod virtual_mesh;
 
 pub use binary::{NORMAL_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode, encode_mesh};
