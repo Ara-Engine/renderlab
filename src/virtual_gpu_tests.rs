@@ -397,6 +397,98 @@ fn gpu_virtual_streaming_failure_repair_and_retirement_waves() {
 #[allow(dead_code)]
 #[path = "../examples/m4/cameras.rs"]
 mod cameras;
+use super::materials::prepared;
+
+fn assert_registered_image(actual: &[u8], reference: &[u8], width: usize, height: usize) {
+    let mask = |pixels: &[u8]| -> Vec<bool> {
+        pixels
+            .chunks_exact(4)
+            .map(|p| p[..3] != pixels[..3])
+            .collect()
+    };
+    let actual_mask = mask(actual);
+    let reference_mask = mask(reference);
+    let boundary = |mask: &[bool]| -> Vec<bool> {
+        (0..width * height)
+            .map(|i| {
+                mask[i]
+                    && (i % width == 0
+                        || i % width == width - 1
+                        || i < width
+                        || i >= width * (height - 1)
+                        || !mask[i - 1]
+                        || !mask[i + 1]
+                        || !mask[i - width]
+                        || !mask[i + width])
+            })
+            .collect()
+    };
+    let actual_edge = boundary(&actual_mask);
+    let reference_edge = boundary(&reference_mask);
+    let near = |i: usize, edge: &[bool], radius_squared: isize| {
+        (-2_isize..=2).any(|dy| {
+            (-2_isize..=2).any(|dx| {
+                let x = (i % width) as isize + dx;
+                let y = (i / width) as isize + dy;
+                dx * dx + dy * dy <= radius_squared
+                    && x >= 0
+                    && y >= 0
+                    && x < width as isize
+                    && y < height as isize
+                    && edge[y as usize * width + x as usize]
+            })
+        })
+    };
+    let mut distances_squared = Vec::new();
+    for (source, target) in [
+        (&actual_edge, &reference_edge),
+        (&reference_edge, &actual_edge),
+    ] {
+        for (i, &edge) in source.iter().enumerate().filter(|(_, edge)| **edge) {
+            assert!(
+                edge && near(i, target, 4),
+                "registered silhouette exceeds 2px at ({},{})",
+                i % width,
+                i / width
+            );
+            distances_squared.push(if target[i] {
+                0_u8
+            } else if near(i, target, 1) {
+                1
+            } else {
+                4
+            });
+        }
+    }
+    assert!(!distances_squared.is_empty());
+    distances_squared.sort_unstable();
+    let p99 = distances_squared[((distances_squared.len() - 1) as f64 * 0.99).ceil() as usize];
+    assert!(p99 <= 1, "registered silhouette p99 exceeds 1px");
+    let mut interior = 0;
+    let mut disagreements = 0;
+    for i in 0..width * height {
+        if actual_mask[i]
+            && reference_mask[i]
+            && !near(i, &actual_edge, 4)
+            && !near(i, &reference_edge, 4)
+        {
+            interior += 1;
+            // The registered unlit sheet's blue/orange factors have opposite red/blue ordering.
+            disagreements += usize::from(
+                (actual[i * 4] > actual[i * 4 + 2]) != (reference[i * 4] > reference[i * 4 + 2]),
+            );
+        }
+    }
+    assert!(interior > 0);
+    assert!(
+        disagreements * 1000 <= interior,
+        "registered material IDs disagree in >0.1% of interior"
+    );
+    eprintln!(
+        "m4_image boundary_pixels={} p99_squared={p99} max_distance<=2 material_disagreements={disagreements} interior={interior}",
+        distances_squared.len()
+    );
+}
 #[test]
 #[ignore = "Vulkan GPU; registered 8MiB near-view convergence and 300 quiet frames after actual page pressure"]
 fn gpu_virtual_registered_pressure_quiescence() {
@@ -435,8 +527,8 @@ fn gpu_virtual_registered_pressure_quiescence() {
         );
     }
     assert!(
-        a.stats().evictions > 0,
-        "registered pressure never exercised replacement"
+        a.stats().residency_debt,
+        "registered fixture did not reach pool capacity"
     );
     let before = a.stats().clone();
     for _ in 0..300 {
@@ -460,4 +552,29 @@ fn gpu_virtual_registered_pressure_quiescence() {
         "m4_registered_pressure convergence_frames={frames} settled_frames=300 stats={:?}",
         a.stats()
     );
+    let mut full = prepared::Prepared::load(std::path::Path::new(
+        "measurements/m4-cook/registration-initial/material-thin.rla",
+    ))
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        full.advance(&mut r).unwrap();
+        if full.ready()
+            && r.try_render_view(
+                &color,
+                &cam,
+                &mut full.draws(Visibility::Unculled),
+                ViewMode::BaseColor,
+            )
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        r.poll().unwrap();
+        assert!(Instant::now() < deadline, "original RLA reference deadline");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let reference = r.test_capture_color(&color);
+    assert_registered_image(&pixels, &reference, 1920, 1080);
 }

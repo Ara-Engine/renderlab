@@ -24,6 +24,7 @@ struct Options {
     frames: usize,
     start: usize,
     warmup: usize,
+    settle_final: usize,
     hold_pose: bool,
     captures: BTreeSet<usize>,
     samples: SampleCount,
@@ -42,6 +43,7 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
         frames: 631,
         start: 0,
         warmup: 0,
+        settle_final: 0,
         hold_pose: false,
         captures: BTreeSet::new(),
         samples: SampleCount::One,
@@ -70,6 +72,7 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
             "--frames" => o.frames = v.parse()?,
             "--start" => o.start = v.parse()?,
             "--warmup" => o.warmup = v.parse()?,
+            "--settle-final" => o.settle_final = v.parse()?,
             "--capture" => o.captures = v.split(',').map(str::parse).collect::<Result<_, _>>()?,
             "--geometry-bytes" => o.stream.geometry_bytes = v.parse()?,
             "--candidates" => o.stream.max_candidates = v.parse()?,
@@ -191,14 +194,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut color = None;
     let mut accepted = 0;
     let start = Instant::now();
-    for n in 0..o.frames + o.warmup {
+    let total = o.frames + o.warmup + o.settle_final;
+    for n in 0..total {
         if n % 60 == 0 {
             guard()?;
         }
         let index = if n < o.warmup || o.hold_pose {
             o.start
         } else {
-            o.start + n - o.warmup
+            o.start + (n - o.warmup).min(o.frames - 1)
         };
         let pose = &cameras.frames[index];
         let camera = pose.camera()?;
@@ -310,7 +314,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.evictions,
             s.retained_cuts
         )?;
-        if o.captures.contains(&index) && (!o.hold_pose || n == o.warmup + o.frames - 1) {
+        let final_pose = o.start + o.frames - 1;
+        let final_capture = o.hold_pose || (o.settle_final > 0 && index == final_pose);
+        if o.captures.contains(&index) && (!final_capture || n == total - 1) {
             let capture_start = Instant::now();
             let mut capture = loop {
                 if let Some(c) = r.try_capture(color)? {
@@ -372,6 +378,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.stats()
         ),
     )?;
+    if let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene) {
+        let index = if o.hold_pose {
+            o.start
+        } else {
+            o.start + o.frames - 1
+        };
+        let pose = &cameras.frames[index];
+        let mut groups = BufWriter::new(fs::File::create(o.output.join("groups.csv"))?);
+        writeln!(
+            groups,
+            "placement,group,depth,material,error,active,selected_clusters,selected_indices"
+        )?;
+        for (slot, (placement, selection)) in asset
+            .package()
+            .placements
+            .iter()
+            .zip(scene.selections())
+            .enumerate()
+        {
+            let mesh = &asset.package().meshes[placement.mesh as usize];
+            let errors = project_errors(
+                mesh,
+                &pose.camera()?,
+                Mat4::from_cols_array_2d(&placement.transform),
+                pose.height,
+            )?;
+            for (id, (group, error)) in mesh.groups.iter().zip(errors).enumerate() {
+                let selected: Vec<_> = selection
+                    .cut
+                    .clusters
+                    .iter()
+                    .map(|c| &mesh.clusters[c.index()])
+                    .filter(|c| c.owner.index() == id)
+                    .collect();
+                writeln!(
+                    groups,
+                    "{slot},{id},{},{},{error},{},{},{}",
+                    group.depth,
+                    mesh.clusters[group.clusters.offset as usize].material,
+                    selection
+                        .cut
+                        .active_groups
+                        .binary_search(&asset::virtual_mesh::GroupId(id as u32))
+                        .is_ok(),
+                    selected.len(),
+                    selected.iter().map(|c| c.indices.count).sum::<u32>()
+                )?;
+            }
+        }
+    }
     eprintln!(
         "replay frames={accepted} output={} stream={:?}",
         o.output.display(),

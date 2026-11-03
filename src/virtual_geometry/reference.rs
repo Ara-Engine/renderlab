@@ -68,7 +68,14 @@ pub(super) fn select(
     let mut reasons = vec![];
     let mut candidates = 0;
     let mut visits = 0;
-    for (g, &error) in errors.iter().enumerate() {
+    let mut published = active.clone();
+    let mut order: Vec<_> = errors.iter().copied().enumerate().collect();
+    order.sort_by(|(a, x), (b, y)| {
+        y.total_cmp(x)
+            .then_with(|| mesh.groups[*b].depth.cmp(&mesh.groups[*a].depth))
+            .then_with(|| a.cmp(b))
+    });
+    for (g, error) in order {
         if active.contains(&GroupId(g as u32)) || error <= threshold {
             continue;
         }
@@ -115,12 +122,14 @@ pub(super) fn select(
                 required = target;
                 if missing.is_empty() {
                     active = proposal;
+                    published = active.clone();
                     selected = next;
+                    requested.clear();
                     None
                 } else {
                     requested = missing;
-                    reasons.push(DebtReason::MissingPages);
-                    break;
+                    active = proposal;
+                    None
                 }
             }
         };
@@ -130,12 +139,15 @@ pub(super) fn select(
             reasons.push(r);
         }
     }
+    if !requested.is_empty() {
+        reasons.push(DebtReason::MissingPages);
+    }
     let denied: Vec<_> = (0..mesh.groups.len())
-        .filter(|g| !active.contains(&GroupId(*g as u32)) && errors[*g] > threshold)
+        .filter(|g| !published.contains(&GroupId(*g as u32)) && errors[*g] > threshold)
         .collect();
     Ok(Selection {
         cut: Cut {
-            active_groups: active.into_iter().collect(),
+            active_groups: published.into_iter().collect(),
             pages: pages(&selected).into_iter().collect(),
             clusters: selected,
         },

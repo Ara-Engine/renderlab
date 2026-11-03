@@ -222,6 +222,7 @@ pub struct VirtualScene {
     pub(crate) selections: Vec<Selection>,
     protected: Vec<PageId>,
     key: Option<SelectionKey>,
+    continue_selection: bool,
     transforms: u64,
 }
 fn roots(package: &Package) -> Vec<PageId> {
@@ -762,6 +763,7 @@ impl VirtualScene {
             selections: vec![],
             protected: asset.roots.clone(),
             key: None,
+            continue_selection: false,
             transforms: 0,
         })
     }
@@ -832,9 +834,16 @@ impl VirtualScene {
             registry: asset.registry.lock().unwrap().revision,
             transforms: self.transforms,
         };
-        if self.key.as_ref() == Some(&key) {
+        if self.key.as_ref() == Some(&key) && !self.continue_selection {
             return Ok(());
         }
+        let same_view = self.key.as_ref().is_some_and(|old| {
+            old.camera == key.camera
+                && old.fov == key.fov
+                && old.near == key.near
+                && old.height == key.height
+                && old.transforms == key.transforms
+        });
         let mut minimum_left: usize = self
             .meshes
             .iter()
@@ -868,62 +877,69 @@ impl VirtualScene {
             let errors = project_errors(mesh, camera, self.models()[slot], height)?;
             asset.stats.projection += start.elapsed();
             let start = Instant::now();
-            let mut selection = match asset.options.selector {
-                SelectorMode::Baseline => select_with_protected(
+            let initial = self
+                .selections
+                .get(slot)
+                .filter(|_| same_view)
+                .map(|s| &s.cut);
+            let budget = SelectionBudget {
+                // Reserve staging before planning any resident transition.
+                geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
+                max_candidates: asset
+                    .options
+                    .max_candidates
+                    .saturating_sub(candidates + other_candidates),
+                max_clusters: asset.options.max_clusters - output - minimum_left - other_output,
+                max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
+            };
+            let mut selection = match (asset.options.selector, initial) {
+                (SelectorMode::Baseline, Some(cut)) => select_from_cut(
                     mesh,
                     &errors,
                     asset.options.error_pixels,
                     available,
-                    SelectionBudget {
-                        // One full staging page of headroom. Resident slots include padding reservation.
-                        geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
-                        max_candidates: asset
-                            .options
-                            .max_candidates
-                            .saturating_sub(candidates + other_candidates),
-                        max_clusters: asset.options.max_clusters
-                            - output
-                            - minimum_left
-                            - other_output,
-                        max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
-                    },
+                    budget,
+                    &protected,
+                    cut,
+                )
+                .map_err(|e| Error::InvalidInput(e.0))?,
+                (SelectorMode::Baseline, None) => select_with_protected(
+                    mesh,
+                    &errors,
+                    asset.options.error_pixels,
+                    available,
+                    budget,
                     &protected,
                 )
                 .map_err(|e| Error::InvalidInput(e.0))?,
-                SelectorMode::SimpleReference => reference::select(
+                (SelectorMode::SimpleReference, initial) => reference::select(
                     mesh,
                     &errors,
                     asset.options.error_pixels,
                     available,
-                    SelectionBudget {
+                    budget,
+                    &protected,
+                    initial,
+                )?,
+            };
+            if initial.is_none()
+                && retain_better_cut(
+                    self.selections.get(slot),
+                    &mut selection,
+                    &errors,
+                    asset.options.error_pixels,
+                    available,
+                    &protected,
+                    RetentionBudget {
+                        roots: &asset.roots,
                         geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
-                        max_candidates: asset
-                            .options
-                            .max_candidates
-                            .saturating_sub(candidates + other_candidates),
                         max_clusters: asset.options.max_clusters
                             - output
                             - minimum_left
                             - other_output,
-                        max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
                     },
-                    &protected,
-                    None,
-                )?,
-            };
-            if retain_better_cut(
-                self.selections.get(slot),
-                &mut selection,
-                &errors,
-                asset.options.error_pixels,
-                available,
-                &protected,
-                RetentionBudget {
-                    roots: &asset.roots,
-                    geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
-                    max_clusters: asset.options.max_clusters - output - minimum_left - other_output,
-                },
-            ) {
+                )
+            {
                 asset.stats.retained_cuts += 1;
                 if selection.debt.unresolved_groups > 0 {
                     let spent = selection.candidates;
@@ -973,6 +989,18 @@ impl VirtualScene {
             union_into(&mut protected, &selection.demand.required_pages);
             selections.push(selection);
         }
+        // Resume capped work only after a useful publication or a new view. A stalled
+        // missing/capacity-denied proposal stays cached until availability changes.
+        self.continue_selection = selections.iter().any(|s| {
+            s.debt
+                .reasons
+                .contains(&asset::virtual_mesh::DebtReason::CandidateCapacity)
+        }) && (!same_view
+            || self
+                .selections
+                .iter()
+                .map(|s| &s.cut)
+                .ne(selections.iter().map(|s| &s.cut)));
         self.selections = selections;
         // Store this scene's own pages; other scenes' demands are unioned at admission time.
         let mut own = asset.roots.clone();

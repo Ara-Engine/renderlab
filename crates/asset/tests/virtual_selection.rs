@@ -117,6 +117,80 @@ fn exact_once(mesh: &VirtualMesh, cut: &Cut) {
 }
 
 #[test]
+fn candidate_pressure_refines_highest_error_before_finest_group_id() {
+    let mesh = graph(&[
+        &[None],
+        &[Some(0)],
+        &[None],
+        &[Some(2)],
+        &[Some(1)],
+        &[Some(3)],
+    ]);
+    let errors = [10., 100., 10., 200., f64::INFINITY, f64::INFINITY];
+    let all = vec![true; mesh.clusters.len()];
+    for candidates in [1, 2] {
+        let result = select(
+            &mesh,
+            &errors,
+            1.,
+            &all,
+            SelectionBudget {
+                max_candidates: candidates,
+                ..budget()
+            },
+        )
+        .unwrap();
+        exact_once(&mesh, &result.cut);
+        assert!(
+            result.cut.active_groups.contains(&GroupId(3)),
+            "highest-error region starved by group ID: {:?}",
+            result.cut
+        );
+        assert!(
+            !result.cut.active_groups.contains(&GroupId(0)),
+            "fine detail consumed the coarse-region allowance"
+        );
+        assert_eq!(result.candidates, candidates);
+        assert_eq!(
+            result.debt.maximum_denied_error,
+            if candidates == 1 { 100. } else { 10. }
+        );
+    }
+}
+
+#[test]
+fn equal_infinite_errors_balance_coarse_levels_before_fine_detail() {
+    let mut mesh = graph(&[
+        &[None],
+        &[Some(0)],
+        &[None],
+        &[Some(2)],
+        &[Some(1)],
+        &[Some(3)],
+    ]);
+    for (g, depth) in mesh.groups.iter_mut().zip([0, 1, 0, 1, 2, 2]) {
+        g.depth = depth;
+    }
+    let result = select(
+        &mesh,
+        &[f64::INFINITY; 6],
+        1.,
+        &vec![true; mesh.clusters.len()],
+        SelectionBudget {
+            max_candidates: 2,
+            ..budget()
+        },
+    )
+    .unwrap();
+    exact_once(&mesh, &result.cut);
+    assert_eq!(
+        result.cut.active_groups,
+        [GroupId(1), GroupId(3), GroupId(4), GroupId(5)]
+    );
+    assert_eq!(result.candidates, 2);
+}
+
+#[test]
 fn exhaustive_small_dags_availability_capacity_and_upstream_rule() {
     let graphs = [
         graph(&[&[None], &[Some(0)], &[Some(1)]]),

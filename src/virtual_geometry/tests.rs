@@ -434,6 +434,52 @@ fn stationary_pressure_protects_current_cover_and_reports_capacity_without_rerea
             .contains(&asset::virtual_mesh::DebtReason::GeometryCapacity)
     );
 }
+
+#[test]
+fn one_candidate_streaming_advances_from_published_cut_without_reloading_intermediates() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (p, _) = fixture(4);
+        let mut a = VirtualAsset::new(
+            p,
+            directory("one-candidate"),
+            StreamOptions {
+                max_candidates: 1,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        let mut available = [false, false, false, true];
+        for _ in 0..8 {
+            let previous = scene.selections().first().map(|s| s.cut.clone());
+            scene.select(&mut a, &available, &camera(4.), 1080).unwrap();
+            assert!(a.stats().candidates <= 1);
+            if scene.selections()[0].cut.pages == [PageId(0)] {
+                break;
+            }
+            let request = scene.selections()[0].demand.requested_pages.clone();
+            assert!(
+                !request.is_empty() || previous.as_ref() != Some(&scene.selections()[0].cut),
+                "candidate allowance spent on an obsolete root path: {:?}",
+                scene.selections()
+            );
+            for p in request {
+                assert!(!available[p.index()], "page requested twice");
+                available[p.index()] = true;
+                a.revision += 1;
+            }
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        let settled = a.stats().selection_runs;
+        scene.select(&mut a, &available, &camera(4.), 1080).unwrap();
+        assert_eq!(
+            a.stats().selection_runs,
+            settled,
+            "finished candidate work did not quiesce"
+        );
+    }
+}
 #[test]
 fn simple_current_cut_refinement_matches_baseline_and_avoids_obsolete_representations() {
     let (p, _) = fixture(4);

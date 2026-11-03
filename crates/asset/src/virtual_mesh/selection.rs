@@ -234,9 +234,19 @@ fn select_internal(
     let mut reasons = vec![];
     let mut candidates = 0;
     let mut visits = c;
+    let mut published = active.clone();
     // Incoming owners are represented by clusters. Topological propagation computes
     // the complete closure before looking at pages; intermediate representations are never required.
-    for seed in 0..n {
+    let mut order: Vec<_> = (0..n).collect();
+    // Near-plane errors can tie at infinity. Coarser levels must share detail
+    // before a low-ID region spends the pool on fine geometry.
+    order.sort_unstable_by(|&a, &b| {
+        projected_errors[b]
+            .total_cmp(&projected_errors[a])
+            .then_with(|| mesh.groups[b].depth.cmp(&mesh.groups[a].depth))
+            .then_with(|| a.cmp(&b))
+    });
+    for seed in order {
         if active[seed] || projected_errors[seed] <= threshold {
             continue;
         }
@@ -277,15 +287,22 @@ fn select_internal(
         if !missing.is_empty() {
             required = target;
             requested = missing;
-            reasons.push(DebtReason::MissingPages);
-            break;
+            active = proposal;
+            // Continue the bounded plan so a finer final cover can eliminate
+            // missing intermediate pages. Only available complete cuts publish.
+            continue;
         }
         active = proposal;
+        published.clone_from(&active);
         selected = replacement;
         required = target;
+        requested.clear();
+    }
+    if !requested.is_empty() {
+        reasons.push(DebtReason::MissingPages);
     }
     let denied: Vec<_> = (0..n)
-        .filter(|&g| !active[g] && projected_errors[g] > threshold)
+        .filter(|&g| !published[g] && projected_errors[g] > threshold)
         .collect();
     let debt = QualityDebt {
         unresolved_groups: denied.len(),
@@ -297,7 +314,7 @@ fn select_internal(
     };
     Ok(Selection {
         cut: Cut {
-            active_groups: active
+            active_groups: published
                 .iter()
                 .enumerate()
                 .filter(|(_, v)| **v)

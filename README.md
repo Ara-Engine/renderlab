@@ -16,7 +16,7 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 
-Milestones 1-3 are complete on the recorded Windows/Vulkan host. [Milestone 3](docs/milestone-3.md) records prepared assets, owned textures/materials, diagnostic views and basic MSAA. [Milestone 4](docs/milestone-4.md) is in progress: clustered pages and bounded runtime streaming are implemented, but a reproduced near-view silhouette failure blocks acceptance. Lighting, shadows, transparency, temporal reconstruction and GI remain future work. Thin features and texture detail can still alias, including with MSAA.
+Milestones 1-3 are complete on the recorded Windows/Vulkan host. [Milestone 3](docs/milestone-3.md) records prepared assets, owned textures/materials, diagnostic views and basic MSAA. [Milestone 4](docs/milestone-4.md) is in progress: clustered pages and bounded runtime streaming are implemented, but moving-frame quality and selection cost still block acceptance. Lighting, shadows, transparency, temporal reconstruction and GI remain future work. Thin features and texture detail can still alias, including with MSAA.
 
 ## Prepare an asset
 
