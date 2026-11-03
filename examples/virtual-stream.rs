@@ -1,9 +1,13 @@
 //! Finite registered-camera replay, with explicit full RLA and independent legal-selector controls.
 #[path = "m4/cameras.rs"]
 mod cameras;
+#[path = "m4/diagnostics.rs"]
+mod diagnostics;
 #[allow(dead_code)]
 #[path = "../viewer/src/prepared.rs"]
 mod prepared;
+#[path = "m4/selection_timing.rs"]
+mod selection_timing;
 #[path = "../support/validation.rs"]
 mod validation;
 use renderlab::{virtual_geometry::*, *};
@@ -26,6 +30,10 @@ struct Options {
     warmup: usize,
     settle_final: usize,
     hold_pose: bool,
+    page_log: bool,
+    frame_period: Duration,
+    repeats: usize,
+    cpu_stride: usize,
     captures: BTreeSet<usize>,
     samples: SampleCount,
     stream: StreamOptions,
@@ -45,6 +53,10 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
         warmup: 0,
         settle_final: 0,
         hold_pose: false,
+        page_log: false,
+        frame_period: Duration::ZERO,
+        repeats: 5,
+        cpu_stride: 30,
         captures: BTreeSet::new(),
         samples: SampleCount::One,
         stream: StreamOptions::default(),
@@ -55,6 +67,10 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         if arg == "--hold-pose" {
             o.hold_pose = true;
+            continue;
+        }
+        if arg == "--page-log" {
+            o.page_log = true;
             continue;
         }
         if arg == "--validate" {
@@ -70,6 +86,11 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
             "--output" => o.output = v.into(),
             "--mode" => o.mode = v,
             "--frames" => o.frames = v.parse()?,
+            "--frame-period-ms" => {
+                o.frame_period = Duration::try_from_secs_f64(v.parse::<f64>()? / 1000.)?
+            }
+            "--repeats" => o.repeats = v.parse()?,
+            "--cpu-stride" => o.cpu_stride = v.parse()?,
             "--start" => o.start = v.parse()?,
             "--warmup" => o.warmup = v.parse()?,
             "--settle-final" => o.settle_final = v.parse()?,
@@ -99,16 +120,16 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
         }
     }
     match o.mode.as_str() {
-        "stream" => {}
+        "stream" | "cpu" => {}
         "simple" => o.stream.selector = SelectorMode::SimpleReference,
         "full" => {
             if o.asset.is_none() {
                 return Err("full mode requires original --asset RLA".into());
             }
         }
-        _ => return Err("mode must be stream|simple|full".into()),
+        _ => return Err("mode must be stream|simple|full|cpu".into()),
     }
-    if o.frames == 0 {
+    if o.frames == 0 || o.repeats == 0 || o.repeats > 100 || o.cpu_stride == 0 {
         return Err("frames must be positive".into());
     }
     Ok(o)
@@ -150,6 +171,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("output directory already exists; preserve prior evidence".into());
     }
     fs::create_dir_all(&o.output)?;
+    fs::write(
+        o.output.join("run.txt"),
+        format!(
+            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={}\nargs={:?}\n",
+            if cfg!(debug_assertions) {
+                "dev"
+            } else {
+                "release"
+            },
+            cfg!(feature = "selection-oracle"),
+            cfg!(feature = "selection-shadow"),
+            cfg!(feature = "selection-profile"),
+            o.validate,
+            o.frame_period.as_secs_f64() * 1000.,
+            o.page_log,
+            std::env::args().collect::<Vec<_>>()
+        ),
+    )?;
+    if o.mode == "cpu" {
+        return selection_timing::run(&o, &cameras);
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -187,15 +229,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut csv = fs::File::create(o.output.join("frames.csv"))?;
     writeln!(
         csv,
-        "frame,phase,prep_us,encode_us,submit_us,projection_total_us,selection_total_us,admission_total_us,reads,uploads,geometry,peak,published,retiring,staging,pinned,payload,owned_buffers,metadata,scratch,cpu_ready,cut_clusters,candidates,visits,unresolved,max_error,candidate_debt,output_debt,residency_debt,selection_runs,io_queue_total_us,io_read_total_us,io_verify_total_us,failures,retries,evictions,retained_cuts"
+        "frame,phase,prep_us,encode_us,submit_us,projection_total_us,selection_total_us,admission_total_us,reads,uploads,geometry,peak,published,retiring,staging,pinned,payload,owned_buffers,metadata,scratch,cpu_ready,cut_clusters,candidates,visits,unresolved,max_error,candidate_debt,output_debt,residency_debt,selection_runs,io_queue_total_us,io_read_total_us,io_verify_total_us,failures,retries,evictions,retained_cuts,selection_calls,completion_total_us,resources_total_us,protection_total_us,stale_ready_total_us,make_room_total_us,upload_admission_total_us,requests_total_us,snapshot_total_us,dropped_ready,page_log_total_us"
     )?;
     let mut gpu = fs::File::create(o.output.join("gpu.csv"))?;
     writeln!(gpu, "frame,mesh_pass_us")?;
+    let mut page_log = if o.page_log {
+        virtual_asset
+            .as_ref()
+            .map(|a| {
+                diagnostics::PageLog::new(&o.output.join("pages.csv"), a.package().pages.len())
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let mut tick = 0;
     let mut color = None;
     let mut accepted = 0;
     let start = Instant::now();
     let total = o.frames + o.warmup + o.settle_final;
     for n in 0..total {
+        let frame_start = Instant::now();
         if n % 60 == 0 {
             guard()?;
         }
@@ -249,6 +303,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o.view,
                 )?
             };
+            if let (Some(log), Some(asset), Some(scene)) =
+                (&mut page_log, &virtual_asset, &virtual_scene)
+            {
+                log.sample(tick, index, asset, scene)?;
+            }
+            tick += 1;
             for sample in r.poll()?.gpu {
                 writeln!(
                     gpu,
@@ -266,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::sleep(Duration::from_millis(1));
         };
         if n < o.warmup {
+            std::thread::sleep(o.frame_period.saturating_sub(frame_start.elapsed()));
             continue;
         }
         accepted += 1;
@@ -275,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default();
         writeln!(
             csv,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             pose.frame,
             pose.phase,
             report.cpu.preparation.as_micros(),
@@ -312,7 +373,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.failures,
             s.retries,
             s.evictions,
-            s.retained_cuts
+            s.retained_cuts,
+            s.selection_calls,
+            s.completion.as_micros(),
+            s.resources.as_micros(),
+            s.protection.as_micros(),
+            s.stale_ready.as_micros(),
+            s.make_room.as_micros(),
+            s.upload_admission.as_micros(),
+            s.requests.as_micros(),
+            s.snapshot.as_micros(),
+            s.dropped_ready,
+            page_log.as_ref().map_or(0, |l| l.overhead.as_micros())
         )?;
         let final_pose = o.start + o.frames - 1;
         let final_capture = o.hold_pose || (o.settle_final > 0 && index == final_pose);
@@ -352,6 +424,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write_start.elapsed().as_micros()
             );
         }
+        std::thread::sleep(o.frame_period.saturating_sub(frame_start.elapsed()));
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     while r.stats().flights > 0 {
@@ -385,49 +458,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             o.start + o.frames - 1
         };
         let pose = &cameras.frames[index];
-        let mut groups = BufWriter::new(fs::File::create(o.output.join("groups.csv"))?);
-        writeln!(
-            groups,
-            "placement,group,depth,material,error,active,selected_clusters,selected_indices"
-        )?;
-        for (slot, (placement, selection)) in asset
-            .package()
-            .placements
-            .iter()
-            .zip(scene.selections())
-            .enumerate()
-        {
-            let mesh = &asset.package().meshes[placement.mesh as usize];
-            let errors = project_errors(
-                mesh,
-                &pose.camera()?,
-                Mat4::from_cols_array_2d(&placement.transform),
-                pose.height,
-            )?;
-            for (id, (group, error)) in mesh.groups.iter().zip(errors).enumerate() {
-                let selected: Vec<_> = selection
-                    .cut
-                    .clusters
-                    .iter()
-                    .map(|c| &mesh.clusters[c.index()])
-                    .filter(|c| c.owner.index() == id)
-                    .collect();
-                writeln!(
-                    groups,
-                    "{slot},{id},{},{},{error},{},{},{}",
-                    group.depth,
-                    mesh.clusters[group.clusters.offset as usize].material,
-                    selection
-                        .cut
-                        .active_groups
-                        .binary_search(&asset::virtual_mesh::GroupId(id as u32))
-                        .is_ok(),
-                    selected.len(),
-                    selected.iter().map(|c| c.indices.count).sum::<u32>()
-                )?;
-            }
-        }
+        diagnostics::groups(&o.output.join("groups.csv"), asset, scene, pose, o.stream)?;
     }
+
     eprintln!(
         "replay frames={accepted} output={} stream={:?}",
         o.output.display(),

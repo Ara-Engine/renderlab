@@ -485,3 +485,213 @@ fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
     assert!(checked > 1000);
     println!("current_cut_checked={checked}");
 }
+
+#[cfg(feature = "selection-oracle")]
+fn assert_equivalent(
+    actual: &renderlab_asset::Result<Selection>,
+    old: renderlab_asset::Result<Selection>,
+) {
+    assert_eq!(actual.is_ok(), old.is_ok(), "new={actual:?} old={old:?}");
+    if let (Ok(a), Ok(b)) = (actual, old) {
+        assert_eq!(a.cut, b.cut);
+        assert_eq!(a.demand, b.demand);
+        assert_eq!(a.debt, b.debt);
+        assert_eq!(a.candidates, b.candidates);
+    }
+}
+#[cfg(feature = "selection-oracle")]
+fn select(
+    mesh: &VirtualMesh,
+    errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+) -> renderlab_asset::Result<Selection> {
+    let actual = renderlab_asset::virtual_mesh::select(mesh, errors, threshold, available, budget);
+    assert_equivalent(
+        &actual,
+        selection_oracle::select(mesh, errors, threshold, available, budget),
+    );
+    actual
+}
+#[cfg(feature = "selection-oracle")]
+fn select_from_cut(
+    mesh: &VirtualMesh,
+    errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+    initial: &Cut,
+) -> renderlab_asset::Result<Selection> {
+    let actual = renderlab_asset::virtual_mesh::select_from_cut(
+        mesh, errors, threshold, available, budget, protected, initial,
+    );
+    assert_equivalent(
+        &actual,
+        selection_oracle::select_from_cut(
+            mesh, errors, threshold, available, budget, protected, initial,
+        ),
+    );
+    actual
+}
+
+#[test]
+#[cfg(feature = "selection-oracle")]
+fn seeded_shared_page_dags_match_preserved_scan_policy() {
+    let mut seed = 0xfbe75c1a9b234d01u64;
+    let mut draw = |limit: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed as usize) % limit
+    };
+    for _ in 0..6000 {
+        let n = 2 + draw(23);
+        let members: Vec<Vec<_>> = (0..n)
+            .map(|g| {
+                (0..1 + draw(4))
+                    .map(|_| {
+                        if g == 0 || draw(4) == 0 {
+                            None
+                        } else {
+                            Some(draw(g) as u32)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut mesh = graph(&members.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let pc = 1 + draw(mesh.clusters.len());
+        let mut offsets = vec![0; pc];
+        for c in &mut mesh.clusters {
+            c.page = PageId(draw(pc) as u32);
+            c.indices.offset = offsets[c.page.index()];
+            offsets[c.page.index()] += c.indices.count;
+        }
+        let mut errors = vec![0.; n];
+        for g in 0..n {
+            errors[g] = if mesh.groups[g].simplified.error == f32::MAX {
+                f64::INFINITY
+            } else {
+                draw(5) as f64
+            };
+            for c in &mesh.clusters[mesh.groups[g].clusters.range(mesh.clusters.len()).unwrap()] {
+                if let Some(r) = c.refined {
+                    errors[g] = errors[g].max(errors[r.index()]);
+                }
+            }
+        }
+        let root_errors: Vec<_> = mesh
+            .groups
+            .iter()
+            .map(|g| {
+                if g.simplified.error == f32::MAX {
+                    f64::INFINITY
+                } else {
+                    0.
+                }
+            })
+            .collect();
+        let roots = select(&mesh, &root_errors, 1., &vec![true; pc], budget())
+            .unwrap()
+            .cut;
+        let mut available: Vec<_> = (0..pc).map(|_| draw(3) > 0).collect();
+        for p in &roots.pages {
+            available[p.index()] = true;
+        }
+        let protected: Vec<_> = (0..pc)
+            .filter(|_| draw(4) == 0)
+            .map(|p| PageId(p as u32))
+            .collect();
+        let b = SelectionBudget {
+            geometry_bytes: draw(pc + 2) * PAGE_BYTES,
+            max_clusters: draw(mesh.clusters.len() + 2),
+            max_candidates: draw(n + 2),
+            ..budget()
+        };
+        let actual = select_with_protected(&mesh, &errors, 1., &available, b, &protected);
+        assert_equivalent(
+            &actual,
+            selection_oracle::select_with_protected(&mesh, &errors, 1., &available, b, &protected),
+        );
+        if let Ok(a) = actual {
+            exact_once(&mesh, &a.cut);
+        }
+        let initial = select(
+            &mesh,
+            &errors,
+            1.,
+            &vec![true; pc],
+            SelectionBudget {
+                max_candidates: draw(n + 1),
+                ..budget()
+            },
+        )
+        .unwrap()
+        .cut;
+        for p in &initial.pages {
+            available[p.index()] = true;
+        }
+        let next = select_from_cut(&mesh, &errors, 1., &available, b, &protected, &initial);
+        if let Ok(a) = next {
+            exact_once(&mesh, &a.cut);
+        }
+    }
+    println!("seeded DAGs=6000 root+initial cases=12000 seed=fbe75c1a9b234d01");
+}
+
+#[test]
+fn selection_charges_page_scratch_before_allocation() {
+    let mesh = graph(&[&[None], &[Some(0)]]);
+    let available = vec![true; 8192];
+    let result = renderlab_asset::virtual_mesh::select(
+        &mesh,
+        &[2., f64::INFINITY],
+        1.,
+        &available,
+        budget(),
+    )
+    .unwrap();
+    let expected = 32 * mesh.groups.len() + 48 * mesh.clusters.len() + 16 * available.len() + 8;
+    assert_eq!(result.scratch_bound_bytes, expected);
+    assert!(
+        renderlab_asset::virtual_mesh::select(
+            &mesh,
+            &[2., f64::INFINITY],
+            1.,
+            &available,
+            SelectionBudget {
+                max_scratch_bytes: expected - 1,
+                ..budget()
+            }
+        )
+        .is_err()
+    );
+    let bounded = renderlab_asset::virtual_mesh::select(
+        &mesh,
+        &[2., f64::INFINITY],
+        1.,
+        &available,
+        SelectionBudget {
+            max_clusters: 1,
+            ..budget()
+        },
+    )
+    .unwrap();
+    assert!(bounded.cut.clusters.capacity() <= 1);
+    assert!(bounded.demand.required_pages.capacity() <= available.len());
+    assert!(bounded.demand.requested_pages.capacity() <= available.len());
+    // Duplicate protected IDs do not allocate from the caller's unbounded list length.
+    let duplicate = vec![PageId(0); 200_000];
+    let result = select_with_protected(
+        &mesh,
+        &[2., f64::INFINITY],
+        1.,
+        &available,
+        budget(),
+        &duplicate,
+    )
+    .unwrap();
+    assert_eq!(result.scratch_bound_bytes, expected);
+}

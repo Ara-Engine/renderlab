@@ -225,6 +225,87 @@ fn aggregate_admission_shared_pages_offscreen_and_deterministic_demand() {
     assert!(minimal.stats.residency_debt);
 }
 #[test]
+fn same_view_reserves_later_placements_published_output() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (mut package, _) = fixture(2);
+        // One coarse cluster becomes two fine clusters. Each placement has independent pages.
+        package.meshes[0].clusters.pop();
+        package.meshes[0].clusters[2].indices.count = 6;
+        package.meshes[0].groups[1].clusters.count = 1;
+        let mut second = package.meshes[0].clone();
+        for c in &mut second.clusters {
+            c.page.0 += 2;
+        }
+        package.meshes.push(second);
+        package.pages.extend(package.pages.clone());
+        let mut asset = VirtualAsset::new(
+            package,
+            directory("same-view-output"),
+            StreamOptions {
+                max_clusters: 4,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // A separate offscreen scene's minimum stays reserved in the aggregate cap.
+        let other = VirtualScene::new(
+            &asset,
+            &[VirtualPlacement {
+                mesh: 0,
+                transform: Mat4::from_translation(Vec3::new(100000., 0., 0.)),
+            }],
+        )
+        .unwrap();
+        let mut scene = VirtualScene::new(
+            &asset,
+            &[
+                VirtualPlacement {
+                    mesh: 0,
+                    transform: Mat4::IDENTITY,
+                },
+                VirtualPlacement {
+                    mesh: 1,
+                    transform: Mat4::IDENTITY,
+                },
+            ],
+        )
+        .unwrap();
+        scene
+            .select(&mut asset, &[false, true, true, true], &camera(4.), 1080)
+            .unwrap();
+        assert_eq!(
+            scene
+                .selections
+                .iter()
+                .map(|s| s.cut.clusters.len())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let later = scene.selections[1].cut.clone();
+        asset.revision += 1;
+        scene
+            .select(&mut asset, &[true; 4], &camera(4.), 1080)
+            .unwrap();
+        assert_eq!(scene.selections[1].cut, later);
+        assert_eq!(
+            scene
+                .selections
+                .iter()
+                .map(|s| s.cut.clusters.len())
+                .sum::<usize>(),
+            3
+        );
+        assert_eq!(asset.stats.cut_clusters, 4);
+        // New views can rebuild/coarsen, but admission and the other scene's minimum still hold.
+        scene
+            .select(&mut asset, &[true; 4], &camera(4000.), 1080)
+            .unwrap();
+        assert_eq!(asset.stats.cut_clusters, 3);
+        drop(other);
+    }
+}
+#[test]
 fn conservative_projection_near_affine_scale_mirror_and_domain() {
     let (p, _) = fixture(3);
     let mesh = &p.meshes[0];
@@ -553,4 +634,117 @@ fn metadata_bootstrap_hashes_real_bytes_and_rejects_oversized_declared_payload_b
     fs::write(&file, &bytes[..24]).unwrap();
     let error = io::load(&dir, &path).unwrap_err().to_string();
     assert!(error.contains("bootstrap capacity"), "{error}");
+}
+
+#[test]
+fn forced_candidate_motion_reports_retained_cut_liveness() {
+    for cap in [1, 64] {
+        let levels = cap + 8;
+        let (mut package, _) = fixture(1);
+        let template = package.meshes[0].clone();
+        package.meshes[0].groups.clear();
+        package.meshes[0].clusters.clear();
+        package.pages = vec![package.pages[0].clone(); levels];
+        for g in 0..levels {
+            let mut group = template.groups[0].clone();
+            group.depth = g as u32;
+            group.clusters.offset = (g * 2) as u32;
+            group.simplified.error = if g + 1 == levels {
+                f32::MAX
+            } else {
+                (g + 1) as f32 * 0.02
+            };
+            package.meshes[0].groups.push(group);
+            for c in &template.clusters {
+                let mut c = c.clone();
+                c.owner = GroupId(g as u32);
+                c.refined = g.checked_sub(1).map(|r| GroupId(r as u32));
+                c.page = PageId(g as u32);
+                package.meshes[0].clusters.push(c);
+            }
+        }
+        for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+            let mut a = VirtualAsset::new(
+                package.clone(),
+                directory("motion-liveness"),
+                StreamOptions {
+                    max_candidates: cap,
+                    selector,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut scene = VirtualScene::from_package(&a).unwrap();
+            let available: Vec<_> = (0..levels).map(|p| p >= 4).collect();
+            for _ in 0..levels {
+                scene.select(&mut a, &available, &camera(4.), 1080).unwrap();
+            }
+            assert_eq!(scene.selections()[0].cut.pages, [PageId(4)]);
+            let mut stalled = 0;
+            for frame in 0..5 {
+                scene
+                    .select(
+                        &mut a,
+                        &available,
+                        &camera(4. + frame as f32 * 0.01 + 0.01),
+                        1080,
+                    )
+                    .unwrap();
+                let s = &scene.selections()[0];
+                assert!(s.candidates <= cap);
+                assert!(s.cut.pages.iter().all(|p| available[p.index()]));
+                stalled += usize::from(
+                    s.debt.unresolved_groups > 0 && s.demand.requested_pages.is_empty(),
+                );
+            }
+            println!(
+                "forced-motion cap={cap} selector={selector:?} debt-without-demand={stalled}/5 retained={}",
+                a.stats.retained_cuts
+            );
+            // Diagnostic only. C1a preserves publication/allowance policy even when it stalls.
+        }
+    }
+}
+
+#[test]
+fn shrinking_cuts_keep_minimum_output_admitted_across_scenes() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (mut p, _) = fixture(2);
+        p.meshes[0].clusters.remove(1);
+        p.meshes[0].clusters[0].indices.count = 6;
+        p.meshes[0].groups[0].clusters.count = 1;
+        p.meshes[0].groups[1].clusters.offset = 1;
+        let mut a = VirtualAsset::new(
+            p,
+            directory("shrinking-output"),
+            StreamOptions {
+                max_clusters: 4,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let placements = [VirtualPlacement {
+            mesh: 0,
+            transform: Mat4::IDENTITY,
+        }; 2];
+        let mut scene = VirtualScene::new(&a, &placements).unwrap();
+        scene.select(&mut a, &[true; 2], &camera(4.), 1080).unwrap();
+        assert_eq!(
+            scene
+                .selections
+                .iter()
+                .map(|s| s.cut.clusters.len())
+                .collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert_eq!(a.stats.cut_clusters, 2);
+        assert!(VirtualScene::new(&a, &placements[..1]).is_err());
+        a.revision += 1;
+        scene.select(&mut a, &[true; 2], &camera(4.), 1080).unwrap();
+        scene
+            .select(&mut a, &[true; 2], &camera(4000.), 1080)
+            .unwrap();
+        assert_eq!(a.stats.cut_clusters, 4);
+    }
 }

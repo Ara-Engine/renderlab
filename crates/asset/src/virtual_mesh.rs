@@ -4,6 +4,8 @@ mod codec;
 mod selection;
 use crate::{Asset, Error, Limits, Placement, Result, Vertex, add, cap, product, valid_transform};
 pub use codec::{decode, decode_page, encode};
+#[cfg(feature = "selection-oracle")]
+pub use selection::oracle as selection_oracle;
 pub use selection::{
     Cut, DebtReason, Demand, QualityDebt, Selection, SelectionBudget, select, select_from_cut,
     select_with_protected,

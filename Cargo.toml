@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+selection-oracle = ["renderlab-asset/selection-oracle"]
+selection-shadow = ["selection-oracle"]
+selection-profile = ["renderlab-asset/selection-profile"]
+
 [workspace]
 resolver = "3"
 members = ["viewer", "crates/asset", "crates/cook"]

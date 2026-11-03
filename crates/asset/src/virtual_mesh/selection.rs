@@ -1,4 +1,7 @@
 use super::*;
+mod incremental;
+#[cfg(feature = "selection-oracle")]
+pub mod oracle;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SelectionBudget {
@@ -50,17 +53,24 @@ pub struct Selection {
     pub demand: Demand,
     pub debt: QualityDebt,
     pub candidates: usize,
+    /// Cluster predicate/link/shard touches. Excludes validation, scalar/group/page scans and sorting.
+    /// The preserved scan oracle counts only whole cut/closure scans, a subset of these touches.
     pub cluster_visits: usize,
     pub scratch_bound_bytes: usize,
 }
 
 fn cluster_cut(mesh: &VirtualMesh, active: &[bool]) -> Vec<ClusterId> {
-    mesh.clusters
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()]))
-        .map(|(i, _)| ClusterId(i as u32))
-        .collect()
+    let mut out = Vec::with_capacity(mesh.clusters.len());
+    out.extend(
+        mesh.clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()])
+            })
+            .map(|(i, _)| ClusterId(i as u32)),
+    );
+    out
 }
 fn pages(mesh: &VirtualMesh, clusters: &[ClusterId]) -> Vec<PageId> {
     let mut out: Vec<_> = clusters
@@ -71,12 +81,12 @@ fn pages(mesh: &VirtualMesh, clusters: &[ClusterId]) -> Vec<PageId> {
     out.dedup();
     out
 }
-fn union(a: &[PageId], b: &[PageId]) -> Vec<PageId> {
-    let mut out = a.to_vec();
-    out.extend(b);
-    out.sort_unstable();
-    out.dedup();
-    out
+fn charged_pages(page_count: usize, sets: &[&[PageId]]) -> usize {
+    let mut seen = vec![false; page_count];
+    for page in sets.iter().flat_map(|s| s.iter()) {
+        seen[page.index()] = true;
+    }
+    seen.into_iter().filter(|v| *v).count()
 }
 
 /// Rebuild from all terminal groups over published availability; never publish half a group.
@@ -143,6 +153,8 @@ fn select_internal(
     protected: &[PageId],
     initial: Option<&Cut>,
 ) -> Result<Selection> {
+    #[cfg(feature = "selection-profile")]
+    let profile = std::time::Instant::now();
     if protected.iter().any(|p| p.index() >= available.len()) {
         return Err(Error("protected page outside package"));
     }
@@ -150,6 +162,8 @@ fn select_internal(
     let c = mesh.clusters.len();
     let scratch = product(n, 32)?
         .checked_add(product(c, 48)?)
+        .and_then(|v| v.checked_add(available.len().checked_mul(16)?))
+        .and_then(|v| v.checked_add(8))
         .ok_or(Error("selection scratch overflow"))?;
     cap(
         scratch,
@@ -185,6 +199,8 @@ fn select_internal(
             return Err(Error("nonmonotone projected group errors"));
         }
     }
+    #[cfg(feature = "selection-profile")]
+    let domain_ns = profile.elapsed().as_nanos();
     let mut active = vec![false; n];
     for g in mesh.terminal_groups() {
         active[g.index()] = true;
@@ -192,7 +208,10 @@ fn select_internal(
     let mut selected = cluster_cut(mesh, &active);
     let pinned = pages(mesh, &selected);
     if selected.len() > budget.max_clusters
-        || product(union(&pinned, protected).len(), PAGE_BYTES)? > budget.geometry_bytes
+        || product(
+            charged_pages(available.len(), &[&pinned, protected]),
+            PAGE_BYTES,
+        )? > budget.geometry_bytes
     {
         return Err(Error("capacity below minimum cover"));
     }
@@ -222,32 +241,37 @@ fn select_internal(
             || selected.len() > budget.max_clusters
             || current_pages.iter().any(|p| !available[p.index()])
             || product(
-                union(&union(&pinned, &current_pages), protected).len(),
+                charged_pages(available.len(), &[&pinned, &current_pages, protected]),
                 PAGE_BYTES,
             )? > budget.geometry_bytes
         {
             return Err(Error("initial cut ranges/availability/capacity"));
         }
     }
-    let mut required = union(&pinned, &pages(mesh, &selected));
-    let mut requested = vec![];
+    drop(selected);
+    #[cfg(feature = "selection-profile")]
+    let admitted_ns = profile.elapsed().as_nanos();
+    let mut state = incremental::State::new(mesh, available, active, &pinned, protected);
+    #[cfg(feature = "selection-profile")]
+    let indexed_ns = profile.elapsed().as_nanos();
     let mut reasons = vec![];
     let mut candidates = 0;
-    let mut visits = c;
-    let mut published = active.clone();
-    // Incoming owners are represented by clusters. Topological propagation computes
-    // the complete closure before looking at pages; intermediate representations are never required.
-    let mut order: Vec<_> = (0..n).collect();
-    // Near-plane errors can tie at infinity. Coarser levels must share detail
-    // before a low-ID region spends the pool on fine geometry.
+    let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_unstable_by(|&a, &b| {
-        projected_errors[b]
-            .total_cmp(&projected_errors[a])
-            .then_with(|| mesh.groups[b].depth.cmp(&mesh.groups[a].depth))
+        projected_errors[b as usize]
+            .total_cmp(&projected_errors[a as usize])
+            .then_with(|| {
+                mesh.groups[b as usize]
+                    .depth
+                    .cmp(&mesh.groups[a as usize].depth)
+            })
             .then_with(|| a.cmp(&b))
     });
+    #[cfg(feature = "selection-profile")]
+    let sorted_ns = profile.elapsed().as_nanos();
     for seed in order {
-        if active[seed] || projected_errors[seed] <= threshold {
+        let seed = seed as usize;
+        if state.planned.active[seed] || projected_errors[seed] <= threshold {
             continue;
         }
         if candidates >= budget.max_candidates.min(n) {
@@ -255,81 +279,93 @@ fn select_internal(
             break;
         }
         candidates += 1;
-        let mut proposal = active.clone();
-        proposal[seed] = true;
-        for cluster in &mesh.clusters {
-            if cluster.refined.is_some_and(|r| proposal[r.index()]) {
-                proposal[cluster.owner.index()] = true;
+        state.propose(seed);
+        let denial = if state.planned.clusters > budget.max_clusters.min(c) {
+            Some(DebtReason::OutputCapacity)
+        } else if product(state.charged, PAGE_BYTES)? > budget.geometry_bytes {
+            Some(DebtReason::GeometryCapacity)
+        } else {
+            None
+        };
+        if let Some(reason) = denial {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
             }
+            state.rollback();
+        } else {
+            state.accept();
         }
-        // Clusters are in increasing owner order, so newly marked owners propagate in this pass.
-        let replacement = cluster_cut(mesh, &proposal);
-        visits = visits.saturating_add(c.saturating_mul(2));
-        if replacement.len() > budget.max_clusters.min(c) {
-            if !reasons.contains(&DebtReason::OutputCapacity) {
-                reasons.push(DebtReason::OutputCapacity);
-            }
-            continue;
-        }
-        let target = union(&pinned, &pages(mesh, &replacement));
-        let charged = union(&union(&target, &pages(mesh, &selected)), protected);
-        if product(charged.len(), PAGE_BYTES)? > budget.geometry_bytes {
-            if !reasons.contains(&DebtReason::GeometryCapacity) {
-                reasons.push(DebtReason::GeometryCapacity);
-            }
-            continue;
-        }
-        let missing: Vec<_> = target
-            .iter()
-            .copied()
-            .filter(|p| !available[p.index()])
-            .collect();
-        if !missing.is_empty() {
-            required = target;
-            requested = missing;
-            active = proposal;
-            // Continue the bounded plan so a finer final cover can eliminate
-            // missing intermediate pages. Only available complete cuts publish.
-            continue;
-        }
-        active = proposal;
-        published.clone_from(&active);
-        selected = replacement;
-        required = target;
-        requested.clear();
     }
+    #[cfg(feature = "selection-profile")]
+    let proposed_ns = profile.elapsed().as_nanos();
+    let mut required = Vec::with_capacity(c);
+    required.extend(
+        state
+            .planned
+            .refs
+            .iter()
+            .enumerate()
+            .filter(|(p, count)| **count > 0 || pinned.binary_search(&PageId(*p as u32)).is_ok())
+            .map(|(p, _)| PageId(p as u32)),
+    );
+    let mut requested = Vec::with_capacity(c);
+    requested.extend(required.iter().copied().filter(|p| !available[p.index()]));
+    let selected = cluster_cut(mesh, &state.published.active);
+    let published = &state.published.active;
+    // Count cluster predicate/link/shard touches, excluding the unchanged boundary validator,
+    // scalar error checks, group/page scans and sorting. The scan oracle counts only cut/closure
+    // scans, a subset of these operations, so an old/new ratio is a conservative work reduction.
+    let visits = state.visits + c * if initial.is_some() { 4 } else { 2 };
     if !requested.is_empty() {
         reasons.push(DebtReason::MissingPages);
     }
-    let denied: Vec<_> = (0..n)
-        .filter(|&g| !published[g] && projected_errors[g] > threshold)
-        .collect();
+    let mut unresolved_groups = 0;
+    let mut maximum_denied_error: f64 = 0.;
+    for (g, &error) in projected_errors.iter().enumerate() {
+        if !published[g] && error > threshold {
+            unresolved_groups += 1;
+            maximum_denied_error = maximum_denied_error.max(error);
+        }
+    }
     let debt = QualityDebt {
-        unresolved_groups: denied.len(),
-        maximum_denied_error: denied
-            .iter()
-            .map(|&g| projected_errors[g])
-            .fold(0., f64::max),
+        unresolved_groups,
+        maximum_denied_error,
         reasons,
     };
-    Ok(Selection {
+    let mut active_groups = Vec::with_capacity(n);
+    active_groups.extend(
+        published
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v)
+            .map(|(g, _)| GroupId(g as u32)),
+    );
+    let selection = Selection {
         cut: Cut {
-            active_groups: published
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| **v)
-                .map(|(g, _)| GroupId(g as u32))
-                .collect(),
+            active_groups,
             pages: pages(mesh, &selected),
-            clusters: selected,
+            clusters: selected.into_boxed_slice().into_vec(),
         },
         demand: Demand {
-            required_pages: required,
-            requested_pages: requested,
+            required_pages: required.into_boxed_slice().into_vec(),
+            requested_pages: requested.into_boxed_slice().into_vec(),
         },
         debt,
         candidates,
         cluster_visits: visits,
         scratch_bound_bytes: scratch,
-    })
+    };
+    #[cfg(feature = "selection-profile")]
+    eprintln!(
+        "selection_profile initial={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={}",
+        initial.is_some(),
+        candidates,
+        domain_ns,
+        admitted_ns - domain_ns,
+        indexed_ns - admitted_ns,
+        sorted_ns - indexed_ns,
+        proposed_ns - sorted_ns,
+        profile.elapsed().as_nanos() - proposed_ns
+    );
+    Ok(selection)
 }

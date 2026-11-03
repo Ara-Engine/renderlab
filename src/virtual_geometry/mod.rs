@@ -124,6 +124,15 @@ pub struct StreamStats {
     pub projection: Duration,
     pub selection: Duration,
     pub admission: Duration,
+    pub completion: Duration,
+    pub resources: Duration,
+    pub protection: Duration,
+    pub stale_ready: Duration,
+    pub make_room: Duration,
+    pub upload_admission: Duration,
+    pub requests: Duration,
+    pub snapshot: Duration,
+    pub dropped_ready: u64,
     pub io_queue: Duration,
     pub io_read: Duration,
     pub io_verify: Duration,
@@ -137,6 +146,7 @@ pub struct StreamStats {
     pub retries: u64,
     pub failures: u64,
     pub selection_runs: u64,
+    pub selection_calls: u64,
     pub retained_cuts: u64,
     /// Logical reserved geometry, including 64KiB page slots and actual staging buffer bytes.
     pub geometry_bytes: usize,
@@ -168,6 +178,7 @@ struct SceneAdmission {
     id: u64,
     scratch: usize,
     output: usize,
+    output_reservation: usize,
     candidates: usize,
     protected: Vec<PageId>,
 }
@@ -413,6 +424,7 @@ impl VirtualAsset {
         }
         renderer.virtual_admit_scene(scene.len())?;
         renderer.virtual_identity(&mut self.renderer)?;
+        let section = Instant::now();
         renderer.virtual_collect()?;
         self.complete(renderer.completed_submission());
         while let Some(result) = self.io.receive() {
@@ -428,6 +440,8 @@ impl VirtualAsset {
                 }
             }
         }
+        self.stats.completion += section.elapsed();
+        let section = Instant::now();
         renderer.virtual_resources(self)?;
         if scene.instances.is_none()
             && let Some(instances) =
@@ -436,6 +450,7 @@ impl VirtualAsset {
             scene.instances = Some(instances);
             scene.pending_models = None;
         }
+        self.stats.resources += section.elapsed();
         let start = Instant::now();
         let available: Vec<_> = self
             .states
@@ -448,6 +463,7 @@ impl VirtualAsset {
             scene.protected = self.roots.clone();
         }
         self.stats.admission += start.elapsed();
+        let section = Instant::now();
         let mut protected = scene.protected.clone();
         {
             let registry = self.registry.lock().unwrap();
@@ -458,6 +474,8 @@ impl VirtualAsset {
             }
         }
         let protected = &protected;
+        self.stats.protection += section.elapsed();
+        let section = Instant::now();
         // Drop stale CPU completions; queued reads finish into the same bounded slots.
         for (id, state) in self.states.iter_mut().enumerate() {
             if matches!(state, PageState::Ready(_))
@@ -465,8 +483,10 @@ impl VirtualAsset {
             {
                 *state = PageState::Missing;
                 self.outstanding -= 1;
+                self.stats.dropped_ready += 1;
             }
         }
+        self.stats.stale_ready += section.elapsed();
         let start = Instant::now();
         let mut admitted = 0;
         for &page in protected {
@@ -477,10 +497,13 @@ impl VirtualAsset {
                 continue;
             }
             let charge = PAGE_BYTES + self.package.pages[page.index()].payload_bytes as usize;
+            let section = Instant::now();
             self.make_room(charge, protected, renderer.completed_submission());
+            self.stats.make_room += section.elapsed();
             if self.geometry_charge() + charge > self.options.geometry_bytes {
                 continue;
             }
+            let section = Instant::now();
             if let PageState::Ready(data) = &self.states[page.index()]
                 && let Some(gpu) = renderer.try_upload_virtual_page(data)?
             {
@@ -493,8 +516,10 @@ impl VirtualAsset {
                 admitted += 1;
                 self.snapshot();
             }
+            self.stats.upload_admission += section.elapsed();
         }
         self.stats.admission += start.elapsed();
+        let section = Instant::now();
         for &page in protected {
             if self.outstanding == READ_SLOTS {
                 break;
@@ -507,6 +532,7 @@ impl VirtualAsset {
                 self.stats.reads += 1;
             }
         }
+        self.stats.requests += section.elapsed();
         self.snapshot();
         Ok(())
     }
@@ -561,6 +587,7 @@ impl VirtualAsset {
         }
     }
     fn snapshot(&mut self) {
+        let section = Instant::now();
         self.stats.states = [0; 7];
         self.stats.published_bytes = 0;
         self.stats.retiring_bytes = 0;
@@ -598,6 +625,7 @@ impl VirtualAsset {
             * PAGE_BYTES;
         debug_assert!(self.stats.geometry_bytes <= self.options.geometry_bytes);
         debug_assert!(self.outstanding <= READ_SLOTS);
+        self.stats.snapshot += section.elapsed();
     }
 }
 // A previous cut is already a proved complete cover. Keep it while IO is pending only when
@@ -668,6 +696,60 @@ fn retain_better_cut(
     }
     true
 }
+#[allow(clippy::too_many_arguments)]
+fn run_selector(
+    selector: SelectorMode,
+    mesh: &VirtualMesh,
+    errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+    initial: Option<&asset::virtual_mesh::Cut>,
+) -> Result<Selection, Error> {
+    let result = match (selector, initial) {
+        (SelectorMode::Baseline, Some(cut)) => {
+            select_from_cut(mesh, errors, threshold, available, budget, protected, cut)
+                .map_err(|e| Error::InvalidInput(e.0))
+        }
+        (SelectorMode::Baseline, None) => {
+            select_with_protected(mesh, errors, threshold, available, budget, protected)
+                .map_err(|e| Error::InvalidInput(e.0))
+        }
+        (SelectorMode::SimpleReference, cut) => {
+            reference::select(mesh, errors, threshold, available, budget, protected, cut)
+        }
+    };
+    #[cfg(feature = "selection-shadow")]
+    {
+        use asset::virtual_mesh::selection_oracle;
+        let old = if let Some(cut) = initial {
+            selection_oracle::select_from_cut(
+                mesh, errors, threshold, available, budget, protected, cut,
+            )
+        } else {
+            selection_oracle::select_with_protected(
+                mesh, errors, threshold, available, budget, protected,
+            )
+        };
+        assert_eq!(result.is_ok(), old.is_ok(), "shadow error mismatch");
+        if let (Ok(new), Ok(old)) = (&result, old) {
+            assert_eq!(new.cut, old.cut, "shadow cut");
+            assert_eq!(new.demand, old.demand, "shadow demand");
+            assert_eq!(new.debt, old.debt, "shadow debt");
+            assert_eq!(new.candidates, old.candidates, "shadow candidates");
+            eprintln!(
+                "selection_shadow initial={} candidates={} old_scan_touches={} new_cluster_touches={}",
+                initial.is_some(),
+                new.candidates,
+                old.cluster_visits,
+                new.cluster_visits
+            );
+        }
+    }
+    result
+}
+
 impl VirtualScene {
     /// Admission counts offscreen instances too. Rejected scenes allocate no GPU objects or reads.
     pub fn new(asset: &VirtualAsset, placements: &[VirtualPlacement]) -> Result<Self, Error> {
@@ -699,7 +781,9 @@ impl VirtualScene {
             .package
             .meshes
             .iter()
-            .map(|m| m.groups.len() * 40 + m.clusters.len() * 48)
+            .map(|m| {
+                m.groups.len() * 40 + m.clusters.len() * 48 + asset.package.pages.len() * 16 + 8
+            })
             .max()
             .unwrap_or(0);
         let per_instance = asset
@@ -729,7 +813,7 @@ impl VirtualScene {
             .ok_or(Error::InvalidInput("scene scratch overflow"))?;
         let mut registry = asset.registry.lock().unwrap();
         let retained_scratch: usize = registry.scenes.iter().map(|s| s.scratch).sum();
-        let retained_output: usize = registry.scenes.iter().map(|s| s.output).sum();
+        let retained_output: usize = registry.scenes.iter().map(|s| s.output_reservation).sum();
         if retained_output + minimum > asset.options.max_clusters {
             return Err(Error::InvalidInput(
                 "total output below registered scene minimum covers",
@@ -747,6 +831,7 @@ impl VirtualScene {
             id,
             scratch: scratch_bound,
             output: minimum,
+            output_reservation: minimum,
             candidates: 0,
             protected: asset.roots.clone(),
         });
@@ -844,12 +929,22 @@ impl VirtualScene {
                 && old.height == key.height
                 && old.transforms == key.transforms
         });
-        let mut minimum_left: usize = self
+        let mut reserved_left: usize = self
             .meshes
             .iter()
-            .map(|&id| minimum_clusters(&asset.package.meshes[id as usize]))
+            .enumerate()
+            .map(|(slot, &id)| {
+                if same_view {
+                    self.selections.get(slot).map(|s| s.cut.clusters.len())
+                } else {
+                    None
+                }
+                .unwrap_or(0)
+                .max(minimum_clusters(&asset.package.meshes[id as usize]))
+            })
             .sum();
         let mut output = 0;
+        let mut reserved_output = 0;
         let mut candidates = 0;
         let mut protected = asset.roots.clone();
         // Charge the last published cover while planning its replacement. Otherwise a
@@ -864,7 +959,7 @@ impl VirtualScene {
         for entry in &registry.scenes {
             if entry.id != self.lease.id {
                 union_into(&mut protected, &entry.protected);
-                other_output += entry.output;
+                other_output += entry.output_reservation;
                 other_candidates += entry.candidates;
             }
         }
@@ -872,7 +967,22 @@ impl VirtualScene {
         let mut selections = Vec::with_capacity(self.len());
         for (slot, &id) in self.meshes.iter().enumerate() {
             let mesh = &asset.package.meshes[id as usize];
-            minimum_left -= minimum_clusters(mesh);
+            // Same-view queries only refine. Preserve the actual output already owned by later slots.
+            reserved_left -= if same_view {
+                self.selections
+                    .get(slot)
+                    .map_or(0, |s| s.cut.clusters.len())
+                    .max(minimum_clusters(mesh))
+            } else {
+                minimum_clusters(mesh)
+            };
+            let output_budget = asset
+                .options
+                .max_clusters
+                .checked_sub(reserved_output + reserved_left + other_output)
+                .ok_or(Error::InvalidInput(
+                    "aggregate output reservation exceeds capacity",
+                ))?;
             let start = Instant::now();
             let errors = project_errors(mesh, camera, self.models()[slot], height)?;
             asset.stats.projection += start.elapsed();
@@ -889,39 +999,20 @@ impl VirtualScene {
                     .options
                     .max_candidates
                     .saturating_sub(candidates + other_candidates),
-                max_clusters: asset.options.max_clusters - output - minimum_left - other_output,
+                max_clusters: output_budget,
                 max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
             };
-            let mut selection = match (asset.options.selector, initial) {
-                (SelectorMode::Baseline, Some(cut)) => select_from_cut(
-                    mesh,
-                    &errors,
-                    asset.options.error_pixels,
-                    available,
-                    budget,
-                    &protected,
-                    cut,
-                )
-                .map_err(|e| Error::InvalidInput(e.0))?,
-                (SelectorMode::Baseline, None) => select_with_protected(
-                    mesh,
-                    &errors,
-                    asset.options.error_pixels,
-                    available,
-                    budget,
-                    &protected,
-                )
-                .map_err(|e| Error::InvalidInput(e.0))?,
-                (SelectorMode::SimpleReference, initial) => reference::select(
-                    mesh,
-                    &errors,
-                    asset.options.error_pixels,
-                    available,
-                    budget,
-                    &protected,
-                    initial,
-                )?,
-            };
+            let mut selection = run_selector(
+                asset.options.selector,
+                mesh,
+                &errors,
+                asset.options.error_pixels,
+                available,
+                budget,
+                &protected,
+                initial,
+            )?;
+            asset.stats.selection_calls += 1;
             if initial.is_none()
                 && retain_better_cut(
                     self.selections.get(slot),
@@ -933,10 +1024,7 @@ impl VirtualScene {
                     RetentionBudget {
                         roots: &asset.roots,
                         geometry_bytes: asset.options.geometry_bytes - PAGE_BYTES,
-                        max_clusters: asset.options.max_clusters
-                            - output
-                            - minimum_left
-                            - other_output,
+                        max_clusters: output_budget,
                     },
                 )
             {
@@ -950,33 +1038,20 @@ impl VirtualScene {
                             .options
                             .max_candidates
                             .saturating_sub(candidates + other_candidates + spent),
-                        max_clusters: asset.options.max_clusters
-                            - output
-                            - minimum_left
-                            - other_output,
+                        max_clusters: output_budget,
                         max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
                     };
-                    let mut incremental = match asset.options.selector {
-                        SelectorMode::Baseline => select_from_cut(
-                            mesh,
-                            &errors,
-                            asset.options.error_pixels,
-                            available,
-                            budget,
-                            &protected,
-                            &selection.cut,
-                        )
-                        .map_err(|e| Error::InvalidInput(e.0))?,
-                        SelectorMode::SimpleReference => reference::select(
-                            mesh,
-                            &errors,
-                            asset.options.error_pixels,
-                            available,
-                            budget,
-                            &protected,
-                            Some(&selection.cut),
-                        )?,
-                    };
+                    let mut incremental = run_selector(
+                        asset.options.selector,
+                        mesh,
+                        &errors,
+                        asset.options.error_pixels,
+                        available,
+                        budget,
+                        &protected,
+                        Some(&selection.cut),
+                    )?;
+                    asset.stats.selection_calls += 1;
                     incremental.candidates += spent;
                     incremental.cluster_visits += visits;
                     selection = incremental;
@@ -984,6 +1059,7 @@ impl VirtualScene {
             }
             asset.stats.selection += start.elapsed();
             output += selection.cut.clusters.len();
+            reserved_output += selection.cut.clusters.len().max(minimum_clusters(mesh));
             candidates += selection.candidates;
             union_into(&mut protected, &selection.cut.pages);
             union_into(&mut protected, &selection.demand.required_pages);
@@ -1017,9 +1093,11 @@ impl VirtualScene {
             .find(|s| s.id == self.lease.id)
             .unwrap();
         let changed = entry.output != output
+            || entry.output_reservation != reserved_output
             || entry.candidates != candidates
             || entry.protected != self.protected;
         entry.output = output;
+        entry.output_reservation = reserved_output;
         entry.candidates = candidates;
         entry.protected = self.protected.clone();
         if changed {

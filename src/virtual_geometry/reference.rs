@@ -162,6 +162,9 @@ pub(super) fn select(
         },
         candidates,
         cluster_visits: visits,
-        scratch_bound_bytes: mesh.groups.len() * 32 + mesh.clusters.len() * 48,
+        scratch_bound_bytes: mesh.groups.len() * 32
+            + mesh.clusters.len() * 48
+            + available.len() * 16
+            + 8,
     })
 }
