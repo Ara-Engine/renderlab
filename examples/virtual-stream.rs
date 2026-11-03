@@ -46,6 +46,7 @@ struct Options {
     cpu_stride: usize,
     captures: BTreeSet<usize>,
     samples: SampleCount,
+    anisotropy_clamp: u16,
     stream: StreamOptions,
     validate: bool,
     verify_cover: bool,
@@ -78,6 +79,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
         cpu_stride: 30,
         captures: BTreeSet::new(),
         samples: SampleCount::One,
+        anisotropy_clamp: 1,
         stream,
         validate: false,
         verify_cover: false,
@@ -131,6 +133,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
             "--candidates" => o.stream.max_candidates = v.parse()?,
             "--output-clusters" => o.stream.max_clusters = v.parse()?,
             "--error-pixels" => o.stream.error_pixels = v.parse()?,
+            "--anisotropy" => o.anisotropy_clamp = v.parse()?,
             "--io-delay-ms" => o.stream.io_delay = Duration::from_millis(v.parse()?),
             "--samples" => {
                 o.samples = match v.as_str() {
@@ -246,7 +249,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
         renderer_limits,
-        RendererOptions { samples: o.samples },
+        RendererOptions {
+            samples: o.samples,
+            anisotropy_clamp: o.anisotropy_clamp,
+        },
         include_str!("../shaders/scene.wgsl"),
     )?;
     let device_ready_us = process_start.elapsed().as_micros();

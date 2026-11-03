@@ -123,7 +123,9 @@ class Window:
             raise c.WinError(c.get_last_error())
         try:
             time.sleep(0.3)
-            for x, y in ((2, 2), (rect.right - 3, 2), (2, rect.bottom - 3), (rect.right - 3, rect.bottom - 3), (rect.right // 2, rect.bottom // 2)):
+            # Windows rounds the client corners; hit-test within the drawable rectangle.
+            inset = min(12, rect.right // 4, rect.bottom // 4)
+            for x, y in ((inset, inset), (rect.right - inset, inset), (inset, rect.bottom - inset), (rect.right - inset, rect.bottom - inset), (rect.right // 2, rect.bottom // 2)):
                 hit = self.u.WindowFromPoint(w.POINT(origin.x + x, origin.y + y))
                 if self.u.GetAncestor(hit, 2) != hwnd:
                     raise RuntimeError("refuse capture with another window covering the viewer")
@@ -150,7 +152,9 @@ def run(args):
     held_camera.write_text(json.dumps(cameras))
     command = [str(args.viewer.resolve()), "--validate", "--samples", "4", "--log-frames",
                "--seconds", "180", "--shader", str(shader), "--cameras", str(held_camera),
-               "--limits", str(args.limits.resolve())]
+               "--limits", str(args.limits.resolve()), "--anisotropy", str(args.anisotropy)]
+    if args.interactive_camera:
+        command += ["--interactive-camera"]
     if args.asset:
         command += ["--asset", str(args.asset.resolve())]
     else:
@@ -331,6 +335,8 @@ def main():
     native.add_argument("--cache", type=Path)
     native.add_argument("--io-delay-ms", type=int, default=1000)
     native.add_argument("--capture", action="store_true")
+    native.add_argument("--anisotropy", type=int, choices=range(1, 17), default=1)
+    native.add_argument("--interactive-camera", action="store_true")
     args = parser.parse_args()
     if args.command == "analyze":
         print(json.dumps({str(path): summarize(path.read_text(errors="replace")) for path in args.logs}, indent=2))

@@ -11,7 +11,10 @@ fn material_renderer(samples: SampleCount) -> Renderer {
         queue,
         SRGB,
         Limits::default(),
-        RendererOptions { samples },
+        RendererOptions {
+            samples,
+            ..Default::default()
+        },
         SOURCE,
     )
     .unwrap()

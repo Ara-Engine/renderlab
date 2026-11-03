@@ -9,8 +9,11 @@ Open the cooked quarry with an existing viewer binary. Build only with -Build.
 [CmdletBinding()]
 param(
     [Alias('Profile')][ValidateSet('dev', 'release')][string]$BuildProfile = 'release',
-    [ValidateSet('streamed', 'full')][string]$QualityMode = 'streamed',
+    [ValidateSet('streamed', 'full')][string]$QualityMode = 'full',
     [ValidateSet(1, 4)][int]$Samples = 4,
+    [ValidateRange(1, 16)][int]$Anisotropy = 16,
+    [ValidateSet('baseline', 'detail')][string]$TextureQuality = 'detail',
+    [string]$DetailDirectory = 'measurements/quarry-quality/detail',
     [string]$Asset = 'measurements/quarry-scan/cache/assets/86bdd8afdf69bace8a08d3974e8e9da9af20e6b261880b9728730d9f3387b0b3',
     [string]$Manifest = 'measurements/quarry-scan/quarry-virtual.manifest',
     [string]$Cache = 'measurements/quarry-scan/cache',
@@ -36,6 +39,12 @@ try {
     if ($Build -and ($Binary -or $PrintCommand)) {
         throw '-Build requires the default binary and cannot be combined with -PrintCommand.'
     }
+    if ($TextureQuality -eq 'detail') {
+        if (-not $PSBoundParameters.ContainsKey('Asset')) { $Asset = Join-Path $DetailDirectory 'full.rla' }
+        if (-not $PSBoundParameters.ContainsKey('Manifest')) { $Manifest = Join-Path $DetailDirectory 'virtual.manifest' }
+        if (-not $PSBoundParameters.ContainsKey('Cache')) { $Cache = Join-Path $DetailDirectory 'cache' }
+        if (-not $PSBoundParameters.ContainsKey('Limits')) { $Limits = Join-Path $DetailDirectory 'limits.json' }
+    }
     if ($RuntimePolicy -eq 'baseline' -and
         ($PSBoundParameters.ContainsKey('ReadSlots') -or $PSBoundParameters.ContainsKey('UploadsPerTick'))) {
         throw 'Use -RuntimePolicy responsive to apply read/upload overrides.'
@@ -60,7 +69,7 @@ try {
         $Binary = Join-Path $targetDirectory "$profileDirectory/renderlab-viewer.exe"
     }
     $viewerArgs = @('--limits', $effectiveLimits, '--cameras', $effectiveCameras,
-        '--shader', (Join-Path $repo 'shaders/scene.wgsl'), '--samples', "$Samples")
+        '--shader', (Join-Path $repo 'shaders/scene.wgsl'), '--samples', "$Samples", '--anisotropy', "$Anisotropy")
     if ($CameraMode -eq 'interactive') { $viewerArgs += '--interactive-camera' }
     if ($QualityMode -eq 'full') { $viewerArgs += @('--asset', $Asset) }
     else { $viewerArgs += @('--virtual-manifest', $Manifest, '--cache', $Cache) }

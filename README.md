@@ -4,13 +4,13 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 ## Run
 
-On the scan-development host, `powershell -File scripts/quarry-demo.ps1` opens the private twelve-scan quarry with the existing optimized viewer, 4x MSAA and interactive camera controls. It does not build or import. See [the demo settings and measured tradeoffs](docs/scan-tuning.md). The source scans and cooked cache are not distributed with this repository.
+On the scan-development host, `powershell -File scripts/quarry-demo.ps1` opens the private twelve-scan quarry with the existing optimized viewer, full geometry, 4K textures, 4x MSAA, 16x anisotropic filtering and interactive camera controls. [Real-scan results](docs/scan-results.md) compare this path with bounded streaming. It does not build or import. See [the demo settings and measured tradeoffs](docs/scan-tuning.md). The source scans and cooked cache are not distributed with this repository.
 
 `cargo run -p renderlab-viewer` opens a persistent 960x640 viewer. The viewer uses the library's owned `Renderer`, with Vulkan/WGSL via wgpu 30 and winit 0.30. Vulkan drivers are required. Windows is the only tested platform.
 
 - Arrow keys: camera orbit/elevation. WASD: translate the camera and its look-at point.
 - Space: animate the first cube or prepared asset. R: reset. Escape: exit.
-- `--asset PATH` loads a prepared payload. `--samples 4` enables 4x MSAA; the default is one sample. Keys 1–4 select base color, world normal, metallic and roughness views; `--view color|normal|metallic|roughness` sets the initial view.
+- `--asset PATH` loads a prepared payload. `--samples 4` enables 4x MSAA; the default is one sample. `--anisotropy 16` improves all-linear mipmapped texture sampling; the library/viewer default is 1. Keys 1–4 select base color, world normal, metallic and roughness views; `--view color|normal|metallic|roughness` sets the initial view.
 - `--instances 10000` opens a repeated-cube grid. C toggles conservative culling; N switches between overview and near view. The title reports visible instances.
 - Edit `shaders/scene.wgsl` while running. The viewer checks content every 50 ms. Syntax or pipeline-layout errors appear in the terminal/title; the last valid pipeline keeps rendering. Save a correction to recover.
 - An optional first argument or `--shader PATH` specifies a different shader path. The default uses the source checkout path, so this is currently a developer tool, not a distributable application.
@@ -46,4 +46,4 @@ The recorded final validation run isolated stale overlay registrations with a pr
 See [the Milestone 0 record](docs/milestone-0.md), [Milestone 1 evidence and open gates](docs/milestone-1.md), [brief](docs/brief.md), and [rendering research](docs/research/industry-rendering-costs.md). Fast development builds use two compiler jobs, incremental compilation, and line-table debug info. They are not optimized GPU benchmarks.
 
 
-Development timing: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-dev-loop.ps1` (add `-Cold` for a fresh target, or `-Asset PATH -Samples 4` for prepared content). It temporarily edits and restores source files; run without concurrent edits in this checkout. `cargo run --release --example asset-cost -- PATH 4 static` records optimized headless prepared-asset costs; use `motion` for camera/object changes. Measurements and captures remain ignored.
+Development timing: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-dev-loop.ps1` (add `-Cold` for a fresh target, or `-Asset PATH -Samples 4 -Limits PATH -Cameras PATH -Anisotropy 16` for a configured prepared scene). It temporarily edits and restores source files; run without concurrent edits in this checkout. `cargo run --release --example asset-cost -- PATH 4 static` records optimized headless prepared-asset costs; use `motion` for camera/object changes. Measurements and captures remain ignored.

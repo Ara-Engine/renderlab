@@ -1,4 +1,4 @@
-﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1', [string]$VirtualManifest = '', [string]$Cache = 'measurements/m4-cook/root-unit-a/cache', [string]$Cameras = '')
+﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1', [string]$VirtualManifest = '', [string]$Cache = 'measurements/m4-cook/root-unit-a/cache', [string]$Cameras = '', [string]$Limits = '', [ValidateRange(1, 16)][int]$Anisotropy = 1)
 $ErrorActionPreference = 'Stop'
 if ($Runs -lt 1) { throw 'Runs must be positive' }
 if ($Asset -and $VirtualManifest) { throw 'Choose an asset or a virtual manifest' }
@@ -20,8 +20,11 @@ $results = [ordered]@{
     diff = (git diff --stat | Out-String)
     profile = 'dev'
     cargo_jobs = 2
-    scene = $(if ($VirtualManifest) { 'virtual asset with first-view preparation; opaque unlit; Depth32Float; camera-file extent when supplied, otherwise 960x640' } elseif ($Asset) { 'prepared asset; opaque unlit; Depth32Float; 960x640 initial window' } else { 'two indexed cubes and a triangle; Depth32Float; 960x640 initial window' })
+    scene = $(if ($VirtualManifest) { 'virtual asset with first-view preparation; opaque unlit; Depth32Float; camera-file extent when supplied, otherwise 960x640' } elseif ($Asset) { 'prepared asset; opaque unlit; Depth32Float; camera-file extent when supplied, otherwise 960x640' } else { 'two indexed cubes and a triangle; Depth32Float; 960x640 initial window' })
     samples = [int]$Samples
+    anisotropy = $Anisotropy
+    limits = $(if ($Limits) { (Resolve-Path $Limits).Path } else { $null })
+    limits_sha256 = $(if ($Limits) { (Get-FileHash $Limits -Algorithm SHA256).Hash } else { $null })
     asset = $(if ($Asset) { (Resolve-Path $Asset).Path } else { $null })
     asset_sha256 = $(if ($Asset) { (Get-FileHash $Asset -Algorithm SHA256).Hash } else { $null })
     virtual_manifest = $(if ($VirtualManifest) { (Resolve-Path $VirtualManifest).Path } else { $null })
@@ -100,7 +103,8 @@ function Wait-Log([string]$Path, [string]$Pattern) {
 function Launch([string]$Name) {
     Assert-Quiet
     $results.binaries[$Name] = (Get-FileHash target/debug/renderlab-viewer.exe -Algorithm SHA256).Hash
-    $viewerArguments = @('--seconds', '25', '--samples', $Samples, '--validate')
+    $viewerArguments = @('--seconds', '25', '--samples', $Samples, '--anisotropy', $Anisotropy, '--validate')
+    if ($Limits) { $viewerArguments += @('--limits', ('"' + $results.limits + '"')) }
     if ($Asset) { $viewerArguments += @('--asset', ('"' + $results.asset + '"')) }
     if ($VirtualManifest) { $viewerArguments += @('--virtual-manifest', ('"' + $results.virtual_manifest + '"'), '--cache', ('"' + $results.cache + '"')) }
     if ($Cameras) { $viewerArguments += @('--cameras', ('"' + $results.cameras + '"')) }

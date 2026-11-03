@@ -350,6 +350,9 @@ impl Renderer {
         options: RendererOptions,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        if !(1..=16).contains(&options.anisotropy_clamp) {
+            return Err(Error::InvalidInput("anisotropy_clamp must be in 1..=16"));
+        }
         for format in [color_format, wgpu::TextureFormat::Depth32Float] {
             let features = format.guaranteed_format_features(device.features());
             if !features
@@ -1161,7 +1164,10 @@ impl Renderer {
         .map(|s| {
             self.ledger.own(
                 self.device
-                    .create_sampler(&crate::material::sampler_descriptor(s)),
+                    .create_sampler(&crate::material::sampler_descriptor(
+                        s,
+                        self.options.anisotropy_clamp,
+                    )),
                 ResourceKind::Sampler,
             )
         });

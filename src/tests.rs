@@ -36,12 +36,14 @@ fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
     );
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::debugging(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     eprintln!(
-        "adapter={:?} build_profile=dev tests_sequential=true",
-        adapter.get_info()
+        "adapter={:?} debug_assertions={} tests_sequential=true",
+        adapter.get_info(),
+        cfg!(debug_assertions)
     );
     let features = if timing {
         adapter.features() & wgpu::Features::TIMESTAMP_QUERY

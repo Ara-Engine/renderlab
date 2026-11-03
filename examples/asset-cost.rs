@@ -89,7 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         queue,
         color.format(),
         renderer_limits,
-        RendererOptions { samples },
+        RendererOptions {
+            samples,
+            ..Default::default()
+        },
         include_str!("../shaders/scene.wgsl"),
     )?;
     let deadline = Instant::now() + Duration::from_secs(120);

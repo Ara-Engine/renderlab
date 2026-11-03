@@ -330,7 +330,10 @@ fn gpu_virtual_ranges_reference_and_settled() {
             queue,
             FORMAT,
             Limits::default(),
-            RendererOptions { samples },
+            RendererOptions {
+                samples,
+                ..Default::default()
+            },
             SOURCE,
         )
         .unwrap();
@@ -603,6 +606,7 @@ fn gpu_virtual_streaming_failure_repair_and_retirement_waves() {
         Limits::default(),
         RendererOptions {
             samples: SampleCount::Four,
+            ..Default::default()
         },
         SOURCE,
     )

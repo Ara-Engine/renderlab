@@ -22,10 +22,21 @@ pub enum SampleCount {
     One = 1,
     Four = 4,
 }
-#[derive(Clone, Copy, Debug, Default)]
-/// Fixed for a renderer lifetime. Pipeline reload retains this sample configuration.
+#[derive(Clone, Copy, Debug)]
+/// Fixed for a renderer lifetime, including across shader reloads.
 pub struct RendererOptions {
     pub samples: SampleCount,
+    /// 1 disables anisotropy; 2..=16 enhances all-linear mipmapped bindings only.
+    /// Explicit nearest and disabled-mip samplers retain their authored behavior.
+    pub anisotropy_clamp: u16,
+}
+impl Default for RendererOptions {
+    fn default() -> Self {
+        Self {
+            samples: SampleCount::One,
+            anisotropy_clamp: 1,
+        }
+    }
 }
 
 /// Immutable shared upload. Cloning retains ownership without allocating or uploading.
@@ -158,7 +169,10 @@ pub(crate) fn validate_texture(
     }
     Err(Error::InvalidInput("incomplete texture mip chain"))
 }
-pub(crate) fn sampler_descriptor(s: Sampler) -> wgpu::SamplerDescriptor<'static> {
+pub(crate) fn sampler_descriptor(
+    s: Sampler,
+    anisotropy_clamp: u16,
+) -> wgpu::SamplerDescriptor<'static> {
     let wrap = |v| match v {
         Wrap::Clamp => wgpu::AddressMode::ClampToEdge,
         Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
@@ -184,6 +198,14 @@ pub(crate) fn sampler_descriptor(s: Sampler) -> wgpu::SamplerDescriptor<'static>
         } else {
             32.0
         },
+        anisotropy_clamp: if s.mag == Filter::Linear
+            && s.min == Filter::Linear
+            && s.mipmap == MipmapFilter::Linear
+        {
+            anisotropy_clamp
+        } else {
+            1
+        },
         ..Default::default()
     }
 }
@@ -192,6 +214,43 @@ pub(crate) fn sampler_descriptor(s: Sampler) -> wgpu::SamplerDescriptor<'static>
 mod tests {
     use super::*;
     use renderlab_asset::{Mip, Texture as Data};
+    #[test]
+    fn anisotropy_preserves_explicit_sampler_choices() {
+        let linear = Sampler::default();
+        assert_eq!(sampler_descriptor(linear, 16).anisotropy_clamp, 16);
+        assert_eq!(sampler_descriptor(linear, 1).anisotropy_clamp, 1);
+        for authored in [
+            Sampler {
+                mag: Filter::Nearest,
+                ..linear
+            },
+            Sampler {
+                min: Filter::Nearest,
+                ..linear
+            },
+            Sampler {
+                mipmap: MipmapFilter::Nearest,
+                ..linear
+            },
+            Sampler {
+                mipmap: MipmapFilter::None,
+                ..linear
+            },
+        ] {
+            assert_eq!(sampler_descriptor(authored, 16).anisotropy_clamp, 1);
+        }
+        assert_eq!(
+            sampler_descriptor(
+                Sampler {
+                    mipmap: MipmapFilter::None,
+                    ..linear
+                },
+                16
+            )
+            .lod_max_clamp,
+            0.25
+        );
+    }
     #[test]
     fn texture_admission_checks_complete_odd_mips_before_allocation() {
         let mut data = Data {

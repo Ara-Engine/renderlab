@@ -28,6 +28,8 @@ M4 is complete with independent Opus acceptance and verified corrections. It pro
 
 On 2026-11-03 Islam explicitly authorized using one of his local scan packs, fixing the outstanding caveats and returning with real results, leaving the PC available for unattended work. This supersedes the earlier stop-after-M4 instruction for that scope. Follow [the scan validation plan](scan-validation-plan.md). It requires actual scanned content, inspected images, responsive interaction and controlled measurements; it does not turn the long-term Unreal ambition into a demonstrated result.
 
+The [real quarry result](scan-results.md) now renders twelve scans and 13,034,903 source triangles with 4K textures, 4x MSAA and measured anisotropic filtering. The interactive local demo defaults to full resident geometry because this scene fits and that path is much cheaper on the CPU. Quality, native resize/reload and development-loop evidence are recorded there. Adaptive streaming remains available, but its moving CPU target is unmet; the historical driver-stall cause remains unproven. Do not describe the fast full-resident path as solving arbitrary-world streaming or the remaining visual layers.
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.

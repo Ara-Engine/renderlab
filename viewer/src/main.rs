@@ -66,6 +66,7 @@ struct Options {
     interactive_camera: bool,
     stream: StreamOptions,
     samples: SampleCount,
+    anisotropy_clamp: u16,
     view: ViewMode,
 }
 impl Options {
@@ -89,6 +90,7 @@ impl Options {
             interactive_camera: false,
             stream,
             samples: SampleCount::One,
+            anisotropy_clamp: 1,
             view: ViewMode::BaseColor,
         };
         let mut args = args.into_iter();
@@ -153,6 +155,13 @@ impl Options {
                         Some("4") => SampleCount::Four,
                         _ => return Err("--samples requires 1 or 4".into()),
                     }
+                }
+                "--anisotropy" => {
+                    options.anisotropy_clamp = args
+                        .next()
+                        .ok_or("missing anisotropy")?
+                        .parse()
+                        .map_err(|_| "invalid anisotropy")?;
                 }
                 "--view" => {
                     options.view = match args.next().as_deref() {
@@ -394,6 +403,7 @@ impl View {
             renderer_limits,
             RendererOptions {
                 samples: options.samples,
+                anisotropy_clamp: options.anisotropy_clamp,
             },
             &source,
         )?;

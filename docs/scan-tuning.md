@@ -8,15 +8,15 @@ Run from the checkout containing the private cooked quarry:
 .\scripts\quarry-demo.ps1 -QualityMode full -Pose 4
 ```
 
-The default opens the optimized viewer at 1920x1080, 4x MSAA, with streamed geometry and an interactive camera. Arrows orbit, WASD translates, R resets, and Escape exits. `-Pose 4`, `8`, or `12` starts at the close, grazing, or reverse view. `-CameraMode held` disables manual camera changes; `path` replays the registered poses. `-Progressive` shows a coarse cover during preparation. The default prepares the first detailed view before showing the scene.
+The final default opens the optimized viewer at 1920x1080 with full resident geometry, twelve 4K textures, 4x MSAA, 16x anisotropic filtering and an interactive camera. This scene fits in GPU memory, and the resident path is much cheaper on the CPU. See [the final comparison](scan-results.md). `-QualityMode streamed` selects bounded streaming, `-TextureQuality baseline` uses the original 2K content, and `-Anisotropy 1` restores ordinary filtering. The private detail cache is reached through `measurements/quarry-quality/detail`; `-DetailDirectory` overrides it. Arrows orbit, WASD translates, R resets, and Escape exits. `-Pose 4`, `8`, or `12` starts at the close, grazing, or reverse view. `-CameraMode held` disables manual camera changes; `path` replays the registered poses. `-Progressive` shows a coarse cover during preparation. The default prepares the first detailed view before showing the scene.
 
 Ordinary launches reuse an existing binary and never build or recook. `-Build` builds only the viewer with two Cargo jobs. `-PrintCommand` prepares local JSON and prints the invocation without running it. Asset, manifest, cache, limits, cameras and binary paths are configurable. The live checkout shader is watched. Private content stays outside Git. The launcher isolates implicit Vulkan overlay layers for its child process because stale PRISM registrations on this host broke earlier runs; explicit Khronos validation remains available with `-Validate`. The previous environment value is restored afterward.
 
 ## Development profile
 
-The retained dev profile optimizes `renderlab-asset`, `sha2`, `wgpu`, `wgpu-core` and `wgpu-hal` at level 2. Renderlab and viewer code remain opt-0. Debug assertions, overflow checks and validation are preserved. This is a compilation setting, not an algorithm improvement.
+The retained dev profile optimizes `renderlab-asset`, `sha2`, `wgpu`, `wgpu-core` and `wgpu-hal` at level 2, Renderlab at level 1, and leaves viewer code at opt-0. Debug assertions, overflow checks and validation are preserved. This is a compilation setting, not an algorithm improvement. The final root opt-1 trial reduced large-scene upload preparation from 8.584 to 3.590 s; a real renderer body edit rebuilt in 3.597 s. The full method and edit-to-image cost are in [scan-results.md](scan-results.md).
 
-On Ryzen 7800X3D / RTX 4070 SUPER / NVIDIA 617.14, the unchanged 338-pose quarry replay at 1080p/4x with active validation gave:
+Before that final root opt-1 adjustment, on Ryzen 7800X3D / RTX 4070 SUPER / NVIDIA 617.14, the unchanged 338-pose quarry replay at 1080p/4x with active validation gave:
 
 | CPU advance plus drawing, excluding pacing/presentation | Previous opt-0 dependencies | Selected opt-2 dependencies |
 | --- | ---: | ---: |
@@ -32,9 +32,9 @@ Evidence: `.refs/quarry-responsiveness/bin/tuning-dev-b.json`, `measurements/qua
 
 ## Responsive streaming policy
 
-The demo uses 128 queued/completed read slots and at most 64 page uploads per tick. `-RuntimePolicy baseline` retains the registered 4-read/2-upload policy. `-ReadSlots` and `-UploadsPerTick` configure the responsive policy. Canonical JSON is never changed. The renderer's three-flight admission gate and geometry accounting still apply; 64 configured uploads does not promise 64 admitted uploads.
+The streamed demo mode uses 128 queued/completed read slots and at most 64 page uploads per tick. `-RuntimePolicy baseline` retains the registered 4-read/2-upload policy. `-ReadSlots` and `-UploadsPerTick` configure the responsive policy. Canonical JSON is never changed. The renderer's three-flight admission gate and geometry accounting still apply; 64 configured uploads does not promise 64 admitted uploads.
 
-Geometry, metadata and texture budgets remain 512 MiB each, and the error threshold remains 1 pixel. The CPU IO payload bound rises from 327,681 to 8,454,145 bytes. The one IO worker is unchanged. Higher admission allows more detail to become resident and increases both memory use and work; it is not an equal-work algorithm speedup.
+For the original 2K policy experiment below, geometry, metadata and texture budgets remain 512 MiB each, and the error threshold remains 1 pixel. The final detail preset separately raises texture/bootstrap admission for the measured 4K chains; geometry and metadata remain unchanged. The CPU IO payload bound rises from 327,681 to 8,454,145 bytes. The one IO worker is unchanged. Higher admission allows more detail to become resident and increases both memory use and work; it is not an equal-work algorithm speedup.
 
 | Optimized, validation off, same preserved binary and camera path | Registered policy | Responsive policy |
 | --- | ---: | ---: |

@@ -29,7 +29,10 @@ log = "0.4"
 debug = "line-tables-only"
 incremental = true
 
-# Stable dependencies and selection stay optimized; ordinary viewer/runtime edits stay opt-0.
+# Keep large-scene upload preparation practical while viewer edits stay opt-0.
+[profile.dev.package.renderlab]
+opt-level = 1
+
 [profile.dev.package.renderlab-asset]
 opt-level = 2
 
