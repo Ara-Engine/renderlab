@@ -75,7 +75,7 @@ try {
     Run-Cargo 'cpu' @('test', '--locked', '--workspace', '--all-targets', '-j', '2', '--', '--test-threads=1')
     if ($Gpu) {
         Run-Cargo 'gpu' @('test', '--locked', '-p', 'renderlab', '-j', '2', '--', '--ignored', '--test-threads=1', '--nocapture')
-        if (!(Select-String -Path "$run/gpu.stdout.log" -Pattern '13 passed; 0 failed; 0 ignored' -Quiet)) {throw 'GPU case count changed: inspect the actual result; no ignored case counts as passed'}
+        if (!(Select-String -Path "$run/gpu.stdout.log" -Pattern '14 passed; 0 failed; 0 ignored' -Quiet)) {throw 'GPU case count changed: inspect the actual result; no ignored case counts as passed'}
     }
     if ($Replay) {
         $cache = 'measurements/m4-cook/root-unit-a/cache'

@@ -1,4 +1,9 @@
 use super::*;
+#[cfg(feature = "selection-oracle")]
+use asset::virtual_mesh::{PAGE_BYTES, PageId, Selection, SelectionBudget, VirtualMesh};
+#[cfg(feature = "selection-oracle")]
+#[path = "../../src/virtual_geometry/reference.rs"]
+mod policy;
 
 #[cfg(not(feature = "selection-oracle"))]
 pub fn run(_: &Options, _: &cameras::Cameras) -> Result<(), Box<dyn std::error::Error>> {
@@ -88,27 +93,17 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                     snapshots.write_all(b"\n")?;
                     let call = |old| {
                         if old {
-                            if from_cut {
-                                selection_oracle::select_from_cut(
-                                    mesh,
-                                    &errors,
-                                    o.stream.error_pixels,
-                                    &available,
-                                    b,
-                                    protected,
-                                    &initial,
-                                )
-                            } else {
-                                selection_oracle::select_with_protected(
-                                    mesh,
-                                    &errors,
-                                    o.stream.error_pixels,
-                                    &available,
-                                    b,
-                                    protected,
-                                )
-                            }
-                        } else if from_cut {
+                            return policy::select(
+                                mesh,
+                                &errors,
+                                o.stream.error_pixels,
+                                &available,
+                                b,
+                                protected,
+                                from_cut.then_some(&initial),
+                            );
+                        }
+                        let result = if from_cut {
                             select_from_cut(
                                 mesh,
                                 &errors,
@@ -127,7 +122,8 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                                 b,
                                 protected,
                             )
-                        }
+                        };
+                        result.map_err(|e| Error::InvalidInput(e.0))
                     };
                     // Warm both sides and verify before timing. All input creation/projection/hash work is outside.
                     let a = call(false)?;
@@ -161,7 +157,7 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                                 rows,
                                 "{frame},{slot},{},{from_cut},{repeat},{},{ns},{},{},{},{},0,{identity},{output}",
                                 if all { "all" } else { "roots" },
-                                if old { "oracle" } else { "incremental" },
+                                if old { "reference" } else { "incremental" },
                                 s.cluster_visits,
                                 s.candidates,
                                 s.cut.clusters.len(),

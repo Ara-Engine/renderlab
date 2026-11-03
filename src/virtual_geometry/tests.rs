@@ -701,8 +701,83 @@ fn forced_candidate_motion_reports_retained_cut_liveness() {
                 "forced-motion cap={cap} selector={selector:?} debt-without-demand={stalled}/5 retained={}",
                 a.stats.retained_cuts
             );
-            // Diagnostic only. C1a preserves publication/allowance policy even when it stalls.
+            assert_eq!(stalled, 0, "moving retention discarded useful root demand");
         }
+    }
+}
+
+#[test]
+fn capped_view_change_preserves_root_final_demand_with_multiple_placements() {
+    for selector in [SelectorMode::Baseline, SelectorMode::SimpleReference] {
+        let (p, _) = fixture(4);
+        let mut a = VirtualAsset::new(
+            p,
+            directory("root-demand-retention"),
+            StreamOptions {
+                max_candidates: 1,
+                selector,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::new(
+            &a,
+            &[
+                VirtualPlacement {
+                    mesh: 0,
+                    transform: Mat4::IDENTITY,
+                },
+                VirtualPlacement {
+                    mesh: 0,
+                    transform: Mat4::from_translation(Vec3::new(100000., 0., 0.)),
+                },
+            ],
+        )
+        .unwrap();
+        // Establish a finer resident cover, then remove an obsolete intermediate page.
+        let mut available = [false, true, true, true];
+        for _ in 0..8 {
+            scene.select(&mut a, &available, &camera(4.), 1080).unwrap();
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(1)]);
+        available[2] = false;
+        a.revision += 1;
+        for frame in 0..3 {
+            scene
+                .select(
+                    &mut a,
+                    &available,
+                    &camera(4. + frame as f32 * 0.01 + 0.01),
+                    1080,
+                )
+                .unwrap();
+            let s = &scene.selections()[0];
+            assert_eq!(s.cut.pages, [PageId(1)]);
+            assert_eq!(s.demand.requested_pages, [PageId(2)]);
+            assert!(a.stats().candidates <= 1);
+            assert!(scene.protected.len() * PAGE_BYTES <= a.options.geometry_bytes - PAGE_BYTES);
+        }
+        // On a fresh fixed view the retained path receives the full allowance, requests
+        // only final detail, publishes it and then stays cached for 300 CPU frames.
+        scene
+            .select(&mut a, &available, &camera(4.03), 1080)
+            .unwrap();
+        assert_eq!(scene.selections()[0].demand.requested_pages, [PageId(0)]);
+        available[0] = true;
+        a.revision += 1;
+        for _ in 0..4 {
+            scene
+                .select(&mut a, &available, &camera(4.03), 1080)
+                .unwrap();
+        }
+        assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+        let before = a.stats().selection_runs;
+        for _ in 0..300 {
+            scene
+                .select(&mut a, &available, &camera(4.03), 1080)
+                .unwrap();
+        }
+        assert_eq!(a.stats().selection_runs, before);
     }
 }
 

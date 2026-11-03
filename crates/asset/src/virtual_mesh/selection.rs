@@ -269,9 +269,10 @@ fn select_internal(
     });
     #[cfg(feature = "selection-profile")]
     let sorted_ns = profile.elapsed().as_nanos();
+    use incremental::Track;
     for seed in order {
         let seed = seed as usize;
-        if state.planned.active[seed] || projected_errors[seed] <= threshold {
+        if state.published.active[seed] || projected_errors[seed] <= threshold {
             continue;
         }
         if candidates >= budget.max_candidates.min(n) {
@@ -279,21 +280,47 @@ fn select_internal(
             break;
         }
         candidates += 1;
-        state.propose(seed);
-        let denial = if state.planned.clusters > budget.max_clusters.min(c) {
+        if !state.planned.active[seed] {
+            state.propose(seed, Track::Plan);
+            let denial = if state.planned.clusters > budget.max_clusters.min(c) {
+                Some(DebtReason::OutputCapacity)
+            } else if product(state.charged, PAGE_BYTES)? > budget.geometry_bytes {
+                Some(DebtReason::GeometryCapacity)
+            } else {
+                None
+            };
+            if let Some(reason) = denial {
+                if !reasons.contains(&reason) {
+                    reasons.push(reason);
+                }
+                state.rollback(Track::Plan);
+                continue;
+            }
+            state.accept(Track::Plan);
+        }
+        if state.planned.missing == 0 {
+            state.publish_plan();
+            continue;
+        }
+        // Publication is a separate transaction inside the admitted plan. Its complete cut
+        // must be resident; it cannot introduce IO demand or bypass transition accounting.
+        state.propose(seed, Track::Publication);
+        let denial = if state.published.clusters > budget.max_clusters.min(c) {
             Some(DebtReason::OutputCapacity)
         } else if product(state.charged, PAGE_BYTES)? > budget.geometry_bytes {
             Some(DebtReason::GeometryCapacity)
         } else {
             None
         };
-        if let Some(reason) = denial {
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-            state.rollback();
+        if let Some(reason) = denial
+            && !reasons.contains(&reason)
+        {
+            reasons.push(reason);
+        }
+        if denial.is_some() || state.published.missing != 0 {
+            state.rollback(Track::Publication);
         } else {
-            state.accept();
+            state.accept(Track::Publication);
         }
     }
     #[cfg(feature = "selection-profile")]

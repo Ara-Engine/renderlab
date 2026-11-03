@@ -489,6 +489,76 @@ fn assert_registered_image(actual: &[u8], reference: &[u8], width: usize, height
         distances_squared.len()
     );
 }
+
+#[test]
+#[ignore = "Vulkan GPU; ordinary paced registered motion must publish the resident fin independently of missing pages"]
+fn gpu_virtual_registered_moving_fin_publication() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let color = target(r.device(), 1920, 1080);
+    let cameras = cameras::Cameras::load(std::path::Path::new(
+        "measurements/m4-cook/registration-initial/cameras.json",
+    ))
+    .unwrap();
+    let mut a = VirtualAsset::open(
+        std::path::Path::new("measurements/m4-cook/root-unit-a/cache"),
+        std::path::Path::new("measurements/m4-cook/root-unit-a/material-thin.manifest"),
+        StreamOptions::default(),
+    )
+    .unwrap();
+    let mut scene = VirtualScene::from_package(&a).unwrap();
+    for pose in &cameras.frames[..=210] {
+        let start = Instant::now();
+        virtual_frame(&mut r, &color, &pose.camera().unwrap(), &mut a, &mut scene);
+        assert!(a.stats().geometry_peak <= 8 << 20);
+        assert!(a.stats().metadata_bytes + a.stats().scratch_bound_bytes <= 8 << 20);
+        std::thread::sleep(Duration::from_micros(16_670).saturating_sub(start.elapsed()));
+    }
+    assert_eq!(a.status(PageId(1)), Some(PageStatus::Resident));
+    assert!(
+        scene.selections()[0]
+            .cut
+            .active_groups
+            .contains(&asset::virtual_mesh::GroupId(1004)),
+        "resident orange fin blocked behind an unrelated plan page"
+    );
+    let pixels = r.test_capture_color(&color);
+    save(
+        "m4-moving-fin-210",
+        1920,
+        1080,
+        &pixels
+            .chunks_exact(4)
+            .flat_map(|p| p[..3].iter().copied())
+            .collect::<Vec<_>>(),
+    );
+    let cam = cameras.frames[210].camera().unwrap();
+    let mut full = prepared::Prepared::load(std::path::Path::new(
+        "measurements/m4-cook/registration-initial/material-thin.rla",
+    ))
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        full.advance(&mut r).unwrap();
+        if full.ready()
+            && r.try_render_view(
+                &color,
+                &cam,
+                &mut full.draws(Visibility::Unculled),
+                ViewMode::BaseColor,
+            )
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        r.poll().unwrap();
+        assert!(Instant::now() < deadline, "original RLA reference deadline");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_registered_image(&pixels, &r.test_capture_color(&color), 1920, 1080);
+}
+
 #[test]
 #[ignore = "Vulkan GPU; registered 8MiB near-view convergence and 300 quiet frames after actual page pressure"]
 fn gpu_virtual_registered_pressure_quiescence() {

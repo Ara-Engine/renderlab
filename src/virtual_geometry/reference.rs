@@ -12,6 +12,37 @@ pub(super) fn select(
     protected: &[PageId],
     initial: Option<&Cut>,
 ) -> Result<Selection, Error> {
+    let scratch = mesh.groups.len() * 32 + mesh.clusters.len() * 48 + available.len() * 16 + 8;
+    if scratch > budget.max_scratch_bytes
+        || errors.len() != mesh.groups.len()
+        || !threshold.is_finite()
+        || threshold < 0.
+        || errors.iter().any(|e| e.is_nan() || *e < 0.)
+        || protected.iter().any(|p| p.index() >= available.len())
+    {
+        return Err(Error::InvalidInput("reference domain/scratch capacity"));
+    }
+    mesh.validate(
+        available.len(),
+        usize::MAX,
+        asset::virtual_mesh::VirtualLimits {
+            max_groups: mesh.groups.len(),
+            max_clusters: mesh.clusters.len(),
+            max_metadata_bytes: budget.max_scratch_bytes,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| Error::InvalidInput(e.0))?;
+    if mesh
+        .terminal_groups()
+        .any(|g| errors[g.index()] <= threshold)
+        || mesh.clusters.iter().any(|c| {
+            c.refined
+                .is_some_and(|r| errors[c.owner.index()] < errors[r.index()])
+        })
+    {
+        return Err(Error::InvalidInput("reference projected error domain"));
+    }
     let mut active: BTreeSet<_> = mesh.terminal_groups().collect();
     let cut = |a: &BTreeSet<GroupId>| -> Vec<ClusterId> {
         mesh.clusters
@@ -63,8 +94,6 @@ pub(super) fn select(
             return Err(Error::InvalidInput("reference initial cut admission"));
         }
     }
-    let mut required: BTreeSet<_> = pinned.union(&pages(&selected)).copied().collect();
-    let mut requested = vec![];
     let mut reasons = vec![];
     let mut candidates = 0;
     let mut visits = 0;
@@ -75,17 +104,9 @@ pub(super) fn select(
             .then_with(|| mesh.groups[*b].depth.cmp(&mesh.groups[*a].depth))
             .then_with(|| a.cmp(b))
     });
-    for (g, error) in order {
-        if active.contains(&GroupId(g as u32)) || error <= threshold {
-            continue;
-        }
-        if candidates >= budget.max_candidates {
-            reasons.push(DebtReason::CandidateCapacity);
-            break;
-        }
-        candidates += 1;
-        let mut proposal = active.clone();
-        proposal.insert(GroupId(g as u32));
+    let mut closure = |base: &BTreeSet<GroupId>, seed: GroupId| {
+        let mut proposal = base.clone();
+        proposal.insert(seed);
         loop {
             let owners: Vec<_> = mesh
                 .clusters
@@ -100,38 +121,66 @@ pub(super) fn select(
                 break;
             }
         }
-        let next = cut(&proposal);
-        visits += mesh.clusters.len();
-        let reason = if next.len() > budget.max_clusters {
-            Some(DebtReason::OutputCapacity)
-        } else {
-            let target: BTreeSet<_> = pages(&next).union(&pinned).copied().collect();
-            let charged: BTreeSet<_> = target
-                .union(&pages(&selected))
-                .copied()
-                .chain(other.iter().copied())
-                .collect();
-            if charged.len() * PAGE_BYTES > budget.geometry_bytes {
+        proposal
+    };
+    let target = |a: &BTreeSet<GroupId>| -> BTreeSet<PageId> {
+        pages(&cut(a)).union(&pinned).copied().collect()
+    };
+    let charged = |p: &BTreeSet<PageId>, u: &[ClusterId]| -> usize {
+        p.iter()
+            .copied()
+            .chain(pages(u))
+            .chain(other.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    for (g, error) in order {
+        let seed = GroupId(g as u32);
+        if published.contains(&seed) || error <= threshold {
+            continue;
+        }
+        if candidates >= budget.max_candidates {
+            reasons.push(DebtReason::CandidateCapacity);
+            break;
+        }
+        candidates += 1;
+        if !active.contains(&seed) {
+            let proposal = closure(&active, seed);
+            let next = cut(&proposal);
+            let reason = if next.len() > budget.max_clusters {
+                Some(DebtReason::OutputCapacity)
+            } else if charged(&target(&proposal), &selected) * PAGE_BYTES > budget.geometry_bytes {
                 Some(DebtReason::GeometryCapacity)
             } else {
-                let missing: Vec<_> = target
-                    .iter()
-                    .copied()
-                    .filter(|p| !available[p.index()])
-                    .collect();
-                required = target;
-                if missing.is_empty() {
-                    active = proposal;
-                    published = active.clone();
-                    selected = next;
-                    requested.clear();
-                    None
-                } else {
-                    requested = missing;
-                    active = proposal;
-                    None
+                None
+            };
+            if let Some(r) = reason {
+                if !reasons.contains(&r) {
+                    reasons.push(r);
                 }
+                continue;
             }
+            active = proposal;
+        }
+        let planned_pages = target(&active);
+        if planned_pages.iter().all(|p| available[p.index()]) {
+            published = active.clone();
+            selected = cut(&published);
+            continue;
+        }
+        let proposal = closure(&published, seed);
+        assert!(proposal.is_subset(&active));
+        let next = cut(&proposal);
+        let reason = if next.len() > budget.max_clusters {
+            Some(DebtReason::OutputCapacity)
+        } else if charged(&planned_pages, &next) * PAGE_BYTES > budget.geometry_bytes {
+            Some(DebtReason::GeometryCapacity)
+        } else {
+            if pages(&next).iter().all(|p| available[p.index()]) {
+                published = proposal;
+                selected = next;
+            }
+            None
         };
         if let Some(r) = reason
             && !reasons.contains(&r)
@@ -139,6 +188,12 @@ pub(super) fn select(
             reasons.push(r);
         }
     }
+    let required = target(&active);
+    let requested: Vec<_> = required
+        .iter()
+        .copied()
+        .filter(|p| !available[p.index()])
+        .collect();
     if !requested.is_empty() {
         reasons.push(DebtReason::MissingPages);
     }
@@ -162,9 +217,6 @@ pub(super) fn select(
         },
         candidates,
         cluster_visits: visits,
-        scratch_bound_bytes: mesh.groups.len() * 32
-            + mesh.clusters.len() * 48
-            + available.len() * 16
-            + 8,
+        scratch_bound_bytes: scratch,
     })
 }

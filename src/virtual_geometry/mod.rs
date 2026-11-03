@@ -696,6 +696,46 @@ fn retain_better_cut(
     }
     true
 }
+
+// Keep an already admitted final plan when a capped retained query has no useful demand.
+// Recheck the union against its actual publication: independent refinement can add pages.
+fn retain_missing_demand(
+    demand: &asset::virtual_mesh::Demand,
+    next: &mut Selection,
+    available: &[bool],
+    protected: &[PageId],
+    geometry_bytes: usize,
+) -> bool {
+    if next.debt.unresolved_groups == 0
+        || !next.demand.requested_pages.is_empty()
+        || demand.required_pages.iter().all(|p| available[p.index()])
+    {
+        return false;
+    }
+    let mut union = demand.required_pages.clone();
+    union_into(&mut union, &next.cut.pages);
+    union_into(&mut union, protected);
+    if union.len() * PAGE_BYTES > geometry_bytes {
+        return false;
+    }
+    next.demand.required_pages = demand.required_pages.clone();
+    next.demand.requested_pages = demand
+        .required_pages
+        .iter()
+        .copied()
+        .filter(|p| !available[p.index()])
+        .collect();
+    if !next
+        .debt
+        .reasons
+        .contains(&asset::virtual_mesh::DebtReason::MissingPages)
+    {
+        next.debt
+            .reasons
+            .push(asset::virtual_mesh::DebtReason::MissingPages);
+    }
+    true
+}
 #[allow(clippy::too_many_arguments)]
 fn run_selector(
     selector: SelectorMode,
@@ -722,16 +762,9 @@ fn run_selector(
     };
     #[cfg(feature = "selection-shadow")]
     {
-        use asset::virtual_mesh::selection_oracle;
-        let old = if let Some(cut) = initial {
-            selection_oracle::select_from_cut(
-                mesh, errors, threshold, available, budget, protected, cut,
-            )
-        } else {
-            selection_oracle::select_with_protected(
-                mesh, errors, threshold, available, budget, protected,
-            )
-        };
+        let old = reference::select(
+            mesh, errors, threshold, available, budget, protected, initial,
+        );
         assert_eq!(result.is_ok(), old.is_ok(), "shadow error mismatch");
         if let (Ok(new), Ok(old)) = (&result, old) {
             assert_eq!(new.cut, old.cut, "shadow cut");
@@ -739,7 +772,7 @@ fn run_selector(
             assert_eq!(new.debt, old.debt, "shadow debt");
             assert_eq!(new.candidates, old.candidates, "shadow candidates");
             eprintln!(
-                "selection_shadow initial={} candidates={} old_scan_touches={} new_cluster_touches={}",
+                "selection_shadow policy=two-track initial={} candidates={} reference_scan_touches={} new_cluster_touches={}",
                 initial.is_some(),
                 new.candidates,
                 old.cluster_visits,
@@ -1041,20 +1074,41 @@ impl VirtualScene {
                         max_clusters: output_budget,
                         max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
                     };
-                    let mut incremental = run_selector(
-                        asset.options.selector,
-                        mesh,
-                        &errors,
-                        asset.options.error_pixels,
-                        available,
-                        budget,
-                        &protected,
-                        Some(&selection.cut),
-                    )?;
-                    asset.stats.selection_calls += 1;
-                    incremental.candidates += spent;
-                    incremental.cluster_visits += visits;
-                    selection = incremental;
+                    if budget.max_candidates > 0 {
+                        let mut incremental = run_selector(
+                            asset.options.selector,
+                            mesh,
+                            &errors,
+                            asset.options.error_pixels,
+                            available,
+                            budget,
+                            &protected,
+                            Some(&selection.cut),
+                        )?;
+                        asset.stats.selection_calls += 1;
+                        retain_missing_demand(
+                            &selection.demand,
+                            &mut incremental,
+                            available,
+                            &protected,
+                            budget.geometry_bytes,
+                        );
+                        incremental.candidates += spent;
+                        incremental.cluster_visits += visits;
+                        selection = incremental;
+                    }
+                    // A tiny moving allowance can revisit an already resident root prefix.
+                    // Keep the previous final plan until it arrives, rather than losing all
+                    // IO progress at each view change. This only reuses admitted demand.
+                    if let Some(previous) = self.selections.get(slot) {
+                        retain_missing_demand(
+                            &previous.demand,
+                            &mut selection,
+                            available,
+                            &protected,
+                            budget.geometry_bytes,
+                        );
+                    }
                 }
             }
             asset.stats.selection += start.elapsed();

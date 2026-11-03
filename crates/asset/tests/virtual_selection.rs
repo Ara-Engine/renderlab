@@ -1,4 +1,18 @@
+use renderlab_asset as asset;
 use renderlab_asset::{Asset, Material, virtual_mesh::*};
+
+// Exercise the same independent ordered-set policy oracle used by runtime shadow checks.
+// This test adapter only translates the runtime error type; it shares no production traversal.
+#[derive(Debug)]
+enum Error {
+    InvalidInput(&'static str),
+}
+#[path = "../../../src/virtual_geometry/reference.rs"]
+mod policy;
+
+fn policy_result(result: Result<Selection, Error>) -> renderlab_asset::Result<Selection> {
+    result.map_err(|Error::InvalidInput(message)| renderlab_asset::Error(message))
+}
 
 fn graph(groups: &[&[Option<u32>]]) -> VirtualMesh {
     let mut mesh = VirtualMesh {
@@ -114,6 +128,46 @@ fn exact_once(mesh: &VirtualMesh, cut: &Cut) {
             .map(|(i, _)| ClusterId(i as u32))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn resident_independent_fin_publishes_while_another_region_waits() {
+    let mesh = graph(&[&[None], &[None], &[Some(0)], &[Some(1)]]);
+    let result = renderlab_asset::virtual_mesh::select(
+        &mesh,
+        &[200., 100., f64::INFINITY, f64::INFINITY],
+        1.,
+        &[false, true, true, true],
+        SelectionBudget {
+            max_candidates: 2,
+            geometry_bytes: 4 * PAGE_BYTES,
+            ..budget()
+        },
+    )
+    .unwrap();
+    exact_once(&mesh, &result.cut);
+    assert_eq!(result.cut.clusters, [ClusterId(1), ClusterId(2)]);
+    assert_eq!(
+        result.cut.active_groups,
+        [GroupId(1), GroupId(2), GroupId(3)]
+    );
+    assert_eq!(result.candidates, 2);
+    assert_eq!(result.demand.requested_pages, [PageId(0)]);
+    #[cfg(feature = "selection-oracle")]
+    {
+        // The preserved C1a policy intentionally has the old blocked result. It is a
+        // historical baseline, not the oracle for the new publication policy.
+        let historical = selection_oracle::select(
+            &mesh,
+            &[200., 100., f64::INFINITY, f64::INFINITY],
+            1.,
+            &[false, true, true, true],
+            budget(),
+        )
+        .unwrap();
+        assert_eq!(historical.cut.clusters, [ClusterId(2), ClusterId(3)]);
+        assert_eq!(historical.demand.requested_pages, [PageId(0)]);
+    }
 }
 
 #[test]
@@ -457,6 +511,16 @@ fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
                                 );
                                 assert!(next.cut.pages.iter().all(|p| available[p.index()]));
                                 assert!(next.cut.clusters.len() <= output);
+                                assert!(next.candidates <= candidates);
+                                assert_eq!(
+                                    next.demand.requested_pages,
+                                    next.demand
+                                        .required_pages
+                                        .iter()
+                                        .copied()
+                                        .filter(|p| !available[p.index()])
+                                        .collect::<Vec<_>>()
+                                );
                                 let mut protected = initial.pages.clone();
                                 protected.extend(&next.cut.pages);
                                 protected.extend(&next.demand.required_pages);
@@ -486,7 +550,6 @@ fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
     println!("current_cut_checked={checked}");
 }
 
-#[cfg(feature = "selection-oracle")]
 fn assert_equivalent(
     actual: &renderlab_asset::Result<Selection>,
     old: renderlab_asset::Result<Selection>,
@@ -499,7 +562,6 @@ fn assert_equivalent(
         assert_eq!(a.candidates, b.candidates);
     }
 }
-#[cfg(feature = "selection-oracle")]
 fn select(
     mesh: &VirtualMesh,
     errors: &[f64],
@@ -510,11 +572,18 @@ fn select(
     let actual = renderlab_asset::virtual_mesh::select(mesh, errors, threshold, available, budget);
     assert_equivalent(
         &actual,
-        selection_oracle::select(mesh, errors, threshold, available, budget),
+        policy_result(policy::select(
+            mesh,
+            errors,
+            threshold,
+            available,
+            budget,
+            &[],
+            None,
+        )),
     );
     actual
 }
-#[cfg(feature = "selection-oracle")]
 fn select_from_cut(
     mesh: &VirtualMesh,
     errors: &[f64],
@@ -529,16 +598,21 @@ fn select_from_cut(
     );
     assert_equivalent(
         &actual,
-        selection_oracle::select_from_cut(
-            mesh, errors, threshold, available, budget, protected, initial,
-        ),
+        policy_result(policy::select(
+            mesh,
+            errors,
+            threshold,
+            available,
+            budget,
+            protected,
+            Some(initial),
+        )),
     );
     actual
 }
 
 #[test]
-#[cfg(feature = "selection-oracle")]
-fn seeded_shared_page_dags_match_preserved_scan_policy() {
+fn seeded_shared_page_dags_match_independent_two_track_policy() {
     let mut seed = 0xfbe75c1a9b234d01u64;
     let mut draw = |limit: usize| {
         seed ^= seed << 13;
@@ -613,10 +687,31 @@ fn seeded_shared_page_dags_match_preserved_scan_policy() {
         let actual = select_with_protected(&mesh, &errors, 1., &available, b, &protected);
         assert_equivalent(
             &actual,
-            selection_oracle::select_with_protected(&mesh, &errors, 1., &available, b, &protected),
+            policy_result(policy::select(
+                &mesh, &errors, 1., &available, b, &protected, None,
+            )),
         );
         if let Ok(a) = actual {
             exact_once(&mesh, &a.cut);
+            assert!(a.cut.pages.iter().all(|p| available[p.index()]));
+            assert!(a.cut.clusters.len() <= b.max_clusters);
+            assert!(a.candidates <= b.max_candidates);
+            assert_eq!(
+                a.demand.requested_pages,
+                a.demand
+                    .required_pages
+                    .iter()
+                    .copied()
+                    .filter(|p| !available[p.index()])
+                    .collect::<Vec<_>>()
+            );
+            let mut charge = protected.clone();
+            charge.extend(&roots.pages);
+            charge.extend(&a.cut.pages);
+            charge.extend(&a.demand.required_pages);
+            charge.sort_unstable();
+            charge.dedup();
+            assert!(charge.len() * PAGE_BYTES <= b.geometry_bytes);
         }
         let initial = select(
             &mesh,
@@ -636,6 +731,31 @@ fn seeded_shared_page_dags_match_preserved_scan_policy() {
         let next = select_from_cut(&mesh, &errors, 1., &available, b, &protected, &initial);
         if let Ok(a) = next {
             exact_once(&mesh, &a.cut);
+            assert!(
+                initial
+                    .active_groups
+                    .iter()
+                    .all(|g| a.cut.active_groups.contains(g))
+            );
+            assert!(a.cut.pages.iter().all(|p| available[p.index()]));
+            assert!(a.cut.clusters.len() <= b.max_clusters);
+            assert!(a.candidates <= b.max_candidates);
+            assert_eq!(
+                a.demand.requested_pages,
+                a.demand
+                    .required_pages
+                    .iter()
+                    .copied()
+                    .filter(|p| !available[p.index()])
+                    .collect::<Vec<_>>()
+            );
+            let mut charge = protected.clone();
+            charge.extend(&roots.pages);
+            charge.extend(&a.cut.pages);
+            charge.extend(&a.demand.required_pages);
+            charge.sort_unstable();
+            charge.dedup();
+            assert!(charge.len() * PAGE_BYTES <= b.geometry_bytes);
         }
     }
     println!("seeded DAGs=6000 root+initial cases=12000 seed=fbe75c1a9b234d01");

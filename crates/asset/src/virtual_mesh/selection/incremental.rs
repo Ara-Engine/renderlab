@@ -4,6 +4,13 @@ pub(super) struct Cover {
     pub active: Vec<bool>,
     pub refs: Vec<u32>,
     pub clusters: usize,
+    pub missing: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Track {
+    Plan,
+    Publication,
 }
 
 /// One call owns all indices and journals. No mutable selection state survives the call.
@@ -16,11 +23,10 @@ pub(super) struct State<'a> {
     pub planned: Cover,
     pub published: Cover,
     journal: Vec<u32>,
-    pending: Vec<u32>,
+    gap: Vec<u32>,
     proposal: Vec<bool>,
     deltas: Vec<(PageId, bool)>,
     pub charged: usize,
-    missing: usize,
     pub visits: usize,
 }
 
@@ -78,37 +84,49 @@ impl<'a> State<'a> {
                 active: active.clone(),
                 refs: refs.clone(),
                 clusters,
+                missing: 0,
             },
             planned: Cover {
                 active,
                 refs,
                 clusters,
+                missing: 0,
             },
             journal: Vec::with_capacity(n),
-            pending: Vec::with_capacity(n),
+            gap: Vec::with_capacity(n),
             proposal: vec![false; n],
             deltas: Vec::with_capacity(mesh.clusters.len()),
             charged,
-            missing: 0,
             // Two CSR passes and the initial cover scan. Proposal/publication count each
             // closure/boundary record read below. Rollback replays pages without cluster reads.
             visits: mesh.clusters.len() * 3,
         }
     }
 
-    fn page_delta(&mut self, page: PageId, add: bool, planning: bool) {
+    fn cover(&self, track: Track) -> &Cover {
+        match track {
+            Track::Plan => &self.planned,
+            Track::Publication => &self.published,
+        }
+    }
+
+    fn cover_mut(&mut self, track: Track) -> &mut Cover {
+        match track {
+            Track::Plan => &mut self.planned,
+            Track::Publication => &mut self.published,
+        }
+    }
+
+    fn page_delta(&mut self, page: PageId, add: bool, track: Track) {
         let p = page.index();
         let before = self.fixed[p] || self.planned.refs[p] > 0 || self.published.refs[p] > 0;
-        let cover = if planning {
-            &mut self.planned
-        } else {
-            &mut self.published
-        };
-        if planning && !self.available[p] && cover.refs[p] == u32::from(!add) {
+        let available = self.available[p];
+        let cover = self.cover_mut(track);
+        if !available && cover.refs[p] == u32::from(!add) {
             if add {
-                self.missing += 1;
+                cover.missing += 1;
             } else {
-                self.missing -= 1;
+                cover.missing -= 1;
             }
         }
         if add {
@@ -122,29 +140,34 @@ impl<'a> State<'a> {
         self.charged = self.charged + usize::from(after) - usize::from(before);
     }
 
-    fn mark(&mut self, g: usize) {
-        self.planned.active[g] = true;
+    fn mark(&mut self, g: usize, track: Track) {
+        debug_assert!(matches!(track, Track::Plan) || self.planned.active[g]);
+        self.cover_mut(track).active[g] = true;
         self.proposal[g] = true;
         self.journal.push(g as u32);
     }
 
-    pub fn propose(&mut self, seed: usize) {
+    pub fn propose(&mut self, seed: usize, track: Track) {
         self.journal.clear();
         self.deltas.clear();
-        self.mark(seed);
+        self.mark(seed, track);
         let mut cursor = 0;
         while cursor < self.journal.len() {
             let g = self.journal[cursor] as usize;
             for i in self.offsets[g]..self.offsets[g + 1] {
                 self.visits += 1;
                 let owner = self.mesh.clusters[self.incoming[i] as usize].owner.index();
-                if !self.planned.active[owner] {
-                    self.mark(owner);
+                if !self.cover(track).active[owner] {
+                    self.mark(owner, track);
                 }
             }
             cursor += 1;
         }
-        // All flags now describe the final closure. Only its boundary changes the cut.
+        self.apply_boundary(track);
+    }
+
+    fn apply_boundary(&mut self, track: Track) {
+        // All flags describe the final closure. Only its boundary changes the cut.
         // Internal coarse shards never enter page accounting, even temporarily.
         for i in 0..self.journal.len() {
             let g = self.journal[i] as usize;
@@ -152,64 +175,61 @@ impl<'a> State<'a> {
             for id in span.offset as usize..(span.offset + span.count) as usize {
                 self.visits += 1;
                 let c = &self.mesh.clusters[id];
-                if c.refined.is_none_or(|r| !self.planned.active[r.index()]) {
+                if c.refined
+                    .is_none_or(|r| !self.cover(track).active[r.index()])
+                {
                     let page = c.page;
                     self.deltas.push((page, true));
-                    self.page_delta(page, true, true);
+                    self.page_delta(page, true, track);
                 }
             }
             for link in self.offsets[g]..self.offsets[g + 1] {
                 self.visits += 1;
                 let c = &self.mesh.clusters[self.incoming[link] as usize];
-                if self.planned.active[c.owner.index()] && !self.proposal[c.owner.index()] {
+                if self.cover(track).active[c.owner.index()] && !self.proposal[c.owner.index()] {
                     let page = c.page;
                     self.deltas.push((page, false));
-                    self.page_delta(page, false, true);
+                    self.page_delta(page, false, track);
                 }
             }
         }
     }
 
-    pub fn rollback(&mut self) {
+    pub fn rollback(&mut self, track: Track) {
         for i in (0..self.deltas.len()).rev() {
             let (page, add) = self.deltas[i];
-            self.page_delta(page, !add, true);
+            self.page_delta(page, !add, track);
         }
-        for &g in &self.journal {
-            self.planned.active[g as usize] = false;
+        for i in 0..self.journal.len() {
+            let g = self.journal[i];
+            self.cover_mut(track).active[g as usize] = false;
             self.proposal[g as usize] = false;
         }
     }
 
-    pub fn accept(&mut self) {
-        self.pending.extend_from_slice(&self.journal);
+    pub fn accept(&mut self, track: Track) {
+        if matches!(track, Track::Plan) {
+            self.gap.extend_from_slice(&self.journal);
+        }
         for &g in &self.journal {
             self.proposal[g as usize] = false;
         }
-        if self.missing != 0 {
-            return;
-        }
-        for i in 0..self.pending.len() {
-            let g = self.pending[i] as usize;
-            let span = self.mesh.groups[g].clusters;
-            for id in span.offset as usize..(span.offset + span.count) as usize {
-                self.visits += 1;
-                let c = &self.mesh.clusters[id];
-                if c.refined.is_none_or(|r| !self.planned.active[r.index()]) {
-                    self.page_delta(c.page, true, false);
-                }
-            }
-            for link in self.offsets[g]..self.offsets[g + 1] {
-                self.visits += 1;
-                let c = &self.mesh.clusters[self.incoming[link] as usize];
-                if self.published.active[c.owner.index()] {
-                    self.page_delta(c.page, false, false);
-                }
+    }
+
+    /// The admitted plan is available and fits; synchronizing removes transition pages.
+    /// Filter the gap because independent publication can already have activated some groups.
+    pub fn publish_plan(&mut self) {
+        debug_assert_eq!(self.planned.missing, 0);
+        self.journal.clear();
+        self.deltas.clear();
+        for i in 0..self.gap.len() {
+            let g = self.gap[i] as usize;
+            if !self.published.active[g] {
+                self.mark(g, Track::Publication);
             }
         }
-        for &g in &self.pending {
-            self.published.active[g as usize] = true;
-        }
-        self.pending.clear();
+        self.apply_boundary(Track::Publication);
+        self.accept(Track::Publication);
+        self.gap.clear();
     }
 }
