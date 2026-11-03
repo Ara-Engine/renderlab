@@ -4,6 +4,8 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 
 ## Run
 
+On the scan-development host, `powershell -File scripts/quarry-demo.ps1` opens the private twelve-scan quarry with the existing optimized viewer, 4x MSAA and interactive camera controls. It does not build or import. See [the demo settings and measured tradeoffs](docs/scan-tuning.md). The source scans and cooked cache are not distributed with this repository.
+
 `cargo run -p renderlab-viewer` opens a persistent 960x640 viewer. The viewer uses the library's owned `Renderer`, with Vulkan/WGSL via wgpu 30 and winit 0.30. Vulkan drivers are required. Windows is the only tested platform.
 
 - Arrow keys: camera orbit/elevation. WASD: translate the camera and its look-at point.
@@ -13,6 +15,7 @@ Provisional name for an independent Rust renderer. Public repository: [Ara-Engin
 - Edit `shaders/scene.wgsl` while running. The viewer checks content every 50 ms. Syntax or pipeline-layout errors appear in the terminal/title; the last valid pipeline keeps rendering. Save a correction to recover.
 - An optional first argument or `--shader PATH` specifies a different shader path. The default uses the source checkout path, so this is currently a developer tool, not a distributable application.
 - `--frames N` or `--seconds N` bounds a run. `--log-frames` prints CPU phases, GPU pass samples, uploads, and presentation-call costs. `--no-timestamps` exercises rendering without GPU timing.
+- `--cameras PATH --interactive-camera` starts from the first registered pose and allows the same manual controls; without that flag, registered poses drive the camera.
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 

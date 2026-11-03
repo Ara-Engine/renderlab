@@ -63,6 +63,7 @@ struct Options {
     progressive: bool,
     cache: PathBuf,
     cameras: Option<PathBuf>,
+    interactive_camera: bool,
     stream: StreamOptions,
     samples: SampleCount,
     view: ViewMode,
@@ -85,6 +86,7 @@ impl Options {
             progressive: false,
             cache: "measurements/m4-cook/root-unit-a/cache".into(),
             cameras: None,
+            interactive_camera: false,
             stream,
             samples: SampleCount::One,
             view: ViewMode::BaseColor,
@@ -93,6 +95,7 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--progressive" => options.progressive = true,
+                "--interactive-camera" => options.interactive_camera = true,
                 "--virtual-manifest" => {
                     options.virtual_manifest = Some(args.next().ok_or("missing manifest")?.into())
                 }
@@ -322,6 +325,11 @@ impl View {
         );
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
+            flags: if options.validate {
+                wgpu::InstanceFlags::debugging()
+            } else {
+                wgpu::InstanceFlags::default()
+            },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance.create_surface(window.clone())?;
@@ -619,11 +627,47 @@ impl View {
             .cameras
             .as_ref()
             .map(|c| {
-                let pose = &c.frames[(self.presented as usize).min(c.frames.len() - 1)];
+                let index = if options.interactive_camera {
+                    0
+                } else {
+                    (self.presented as usize).min(c.frames.len() - 1)
+                };
+                let pose = &c.frames[index];
                 if options.log_frames {
                     eprintln!("registered_pose={} phase={}", pose.frame, pose.phase);
                 }
-                pose.camera()
+                if options.interactive_camera {
+                    let defaults = Scene::default();
+                    let yaw = self.scene.yaw - defaults.yaw;
+                    let pitch = self.scene.elevation - defaults.elevation;
+                    if yaw == 0.0 && pitch == 0.0 && self.scene.translation == renderlab::Vec3::ZERO
+                    {
+                        return pose.camera();
+                    }
+                    let up = renderlab::Vec3::from_array(pose.up).normalize();
+                    let target = renderlab::Vec3::from_array(pose.target) + self.scene.translation;
+                    let offset = renderlab::Vec3::from_array(pose.eye)
+                        - renderlab::Vec3::from_array(pose.target);
+                    let radius = offset.length();
+                    let vertical = offset.dot(up);
+                    let elevation =
+                        ((vertical / radius).clamp(-1.0, 1.0).asin() + pitch).clamp(-1.4, 1.4);
+                    let horizontal = (offset - up * vertical).normalize();
+                    let direction =
+                        renderlab::Mat4::from_axis_angle(up, yaw).transform_vector3(horizontal);
+                    let eye =
+                        target + radius * (direction * elevation.cos() + up * elevation.sin());
+                    renderlab::Camera::look_at(
+                        eye,
+                        target,
+                        up,
+                        pose.fov_y_radians,
+                        pose.near,
+                        pose.far,
+                    )
+                } else {
+                    pose.camera()
+                }
             })
             .transpose()?;
         let virtual_camera = registered_camera.unwrap_or_else(|| self.scene.camera(2));

@@ -94,8 +94,6 @@ impl Drop for ValidationRun {
         assert!(messages > 0, "Vulkan diagnostic sink was not exercised");
         assert_eq!(errors, 0, "Vulkan diagnostics reported errors");
         assert_eq!(missing, 0, "requested Vulkan validation layer unavailable");
-        if cfg!(debug_assertions) {
-            assert!(active > 0, "Khronos validation activation was not observed");
-        }
+        assert!(active > 0, "Khronos validation activation was not observed");
     }
 }
