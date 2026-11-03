@@ -44,7 +44,7 @@ Next-unit throughput checkpoint:
 
 - Blocking first steps: M5-A is pushed and accepted; the selector/planner integration checks pass. Existing how/design/Opus decisions govern the next units; no new broad design round.
 - Independent workstreams: one main-checkout owner integrates GPU shadows; an isolated worker prepares tangent and normal-map cooking; the existing UE worker owns only calibration scripts and its private project.
-- Shared mutable state: shadow renderer/WGSL/layout changes have one owner. Normal-map preparation stays in its own checkout and does not migrate the runtime layout yet. Only the shadow owner may use GPU/window work and engine builds in this phase; cooker CPU checks use a separate cached target.
+- Shared mutable state: shadow renderer/WGSL/layout changes have one owner. Normal-map preparation stays in its own checkout and does not migrate the runtime layout yet. Root allocates GPU and heavy builds to one worker at a time: first the bounded UE calibration run while shadow implementation proceeds, then shadow verification. Cooker CPU checks use a separate cached target.
 - Smallest safe decomposition: finish one shadowed fixture and quarry with explicit coverage/quality limits, and separately return tested tangent preparation. Root owns integration, comparisons, closing documentation and pushes. Shadow-demand refinement and the normal-map runtime adapter follow these concrete seams.
 
 The decision trail is `milestones-5-6-decisions.tsv`; local per-attempt hillclimb logs stay in each worktree's ignored evidence directory. Hardware baseline remains this Windows PC with RTX 4070 SUPER/NVIDIA 617.14. Recheck foreground-game state and contention before interactive or GPU work.
