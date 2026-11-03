@@ -52,7 +52,7 @@ pub fn run(o: &Options, cameras: &cameras::Cameras) -> Result<(), Box<dyn std::e
                 geometry_bytes: o.stream.geometry_bytes - PAGE_BYTES,
                 max_candidates: o.stream.max_candidates,
                 max_clusters: o.stream.max_clusters,
-                max_scratch_bytes: METADATA_LIMIT,
+                max_scratch_bytes: o.stream.metadata_bytes,
             };
             let root_errors: Vec<_> = mesh
                 .groups
@@ -210,7 +210,9 @@ impl Side {
 /// validation (the earlier admission work) and validation plus index preparation, alternated.
 #[cfg(feature = "selection-oracle")]
 fn startup(o: &Options, admitted: &VirtualAsset) -> Result<(), Box<dyn std::error::Error>> {
-    use asset::virtual_mesh::{Package, PreparedPackage, VirtualLimits};
+    use asset::virtual_mesh::{Package, PreparedPackage};
+    let mut limits = o.stream.limits;
+    limits.max_metadata_bytes = limits.max_metadata_bytes.min(o.stream.metadata_bytes);
     let mut out = BufWriter::new(fs::File::create(o.output.join("startup.csv"))?);
     writeln!(out, "repeat,step,ns,index_bytes,metadata_bytes")?;
     for repeat in 0..o.repeats {
@@ -229,13 +231,12 @@ fn startup(o: &Options, admitted: &VirtualAsset) -> Result<(), Box<dyn std::erro
             let copy = Package::clone(admitted.package());
             if prepare_first {
                 let start = Instant::now();
-                let prepared =
-                    std::hint::black_box(PreparedPackage::new(copy, VirtualLimits::default())?);
+                let prepared = std::hint::black_box(PreparedPackage::new(copy, limits)?);
                 let ns = start.elapsed().as_nanos();
                 writeln!(out, "{repeat},prepare,{ns},{},0", prepared.index_bytes())?;
             } else {
                 let start = Instant::now();
-                std::hint::black_box(copy.validate(VirtualLimits::default())?);
+                std::hint::black_box(copy.validate(limits)?);
                 let ns = start.elapsed().as_nanos();
                 writeln!(out, "{repeat},validate,{ns},0,0")?;
             }

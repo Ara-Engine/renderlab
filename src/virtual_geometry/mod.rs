@@ -31,7 +31,15 @@ pub const TEXTURE_LIMIT: usize = 64 << 20;
 
 #[derive(Clone, Copy, Debug)]
 pub struct StreamOptions {
+    /// Data admission, distinct from the finite live resource budgets below.
+    pub limits: VirtualLimits,
     pub geometry_bytes: usize,
+    pub metadata_bytes: usize,
+    pub texture_bytes: usize,
+    /// Maximum encoded package bytes during synchronous bootstrap.
+    pub bootstrap_bytes: usize,
+    pub read_slots: usize,
+    pub uploads_per_tick: usize,
     pub max_candidates: usize,
     /// Total output across every admitted placement, including offscreen minimum covers.
     pub max_clusters: usize,
@@ -42,13 +50,63 @@ pub struct StreamOptions {
 impl Default for StreamOptions {
     fn default() -> Self {
         Self {
+            limits: VirtualLimits::default(),
             geometry_bytes: 8 << 20,
+            metadata_bytes: METADATA_LIMIT,
+            texture_bytes: TEXTURE_LIMIT,
+            bootstrap_bytes: METADATA_LIMIT + TEXTURE_LIMIT,
+            read_slots: READ_SLOTS,
+            uploads_per_tick: UPLOADS_PER_FRAME,
             max_candidates: 1024,
             max_clusters: 65536,
             error_pixels: 1.,
             io_delay: Duration::ZERO,
             selector: SelectorMode::Baseline,
         }
+    }
+}
+impl StreamOptions {
+    pub fn validate(self) -> Result<(), Error> {
+        if !self.error_pixels.is_finite() || self.error_pixels < 0. {
+            return Err(Error::InvalidInput(
+                "error_pixels must be finite and nonnegative",
+            ));
+        }
+        for (value, message) in [
+            (
+                self.geometry_bytes,
+                "geometry_bytes must be positive and finite",
+            ),
+            (
+                self.metadata_bytes,
+                "metadata_bytes must be positive and finite",
+            ),
+            (
+                self.texture_bytes,
+                "texture_bytes must be positive and finite",
+            ),
+            (
+                self.bootstrap_bytes,
+                "bootstrap_bytes must be positive and finite",
+            ),
+            (self.read_slots, "read_slots must be positive and finite"),
+            (
+                self.uploads_per_tick,
+                "uploads_per_tick must be positive and finite",
+            ),
+            (
+                self.max_clusters,
+                "max_clusters must be positive and finite",
+            ),
+        ] {
+            if value == 0 || value == usize::MAX {
+                return Err(Error::InvalidInput(message));
+            }
+        }
+        if Instant::now().checked_add(self.io_delay).is_none() {
+            return Err(Error::InvalidInput("io_delay exceeds clock range"));
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -264,6 +322,14 @@ enum QueryTurn {
     Refine,
     Rebuild,
 }
+fn checked_bytes(terms: impl IntoIterator<Item = (usize, usize)>) -> Result<usize, Error> {
+    terms.into_iter().try_fold(0usize, |total, (count, size)| {
+        count
+            .checked_mul(size)
+            .and_then(|n| total.checked_add(n))
+            .ok_or(Error::InvalidInput("runtime size overflow"))
+    })
+}
 fn roots(package: &Package) -> Vec<PageId> {
     let mut out = Vec::new();
     for mesh in &package.meshes {
@@ -295,7 +361,7 @@ impl VirtualAsset {
         options: StreamOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(
-            io::load(cache, manifest)?,
+            io::load(cache, manifest, options)?,
             cache.join("virtual-v1/pages"),
             options,
         )
@@ -307,70 +373,87 @@ impl VirtualAsset {
         page_directory: PathBuf,
         options: StreamOptions,
     ) -> Result<Self, Error> {
-        let package = PreparedPackage::new(package, VirtualLimits::default())
-            .map_err(|e| Error::InvalidInput(e.0))?;
-        if !options.error_pixels.is_finite()
-            || options.error_pixels < 0.
-            || options.geometry_bytes < PAGE_BYTES
-            || options.io_delay > Duration::from_secs(60)
-        {
-            return Err(Error::InvalidInput(
-                "invalid streaming limits/delay (maximum 60 seconds)",
-            ));
-        }
+        options.validate()?;
+        let mut limits = options.limits;
+        limits.max_metadata_bytes = limits.max_metadata_bytes.min(options.metadata_bytes);
+        let package =
+            PreparedPackage::new(package, limits).map_err(|e| Error::InvalidInput(e.0))?;
         let roots = roots(&package);
-        if options.geometry_bytes < (roots.len() + 1) * PAGE_BYTES {
+        if options.geometry_bytes < checked_bytes([(roots.len(), PAGE_BYTES), (1, PAGE_BYTES)])? {
             return Err(Error::InvalidInput(
                 "geometry capacity below pinned minimum plus one upload staging page",
             ));
         }
-        let texture_bytes = package
-            .resources
-            .textures
-            .iter()
-            .flat_map(|t| &t.mips)
-            .map(|m| m.rgba8.len())
-            .sum::<usize>();
-        if package
-            .resources
-            .textures
-            .iter()
-            .flat_map(|t| &t.mips)
-            .map(|m| m.rgba8.capacity())
-            .sum::<usize>()
-            > TEXTURE_LIMIT
-        {
-            return Err(Error::InvalidInput(
-                "virtual texture capacity exceeds 64MiB",
-            ));
-        }
-        let metadata_owned = package.meshes.capacity() * std::mem::size_of::<VirtualMesh>()
-            + package
-                .meshes
-                .iter()
-                .map(|m| {
-                    m.groups.capacity() * std::mem::size_of::<asset::virtual_mesh::Group>()
-                        + m.clusters.capacity()
-                            * std::mem::size_of::<asset::virtual_mesh::Cluster>()
-                })
-                .sum::<usize>()
-            + package.pages.capacity() * std::mem::size_of::<Page>()
-            + package.placements.capacity() * std::mem::size_of::<asset::Placement>()
-            + package.resources.materials.capacity() * std::mem::size_of::<asset::Material>()
-            + package.resources.textures.capacity() * std::mem::size_of::<asset::Texture>()
-            + package
+        let texture_bytes = checked_bytes(
+            package
                 .resources
                 .textures
                 .iter()
-                .map(|t| t.mips.capacity() * std::mem::size_of::<asset::Mip>())
-                .sum::<usize>();
-        let metadata_bytes = metadata_owned
-            + package.index_bytes()
-            + package.pages.len() * std::mem::size_of::<PageState>()
-            + roots.capacity() * 4
-            + 4096;
-        if metadata_bytes > METADATA_LIMIT {
-            return Err(Error::InvalidInput("virtual retained metadata capacity"));
+                .flat_map(|t| &t.mips)
+                .map(|m| (m.rgba8.len(), 1)),
+        )?;
+        let texture_capacity = checked_bytes(
+            package
+                .resources
+                .textures
+                .iter()
+                .flat_map(|t| &t.mips)
+                .map(|m| (m.rgba8.capacity(), 1)),
+        )?;
+        if texture_capacity > options.texture_bytes {
+            return Err(Error::InvalidInput(
+                "virtual texture capacity exceeds texture_bytes",
+            ));
+        }
+        let metadata_owned = checked_bytes(
+            [
+                (
+                    package.meshes.capacity(),
+                    std::mem::size_of::<VirtualMesh>(),
+                ),
+                (package.pages.capacity(), std::mem::size_of::<Page>()),
+                (
+                    package.placements.capacity(),
+                    std::mem::size_of::<asset::Placement>(),
+                ),
+                (
+                    package
+                        .resource_metadata_bytes()
+                        .map_err(|e| Error::InvalidInput(e.0))?,
+                    1,
+                ),
+            ]
+            .into_iter()
+            .chain(package.meshes.iter().flat_map(|m| {
+                [
+                    (
+                        m.groups.capacity(),
+                        std::mem::size_of::<asset::virtual_mesh::Group>(),
+                    ),
+                    (
+                        m.clusters.capacity(),
+                        std::mem::size_of::<asset::virtual_mesh::Cluster>(),
+                    ),
+                ]
+            })),
+        )?;
+        let metadata_bytes = checked_bytes([
+            (metadata_owned, 1),
+            (package.index_bytes(), 1),
+            (package.pages.len(), std::mem::size_of::<PageState>()),
+            (roots.capacity(), 4),
+            (4096, 1),
+            (
+                PageIo::metadata_bytes(options.read_slots.min(package.pages.len()))?,
+                1,
+            ),
+        ])?;
+        // Bound every possible page/staging accounting sum by actual package size, not a config maximum.
+        checked_bytes([(package.pages.len(), PAGE_BYTES * 2)])?;
+        if metadata_bytes > options.metadata_bytes {
+            return Err(Error::InvalidInput(
+                "virtual retained metadata capacity exceeds metadata_bytes",
+            ));
         }
         let states = (0..package.pages.len())
             .map(|_| PageState::Missing)
@@ -378,13 +461,24 @@ impl VirtualAsset {
         let stats = StreamStats {
             metadata_bytes,
             texture_bytes,
-            cpu_io_bound_bytes: (READ_SLOTS + 1) * PAGE_BYTES + 1,
+            cpu_io_bound_bytes: options
+                .read_slots
+                .min(package.pages.len())
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(PAGE_BYTES))
+                .and_then(|n| n.checked_add(1))
+                .ok_or(Error::InvalidInput("read_slots byte overflow"))?,
             ..Default::default()
         };
+        let io = PageIo::new(
+            page_directory,
+            options.io_delay,
+            options.read_slots.min(package.pages.len()),
+        )?;
         Ok(Self {
             package,
             states,
-            io: PageIo::new(page_directory, options.io_delay),
+            io,
             roots,
             options,
             textures: vec![],
@@ -531,7 +625,7 @@ impl VirtualAsset {
         let start = Instant::now();
         let mut admitted = 0;
         for &page in protected {
-            if admitted == UPLOADS_PER_FRAME {
+            if admitted == self.options.uploads_per_tick {
                 break;
             }
             if !matches!(self.states[page.index()], PageState::Ready(_)) {
@@ -541,7 +635,12 @@ impl VirtualAsset {
             let section = Instant::now();
             self.make_room(charge, protected, renderer.completed_submission());
             self.stats.make_room += section.elapsed();
-            if self.geometry_charge() + charge > self.options.geometry_bytes {
+            if charge
+                > self
+                    .options
+                    .geometry_bytes
+                    .saturating_sub(self.geometry_charge())
+            {
                 continue;
             }
             let section = Instant::now();
@@ -562,7 +661,7 @@ impl VirtualAsset {
         self.stats.admission += start.elapsed();
         let section = Instant::now();
         for &page in protected {
-            if self.outstanding == READ_SLOTS {
+            if self.outstanding == self.options.read_slots.min(self.states.len()) {
                 break;
             }
             if matches!(self.states[page.index()], PageState::Missing)
@@ -609,7 +708,7 @@ impl VirtualAsset {
         let mut retiring = self.stats.retiring_bytes;
         let mut completed_once = false;
         for id in 0..self.states.len() {
-            if used + charge <= self.options.geometry_bytes {
+            if charge <= self.options.geometry_bytes.saturating_sub(used) {
                 break;
             }
             if protected.binary_search(&PageId(id as u32)).is_ok() {
@@ -692,7 +791,7 @@ impl VirtualAsset {
             .count()
             * PAGE_BYTES;
         debug_assert!(self.stats.geometry_bytes <= self.options.geometry_bytes);
-        debug_assert!(self.outstanding <= READ_SLOTS);
+        debug_assert!(self.outstanding <= self.options.read_slots.min(self.states.len()));
         self.stats.snapshot += section.elapsed();
     }
 }
@@ -897,47 +996,61 @@ impl VirtualScene {
             .meshes
             .iter()
             .map(|m| {
-                m.groups.len() * 40 + m.clusters.len() * 48 + asset.package.pages.len() * 16 + 8
+                checked_bytes([
+                    (m.groups.len(), 40),
+                    (m.clusters.len(), 48),
+                    (asset.package.pages.len(), 16),
+                    (8, 1),
+                ])
             })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .max()
             .unwrap_or(0);
-        let per_instance = asset
-            .package
-            .meshes
-            .iter()
-            .map(|m| m.groups.len() * 16)
-            .max()
-            .unwrap_or(0)
-            + asset.package.pages.len() * 32
-            + 256
-            + std::mem::size_of::<QueryTurn>();
-        let output = asset.options.max_clusters.min(
+        let per_instance = checked_bytes([
+            (
+                asset
+                    .package
+                    .meshes
+                    .iter()
+                    .map(|m| m.groups.len())
+                    .max()
+                    .unwrap_or(0),
+                16,
+            ),
+            (asset.package.pages.len(), 32),
+            (256, 1),
+            (std::mem::size_of::<QueryTurn>(), 1),
+        ])?;
+        let actual_output = checked_bytes(
             placements
                 .iter()
-                .map(|p| asset.package.meshes[p.mesh as usize].clusters.len())
-                .sum(),
-        );
-        let scratch_bound = largest
-            .checked_add(
-                placements
-                    .len()
-                    .checked_mul(per_instance)
-                    .ok_or(Error::InvalidInput("scene metadata overflow"))?,
-            )
-            .and_then(|n| n.checked_add(output * 192))
-            .and_then(|n| n.checked_add(asset.package.pages.len() * 16))
-            .ok_or(Error::InvalidInput("scene scratch overflow"))?;
+                .map(|p| (asset.package.meshes[p.mesh as usize].clusters.len(), 1)),
+        )?;
+        let output = asset.options.max_clusters.min(actual_output);
+        let scratch_bound = checked_bytes([
+            (largest, 1),
+            (placements.len(), per_instance),
+            (output, 192),
+            (asset.package.pages.len(), 16),
+        ])?;
         let mut registry = asset.registry.lock().unwrap();
-        let retained_scratch: usize = registry.scenes.iter().map(|s| s.scratch).sum();
-        let retained_output: usize = registry.scenes.iter().map(|s| s.output_reservation).sum();
-        if retained_output + minimum > asset.options.max_clusters {
+        let retained_scratch = checked_bytes(registry.scenes.iter().map(|s| (s.scratch, 1)))?;
+        let retained_output =
+            checked_bytes(registry.scenes.iter().map(|s| (s.output_reservation, 1)))?;
+        if minimum > asset.options.max_clusters.saturating_sub(retained_output) {
             return Err(Error::InvalidInput(
                 "total output below registered scene minimum covers",
             ));
         }
-        if asset.metadata_bytes + retained_scratch + scratch_bound > METADATA_LIMIT {
+        if checked_bytes([
+            (asset.metadata_bytes, 1),
+            (retained_scratch, 1),
+            (scratch_bound, 1),
+        ])? > asset.options.metadata_bytes
+        {
             return Err(Error::InvalidInput(
-                "metadata plus retained selection/projection/encoding scratch exceeds 8MiB; reduce output/instances",
+                "metadata plus retained selection/projection/encoding scratch exceeds metadata_bytes; reduce output/instances",
             ));
         }
         let id = registry.next;
@@ -1189,7 +1302,7 @@ impl VirtualScene {
                     .max_candidates
                     .saturating_sub(candidates + other_candidates),
                 max_clusters: output_budget,
-                max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
+                max_scratch_bytes: asset.options.metadata_bytes - asset.metadata_bytes,
             };
             let rebuild_turn = self.query_turns[slot] == QueryTurn::Rebuild;
             let refine_turn = self.query_turns[slot] == QueryTurn::Refine
@@ -1266,7 +1379,7 @@ impl VirtualScene {
                             .max_candidates
                             .saturating_sub(candidates + other_candidates + spent),
                         max_clusters: output_budget,
-                        max_scratch_bytes: METADATA_LIMIT - asset.metadata_bytes,
+                        max_scratch_bytes: asset.options.metadata_bytes - asset.metadata_bytes,
                     };
                     if budget.max_candidates > 0 {
                         let mut incremental = run_selector(

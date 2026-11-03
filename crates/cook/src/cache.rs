@@ -11,7 +11,6 @@ use std::{
 
 const ALGORITHM: &[u8] =
     b"renderlab-cook/static-glb/area-mips/1/gltf-1.4.1/image-0.25.10/sha2-0.10.9";
-const MANIFEST_LIMIT: usize = 1 << 20;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {
@@ -49,6 +48,24 @@ fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
     ] {
         h.update((n as u64).to_le_bytes());
     }
+    // Preserve all previously published default keys. Source admission must never be skipped
+    // by a hit made with a looser source policy; keep policy in the lookup identity for that reason.
+    let extra = |l: CookLimits| {
+        [
+            l.accessors,
+            l.buffer_views,
+            l.scenes,
+            l.samplers,
+            l.json_values,
+            l.manifest_bytes,
+        ]
+    };
+    if extra(limits) != extra(CookLimits::default()) {
+        h.update(b"source-policy-2");
+        for n in extra(limits) {
+            h.update((n as u64).to_le_bytes());
+        }
+    }
     h.update(source);
     h.finalize().into()
 }
@@ -61,7 +78,12 @@ pub(crate) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
         size <= limit as u64,
         format!("{} exceeds byte limit {limit}", path.display()),
     )?;
-    let mut bytes = Vec::with_capacity(size as usize);
+    let size = usize::try_from(size)
+        .map_err(|_| Error("file length exceeds host address space".into()))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|e| Error(format!("file allocation: {e}")))?;
     file.take((limit as u64).saturating_add(1))
         .read_to_end(&mut bytes)?;
     ensure(
@@ -141,7 +163,7 @@ impl Manifest {
     }
     fn decode(bytes: &[u8], limits: CookLimits) -> Result<Self> {
         ensure(
-            bytes.len() >= 84 && bytes.len() <= MANIFEST_LIMIT,
+            bytes.len() >= 84 && bytes.len() <= limits.manifest_bytes,
             "truncated/oversized cache manifest",
         )?;
         ensure(
@@ -260,7 +282,7 @@ pub fn load_manifest(
     manifest_path: &Path,
     limits: CookLimits,
 ) -> Result<LoadedAsset> {
-    let bytes = read_bounded(manifest_path, MANIFEST_LIMIT)?;
+    let bytes = read_bounded(manifest_path, limits.manifest_bytes)?;
     let manifest = Manifest::decode(&bytes, limits)?;
     Ok(load(cache, &manifest, limits)?.0)
 }
@@ -305,7 +327,7 @@ pub fn cook_file(
     let identity = key(&source, settings, limits);
     let key_path = cache.join("keys").join(hex(&identity));
     let cached = (|| {
-        let manifest = Manifest::decode(&read_bounded(&key_path, MANIFEST_LIMIT)?, limits)?;
+        let manifest = Manifest::decode(&read_bounded(&key_path, limits.manifest_bytes)?, limits)?;
         ensure(manifest.key == identity, "cache key identity mismatch")?;
         let (loaded, _, load_us) = load(cache, &manifest, limits)?;
         Ok((manifest, loaded, load_us))

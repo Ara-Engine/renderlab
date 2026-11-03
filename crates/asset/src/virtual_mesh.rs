@@ -116,7 +116,7 @@ pub struct Package {
     /// Only materials and textures; meshes/placements must be empty. Encoded using unchanged RLA1.
     pub resources: Asset,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VirtualLimits {
     pub prepared: Limits,
     pub max_groups: usize,
@@ -124,6 +124,19 @@ pub struct VirtualLimits {
     pub max_pages: usize,
     pub max_metadata_bytes: usize,
     pub max_geometry_bytes: usize,
+}
+impl VirtualLimits {
+    /// Uncapped data policy; page layout, ID/span widths and structural validation remain enforced.
+    pub const fn unlimited() -> Self {
+        Self {
+            prepared: Limits::unlimited(),
+            max_groups: usize::MAX,
+            max_clusters: usize::MAX,
+            max_pages: usize::MAX,
+            max_metadata_bytes: usize::MAX,
+            max_geometry_bytes: usize::MAX,
+        }
+    }
 }
 impl Default for VirtualLimits {
     fn default() -> Self {
@@ -156,6 +169,17 @@ impl VirtualMesh {
         materials: usize,
         limits: VirtualLimits,
     ) -> Result<()> {
+        cap(
+            self.groups.len(),
+            u32::MAX as usize,
+            "virtual group ID width",
+        )?;
+        cap(
+            self.clusters.len(),
+            u32::MAX as usize,
+            "virtual cluster ID width",
+        )?;
+        cap(page_count, u32::MAX as usize, "virtual page ID width")?;
         cap(self.groups.len(), limits.max_groups, "virtual group limit")?;
         cap(
             self.clusters.len(),
@@ -238,8 +262,14 @@ impl Package {
             pages: self.pages.len(),
             ..PackageCounts::default()
         };
-        counts.metadata_host_bytes =
-            product(self.meshes.len(), std::mem::size_of::<VirtualMesh>())?;
+        add(
+            &mut counts.metadata_host_bytes,
+            self.resource_metadata_bytes()?,
+        )?;
+        add(
+            &mut counts.metadata_host_bytes,
+            product(self.meshes.len(), std::mem::size_of::<VirtualMesh>())?,
+        )?;
         add(
             &mut counts.metadata_host_bytes,
             product(self.pages.len(), std::mem::size_of::<Page>())?,
@@ -331,6 +361,28 @@ impl Package {
             }
         }
         Ok(counts)
+    }
+
+    /// Resource containers are metadata; only texel storage belongs to the texture budget.
+    pub fn resource_metadata_bytes(&self) -> Result<usize> {
+        let mut bytes = product(
+            self.resources.materials.capacity(),
+            std::mem::size_of::<crate::Material>(),
+        )?;
+        add(
+            &mut bytes,
+            product(
+                self.resources.textures.capacity(),
+                std::mem::size_of::<crate::Texture>(),
+            )?,
+        )?;
+        for texture in &self.resources.textures {
+            add(
+                &mut bytes,
+                product(texture.mips.capacity(), std::mem::size_of::<crate::Mip>())?,
+            )?;
+        }
+        Ok(bytes)
     }
 }
 

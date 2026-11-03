@@ -1,3 +1,8 @@
+#[path = "../../support/limits.rs"]
+mod policy;
+#[path = "../../support/runtime_policy.rs"]
+mod runtime_policy;
+use renderlab::asset;
 #[path = "../../examples/m4/cameras.rs"]
 mod cameras;
 mod fixture;
@@ -28,6 +33,7 @@ use winit::{
 
 const TITLE: &str = "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | 1-4 views | Esc exit";
 struct Options {
+    policy: policy::Policy,
     shader: PathBuf,
     frames: Option<u64>,
     seconds: Option<f64>,
@@ -46,7 +52,10 @@ struct Options {
 }
 impl Options {
     fn parse() -> Result<Self, String> {
+        let (policy, args) = policy::Policy::args(std::env::args().skip(1).collect())?;
+        let stream = runtime_policy::stream(&policy)?;
         let mut options = Self {
+            policy,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
             frames: None,
             seconds: None,
@@ -59,11 +68,11 @@ impl Options {
             progressive: false,
             cache: "measurements/m4-cook/root-unit-a/cache".into(),
             cameras: None,
-            stream: StreamOptions::default(),
+            stream,
             samples: SampleCount::One,
             view: ViewMode::BaseColor,
         };
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--progressive" => options.progressive = true,
@@ -174,6 +183,7 @@ impl Options {
         {
             return Err("limits must be positive".into());
         }
+        options.stream.validate().map_err(|e| e.to_string())?;
         Ok(options)
     }
 }
@@ -249,7 +259,15 @@ impl View {
         let asset = options
             .asset
             .as_deref()
-            .map(prepared::Prepared::load)
+            .map(|path| {
+                prepared::Prepared::load_with_limits(
+                    path,
+                    options.policy.prepared(),
+                    options
+                        .policy
+                        .size("viewer", "max_placement_slots", 1_000_000),
+                )
+            })
             .transpose()?;
         let cameras = options
             .cameras
@@ -321,17 +339,25 @@ impl View {
             .ok_or("surface has no sRGB format")?;
         config.present_mode = wgpu::PresentMode::Fifo;
         let source = std::fs::read_to_string(&options.shader)?;
-        let renderer = Renderer::new_with_options(
-            device,
-            queue,
-            config.format,
+        let renderer_limits = runtime_policy::renderer(
+            &options.policy,
             Limits {
                 max_instances: options
                     .instances
                     .max(1024)
                     .max(asset.as_ref().map_or(1, |a| a.max_instances())),
-                ..Limits::default()
+                ..Default::default()
             },
+        );
+        eprintln!(
+            "effective_limits {}",
+            runtime_policy::json(&options.policy, options.stream, renderer_limits)
+        );
+        let renderer = Renderer::new_with_options(
+            device,
+            queue,
+            config.format,
+            renderer_limits,
             RendererOptions {
                 samples: options.samples,
             },

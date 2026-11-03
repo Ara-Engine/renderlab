@@ -1,4 +1,9 @@
 //! Headless prepared-asset cost observations; presentation and scanout are excluded.
+#[path = "../support/limits.rs"]
+mod policy;
+#[path = "../support/runtime_policy.rs"]
+mod runtime_policy;
+use renderlab::asset;
 #[path = "../viewer/src/prepared.rs"]
 mod prepared;
 
@@ -15,7 +20,7 @@ fn collect(events: Events, samples: &mut [Option<Duration>]) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let (policy, args) = policy::Policy::args(std::env::args().skip(1).collect())?;
     if args.len() != 3 {
         return Err("expected: asset-cost <prepared-payload> <1|4> <static|motion>".into());
     }
@@ -32,7 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if Path::new("D:/AraBuild/render-v3/quiet-window.lock").exists() {
         return Err("another measurement owns the GPU quiet window".into());
     }
-    let mut asset = prepared::Prepared::load(Path::new(&args[0]))?;
+    let mut asset = prepared::Prepared::load_with_limits(
+        Path::new(&args[0]),
+        policy.prepared(),
+        policy.size("viewer", "max_placement_slots", 1_000_000),
+    )?;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::empty(),
@@ -64,14 +73,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let mut renderer = Renderer::new_with_options(
-        device,
-        queue,
-        color.format(),
+    let renderer_limits = runtime_policy::renderer(
+        &policy,
         Limits {
             max_instances: asset.max_instances(),
             ..Default::default()
         },
+    );
+    eprintln!(
+        "effective_limits {}",
+        runtime_policy::json(&policy, runtime_policy::stream(&policy)?, renderer_limits)
+    );
+    let mut renderer = Renderer::new_with_options(
+        device,
+        queue,
+        color.format(),
+        renderer_limits,
         RendererOptions { samples },
         include_str!("../shaders/scene.wgsl"),
     )?;

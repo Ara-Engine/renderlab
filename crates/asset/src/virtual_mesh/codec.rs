@@ -170,6 +170,23 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
     if !resources.meshes.is_empty() || !resources.placements.is_empty() {
         return Err(Error("virtual resources contain geometry"));
     }
+    // Charge resource containers before allocating the remaining metadata. Pixel bytes are separate.
+    let resource_metadata = Package {
+        meshes: vec![],
+        pages: vec![],
+        placements: vec![],
+        resources,
+    };
+    add(
+        &mut r.allocated,
+        resource_metadata.resource_metadata_bytes()?,
+    )?;
+    cap(
+        r.allocated,
+        r.limit,
+        "virtual decode resource metadata limit",
+    )?;
+    let resources = resource_metadata.resources;
     let mut meshes = Vec::with_capacity(nm);
     let mut ng = 0;
     let mut nc = 0;

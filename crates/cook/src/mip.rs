@@ -21,7 +21,12 @@ fn srgb(v: f64) -> u8 {
 /// Area box filter. Fractional coverage includes every odd edge texel.
 pub(crate) fn build(width: u32, height: u32, rgba8: Vec<u8>, role: TextureRole) -> Result<Texture> {
     ensure(
-        width > 0 && height > 0 && u64::from(width) * u64::from(height) * 4 == rgba8.len() as u64,
+        width > 0
+            && height > 0
+            && u64::from(width)
+                .checked_mul(u64::from(height))
+                .and_then(|n| n.checked_mul(4))
+                == Some(rgba8.len() as u64),
         "invalid mip source",
     )?;
     let mut texture = Texture {
@@ -39,7 +44,11 @@ pub(crate) fn build(width: u32, height: u32, rgba8: Vec<u8>, role: TextureRole) 
     {
         let input = texture.mips.last().unwrap();
         let (w, h) = ((input.width / 2).max(1), (input.height / 2).max(1));
-        let mut output = vec![0; w as usize * h as usize * 4];
+        let size = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| crate::Error("mip allocation overflow".into()))?;
+        let mut output = vec![0; size];
         for y in 0..h {
             let y0 = f64::from(y) * f64::from(input.height) / f64::from(h);
             let y1 = f64::from(y + 1) * f64::from(input.height) / f64::from(h);

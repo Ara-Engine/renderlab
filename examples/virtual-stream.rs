@@ -1,4 +1,8 @@
-//! Finite registered-camera replay, with explicit full RLA and independent legal-selector controls.
+#[path = "../support/limits.rs"]
+mod policy;
+#[path = "../support/runtime_policy.rs"]
+mod runtime_policy;
+// Finite registered-camera replay, with explicit full RLA and independent legal-selector controls.
 #[path = "m4/cameras.rs"]
 mod cameras;
 #[path = "m4/diagnostics.rs"]
@@ -21,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 struct Options {
+    policy: policy::Policy,
     cache: PathBuf,
     manifest: PathBuf,
     cameras: PathBuf,
@@ -44,7 +49,13 @@ struct Options {
     view: ViewMode,
 }
 fn parse() -> Result<Options, Box<dyn std::error::Error>> {
+    parse_args(std::env::args().skip(1).collect())
+}
+fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> {
+    let (policy, args) = policy::Policy::args(args)?;
+    let stream = runtime_policy::stream(&policy)?;
     let mut o = Options {
+        policy,
         cache: "measurements/m4-cook/root-unit-a/cache".into(),
         manifest: "measurements/m4-cook/root-unit-a/closed-sphere.manifest".into(),
         cameras: "measurements/m4-cook/registration-initial/cameras.json".into(),
@@ -63,11 +74,11 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
         cpu_stride: 30,
         captures: BTreeSet::new(),
         samples: SampleCount::One,
-        stream: StreamOptions::default(),
+        stream,
         validate: false,
         view: ViewMode::BaseColor,
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--progressive" {
             o.progressive = true;
@@ -140,6 +151,7 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
     if o.frames == 0 || o.repeats == 0 || o.repeats > 100 || o.cpu_stride == 0 {
         return Err("frames must be positive".into());
     }
+    o.stream.validate()?;
     Ok(o)
 }
 fn guard() -> Result<(), Box<dyn std::error::Error>> {
@@ -172,7 +184,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _validation = validation::begin(o.validate);
     let cameras = cameras::Cameras::load(&o.cameras)?;
     if o.start >= cameras.frames.len()
-        || (!o.hold_pose && o.start + o.frames > cameras.frames.len())
+        || (!o.hold_pose
+            && o.start
+                .checked_add(o.frames)
+                .is_none_or(|n| n > cameras.frames.len()))
     {
         return Err("frame range exceeds registered camera file".into());
     }
@@ -199,6 +214,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::env::args().collect::<Vec<_>>()
         ),
     )?;
+    let renderer_limits = runtime_policy::renderer(&o.policy, Limits::default());
+    let effective = runtime_policy::json(&o.policy, o.stream, renderer_limits);
+    eprintln!("effective_limits {effective}");
+    fs::write(
+        o.output.join("limits.json"),
+        serde_json::to_vec_pretty(&effective)?,
+    )?;
     if o.mode == "cpu" {
         return selection_timing::run(&o, &cameras);
     }
@@ -217,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device,
         queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
-        Limits::default(),
+        renderer_limits,
         RendererOptions { samples: o.samples },
         include_str!("../shaders/scene.wgsl"),
     )?;
@@ -226,7 +248,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .asset
         .as_deref()
         .filter(|_| o.mode == "full")
-        .map(prepared::Prepared::load)
+        .map(|path| {
+            prepared::Prepared::load_with_limits(
+                path,
+                o.policy.prepared(),
+                o.policy.size("viewer", "max_placement_slots", 1_000_000),
+            )
+        })
         .transpose()?;
     let mut virtual_asset = if full.is_none() {
         Some(VirtualAsset::open(&o.cache, &o.manifest, o.stream)?)
@@ -643,4 +671,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         virtual_asset.as_ref().map(|a| a.stats())
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+    #[test]
+    fn explicit_flags_override_file_in_either_order() {
+        let path = std::env::temp_dir().join(format!(
+            "renderlab-replay-limits-{}.json",
+            std::process::id()
+        ));
+        fs::write(&path, br#"{"runtime":{"geometry_bytes":1048576,"read_slots":1,"uploads_per_tick":1},"prepared":"unlimited"}"#).unwrap();
+        for args in [
+            vec![
+                "--limits".to_owned(),
+                path.to_string_lossy().into_owned(),
+                "--geometry-bytes".into(),
+                "2097152".into(),
+            ],
+            vec![
+                "--geometry-bytes".to_owned(),
+                "2097152".into(),
+                "--limits".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        ] {
+            let o = parse_args(args).unwrap();
+            assert_eq!(o.stream.geometry_bytes, 2097152);
+            assert_eq!(o.stream.read_slots, 1);
+            assert_eq!(o.stream.uploads_per_tick, 1);
+            assert_eq!(o.stream.limits.prepared, asset::Limits::unlimited());
+        }
+        assert!(
+            parse_args(vec![
+                "--limits".into(),
+                path.to_string_lossy().into_owned(),
+                "--limits".into(),
+                path.to_string_lossy().into_owned()
+            ])
+            .is_err()
+        );
+        fs::remove_file(path).unwrap();
+    }
 }

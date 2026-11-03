@@ -37,12 +37,19 @@ pub struct Prepared {
     pub radius: f32,
 }
 impl Prepared {
+    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let limits = asset::Limits::default();
+        Self::load_with_limits(path, asset::Limits::default(), 1_000_000)
+    }
+    pub fn load_with_limits(
+        path: &Path,
+        limits: asset::Limits,
+        max_placement_slots: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let mut bytes = Vec::new();
         File::open(path)?
-            .take(limits.max_file_bytes as u64 + 1)
+            .take((limits.max_file_bytes as u64).saturating_add(1))
             .read_to_end(&mut bytes)?;
         if bytes.len() > limits.max_file_bytes {
             return Err("prepared file exceeds input byte limit".into());
@@ -58,10 +65,18 @@ impl Prepared {
             start.elapsed().as_secs_f64() * 1000.0,
             source.validate(limits)?
         );
-        Self::new(source)
+        Self::new_with_limits(source, limits, max_placement_slots)
     }
+    #[allow(dead_code)]
     pub fn new(source: asset::Asset) -> Result<Self, Box<dyn std::error::Error>> {
-        source.validate(asset::Limits::default())?;
+        Self::new_with_limits(source, asset::Limits::default(), 1_000_000)
+    }
+    pub fn new_with_limits(
+        source: asset::Asset,
+        limits: asset::Limits,
+        max_placement_slots: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        source.validate(limits)?;
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         let mut by_mesh = vec![Vec::new(); source.meshes.len()];
@@ -75,8 +90,11 @@ impl Prepared {
             .try_fold(0usize, |total, (mesh, models)| {
                 total.checked_add(mesh.primitives.len().checked_mul(models.len())?)
             });
-        if slots.is_none_or(|n| n > 1_000_000) {
-            return Err("asset exceeds viewer's one million primitive-placement slot limit".into());
+        if slots.is_none_or(|n| n > max_placement_slots) {
+            return Err(
+                "asset exceeds viewer slot limit (max_placement_slots) or slot arithmetic overflow"
+                    .into(),
+            );
         }
         let mut batches = Vec::new();
         let mut primitives = Vec::new();

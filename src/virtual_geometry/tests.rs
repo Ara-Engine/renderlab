@@ -329,7 +329,7 @@ fn filesystem_worker_actual_hash_failure_delay_repair_and_shutdown() {
     let (p, blobs) = fixture(3);
     let dir = directory("worker");
     write_pages(&p, &blobs, &dir);
-    let io = PageIo::new(dir.clone(), Duration::from_millis(100));
+    let io = PageIo::new(dir.clone(), Duration::from_millis(100), READ_SLOTS).unwrap();
     let started = Instant::now();
     assert!(io.request(PageId(0), &p.pages[0]));
     assert!(io.receive().is_none());
@@ -374,7 +374,7 @@ fn filesystem_worker_actual_hash_failure_delay_repair_and_shutdown() {
         std::thread::sleep(Duration::from_millis(2));
     }
     drop(io);
-    let io = PageIo::new(dir, Duration::from_secs(60));
+    let io = PageIo::new(dir, Duration::from_secs(60), READ_SLOTS).unwrap();
     for i in 0..4 {
         assert!(io.request(PageId(i % 3), &p.pages[i as usize % 3]));
     }
@@ -790,16 +790,19 @@ fn metadata_bootstrap_hashes_real_bytes_and_rejects_oversized_declared_payload_b
     manifest.extend((bytes.len() as u64).to_le_bytes());
     let path = dir.join("current.manifest");
     fs::write(&path, &manifest).unwrap();
-    assert_eq!(io::load(&dir, &path).unwrap(), p);
+    assert_eq!(io::load(&dir, &path, StreamOptions::default()).unwrap(), p);
     let mut corrupt = bytes.clone();
     corrupt[30] ^= 1;
     fs::write(&file, &corrupt).unwrap();
-    assert!(io::load(&dir, &path).is_err());
+    assert!(io::load(&dir, &path, StreamOptions::default()).is_err());
     // A large manifest with only a header must fail its working-set gate before reading/allocating the declared body.
-    manifest[72..80].copy_from_slice(&(METADATA_LIMIT as u64).to_le_bytes());
+    let resources = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as u64;
+    manifest[72..80].copy_from_slice(&(METADATA_LIMIT as u64 + resources).to_le_bytes());
     fs::write(&path, &manifest).unwrap();
     fs::write(&file, &bytes[..24]).unwrap();
-    let error = io::load(&dir, &path).unwrap_err().to_string();
+    let error = io::load(&dir, &path, StreamOptions::default())
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("bootstrap capacity"), "{error}");
 }
 
@@ -1320,4 +1323,120 @@ fn saturated_debt_does_not_discard_a_resident_required_boundary() {
         ),
         "finite debt comparisons must retain their existing ordering"
     );
+}
+
+#[test]
+fn configured_data_and_runtime_limits_reach_bootstrap_and_preparation() {
+    let (mut package, _) = fixture(3);
+    let mut w = 4097u32;
+    let mut mips = vec![];
+    loop {
+        mips.push(asset::Mip {
+            width: w,
+            height: 1,
+            rgba8: vec![128; w as usize * 4],
+        });
+        if w == 1 {
+            break;
+        }
+        w = (w / 2).max(1);
+    }
+    package.resources.textures.push(asset::Texture {
+        role: asset::TextureRole::BaseColorSrgb,
+        mips,
+    });
+    assert!(package.validate(VirtualLimits::default()).is_err());
+    let limits = VirtualLimits::unlimited();
+    let bytes = asset::virtual_mesh::encode(&package, limits).unwrap();
+    let dir = directory("configured-bootstrap");
+    let packages = dir.join("virtual-v1/packages");
+    fs::create_dir_all(&packages).unwrap();
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    fs::write(packages.join(io::hex(&digest)), &bytes).unwrap();
+    let mut manifest = Vec::from(&b"RVM\0\x01\0\0\0"[..]);
+    manifest.extend([0; 32]);
+    manifest.extend(digest);
+    manifest.extend((bytes.len() as u64).to_le_bytes());
+    let path = dir.join("current");
+    fs::write(&path, &manifest).unwrap();
+    let options = StreamOptions {
+        limits,
+        metadata_bytes: 32 << 10,
+        texture_bytes: 64 << 10,
+        bootstrap_bytes: 128 << 10,
+        geometry_bytes: 4 * PAGE_BYTES,
+        read_slots: 1,
+        uploads_per_tick: 1,
+        ..Default::default()
+    };
+    let asset = VirtualAsset::open(&dir, &path, options).unwrap();
+    assert_eq!(asset.package.resources.textures[0].mips[0].width, 4097);
+    assert_eq!(asset.stats.cpu_io_bound_bytes, 2 * PAGE_BYTES + 1);
+    VirtualScene::from_package(&asset).unwrap();
+    for bad in [
+        StreamOptions {
+            bootstrap_bytes: bytes.len() - 1,
+            ..options
+        },
+        StreamOptions {
+            metadata_bytes: 100,
+            ..options
+        },
+        StreamOptions {
+            texture_bytes: 1,
+            ..options
+        },
+        StreamOptions {
+            geometry_bytes: PAGE_BYTES,
+            ..options
+        },
+        StreamOptions {
+            read_slots: 0,
+            ..options
+        },
+        StreamOptions {
+            uploads_per_tick: 0,
+            ..options
+        },
+        StreamOptions {
+            limits: VirtualLimits {
+                max_pages: 2,
+                ..limits
+            },
+            ..options
+        },
+        StreamOptions {
+            limits: VirtualLimits {
+                prepared: asset::Limits {
+                    max_dimension: 4096,
+                    ..asset::Limits::unlimited()
+                },
+                ..limits
+            },
+            ..options
+        },
+    ] {
+        assert!(VirtualAsset::open(&dir, &path, bad).is_err(), "{bad:?}");
+    }
+    let mut malformed = package;
+    malformed.meshes[0].clusters[0].refined = Some(GroupId(0));
+    assert!(malformed.validate(limits).is_err());
+    for n in 0..24 {
+        assert!(asset::virtual_mesh::decode(&bytes[..n], limits).is_err());
+    }
+    let mut corrupt = bytes.clone();
+    corrupt[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(asset::virtual_mesh::decode(&corrupt, limits).is_err());
+    // Huge quotas cannot request huge channel allocations: capacity follows actual package pages.
+    let large = VirtualAsset::new(
+        asset::virtual_mesh::decode(&bytes, limits).unwrap(),
+        dir,
+        StreamOptions {
+            read_slots: usize::MAX - 1,
+            uploads_per_tick: usize::MAX - 1,
+            ..options
+        },
+    )
+    .unwrap();
+    assert_eq!(large.stats.cpu_io_bound_bytes, 4 * PAGE_BYTES + 1);
 }

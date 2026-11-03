@@ -537,6 +537,10 @@ fn gpu_virtual_streaming_failure_repair_and_retirement_waves() {
         dir.clone(),
         StreamOptions {
             geometry_bytes: 4 * PAGE_BYTES,
+            metadata_bytes: 32 << 10,
+            texture_bytes: 1024,
+            read_slots: 2,
+            uploads_per_tick: 1,
             io_delay: Duration::from_millis(100),
             ..Default::default()
         },
@@ -610,6 +614,10 @@ fn gpu_virtual_streaming_failure_repair_and_retirement_waves() {
         dir,
         StreamOptions {
             geometry_bytes: 4 * PAGE_BYTES,
+            metadata_bytes: 32 << 10,
+            texture_bytes: 1024,
+            read_slots: 2,
+            uploads_per_tick: 1,
             ..Default::default()
         },
     )
@@ -1098,4 +1106,131 @@ fn gpu_virtual_one_candidate_motion_progress_and_failed_read() {
             a.stats().uploads
         );
     }
+}
+
+#[test]
+#[ignore = "Vulkan GPU; nondefault bounded read/upload quotas and resource admission"]
+fn gpu_virtual_configured_limits_use_real_quotas_and_device_admission() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let (base, blobs) = fixture(1);
+    let mut package = base.clone();
+    package.meshes.clear();
+    package.pages.clear();
+    for page in 0..6 {
+        let mut mesh = base.meshes[0].clone();
+        for c in &mut mesh.clusters {
+            c.page = PageId(page);
+        }
+        package.meshes.push(mesh);
+        package.pages.push(base.pages[0].clone());
+    }
+    package.resources.textures.push(asset::Texture {
+        role: asset::TextureRole::BaseColorSrgb,
+        mips: vec![asset::Mip {
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        }],
+    });
+    package.resources.materials[0].base_color_texture = Some(asset::BaseColorTexture {
+        texture: 0,
+        sampler: asset::Sampler::default(),
+    });
+    let dir = startup_directory("configured-quota");
+    write_pages(&base, &blobs, &dir);
+    for (reads, uploads) in [(1, 1), (7, 3)] {
+        r.test_drain("separate quota cases");
+        let texture_uploads_before = r.stats().uploads.textures;
+        assert!(
+            VirtualAsset::new(
+                package.clone(),
+                dir.clone(),
+                StreamOptions {
+                    texture_bytes: 3,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        let mut a = VirtualAsset::new(
+            package.clone(),
+            dir.clone(),
+            StreamOptions {
+                geometry_bytes: 7 * PAGE_BYTES,
+                metadata_bytes: 32 << 10,
+                texture_bytes: 4,
+                read_slots: reads,
+                uploads_per_tick: uploads,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut maximum_pending = 0;
+        let mut maximum_uploads = 0;
+        loop {
+            r.test_drain("control quota observation between ticks");
+            let before = a.stats().uploads;
+            a.advance(&mut r, &mut scene, &camera(0.), 321).unwrap();
+            let tick_uploads = a.stats().uploads - before;
+            maximum_uploads = maximum_uploads.max(tick_uploads);
+            let stats = a.stats();
+            let pending = stats.states[PageStatus::Queued as usize]
+                + stats.states[PageStatus::Ready as usize];
+            maximum_pending = maximum_pending.max(pending);
+            assert!(pending <= reads.min(6));
+            assert!(tick_uploads <= uploads as u64);
+            assert!(stats.geometry_peak <= 7 * PAGE_BYTES);
+            assert!(stats.metadata_bytes + stats.scratch_bound_bytes <= 32 << 10);
+            assert_eq!(
+                stats.cpu_io_bound_bytes,
+                (reads.min(6) + 1) * PAGE_BYTES + 1
+            );
+            if stats.states[PageStatus::Resident as usize] == 6 {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            // Let the real worker fill ready payloads, with no GPU work overlapping this pause.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(a.stats().texture_bytes, 4);
+        assert_eq!(r.stats().uploads.textures - texture_uploads_before, 4);
+        assert_eq!(maximum_pending, reads.min(6));
+        if uploads == 1 {
+            assert_eq!(maximum_uploads, 1);
+        } else {
+            assert!((2..=3).contains(&maximum_uploads));
+        }
+        eprintln!(
+            "configured_quotas read_slots={reads} uploads_per_tick={uploads} maximum_pending={maximum_pending} maximum_uploads={maximum_uploads} geometry_peak={} metadata={} scratch={}",
+            a.stats().geometry_peak,
+            a.stats().metadata_bytes,
+            a.stats().scratch_bound_bytes
+        );
+    }
+    r.test_drain("before rejected device admission");
+    let dim = r.device().limits().max_texture_dimension_2d + 1;
+    let mut width = dim;
+    let mut mips = vec![];
+    loop {
+        mips.push(asset::Mip {
+            width,
+            height: 1,
+            rgba8: vec![0; width as usize * 4],
+        });
+        if width == 1 {
+            break;
+        }
+        width = (width / 2).max(1);
+    }
+    let invalid = asset::Texture {
+        role: asset::TextureRole::BaseColorSrgb,
+        mips,
+    };
+    let before = r.stats().uploads.textures;
+    assert!(r.try_upload_texture(&invalid).is_err());
+    assert_eq!(r.stats().uploads.textures, before);
+    r.poll().unwrap();
 }

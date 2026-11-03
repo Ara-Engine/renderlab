@@ -469,3 +469,253 @@ fn concurrent_writers_publish_complete_entries_and_manifests() {
 fn source_bytes() -> Vec<u8> {
     source()
 }
+
+#[test]
+fn configurable_source_policy_and_warm_cache_never_bypass_tighter_limits() {
+    let dir = Sandbox::new();
+    let bytes = source();
+    fs::write(dir.path("source.glb"), &bytes).unwrap();
+    let cache = dir.path("cache");
+    let manifest = dir.path("current");
+    let cold = cook_file(
+        &dir.path("source.glb"),
+        &cache,
+        &manifest,
+        Settings::default(),
+        CookLimits::default(),
+    )
+    .unwrap();
+    let warm = cook_file(
+        &dir.path("source.glb"),
+        &cache,
+        &manifest,
+        Settings::default(),
+        CookLimits::default(),
+    )
+    .unwrap();
+    assert!(warm.report.cache_hit);
+    assert_eq!(cold.loaded.key, warm.loaded.key);
+    for limits in [
+        CookLimits {
+            source_bytes: bytes.len() - 1,
+            ..Default::default()
+        },
+        CookLimits {
+            json_bytes: 1,
+            ..Default::default()
+        },
+        CookLimits {
+            nodes: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            hierarchy_depth: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            accessors: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            buffer_views: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            scenes: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            samplers: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            json_values: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            image_decoded_bytes: 0,
+            ..Default::default()
+        },
+        CookLimits {
+            manifest_bytes: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            cook_file(
+                &dir.path("source.glb"),
+                &cache,
+                &dir.path("rejected"),
+                Settings::default(),
+                limits
+            )
+            .is_err(),
+            "{limits:?}"
+        );
+    }
+    let mut tighter = CookLimits::default();
+    tighter.prepared.max_vertices = 1;
+    assert!(load_manifest(&cache, &manifest, tighter).is_err());
+    assert!(
+        cook_file(
+            &dir.path("source.glb"),
+            &cache,
+            &dir.path("rejected"),
+            Settings::default(),
+            tighter
+        )
+        .is_err()
+    );
+    let uncapped = cook_file(
+        &dir.path("source.glb"),
+        &cache,
+        &dir.path("uncapped"),
+        Settings::default(),
+        CookLimits::unlimited(),
+    )
+    .unwrap();
+    assert_eq!(cold.loaded.payload_hash, uncapped.loaded.payload_hash);
+    assert!(
+        cook_file(
+            &dir.path("source.glb"),
+            &cache,
+            &dir.path("uncapped"),
+            Settings::default(),
+            CookLimits::unlimited()
+        )
+        .unwrap()
+        .report
+        .cache_hit
+    );
+    let bad = mutate(&bytes, |r, _| r["nodes"][0]["children"] = json!([0]));
+    assert!(prepare(&bad, Settings::default(), CookLimits::unlimited()).is_err());
+    assert!(
+        prepare(
+            &bytes[..bytes.len() - 1],
+            Settings::default(),
+            CookLimits::unlimited()
+        )
+        .is_err()
+    );
+    let bad = mutate(&bytes, |r, _| r["accessors"][0]["count"] = json!(u32::MAX));
+    assert!(prepare(&bad, Settings::default(), CookLimits::unlimited()).is_err());
+}
+
+#[test]
+fn real_narrow_texture_above_old_dimension_and_sampler_caps_cooks_without_large_geometry() {
+    use std::io::Cursor;
+    let mut png = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        4097,
+        1,
+        image::Rgba([120, 80, 40, 255]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
+    let bytes = mutate(&source(), |r, bin| {
+        let view = r["images"][0]["bufferView"].as_u64().unwrap() as usize;
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        r["bufferViews"][view]["byteOffset"] = json!(bin.len());
+        r["bufferViews"][view]["byteLength"] = json!(png.get_ref().len());
+        bin.extend(png.get_ref());
+        r["buffers"][0]["byteLength"] = json!(bin.len());
+        let samplers = r["samplers"].as_array_mut().unwrap();
+        samplers.resize(4097, json!({}));
+    });
+    assert!(prepare(&bytes, Settings::default(), CookLimits::default()).is_err());
+    let mut configured = CookLimits {
+        samplers: 4097,
+        ..Default::default()
+    };
+    configured.prepared.max_dimension = 4097;
+    let a = prepare(&bytes, Settings::default(), configured).unwrap();
+    let b = prepare(&bytes, Settings::default(), CookLimits::unlimited()).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.textures[0].mips[0].width, 4097);
+    assert!(a.validate(configured.prepared).unwrap().vertices < 100);
+    assert!(a.validate(renderlab_asset::Limits::default()).is_err());
+    let encoded = renderlab_asset::encode(&a, configured.prepared).unwrap();
+    assert!(renderlab_asset::decode(&encoded, renderlab_asset::Limits::default()).is_err());
+    assert_eq!(
+        renderlab_asset::decode(&encoded, renderlab_asset::Limits::unlimited()).unwrap(),
+        a
+    );
+}
+
+#[test]
+fn cli_limits_file_is_strict_and_effective_on_cook_and_inspect() {
+    let d = Sandbox::new();
+    let src = d.path("source.glb");
+    let cache = d.path("cache");
+    let manifest = d.path("current");
+    let config = d.path("limits.json");
+    fs::write(&src, source()).unwrap();
+    fs::write(
+        &config,
+        br#"{"prepared":"unlimited","cook":{"source_bytes":"unlimited"}}"#,
+    )
+    .unwrap();
+    let command = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_renderlab-cook"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let cooked = command(&[
+        "cook",
+        src.to_str().unwrap(),
+        cache.to_str().unwrap(),
+        manifest.to_str().unwrap(),
+        "--limits",
+        config.to_str().unwrap(),
+    ]);
+    assert!(
+        cooked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cooked.stderr)
+    );
+    let report: Value = serde_json::from_slice(&cooked.stdout).unwrap();
+    assert_eq!(report["limits"]["prepared"]["max_vertices"], "unlimited");
+    let inspected = command(&[
+        "--limits",
+        config.to_str().unwrap(),
+        "inspect",
+        cache.to_str().unwrap(),
+        manifest.to_str().unwrap(),
+    ]);
+    assert!(inspected.status.success());
+    fs::write(&config, br#"{"prepared":{"max_vertices":1}}"#).unwrap();
+    assert!(
+        !command(&[
+            "inspect",
+            cache.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+            "--limits",
+            config.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    fs::write(&config, br#"{"runtime":{"read_slots":0}}"#).unwrap();
+    let rejected = command(&[
+        "inspect",
+        cache.to_str().unwrap(),
+        manifest.to_str().unwrap(),
+        "--limits",
+        config.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("runtime.read_slots"));
+    fs::write(&config, br#"{"cook":{"unknown":1}}"#).unwrap();
+    let rejected = command(&[
+        "inspect",
+        cache.to_str().unwrap(),
+        manifest.to_str().unwrap(),
+        "--limits",
+        config.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cook.unknown"));
+}

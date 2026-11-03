@@ -6,7 +6,7 @@ use gltf::{
 use renderlab_asset::*;
 use std::{collections::HashMap, io::Cursor};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CookLimits {
     pub source_bytes: usize,
     pub json_bytes: usize,
@@ -14,6 +14,12 @@ pub struct CookLimits {
     pub hierarchy_depth: usize,
     pub images: usize,
     pub image_decoded_bytes: usize,
+    pub accessors: usize,
+    pub buffer_views: usize,
+    pub scenes: usize,
+    pub samplers: usize,
+    pub json_values: usize,
+    pub manifest_bytes: usize,
     pub prepared: Limits,
 }
 impl Default for CookLimits {
@@ -25,7 +31,34 @@ impl Default for CookLimits {
             hierarchy_depth: 128,
             images: 256,
             image_decoded_bytes: 128 << 20,
+            accessors: 65536,
+            buffer_views: 65536,
+            scenes: 256,
+            samplers: 4096,
+            json_values: 500_000,
+            manifest_bytes: 1 << 20,
             prepared: Limits::default(),
+        }
+    }
+}
+impl CookLimits {
+    /// Disable admission policy caps, retaining GLB/codec extents and structural validation.
+    /// serde_json's parser recursion safety limit remains in force.
+    pub const fn unlimited() -> Self {
+        Self {
+            source_bytes: usize::MAX,
+            json_bytes: usize::MAX,
+            nodes: usize::MAX,
+            hierarchy_depth: usize::MAX,
+            images: usize::MAX,
+            image_decoded_bytes: usize::MAX,
+            accessors: usize::MAX,
+            buffer_views: usize::MAX,
+            scenes: usize::MAX,
+            samplers: usize::MAX,
+            json_values: usize::MAX,
+            manifest_bytes: usize::MAX,
+            prepared: Limits::unlimited(),
         }
     }
 }
@@ -112,10 +145,10 @@ fn preflight(json: &[u8], limits: CookLimits) -> Result<()> {
         ("materials", limits.prepared.max_materials),
         ("textures", limits.prepared.max_textures),
         ("images", limits.images),
-        ("accessors", 65536),
-        ("bufferViews", 65536),
-        ("scenes", 256),
-        ("samplers", 4096),
+        ("accessors", limits.accessors),
+        ("bufferViews", limits.buffer_views),
+        ("scenes", limits.scenes),
+        ("samplers", limits.samplers),
     ] {
         if let Some(v) = root.get(key) {
             ensure(
@@ -167,10 +200,12 @@ fn preflight(json: &[u8], limits: CookLimits) -> Result<()> {
         }
     }
     let mut stack = vec![&root];
-    let mut visited = 0;
+    let mut visited = 0usize;
     while let Some(value) = stack.pop() {
-        visited += 1;
-        ensure(visited <= 500_000, "JSON structure work limit")?;
+        visited = visited
+            .checked_add(1usize)
+            .ok_or_else(|| Error("JSON work overflow".into()))?;
+        ensure(visited <= limits.json_values, "JSON structure work limit")?;
         match value {
             serde_json::Value::Object(map) => {
                 for (key, value) in map {
@@ -361,8 +396,14 @@ impl Textures<'_> {
                 && h <= self.limits.prepared.max_dimension,
             "image dimension limit",
         )?;
-        let rgba = u64::from(w) * u64::from(h) * 4;
-        let native = decoder.total_bytes();
+        let rgba = u64::from(w)
+            .checked_mul(u64::from(h))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| Error("image size overflow".into()))?;
+        let native = u64::from(w)
+            .checked_mul(u64::from(h))
+            .and_then(|n| n.checked_mul(u64::from(decoder.color_type().bytes_per_pixel())))
+            .ok_or_else(|| Error("native image size overflow".into()))?;
         let charge = native
             .checked_add(rgba)
             .ok_or_else(|| Error("image size overflow".into()))?;
@@ -374,7 +415,11 @@ impl Textures<'_> {
         let mut mip_bytes = 0u64;
         let (mut mw, mut mh) = (w, h);
         loop {
-            mip_bytes += u64::from(mw) * u64::from(mh) * 4;
+            mip_bytes = u64::from(mw)
+                .checked_mul(u64::from(mh))
+                .and_then(|n| n.checked_mul(4))
+                .and_then(|n| mip_bytes.checked_add(n))
+                .ok_or_else(|| Error("mip size overflow".into()))?;
             if mw == 1 && mh == 1 {
                 break;
             }
@@ -394,7 +439,11 @@ impl Textures<'_> {
         let rgba = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| Error(format!("image decode: {e}")))?
             .to_rgba8();
-        let index = self.records.len() as u32;
+        let index = self
+            .records
+            .len()
+            .try_into()
+            .map_err(|_| Error("texture ID width".into()))?;
         self.records.push(mip::build(w, h, rgba.into_raw(), role)?);
         self.roles.insert((source.index(), role), index);
         Ok((index, s))
@@ -500,6 +549,7 @@ fn meshes(
                 .get(&Semantic::Positions)
                 .ok_or_else(|| Error("missing POSITION accessor".into()))?;
             let count = positions.count();
+            ensure(count <= u32::MAX as usize, "vertex index width")?;
             ensure(
                 count <= limits.prepared.max_vertices,
                 "primitive vertex limit",
@@ -508,6 +558,7 @@ fn meshes(
                 attribute(&a, &s, count)?;
             }
             let index_count = p.indices().map_or(count, |a| a.count());
+            ensure(index_count <= u32::MAX as usize, "index count width")?;
             ensure(
                 index_count > 0 && index_count.is_multiple_of(3),
                 "triangle index count must be nonzero multiple of 3",
@@ -700,7 +751,12 @@ fn placements(document: &gltf::Document, limits: CookLimits) -> Result<Vec<Place
             "node hierarchy depth limit",
         )?;
         for child in nodes[i].children() {
-            queue.push((child.index(), depth + 1));
+            queue.push((
+                child.index(),
+                depth
+                    .checked_add(1)
+                    .ok_or_else(|| Error("hierarchy depth overflow".into()))?,
+            ));
         }
     }
     ensure(queue.len() == nodes.len(), "invalid hierarchy cycle")?;
@@ -779,19 +835,16 @@ pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<
         roles: HashMap::new(),
     };
     let mut materials = materials(document, &mut textures)?;
-    let other_bytes = textures
-        .prepared
-        .checked_add(
-            materials
-                .len()
-                .saturating_add(1)
-                .saturating_mul(std::mem::size_of::<Material>()),
-        )
+    let other_bytes = materials
+        .len()
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<Material>()))
+        .and_then(|n| n.checked_add(textures.prepared))
         .and_then(|n| {
             n.checked_add(
                 placements
                     .len()
-                    .saturating_mul(std::mem::size_of::<Placement>()),
+                    .checked_mul(std::mem::size_of::<Placement>())?,
             )
         })
         .ok_or_else(|| Error("prepared byte overflow".into()))?;

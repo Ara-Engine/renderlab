@@ -156,8 +156,8 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
     };
     let mut page_bytes = vec![];
     let mut statistics = Statistics::default();
-    let mut aggregate_groups = 0;
-    let mut aggregate_clusters = 0;
+    let mut aggregate_groups = 0usize;
+    let mut aggregate_clusters = 0usize;
     for source in &asset.meshes {
         // Shared-position boundaries between independently cooked material/primitive subsets are locked.
         // The same primitive's UV/normal seams remain under regular simplification and protect mask.
@@ -235,10 +235,24 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
             meshopt::clod_build(config, &mesh, |group, clusters| {
                 let id = groups.len();
                 let index_bytes = clusters.iter().map(|c| c.indices.len() * 4).sum::<usize>();
-                if aggregate_groups + groups.len() + 1 > limits.max_groups
-                    || aggregate_clusters + raw.len() + clusters.len() > limits.max_clusters
-                    || statistics.copied_callback_index_bytes + index_bytes
-                        > limits.max_geometry_bytes
+                if id >= i32::MAX as usize
+                    || group.depth < 0
+                    || raw
+                        .len()
+                        .checked_add(clusters.len())
+                        .is_none_or(|n| n > u32::MAX as usize)
+                    || aggregate_groups
+                        .checked_add(groups.len())
+                        .and_then(|n| n.checked_add(1))
+                        .is_none_or(|n| n > limits.max_groups)
+                    || aggregate_clusters
+                        .checked_add(raw.len())
+                        .and_then(|n| n.checked_add(clusters.len()))
+                        .is_none_or(|n| n > limits.max_clusters)
+                    || statistics
+                        .copied_callback_index_bytes
+                        .checked_add(index_bytes)
+                        .is_none_or(|n| n > limits.max_geometry_bytes)
                 {
                     overflow = true;
                     return id as i32;
@@ -310,7 +324,13 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
             }
             ensure(
                 package.pages.len() < limits.max_pages
-                    && (package.pages.len() + 1) * PAGE_BYTES <= limits.max_geometry_bytes,
+                    && package.pages.len() < u32::MAX as usize
+                    && package
+                        .pages
+                        .len()
+                        .checked_add(1)
+                        .and_then(|n| n.checked_mul(PAGE_BYTES))
+                        .is_some_and(|n| n <= limits.max_geometry_bytes),
                 "virtual page budget",
             )?;
             clusters[i].page = PageId(package.pages.len() as u32);

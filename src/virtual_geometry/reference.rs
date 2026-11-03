@@ -12,7 +12,14 @@ pub(super) fn select(
     protected: &[PageId],
     initial: Option<&Cut>,
 ) -> Result<Selection, Error> {
-    let scratch = mesh.groups.len() * 32 + mesh.clusters.len() * 48 + available.len() * 16 + 8;
+    let scratch = mesh
+        .groups
+        .len()
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(mesh.clusters.len().checked_mul(48)?))
+        .and_then(|n| n.checked_add(available.len().checked_mul(16)?))
+        .and_then(|n| n.checked_add(8))
+        .ok_or(Error::InvalidInput("reference scratch overflow"))?;
     if scratch > budget.max_scratch_bytes
         || errors.len() != mesh.groups.len()
         || !threshold.is_finite()

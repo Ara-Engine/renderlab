@@ -146,3 +146,20 @@ fn scalar_reference_transform_and_mip_contracts_are_checked() {
         assert!(decode(&bytes, limits).is_err());
     }
 }
+
+#[test]
+fn uncapped_policy_keeps_truncation_overflow_and_validity_checks() {
+    let a = fixture();
+    let limits = Limits::unlimited();
+    let bytes = encode(&a, limits).unwrap();
+    assert_eq!(decode(&bytes, limits).unwrap(), a);
+    for n in 0..bytes.len() {
+        assert!(decode(&bytes[..n], limits).is_err());
+    }
+    let mut bad = bytes.clone();
+    bad[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(decode(&bad, limits).is_err());
+    let mut invalid = a;
+    invalid.meshes[0].primitives[0].indices[0] = u32::MAX;
+    assert!(invalid.validate(limits).is_err());
+}

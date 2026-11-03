@@ -135,7 +135,7 @@ impl Default for Sampler {
 }
 
 /// Caps apply to the whole asset, including all primitives and mip levels.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_file_bytes: usize,
     pub max_decoded_bytes: usize,
@@ -147,6 +147,25 @@ pub struct Limits {
     pub max_vertices: usize,
     pub max_indices: usize,
     pub max_dimension: u32,
+}
+
+impl Limits {
+    /// Remove admission policy ceilings. Format widths, checked arithmetic and validity still apply.
+    /// These maxima are comparisons, never requested allocation sizes.
+    pub const fn unlimited() -> Self {
+        Self {
+            max_file_bytes: usize::MAX,
+            max_decoded_bytes: usize::MAX,
+            max_meshes: usize::MAX,
+            max_primitives: usize::MAX,
+            max_placements: usize::MAX,
+            max_materials: usize::MAX,
+            max_textures: usize::MAX,
+            max_vertices: usize::MAX,
+            max_indices: usize::MAX,
+            max_dimension: u32::MAX,
+        }
+    }
 }
 
 impl Default for Limits {
@@ -224,6 +243,14 @@ pub fn valid_transform(m: &[[f32; 4]; 4]) -> bool {
 impl Asset {
     /// Check all references and scalar domains before encoding or GPU integration.
     pub fn validate(&self, limits: Limits) -> Result<Counts> {
+        for count in [
+            self.meshes.len(),
+            self.placements.len(),
+            self.materials.len(),
+            self.textures.len(),
+        ] {
+            cap(count, u32::MAX as usize, "prepared count width")?;
+        }
         cap(self.meshes.len(), limits.max_meshes, "mesh limit")?;
         cap(
             self.placements.len(),
@@ -338,12 +365,19 @@ pub(crate) fn validate_mesh(mesh: &Mesh, counts: &mut Counts, limits: Limits) ->
     if mesh.primitives.is_empty() {
         return Err(Error("empty mesh"));
     }
+    cap(
+        mesh.primitives.len(),
+        u32::MAX as usize,
+        "primitive count width",
+    )?;
     add(&mut counts.primitives, mesh.primitives.len())?;
     cap(counts.primitives, limits.max_primitives, "primitive limit")?;
     for p in &mesh.primitives {
         if p.vertices.is_empty() || p.indices.is_empty() || !p.indices.len().is_multiple_of(3) {
             return Err(Error("empty or nontriangle primitive"));
         }
+        cap(p.vertices.len(), u32::MAX as usize, "vertex count width")?;
+        cap(p.indices.len(), u32::MAX as usize, "index count width")?;
         add(&mut counts.vertices, p.vertices.len())?;
         add(&mut counts.indices, p.indices.len())?;
         cap(counts.vertices, limits.max_vertices, "vertex limit")?;

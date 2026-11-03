@@ -22,7 +22,7 @@ struct Request {
     record: Page,
     queued: Instant,
 }
-/// Exactly four outstanding requests including active IO and completed CPU payloads.
+/// Bounded outstanding requests including active IO and completed CPU payloads.
 /// Drop disconnects both channels before joining; neither send nor delay can trap shutdown.
 pub(super) struct PageIo {
     requests: Option<mpsc::SyncSender<Request>>,
@@ -31,9 +31,14 @@ pub(super) struct PageIo {
     stop: Arc<AtomicBool>,
 }
 impl PageIo {
-    pub fn new(directory: PathBuf, delay: Duration) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<Request>(READ_SLOTS);
-        let (results, completed) = mpsc::sync_channel(READ_SLOTS);
+    pub fn metadata_bytes(slots: usize) -> Result<usize, Error> {
+        slots
+            .checked_mul(std::mem::size_of::<Request>() + std::mem::size_of::<ReadResult>())
+            .ok_or(Error::InvalidInput("read_slots metadata overflow"))
+    }
+    pub fn new(directory: PathBuf, delay: Duration, slots: usize) -> Result<Self, Error> {
+        let (tx, rx) = mpsc::sync_channel::<Request>(slots);
+        let (results, completed) = mpsc::sync_channel(slots);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let worker = thread::Builder::new()
@@ -70,7 +75,9 @@ impl PageIo {
                     let verify = start.elapsed();
                     drop(bytes);
                     // Delay actual completion, after real read/hash/decode, on the worker.
-                    let until = Instant::now() + delay;
+                    let until = Instant::now()
+                        .checked_add(delay)
+                        .unwrap_or_else(Instant::now);
                     while !stopping.load(Ordering::Acquire) && Instant::now() < until {
                         thread::park_timeout(until.saturating_duration_since(Instant::now()));
                     }
@@ -91,13 +98,13 @@ impl PageIo {
                     }
                 }
             })
-            .expect("page worker thread creation");
-        Self {
+            .map_err(|_| Error::InvalidInput("page worker thread creation failed"))?;
+        Ok(Self {
             requests: Some(tx),
             results: Some(completed),
             worker: Some(worker),
             stop,
-        }
+        })
     }
     pub fn request(&self, page: PageId, record: &Page) -> bool {
         self.requests
@@ -130,7 +137,12 @@ pub(super) fn hex(hash: &[u8; 32]) -> String {
 }
 
 /// Bounded synchronous metadata bootstrap. Never reads or scans page blobs.
-pub(super) fn load(cache: &Path, manifest: &Path) -> Result<Package, Box<dyn std::error::Error>> {
+pub(super) fn load(
+    cache: &Path,
+    manifest: &Path,
+    options: StreamOptions,
+) -> Result<Package, Box<dyn std::error::Error>> {
+    options.validate()?;
     let mut bytes = Vec::new();
     File::open(manifest)?.take(81).read_to_end(&mut bytes)?;
     if bytes.len() != 80 || &bytes[..8] != b"RVM\0\x01\0\0\0" {
@@ -138,7 +150,9 @@ pub(super) fn load(cache: &Path, manifest: &Path) -> Result<Package, Box<dyn std
     }
     let digest: [u8; 32] = bytes[40..72].try_into()?;
     let length = u64::from_le_bytes(bytes[72..80].try_into()?);
-    if length > (METADATA_LIMIT + TEXTURE_LIMIT) as u64 {
+    if length > options.bootstrap_bytes as u64
+        || length > options.limits.prepared.max_file_bytes as u64
+    {
         return Err("metadata bootstrap file cap".into());
     }
     let mut file = File::open(cache.join("virtual-v1/packages").join(hex(&digest)))?;
@@ -146,26 +160,33 @@ pub(super) fn load(cache: &Path, manifest: &Path) -> Result<Package, Box<dyn std
     file.read_exact(&mut header)?;
     let resources = u32::from_le_bytes(header[20..24].try_into()?) as usize;
     // Reserve the encoded metadata AND decoded/validation element storage together.
-    // One MiB covers bounded M3 material/texture/mip containers (texels are separate).
-    let encoded_metadata = (length as usize)
+    // Resource container bytes are charged by the codec; no fixed reservation or default policy is injected.
+    let length = usize::try_from(length).map_err(|_| "package exceeds host address space")?;
+    let encoded_metadata = length
         .checked_sub(resources)
         .filter(|n| *n >= 24)
         .ok_or("invalid resource extent")?;
-    if resources > TEXTURE_LIMIT || encoded_metadata >= METADATA_LIMIT - (1 << 20) {
+    if resources > options.texture_bytes || encoded_metadata >= options.metadata_bytes {
         return Err("metadata/resource bootstrap capacity".into());
     }
-    let limits = VirtualLimits {
-        max_metadata_bytes: METADATA_LIMIT - (1 << 20) - encoded_metadata,
-        prepared: asset::Limits {
-            max_decoded_bytes: TEXTURE_LIMIT,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let mut limits = options.limits;
+    limits.max_metadata_bytes = limits
+        .max_metadata_bytes
+        .min(options.metadata_bytes - encoded_metadata);
+    limits.prepared.max_decoded_bytes = limits.prepared.max_decoded_bytes.min(
+        options
+            .texture_bytes
+            .checked_add(options.metadata_bytes - encoded_metadata)
+            .ok_or("bootstrap decode byte overflow")?,
+    );
     file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::with_capacity(length as usize + 1);
-    file.take(length + 1).read_to_end(&mut bytes)?;
-    if bytes.len() != length as usize || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| "package allocation failed")?;
+    file.take((length as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() != length || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
         return Err("package extent/digest mismatch".into());
     }
     Ok(asset::virtual_mesh::decode(&bytes, limits)?)
