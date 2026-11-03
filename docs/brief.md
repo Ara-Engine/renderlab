@@ -22,7 +22,7 @@ M2's persistent instancing and conservative visibility are complete, with root v
 
 M3's prepared assets, isolated cooker, material rendering and 1x/4x AA are complete after independent Opus review and a verified sampler correction. [Milestone 3](milestone-3.md) records images, resource stress, live interaction, development latency and carried limitations. M4's bounded virtual geometry follows [its execution plan](milestone-4-plan.md).
 
-M4 Unit A is accepted: registered dense fixtures, clustered immutable pages, bounded metadata and CPU proofs of legal cuts. [Milestone 4](milestone-4.md) records the fixed content/camera hashes, independently reproduced checks and cooking costs. GPU streaming, retirement accounting, moving-image quality and M4 acceptance remain pending.
+M4 Unit A is accepted: registered dense fixtures, clustered immutable pages, bounded metadata and CPU proofs of legal cuts. Unit B's bounded streaming and retirement implementation passes root's CPU/GPU correctness suite, but a reproduced cold near-view silhouette failure blocks acceptance. [Milestone 4](milestone-4.md) records identities, checks and the failed gate; Unit C quality, interaction and performance work remains open.
 
 ## Milestone 0: development environment (complete)
 

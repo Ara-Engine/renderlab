@@ -89,6 +89,63 @@ pub fn select(
     available: &[bool],
     budget: SelectionBudget,
 ) -> Result<Selection> {
+    select_with_protected(mesh, projected_errors, threshold, available, budget, &[])
+}
+
+/// Same legal selector with a package-global page union already protected by other instances.
+/// Protected pages are charged once, including overlap with this instance's transition.
+pub fn select_with_protected(
+    mesh: &VirtualMesh,
+    projected_errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+) -> Result<Selection> {
+    select_internal(
+        mesh,
+        projected_errors,
+        threshold,
+        available,
+        budget,
+        protected,
+        None,
+    )
+}
+
+/// Refine a validated currently published legal cut. This avoids requesting obsolete
+/// intermediate representations when a streaming runtime retains an already finer cover.
+pub fn select_from_cut(
+    mesh: &VirtualMesh,
+    projected_errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+    initial: &Cut,
+) -> Result<Selection> {
+    select_internal(
+        mesh,
+        projected_errors,
+        threshold,
+        available,
+        budget,
+        protected,
+        Some(initial),
+    )
+}
+fn select_internal(
+    mesh: &VirtualMesh,
+    projected_errors: &[f64],
+    threshold: f64,
+    available: &[bool],
+    budget: SelectionBudget,
+    protected: &[PageId],
+    initial: Option<&Cut>,
+) -> Result<Selection> {
+    if protected.iter().any(|p| p.index() >= available.len()) {
+        return Err(Error("protected page outside package"));
+    }
     let n = mesh.groups.len();
     let c = mesh.clusters.len();
     let scratch = product(n, 32)?
@@ -135,14 +192,44 @@ pub fn select(
     let mut selected = cluster_cut(mesh, &active);
     let pinned = pages(mesh, &selected);
     if selected.len() > budget.max_clusters
-        || product(pinned.len(), PAGE_BYTES)? > budget.geometry_bytes
+        || product(union(&pinned, protected).len(), PAGE_BYTES)? > budget.geometry_bytes
     {
         return Err(Error("capacity below minimum cover"));
     }
     if pinned.iter().any(|p| !available[p.index()]) {
         return Err(Error("minimum cover pages unavailable"));
     }
-    let mut required = pinned.clone();
+    if let Some(initial) = initial {
+        active.fill(false);
+        for g in &initial.active_groups {
+            if g.index() >= n || active[g.index()] {
+                return Err(Error("invalid initial active group"));
+            }
+            active[g.index()] = true;
+        }
+        if mesh.terminal_groups().any(|g| !active[g.index()])
+            || mesh.clusters.iter().any(|c| {
+                c.refined
+                    .is_some_and(|r| active[r.index()] && !active[c.owner.index()])
+            })
+        {
+            return Err(Error("initial cut is not a closed minimum cover"));
+        }
+        selected = cluster_cut(mesh, &active);
+        let current_pages = pages(mesh, &selected);
+        if selected != initial.clusters
+            || current_pages != initial.pages
+            || selected.len() > budget.max_clusters
+            || current_pages.iter().any(|p| !available[p.index()])
+            || product(
+                union(&union(&pinned, &current_pages), protected).len(),
+                PAGE_BYTES,
+            )? > budget.geometry_bytes
+        {
+            return Err(Error("initial cut ranges/availability/capacity"));
+        }
+    }
+    let mut required = union(&pinned, &pages(mesh, &selected));
     let mut requested = vec![];
     let mut reasons = vec![];
     let mut candidates = 0;
@@ -175,7 +262,7 @@ pub fn select(
             continue;
         }
         let target = union(&pinned, &pages(mesh, &replacement));
-        let charged = union(&target, &pages(mesh, &selected));
+        let charged = union(&union(&target, &pages(mesh, &selected)), protected);
         if product(charged.len(), PAGE_BYTES)? > budget.geometry_bytes {
             if !reasons.contains(&DebtReason::GeometryCapacity) {
                 reasons.push(DebtReason::GeometryCapacity);

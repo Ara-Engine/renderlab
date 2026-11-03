@@ -9,6 +9,7 @@ mod mesh;
 mod normal;
 mod observe;
 mod renderer;
+pub mod virtual_geometry;
 mod visibility;
 
 pub use glam::{Mat4, Vec3};
@@ -18,6 +19,7 @@ pub use material::{
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
+pub use renderer::Capture;
 pub use renderer::Renderer;
 pub use renderlab_asset::{self as asset, Vertex};
 pub use wgpu;

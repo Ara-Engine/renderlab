@@ -1,5 +1,8 @@
+#[path = "../../examples/m4/cameras.rs"]
+mod cameras;
 mod fixture;
 mod prepared;
+use renderlab::virtual_geometry::{SelectorMode, StreamOptions, VirtualAsset, VirtualScene};
 #[path = "../../support/validation.rs"]
 mod validation;
 use fixture::Scene;
@@ -31,6 +34,10 @@ struct Options {
     validate: bool,
     instances: u32,
     asset: Option<PathBuf>,
+    virtual_manifest: Option<PathBuf>,
+    cache: PathBuf,
+    cameras: Option<PathBuf>,
+    stream: StreamOptions,
     samples: SampleCount,
     view: ViewMode,
 }
@@ -45,12 +52,64 @@ impl Options {
             validate: false,
             instances: 2,
             asset: None,
+            virtual_manifest: None,
+            cache: "measurements/m4-cook/root-unit-a/cache".into(),
+            cameras: None,
+            stream: StreamOptions::default(),
             samples: SampleCount::One,
             view: ViewMode::BaseColor,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--virtual-manifest" => {
+                    options.virtual_manifest = Some(args.next().ok_or("missing manifest")?.into())
+                }
+                "--cache" => options.cache = args.next().ok_or("missing cache")?.into(),
+                "--cameras" => options.cameras = Some(args.next().ok_or("missing cameras")?.into()),
+                "--geometry-bytes" => {
+                    options.stream.geometry_bytes = args
+                        .next()
+                        .ok_or("missing geometry bytes")?
+                        .parse()
+                        .map_err(|_| "invalid geometry bytes")?
+                }
+                "--candidates" => {
+                    options.stream.max_candidates = args
+                        .next()
+                        .ok_or("missing candidates")?
+                        .parse()
+                        .map_err(|_| "invalid candidates")?
+                }
+                "--output-clusters" => {
+                    options.stream.max_clusters = args
+                        .next()
+                        .ok_or("missing output clusters")?
+                        .parse()
+                        .map_err(|_| "invalid output clusters")?
+                }
+                "--error-pixels" => {
+                    options.stream.error_pixels = args
+                        .next()
+                        .ok_or("missing pixel error")?
+                        .parse()
+                        .map_err(|_| "invalid error")?
+                }
+                "--io-delay-ms" => {
+                    options.stream.io_delay = Duration::from_millis(
+                        args.next()
+                            .ok_or("missing delay")?
+                            .parse()
+                            .map_err(|_| "invalid delay")?,
+                    )
+                }
+                "--selector" => {
+                    options.stream.selector = match args.next().as_deref() {
+                        Some("baseline") => SelectorMode::Baseline,
+                        Some("simple") => SelectorMode::SimpleReference,
+                        _ => return Err("selector requires baseline|simple".into()),
+                    }
+                }
                 "--asset" => {
                     options.asset = Some(args.next().ok_or("missing prepared asset path")?.into())
                 }
@@ -101,6 +160,9 @@ impl Options {
                 _ => return Err(format!("unknown argument {arg}")),
             }
         }
+        if options.asset.is_some() && options.virtual_manifest.is_some() {
+            return Err("choose --asset or --virtual-manifest".into());
+        }
         if options.instances < 2
             || options.frames == Some(0)
             || options.seconds.is_some_and(|s| !s.is_finite() || s <= 0.0)
@@ -141,6 +203,8 @@ struct View {
     renderer: Renderer,
     meshes: Vec<Mesh>,
     asset: Option<prepared::Prepared>,
+    virtual_asset: Option<(VirtualAsset, VirtualScene)>,
+    cameras: Option<cameras::Cameras>,
     view_mode: ViewMode,
     title: String,
     instances: Vec<Instances>,
@@ -178,11 +242,28 @@ impl View {
             .as_deref()
             .map(prepared::Prepared::load)
             .transpose()?;
+        let cameras = options
+            .cameras
+            .as_deref()
+            .map(cameras::Cameras::load)
+            .transpose()?;
+        let virtual_asset = options
+            .virtual_manifest
+            .as_deref()
+            .map(|manifest| -> Result<_, Box<dyn std::error::Error>> {
+                let asset = VirtualAsset::open(&options.cache, manifest, options.stream)?;
+                let scene = VirtualScene::from_package(&asset)?;
+                Ok((asset, scene))
+            })
+            .transpose()?;
         let window = Arc::new(
             events.create_window(
                 Window::default_attributes()
                     .with_title(TITLE)
-                    .with_inner_size(winit::dpi::PhysicalSize::new(960, 640)),
+                    .with_inner_size(winit::dpi::PhysicalSize::new(
+                        cameras.as_ref().map_or(960, |c| c.frames[0].width),
+                        cameras.as_ref().map_or(640, |c| c.frames[0].height),
+                    )),
             )?,
         );
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -255,6 +336,8 @@ impl View {
             renderer,
             meshes: Vec::new(),
             asset,
+            virtual_asset,
+            cameras,
             view_mode: options.view,
             title: TITLE.into(),
             instances: Vec::new(),
@@ -321,10 +404,14 @@ impl View {
         if let Some(asset) = &mut self.asset {
             asset.advance(&mut self.renderer)?;
         }
-        if self.asset.is_none() && self.meshes.len() < 2 {
+        if self.asset.is_none() && self.virtual_asset.is_none() && self.meshes.len() < 2 {
             fixture::upload_next(&mut self.renderer, &mut self.meshes)?;
         }
-        if self.asset.is_none() && self.meshes.len() == 2 && self.instances.len() < 2 {
+        if self.asset.is_none()
+            && self.virtual_asset.is_none()
+            && self.meshes.len() == 2
+            && self.instances.len() < 2
+        {
             fixture::upload_instances_next(
                 &mut self.renderer,
                 &mut self.instances,
@@ -404,12 +491,13 @@ impl View {
             || self.size.width == 0
             || self.size.height == 0
             || self.occluded
-            || self
-                .asset
-                .as_ref()
-                .map_or(self.meshes.len() < 2 || self.instances.len() < 2, |a| {
-                    !a.ready()
-                })
+            || (self.virtual_asset.is_none()
+                && self
+                    .asset
+                    .as_ref()
+                    .map_or(self.meshes.len() < 2 || self.instances.len() < 2, |a| {
+                        !a.ready()
+                    }))
         {
             return Ok(());
         }
@@ -453,35 +541,80 @@ impl View {
                 return Err("surface validation failed; restart required".into());
             }
         };
-        let caller_start = Instant::now();
-        let (camera, mut draws) = if let Some(asset) = &mut self.asset {
-            asset.animate(self.scene.phase)?;
-            let camera = asset.camera(
-                self.scene.yaw,
-                self.scene.elevation,
-                self.scene.translation,
-                self.scene.close_view,
-                self.config.width as f32 / self.config.height as f32,
+        let registered_camera = self
+            .cameras
+            .as_ref()
+            .map(|c| {
+                let pose = &c.frames[(self.presented as usize).min(c.frames.len() - 1)];
+                if options.log_frames {
+                    eprintln!("registered_pose={} phase={}", pose.frame, pose.phase);
+                }
+                pose.camera()
+            })
+            .transpose()?;
+        let (report, caller_ms, render_ms) = if let Some((asset, scene)) = &mut self.virtual_asset {
+            let caller_start = Instant::now();
+            let camera = registered_camera.unwrap_or_else(|| self.scene.camera(2));
+            let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.;
+            let render_start = Instant::now();
+            let report = self.renderer.try_render_virtual(
+                &frame.texture,
+                &camera,
+                asset,
+                scene,
+                self.view_mode,
             )?;
-            (camera, asset.draws(self.visibility))
-        } else {
-            self.instances[0].set(0, self.scene.first_model(options.instances))?;
-            let (cubes, triangle) = self.instances.split_at_mut(1);
+            if options.log_frames {
+                eprintln!("virtual_stats={:?}", asset.stats());
+            }
             (
-                self.scene.camera(options.instances),
-                vec![
-                    Draw::new(&self.meshes[0], &mut cubes[0]).with_visibility(self.visibility),
-                    Draw::new(&self.meshes[1], &mut triangle[0]).with_visibility(self.visibility),
-                ],
+                report,
+                caller_ms,
+                render_start.elapsed().as_secs_f64() * 1000.,
+            )
+        } else {
+            let caller_start = Instant::now();
+            let (camera, mut draws) = if let Some(asset) = &mut self.asset {
+                asset.animate(self.scene.phase)?;
+                let camera = asset.camera(
+                    self.scene.yaw,
+                    self.scene.elevation,
+                    self.scene.translation,
+                    self.scene.close_view,
+                    self.config.width as f32 / self.config.height as f32,
+                )?;
+                (
+                    registered_camera.unwrap_or(camera),
+                    asset.draws(self.visibility),
+                )
+            } else {
+                self.instances[0].set(0, self.scene.first_model(options.instances))?;
+                let (cubes, triangle) = self.instances.split_at_mut(1);
+                (
+                    registered_camera.unwrap_or_else(|| self.scene.camera(options.instances)),
+                    vec![
+                        Draw::new(&self.meshes[0], &mut cubes[0]).with_visibility(self.visibility),
+                        Draw::new(&self.meshes[1], &mut triangle[0])
+                            .with_visibility(self.visibility),
+                    ],
+                )
+            };
+
+            let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.;
+            let render_start = Instant::now();
+            let result = self.renderer.try_render_view(
+                &frame.texture,
+                &camera,
+                &mut draws,
+                self.view_mode,
+            )?;
+            drop(draws);
+            (
+                result,
+                caller_ms,
+                render_start.elapsed().as_secs_f64() * 1000.,
             )
         };
-        let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.0;
-        let render_start = Instant::now();
-        let report =
-            self.renderer
-                .try_render_view(&frame.texture, &camera, &mut draws, self.view_mode)?;
-        drop(draws);
-        let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
         if options.log_frames {
             eprintln!(
                 "caller_ms={caller_ms:.4} render_whole_ms={render_ms:.4} accepted={}",

@@ -314,3 +314,100 @@ fn virtual_codec_rejects_bad_counts_cycles_references_and_domains() {
         .is_err()
     );
 }
+#[test]
+fn published_cut_refinement_preserves_closed_coverage_and_transition_budget() {
+    let graphs = [
+        graph(&[&[None], &[Some(0)], &[Some(1)]]),
+        graph(&[&[None], &[None], &[Some(0), Some(1)], &[Some(0)]]),
+        graph(&[&[None], &[Some(0)], &[Some(0)], &[Some(1), Some(2)]]),
+    ];
+    let mut checked = 0;
+    for mesh in graphs {
+        let n = mesh.groups.len();
+        let pc = mesh.clusters.len();
+        for mask in 0..1usize << n {
+            let active: Vec<_> = (0..n).map(|g| mask & (1 << g) != 0).collect();
+            if !legal(&mesh, &active) {
+                continue;
+            }
+            let ids: Vec<_> = mesh
+                .clusters
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()])
+                })
+                .map(|(i, _)| ClusterId(i as u32))
+                .collect();
+            let mut pages: Vec<_> = ids.iter().map(|c| mesh.clusters[c.index()].page).collect();
+            pages.sort_unstable();
+            pages.dedup();
+            let initial = Cut {
+                active_groups: active
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| **a)
+                    .map(|(g, _)| GroupId(g as u32))
+                    .collect(),
+                clusters: ids,
+                pages,
+            };
+            let errors = vec![f64::INFINITY; n];
+            for availability in 0..1usize << pc {
+                let available: Vec<_> = (0..pc).map(|p| availability & (1 << p) != 0).collect();
+                for capacity in 1..=pc + 1 {
+                    for output in 1..=pc + 1 {
+                        for candidates in 0..=n {
+                            let b = SelectionBudget {
+                                geometry_bytes: capacity * PAGE_BYTES,
+                                max_candidates: candidates,
+                                max_clusters: output,
+                                ..budget()
+                            };
+                            if let Ok(next) = select_from_cut(
+                                &mesh,
+                                &errors,
+                                1.,
+                                &available,
+                                b,
+                                &initial.pages,
+                                &initial,
+                            ) {
+                                checked += 1;
+                                exact_once(&mesh, &next.cut);
+                                assert!(
+                                    initial
+                                        .active_groups
+                                        .iter()
+                                        .all(|g| next.cut.active_groups.contains(g))
+                                );
+                                assert!(next.cut.pages.iter().all(|p| available[p.index()]));
+                                assert!(next.cut.clusters.len() <= output);
+                                let mut protected = initial.pages.clone();
+                                protected.extend(&next.cut.pages);
+                                protected.extend(&next.demand.required_pages);
+                                protected.sort_unstable();
+                                protected.dedup();
+                                assert!(protected.len() * PAGE_BYTES <= b.geometry_bytes);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut invalid = initial.clone();
+            invalid.active_groups.clear();
+            assert!(
+                select_from_cut(&mesh, &errors, 1., &vec![true; pc], budget(), &[], &invalid)
+                    .is_err()
+            );
+            let mut invalid = initial.clone();
+            invalid.clusters.clear();
+            assert!(
+                select_from_cut(&mesh, &errors, 1., &vec![true; pc], budget(), &[], &invalid)
+                    .is_err()
+            );
+        }
+    }
+    assert!(checked > 1000);
+    println!("current_cut_checked={checked}");
+}

@@ -1,3 +1,12 @@
+pub(crate) struct PreparedDraw<'a> {
+    pub mesh: &'a crate::Mesh,
+    pub instances: &'a crate::Instances,
+    pub material: Option<&'a crate::Material>,
+    pub indices: std::ops::Range<u32>,
+    pub slots: std::ops::Range<u32>,
+    #[cfg(test)]
+    pub reference_ids: Option<&'a wgpu::Buffer>,
+}
 use crate::{
     instances::InstanceState,
     mesh::matrix_bytes,
@@ -17,7 +26,7 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
 
 type MapResult = Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>;
-struct Flight {
+pub(crate) struct Flight {
     done: Arc<OnceLock<()>>,
     mapped: Option<MapResult>,
     submission: u64,
@@ -282,6 +291,7 @@ pub struct Renderer {
     pipelines: PipelineStats,
     uploads: UploadBytes,
     submissions: u64,
+    completed_submission: u64,
     frames: u64,
     peak_flights: usize,
     busy_uploads: u64,
@@ -290,7 +300,7 @@ pub struct Renderer {
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
-struct OperationScopes([wgpu::ErrorScopeGuard; 3]);
+pub(crate) struct OperationScopes([wgpu::ErrorScopeGuard; 3]);
 impl OperationScopes {
     fn new(device: &wgpu::Device) -> Self {
         Self([
@@ -569,6 +579,7 @@ impl Renderer {
             },
             uploads: UploadBytes::default(),
             submissions: 0,
+            completed_submission: 0,
             frames: 0,
             peak_flights: 0,
             busy_uploads: 0,
@@ -674,13 +685,13 @@ impl Renderer {
         )
     }
 
-    fn check_fault(&self) -> Result<(), Error> {
+    pub(crate) fn check_fault(&self) -> Result<(), Error> {
         match self.fault.get() {
             Some(fault) => Err(Error::Fault(fault.clone())),
             None => Ok(()),
         }
     }
-    fn fail(&self, message: String) -> Error {
+    pub(crate) fn fail(&self, message: String) -> Error {
         let _ = self.fault.set(Fault(message));
         Error::Fault(self.fault.get().unwrap().clone())
     }
@@ -727,13 +738,13 @@ impl Renderer {
         })
     }
 
-    fn occupied(&self) -> usize {
+    pub(crate) fn occupied(&self) -> usize {
         self.slots.iter().filter(|s| s.flight.is_some()).count()
     }
-    fn free_slot(&self) -> Option<usize> {
+    pub(crate) fn free_slot(&self) -> Option<usize> {
         self.slots.iter().position(|s| s.flight.is_none())
     }
-    fn record_flight(&mut self, slot: usize, flight: Flight) {
+    pub(crate) fn record_flight(&mut self, slot: usize, flight: Flight) {
         self.slots[slot].flight = Some(flight);
         self.peak_flights = self.peak_flights.max(self.occupied());
     }
@@ -981,7 +992,7 @@ impl Renderer {
         }))
     }
 
-    fn submit_upload(&mut self, slot: usize) {
+    pub(crate) fn submit_upload(&mut self, slot: usize) {
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
         let submitted_at = Instant::now();
@@ -1199,7 +1210,7 @@ impl Renderer {
         }
     }
 
-    fn validate_color(&self, color: &wgpu::Texture) -> Result<(), Error> {
+    pub(crate) fn validate_color(&self, color: &wgpu::Texture) -> Result<(), Error> {
         if color.format() != self.format
             || color.dimension() != wgpu::TextureDimension::D2
             || color.width() == 0
@@ -1314,42 +1325,7 @@ impl Renderer {
                 uploads.write_calls += 1;
                 upload += start.elapsed();
             }
-            if instances.state.dirty_count > 0 {
-                for span in instances.state.dirty_runs() {
-                    let start = Instant::now();
-                    self.scratch.clear();
-                    for &model in &instances.state.models[span.clone()] {
-                        self.scratch.extend_from_slice(&matrix_bytes(model));
-                    }
-                    packing += start.elapsed();
-                    let start = Instant::now();
-                    self.queue.write_buffer(
-                        &instances.transforms,
-                        span.start as u64 * 64,
-                        &self.scratch,
-                    );
-                    uploads.models += self.scratch.len() as u64;
-                    upload += start.elapsed();
-                    let start = Instant::now();
-                    self.scratch.clear();
-                    for normal in &instances.state.normals[span.clone()] {
-                        self.scratch.extend_from_slice(&normal.bytes());
-                    }
-                    packing += start.elapsed();
-                    let start = Instant::now();
-                    self.queue.write_buffer(
-                        &instances.normals,
-                        span.start as u64 * 64,
-                        &self.scratch,
-                    );
-                    uploads.normals += self.scratch.len() as u64;
-                    uploads.write_calls += 1;
-                    uploads.model_writes += 1;
-                    uploads.write_calls += 1;
-                    upload += start.elapsed();
-                }
-                instances.state.clear_dirty();
-            }
+            self.upload_instance_edits(instances, &mut uploads, &mut packing, &mut upload);
             scene.collections += 1;
             scene.normal_cache_bytes += (instances.state.normals.capacity()
                 * std::mem::size_of::<crate::normal::NormalTransform>())
@@ -1363,6 +1339,142 @@ impl Renderer {
             scene.draws += u64::from(visible > 0);
             scene.triangles += visible * u64::from(draw.mesh.index_count / 3);
         }
+        // The per-slot oracle intentionally bypasses the production ID publication buffer.
+        #[cfg(test)]
+        let reference_ids: Vec<_> = if self.reference_draws {
+            draws
+                .iter()
+                .map(|draw| {
+                    assert_eq!(draw.visibility, Visibility::Unculled);
+                    let buffer = self.ledger.own(
+                        self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("test oracle identity IDs"),
+                            size: draw.instances.len() as u64 * 4,
+                            usage: wgpu::BufferUsages::VERTEX,
+                            mapped_at_creation: true,
+                        }),
+                        ResourceKind::Buffer,
+                    );
+                    {
+                        let mut bytes = buffer.get_mapped_range_mut(..).unwrap();
+                        for slot in 0..draw.instances.len() {
+                            bytes
+                                .slice(slot * 4..slot * 4 + 4)
+                                .copy_from_slice(&(slot as u32).to_ne_bytes());
+                        }
+                    }
+                    buffer.unmap();
+                    buffer
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        let mut prepared = Vec::with_capacity(draws.len());
+        #[cfg(test)]
+        let mut reference_ids = reference_ids.iter();
+        for draw in draws.iter() {
+            #[cfg(test)]
+            if self.reference_draws {
+                assert_eq!(draw.visibility, Visibility::Unculled);
+                let reference_ids = reference_ids.next().unwrap();
+                for slot in 0..draw.instances.len() as u32 {
+                    prepared.push(PreparedDraw {
+                        mesh: draw.mesh,
+                        instances: draw.instances,
+                        material: draw.material,
+                        indices: 0..draw.mesh.index_count,
+                        slots: slot..slot + 1,
+                        reference_ids: Some(reference_ids),
+                    });
+                }
+                scene.draws += draw.instances.len().saturating_sub(1) as u64;
+                continue;
+            }
+            prepared.push(PreparedDraw {
+                mesh: draw.mesh,
+                instances: draw.instances,
+                material: draw.material,
+                indices: 0..draw.mesh.index_count,
+                slots: 0..draw.instances.state.ids.len() as u32,
+                #[cfg(test)]
+                reference_ids: None,
+            });
+        }
+        self.submit_prepared(
+            color,
+            camera_bytes,
+            view_mode,
+            &prepared,
+            slot,
+            uploads,
+            scene,
+            CpuFrame {
+                preparation,
+                visibility,
+                packing,
+                upload,
+                poll,
+                ..CpuFrame::default()
+            },
+        )
+    }
+
+    fn upload_instance_edits(
+        &mut self,
+        instances: &mut Instances,
+        uploads: &mut UploadBytes,
+        packing: &mut Duration,
+        upload: &mut Duration,
+    ) {
+        if instances.state.dirty_count > 0 {
+            for span in instances.state.dirty_runs() {
+                let start = Instant::now();
+                self.scratch.clear();
+                for &model in &instances.state.models[span.clone()] {
+                    self.scratch.extend_from_slice(&matrix_bytes(model));
+                }
+                *packing += start.elapsed();
+                let start = Instant::now();
+                self.queue.write_buffer(
+                    &instances.transforms,
+                    span.start as u64 * 64,
+                    &self.scratch,
+                );
+                uploads.models += self.scratch.len() as u64;
+                *upload += start.elapsed();
+                let start = Instant::now();
+                self.scratch.clear();
+                for normal in &instances.state.normals[span.clone()] {
+                    self.scratch.extend_from_slice(&normal.bytes());
+                }
+                *packing += start.elapsed();
+                let start = Instant::now();
+                self.queue
+                    .write_buffer(&instances.normals, span.start as u64 * 64, &self.scratch);
+                uploads.normals += self.scratch.len() as u64;
+                uploads.write_calls += 1;
+                uploads.model_writes += 1;
+                uploads.write_calls += 1;
+                *upload += start.elapsed();
+            }
+            instances.state.clear_dirty();
+        }
+    }
+
+    // Persistent data is prepared once, then borrowed for the shared render pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_prepared(
+        &mut self,
+        color: &wgpu::Texture,
+        camera_bytes: [u8; 64],
+        view_mode: ViewMode,
+        draws: &[PreparedDraw<'_>],
+        slot: usize,
+        uploads: UploadBytes,
+        scene: SceneCounts,
+        cpu: CpuFrame,
+    ) -> Result<Option<FrameReport>, Error> {
         self.uploads.add(uploads);
         let encode_start = Instant::now();
         if self
@@ -1453,36 +1565,6 @@ impl Renderer {
                     beginning_of_pass_write_index: Some(slot as u32 * 2),
                     end_of_pass_write_index: Some(slot as u32 * 2 + 1),
                 });
-        #[cfg(test)]
-        let unculled_identity_buffers: Vec<_> = if self.reference_draws {
-            draws
-                .iter()
-                .map(|draw| {
-                    assert_eq!(draw.visibility, Visibility::Unculled);
-                    let buffer = self.ledger.own(
-                        self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("test oracle identity IDs"),
-                            size: draw.instances.len() as u64 * 4,
-                            usage: wgpu::BufferUsages::VERTEX,
-                            mapped_at_creation: true,
-                        }),
-                        ResourceKind::Buffer,
-                    );
-                    {
-                        let mut bytes = buffer.get_mapped_range_mut(..).unwrap();
-                        for slot in 0..draw.instances.len() {
-                            bytes
-                                .slice(slot * 4..slot * 4 + 4)
-                                .copy_from_slice(&(slot as u32).to_ne_bytes());
-                        }
-                    }
-                    buffer.unmap();
-                    buffer
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
@@ -1513,17 +1595,8 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &*self.bind, &[]);
-            #[cfg(test)]
-            let mut unculled_identity_buffers = unculled_identity_buffers.iter();
-            for draw in draws.iter() {
-                let count = draw.instances.state.ids.len() as u32;
-                #[cfg(test)]
-                let count = if self.reference_draws {
-                    draw.instances.len() as u32
-                } else {
-                    count
-                };
-                if count == 0 {
+            for draw in draws {
+                if draw.slots.is_empty() {
                     continue;
                 }
                 pass.set_bind_group(1, &*draw.instances.bind, &[]);
@@ -1535,19 +1608,14 @@ impl Renderer {
                         .bind,
                     &[],
                 );
-                pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
+                #[cfg(test)]
+                let ids = draw.reference_ids.unwrap_or(&draw.instances.id_buffer);
+                #[cfg(not(test))]
+                let ids = &draw.instances.id_buffer;
+                pass.set_vertex_buffer(1, ids.slice(..));
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                 pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-                #[cfg(test)]
-                if self.reference_draws {
-                    pass.set_vertex_buffer(1, unculled_identity_buffers.next().unwrap().slice(..));
-                    for slot in 0..draw.instances.len() as u32 {
-                        pass.draw_indexed(0..draw.mesh.index_count, 0, slot..slot + 1);
-                    }
-                    scene.draws += u64::from(count) - 1;
-                    continue;
-                }
-                pass.draw_indexed(0..draw.mesh.index_count, 0, 0..count);
+                pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
         let mapped = if timed {
@@ -1603,13 +1671,9 @@ impl Renderer {
             frame,
             revision: self.revision,
             cpu: CpuFrame {
-                preparation,
-                visibility,
-                packing,
-                upload,
                 encode,
                 submit,
-                poll,
+                ..cpu
             },
             uploads,
             timed,
@@ -1617,7 +1681,7 @@ impl Renderer {
         }))
     }
 
-    fn collect(&mut self) -> Result<Duration, Error> {
+    pub(crate) fn collect(&mut self) -> Result<Duration, Error> {
         self.check_fault()?;
         let start = Instant::now();
         self.device
@@ -1634,6 +1698,8 @@ impl Renderer {
                 continue;
             }
             let flight = slot.flight.take().unwrap();
+            // Completion of N proves completion of every earlier queue submission.
+            self.completed_submission = self.completed_submission.max(flight.submission);
             let mut gpu = None;
             if let Some(mapped) = flight.mapped {
                 match mapped.get().unwrap() {
@@ -1753,3 +1819,7 @@ impl Renderer {
         }
     }
 }
+
+#[path = "virtual_gpu.rs"]
+mod virtual_gpu;
+pub use virtual_gpu::Capture;

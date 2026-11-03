@@ -1209,3 +1209,6 @@ fn assert_adjacent_slot_write(
 
 #[path = "material_tests.rs"]
 mod materials;
+
+#[path = "virtual_gpu_tests.rs"]
+mod virtual_pages;

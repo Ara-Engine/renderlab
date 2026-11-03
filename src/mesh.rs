@@ -182,7 +182,17 @@ impl Camera {
         }
         Ok(camera)
     }
-    pub(crate) fn matrix(self, width: u32, height: u32) -> Mat4 {
+    /// Exact right-handed view used by rasterization; forward is -Z.
+    pub fn view(self) -> Mat4 {
+        self.view
+    }
+    pub fn fov_y(self) -> f32 {
+        self.fov_y
+    }
+    pub fn near(self) -> f32 {
+        self.near
+    }
+    pub fn matrix(self, width: u32, height: u32) -> Mat4 {
         Mat4::perspective_rh(
             self.fov_y,
             width as f32 / height as f32,
