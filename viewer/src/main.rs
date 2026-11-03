@@ -32,6 +32,23 @@ use winit::{
 };
 
 const TITLE: &str = "Renderlab | arrows orbit | WASD move | R reset | Space motion | C cull | N near | 1-4 views | Esc exit";
+const RETRY_INTERVAL: Duration = Duration::from_millis(8);
+
+struct PendingResize {
+    size: winit::dpi::PhysicalSize<u32>,
+    requested: Instant,
+    deferrals: u64,
+}
+impl PendingResize {
+    fn new(size: winit::dpi::PhysicalSize<u32>) -> Self {
+        Self {
+            size,
+            requested: Instant::now(),
+            deferrals: 0,
+        }
+    }
+}
+
 struct Options {
     policy: policy::Policy,
     shader: PathBuf,
@@ -234,7 +251,8 @@ struct View {
     shader_check: Instant,
     markers: VecDeque<Marker>,
     last: Instant,
-    pending_size: Option<winit::dpi::PhysicalSize<u32>>,
+    pending_size: Option<PendingResize>,
+    retry_redraw_at: Instant,
     size: winit::dpi::PhysicalSize<u32>,
     configured: bool,
     occluded: bool,
@@ -411,7 +429,8 @@ impl View {
                 completed: false,
             }]),
             last: Instant::now(),
-            pending_size: Some(size),
+            pending_size: Some(PendingResize::new(size)),
+            retry_redraw_at: Instant::now(),
             size,
             configured: false,
             occluded: false,
@@ -458,22 +477,25 @@ impl View {
             }
             return Ok(false);
         }
-        if let Some(asset) = &mut self.asset {
-            asset.advance(&mut self.renderer)?;
-        }
-        if self.asset.is_none() && self.virtual_asset.is_none() && self.meshes.len() < 2 {
-            fixture::upload_next(&mut self.renderer, &mut self.meshes)?;
-        }
-        if self.asset.is_none()
-            && self.virtual_asset.is_none()
-            && self.meshes.len() == 2
-            && self.instances.len() < 2
-        {
-            fixture::upload_instances_next(
-                &mut self.renderer,
-                &mut self.instances,
-                options.instances,
-            )?;
+        // Do not refill the queue while a surface reconfiguration is draining it.
+        if self.pending_size.is_none() {
+            if let Some(asset) = &mut self.asset {
+                asset.advance(&mut self.renderer)?;
+            }
+            if self.asset.is_none() && self.virtual_asset.is_none() && self.meshes.len() < 2 {
+                fixture::upload_next(&mut self.renderer, &mut self.meshes)?;
+            }
+            if self.asset.is_none()
+                && self.virtual_asset.is_none()
+                && self.meshes.len() == 2
+                && self.instances.len() < 2
+            {
+                fixture::upload_instances_next(
+                    &mut self.renderer,
+                    &mut self.instances,
+                    options.instances,
+                )?;
+            }
         }
         if self.shader_check.elapsed() >= Duration::from_millis(50) {
             self.shader_check = Instant::now();
@@ -548,6 +570,41 @@ impl View {
             || self.size.width == 0
             || self.size.height == 0
             || self.occluded
+        {
+            return Ok(());
+        }
+        let mut configure_ms = 0.0;
+        if let Some(pending) = &mut self.pending_size {
+            self.pending_frame = None;
+            let flights = self.renderer.stats().flights;
+            if flights != 0 {
+                if pending.deferrals == 0 {
+                    eprintln!(
+                        "configure_deferred width={} height={} flights={flights}",
+                        pending.size.width, pending.size.height
+                    );
+                }
+                pending.deferrals += 1;
+                return Ok(());
+            }
+            let pending = self.pending_size.take().unwrap();
+            self.config.width = pending.size.width;
+            self.config.height = pending.size.height;
+            let wait_ms = pending.requested.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "configure_begin width={} height={} flights=0 pending_frame=false wait_ms={wait_ms:.3} deferrals={}",
+                pending.size.width, pending.size.height, pending.deferrals
+            );
+            let clock = Instant::now();
+            self.surface.configure(self.renderer.device(), &self.config);
+            configure_ms = clock.elapsed().as_secs_f64() * 1000.0;
+            self.configured = true;
+            eprintln!(
+                "configure_ms={configure_ms:.3} width={} height={}",
+                pending.size.width, pending.size.height
+            );
+        }
+        if !self.configured
             || (self.virtual_asset.is_none()
                 && self
                     .asset
@@ -647,24 +704,6 @@ impl View {
                 }
             }
         }
-        let mut configure_ms = 0.0;
-        if let Some(size) = self.pending_size.take() {
-            self.pending_frame = None;
-            self.config.width = size.width;
-            self.config.height = size.height;
-            let clock = Instant::now();
-            self.surface.configure(self.renderer.device(), &self.config);
-            configure_ms = clock.elapsed().as_secs_f64() * 1000.0;
-            self.configured = true;
-            eprintln!(
-                "configure_ms={configure_ms:.3} width={} height={}",
-                size.width, size.height
-            );
-            self.renderer.poll()?;
-        }
-        if !self.configured {
-            return Ok(());
-        }
         let acquire = Instant::now();
         let result = self.pending_frame.take().map_or_else(
             || self.surface.get_current_texture(),
@@ -675,7 +714,7 @@ impl View {
             wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.pending_size = Some(self.size);
+                self.pending_size = Some(PendingResize::new(self.size));
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -871,7 +910,7 @@ impl View {
             self.pending_frame = Some(frame);
         }
         if suboptimal {
-            self.pending_size = Some(self.size);
+            self.pending_size = Some(PendingResize::new(self.size));
         }
         Ok(())
     }
@@ -906,7 +945,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => events.exit(),
             WindowEvent::Resized(size) => {
                 view.size = size;
-                view.pending_size = Some(size);
+                view.pending_size = Some(PendingResize::new(size));
                 eprintln!("resize_requested={}x{}", size.width, size.height);
             }
             WindowEvent::Occluded(value) => {
@@ -946,8 +985,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let before = view.presented;
                 if let Err(error) = view.redraw(&self.options) {
                     self.stop(events, error);
+                } else if view.presented == before {
+                    view.retry_redraw_at = Instant::now() + RETRY_INTERVAL;
+                } else {
+                    view.retry_redraw_at = Instant::now();
                 }
             }
             _ => {}
@@ -957,9 +1001,7 @@ impl ApplicationHandler for App {
         if events.exiting() {
             return;
         }
-        events.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(8),
-        ));
+        events.set_control_flow(ControlFlow::WaitUntil(Instant::now() + RETRY_INTERVAL));
         if let Some(view) = &mut self.view {
             if self
                 .options
@@ -979,7 +1021,11 @@ impl ApplicationHandler for App {
                 }
                 Ok(false) => {
                     if view.finish_at.is_none() {
-                        view.window.request_redraw();
+                        if Instant::now() >= view.retry_redraw_at {
+                            view.window.request_redraw();
+                        } else {
+                            events.set_control_flow(ControlFlow::WaitUntil(view.retry_redraw_at));
+                        }
                     }
                 }
                 Err(error) => self.stop(events, error),
