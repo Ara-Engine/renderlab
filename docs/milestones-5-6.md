@@ -38,4 +38,13 @@ Streaming baseline is the final 338-pose quarry path with 4K textures, 4x MSAA, 
 
 Resize begins with diagnosis. The historical 4.93 s configure stall is unexplained; recent draining and recovery checks pass. The [verified opt-in probes](resize-followup.md) now separate application work, surface configuration and acquisition/presentation, with a bounded native control/probe pair and inspected recovery images. No recurrence occurred, so internal driver/desktop attribution remains inconclusive. No speculative synchronization fix was made. The first streaming hillclimb likewise retained no change: correctness passed, but gameplay-contended paired timings did not establish a reliable gain. Its candidate and evidence are preserved locally; the streaming target remains unmet.
 
+The next [streaming attempt](streaming-owner-witness.md) is retained: an unavailable-owner proof avoids publication transactions that cannot succeed. Frozen selector calls improve with identical outputs; the short live screen remains above the 8 ms target. It is not a new measurement of the full canonical path. Root integrated it with M5-A and the [CPU shadow planner](m6-shadow-plan.md); 14 selector, 18 runtime and 13 shadow-plan CPU tests, regular/virtual lit image equality with active validation, affected Clippy and formatting pass. Evidence is `measurements/m5-m6/integration-457f291/`. The planner does not yet render shadows.
+
+Next-unit throughput checkpoint:
+
+- Blocking first steps: M5-A is pushed and accepted; the selector/planner integration checks pass. Existing how/design/Opus decisions govern the next units; no new broad design round.
+- Independent workstreams: one main-checkout owner integrates GPU shadows; an isolated worker prepares tangent and normal-map cooking; the existing UE worker owns only calibration scripts and its private project.
+- Shared mutable state: shadow renderer/WGSL/layout changes have one owner. Normal-map preparation stays in its own checkout and does not migrate the runtime layout yet. Only the shadow owner may use GPU/window work and engine builds in this phase; cooker CPU checks use a separate cached target.
+- Smallest safe decomposition: finish one shadowed fixture and quarry with explicit coverage/quality limits, and separately return tested tangent preparation. Root owns integration, comparisons, closing documentation and pushes. Shadow-demand refinement and the normal-map runtime adapter follow these concrete seams.
+
 The decision trail is `milestones-5-6-decisions.tsv`; local per-attempt hillclimb logs stay in each worktree's ignored evidence directory. Hardware baseline remains this Windows PC with RTX 4070 SUPER/NVIDIA 617.14. Recheck foreground-game state and contention before interactive or GPU work.
