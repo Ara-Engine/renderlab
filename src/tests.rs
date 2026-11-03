@@ -1223,3 +1223,6 @@ mod lighting_tests;
 
 #[path = "shadow_tests.rs"]
 mod shadow_tests;
+
+#[path = "normal_map_tests.rs"]
+mod normal_maps;

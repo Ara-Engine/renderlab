@@ -105,9 +105,9 @@ pub fn prepare() -> Result<NormalFixture> {
     });
     let indices = [0, 1, 2, 0, 2, 3];
     let authored_vertices: Vec<_> = indices.iter().map(|&i| vertices[i as usize]).collect();
-    let authored_tangents = [[1.0, 0.0, 0.0, 1.0]; 3]
+    let authored_tangents = [[1.0, 0.0, 0.0, -1.0]; 3]
         .into_iter()
-        .chain([[-1.0, 0.0, 0.0, -1.0]; 3])
+        .chain([[-1.0, 0.0, 0.0, 1.0]; 3])
         .collect::<Vec<_>>();
     let authored = tangent::prepare(
         &authored_vertices,

@@ -61,6 +61,8 @@ pub struct MaterialDescriptor<'a> {
     pub roughness: f32,
     pub base_color_texture: Option<TextureBinding<'a>>,
     pub metallic_roughness_texture: Option<TextureBinding<'a>>,
+    pub normal_texture: Option<TextureBinding<'a>>,
+    pub normal_scale: f32,
     pub double_sided: bool,
 }
 impl Default for MaterialDescriptor<'_> {
@@ -71,6 +73,8 @@ impl Default for MaterialDescriptor<'_> {
             roughness: 1.0,
             base_color_texture: None,
             metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.,
             double_sided: false,
         }
     }
@@ -78,11 +82,12 @@ impl Default for MaterialDescriptor<'_> {
 /// Caller-owned material retains its textures, including when the upload handles are dropped.
 pub struct Material {
     pub(crate) renderer: Arc<()>,
+    pub(crate) normal_mapped: bool,
     pub(crate) double_sided: bool,
     pub(crate) bind: Owned<wgpu::BindGroup>,
     pub(crate) _uniform: Owned<wgpu::Buffer>,
-    pub(crate) _samplers: [Owned<wgpu::Sampler>; 2],
-    pub(crate) _textures: [Texture; 2],
+    pub(crate) _samplers: [Owned<wgpu::Sampler>; 3],
+    pub(crate) _textures: [Texture; 3],
     pub(crate) _allocation: Allocation,
 }
 impl MaterialDescriptor<'_> {
@@ -97,7 +102,11 @@ impl MaterialDescriptor<'_> {
                 "material factors must be finite in [0,1]",
             ));
         }
+        if !self.normal_scale.is_finite() {
+            return Err(Error::InvalidInput("normal scale must be finite"));
+        }
         for (binding, role) in [
+            (self.normal_texture, TextureRole::NormalLinear),
             (self.base_color_texture, TextureRole::BaseColorSrgb),
             (
                 self.metallic_roughness_texture,
@@ -115,8 +124,8 @@ impl MaterialDescriptor<'_> {
         }
         Ok(())
     }
-    pub(crate) fn bytes(&self) -> [u8; 32] {
-        let mut bytes = [0; 32];
+    pub(crate) fn bytes(&self) -> [u8; 48] {
+        let mut bytes = [0; 48];
         for (dst, value) in bytes.chunks_exact_mut(4).zip(
             self.base_color
                 .into_iter()
@@ -125,6 +134,8 @@ impl MaterialDescriptor<'_> {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
         bytes[24..28].copy_from_slice(&u32::from(self.double_sided).to_ne_bytes());
+        bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
+        bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
         bytes
     }
 }

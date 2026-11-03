@@ -103,6 +103,7 @@ pub struct VirtualMesh {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
+    pub tangents: Option<crate::TangentBasis>,
     pub vertices: u32,
     pub indices: u32,
     pub payload_bytes: u32,
@@ -113,7 +114,7 @@ pub struct Package {
     pub meshes: Vec<VirtualMesh>,
     pub pages: Vec<Page>,
     pub placements: Vec<Placement>,
-    /// Only materials and textures; meshes/placements must be empty. Encoded using unchanged RLA1.
+    /// Only materials and textures; meshes/placements must be empty. Encoded with the corresponding RLA schema.
     pub resources: Asset,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,6 +243,13 @@ impl VirtualMesh {
 }
 
 impl Package {
+    pub fn version(&self) -> u32 {
+        if self.resources.extended() || self.pages.iter().any(|p| p.tangents.is_some()) {
+            2
+        } else {
+            VERSION
+        }
+    }
     pub fn validate(&self, limits: VirtualLimits) -> Result<PackageCounts> {
         if !self.resources.meshes.is_empty() || !self.resources.placements.is_empty() {
             return Err(Error("virtual resources contain geometry"));
@@ -317,6 +325,13 @@ impl Package {
             mesh.validate(self.pages.len(), self.resources.materials.len(), limits)?;
             for c in &mesh.clusters {
                 let page = &self.pages[c.page.index()];
+                if self.resources.materials[c.material as usize]
+                    .normal_texture
+                    .is_some()
+                    && page.tangents.is_none()
+                {
+                    return Err(Error("normal-mapped virtual cluster requires tangent page"));
+                }
                 let r = c.indices.range(page.indices as usize)?;
                 intervals.push((c.page.0, r.start as u32, r.end as u32));
             }
@@ -324,9 +339,12 @@ impl Package {
         intervals.sort_unstable();
         let mut cursor = 0;
         for (i, p) in self.pages.iter().enumerate() {
-            let length = product(p.vertices as usize, 48)?
-                .checked_add(product(p.indices as usize, 4)?)
-                .ok_or(Error("page size overflow"))?;
+            let length = product(
+                p.vertices as usize,
+                if p.tangents.is_some() { 64 } else { 48 },
+            )?
+            .checked_add(product(p.indices as usize, 4)?)
+            .ok_or(Error("page size overflow"))?;
             if p.vertices == 0
                 || p.indices == 0
                 || !p.indices.is_multiple_of(3)
@@ -388,6 +406,7 @@ impl Package {
 
 #[derive(Clone, Debug)]
 pub struct PageGeometry {
+    pub tangents: Option<crate::TangentStream>,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }

@@ -189,6 +189,7 @@ fn gpu_material_values_sampler_normals_and_sidedness() {
             sampler: Sampler::default(),
         }),
         double_sided: false,
+        ..Default::default()
     };
     let m = material(&mut r, &data);
     let m2 = material(&mut r, &data);
@@ -197,7 +198,7 @@ fn gpu_material_values_sampler_normals_and_sidedness() {
         before.ownership.texture_creations,
         r.stats().ownership.texture_creations
     );
-    assert_eq!(r.stats().uploads.materials - before.uploads.materials, 64);
+    assert_eq!(r.stats().uploads.materials - before.uploads.materials, 96);
     drop(m2);
     drop(base);
     drop(mr);
@@ -586,6 +587,7 @@ fn prepared_viewer_bounds_batch_expansion_before_upload() {
         meshes: vec![asset::Mesh {
             primitives: vec![
                 asset::Primitive {
+                    tangents: None,
                     vertices: swatch_vertices([0.0; 2]).to_vec(),
                     indices: vec![0, 1, 2],
                     material: 0

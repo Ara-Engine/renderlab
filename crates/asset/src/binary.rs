@@ -1,6 +1,7 @@
 use crate::*;
 
 pub const SCHEMA_VERSION: u32 = 1;
+pub const NORMAL_SCHEMA_VERSION: u32 = 2;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -17,17 +18,30 @@ impl Writer {
             self.u32(f.to_bits());
         }
     }
-    fn mesh(&mut self, mesh: &Mesh) -> Result<()> {
+    fn mesh(&mut self, mesh: &Mesh, version: u32) -> Result<()> {
         self.count(mesh.primitives.len())?;
         for p in &mesh.primitives {
             self.u32(p.material);
             self.count(p.vertices.len())?;
             self.count(p.indices.len())?;
+            if version == 2 {
+                self.u32(match p.tangents.as_ref().map(|t| t.basis) {
+                    None => 0,
+                    Some(TangentBasis::Authored) => 1,
+                    Some(TangentBasis::MikkTSpace) => 2,
+                });
+                self.count(p.tangents.as_ref().map_or(0, |t| t.values.len()))?;
+            }
             for v in &p.vertices {
                 self.floats(&v.position);
                 self.floats(&v.normal);
                 self.floats(&v.uv);
                 self.floats(&v.color);
+            }
+            if let Some(t) = &p.tangents {
+                for value in &t.values {
+                    self.floats(value);
+                }
             }
             for &i in &p.indices {
                 self.u32(i);
@@ -67,7 +81,12 @@ impl Writer {
 pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
     asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
-    w.u32(SCHEMA_VERSION);
+    let version = if asset.extended() {
+        NORMAL_SCHEMA_VERSION
+    } else {
+        SCHEMA_VERSION
+    };
+    w.u32(version);
     for n in [
         asset.meshes.len(),
         asset.placements.len(),
@@ -77,7 +96,7 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
         w.count(n)?;
     }
     for mesh in &asset.meshes {
-        w.mesh(mesh)?;
+        w.mesh(mesh, version)?;
     }
     for p in &asset.placements {
         w.u32(p.mesh);
@@ -91,11 +110,16 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
         w.u32(u32::from(m.double_sided));
         w.reference(m.base_color_texture.map(|t| (t.texture, t.sampler)));
         w.reference(m.metallic_roughness_texture.map(|t| (t.texture, t.sampler)));
+        if version == 2 {
+            w.reference(m.normal_texture.map(|t| (t.texture, t.sampler)));
+            w.floats(&[m.normal_texture.map_or(1., |t| t.scale)]);
+        }
     }
     for t in &asset.textures {
         w.u32(match t.role {
             TextureRole::BaseColorSrgb => 0,
             TextureRole::MetallicRoughnessLinear => 1,
+            TextureRole::NormalLinear => 2,
         });
         w.count(t.mips.len())?;
         for m in &t.mips {
@@ -113,8 +137,13 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
 pub fn encode_mesh(mesh: &Mesh, limits: Limits) -> Result<Vec<u8>> {
     validate_mesh(mesh, &mut Counts::default(), limits)?;
     let mut w = Writer(b"RLG\0".to_vec());
-    w.u32(SCHEMA_VERSION);
-    w.mesh(mesh)?;
+    let version = if mesh.primitives.iter().any(|p| p.tangents.is_some()) {
+        2
+    } else {
+        1
+    };
+    w.u32(version);
+    w.mesh(mesh, version)?;
     cap(w.0.len(), limits.max_file_bytes, "geometry file byte limit")?;
     Ok(w.0)
 }
@@ -219,7 +248,11 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         decoded: 0,
         limits,
     };
-    if r.take(4)? != MAGIC || r.u32()? != SCHEMA_VERSION {
+    if r.take(4)? != MAGIC {
+        return Err(Error("unknown prepared schema"));
+    }
+    let version = r.u32()?;
+    if !matches!(version, 1 | 2) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -247,17 +280,40 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             let material = r.u32()?;
             let nv = r.count(limits.max_vertices.saturating_sub(vertices), 48, 48)?;
             let ni = r.count(limits.max_indices.saturating_sub(indices), 4, 4)?;
+            let tangents = if version == 2 {
+                let basis = match r.u32()? {
+                    0 => None,
+                    1 => Some(TangentBasis::Authored),
+                    2 => Some(TangentBasis::MikkTSpace),
+                    _ => return Err(Error("invalid tangent basis")),
+                };
+                let count = r.count(nv, 16, 16)?;
+                if count != basis.map_or(0, |_| nv) {
+                    return Err(Error("invalid tangent count"));
+                }
+                basis
+            } else {
+                None
+            };
             add(&mut vertices, nv)?;
             add(&mut indices, ni)?;
             cap(
                 product(nv, 48)?
                     .checked_add(product(ni, 4)?)
+                    .and_then(|n| {
+                        n.checked_add(if tangents.is_some() {
+                            product(nv, 16).ok()?
+                        } else {
+                            0
+                        })
+                    })
                     .ok_or(Error("size overflow"))?,
                 r.data.len(),
                 "truncated primitive",
             )?;
             let mut p = Primitive {
                 vertices: Vec::with_capacity(nv),
+                tangents: None,
                 indices: Vec::with_capacity(ni),
                 material,
             };
@@ -268,6 +324,13 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
                     uv: r.floats()?,
                     color: r.floats()?,
                 });
+            }
+            if let Some(basis) = tangents {
+                let mut values = Vec::with_capacity(nv);
+                for _ in 0..nv {
+                    values.push(r.floats()?);
+                }
+                p.tangents = Some(TangentStream { basis, values });
             }
             for _ in 0..ni {
                 let i = r.u32()?;
@@ -297,7 +360,22 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let metallic_roughness_texture = r
             .reference()?
             .map(|(texture, sampler)| MetallicRoughnessTexture { texture, sampler });
+        let normal_texture = if version == 2 {
+            let reference = r.reference()?;
+            let [scale] = r.floats()?;
+            if reference.is_none() && scale != 1. {
+                return Err(Error("noncanonical absent normal scale"));
+            }
+            reference.map(|(texture, sampler)| NormalTexture {
+                texture,
+                sampler,
+                scale,
+            })
+        } else {
+            None
+        };
         a.materials.push(Material {
+            normal_texture,
             base_color,
             metallic,
             roughness,
@@ -310,6 +388,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let role = match r.u32()? {
             0 => TextureRole::BaseColorSrgb,
             1 => TextureRole::MetallicRoughnessLinear,
+            2 if version == 2 => TextureRole::NormalLinear,
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;

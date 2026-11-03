@@ -212,6 +212,8 @@ impl Prepared {
                         metallic: data.metallic,
                         roughness: data.roughness,
                         double_sided: data.double_sided,
+                        normal_scale: data.normal_texture.map_or(1., |t| t.scale),
+                        normal_texture: data.normal_texture.map(|t| binding(t.texture, t.sampler)),
                         base_color_texture: data
                             .base_color_texture
                             .map(|t| binding(t.texture, t.sampler)),
@@ -230,10 +232,13 @@ impl Prepared {
             UploadProgress::Geometry(i) => {
                 if let Some(&(mesh, primitive)) = self.primitives.get(i) {
                     let p = &self.source.meshes[mesh].primitives[primitive];
-                    if let Some(m) = r.try_upload_mesh(&MeshData {
-                        vertices: &p.vertices,
-                        indices: &p.indices,
-                    })? {
+                    if let Some(m) = r.try_upload_mesh_with_tangents(
+                        &MeshData {
+                            vertices: &p.vertices,
+                            indices: &p.indices,
+                        },
+                        p.tangents.as_ref(),
+                    )? {
                         self.meshes.push(m);
                         self.progress = UploadProgress::Geometry(i + 1);
                     }

@@ -89,12 +89,43 @@ fn mikk_shared_quad_stays_indexed_and_matches_analytic_frame() {
     assert_eq!(mesh.vertices().len(), 4);
     correspondence(&mesh, &vertices, &indices);
     for t in mesh.tangents() {
-        assert_eq!(*t, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(*t, [1.0, 0.0, 0.0, -1.0]);
     }
     assert_eq!(
         mesh,
         tangent::prepare(&vertices, &indices, TangentSource::GenerateMikkTSpace).unwrap()
     );
+}
+
+#[test]
+fn generated_frames_match_owned_blender_gltf_plane() {
+    // Owned default plane exported by Khronos glTF Blender I/O 5.1.18 with tangents.
+    let vertices = [
+        ([-1.0, 0.0, 1.0], [0.0, 1.0]),
+        ([1.0, 0.0, 1.0], [1.0, 1.0]),
+        ([-1.0, 0.0, -1.0], [0.0, 0.0]),
+        ([1.0, 0.0, -1.0], [1.0, 0.0]),
+    ]
+    .map(|(position, uv)| Vertex {
+        normal: [0.0, 1.0, 0.0],
+        ..vertex(position, uv)
+    });
+    let indices = [0, 1, 3, 0, 3, 2];
+    let exported = [[1.0, 0.0, 0.0, 1.0]; 4];
+    let authored =
+        tangent::prepare(&vertices, &indices, TangentSource::Authored(&exported)).unwrap();
+    let generated =
+        tangent::prepare(&vertices, &indices, TangentSource::GenerateMikkTSpace).unwrap();
+    for (&a, &g) in authored.indices().iter().zip(generated.indices()) {
+        assert_eq!(
+            authored.vertices()[a as usize],
+            generated.vertices()[g as usize]
+        );
+        assert_eq!(
+            authored.tangents()[a as usize],
+            generated.tangents()[g as usize]
+        );
+    }
 }
 
 #[test]
@@ -107,7 +138,7 @@ fn mirrored_uvs_split_shared_vertices_without_averaging_opposite_signs() {
     correspondence(&mesh, &vertices, &indices);
     assert_ne!(mesh.indices()[0], mesh.indices()[3]);
     assert_ne!(mesh.indices()[2], mesh.indices()[4]);
-    for (face, expected) in [[1.0, 0.0, 0.0, 1.0], [-1.0, 0.0, 0.0, -1.0]]
+    for (face, expected) in [[1.0, 0.0, 0.0, -1.0], [-1.0, 0.0, 0.0, 1.0]]
         .iter()
         .enumerate()
     {

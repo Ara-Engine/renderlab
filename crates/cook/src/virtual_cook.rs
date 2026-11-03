@@ -3,6 +3,7 @@ use crate::{Error, Result, cache::hash, ensure};
 use renderlab_asset::{Asset, Vertex, virtual_mesh::*};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const NORMAL_ALGORITHM: &[u8] = b"renderlab-virtual/2/meshopt-0.7.0/meshoptimizer-1.3/13-attributes/locked-tangent-seams/subset-original-frames/pages64k/rla2/mikktspace-0.3.0";
 pub const ALGORITHM: &[u8]=b"renderlab-virtual/1/meshopt-0.7.0/meshoptimizer-1.3/regular-attributes/domain1e6/locked-subset-seams/pages64k/rla1";
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
@@ -59,13 +60,18 @@ fn position_key(v: &Vertex) -> [u32; 3] {
 }
 
 struct PageBuilder {
+    tangents: Option<renderlab_asset::TangentStream>,
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     remap: BTreeMap<(usize, u32), u32>,
 }
 impl PageBuilder {
-    fn new() -> Self {
+    fn new(basis: Option<renderlab_asset::TangentBasis>) -> Self {
         Self {
+            tangents: basis.map(|basis| renderlab_asset::TangentStream {
+                basis,
+                values: vec![],
+            }),
             vertices: vec![],
             indices: vec![],
             remap: BTreeMap::new(),
@@ -77,7 +83,8 @@ impl PageBuilder {
             .iter()
             .filter(|&&v| !self.remap.contains_key(&(c.primitive, v)))
             .collect();
-        (self.vertices.len() + missing.len()) * 48 + (self.indices.len() + c.indices.len()) * 4
+        (self.vertices.len() + missing.len()) * (if self.tangents.is_some() { 64 } else { 48 })
+            + (self.indices.len() + c.indices.len()) * 4
     }
     fn append(&mut self, c: &RawCluster, source: &renderlab_asset::Mesh) -> Span {
         let span = Span {
@@ -89,6 +96,15 @@ impl PageBuilder {
             let local = *self.remap.entry((c.primitive, i)).or_insert_with(|| {
                 self.vertices
                     .push(source.primitives[c.primitive].vertices[i as usize]);
+                if let Some(t) = &mut self.tangents {
+                    t.values.push(
+                        source.primitives[c.primitive]
+                            .tangents
+                            .as_ref()
+                            .unwrap()
+                            .values[i as usize],
+                    );
+                }
                 next
             });
             self.indices.push(local);
@@ -108,6 +124,13 @@ impl PageBuilder {
                 bytes.extend(f.to_bits().to_le_bytes());
             }
         }
+        if let Some(t) = &self.tangents {
+            for v in &t.values {
+                for f in v {
+                    bytes.extend(f.to_le_bytes());
+                }
+            }
+        }
         for i in &self.indices {
             bytes.extend(i.to_le_bytes());
         }
@@ -115,6 +138,7 @@ impl PageBuilder {
         bytes.resize(PAGE_BYTES, 0);
         (
             Page {
+                tangents: self.tangents.as_ref().map(|t| t.basis),
                 vertices: self.vertices.len() as u32,
                 indices: self.indices.len() as u32,
                 payload_bytes: length as u32,
@@ -179,23 +203,48 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
             statistics.source_vertices += p.vertices.len();
             statistics.source_indices += p.indices.len();
             let positions: Vec<_> = p.vertices.iter().map(|v| v.position).collect();
-            let attributes: Vec<_> = p
+            let attribute_count = if p.tangents.is_some() { 13 } else { 9 };
+            let attribute_scalars = p
                 .vertices
-                .iter()
-                .flat_map(|v| {
-                    [
-                        v.normal[0],
-                        v.normal[1],
-                        v.normal[2],
-                        v.uv[0],
-                        v.uv[1],
-                        v.color[0],
-                        v.color[1],
-                        v.color[2],
-                        v.color[3],
-                    ]
-                })
-                .collect();
+                .len()
+                .checked_mul(attribute_count)
+                .ok_or_else(|| Error("virtual attribute count overflow".into()))?;
+            let preparation_bytes = attribute_scalars
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(p.vertices.len().checked_mul(12)?))
+                .ok_or_else(|| Error("virtual attribute byte overflow".into()))?;
+            ensure(
+                preparation_bytes <= limits.prepared.max_decoded_bytes,
+                "virtual attribute preparation byte limit",
+            )?;
+            let mut attributes = Vec::with_capacity(attribute_scalars);
+            for (i, v) in p.vertices.iter().enumerate() {
+                attributes.extend(v.normal.into_iter().chain(v.uv).chain(v.color));
+                if let Some(t) = &p.tangents {
+                    attributes.extend(t.values[i]);
+                }
+            }
+            // Subset simplification retains source frames. Lock coincident frame seams explicitly.
+            let mut frames = BTreeMap::new();
+            let mut tangent_seams = BTreeSet::new();
+            if let Some(t) = &p.tangents {
+                for (v, t) in p.vertices.iter().zip(&t.values) {
+                    let key = position_key(v);
+                    let frame = v
+                        .normal
+                        .into_iter()
+                        .chain(v.uv)
+                        .chain(*t)
+                        .map(|x| if x == 0. { 0 } else { x.to_bits() })
+                        .collect::<Vec<_>>();
+                    if frames
+                        .insert(key, frame.clone())
+                        .is_some_and(|old| old != frame)
+                    {
+                        tangent_seams.insert(key);
+                    }
+                }
+            }
             statistics.peak_single_primitive_attribute_bytes = statistics
                 .peak_single_primitive_attribute_bytes
                 .max(attributes.len() * 4 + positions.len() * 12);
@@ -203,7 +252,8 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
                 .vertices
                 .iter()
                 .map(|v| {
-                    if shared.contains(&position_key(v)) {
+                    if shared.contains(&position_key(v)) || tangent_seams.contains(&position_key(v))
+                    {
                         statistics.source_boundary_vertices_locked += 1;
                         meshopt::SimplifyVertex::Lock
                     } else {
@@ -214,15 +264,15 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
             let adapter =
                 meshopt::VertexDataAdapter::new(meshopt::typed_to_bytes(&positions), 12, 0)
                     .map_err(|e| Error(e.to_string()))?;
-            let weights = [1., 1., 1., 1., 1., 1., 1., 1., 1.];
+            let weights = vec![1.; attribute_count];
             let mesh = meshopt::ClodMesh {
                 indices: &p.indices,
                 vertices: &adapter,
                 vertex_attributes: &attributes,
-                vertex_attributes_stride: 36,
+                vertex_attributes_stride: attribute_count * 4,
                 vertex_lock: Some(&locks),
                 attribute_weights: &weights,
-                attribute_protect_mask: 0x1ff,
+                attribute_protect_mask: (1 << attribute_count) - 1,
             };
             let mut config = meshopt::clod_default_config(settings.max_triangles as usize);
             config.simplify_permissive = false;
@@ -309,10 +359,17 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
                 i,
             )
         });
-        let mut builder = PageBuilder::new();
+        let mut builder = PageBuilder::new(None);
         for i in order {
             let c = &raw[i];
-            if builder.size_after(c) > PAGE_BYTES {
+            let basis = source.primitives[c.primitive]
+                .tangents
+                .as_ref()
+                .map(|t| t.basis);
+            if !builder.indices.is_empty()
+                && (builder.size_after(c) > PAGE_BYTES
+                    || basis != builder.tangents.as_ref().map(|t| t.basis))
+            {
                 ensure(
                     !builder.indices.is_empty(),
                     "single cluster exceeds page capacity",
@@ -320,8 +377,15 @@ pub fn prepare(asset: &Asset, settings: Settings, limits: VirtualLimits) -> Resu
                 let (page, bytes) = builder.finish();
                 package.pages.push(page);
                 page_bytes.push(bytes);
-                builder = PageBuilder::new();
+                builder = PageBuilder::new(basis);
             }
+            if builder.indices.is_empty() {
+                builder = PageBuilder::new(basis);
+            }
+            ensure(
+                builder.size_after(c) <= PAGE_BYTES,
+                "single tangent cluster exceeds page capacity",
+            )?;
             ensure(
                 package.pages.len() < limits.max_pages
                     && package.pages.len() < u32::MAX as usize

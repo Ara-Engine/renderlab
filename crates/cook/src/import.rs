@@ -72,6 +72,8 @@ pub enum MissingNormals {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Settings {
     pub missing_normals: MissingNormals,
+    /// Opt into the versioned tangent/normal-map recipe. Legacy defaults still reject it.
+    pub normal_maps: bool,
 }
 impl Settings {
     pub(crate) fn bytes(self) -> [u8; 1] {
@@ -351,8 +353,11 @@ impl Textures<'_> {
             info.tex_coord() == 0,
             "unsupported texture coordinate set; only UV0",
         )?;
-        let source = info.texture().source();
-        let s = sampler(info.texture().sampler());
+        self.texture(info.texture(), role)
+    }
+    fn texture(&mut self, texture: gltf::Texture<'_>, role: TextureRole) -> Result<(u32, Sampler)> {
+        let source = texture.source();
+        let s = sampler(texture.sampler());
         if let Some(&index) = self.roles.get(&(source.index(), role)) {
             return Ok((index, s));
         }
@@ -435,6 +440,18 @@ impl Textures<'_> {
                     .saturating_sub(self.prepared) as u64,
             "prepared mip byte limit",
         )?;
+        if role == TextureRole::NormalLinear {
+            // All floating-point mip vectors remain live until export, along with decoded RGBA.
+            let intermediate = mip_bytes
+                .checked_mul(3)
+                .and_then(|n| n.checked_add(rgba.checked_mul(3)?))
+                .ok_or_else(|| Error("normal mip intermediate byte overflow".into()))?;
+            ensure(
+                intermediate <= self.limits.image_decoded_bytes.saturating_sub(self.decoded) as u64,
+                "normal mip float preparation byte limit",
+            )?;
+            self.decoded += intermediate as usize;
+        }
         self.prepared += mip_bytes as usize;
         let rgba = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| Error(format!("image decode: {e}")))?
@@ -450,7 +467,11 @@ impl Textures<'_> {
     }
 }
 
-fn materials(document: &gltf::Document, textures: &mut Textures<'_>) -> Result<Vec<Material>> {
+fn materials(
+    document: &gltf::Document,
+    textures: &mut Textures<'_>,
+    settings: Settings,
+) -> Result<Vec<Material>> {
     let mut result = Vec::new();
     for m in document.materials() {
         ensure(
@@ -458,7 +479,7 @@ fn materials(document: &gltf::Document, textures: &mut Textures<'_>) -> Result<V
             "unsupported material alphaMode",
         )?;
         ensure(
-            m.normal_texture().is_none(),
+            settings.normal_maps || m.normal_texture().is_none(),
             "unsupported normalTexture/tangents",
         )?;
         ensure(
@@ -486,7 +507,28 @@ fn materials(document: &gltf::Document, textures: &mut Textures<'_>) -> Result<V
                     .map(|(texture, sampler)| MetallicRoughnessTexture { texture, sampler })
             })
             .transpose()?;
+        let normal_texture = m
+            .normal_texture()
+            .map(|info| -> Result<NormalTexture> {
+                ensure(
+                    info.tex_coord() == 0,
+                    "unsupported normal texture coordinate set; only UV0",
+                )?;
+                ensure(
+                    info.scale().is_finite(),
+                    "normal texture scale must be finite",
+                )?;
+                let (texture, sampler) =
+                    textures.texture(info.texture(), TextureRole::NormalLinear)?;
+                Ok(NormalTexture {
+                    texture,
+                    sampler,
+                    scale: info.scale(),
+                })
+            })
+            .transpose()?;
         result.push(Material {
+            normal_texture,
             base_color: p.base_color_factor(),
             metallic: p.metallic_factor(),
             roughness: p.roughness_factor(),
@@ -498,12 +540,18 @@ fn materials(document: &gltf::Document, textures: &mut Textures<'_>) -> Result<V
     Ok(result)
 }
 
-fn attribute(a: &gltf::Accessor<'_>, semantic: &Semantic, vertices: usize) -> Result<()> {
+fn attribute(
+    a: &gltf::Accessor<'_>,
+    semantic: &Semantic,
+    vertices: usize,
+    normal_maps: bool,
+) -> Result<()> {
     ensure(a.count() == vertices, "inconsistent attribute counts")?;
     let float = a.data_type() == DataType::F32 && !a.normalized();
     let normalized = matches!(a.data_type(), DataType::U8 | DataType::U16) && a.normalized();
     let valid = match semantic {
         Semantic::Positions | Semantic::Normals => a.dimensions() == Dimensions::Vec3 && float,
+        Semantic::Tangents if normal_maps => a.dimensions() == Dimensions::Vec4 && float,
         Semantic::TexCoords(0) => a.dimensions() == Dimensions::Vec2 && (float || normalized),
         Semantic::Colors(0) => {
             matches!(a.dimensions(), Dimensions::Vec3 | Dimensions::Vec4) && (float || normalized)
@@ -555,7 +603,7 @@ fn meshes(
                 "primitive vertex limit",
             )?;
             for (s, a) in p.attributes() {
-                attribute(&a, &s, count)?;
+                attribute(&a, &s, count, settings.normal_maps)?;
             }
             let index_count = p.indices().map_or(count, |a| a.count());
             ensure(index_count <= u32::MAX as usize, "index count width")?;
@@ -608,11 +656,30 @@ fn meshes(
             let textured = materials[material as usize].base_color_texture.is_some()
                 || materials[material as usize]
                     .metallic_roughness_texture
-                    .is_some();
+                    .is_some()
+                || materials[material as usize].normal_texture.is_some();
             ensure(
                 !textured || p.get(&Semantic::TexCoords(0)).is_some(),
                 "textured primitive requires UV0",
             )?;
+            let needs_frame = materials[material as usize].normal_texture.is_some()
+                || (!flat && p.get(&Semantic::Tangents).is_some());
+            ensure(
+                !needs_frame || p.get(&Semantic::TexCoords(0)).is_some(),
+                "tangent primitive requires UV0",
+            )?;
+            if needs_frame {
+                // Bound expanded corner streams and live input before the helper allocates them.
+                let worst = index_count
+                    .checked_mul(128)
+                    .and_then(|n| n.checked_add(count.checked_mul(64)?))
+                    .and_then(|n| n.checked_add(nv.checked_mul(64)?))
+                    .and_then(|n| n.checked_add(ni.checked_mul(4)?));
+                ensure(
+                    worst.is_some_and(|n| n <= limits.prepared.max_decoded_bytes),
+                    "tangent preparation byte limit",
+                )?;
+            }
             let reader = p.reader(|buffer| {
                 if buffer.index() == 0 {
                     Some(blob)
@@ -648,12 +715,52 @@ fn meshes(
                     && indices.iter().all(|&i| (i as usize) < vertices.len()),
                 "invalid primitive vertex index or truncated indices",
             )?;
+            let authored: Option<Vec<_>> = if flat {
+                None
+            } else {
+                reader.read_tangents().map(Iterator::collect)
+            };
             let (vertices, indices) = if flat {
                 flat_normals(&vertices, &indices)?
             } else {
                 (vertices, indices)
             };
+            let (vertices, indices, tangents) = if needs_frame {
+                let source = authored.as_deref().map_or(
+                    crate::tangent::TangentSource::GenerateMikkTSpace,
+                    crate::tangent::TangentSource::Authored,
+                );
+                let prepared =
+                    crate::tangent::prepare(&vertices, &indices, source).map_err(|e| {
+                        Error(format!(
+                            "mesh {} primitive {} tangent frame: {e}",
+                            mesh.index(),
+                            p.index()
+                        ))
+                    })?;
+                let basis = match prepared.mode() {
+                    crate::tangent::TangentMode::Authored => TangentBasis::Authored,
+                    crate::tangent::TangentMode::MikkTSpace => TangentBasis::MikkTSpace,
+                };
+                let (new_vertices, new_indices, values) = prepared.into_parts();
+                nv = nv
+                    .checked_sub(vertices.len())
+                    .and_then(|n| n.checked_add(new_vertices.len()))
+                    .ok_or_else(|| Error("tangent vertex count overflow".into()))?;
+                ensure(
+                    nv <= limits.prepared.max_vertices,
+                    "remapped tangent vertex limit",
+                )?;
+                (
+                    new_vertices,
+                    new_indices,
+                    Some(TangentStream { basis, values }),
+                )
+            } else {
+                (vertices, indices, None)
+            };
             output.primitives.push(Primitive {
+                tangents,
                 vertices,
                 indices,
                 material,
@@ -834,7 +941,7 @@ pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<
         records: Vec::new(),
         roles: HashMap::new(),
     };
-    let mut materials = materials(document, &mut textures)?;
+    let mut materials = materials(document, &mut textures, settings)?;
     let other_bytes = materials
         .len()
         .checked_add(1)

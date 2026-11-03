@@ -25,6 +25,9 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(ALGORITHM);
+    if settings.normal_maps {
+        h.update(b"normal-maps-v2/mikktspace-0.3.0/gltf-negated-mikk-w/ignore-tangent-without-normal/frame2e-4/area1e-6/linear+Y/normalized-area-mips-v1/scale-xy");
+    }
     h.update(SCHEMA_VERSION.to_le_bytes());
     h.update(settings.bytes());
     let p = limits.prepared;
@@ -141,6 +144,7 @@ struct Entry {
 }
 #[derive(Clone)]
 struct Manifest {
+    version: u32,
     key: [u8; 32],
     payload: Entry,
     geometry: Vec<Entry>,
@@ -148,7 +152,7 @@ struct Manifest {
 impl Manifest {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = b"RLM\0".to_vec();
-        bytes.extend(SCHEMA_VERSION.to_le_bytes());
+        bytes.extend(self.version.to_le_bytes());
         bytes.extend(self.key);
         bytes.extend(self.payload.hash);
         bytes.extend(self.payload.bytes.to_le_bytes());
@@ -166,7 +170,7 @@ impl Manifest {
         )?;
         ensure(
             &bytes[..4] == b"RLM\0"
-                && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) == SCHEMA_VERSION,
+                && matches!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1 | 2),
             "unknown cache manifest version",
         )?;
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
@@ -201,6 +205,7 @@ impl Manifest {
             )?;
         }
         Ok(Self {
+            version: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
             key: bytes[8..40].try_into().unwrap(),
             payload: parse(&bytes[40..80])?,
             geometry,
@@ -248,6 +253,12 @@ fn load(
     }
     let lookup_us = lookup.elapsed().as_micros();
     let decode = Instant::now();
+    if manifest.version == 1 {
+        ensure(
+            bytes.get(4..8) == Some(&1u32.to_le_bytes()),
+            "extended payload in legacy manifest",
+        )?;
+    }
     let asset = renderlab_asset::decode(&bytes, limits.prepared)?;
     ensure(
         asset.meshes.len() == manifest.geometry.len(),
@@ -323,7 +334,13 @@ pub fn cook_file(
     let source_read_us = start.elapsed().as_micros();
     let lookup = Instant::now();
     let identity = key(&source, settings, limits);
-    let key_path = cache.join("keys").join(hex(&identity));
+    let key_path = cache
+        .join(if settings.normal_maps {
+            "normal-v2/keys"
+        } else {
+            "keys"
+        })
+        .join(hex(&identity));
     let cached = (|| {
         let manifest = Manifest::decode(&read_bounded(&key_path, limits.manifest_bytes)?, limits)?;
         ensure(manifest.key == identity, "cache key identity mismatch")?;
@@ -372,6 +389,7 @@ pub fn cook_file(
         .map(|m| renderlab_asset::encode_mesh(m, limits.prepared).map_err(Error::from))
         .collect::<Result<Vec<_>>>()?;
     let manifest = Manifest {
+        version: if settings.normal_maps { 2 } else { 1 },
         key: identity,
         payload: Entry {
             hash: hash(&bytes),
@@ -460,6 +478,7 @@ mod tests {
             bytes: 30,
         };
         let manifest = Manifest {
+            version: 1,
             key: [0; 32],
             payload: entry.clone(),
             geometry: vec![entry.clone(), entry],

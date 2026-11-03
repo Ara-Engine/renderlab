@@ -32,11 +32,11 @@ impl Limits {
             || u64::from(self.max_instances) * 64 > device.max_storage_buffer_binding_size
             || device.max_storage_buffers_per_shader_stage < 2
             || device.max_bind_groups < 3
-            || device.max_vertex_buffers < 2
-            || device.max_vertex_attributes < 5
+            || device.max_vertex_buffers < 3
+            || device.max_vertex_attributes < 6
             || device.max_vertex_buffer_array_stride < 48
-            || device.max_sampled_textures_per_shader_stage < 2
-            || device.max_samplers_per_shader_stage < 2
+            || device.max_sampled_textures_per_shader_stage < 4
+            || device.max_samplers_per_shader_stage < 4
             || self.max_texture_bytes == 0
             || self.max_mesh_bytes == 0
             || self.max_mesh_bytes > device.max_buffer_size
@@ -52,6 +52,7 @@ impl Limits {
 /// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
     pub(crate) renderer: std::sync::Arc<()>,
+    pub(crate) tangent: Option<Owned<wgpu::Buffer>>,
     pub(crate) vertex: Owned<wgpu::Buffer>,
     pub(crate) index: Owned<wgpu::Buffer>,
     pub(crate) index_count: u32,

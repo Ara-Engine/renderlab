@@ -1,4 +1,4 @@
-//! Cooker-only tangent preparation. No prepared-asset format or cache changes.
+//! Cooker-only tangent preparation in glTF's texture-coordinate convention.
 use crate::{Result, ensure};
 use renderlab_asset::Vertex;
 use std::collections::HashMap;
@@ -172,7 +172,8 @@ impl mikktspace::Geometry for MikkMesh<'_> {
         self.vertex(face, corner).uv
     }
     fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, corner: usize) {
-        self.corners[face * 3 + corner] = tangent;
+        // glTF's image convention reverses MikkTSpace's generated bitangent sign.
+        self.corners[face * 3 + corner] = [tangent[0], tangent[1], tangent[2], -tangent[3]];
     }
 }
 

@@ -3,12 +3,14 @@ struct Camera { view_projection: mat4x4<f32>, view_mode: vec4<u32> };
 @group(1) @binding(0) var<storage, read> models: array<mat4x4<f32>>;
 struct NormalTransform { x:vec4<f32>, y:vec4<f32>, z:vec4<f32>, info:vec4<f32> };
 @group(1) @binding(1) var<storage, read> normals: array<NormalTransform>;
-struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, pad:u32 };
+struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, pad:u32, normal_scale:f32, normal_mapped:u32, pad2:vec2<u32> };
 @group(2) @binding(0) var<uniform> material:Material;
 @group(2) @binding(1) var base_color:texture_2d<f32>;
 @group(2) @binding(2) var base_sampler:sampler;
 @group(2) @binding(3) var metallic_roughness:texture_2d<f32>;
 @group(2) @binding(4) var mr_sampler:sampler;
+@group(2) @binding(5) var normal_map:texture_2d<f32>;
+@group(2) @binding(6) var normal_sampler:sampler;
 // Frustum visibility assumes this camera * model * original bounded position.
 // Position-displacing reloads must use Visibility::Unculled. Layout checks cannot certify bounds.
 const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
@@ -26,6 +28,8 @@ struct VertexOutput {
     @location(2) normal: vec3<f32>,
     @location(3) @interpolate(flat) winding:f32,
     @location(4) world:vec3<f32>,
+    @location(5) tangent:vec3<f32>,
+    @location(6) @interpolate(flat) handedness:f32,
 };
 fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
@@ -35,7 +39,7 @@ fn unit_normal(n:vec3<f32>) -> vec3<f32> {
 fn world_position(position:vec3<f32>, slot:u32) -> vec4<f32> {
     return models[slot] * vec4<f32>(position, 1.0);
 }
-@vertex fn vs(input: VertexInput) -> VertexOutput {
+fn vertex_output(input: VertexInput) -> VertexOutput {
     let normal = normals[input.slot];
     var output: VertexOutput;
     let world = world_position(input.position, input.slot);
@@ -45,8 +49,22 @@ fn world_position(position:vec3<f32>, slot:u32) -> vec4<f32> {
     output.uv = input.uv;
     output.normal = unit_normal(mat3x3<f32>(normal.x.xyz,normal.y.xyz,normal.z.xyz)*unit_normal(input.normal));
     output.winding = normal.info.x;
+    output.tangent = vec3<f32>(0.0);
+    output.handedness = 0.0;
     return output;
 }
+@vertex fn vs(input:VertexInput) -> VertexOutput { return vertex_output(input); }
+@vertex fn vs_tangent(input:VertexInput, @location(5) tangent:vec4<f32>) -> VertexOutput {
+    var output=vertex_output(input);
+    let m=models[input.slot];
+    let a=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
+    let scale=max(max(max(abs(m[0].x),abs(m[0].y)),max(abs(m[0].z),abs(m[1].x))),max(max(abs(m[1].y),abs(m[1].z)),max(max(abs(m[2].x),abs(m[2].y)),abs(m[2].z))));
+    let t=unit_normal((a*(1.0/max(scale,1e-30)))*tangent.xyz);
+    output.tangent=unit_normal(t-output.normal*dot(output.normal,t));
+    output.handedness=tangent.w*output.winding;
+    return output;
+}
+
 @fragment fn fs(input: VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
     // Cull by source winding so mirrored slots remain in their original equal-depth order.
     if material.double_sided == 0u && front != (input.winding > 0.0) { discard; }
@@ -62,7 +80,7 @@ fn world_position(position:vec3<f32>, slot:u32) -> vec4<f32> {
     return vec4<f32>(result,1.0);
 }
 
-// Group 0-2 retain the diagnostic ABI. Only fs_lit uses group 3.
+// Only fs_lit uses group 3.
 struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32 };
 struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
@@ -184,13 +202,35 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
 @fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
     let source_front=front==(input.winding>0.0);
     // Derivatives evaluated uniformly before any source-winding discard.
+    // Shadow comparison keeps this geometric plane independent of the sampled shading normal.
+    // Viewport Y increases downwards. Negate the derivative cross for the camera-facing normal,
+    // then restore source orientation before the declared source-back frame reversal.
     let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));
+    let face=-geometric;
+    let source_geometric=select(-face,face,source_front);
     let sampled=textureSample(base_color,base_sampler,input.uv);
     let mr=textureSample(metallic_roughness,mr_sampler,input.uv);
+    let normal_sample=textureSample(normal_map,normal_sampler,input.uv).xyz*2.0-vec3<f32>(1.0);
     if material.double_sided==0u && !source_front { discard; }
     var n=unit_normal(input.normal);
-    if dot(n,n)<0.5 { n=geometric; }
+    if dot(input.normal,input.normal)<=1e-12 || dot(n,n)<0.5 { n=source_geometric; }
     if dot(n,n)<0.5 { n=vec3<f32>(0.0,0.0,1.0); }
+    if material.normal_mapped!=0u {
+        let projected_t=input.tangent-n*dot(n,input.tangent);
+        var t=unit_normal(projected_t);
+        if dot(projected_t,projected_t)<=1e-12 || dot(t,t)<0.5 {
+            let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(n.x)>0.9);
+            t=unit_normal(axis-n*dot(n,axis));
+        }
+        let b=input.handedness*cross(n,t);
+        // Divide before multiplying to support every finite scale without overflow.
+        let scale=max(abs(material.normal_scale),1.0);
+        let decoded=vec3<f32>(normal_sample.xy*(material.normal_scale/scale),normal_sample.z/scale);
+        var mapped=unit_normal(decoded);
+        if length(decoded)<=1e-6/scale || dot(mapped,mapped)<0.5 { mapped=vec3<f32>(0.0,0.0,1.0); }
+        n=unit_normal(t*mapped.x+b*mapped.y+n*mapped.z);
+    }
+    // A source-back surface reverses the entire perturbed frame.
     if material.double_sided!=0u && !source_front { n=-n; }
     var v=unit_normal(lighting.eye-input.world);
     if dot(v,v)<0.5 { v=n; }

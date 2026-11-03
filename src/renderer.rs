@@ -30,6 +30,7 @@ const FLIGHTS: usize = 3;
 const CLEAR_COLOR: [f64; 3] = [0.018, 0.025, 0.04];
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+const TANGENT_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![5 => Float32x4];
 const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
 
 type MapResult = Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>;
@@ -262,6 +263,8 @@ impl Renderer {
 }
 struct Pipelines {
     shadow: Owned<wgpu::RenderPipeline>,
+    diagnostic_tangent: Owned<wgpu::RenderPipeline>,
+    lit_tangent: Owned<wgpu::RenderPipeline>,
     diagnostic: Owned<wgpu::RenderPipeline>,
     lit: Owned<wgpu::RenderPipeline>,
     present: Owned<wgpu::RenderPipeline>,
@@ -421,7 +424,7 @@ impl Renderer {
         let device_limits = device.limits();
         if device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 4
+            || device_limits.max_sampled_textures_per_shader_stage < 5
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(
@@ -488,11 +491,11 @@ impl Renderer {
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(32),
+                min_binding_size: wgpu::BufferSize::new(48),
             },
             count: None,
         }];
-        for binding in [1, 3] {
+        for binding in [1, 3, 5] {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -504,7 +507,7 @@ impl Renderer {
                 count: None,
             });
         }
-        for binding in [2, 4] {
+        for binding in [2, 4, 6] {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -655,9 +658,10 @@ impl Renderer {
         };
         // The initial defaults share one immediately submitted flight.
         let scopes = OperationScopes::new(&renderer.device);
-        let defaults: [Texture; 2] = [
+        let defaults: [Texture; 3] = [
             asset::TextureRole::BaseColorSrgb,
             asset::TextureRole::MetallicRoughnessLinear,
+            asset::TextureRole::NormalLinear,
         ]
         .map(|role| {
             renderer.create_texture(
@@ -666,7 +670,11 @@ impl Renderer {
                     mips: vec![asset::Mip {
                         width: 1,
                         height: 1,
-                        rgba8: vec![255; 4],
+                        rgba8: if role == asset::TextureRole::NormalLinear {
+                            vec![128, 128, 255, 255]
+                        } else {
+                            vec![255; 4]
+                        },
                     }],
                 },
                 4,
@@ -706,57 +714,79 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let mesh = |layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, entry| {
-            ledger.own(
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 48,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &VERTEX_ATTRIBUTES,
-                            }),
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 4,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &MODEL_ATTRIBUTES,
-                            }),
-                        ],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(format.into())],
+        let mesh =
+            |layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, entry, tangent: bool| {
+                ledger.own(
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("mesh"),
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
+                            compilation_options: Default::default(),
+                            buffers: &[
+                                Some(wgpu::VertexBufferLayout {
+                                    array_stride: 48,
+                                    step_mode: wgpu::VertexStepMode::Vertex,
+                                    attributes: &VERTEX_ATTRIBUTES,
+                                }),
+                                Some(wgpu::VertexBufferLayout {
+                                    array_stride: 4,
+                                    step_mode: wgpu::VertexStepMode::Instance,
+                                    attributes: &MODEL_ATTRIBUTES,
+                                }),
+                                if tangent {
+                                    Some(wgpu::VertexBufferLayout {
+                                        array_stride: 16,
+                                        step_mode: wgpu::VertexStepMode::Vertex,
+                                        attributes: &TANGENT_ATTRIBUTES,
+                                    })
+                                } else {
+                                    None
+                                },
+                            ],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            targets: &[Some(format.into())],
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: None,
+                            ..Default::default()
+                        },
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: wgpu::TextureFormat::Depth32Float,
+                            depth_write_enabled: Some(true),
+                            depth_compare: Some(wgpu::CompareFunction::Less),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
+                        multisample: wgpu::MultisampleState {
+                            count: samples as u32,
+                            ..Default::default()
+                        },
+                        multiview_mask: None,
+                        cache: None,
                     }),
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: samples as u32,
-                        ..Default::default()
-                    },
-                    multiview_mask: None,
-                    cache: None,
-                }),
-                ResourceKind::RenderPipeline,
-            )
-        };
-        let diagnostic = mesh(layout, format, "fs");
-        let lit = mesh(&lighting.layout, wgpu::TextureFormat::Rgba16Float, "fs_lit");
+                    ResourceKind::RenderPipeline,
+                )
+            };
+        let diagnostic = mesh(layout, format, "fs", false);
+        let diagnostic_tangent = mesh(layout, format, "fs", true);
+        let lit = mesh(
+            &lighting.layout,
+            wgpu::TextureFormat::Rgba16Float,
+            "fs_lit",
+            false,
+        );
+        let lit_tangent = mesh(
+            &lighting.layout,
+            wgpu::TextureFormat::Rgba16Float,
+            "fs_lit",
+            true,
+        );
         let shadow = ledger.own(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("source-sided shadow depth"),
@@ -820,6 +850,8 @@ impl Renderer {
         );
         Pipelines {
             shadow,
+            diagnostic_tangent,
+            lit_tangent,
             diagnostic,
             lit,
             present,
@@ -896,9 +928,18 @@ impl Renderer {
     /// None means real backpressure after a nonblocking collection. Retry on a later wake.
     /// Every admitted upload submits immediately, including callers that never render.
     pub fn try_upload_mesh(&mut self, data: &MeshData<'_>) -> Result<Option<Mesh>, Error> {
+        self.try_upload_mesh_with_tangents(data, None)
+    }
+    /// Upload an optional validated tangent stream in the base mesh's exact vertex domain.
+    pub fn try_upload_mesh_with_tangents(
+        &mut self,
+        data: &MeshData<'_>,
+        tangents: Option<&asset::TangentStream>,
+    ) -> Result<Option<Mesh>, Error> {
         self.check_fault()?;
         let started = Instant::now();
         let sizes = data.validate(self.limits)?;
+        let tangent_bytes = self.validate_mesh_tangents(data, tangents, sizes)?;
         let mut preparation = started.elapsed();
         let poll = self.collect()?;
         if self.occupied() >= FLIGHTS - 1 {
@@ -907,7 +948,7 @@ impl Renderer {
         }
         let slot = self.free_slot().unwrap();
         let pack_start = Instant::now();
-        let mut bytes = Vec::with_capacity((sizes.0 + sizes.1) as usize);
+        let mut bytes = Vec::with_capacity((sizes.0 + sizes.1 + tangent_bytes) as usize);
         for vertex in data.vertices {
             let normal = glam::DVec3::new(
                 vertex.normal[0].into(),
@@ -929,6 +970,11 @@ impl Renderer {
         }
         for index in data.indices {
             bytes.extend_from_slice(&index.to_ne_bytes());
+        }
+        if let Some(t) = tangents {
+            for value in t.values.iter().flatten() {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
         }
         let bounds = Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap();
         preparation += pack_start.elapsed();
@@ -952,6 +998,17 @@ impl Renderer {
             }),
             ResourceKind::Buffer,
         );
+        let tangent = tangents.map(|_| {
+            self.ledger.own(
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mesh tangents"),
+                    size: tangent_bytes,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            )
+        });
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
         }
@@ -960,8 +1017,17 @@ impl Renderer {
             .write_buffer(&vertex, 0, &bytes[..sizes.0 as usize]);
         self.uploads.geometry += sizes.0;
         self.uploads.write_calls += 1;
-        self.queue
-            .write_buffer(&index, 0, &bytes[sizes.0 as usize..]);
+        self.queue.write_buffer(
+            &index,
+            0,
+            &bytes[sizes.0 as usize..(sizes.0 + sizes.1) as usize],
+        );
+        if let Some(t) = &tangent {
+            self.queue
+                .write_buffer(t, 0, &bytes[(sizes.0 + sizes.1) as usize..]);
+            self.uploads.geometry += tangent_bytes;
+            self.uploads.write_calls += 1;
+        }
         self.uploads.geometry += sizes.1;
         self.uploads.write_calls += 1;
         let upload = start.elapsed();
@@ -995,12 +1061,39 @@ impl Renderer {
         };
         self.check_fault()?;
         Ok(Some(Mesh {
+            tangent,
             renderer: self.identity.clone(),
             vertex,
             index,
             index_count: data.indices.len() as u32,
             bounds,
         }))
+    }
+
+    pub(crate) fn validate_mesh_tangents(
+        &self,
+        data: &MeshData<'_>,
+        tangents: Option<&asset::TangentStream>,
+        sizes: (u64, u64),
+    ) -> Result<u64, Error> {
+        let bytes = if let Some(t) = tangents {
+            asset::validate_tangents(data.vertices, data.indices, t)
+                .map_err(|e| Error::InvalidInput(e.0))?;
+            (t.values.len() as u64)
+                .checked_mul(16)
+                .ok_or(Error::InvalidInput("tangent byte overflow"))?
+        } else {
+            0
+        };
+        if sizes
+            .0
+            .checked_add(sizes.1)
+            .and_then(|n| n.checked_add(bytes))
+            .is_none_or(|n| n > self.limits.max_mesh_bytes)
+        {
+            return Err(Error::InvalidInput("tangent mesh exceeds max_mesh_bytes"));
+        }
+        Ok(bytes)
     }
 
     /// Creation follows mesh admission: Busy allocates nothing, accepted uploads submit immediately.
@@ -1210,7 +1303,8 @@ impl Renderer {
                 dimension: wgpu::TextureDimension::D2,
                 format: match data.role {
                     asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-                    asset::TextureRole::MetallicRoughnessLinear => wgpu::TextureFormat::Rgba8Unorm,
+                    asset::TextureRole::MetallicRoughnessLinear
+                    | asset::TextureRole::NormalLinear => wgpu::TextureFormat::Rgba8Unorm,
                 },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
@@ -1285,7 +1379,7 @@ impl Renderer {
     fn create_material(
         &mut self,
         data: &MaterialDescriptor<'_>,
-        defaults: &[Texture; 2],
+        defaults: &[Texture; 3],
     ) -> Material {
         let textures = [
             data.base_color_texture
@@ -1294,11 +1388,16 @@ impl Renderer {
             data.metallic_roughness_texture
                 .map_or(&defaults[1], |t| t.texture)
                 .clone(),
+            data.normal_texture
+                .map_or(&defaults[2], |t| t.texture)
+                .clone(),
         ];
         let samplers = [
             data.base_color_texture
                 .map_or(asset::Sampler::default(), |t| t.sampler),
             data.metallic_roughness_texture
+                .map_or(asset::Sampler::default(), |t| t.sampler),
+            data.normal_texture
                 .map_or(asset::Sampler::default(), |t| t.sampler),
         ]
         .map(|s| {
@@ -1314,7 +1413,7 @@ impl Renderer {
         let uniform = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("immutable material factors"),
-                size: 32,
+                size: 48,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -1345,21 +1444,30 @@ impl Renderer {
                         binding: 4,
                         resource: wgpu::BindingResource::Sampler(&samplers[1]),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&textures[2].0.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&samplers[2]),
+                    },
                 ],
             }),
             ResourceKind::BindGroup,
         );
         self.queue.write_buffer(&uniform, 0, &data.bytes());
-        self.uploads.materials += 32;
+        self.uploads.materials += 48;
         self.uploads.write_calls += 1;
         Material {
+            normal_mapped: data.normal_texture.is_some(),
             renderer: self.identity.clone(),
             double_sided: data.double_sided,
             bind,
             _uniform: uniform,
             _samplers: samplers,
             _textures: textures,
-            _allocation: self.ledger.allocate(AllocationKind::Material, 32),
+            _allocation: self.ledger.allocate(AllocationKind::Material, 48),
         }
     }
 
@@ -1409,6 +1517,13 @@ impl Renderer {
         }) {
             return Err(Error::InvalidInput(
                 "draw resource belongs to another renderer",
+            ));
+        }
+        if draws.iter().any(|draw| {
+            draw.material.is_some_and(|m| m.normal_mapped) && draw.mesh.tangent.is_none()
+        }) {
+            return Err(Error::InvalidInput(
+                "normal-mapped draw requires tangent stream",
             ));
         }
         if draws.iter().any(|draw| {
@@ -1840,10 +1955,20 @@ impl Renderer {
             }
             pass.set_bind_group(0, &*self.bind, &[]);
             // Pass state persists across draws, so unchanged state is never re-encoded.
+            let mut pipeline = None;
             let (mut instances, mut material, mut ids, mut mesh) = (None, None, None, None);
             for draw in draws {
                 if draw.slots.is_empty() {
                     continue;
+                }
+                let candidate = match (lit, draw.mesh.tangent.is_some()) {
+                    (true, true) => &self.pipeline.lit_tangent,
+                    (false, true) => &self.pipeline.diagnostic_tangent,
+                    (true, false) => &self.pipeline.lit,
+                    (false, false) => &self.pipeline.diagnostic,
+                };
+                if changed(&mut pipeline, candidate) {
+                    pass.set_pipeline(candidate);
                 }
                 let bind: &wgpu::BindGroup = &draw.instances.bind;
                 if changed(&mut instances, bind) {
@@ -1866,6 +1991,9 @@ impl Renderer {
                 }
                 if changed(&mut mesh, draw.mesh) {
                     pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                    if let Some(t) = &draw.mesh.tangent {
+                        pass.set_vertex_buffer(2, t.slice(..));
+                    }
                     pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 }
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());

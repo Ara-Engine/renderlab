@@ -146,7 +146,8 @@ fn real_fixtures_preserve_owned_geometry_materials_transforms_roles_and_samplers
         prepare(
             &first[1].1,
             Settings {
-                missing_normals: MissingNormals::Reject
+                missing_normals: MissingNormals::Reject,
+                ..Default::default()
             },
             CookLimits::default()
         )
@@ -402,6 +403,7 @@ fn cache_identity_repair_transform_reuse_and_failure_preservation() {
         &manifest,
         Settings {
             missing_normals: MissingNormals::Reject,
+            ..Default::default()
         },
     );
     assert!(!settings.report.cache_hit);

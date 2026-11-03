@@ -146,9 +146,13 @@ pub(super) fn load(
     options.validate()?;
     let mut bytes = Vec::new();
     File::open(manifest)?.take(81).read_to_end(&mut bytes)?;
-    if bytes.len() != 80 || &bytes[..8] != b"RVM\0\x01\0\0\0" {
+    if bytes.len() != 80
+        || &bytes[..4] != b"RVM\0"
+        || !matches!(u32::from_le_bytes(bytes[4..8].try_into()?), 1 | 2)
+    {
         return Err("invalid virtual manifest".into());
     }
+    let version = u32::from_le_bytes(bytes[4..8].try_into()?);
     let digest: [u8; 32] = bytes[40..72].try_into()?;
     let length = u64::from_le_bytes(bytes[72..80].try_into()?);
     if length > options.bootstrap_bytes as u64
@@ -156,7 +160,11 @@ pub(super) fn load(
     {
         return Err("metadata bootstrap file cap".into());
     }
-    let mut file = File::open(cache.join("virtual-v1/packages").join(hex(&digest)))?;
+    let mut file = File::open(
+        cache
+            .join(format!("virtual-v{version}/packages"))
+            .join(hex(&digest)),
+    )?;
     let mut header = [0u8; 24];
     file.read_exact(&mut header)?;
     let resources = u32::from_le_bytes(header[20..24].try_into()?) as usize;
@@ -194,6 +202,9 @@ pub(super) fn load(
     #[cfg(feature = "selection-profile")]
     let verified_us = profile.elapsed().as_micros();
     let package = asset::virtual_mesh::decode(&bytes, limits)?;
+    if package.version() != version {
+        return Err("virtual manifest/package version mismatch".into());
+    }
     #[cfg(feature = "selection-profile")]
     eprintln!(
         "bootstrap_profile bytes={length} read_us={read_us} digest_us={} decode_us={}",

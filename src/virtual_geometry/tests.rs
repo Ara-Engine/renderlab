@@ -41,6 +41,7 @@ pub(crate) fn fixture(levels: usize) -> (Package, Vec<Vec<u8>>) {
         // Different page identity with identical positions, but different unused UV.
         bytes[24..28].copy_from_slice(&(level as f32).to_le_bytes());
         pages.push(Page {
+            tangents: None,
             vertices: 6,
             indices: 6,
             payload_bytes: offset as u32,

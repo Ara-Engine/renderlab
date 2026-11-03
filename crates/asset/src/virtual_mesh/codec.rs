@@ -23,7 +23,8 @@ pub fn encode(p: &Package, limits: VirtualLimits) -> Result<Vec<u8>> {
     p.validate(limits)?;
     let resources = crate::encode(&p.resources, limits.prepared)?;
     let mut out = b"RLV\0".to_vec();
-    u32v(&mut out, VERSION);
+    let version = p.version();
+    u32v(&mut out, version);
     for n in [
         p.meshes.len(),
         p.placements.len(),
@@ -61,6 +62,16 @@ pub fn encode(p: &Package, limits: VirtualLimits) -> Result<Vec<u8>> {
     for p in &p.pages {
         for v in [p.vertices, p.indices, p.payload_bytes] {
             u32v(&mut out, v);
+        }
+        if version == 2 {
+            u32v(
+                &mut out,
+                match p.tangents {
+                    None => 0,
+                    Some(crate::TangentBasis::Authored) => 1,
+                    Some(crate::TangentBasis::MikkTSpace) => 2,
+                },
+            );
         }
         out.extend(p.sha256);
     }
@@ -142,7 +153,11 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
         allocated: 0,
         limit: limits.max_metadata_bytes,
     };
-    if r.take(4)? != b"RLV\0" || r.u32()? != VERSION {
+    if r.take(4)? != b"RLV\0" {
+        return Err(Error("unknown virtual schema"));
+    }
+    let version = r.u32()?;
+    if !matches!(version, 1 | 2) {
         return Err(Error("unknown virtual schema"));
     }
     let nm = r.n(
@@ -165,6 +180,9 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
     let resource_bytes = r.take(nr)?;
     if resource_bytes.len() < 24 || resource_bytes[8..16] != [0; 8] {
         return Err(Error("virtual resources contain geometry or are truncated"));
+    }
+    if version == 1 && resource_bytes[4..8] != 1u32.to_le_bytes() {
+        return Err(Error("extended resources in legacy virtual schema"));
     }
     let resources = crate::decode(resource_bytes, limits.prepared)?;
     if !resources.meshes.is_empty() || !resources.placements.is_empty() {
@@ -236,10 +254,24 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
     }
     let mut pages = Vec::with_capacity(np);
     for _ in 0..np {
+        let vertices = r.u32()?;
+        let indices = r.u32()?;
+        let payload_bytes = r.u32()?;
+        let tangents = if version == 2 {
+            match r.u32()? {
+                0 => None,
+                1 => Some(crate::TangentBasis::Authored),
+                2 => Some(crate::TangentBasis::MikkTSpace),
+                _ => return Err(Error("invalid page tangent basis")),
+            }
+        } else {
+            None
+        };
         pages.push(Page {
-            vertices: r.u32()?,
-            indices: r.u32()?,
-            payload_bytes: r.u32()?,
+            tangents,
+            vertices,
+            indices,
+            payload_bytes,
             sha256: r.take(32)?.try_into().unwrap(),
         });
     }
@@ -259,9 +291,12 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
 /// Caller supplies SHA-256 of the entire 64KiB file; the dependency-free codec checks it.
 /// Runtime IO must hash the actual bytes, then call this before publishing availability.
 pub fn decode_page(p: &Page, bytes: &[u8], actual_sha256: [u8; 32]) -> Result<PageGeometry> {
-    let size = product(p.vertices as usize, 48)?
-        .checked_add(product(p.indices as usize, 4)?)
-        .ok_or(Error("page byte overflow"))?;
+    let size = product(
+        p.vertices as usize,
+        if p.tangents.is_some() { 64 } else { 48 },
+    )?
+    .checked_add(product(p.indices as usize, 4)?)
+    .ok_or(Error("page byte overflow"))?;
     if bytes.len() != PAGE_BYTES
         || size != p.payload_bytes as usize
         || size > PAGE_BYTES
@@ -290,11 +325,21 @@ pub fn decode_page(p: &Page, bytes: &[u8], actual_sha256: [u8; 32]) -> Result<Pa
             color: r.floats()?,
         });
     }
+    let tangents = if let Some(basis) = p.tangents {
+        let mut values = Vec::with_capacity(p.vertices as usize);
+        for _ in 0..p.vertices {
+            values.push(r.floats()?);
+        }
+        Some(crate::TangentStream { basis, values })
+    } else {
+        None
+    };
     for _ in 0..p.indices {
         indices.push(r.u32()?);
     }
     let mut mesh = crate::Mesh {
         primitives: vec![crate::Primitive {
+            tangents,
             vertices,
             indices,
             material: 0,
@@ -310,6 +355,7 @@ pub fn decode_page(p: &Page, bytes: &[u8], actual_sha256: [u8; 32]) -> Result<Pa
     )?;
     let p = mesh.primitives.pop().unwrap();
     Ok(PageGeometry {
+        tangents: p.tangents,
         vertices: p.vertices,
         indices: p.indices,
     })

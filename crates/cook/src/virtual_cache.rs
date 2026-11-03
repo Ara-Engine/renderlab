@@ -15,6 +15,7 @@ use std::{
 
 #[derive(Clone)]
 struct Manifest {
+    version: u32,
     key: [u8; 32],
     package: [u8; 32],
     bytes: u64,
@@ -22,7 +23,7 @@ struct Manifest {
 impl Manifest {
     fn encode(&self) -> Vec<u8> {
         let mut b = b"RVM\0".to_vec();
-        b.extend(1u32.to_le_bytes());
+        b.extend(self.version.to_le_bytes());
         b.extend(self.key);
         b.extend(self.package);
         b.extend(self.bytes.to_le_bytes());
@@ -30,7 +31,9 @@ impl Manifest {
     }
     fn decode(b: &[u8], limits: VirtualLimits) -> Result<Self> {
         ensure(
-            b.len() == 80 && &b[..4] == b"RVM\0" && b[4..8] == 1u32.to_le_bytes(),
+            b.len() == 80
+                && &b[..4] == b"RVM\0"
+                && matches!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 1 | 2),
             "invalid virtual manifest",
         )?;
         let bytes = u64::from_le_bytes(b[72..80].try_into().unwrap());
@@ -39,18 +42,26 @@ impl Manifest {
             "virtual manifest byte limit",
         )?;
         Ok(Self {
+            version: u32::from_le_bytes(b[4..8].try_into().unwrap()),
             key: b[8..40].try_into().unwrap(),
             package: b[40..72].try_into().unwrap(),
             bytes,
         })
     }
 }
-fn path(cache: &Path, kind: &str, digest: &[u8; 32]) -> PathBuf {
-    cache.join("virtual-v1").join(kind).join(hex(digest))
+fn path(cache: &Path, version: u32, kind: &str, digest: &[u8; 32]) -> PathBuf {
+    cache
+        .join(format!("virtual-v{version}"))
+        .join(kind)
+        .join(hex(digest))
 }
 fn key(source: &[u8], settings: Settings, limits: VirtualLimits) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(virtual_cook::ALGORITHM);
+    h.update(if source.get(4..8) == Some(&2u32.to_le_bytes()) {
+        virtual_cook::NORMAL_ALGORITHM
+    } else {
+        virtual_cook::ALGORITHM
+    });
     h.update(settings.bytes());
     h.update(virtual_mesh::VERSION.to_le_bytes());
     let p = limits.prepared;
@@ -100,14 +111,21 @@ pub struct CookResult {
 
 /// Verify metadata plus each complete immutable page one at a time, retaining no source geometry.
 fn load(cache: &Path, m: &Manifest, limits: VirtualLimits) -> Result<Loaded> {
-    let bytes = read_bounded(&path(cache, "packages", &m.package), m.bytes as usize)?;
+    let bytes = read_bounded(
+        &path(cache, m.version, "packages", &m.package),
+        m.bytes as usize,
+    )?;
     ensure(
         bytes.len() as u64 == m.bytes && hash(&bytes) == m.package,
         "virtual metadata digest/length mismatch",
     )?;
+    ensure(
+        bytes.get(4..8) == Some(&m.version.to_le_bytes()),
+        "virtual manifest/package version mismatch",
+    )?;
     let package = virtual_mesh::decode(&bytes, limits)?;
     for p in &package.pages {
-        let bytes = read_bounded(&path(cache, "pages", &p.sha256), PAGE_BYTES)?;
+        let bytes = read_bounded(&path(cache, m.version, "pages", &p.sha256), PAGE_BYTES)?;
         virtual_mesh::decode_page(p, &bytes, hash(&bytes))?;
     }
     let counts = package.validate(limits)?;
@@ -127,11 +145,24 @@ pub fn load_manifest(cache: &Path, current: &Path, limits: VirtualLimits) -> Res
     )
 }
 pub fn load_page(cache: &Path, p: &virtual_mesh::Page) -> Result<virtual_mesh::PageGeometry> {
-    let b = read_bounded(&path(cache, "pages", &p.sha256), PAGE_BYTES)?;
+    let b = read_bounded(
+        &path(
+            cache,
+            if p.tangents.is_some() { 2 } else { 1 },
+            "pages",
+            &p.sha256,
+        ),
+        PAGE_BYTES,
+    )?;
     Ok(virtual_mesh::decode_page(p, &b, hash(&b))?)
 }
 pub fn page_path(cache: &Path, p: &virtual_mesh::Page) -> PathBuf {
-    path(cache, "pages", &p.sha256)
+    path(
+        cache,
+        if p.tangents.is_some() { 2 } else { 1 },
+        "pages",
+        &p.sha256,
+    )
 }
 
 /// Input is a separately preserved M3 full-detail reference; runtime consumes only package/pages.
@@ -146,7 +177,12 @@ pub fn cook_file(
     settings.validate()?;
     let source = read_bounded(source, limits.prepared.max_file_bytes)?;
     let key = key(&source, settings, limits);
-    let key_path = path(cache, "keys", &key);
+    let version = if source.get(4..8) == Some(&2u32.to_le_bytes()) {
+        2
+    } else {
+        1
+    };
+    let key_path = path(cache, version, "keys", &key);
     let cached = (|| {
         let m = Manifest::decode(&read_bounded(&key_path, 80)?, limits)?;
         ensure(m.key == key, "virtual key identity mismatch")?;
@@ -180,14 +216,18 @@ pub fn cook_file(
     let prepare_us = before.elapsed().as_micros();
     let bytes = virtual_mesh::encode(&cooked.package, limits)?;
     let m = Manifest {
+        version: cooked.package.version(),
         key,
         package: hash(&bytes),
         bytes: bytes.len() as u64,
     };
     for (p, b) in cooked.package.pages.iter().zip(&cooked.pages) {
-        immutable_entry(&path(cache, "pages", &p.sha256), b)?;
+        immutable_entry(&path(cache, m.version, "pages", &p.sha256), b)?;
+        if m.version == 2 && p.tangents.is_none() {
+            immutable_entry(&path(cache, 1, "pages", &p.sha256), b)?;
+        }
     }
-    immutable_entry(&path(cache, "packages", &m.package), &bytes)?;
+    immutable_entry(&path(cache, m.version, "packages", &m.package), &bytes)?;
     let before = Instant::now();
     let loaded = load(cache, &m, limits)?;
     let verify_us = before.elapsed().as_micros();

@@ -42,6 +42,11 @@ impl Renderer {
                 metallic: data.metallic,
                 roughness: data.roughness,
                 double_sided: data.double_sided,
+                normal_scale: data.normal_texture.map_or(1., |b| b.scale),
+                normal_texture: data.normal_texture.map(|b| TextureBinding {
+                    texture: &asset.textures[b.texture as usize],
+                    sampler: b.sampler,
+                }),
                 base_color_texture: data.base_color_texture.map(|b| TextureBinding {
                     texture: &asset.textures[b.texture as usize],
                     sampler: b.sampler,
@@ -65,11 +70,13 @@ impl Renderer {
         data: &asset::virtual_mesh::PageGeometry,
     ) -> Result<Option<crate::virtual_geometry::GpuPage>, Error> {
         self.check_fault()?;
+        let tangents = data.tangents.as_ref();
         let data = MeshData {
             vertices: &data.vertices,
             indices: &data.indices,
         };
         let sizes = data.validate(self.limits)?;
+        let tangent_bytes = self.validate_mesh_tangents(&data, tangents, sizes)?;
         self.collect()?;
         if self.occupied() >= FLIGHTS - 1 {
             self.busy_uploads += 1;
@@ -98,10 +105,17 @@ impl Renderer {
             sizes.1,
             wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         );
+        let tangent = tangents.map(|_| {
+            buffer(
+                "virtual page tangents",
+                tangent_bytes,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            )
+        });
         let staging = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("charged virtual page staging"),
-                size: sizes.0 + sizes.1,
+                size: sizes.0 + sizes.1 + tangent_bytes,
                 usage: wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: true,
             }),
@@ -134,11 +148,21 @@ impl Renderer {
                     .copy_from_slice(&value.to_ne_bytes());
                 offset += 4;
             }
+            if let Some(t) = tangents {
+                for value in t.values.iter().flatten() {
+                    view.slice(offset..offset + 4)
+                        .copy_from_slice(&value.to_ne_bytes());
+                    offset += 4;
+                }
+            }
         }
         staging.unmap();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(&staging, 0, &vertex, 0, sizes.0);
         encoder.copy_buffer_to_buffer(&staging, sizes.0, &index, 0, sizes.1);
+        if let Some(t) = &tangent {
+            encoder.copy_buffer_to_buffer(&staging, sizes.0 + sizes.1, t, 0, tangent_bytes);
+        }
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
         encoder.on_submitted_work_done(move || {
@@ -164,10 +188,11 @@ impl Renderer {
                 submitted_at,
             },
         );
-        self.uploads.geometry += sizes.0 + sizes.1;
+        self.uploads.geometry += sizes.0 + sizes.1 + tangent_bytes;
         self.check_fault()?;
         Ok(Some(crate::virtual_geometry::GpuPage {
             mesh: Mesh {
+                tangent,
                 renderer: self.identity.clone(),
                 vertex,
                 index,

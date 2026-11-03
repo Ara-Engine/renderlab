@@ -2,7 +2,7 @@
 mod binary;
 pub mod virtual_mesh;
 
-pub use binary::{SCHEMA_VERSION, decode, encode, encode_mesh};
+pub use binary::{NORMAL_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode, encode_mesh};
 use std::fmt;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -21,8 +21,65 @@ pub struct Mesh {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Primitive {
     pub vertices: Vec<Vertex>,
+    pub tangents: Option<TangentStream>,
     pub indices: Vec<u32>,
     pub material: u32,
+}
+
+/// One frame per base vertex, in the same indexed domain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TangentStream {
+    pub basis: TangentBasis,
+    pub values: Vec<[f32; 4]>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TangentBasis {
+    Authored,
+    MikkTSpace,
+}
+
+/// Validate external frames without changing an authored basis or averaging a seam.
+pub fn validate_tangents(
+    vertices: &[Vertex],
+    indices: &[u32],
+    stream: &TangentStream,
+) -> Result<()> {
+    if stream.values.len() != vertices.len() {
+        return Err(Error("tangent count must equal vertex count"));
+    }
+    for (v, t) in vertices.iter().zip(&stream.values) {
+        let dot = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                .sum::<f64>()
+        };
+        if !t.iter().chain(&v.normal).all(|f| f.is_finite())
+            || (dot(&t[..3], &t[..3]) - 1.).abs() > 2e-4
+            || (dot(&v.normal, &v.normal) - 1.).abs() > 2e-4
+            || dot(&t[..3], &v.normal).abs() > 2e-4
+            || !matches!(t[3], -1. | 1.)
+        {
+            return Err(Error("invalid unit tangent frame or handedness"));
+        }
+    }
+    for tri in indices.chunks_exact(3) {
+        let first = stream
+            .values
+            .get(tri[0] as usize)
+            .ok_or(Error("invalid tangent index"))?[3];
+        for &i in &tri[1..] {
+            if stream
+                .values
+                .get(i as usize)
+                .ok_or(Error("invalid tangent index"))?[3]
+                != first
+            {
+                return Err(Error("triangle crosses tangent handedness seam"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,6 +105,7 @@ pub struct Material {
     pub roughness: f32,
     pub base_color_texture: Option<BaseColorTexture>,
     pub metallic_roughness_texture: Option<MetallicRoughnessTexture>,
+    pub normal_texture: Option<NormalTexture>,
     pub double_sided: bool,
 }
 
@@ -59,6 +117,7 @@ impl Default for Material {
             roughness: 1.0,
             base_color_texture: None,
             metallic_roughness_texture: None,
+            normal_texture: None,
             double_sided: false,
         }
     }
@@ -76,10 +135,19 @@ pub struct MetallicRoughnessTexture {
     pub sampler: Sampler,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalTexture {
+    pub texture: u32,
+    pub sampler: Sampler,
+    /// Linear tangent-space RGB, +Y along W * cross(N, T). Scale XY before normalization.
+    pub scale: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextureRole {
     BaseColorSrgb,
     MetallicRoughnessLinear,
+    NormalLinear,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,6 +272,8 @@ pub struct Counts {
     pub textures: usize,
     pub vertices: usize,
     pub indices: usize,
+    pub tangent_vertices: usize,
+    pub tangent_bytes: usize,
     pub mip_levels: usize,
     pub texture_bytes: usize,
     /// Logical element bytes, excluding Vec headers, allocator overhead and spare capacity.
@@ -241,6 +311,17 @@ pub fn valid_transform(m: &[[f32; 4]; 4]) -> bool {
 }
 
 impl Asset {
+    pub fn extended(&self) -> bool {
+        self.meshes
+            .iter()
+            .flat_map(|m| &m.primitives)
+            .any(|p| p.tangents.is_some())
+            || self.materials.iter().any(|m| m.normal_texture.is_some())
+            || self
+                .textures
+                .iter()
+                .any(|t| t.role == TextureRole::NormalLinear)
+    }
     /// Check all references and scalar domains before encoding or GPU integration.
     pub fn validate(&self, limits: Limits) -> Result<Counts> {
         for count in [
@@ -280,6 +361,11 @@ impl Asset {
                 if p.material as usize >= self.materials.len() {
                     return Err(Error("invalid material index"));
                 }
+                if self.materials[p.material as usize].normal_texture.is_some()
+                    && p.tangents.is_none()
+                {
+                    return Err(Error("normal-mapped primitive requires tangents"));
+                }
             }
         }
         for placement in &self.placements {
@@ -299,6 +385,12 @@ impl Asset {
             {
                 return Err(Error("invalid material factor"));
             }
+            if material
+                .normal_texture
+                .is_some_and(|t| !t.scale.is_finite())
+            {
+                return Err(Error("nonfinite normal scale"));
+            }
             let refs = [
                 material
                     .base_color_texture
@@ -306,6 +398,9 @@ impl Asset {
                 material
                     .metallic_roughness_texture
                     .map(|t| (t.texture, TextureRole::MetallicRoughnessLinear)),
+                material
+                    .normal_texture
+                    .map(|t| (t.texture, TextureRole::NormalLinear)),
             ];
             for (index, role) in refs.into_iter().flatten() {
                 let texture = self
@@ -384,6 +479,13 @@ pub(crate) fn validate_mesh(mesh: &Mesh, counts: &mut Counts, limits: Limits) ->
         cap(counts.indices, limits.max_indices, "index limit")?;
         add(&mut counts.decoded_bytes, product(p.vertices.len(), 48)?)?;
         add(&mut counts.decoded_bytes, product(p.indices.len(), 4)?)?;
+        if let Some(t) = &p.tangents {
+            validate_tangents(&p.vertices, &p.indices, t)?;
+            add(&mut counts.tangent_vertices, t.values.len())?;
+            let bytes = product(t.values.len(), 16)?;
+            add(&mut counts.tangent_bytes, bytes)?;
+            add(&mut counts.decoded_bytes, bytes)?;
+        }
         cap(
             counts.decoded_bytes,
             limits.max_decoded_bytes,

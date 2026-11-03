@@ -360,12 +360,9 @@ impl VirtualAsset {
         manifest: &Path,
         options: StreamOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new(
-            io::load(cache, manifest, options)?,
-            cache.join("virtual-v1/pages"),
-            options,
-        )
-        .map_err(Into::into)
+        let package = io::load(cache, manifest, options)?;
+        let directory = cache.join(format!("virtual-v{}/pages", package.version()));
+        Self::new(package, directory, options).map_err(Into::into)
     }
     /// Validates, indexes and admits metadata once, before starting any read or GPU allocation.
     pub fn new(
@@ -774,13 +771,16 @@ impl VirtualAsset {
                 self.stats.retiring_bytes += PAGE_BYTES;
             }
             if let Some(p) = s.gpu() {
-                self.stats.owned_gpu_geometry_bytes +=
-                    p.mesh.vertex.size() as usize + p.mesh.index.size() as usize;
+                self.stats.owned_gpu_geometry_bytes += p.mesh.vertex.size() as usize
+                    + p.mesh.index.size() as usize
+                    + p.mesh.tangent.as_ref().map_or(0, |t| t.size() as usize);
                 self.stats.staging_bytes += p.staging.as_ref().map_or(0, |s| s.size() as usize);
                 self.stats.payload_bytes += self.package.pages[i].payload_bytes as usize;
             }
             if let PageState::Ready(g) = s {
-                self.stats.cpu_ready_bytes += g.vertices.capacity() * 48 + g.indices.capacity() * 4;
+                self.stats.cpu_ready_bytes += g.vertices.capacity() * 48
+                    + g.indices.capacity() * 4
+                    + g.tangents.as_ref().map_or(0, |t| t.values.capacity() * 16);
             }
         }
         self.stats.retiring_peak = self.stats.retiring_peak.max(self.stats.retiring_bytes);

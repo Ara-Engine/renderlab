@@ -469,6 +469,7 @@ fn virtual_codec_rejects_bad_counts_cycles_references_and_domains() {
     let p = Package {
         pages: (0..2)
             .map(|_| Page {
+                tangents: None,
                 vertices: 3,
                 indices: 3,
                 payload_bytes: 156,
@@ -671,6 +672,7 @@ fn prepare(mesh: &VirtualMesh, pages: usize) -> Option<PreparedPackage> {
         pages: indices
             .into_iter()
             .map(|indices| Page {
+                tangents: None,
                 vertices: 1,
                 indices,
                 payload_bytes: 48 + 4 * indices,
