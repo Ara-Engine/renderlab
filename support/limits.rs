@@ -1,4 +1,3 @@
-//! Shared tool-only JSON policy. No serde/config dependency enters either library.
 #![allow(dead_code)]
 use crate::asset;
 use serde_json::{Map, Value, json};
@@ -74,7 +73,6 @@ const SCHEMA: &[(&str, &[&str])] = &[
     ("viewer", &["max_placement_slots"]),
 ];
 impl Policy {
-    /// Load once before ordinary flags, making explicit CLI flags win regardless of order.
     pub fn args(args: Vec<String>) -> Result<(Self, Vec<String>), String> {
         let mut policy = Self::default();
         let mut rest = Vec::new();

@@ -1,6 +1,6 @@
 # M4 execution: legal detail cuts and bounded geometry residency
 
-Authorized by Islam's M2–M4 request. M3 is accepted with its sampler correction. M4 has working bounded streaming and verified moving-image corrections, but performance, constrained progress and final acceptance remain open. This specializes the already reviewed [M4 contract](m2-m4-design.md). Pstack uses Sol for implementation and Opus for the requested hillclimb and consequential reviews. Root owns verification and publication. Stop after M4.
+Completed under Islam's M2–M4 authorization. M4 has independent Opus acceptance after verified review corrections. See [the final verification](m4-final-verification.md) for the capacity matrix, images, optimized observations, live interaction, development measurements and accepted limits. The staged instructions below preserve the execution history of the reviewed [M4 contract](m2-m4-design.md). Pstack used Sol for implementation and Opus for the requested hillclimb and consequential reviews. Stop after M4; this plan authorizes no further work.
 
 ## Throughput and units
 

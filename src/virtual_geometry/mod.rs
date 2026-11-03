@@ -448,8 +448,8 @@ impl VirtualAsset {
                 1,
             ),
         ])?;
-        // Bound every possible page/staging accounting sum by actual package size, not a config maximum.
-        checked_bytes([(package.pages.len(), PAGE_BYTES * 2)])?;
+        let _maximum_page_and_staging_bytes =
+            checked_bytes([(package.pages.len(), PAGE_BYTES * 2)])?;
         if metadata_bytes > options.metadata_bytes {
             return Err(Error::InvalidInput(
                 "virtual retained metadata capacity exceeds metadata_bytes",

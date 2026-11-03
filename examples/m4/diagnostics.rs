@@ -1,6 +1,58 @@
 use super::*;
 use asset::virtual_mesh::{GroupId, PageId, VirtualMesh};
 
+pub fn verify_cover(
+    asset: &VirtualAsset,
+    scene: &VirtualScene,
+    options: StreamOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let s = asset.stats();
+    if s.geometry_bytes > options.geometry_bytes
+        || s.geometry_peak > options.geometry_bytes
+        || s.metadata_bytes + s.scratch_bound_bytes > options.metadata_bytes
+        || s.cpu_ready_bytes > s.cpu_io_bound_bytes
+        || s.texture_bytes > options.texture_bytes
+        || s.candidates > options.max_candidates
+        || s.cut_clusters > options.max_clusters
+    {
+        return Err("replay resource/work budget exceeded".into());
+    }
+    for (placement, selection) in asset.package().placements.iter().zip(scene.selections()) {
+        let mesh = &asset.package().meshes[placement.mesh as usize];
+        let active: BTreeSet<_> = selection.cut.active_groups.iter().copied().collect();
+        if active.len() != selection.cut.active_groups.len()
+            || mesh.terminal_groups().any(|g| !active.contains(&g))
+            || mesh.clusters.iter().any(|c| {
+                c.refined.is_some_and(|r| active.contains(&r)) && !active.contains(&c.owner)
+            })
+        {
+            return Err("replay cut has incomplete replacement closure".into());
+        }
+        let expected: Vec<_> = mesh
+            .clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                active.contains(&c.owner) && c.refined.is_none_or(|r| !active.contains(&r))
+            })
+            .map(|(i, _)| asset::virtual_mesh::ClusterId(i as u32))
+            .collect();
+        let pages: BTreeSet<_> = expected
+            .iter()
+            .map(|c| mesh.clusters[c.index()].page)
+            .collect();
+        if expected != selection.cut.clusters
+            || pages.iter().copied().collect::<Vec<_>>() != selection.cut.pages
+            || pages
+                .iter()
+                .any(|&p| asset.status(p) != Some(PageStatus::Resident))
+        {
+            return Err("replay cut is not the complete resident cluster cover".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn groups(
     path: &std::path::Path,
     asset: &VirtualAsset,

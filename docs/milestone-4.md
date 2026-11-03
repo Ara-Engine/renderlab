@@ -1,6 +1,6 @@
 # Milestone 4: bounded virtual geometry
 
-In progress. Registered geometry, bounded streaming, GPU lifetimes, constrained progress, development selection and prepared first-image quality have accepted checkpoints. Independent Opus review accepted the startup and saturated-debt retention correction after root reproduction. Development policy limits are now configurable. Complete capacity/failure reconciliation, live interaction and final measurements/acceptance remain open. Follow [the execution plan](milestone-4-plan.md); stop after M4. There is no demonstrated advantage over Nanite or Unreal.
+Complete for the registered Windows/Vulkan scope, with independent Opus acceptance and verified review corrections. Registered geometry, bounded streaming, GPU lifetimes, constrained progress, development selection and prepared first-image quality have accepted checkpoints. Development policy limits are configurable. The [capacity/failure matrix and optimized observations](m4-acceptance-matrix.md) and [root live-viewer/development verification](m4-final-verification.md) record final evidence and accepted limitations. Live checks corrected progressive surface acquisition and startup-marker defects; review corrected retained-frame teardown. The unexplained resize outlier remains disclosed. [The execution plan](milestone-4-plan.md) is complete; stop after M4. There is no demonstrated advantage over Nanite or Unreal.
 
 ## Registered content
 

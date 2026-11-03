@@ -1192,7 +1192,6 @@ fn gpu_virtual_configured_limits_use_real_quotas_and_device_admission() {
                 break;
             }
             assert!(Instant::now() < deadline);
-            // Let the real worker fill ready payloads, with no GPU work overlapping this pause.
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(a.stats().texture_bytes, 4);

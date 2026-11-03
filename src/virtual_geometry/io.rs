@@ -22,7 +22,6 @@ struct Request {
     record: Page,
     queued: Instant,
 }
-/// Bounded outstanding requests including active IO and completed CPU payloads.
 /// Drop disconnects both channels before joining; neither send nor delay can trap shutdown.
 pub(super) struct PageIo {
     requests: Option<mpsc::SyncSender<Request>>,
@@ -160,7 +159,6 @@ pub(super) fn load(
     file.read_exact(&mut header)?;
     let resources = u32::from_le_bytes(header[20..24].try_into()?) as usize;
     // Reserve the encoded metadata AND decoded/validation element storage together.
-    // Resource container bytes are charged by the codec; no fixed reservation or default policy is injected.
     let length = usize::try_from(length).map_err(|_| "package exceeds host address space")?;
     let encoded_metadata = length
         .checked_sub(resources)

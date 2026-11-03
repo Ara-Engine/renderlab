@@ -1,4 +1,3 @@
-//! Runtime tool adapters, shared by the viewer and replay.
 #![allow(dead_code)]
 use crate::policy::{self, Policy};
 use renderlab::{Limits, virtual_geometry::StreamOptions};

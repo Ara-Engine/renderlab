@@ -93,6 +93,7 @@ try {
         & cargo tree --locked -p $package --edges normal,build | Set-Content "$run/$package-tree.txt"
         if ($LASTEXITCODE -ne 0) {throw 'dependency tree failed'}
         if (Select-String -Path "$run/$package-tree.txt" -Pattern 'meshopt|float-cmp| cc v|gltf| image v' -Quiet) {throw "cooker dependency leaked into $package"}
+        if ($package -ne 'renderlab-viewer' -and (Select-String -Path "$run/$package-tree.txt" -Pattern 'serde' -Quiet)) {throw "tooling serialization dependency leaked into $package"}
     }
     $after = @(Source-Hashes)
     $after | ConvertTo-Json | Set-Content "$run/source-hashes-after.json"

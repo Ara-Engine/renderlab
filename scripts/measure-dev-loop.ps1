@@ -1,6 +1,7 @@
-﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1')
+﻿param([switch]$Cold, [int]$Runs = 5, [string]$Asset = '', [ValidateSet('1', '4')][string]$Samples = '1', [string]$VirtualManifest = '', [string]$Cache = 'measurements/m4-cook/root-unit-a/cache', [string]$Cameras = '')
 $ErrorActionPreference = 'Stop'
 if ($Runs -lt 1) { throw 'Runs must be positive' }
+if ($Asset -and $VirtualManifest) { throw 'Choose an asset or a virtual manifest' }
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 Push-Location $root
 $run = Join-Path $root ('measurements/dev-loop/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -19,16 +20,21 @@ $results = [ordered]@{
     diff = (git diff --stat | Out-String)
     profile = 'dev'
     cargo_jobs = 2
-    scene = $(if ($Asset) { 'prepared asset; opaque unlit; Depth32Float; 960x640 initial window' } else { 'two indexed cubes and a triangle; Depth32Float; 960x640 initial window' })
+    scene = $(if ($VirtualManifest) { 'virtual asset with first-view preparation; opaque unlit; Depth32Float; camera-file extent when supplied, otherwise 960x640' } elseif ($Asset) { 'prepared asset; opaque unlit; Depth32Float; 960x640 initial window' } else { 'two indexed cubes and a triangle; Depth32Float; 960x640 initial window' })
     samples = [int]$Samples
     asset = $(if ($Asset) { (Resolve-Path $Asset).Path } else { $null })
     asset_sha256 = $(if ($Asset) { (Get-FileHash $Asset -Algorithm SHA256).Hash } else { $null })
+    virtual_manifest = $(if ($VirtualManifest) { (Resolve-Path $VirtualManifest).Path } else { $null })
+    virtual_manifest_sha256 = $(if ($VirtualManifest) { (Get-FileHash $VirtualManifest -Algorithm SHA256).Hash } else { $null })
+    cache = $(if ($VirtualManifest) { (Resolve-Path $Cache).Path } else { $null })
+    cameras = $(if ($Cameras) { (Resolve-Path $Cameras).Path } else { $null })
+    cameras_sha256 = $(if ($Cameras) { (Get-FileHash $Cameras -Algorithm SHA256).Hash } else { $null })
     builds = [ordered]@{}
     launches = @()
     binaries = [ordered]@{}
     vulkan_implicit_layer_path = $env:VK_IMPLICIT_LAYER_PATH
     success = $false
-    source_hashes = @(Get-FileHash -Path (@('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml') + @(Get-ChildItem src,viewer/src,shaders -Recurse -File | Select-Object -ExpandProperty FullName)) -Algorithm SHA256 | Select-Object Path,Hash)
+    source_hashes = @(Get-FileHash -Path (@('Cargo.toml', 'Cargo.lock', 'viewer/Cargo.toml', '.cargo/config.toml', 'scripts/measure-dev-loop.ps1') + @(Get-ChildItem src,viewer/src,shaders,crates/asset/src,support,examples/m4 -Recurse -File | Select-Object -ExpandProperty FullName)) -Algorithm SHA256 | Select-Object Path,Hash)
 }
 function Assert-Quiet {
     if (Get-Process -Name 'VALORANT*' -ErrorAction SilentlyContinue) { throw 'Gameplay process present; interactive measurements deferred.' }
@@ -96,6 +102,8 @@ function Launch([string]$Name) {
     $results.binaries[$Name] = (Get-FileHash target/debug/renderlab-viewer.exe -Algorithm SHA256).Hash
     $viewerArguments = @('--seconds', '25', '--samples', $Samples, '--validate')
     if ($Asset) { $viewerArguments += @('--asset', ('"' + $results.asset + '"')) }
+    if ($VirtualManifest) { $viewerArguments += @('--virtual-manifest', ('"' + $results.virtual_manifest + '"'), '--cache', ('"' + $results.cache + '"')) }
+    if ($Cameras) { $viewerArguments += @('--cameras', ('"' + $results.cameras + '"')) }
     $script:viewer = Start-Process target/debug/renderlab-viewer.exe -ArgumentList $viewerArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$run/$Name.stdout.log" -RedirectStandardError "$run/$Name.log"
     $null = $script:viewer.Handle
 }
@@ -163,7 +171,7 @@ try {
     }
     $results.rust_sha256_after = (Get-FileHash $rustPath -Algorithm SHA256).Hash
     $results.shader_sha256_after = (Get-FileHash $shaderPath -Algorithm SHA256).Hash
-    $results | ConvertTo-Json -Depth 7 | Set-Content "$run/results.json"
+    $results | ConvertTo-Json -Depth 7 | Set-Content -Encoding UTF8 "$run/results.json"
     Pop-Location
 }
 if ($results.rust_sha256_before -ne $results.rust_sha256_after -or $results.shader_sha256_before -ne $results.shader_sha256_after) { throw 'Exact source restoration failed' }

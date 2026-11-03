@@ -1427,7 +1427,6 @@ fn configured_data_and_runtime_limits_reach_bootstrap_and_preparation() {
     let mut corrupt = bytes.clone();
     corrupt[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(asset::virtual_mesh::decode(&corrupt, limits).is_err());
-    // Huge quotas cannot request huge channel allocations: capacity follows actual package pages.
     let large = VirtualAsset::new(
         asset::virtual_mesh::decode(&bytes, limits).unwrap(),
         dir,

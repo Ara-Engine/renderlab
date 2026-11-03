@@ -1,17 +1,16 @@
-#[path = "../support/limits.rs"]
-mod policy;
-#[path = "../support/runtime_policy.rs"]
-mod runtime_policy;
-// Finite registered-camera replay, with explicit full RLA and independent legal-selector controls.
 #[path = "m4/cameras.rs"]
 mod cameras;
 #[path = "m4/diagnostics.rs"]
 mod diagnostics;
+#[path = "../support/limits.rs"]
+mod policy;
 #[allow(dead_code)]
 #[path = "../viewer/src/prepared.rs"]
 mod prepared;
 #[path = "m4/replay_stats.rs"]
 mod replay_stats;
+#[path = "../support/runtime_policy.rs"]
+mod runtime_policy;
 #[path = "m4/selection_timing.rs"]
 mod selection_timing;
 #[path = "../support/validation.rs"]
@@ -46,6 +45,7 @@ struct Options {
     samples: SampleCount,
     stream: StreamOptions,
     validate: bool,
+    verify_cover: bool,
     view: ViewMode,
 }
 fn parse() -> Result<Options, Box<dyn std::error::Error>> {
@@ -76,6 +76,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
         samples: SampleCount::One,
         stream,
         validate: false,
+        verify_cover: false,
         view: ViewMode::BaseColor,
     };
     let mut args = args.into_iter();
@@ -94,6 +95,10 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
         }
         if arg == "--validate" {
             o.validate = true;
+            continue;
+        }
+        if arg == "--verify-cover" {
+            o.verify_cover = true;
             continue;
         }
         let v = args.next().ok_or("missing argument value")?;
@@ -198,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         o.output.join("run.txt"),
         format!(
-            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={} progressive={}\nargs={:?}\n",
+            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={} progressive={} verify_cover={}\nargs={:?}\n",
             if cfg!(debug_assertions) {
                 "dev"
             } else {
@@ -211,6 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             o.frame_period.as_secs_f64() * 1000.,
             o.page_log,
             o.progressive,
+            o.verify_cover,
             std::env::args().collect::<Vec<_>>()
         ),
     )?;
@@ -226,6 +232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        flags: if o.validate {
+            wgpu::InstanceFlags::debugging()
+        } else {
+            wgpu::InstanceFlags::default()
+        },
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
@@ -306,6 +317,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let mut tick = 0;
+    let mut verified_covers = 0u64;
+    let mut wall = fs::File::create(o.output.join("wall.csv"))?;
+    writeln!(
+        wall,
+        "frame,render_attempts,advance_draw_wall_us,backpressure_wait_us,work_wall_us,pacing_requested_us,pacing_actual_us"
+    )?;
     let mut color = None;
     let mut accepted = 0;
     let start = Instant::now();
@@ -423,12 +440,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+        let mut render_attempts = 0;
+        let mut advance_draw_wall = Duration::ZERO;
+        let mut backpressure_wait = Duration::ZERO;
         let report = loop {
             let attempt_start = Instant::now();
             let before = virtual_asset
                 .as_ref()
                 .map(|a| a.stats().clone())
                 .unwrap_or_default();
+            let render_start = Instant::now();
             let report = if let Some(full) = &mut full {
                 full.advance(&mut r)?;
                 if full.ready() {
@@ -458,6 +479,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o.view,
                 )?
             };
+            advance_draw_wall += render_start.elapsed();
+            render_attempts += 1;
+            if o.verify_cover
+                && let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene)
+                && scene.ready(asset)
+            {
+                diagnostics::verify_cover(asset, scene, o.stream)?;
+                verified_covers += 1;
+            }
             if !first_scene
                 && o.progressive
                 && let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene)
@@ -531,7 +561,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if Instant::now() > deadline {
                 return Err("frame/startup admission deadline exceeded".into());
             }
+            let wait = Instant::now();
             std::thread::sleep(Duration::from_millis(1));
+            backpressure_wait += wait.elapsed();
         };
         if !first_scene {
             first_scene = true;
@@ -628,7 +660,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write_start.elapsed().as_micros()
             );
         }
-        std::thread::sleep(o.frame_period.saturating_sub(frame_start.elapsed()));
+        let work_wall = frame_start.elapsed();
+        let pacing_requested = o.frame_period.saturating_sub(work_wall);
+        let pacing = Instant::now();
+        std::thread::sleep(pacing_requested);
+        writeln!(
+            wall,
+            "{index},{render_attempts},{},{},{},{},{}",
+            advance_draw_wall.as_micros(),
+            backpressure_wait.as_micros(),
+            work_wall.as_micros(),
+            pacing_requested.as_micros(),
+            pacing.elapsed().as_micros()
+        )?;
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     while r.stats().flights > 0 {
@@ -648,7 +692,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         o.output.join("summary.txt"),
         format!(
-            "mode={} frames={accepted} wall={:?}\nstream={:#?}\nrenderer={:#?}\nadapter={info:?}\n",
+            "mode={} frames={accepted} wall={:?} verified_covers={verified_covers}\nstream={:#?}\nrenderer={:#?}\nadapter={info:?}\n",
             o.mode,
             start.elapsed(),
             virtual_asset.as_ref().map(|a| a.stats()),

@@ -214,6 +214,7 @@ impl Marker {
 struct View {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+    pending_frame: Option<wgpu::SurfaceTexture>,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
     meshes: Vec<Mesh>,
@@ -243,6 +244,11 @@ struct View {
     preparation_ticks: u64,
     first_cover: bool,
     preparation_status: Option<renderlab::virtual_geometry::ViewPreparation>,
+}
+impl Drop for View {
+    fn drop(&mut self) {
+        self.pending_frame = None;
+    }
 }
 impl View {
     fn set_title(&mut self, title: String) {
@@ -309,7 +315,9 @@ impl View {
         eprintln!(
             "adapter={:?} scene={} samples={} quality=unlit_depth32float debug_build={}",
             adapter.get_info(),
-            if options.asset.is_some() {
+            if options.virtual_manifest.is_some() {
+                "virtual_asset"
+            } else if options.asset.is_some() {
                 "prepared_asset"
             } else {
                 "cubes_triangle"
@@ -376,6 +384,7 @@ impl View {
         Ok(Self {
             window,
             surface,
+            pending_frame: None,
             config,
             renderer,
             meshes: Vec::new(),
@@ -562,6 +571,27 @@ impl View {
             .transpose()?;
         let virtual_camera = registered_camera.unwrap_or_else(|| self.scene.camera(2));
         if self.presented == 0
+            && options.progressive
+            && let Some((asset, scene)) = &mut self.virtual_asset
+            && !scene.ready(asset)
+        {
+            let status =
+                asset.prepare_view(&mut self.renderer, scene, &virtual_camera, self.size.height)?;
+            self.preparation_ticks += 1;
+            self.preparation_status = Some(status);
+            if let PreparationState::Failed(page) = status.state {
+                return Err(format!(
+                    "initial progressive cover failed: {page:?}: {:?}",
+                    asset.failure(page)
+                )
+                .into());
+            }
+            if !self.shader_rejected {
+                self.set_title("Renderlab | preparing minimum cover".into());
+            }
+            return Ok(());
+        }
+        if self.presented == 0
             && !options.progressive
             && let Some((asset, scene)) = &mut self.virtual_asset
         {
@@ -619,6 +649,7 @@ impl View {
         }
         let mut configure_ms = 0.0;
         if let Some(size) = self.pending_size.take() {
+            self.pending_frame = None;
             self.config.width = size.width;
             self.config.height = size.height;
             let clock = Instant::now();
@@ -635,7 +666,10 @@ impl View {
             return Ok(());
         }
         let acquire = Instant::now();
-        let result = self.surface.get_current_texture();
+        let result = self.pending_frame.take().map_or_else(
+            || self.surface.get_current_texture(),
+            wgpu::CurrentSurfaceTexture::Success,
+        );
         let acquire_ms = acquire.elapsed().as_secs_f64() * 1000.0;
         let (frame, suboptimal) = match result {
             wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
@@ -797,6 +831,9 @@ impl View {
             let presented_at = Instant::now();
             self.presented += 1;
             for marker in &mut self.markers {
+                if marker.startup && !marker.presented {
+                    marker.revision = report.revision;
+                }
                 if marker.revision == report.revision && !marker.presented {
                     marker.emit("present_call", report.frame, presented_at);
                     marker.presented = true;
@@ -830,7 +867,8 @@ impl View {
                 self.finish_at = Some(Instant::now());
             }
         } else {
-            drop(frame);
+            // Vulkan's native discard is a no-op in wgpu-hal 30.
+            self.pending_frame = Some(frame);
         }
         if suboptimal {
             self.pending_size = Some(self.size);

@@ -48,8 +48,6 @@ fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
     ] {
         h.update((n as u64).to_le_bytes());
     }
-    // Preserve all previously published default keys. Source admission must never be skipped
-    // by a hit made with a looser source policy; keep policy in the lookup identity for that reason.
     let extra = |l: CookLimits| {
         [
             l.accessors,
@@ -432,6 +430,29 @@ pub fn cook_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn published_default_lookup_key_stays_compatible() {
+        let [(name, source), _] = crate::fixtures::sources().unwrap();
+        assert_eq!(name, "instanced-boxes.glb");
+        let settings = Settings::default();
+        let limits = CookLimits::default();
+        let default_key = key(&source, settings, limits);
+        assert_eq!(
+            hex(&default_key),
+            "a90a6bab6dc8542b560933e68715879bf3dc4be7fca65289bf1397d6469e94ac"
+        );
+        assert_ne!(
+            default_key,
+            key(
+                &source,
+                settings,
+                CookLimits {
+                    samplers: limits.samplers + 1,
+                    ..limits
+                }
+            )
+        );
+    }
     #[test]
     fn manifest_rejects_aggregate_sidecar_io_before_entry_reads() {
         let entry = Entry {
