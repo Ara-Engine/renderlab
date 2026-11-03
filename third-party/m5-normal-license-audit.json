@@ -1,0 +1,32 @@
+[
+  {
+    "package": "mikktspace-0.3.0",
+    "source": "LICENSE-MIT",
+    "file": "third-party\\licenses\\mikktspace-0.3.0\\LICENSE-MIT",
+    "sha256": "64683213376aa8247990850a6743bb101f31261cce3919c33035b835e75a8331"
+  },
+  {
+    "package": "mikktspace-0.3.0",
+    "source": "LICENSE-APACHE",
+    "file": "third-party\\licenses\\mikktspace-0.3.0\\LICENSE-APACHE",
+    "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026"
+  },
+  {
+    "package": "mikktspace-0.3.0",
+    "source": "src/generated.rs comment header",
+    "file": "third-party\\licenses\\mikktspace-0.3.0\\original-mikk-notice.txt",
+    "sha256": "93a3f3202cd5eded9a2a16cc6db65fdc6e2d779f6e7cdad3e303241ec3c22cf4"
+  },
+  {
+    "package": "glam-0.15.2",
+    "source": "LICENSE-MIT",
+    "file": "third-party\\licenses\\glam-0.15.2\\LICENSE-MIT",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+  },
+  {
+    "package": "glam-0.15.2",
+    "source": "LICENSE-APACHE",
+    "file": "third-party\\licenses\\glam-0.15.2\\LICENSE-APACHE",
+    "sha256": "be33ddb87a30fd321ab100e2d922cba512e50ec7a63d8e62e5bfc0798dd4b585"
+  }
+]
