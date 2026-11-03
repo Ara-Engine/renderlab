@@ -1,0 +1,51 @@
+# Unreal M5 calibration preparation
+
+This is a **prepared, unrun** direct-light calibration bootstrap for installed UE **5.7.4 CL 51494982**, not evidence of image correctness or Unreal parity. Generated projects, imported content and captures stay outside the public repository. No scan assets are imported. The lighting implementation owns the eventual shared fixture and preset; this bootstrap does not claim to match an independently authored Renderlab scene.
+
+Generate files without launching Unreal, compiling shaders or using the GPU:
+
+```powershell
+py -3 -B scripts/ue-m5-prepare.py
+py -3 -B scripts/ue-m5-test.py
+```
+
+The default destination is `D:/Coding/renderlab-work/ue-m5`. The generator checks available space (at least 2 GiB for preparation, not a shader-cache capacity guarantee), pins the installed build and writes a content-only `.uproject`, Python/editor-scripting plugin settings, a private filesystem DDC graph, `scene.json`, `expected.json` and two future launch scripts. It neither installs packages nor starts a service. Only the installed built-in plane/cube are referenced; UE assets/source are not copied into this repository.
+
+After root explicitly assigns the UE GPU/heavy-build slot, the next commands are:
+
+```powershell
+& D:/Coding/renderlab-work/ue-m5/prepare-assets.ps1
+& D:/Coding/renderlab-work/ue-m5/capture.ps1
+```
+
+The first runs `UnrealEditor-Cmd.exe <project> -run=pythonscript -script=<prepare-assets.py> -NullRHI -unattended -nop4 -nosound -ddc=RenderlabLocalDDC`. It saves only `/Game/M5/Calibration` and its material. **NullRHI produces no rendered image and cannot verify image quality.** The second runs the same Python commandlet with `-AllowCommandletRendering -vulkan` instead of `-NullRHI`; the generated scripts contain exact absolute paths and independent logs. This commandlet capture path is supported by the documented APIs, but the combination has not yet been executed locally. Resolve any startup/API/RHI failure before drawing image conclusions. Neither command starts an interactive viewer intentionally; reserve a runtime slot for both, including possible shader work.
+
+The generator overwrites its configuration/scripts, not unrelated files. To adapt the calibration, copy `scene.json`, change the explicit supported inputs, then regenerate with `--scene <path>`. Its versioned schema intentionally supports only axis-aligned plane/box geometry, one white directional light, black environment and a specular-free Lambert material. Unsupported effects, assets and 4x inputs are rejected. Material edits regenerate the owned graph; level regeneration replaces only `M5_` actors and refuses foreign actors. A changed scene hash requires preparation again before capture.
+
+## Calibration contract
+
+- Source coordinates are right-handed metres, X right, Y up, with camera forward -Z. Convert to UE centimetres by `UE = 100 * (-Z, X, Y)`. This changes handedness. It is not a general mesh importer; winding, tangents and texture orientation must be addressed when the final fixture needs them.
+- The bootstrap is a four-metre horizontal 18% linear diffuse plane and a one-metre cube, illuminated from overhead at 1000 lux. Material specular=0, metallic=0, roughness=1 isolate Lambert response; this differs from Renderlab's ordinary dielectric F0=.04. The patch expectation is `L = .18 * 1000 / pi = 57.2957795 cd/m²` at normal incidence. Establish the same specular-free case or an independent BRDF reference in the final Renderlab fixture; do not remove the mismatch by silently adjusting its light.
+- `scene.json` records all positions, dimensions, camera eye/target and vertical FOV. UE receives horizontal FOV calculated from aspect ratio. `expected.json` contains independent projected-pixel expectations and a canonical scene SHA256, generator/helper identities and engine build. `prepared.json` later records actual UE actor bounds.
+- Camera roll is fixed with source +Y up. Pixel coordinates have a top-left origin and describe continuous pixel positions; establish half-pixel conventions and tolerances on the actual rasterized landmarks. Current probes are geometric expectations, not visible rendered markers.
+- Manual exposure is selected, physical-camera exposure disabled, bias zero and pre-exposure disabled. HDR scene colour bypasses the display curve. The offline display contract is `x = max(0, L) * 2**exposure_stops`, `y = x/(1+x)`, then the standard sRGB transfer (`12.92*y` below .0031308, otherwise `1.055*y**(1/2.4)-.055`). Both engines must use the same implementation and stops; `display_rgb()` in the generator provides that pure CPU function after either engine's HDR has been decoded into unexposed linear RGB. EXR decoding/image comparison is left to the runtime verification unit. Default -6 is a recorded bootstrap choice.
+
+No skylight, reflection capture, fog or atmosphere actor is created. Config and capture show flags disable GI/Lumen, SSR/reflection environment, AO/DFAO, contact shadows, all direct shadows/VSM, bloom, vignette, grain and motion blur. Manual capture disables AA. `capture.json` and console-query logs later record effective settings; config text alone is not settings evidence. Missing/unknown CVars in the log invalidate that part of the evidence. Shadows remain absent until the matching M6 unit.
+
+## Linear output and timing boundaries
+
+The capture uses `SceneCaptureComponent2D.capture_scene()`, `SCS_SCENE_COLOR_HDR`, a `RTF_RGBA16F` target and synchronous `ImageWriteBlueprintLibrary.export_to_disk()` with `DesiredImageFormat.EXR`, uncompressed. The intended output is `Artifacts/scene-linear.exr`, scene-linear RGB without UE tone mapping; alpha is inverse opacity. EXR magic/existence checks only prove a file was written. First verify RGB values, channel interpretation, finite values, clipping and actual exposure scale with the Lambert patch. Preserve radiance files before applying the shared offline display transform; do not compare UE filmic screenshots with Renderlab Reinhard images.
+
+`capture.json` measures loading/shader completion separately from the CPU wall span enclosing capture submission plus synchronous GPU readback and EXR encoding. That span includes complete capture work and export overhead; it is **not** GPU frame time, a selected-pass sum or steady-state throughput. Each launch script also measures the entire process through exit, including startup, loading, shader work, capture/export and shutdown. Record CPU/GPU/driver/hardware, backend, contention and build identity with any future paired sample. A fair throughput comparison needs the same output/readback obligations and separate CPU-critical-path and full GPU-span evidence, followed by a matched runtime workload if editor overhead matters. These bootstrap timings cannot establish the 2x gate.
+
+First-run shader/DDC cost is unknown and can be minutes and gigabytes even for a tiny content-only project. There is no C++ game module to compile. The private graph reuses the installed read-only compressed DDC and stores new entries under the private project. Reusing a warm cache changes startup/compilation cost; record cold versus warm separately. Check disk again before launch; preparation's space check does not reserve shader-cache space.
+
+## Next verification, in order
+
+1. Obtain the lighting owner's final fixture/preset and content identity. Translate its exact inputs explicitly; unsupported geometry/materials require a deliberate small extension. Keep `matched_renderlab_fixture` null until the shared identity is established, then record that identity/hash on both sides.
+2. Prepare and capture once in the assigned slot. Check logs for missing APIs/CVars, shader fallback or RHI errors; inspect the actual bounds, projected scale, camera axes and rasterized landmarks against `expected.json` and the final Renderlab fixture.
+3. Check the black background and interior Lambert patch against independent radiance, then exposure, finite/clipping counts and the identical offline display transform. Inspect the full image, including cube silhouettes and surfaces. File creation or a NullRHI exit is not acceptance.
+4. Start with one matched 1x sample after correctness. **No 4x parity claim:** 4x requires UE forward rendering (`r.ForwardShading=1`), MSAA (`r.AntiAliasingMethod=3`, `r.MSAACount=4`), a renderer restart/shader preparation, and actual renderer/sample-resolve evidence beyond those CVar values. Confirm that the chosen capture path itself uses the expected samples; this bootstrap rejects 4x rather than inferring it from a setting.
+5. Add point/spot/material cases from the final fixture, then the private quarry only after calibration. Future point/spot units are candela with inverse-square falloff, source radius zero and attenuation radius converted to centimetres; range/cone functions still need matching. GI, reflections and atmosphere remain excluded on both sides. No quality or performance superiority has been established.
+
+API evidence: the local installation ships headers but no generated `unreal.py` stub was found. Public Python names were checked against Epic's versioned [5.7 scene capture API](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/SceneCaptureComponent2D?application_version=5.7), [render-target API](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/RenderingLibrary?application_version=5.7), [image export API](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/ImageWriteBlueprintLibrary?application_version=5.7), [EXR options](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/ImageWriteOptions?application_version=5.7), [level subsystem](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/LevelEditorSubsystem?application_version=5.7) and [loading completion API](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/AutomationLibrary?application_version=5.7). Local public declarations independently confirm the capture enums, float target, EXR options, light properties and show flags. Developer-mode Python stubs may be generated on the first authorized UE run. Source/docs inspection is not runtime verification; no Unreal implementation code is reproduced here.
