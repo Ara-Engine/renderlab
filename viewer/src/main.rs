@@ -7,6 +7,7 @@ use renderlab::asset;
 mod cameras;
 mod fixture;
 mod prepared;
+mod surface_probe;
 use renderlab::virtual_geometry::{
     PreparationState, SelectorMode, StreamOptions, VirtualAsset, VirtualScene,
 };
@@ -56,6 +57,7 @@ struct Options {
     seconds: Option<f64>,
     timestamps: bool,
     log_frames: bool,
+    trace_surface: bool,
     validate: bool,
     instances: u32,
     asset: Option<PathBuf>,
@@ -80,6 +82,7 @@ impl Options {
             seconds: None,
             timestamps: true,
             log_frames: false,
+            trace_surface: false,
             validate: false,
             instances: 2,
             asset: None,
@@ -198,6 +201,7 @@ impl Options {
                 "--shader" => options.shader = args.next().ok_or("missing shader path")?.into(),
                 "--no-timestamps" => options.timestamps = false,
                 "--log-frames" => options.log_frames = true,
+                "--trace-surface" => options.trace_surface = true,
                 "--validate" => options.validate = true,
                 _ if !arg.starts_with('-') => options.shader = arg.into(),
                 _ => return Err(format!("unknown argument {arg}")),
@@ -241,6 +245,7 @@ impl Marker {
     }
 }
 struct View {
+    surface_probe: surface_probe::SurfaceProbe,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     pending_frame: Option<wgpu::SurfaceTexture>,
@@ -418,6 +423,7 @@ impl View {
             );
         }
         Ok(Self {
+            surface_probe: surface_probe::SurfaceProbe::new(options.trace_surface),
             window,
             surface,
             pending_frame: None,
@@ -461,7 +467,10 @@ impl View {
         })
     }
     fn wake(&mut self, options: &Options) -> Result<bool, Box<dyn std::error::Error>> {
-        let events = self.renderer.poll()?;
+        let probe = self.surface_probe.begin("poll");
+        let events = self.renderer.poll();
+        probe.end(if events.is_ok() { "ok" } else { "error" });
+        let events = events?;
         for completion in events.completed {
             if let Some(frame) = completion.frame {
                 for marker in &mut self.markers {
@@ -593,7 +602,9 @@ impl View {
         }
         let mut configure_ms = 0.0;
         if let Some(pending) = &mut self.pending_size {
+            let probe = self.surface_probe.begin("release_frame");
             self.pending_frame = None;
+            probe.end("returned");
             let flights = self.renderer.stats().flights;
             if flights != 0 {
                 if pending.deferrals == 0 {
@@ -613,9 +624,11 @@ impl View {
                 "configure_begin width={} height={} flights=0 pending_frame=false wait_ms={wait_ms:.3} deferrals={}",
                 pending.size.width, pending.size.height, pending.deferrals
             );
+            let probe = self.surface_probe.begin("configure");
             let clock = Instant::now();
             self.surface.configure(self.renderer.device(), &self.config);
             configure_ms = clock.elapsed().as_secs_f64() * 1000.0;
+            probe.end("returned");
             self.configured = true;
             eprintln!(
                 "configure_ms={configure_ms:.3} width={} height={}",
@@ -758,12 +771,26 @@ impl View {
                 }
             }
         }
+        let probe = self.surface_probe.begin(if self.pending_frame.is_some() {
+            "reuse_frame"
+        } else {
+            "acquire"
+        });
         let acquire = Instant::now();
         let result = self.pending_frame.take().map_or_else(
             || self.surface.get_current_texture(),
             wgpu::CurrentSurfaceTexture::Success,
         );
         let acquire_ms = acquire.elapsed().as_secs_f64() * 1000.0;
+        probe.end(match &result {
+            wgpu::CurrentSurfaceTexture::Success(_) => "success",
+            wgpu::CurrentSurfaceTexture::Suboptimal(_) => "suboptimal",
+            wgpu::CurrentSurfaceTexture::Outdated => "outdated",
+            wgpu::CurrentSurfaceTexture::Timeout => "timeout",
+            wgpu::CurrentSurfaceTexture::Occluded => "occluded",
+            wgpu::CurrentSurfaceTexture::Lost => "lost",
+            wgpu::CurrentSurfaceTexture::Validation => "validation",
+        });
         let (frame, suboptimal) = match result {
             wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
@@ -918,10 +945,15 @@ impl View {
                     report.scene
                 );
             }
+            let probe = self.surface_probe.begin("pre_present_notify");
             self.window.pre_present_notify();
+            probe.end("returned");
+            let probe = self.surface_probe.begin("present");
             let present = Instant::now();
-            self.renderer.present(frame)?;
+            let result = self.renderer.present(frame);
             let presented_at = Instant::now();
+            probe.end(if result.is_ok() { "ok" } else { "error" });
+            result?;
             self.presented += 1;
             for marker in &mut self.markers {
                 if marker.startup && !marker.presented {
@@ -998,6 +1030,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => events.exit(),
             WindowEvent::Resized(size) => {
+                view.surface_probe.event("resize");
                 view.size = size;
                 view.pending_size = Some(PendingResize::new(size));
                 eprintln!("resize_requested={}x{}", size.width, size.height);
@@ -1040,7 +1073,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let before = view.presented;
-                if let Err(error) = view.redraw(&self.options) {
+                let probe = view.surface_probe.begin("redraw");
+                let result = view.redraw(&self.options);
+                probe.end(if result.is_ok() { "ok" } else { "error" });
+                if let Err(error) = result {
                     self.stop(events, error);
                 } else if view.presented == before {
                     view.retry_redraw_at = Instant::now() + RETRY_INTERVAL;
@@ -1064,7 +1100,10 @@ impl ApplicationHandler for App {
             {
                 view.finish_at.get_or_insert(Instant::now());
             }
-            match view.wake(&self.options) {
+            let probe = view.surface_probe.begin("wake");
+            let result = view.wake(&self.options);
+            probe.end(if result.is_ok() { "ok" } else { "error" });
+            match result {
                 Ok(true) => {
                     eprintln!(
                         "viewer_finished presented={} stats={:?}",

@@ -1,2 +1,4 @@
 date	unit	decision	reason	evidence	status
 2026-11-03	contract	Start M5-M6 here and isolate two M4 follow-ups	Islam explicitly authorizes parallel hillclimbs and lighting/shadows; Unreal quality and at least 2x performance are the acceptance floor	docs/milestones-5-6.md	implementation authorized; comparative gate unproven
+2026-11-03	M4-stream-H1	Revert mesh-local page-array attempt; preserve candidate	Focused correctness passed but two contended pairs did not establish a reliable whole-frame gain	streaming worktree .refs/m4-stream-followup/handoff.md and candidate.patch	no accepted speedup; 8 ms target still unmet
+2026-11-03	M4-resize	Accept opt-in lifecycle probes after bounded native verification	Same-source control/probe runs recover images with clean active validation; no slow post-initial configure recurred	docs/resize-followup.md	verified diagnostics; historical cause inconclusive

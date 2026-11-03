@@ -150,11 +150,13 @@ def run(args):
     cameras["frames"] = cameras["frames"][:1]
     held_camera = output / "held-camera.json"
     held_camera.write_text(json.dumps(cameras))
-    command = [str(args.viewer.resolve()), "--validate", "--samples", "4", "--log-frames",
+    command = [str(args.viewer.resolve()), "--validate", "--samples", str(args.samples), "--log-frames",
                "--seconds", "180", "--shader", str(shader), "--cameras", str(held_camera),
                "--limits", str(args.limits.resolve()), "--anisotropy", str(args.anisotropy)]
     if args.interactive_camera:
         command += ["--interactive-camera"]
+    if args.trace_surface:
+        command += ["--trace-surface"]
     if args.asset:
         command += ["--asset", str(args.asset.resolve())]
     else:
@@ -175,10 +177,11 @@ def run(args):
         if time.monotonic() < next_guard:
             return
         next_guard = time.monotonic() + 1
-        tasks = subprocess.check_output(["tasklist.exe", "/FO", "CSV"],
-                                        creationflags=subprocess.CREATE_NO_WINDOW).lower()
-        if any(name in tasks for name in (b"valorant-win64-shipping", b"fortniteclient", b"eldenring")):
-            raise RuntimeError("protected game active")
+        if not args.allow_game_active:
+            tasks = subprocess.check_output(["tasklist.exe", "/FO", "CSV"],
+                                            creationflags=subprocess.CREATE_NO_WINDOW).lower()
+            if any(name in tasks for name in (b"valorant-win64-shipping", b"fortniteclient", b"eldenring")):
+                raise RuntimeError("protected game active")
         if Path("D:/AraBuild/render-v3/quiet-window.lock").exists():
             raise RuntimeError("another GPU quiet window is active")
 
@@ -223,7 +226,10 @@ def run(args):
         before = log().count("resize_requested=")
         configured = log().count("\nconfigure_ms=")
         guard()
+        event("resize_call_begin", width=width, height=height)
+        started = time.monotonic_ns()
         window.resize(width, height)
+        event("resize_call_end", elapsed_ms=(time.monotonic_ns() - started) / 1e6)
         wait("resize_requested=", before)
         if expect_frame:
             wait("\nconfigure_ms=", configured)
@@ -305,6 +311,7 @@ def run(args):
     report.update(command=command, pid=process.pid if process else None,
                   exit=process.returncode if process else None, error=error,
                   forced_termination=forced,
+                  game_guard_overridden=args.allow_game_active,
                   binary_sha256=hashlib.sha256(args.viewer.read_bytes()).hexdigest(),
                   head=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
                   source_sha256={str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -336,7 +343,11 @@ def main():
     native.add_argument("--io-delay-ms", type=int, default=1000)
     native.add_argument("--capture", action="store_true")
     native.add_argument("--anisotropy", type=int, choices=range(1, 17), default=1)
+    native.add_argument("--samples", type=int, choices=(1, 4), default=4)
     native.add_argument("--interactive-camera", action="store_true")
+    native.add_argument("--trace-surface", action="store_true")
+    native.add_argument("--allow-game-active", action="store_true",
+                        help="explicit operator authorization; observations remain contended")
     args = parser.parse_args()
     if args.command == "analyze":
         print(json.dumps({str(path): summarize(path.read_text(errors="replace")) for path in args.logs}, indent=2))
