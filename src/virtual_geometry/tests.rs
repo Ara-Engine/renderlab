@@ -391,6 +391,173 @@ pub(crate) fn retire_for_inflight_test(a: &mut VirtualAsset, completed: u64) {
         completed,
     );
 }
+
+// A frozen conservative watermark isolates admission from asynchronous queue progress. The
+// separate wave test still requires real unfinished draws while evicting their last-use pages.
+pub(crate) fn admission_accounting(r: &mut Renderer) {
+    fn scan_policy(a: &mut VirtualAsset, charge: usize, protected: &[PageId], completed: u64) {
+        for id in 0..a.states.len() {
+            if a.geometry_charge() + charge <= a.options.geometry_bytes {
+                break;
+            }
+            if protected.binary_search(&PageId(id as u32)).is_ok() {
+                continue;
+            }
+            if matches!(a.states[id], PageState::Resident(_)) {
+                let PageState::Resident(p) =
+                    std::mem::replace(&mut a.states[id], PageState::Missing)
+                else {
+                    unreachable!()
+                };
+                a.stats.inflight_retirements += u64::from(p.last_use > completed);
+                a.states[id] = PageState::Retiring(p);
+                a.stats.evictions += 1;
+                a.revision += 1;
+                a.snapshot();
+            }
+            a.complete(completed);
+        }
+    }
+    fn state_summary(a: &VirtualAsset, completed: u64) -> Vec<(PageStatus, usize, bool, bool)> {
+        a.states
+            .iter()
+            .map(|s| {
+                let p = s.gpu();
+                (
+                    s.status(),
+                    p.and_then(|p| p.staging.as_ref())
+                        .map_or(0, |b| b.size() as usize),
+                    p.is_some_and(|p| p.upload <= completed),
+                    p.is_some_and(|p| p.last_use <= completed),
+                )
+            })
+            .collect()
+    }
+    fn fixture_asset(r: &mut Renderer) -> (VirtualAsset, u64, u64) {
+        let (package, blobs) = fixture(10);
+        let data = decode_page(
+            &package.pages[0],
+            &blobs[0],
+            Sha256::digest(&blobs[0]).into(),
+        )
+        .unwrap();
+        let mut a = VirtualAsset::new(
+            package,
+            PathBuf::from("measurements/m4-stream/admission/accounting-test"),
+            StreamOptions {
+                geometry_bytes: 8 * PAGE_BYTES + 624,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for id in [0, 1, 2, 3, 5, 6, 9] {
+            let mut page = r.try_upload_virtual_page(&data).unwrap().unwrap();
+            r.test_drain("admission fixture upload");
+            if id != 3 {
+                page.staging = None;
+            }
+            a.states[id] = match id {
+                3 => PageState::Uploading(page),
+                5 | 6 => PageState::Retiring(page),
+                _ => PageState::Resident(page),
+            };
+        }
+        let completed = r.completed_submission();
+        let page = r.try_upload_virtual_page(&data).unwrap().unwrap();
+        let later = page.upload;
+        assert!(later > completed);
+        a.states[4] = PageState::Uploading(page);
+        if let PageState::Resident(p) = &mut a.states[1] {
+            p.last_use = later;
+        }
+        if let PageState::Retiring(p) = &mut a.states[6] {
+            p.last_use = later;
+        }
+        a.states[7] = PageState::Queued;
+        a.states[8] = PageState::Ready(data);
+        a.outstanding = 2;
+        a.snapshot();
+        r.test_drain("admission frozen watermark fixture complete");
+        (a, completed, later)
+    }
+    for protected in [
+        vec![PageId(0), PageId(9)],
+        vec![PageId(0), PageId(1), PageId(2), PageId(9)],
+        (0..10).map(PageId).collect(),
+    ] {
+        for charge in [0, 312, PAGE_BYTES, 2 * PAGE_BYTES, 5 * PAGE_BYTES] {
+            let (mut actual, completed, later) = fixture_asset(r);
+            let (mut expected, reference_completed, _) = fixture_asset(r);
+            actual.make_room(charge, &protected, completed);
+            scan_policy(&mut expected, charge, &protected, reference_completed);
+            actual.snapshot();
+            expected.snapshot();
+            assert_eq!(
+                state_summary(&actual, completed),
+                state_summary(&expected, reference_completed)
+            );
+            let a = actual.stats();
+            let b = expected.stats();
+            assert_eq!(
+                (
+                    a.states,
+                    [
+                        a.geometry_bytes,
+                        a.geometry_peak,
+                        a.published_bytes,
+                        a.retiring_bytes,
+                        a.retiring_peak,
+                        a.staging_bytes,
+                        a.staging_peak,
+                        a.owned_gpu_geometry_bytes,
+                        a.payload_bytes,
+                        a.pinned_bytes,
+                        a.cpu_ready_bytes,
+                    ],
+                    a.evictions,
+                    a.inflight_retirements
+                ),
+                (
+                    b.states,
+                    [
+                        b.geometry_bytes,
+                        b.geometry_peak,
+                        b.published_bytes,
+                        b.retiring_bytes,
+                        b.retiring_peak,
+                        b.staging_bytes,
+                        b.staging_peak,
+                        b.owned_gpu_geometry_bytes,
+                        b.payload_bytes,
+                        b.pinned_bytes,
+                        b.cpu_ready_bytes,
+                    ],
+                    b.evictions,
+                    b.inflight_retirements
+                ),
+                "charge={charge} protected={protected:?}"
+            );
+            assert_eq!(actual.revision, expected.revision);
+            assert_eq!(a.geometry_bytes, actual.geometry_charge());
+            assert!(a.geometry_peak <= actual.options.geometry_bytes);
+            assert_eq!(actual.status(PageId(0)), Some(PageStatus::Resident));
+            assert_eq!(actual.status(PageId(9)), Some(PageStatus::Resident));
+            assert_eq!(actual.status(PageId(4)), Some(PageStatus::Uploading));
+            assert_eq!(actual.status(PageId(6)), Some(PageStatus::Retiring));
+            assert!(actual.states[4].gpu().unwrap().staging.is_some());
+            if charge == 5 * PAGE_BYTES {
+                assert!(actual.geometry_charge() + charge > actual.options.geometry_bytes);
+            }
+            actual.complete(later);
+            actual.snapshot();
+            assert_eq!(actual.status(PageId(4)), Some(PageStatus::Resident));
+            assert_eq!(actual.status(PageId(6)), Some(PageStatus::Missing));
+            assert_eq!(actual.stats().staging_bytes, 0);
+            assert_eq!(actual.stats().retiring_bytes, 0);
+            assert_eq!(actual.stats().geometry_bytes, actual.geometry_charge());
+        }
+    }
+}
 #[test]
 fn simple_reference_matches_baseline_at_equal_budgets_and_shared_admission_releases() {
     let (p, _) = fixture(4);

@@ -5,6 +5,15 @@ use crate::virtual_geometry::{
     *,
 };
 use sha2::{Digest, Sha256};
+#[test]
+#[ignore = "Vulkan GPU; exact admission accounting and conservative completion against scan policy"]
+fn gpu_virtual_admission_accounting() {
+    let _validation = validation::begin(true);
+    let (device, queue) = device(true);
+    let mut r = Renderer::new(device, queue, FORMAT, Limits::default(), SOURCE).unwrap();
+    crate::virtual_geometry::tests::admission_accounting(&mut r);
+}
+
 fn virtual_frame(
     r: &mut Renderer,
     color: &wgpu::Texture,

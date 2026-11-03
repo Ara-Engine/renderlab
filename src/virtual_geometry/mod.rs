@@ -571,8 +571,12 @@ impl VirtualAsset {
             .sum()
     }
     fn make_room(&mut self, charge: usize, protected: &[PageId], completed: u64) {
+        self.snapshot();
+        let mut used = self.stats.geometry_bytes;
+        let mut retiring = self.stats.retiring_bytes;
+        let mut completed_once = false;
         for id in 0..self.states.len() {
-            if self.geometry_charge() + charge <= self.options.geometry_bytes {
+            if used + charge <= self.options.geometry_bytes {
                 break;
             }
             if protected.binary_search(&PageId(id as u32)).is_ok() {
@@ -584,14 +588,33 @@ impl VirtualAsset {
                 else {
                     unreachable!()
                 };
+                let releasable = p.last_use <= completed;
+                let allocation = PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize);
                 self.stats.inflight_retirements += u64::from(p.last_use > completed);
                 self.states[id] = PageState::Retiring(p);
                 self.stats.evictions += 1;
                 self.revision += 1;
-                self.snapshot();
+                // Observe the transient retirement even when its last use is already complete.
+                retiring += PAGE_BYTES;
+                self.stats.retiring_peak = self.stats.retiring_peak.max(retiring);
+                if completed_once && releasable {
+                    self.states[id] = PageState::Missing;
+                    used -= allocation;
+                    retiring -= PAGE_BYTES;
+                }
             }
-            // Charge the retiring allocation until completion, even if no longer caller-selected.
-            self.complete(completed);
+            if !completed_once {
+                // Keep the original first-eligible completion point. At this fixed watermark,
+                // only the new retirements above can become releasable after this one scan.
+                self.complete(completed);
+                self.snapshot();
+                used = self.stats.geometry_bytes;
+                retiring = self.stats.retiring_bytes;
+                completed_once = true;
+            }
+        }
+        if completed_once {
+            self.snapshot();
         }
     }
     fn snapshot(&mut self) {
@@ -623,7 +646,11 @@ impl VirtualAsset {
         }
         self.stats.retiring_peak = self.stats.retiring_peak.max(self.stats.retiring_bytes);
         self.stats.staging_peak = self.stats.staging_peak.max(self.stats.staging_bytes);
-        self.stats.geometry_bytes = self.geometry_charge();
+        self.stats.geometry_bytes = (self.stats.states[PageStatus::Uploading as usize]
+            + self.stats.states[PageStatus::Resident as usize]
+            + self.stats.states[PageStatus::Retiring as usize])
+            * PAGE_BYTES
+            + self.stats.staging_bytes;
         self.stats.geometry_peak = self.stats.geometry_peak.max(self.stats.geometry_bytes);
         self.stats.pinned_bytes = self
             .roots
