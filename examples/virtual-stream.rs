@@ -6,6 +6,8 @@ mod diagnostics;
 #[allow(dead_code)]
 #[path = "../viewer/src/prepared.rs"]
 mod prepared;
+#[path = "m4/replay_stats.rs"]
+mod replay_stats;
 #[path = "m4/selection_timing.rs"]
 mod selection_timing;
 #[path = "../support/validation.rs"]
@@ -31,6 +33,7 @@ struct Options {
     settle_final: usize,
     hold_pose: bool,
     page_log: bool,
+    progressive: bool,
     frame_period: Duration,
     repeats: usize,
     cpu_stride: usize,
@@ -54,6 +57,7 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
         settle_final: 0,
         hold_pose: false,
         page_log: false,
+        progressive: false,
         frame_period: Duration::ZERO,
         repeats: 5,
         cpu_stride: 30,
@@ -65,6 +69,10 @@ fn parse() -> Result<Options, Box<dyn std::error::Error>> {
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--progressive" {
+            o.progressive = true;
+            continue;
+        }
         if arg == "--hold-pose" {
             o.hold_pose = true;
             continue;
@@ -158,6 +166,7 @@ impl Hidden for std::process::Command {
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let process_start = Instant::now();
     let o = parse()?;
     guard()?;
     let _validation = validation::begin(o.validate);
@@ -174,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         o.output.join("run.txt"),
         format!(
-            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={}\nargs={:?}\n",
+            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={} progressive={}\nargs={:?}\n",
             if cfg!(debug_assertions) {
                 "dev"
             } else {
@@ -186,6 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             o.validate,
             o.frame_period.as_secs_f64() * 1000.,
             o.page_log,
+            o.progressive,
             std::env::args().collect::<Vec<_>>()
         ),
     )?;
@@ -211,6 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RendererOptions { samples: o.samples },
         include_str!("../shaders/scene.wgsl"),
     )?;
+    let device_ready_us = process_start.elapsed().as_micros();
     let mut full = o
         .asset
         .as_deref()
@@ -226,11 +237,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(VirtualScene::from_package)
         .transpose()?;
-    let mut csv = fs::File::create(o.output.join("frames.csv"))?;
+    let asset_ready_us = process_start.elapsed().as_micros();
+    let mut startup = fs::File::create(o.output.join("startup.csv"))?;
+    writeln!(startup, "event,process_us,ticks,reads,uploads,submissions")?;
     writeln!(
-        csv,
-        "frame,phase,prep_us,encode_us,submit_us,projection_total_us,selection_total_us,admission_total_us,reads,uploads,geometry,peak,published,retiring,staging,pinned,payload,owned_buffers,metadata,scratch,cpu_ready,cut_clusters,candidates,visits,unresolved,max_error,candidate_debt,output_debt,residency_debt,selection_runs,io_queue_total_us,io_read_total_us,io_verify_total_us,failures,retries,evictions,retained_cuts,selection_calls,completion_total_us,resources_total_us,protection_total_us,stale_ready_total_us,make_room_total_us,upload_admission_total_us,requests_total_us,snapshot_total_us,dropped_ready,page_log_total_us"
+        startup,
+        "device_ready,{device_ready_us},0,0,0,{}",
+        r.stats().submissions
     )?;
+    writeln!(
+        startup,
+        "asset_ready,{asset_ready_us},0,0,0,{}",
+        r.stats().submissions
+    )?;
+    let mut preparation = fs::File::create(o.output.join("preparation.csv"))?;
+    replay_stats::header(&mut preparation)?;
+    let mut preparation_ticks = fs::File::create(o.output.join("preparation-ticks.csv"))?;
+    writeln!(
+        preparation_ticks,
+        "tick,process_us,advance_us,poll_us,state,cover_ready,pending_pages,failed_pages,submissions,flights"
+    )?;
+    let mut preparation_count = 0usize;
+    let mut first_cover = false;
+    let mut startup_base = StreamStats::default();
+    let mut first_scene = false;
+    let mut csv = fs::File::create(o.output.join("frames.csv"))?;
+    replay_stats::header(&mut csv)?;
+    let mut warmup = fs::File::create(o.output.join("warmup.csv"))?;
+    replay_stats::header(&mut warmup)?;
     let mut gpu = fs::File::create(o.output.join("gpu.csv"))?;
     writeln!(gpu, "frame,mesh_pass_us")?;
     let mut page_log = if o.page_log {
@@ -250,7 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = o.frames + o.warmup + o.settle_final;
     for n in 0..total {
         let frame_start = Instant::now();
-        if n % 60 == 0 {
+        if n > 0 && n % 60 == 0 {
             guard()?;
         }
         let index = if n < o.warmup || o.hold_pose {
@@ -281,7 +315,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let color = color.as_ref().unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
+        // Hold the requested first pose through real streaming preparation. These ticks have
+        // their own complete work records, before normal-frame cumulative counters begin.
+        if !first_scene
+            && !o.progressive
+            && let (Some(asset), Some(scene)) = (&mut virtual_asset, &mut virtual_scene)
+        {
+            loop {
+                let advance_start = Instant::now();
+                let p = asset.prepare_view(&mut r, scene, &camera, pose.height)?;
+                let advance_us = advance_start.elapsed().as_micros();
+                let poll_start = Instant::now();
+                r.poll()?;
+                let poll_us = poll_start.elapsed().as_micros();
+                if let Some(log) = &mut page_log {
+                    log.sample(tick, index, asset, scene)?;
+                }
+                tick += 1;
+                preparation_count += 1;
+                replay_stats::row(
+                    &mut preparation,
+                    preparation_count as u64,
+                    &format!("{:?}", p.state),
+                    None,
+                    asset.stats(),
+                    page_log.as_ref().map_or(0, |l| l.overhead.as_micros()),
+                )?;
+                writeln!(
+                    preparation_ticks,
+                    "{},{},{advance_us},{poll_us},{:?},{},{},{},{},{}",
+                    preparation_count,
+                    process_start.elapsed().as_micros(),
+                    p.state,
+                    p.cover_ready,
+                    p.pending_pages,
+                    p.failed_pages,
+                    r.stats().submissions,
+                    r.stats().flights
+                )?;
+                if p.cover_ready && !first_cover {
+                    first_cover = true;
+                    writeln!(
+                        startup,
+                        "first_cover,{},{},{},{},{}",
+                        process_start.elapsed().as_micros(),
+                        preparation_count,
+                        asset.stats().reads,
+                        asset.stats().uploads,
+                        r.stats().submissions
+                    )?;
+                }
+                match p.state {
+                    PreparationState::Pending => {}
+                    PreparationState::Failed(page) => {
+                        return Err(format!(
+                            "initial cover failed: {page:?}: {:?}",
+                            asset.failure(page)
+                        )
+                        .into());
+                    }
+                    PreparationState::Settled | PreparationState::Degraded => {
+                        eprintln!(
+                            "first_view_preparation={p:?} process_us={} stream={:?} renderer={:?}",
+                            process_start.elapsed().as_micros(),
+                            asset.stats(),
+                            r.stats()
+                        );
+                        startup_base = asset.stats().clone();
+                        break;
+                    }
+                }
+                if Instant::now() > deadline {
+                    return Err("initial view preparation deadline exceeded".into());
+                }
+                std::thread::sleep(
+                    o.frame_period
+                        .max(Duration::from_millis(1))
+                        .saturating_sub(advance_start.elapsed()),
+                );
+            }
+        }
         let report = loop {
+            let attempt_start = Instant::now();
+            let before = virtual_asset
+                .as_ref()
+                .map(|a| a.stats().clone())
+                .unwrap_or_default();
             let report = if let Some(full) = &mut full {
                 full.advance(&mut r)?;
                 if full.ready() {
@@ -294,6 +413,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     None
                 }
+            } else if !first_scene && !o.progressive {
+                r.try_render_prepared_virtual(
+                    color,
+                    &camera,
+                    virtual_asset.as_mut().unwrap(),
+                    virtual_scene.as_mut().unwrap(),
+                    o.view,
+                )?
             } else {
                 r.try_render_virtual(
                     color,
@@ -303,6 +430,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o.view,
                 )?
             };
+            if !first_scene
+                && o.progressive
+                && let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene)
+            {
+                let p = scene.preparation(asset, &camera, pose.height)?;
+                if let PreparationState::Failed(page) = p.state {
+                    return Err(format!(
+                        "initial progressive cover failed: {page:?}: {:?}",
+                        asset.failure(page)
+                    )
+                    .into());
+                }
+                if p.cover_ready && !first_cover {
+                    first_cover = true;
+                    writeln!(
+                        startup,
+                        "first_cover,{},{},{},{},{}",
+                        process_start.elapsed().as_micros(),
+                        preparation_count,
+                        asset.stats().reads,
+                        asset.stats().uploads,
+                        r.stats().submissions
+                    )?;
+                }
+                if report.is_none() {
+                    preparation_count += 1;
+                    replay_stats::row(
+                        &mut preparation,
+                        preparation_count as u64,
+                        "progressive-admission",
+                        None,
+                        asset.stats(),
+                        0,
+                    )?;
+                    writeln!(
+                        preparation_ticks,
+                        "{},{},{},0,{:?},{},{},{},{},{}",
+                        preparation_count,
+                        process_start.elapsed().as_micros(),
+                        attempt_start.elapsed().as_micros(),
+                        p.state,
+                        p.cover_ready,
+                        p.pending_pages,
+                        p.failed_pages,
+                        r.stats().submissions,
+                        r.stats().flights
+                    )?;
+                } else {
+                    // The successful render attempt belongs to normal frame 0; preceding
+                    // non-presenting admission attempts belong to preparation.csv.
+                    startup_base = before;
+                }
+            }
             if let (Some(log), Some(asset), Some(scene)) =
                 (&mut page_log, &virtual_asset, &virtual_scene)
             {
@@ -325,7 +505,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
+        if !first_scene {
+            first_scene = true;
+            let stats = virtual_asset
+                .as_ref()
+                .map(|a| a.stats().clone())
+                .unwrap_or_default();
+            if !first_cover {
+                writeln!(
+                    startup,
+                    "first_cover,{},{},{},{},{}",
+                    process_start.elapsed().as_micros(),
+                    preparation_count,
+                    stats.reads,
+                    stats.uploads,
+                    r.stats().submissions
+                )?;
+            }
+            writeln!(
+                startup,
+                "first_scene_submitted,{},{},{},{},{}",
+                process_start.elapsed().as_micros(),
+                preparation_count,
+                stats.reads,
+                stats.uploads,
+                r.stats().submissions
+            )?;
+        }
         if n < o.warmup {
+            let stats = virtual_asset
+                .as_ref()
+                .map(|a| a.stats().clone())
+                .unwrap_or_default();
+            replay_stats::row(
+                &mut warmup,
+                pose.frame,
+                "explicit-warmup-delta",
+                Some(&report),
+                &replay_stats::since(&stats, &startup_base),
+                0,
+            )?;
+            startup_base = stats;
             std::thread::sleep(o.frame_period.saturating_sub(frame_start.elapsed()));
             continue;
         }
@@ -334,57 +554,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|a| a.stats().clone())
             .unwrap_or_default();
-        writeln!(
-            csv,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        replay_stats::row(
+            &mut csv,
             pose.frame,
-            pose.phase,
-            report.cpu.preparation.as_micros(),
-            report.cpu.encode.as_micros(),
-            report.cpu.submit.as_micros(),
-            s.projection.as_micros(),
-            s.selection.as_micros(),
-            s.admission.as_micros(),
-            s.reads,
-            s.uploads,
-            s.geometry_bytes,
-            s.geometry_peak,
-            s.published_bytes,
-            s.retiring_bytes,
-            s.staging_bytes,
-            s.pinned_bytes,
-            s.payload_bytes,
-            s.owned_gpu_geometry_bytes,
-            s.metadata_bytes,
-            s.scratch_bound_bytes,
-            s.cpu_ready_bytes,
-            s.cut_clusters,
-            s.candidates,
-            s.cluster_visits,
-            s.unresolved_groups,
-            s.maximum_denied_error,
-            s.candidate_debt,
-            s.output_debt,
-            s.residency_debt,
-            s.selection_runs,
-            s.io_queue.as_micros(),
-            s.io_read.as_micros(),
-            s.io_verify.as_micros(),
-            s.failures,
-            s.retries,
-            s.evictions,
-            s.retained_cuts,
-            s.selection_calls,
-            s.completion.as_micros(),
-            s.resources.as_micros(),
-            s.protection.as_micros(),
-            s.stale_ready.as_micros(),
-            s.make_room.as_micros(),
-            s.upload_admission.as_micros(),
-            s.requests.as_micros(),
-            s.snapshot.as_micros(),
-            s.dropped_ready,
-            page_log.as_ref().map_or(0, |l| l.overhead.as_micros())
+            &pose.phase,
+            Some(&report),
+            &replay_stats::since(&s, &startup_base),
+            page_log.as_ref().map_or(0, |l| l.overhead.as_micros()),
         )?;
         let final_pose = o.start + o.frames - 1;
         let final_capture = o.hold_pose || (o.settle_final > 0 && index == final_pose);

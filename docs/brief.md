@@ -6,6 +6,8 @@ Islam wants a separate, public Rust rendering library/engine on this PC, useful 
 
 The immediate motivation is unacceptable iteration speed in the large engine. Treat development latency as a product feature: immediate parameter changes, shader edits without Rust rebuilds, short incremental Rust rebuilds, and prepared scene assets reused across launches.
 
+Islam additionally requires development policy limits to be configurable or explicitly disableable where valid. Small source-file, texture, metadata and streaming-work defaults must not become permanent product ceilings. Expose effective limits through the library and relevant tools, while preserving structural validation, checked arithmetic, format constraints and device limits. Implement this after the active M4 startup correction to avoid conflicting edits and measurement identities. Keep registered test budgets unchanged so prior evidence remains comparable. Removing a policy cap does not establish large-asset scalability; that still requires measurement.
+
 The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
 
 ## Long-term quality and performance target
@@ -22,7 +24,7 @@ M2's persistent instancing and conservative visibility are complete, with root v
 
 M3's prepared assets, isolated cooker, material rendering and 1x/4x AA are complete after independent Opus review and a verified sampler correction. [Milestone 3](milestone-3.md) records images, resource stress, live interaction, development latency and carried limitations. M4's bounded virtual geometry follows [its execution plan](milestone-4-plan.md).
 
-M4 has registered dense fixtures, legal-cut proofs, bounded streaming and safe retirement. Sampled normal moving images pass, the development selection target passes, and constrained refinement/coarsening now makes verified progress. Repeated page-eviction scans have been removed with verified accounting equivalence. Remaining work covers startup quality, final capacity/failure coverage, live interaction and development-loop measurements. [Milestone 4](milestone-4.md) records identities, checks and remaining failures; final independent acceptance is still pending.
+M4 has registered dense fixtures, legal-cut proofs, bounded streaming and safe retirement. Sampled normal moving images pass, the development selection target passes, and constrained refinement/coarsening now makes verified progress. Repeated page-eviction scans have been removed with verified accounting equivalence. Prepared first-image quality and a saturated-debt detail-retention correction have independent Opus acceptance. Remaining work covers configurable development limits, final capacity/failure coverage, live interaction and development-loop measurements. [Milestone 4](milestone-4.md) records identities, checks and remaining failures; final independent acceptance is still pending.
 
 ## Milestone 0: development environment (complete)
 

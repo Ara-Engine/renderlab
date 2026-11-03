@@ -194,6 +194,41 @@ impl Renderer {
             ));
         }
         asset.advance(self, scene, camera, color.height())?;
+        self.render_virtual_cover(color, camera, asset, scene, view_mode)
+    }
+    /// Draw the current view after `VirtualAsset::prepare_view` has settled. Does not advance
+    /// streaming a second time. Degraded preparation draws its legal fallback; inspect the status
+    /// before calling to label that outcome. After first presentation use `try_render_virtual`.
+    pub fn try_render_prepared_virtual(
+        &mut self,
+        color: &wgpu::Texture,
+        camera: &Camera,
+        asset: &mut crate::virtual_geometry::VirtualAsset,
+        scene: &mut crate::virtual_geometry::VirtualScene,
+        view_mode: ViewMode,
+    ) -> Result<Option<FrameReport>, Error> {
+        self.validate_color(color)?;
+        self.virtual_identity(&mut asset.renderer)?;
+        use crate::virtual_geometry::PreparationState;
+        match scene.preparation(asset, camera, color.height())?.state {
+            PreparationState::Pending => return Ok(None),
+            PreparationState::Failed(_) => {
+                return Err(Error::InvalidInput(
+                    "virtual cover page failed; inspect asset.failure and explicitly retry after repair",
+                ));
+            }
+            PreparationState::Settled | PreparationState::Degraded => {}
+        }
+        self.render_virtual_cover(color, camera, asset, scene, view_mode)
+    }
+    fn render_virtual_cover(
+        &mut self,
+        color: &wgpu::Texture,
+        camera: &Camera,
+        asset: &mut crate::virtual_geometry::VirtualAsset,
+        scene: &mut crate::virtual_geometry::VirtualScene,
+        view_mode: ViewMode,
+    ) -> Result<Option<FrameReport>, Error> {
         if !scene.ready(asset) {
             return Ok(None);
         }

@@ -1237,3 +1237,87 @@ fn shrinking_cuts_keep_minimum_output_admitted_across_scenes() {
         assert_eq!(a.stats.cut_clusters, 4);
     }
 }
+
+#[test]
+fn saturated_debt_does_not_discard_a_resident_required_boundary() {
+    let (mut p, _) = fixture(3);
+    let (branch, _) = fixture(2);
+    let offset = p.meshes[0].clusters.len() as u32;
+    for mut group in branch.meshes[0].groups.clone() {
+        group.clusters.offset += offset;
+        p.meshes[0].groups.push(group);
+    }
+    for mut c in branch.meshes[0].clusters.clone() {
+        c.owner.0 += 3;
+        c.refined = c.refined.map(|g| GroupId(g.0 + 3));
+        c.page.0 += 3;
+        p.meshes[0].clusters.push(c);
+    }
+    p.pages.extend(branch.pages);
+    p.validate(VirtualLimits::default()).unwrap();
+    let mesh = &p.meshes[0];
+    let budget = SelectionBudget {
+        geometry_bytes: 5 * PAGE_BYTES,
+        max_candidates: 20,
+        max_clusters: 20,
+        max_scratch_bytes: METADATA_LIMIT,
+    };
+    let old = select_with_protected(
+        mesh,
+        &[10., 20., f64::INFINITY, f64::INFINITY, f64::INFINITY],
+        1.,
+        &[true, false, true, false, true],
+        budget,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(old.cut.pages, [PageId(0), PageId(4)]);
+    let errors = [0., 20., f64::INFINITY, f64::INFINITY, f64::INFINITY];
+    let available = [true, false, true, true, true];
+    let protected = [PageId(0), PageId(2), PageId(4)];
+    let mut next =
+        select_with_protected(mesh, &errors, 1., &available, budget, &protected).unwrap();
+    assert_eq!(next.cut.pages, [PageId(2), PageId(3)]);
+    assert_eq!(next.debt.maximum_denied_error, 20.);
+    assert!(
+        retain_better_cut(
+            Some(&old),
+            &mut next,
+            &errors,
+            1.,
+            &available,
+            &protected,
+            RetentionBudget {
+                roots: &[PageId(2), PageId(4)],
+                geometry_bytes: budget.geometry_bytes,
+                max_clusters: 20
+            }
+        ),
+        "finite debt discarded a required resident boundary because unrelated debt was infinite"
+    );
+    assert_eq!(next.cut, old.cut);
+    assert!(next.debt.maximum_denied_error.is_infinite());
+    let refined =
+        select_from_cut(mesh, &errors, 1., &available, budget, &protected, &next.cut).unwrap();
+    assert_eq!(refined.cut.pages, [PageId(0), PageId(3)]);
+    assert_eq!(refined.debt.unresolved_groups, 0);
+    let finite_errors = [0., 20., f64::INFINITY, 40., f64::INFINITY];
+    let mut finite =
+        select_with_protected(mesh, &finite_errors, 1., &available, budget, &protected).unwrap();
+    assert!(
+        !retain_better_cut(
+            Some(&old),
+            &mut finite,
+            &finite_errors,
+            1.,
+            &available,
+            &protected,
+            RetentionBudget {
+                roots: &[PageId(2), PageId(4)],
+                geometry_bytes: budget.geometry_bytes,
+                max_clusters: 20
+            }
+        ),
+        "finite debt comparisons must retain their existing ordering"
+    );
+}

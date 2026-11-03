@@ -5,6 +5,292 @@ use crate::virtual_geometry::{
     *,
 };
 use sha2::{Digest, Sha256};
+
+// Keep the startup correction's real-disk fixtures with its evidence, including standalone runs.
+fn startup_directory(label: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("RENDERLAB_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "measurements/m4-stream/startup/tests".into());
+    let path = root.join(format!(
+        "{}-{label}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&path).unwrap();
+    path
+}
+#[test]
+#[ignore = "Vulkan GPU; first-view preparation, delayed disk IO, invalidation and quiescence"]
+fn gpu_virtual_first_view_preparation() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let color = target(r.device(), 1920, 1080);
+    let (package, blobs) = fixture(3);
+    let dir = startup_directory("gpu-preparation");
+    write_pages(&package, &blobs, &dir);
+    let mut a = VirtualAsset::new(
+        package,
+        dir,
+        StreamOptions {
+            io_delay: Duration::from_millis(100),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut scene = VirtualScene::from_package(&a).unwrap();
+    let cam = camera(0.);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut saw_coarse_cover = false;
+    let mut requested_camera = cam;
+    let mut requested_height = 1080;
+    let start = Instant::now();
+    let mut ticks = 0;
+    let mut longest_tick = Duration::ZERO;
+    loop {
+        let before = a.stats().clone();
+        let tick_start = Instant::now();
+        let p = a
+            .prepare_view(&mut r, &mut scene, &requested_camera, requested_height)
+            .unwrap();
+        longest_tick = longest_tick.max(tick_start.elapsed());
+        ticks += 1;
+        assert!(a.stats().reads - before.reads <= READ_SLOTS as u64);
+        assert!(a.stats().uploads - before.uploads <= UPLOADS_PER_FRAME as u64);
+        assert!(r.stats().flights <= 3);
+        assert!(a.stats().geometry_peak <= a.options().geometry_bytes);
+        if p.cover_ready && scene.selections()[0].cut.pages != [PageId(0)] {
+            assert_eq!(
+                p.state,
+                PreparationState::Pending,
+                "cover-ready coarse geometry was declared prepared"
+            );
+            assert!(
+                r.try_render_prepared_virtual(
+                    &color,
+                    &requested_camera,
+                    &mut a,
+                    &mut scene,
+                    ViewMode::BaseColor
+                )
+                .unwrap()
+                .is_none()
+            );
+            if !saw_coarse_cover {
+                // Change all preparation inputs while real delayed detail is still pending.
+                requested_camera = camera(0.1);
+                requested_height = 720;
+                scene.set(0, Mat4::from_translation(Vec3::X)).unwrap();
+                assert_eq!(
+                    scene
+                        .preparation(&a, &requested_camera, requested_height)
+                        .unwrap()
+                        .state,
+                    PreparationState::Pending
+                );
+            }
+            saw_coarse_cover = true;
+        }
+        if p.state != PreparationState::Pending {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        r.poll().unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(saw_coarse_cover);
+    assert_eq!(scene.selections()[0].cut.pages, [PageId(0)]);
+    assert_eq!(
+        scene
+            .preparation(&a, &requested_camera, requested_height)
+            .unwrap()
+            .state,
+        PreparationState::Settled
+    );
+    assert_eq!(
+        scene.preparation(&a, &cam, requested_height).unwrap().state,
+        PreparationState::Pending
+    );
+    assert_eq!(
+        scene
+            .preparation(&a, &requested_camera, 1080)
+            .unwrap()
+            .state,
+        PreparationState::Pending
+    );
+    scene.set(0, Mat4::from_translation(Vec3::Y)).unwrap();
+    assert_eq!(
+        scene
+            .preparation(&a, &requested_camera, requested_height)
+            .unwrap()
+            .state,
+        PreparationState::Pending
+    );
+    scene.set(0, Mat4::IDENTITY).unwrap();
+    while a
+        .prepare_view(&mut r, &mut scene, &cam, 1080)
+        .unwrap()
+        .state
+        == PreparationState::Pending
+    {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = a.stats().clone();
+    for _ in 0..300 {
+        assert_eq!(
+            a.prepare_view(&mut r, &mut scene, &cam, 1080)
+                .unwrap()
+                .state,
+            PreparationState::Settled
+        );
+    }
+    assert_eq!(a.stats().reads, before.reads);
+    assert_eq!(a.stats().uploads, before.uploads);
+    assert_eq!(a.stats().selection_runs, before.selection_runs);
+    let before = a.stats().clone();
+    assert!(
+        r.try_render_prepared_virtual(&color, &cam, &mut a, &mut scene, ViewMode::BaseColor)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(a.stats().reads, before.reads);
+    assert_eq!(a.stats().uploads, before.uploads);
+    assert_eq!(a.stats().selection_runs, before.selection_runs);
+    eprintln!(
+        "startup_delayed_io delay_ms=100 elapsed_us={} ticks={ticks} longest_tick_us={} quiet=300",
+        start.elapsed().as_micros(),
+        longest_tick.as_micros()
+    );
+}
+#[test]
+#[ignore = "Vulkan GPU; finite startup for real missing/corrupt files and constrained budgets, explicit repair"]
+fn gpu_virtual_first_view_failure_and_capacity() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let color = target(r.device(), 1920, 1080);
+    let cam = camera(0.);
+    for case in [
+        "missing-root",
+        "corrupt-detail",
+        "geometry",
+        "output",
+        "candidates",
+    ] {
+        let (mut package, blobs) = fixture(if case == "output" { 2 } else { 3 });
+        if case == "output" {
+            // One coarse span covers both triangles; refinement needs two output spans.
+            package.meshes[0].clusters.pop();
+            package.meshes[0].clusters[2].indices.count = 6;
+            package.meshes[0].groups[1].clusters.count = 1;
+        }
+        let dir = startup_directory("gpu-preparation-failure");
+        write_pages(&package, &blobs, &dir);
+        let bad = if case == "missing-root" { 2 } else { 0 };
+        let path = dir.join(
+            package.pages[bad]
+                .sha256
+                .iter()
+                .map(|v| format!("{v:02x}"))
+                .collect::<String>(),
+        );
+        if case == "missing-root" {
+            fs::remove_file(&path).unwrap();
+        }
+        if case == "corrupt-detail" {
+            fs::write(&path, [0; PAGE_BYTES]).unwrap();
+        }
+        let options = StreamOptions {
+            geometry_bytes: if case == "geometry" {
+                2 * PAGE_BYTES
+            } else {
+                8 << 20
+            },
+            max_clusters: if case == "output" { 1 } else { 65536 },
+            max_candidates: if case == "candidates" { 0 } else { 1 },
+            ..Default::default()
+        };
+        let mut a = VirtualAsset::new(package, dir, options).unwrap();
+        let mut scene = VirtualScene::from_package(&a).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let p = loop {
+            let p = a.prepare_view(&mut r, &mut scene, &cam, 1080).unwrap();
+            if p.state != PreparationState::Pending {
+                break p;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preparation never terminated: {case}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        if case == "missing-root" {
+            assert_eq!(p.state, PreparationState::Failed(PageId(2)));
+            assert!(!p.cover_ready);
+            assert!(
+                r.try_render_prepared_virtual(
+                    &color,
+                    &cam,
+                    &mut a,
+                    &mut scene,
+                    ViewMode::BaseColor
+                )
+                .is_err()
+            );
+        } else {
+            assert_eq!(p.state, PreparationState::Degraded);
+            if case == "output" {
+                assert!(p.output_limited);
+            }
+            assert!(p.cover_ready);
+            assert!(
+                r.try_render_prepared_virtual(
+                    &color,
+                    &cam,
+                    &mut a,
+                    &mut scene,
+                    ViewMode::BaseColor
+                )
+                .unwrap()
+                .is_some()
+            );
+        }
+        assert!(a.stats().geometry_peak <= options.geometry_bytes);
+        let before = a.stats().clone();
+        for _ in 0..300 {
+            assert_eq!(a.prepare_view(&mut r, &mut scene, &cam, 1080).unwrap(), p);
+        }
+        assert_eq!(a.stats().reads, before.reads, "unasked retry: {case}");
+        assert_eq!(a.stats().uploads, before.uploads);
+        assert_eq!(a.stats().selection_runs, before.selection_runs);
+        if case == "missing-root" || case == "corrupt-detail" {
+            assert!(a.failure(PageId(bad as u32)).is_some());
+            fs::write(&path, &blobs[bad]).unwrap();
+            a.retry(PageId(bad as u32)).unwrap();
+            assert_eq!(
+                scene.preparation(&a, &cam, 1080).unwrap().state,
+                PreparationState::Pending
+            );
+            loop {
+                let p = a.prepare_view(&mut r, &mut scene, &cam, 1080).unwrap();
+                if p.state != PreparationState::Pending {
+                    assert_eq!(p.state, PreparationState::Settled);
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        eprintln!(
+            "startup_failure_capacity case={case} status={p:?} reads={} failures={} retries={}",
+            a.stats().reads,
+            a.stats().failures,
+            a.stats().retries
+        );
+    }
+}
 #[test]
 #[ignore = "Vulkan GPU; exact admission accounting and conservative completion against scan policy"]
 fn gpu_virtual_admission_accounting() {

@@ -2,7 +2,9 @@
 mod cameras;
 mod fixture;
 mod prepared;
-use renderlab::virtual_geometry::{SelectorMode, StreamOptions, VirtualAsset, VirtualScene};
+use renderlab::virtual_geometry::{
+    PreparationState, SelectorMode, StreamOptions, VirtualAsset, VirtualScene,
+};
 #[path = "../../support/validation.rs"]
 mod validation;
 use fixture::Scene;
@@ -35,6 +37,7 @@ struct Options {
     instances: u32,
     asset: Option<PathBuf>,
     virtual_manifest: Option<PathBuf>,
+    progressive: bool,
     cache: PathBuf,
     cameras: Option<PathBuf>,
     stream: StreamOptions,
@@ -53,6 +56,7 @@ impl Options {
             instances: 2,
             asset: None,
             virtual_manifest: None,
+            progressive: false,
             cache: "measurements/m4-cook/root-unit-a/cache".into(),
             cameras: None,
             stream: StreamOptions::default(),
@@ -62,6 +66,7 @@ impl Options {
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--progressive" => options.progressive = true,
                 "--virtual-manifest" => {
                     options.virtual_manifest = Some(args.next().ok_or("missing manifest")?.into())
                 }
@@ -224,6 +229,10 @@ struct View {
     occluded: bool,
     presented: u64,
     finish_at: Option<Instant>,
+    startup: Instant,
+    preparation_ticks: u64,
+    first_cover: bool,
+    preparation_status: Option<renderlab::virtual_geometry::ViewPreparation>,
 }
 impl View {
     fn set_title(&mut self, title: String) {
@@ -256,6 +265,9 @@ impl View {
                 Ok((asset, scene))
             })
             .transpose()?;
+        if virtual_asset.is_some() {
+            eprintln!("virtual_metadata_ready_us={}", start.elapsed().as_micros());
+        }
         let window = Arc::new(
             events.create_window(
                 Window::default_attributes()
@@ -329,6 +341,12 @@ impl View {
             "timing_status={:?} measurement_definition=m1_async_not_m0",
             renderer.stats().timing
         );
+        if virtual_asset.is_some() {
+            eprintln!(
+                "virtual_device_renderer_ready_us={}",
+                start.elapsed().as_micros()
+            );
+        }
         Ok(Self {
             window,
             surface,
@@ -364,6 +382,10 @@ impl View {
             occluded: false,
             presented: 0,
             finish_at: None,
+            startup: start,
+            preparation_ticks: 0,
+            first_cover: false,
+            preparation_status: None,
         })
     }
     fn wake(&mut self, options: &Options) -> Result<bool, Box<dyn std::error::Error>> {
@@ -501,6 +523,74 @@ impl View {
         {
             return Ok(());
         }
+        let registered_camera = self
+            .cameras
+            .as_ref()
+            .map(|c| {
+                let pose = &c.frames[(self.presented as usize).min(c.frames.len() - 1)];
+                if options.log_frames {
+                    eprintln!("registered_pose={} phase={}", pose.frame, pose.phase);
+                }
+                pose.camera()
+            })
+            .transpose()?;
+        let virtual_camera = registered_camera.unwrap_or_else(|| self.scene.camera(2));
+        if self.presented == 0
+            && !options.progressive
+            && let Some((asset, scene)) = &mut self.virtual_asset
+        {
+            let clock = Instant::now();
+            let status =
+                asset.prepare_view(&mut self.renderer, scene, &virtual_camera, self.size.height)?;
+            self.preparation_ticks += 1;
+            if status.cover_ready && !self.first_cover {
+                self.first_cover = true;
+                eprintln!(
+                    "virtual_first_cover_us={} ticks={}",
+                    self.startup.elapsed().as_micros(),
+                    self.preparation_ticks
+                );
+            }
+            if options.log_frames {
+                eprintln!(
+                    "virtual_preparation_tick={} advance_us={} status={status:?} stream={:?} renderer={:?}",
+                    self.preparation_ticks,
+                    clock.elapsed().as_micros(),
+                    asset.stats(),
+                    self.renderer.stats()
+                );
+            }
+            let changed = self.preparation_status != Some(status);
+            self.preparation_status = Some(status);
+            match status.state {
+                PreparationState::Pending => {
+                    if !self.shader_rejected {
+                        self.set_title("Renderlab | preparing first view".into());
+                    }
+                    return Ok(());
+                }
+                PreparationState::Failed(page) => {
+                    return Err(format!(
+                        "initial virtual cover failed: {page:?}: {:?}",
+                        asset.failure(page)
+                    )
+                    .into());
+                }
+                PreparationState::Degraded => {
+                    if changed {
+                        eprintln!("virtual_initial_degraded={status:?}");
+                    }
+                    if !self.shader_rejected {
+                        self.set_title("Renderlab | initial view limited by capacity or failed pages; see terminal".into());
+                    }
+                }
+                PreparationState::Settled => {
+                    if !self.shader_rejected {
+                        self.set_title(TITLE.into());
+                    }
+                }
+            }
+        }
         let mut configure_ms = 0.0;
         if let Some(size) = self.pending_size.take() {
             self.config.width = size.width;
@@ -541,29 +631,58 @@ impl View {
                 return Err("surface validation failed; restart required".into());
             }
         };
-        let registered_camera = self
-            .cameras
-            .as_ref()
-            .map(|c| {
-                let pose = &c.frames[(self.presented as usize).min(c.frames.len() - 1)];
-                if options.log_frames {
-                    eprintln!("registered_pose={} phase={}", pose.frame, pose.phase);
-                }
-                pose.camera()
-            })
-            .transpose()?;
         let (report, caller_ms, render_ms) = if let Some((asset, scene)) = &mut self.virtual_asset {
             let caller_start = Instant::now();
-            let camera = registered_camera.unwrap_or_else(|| self.scene.camera(2));
+            let camera = virtual_camera;
             let caller_ms = caller_start.elapsed().as_secs_f64() * 1000.;
             let render_start = Instant::now();
-            let report = self.renderer.try_render_virtual(
-                &frame.texture,
-                &camera,
-                asset,
-                scene,
-                self.view_mode,
-            )?;
+            let report = if self.presented == 0 && !options.progressive {
+                self.renderer.try_render_prepared_virtual(
+                    &frame.texture,
+                    &camera,
+                    asset,
+                    scene,
+                    self.view_mode,
+                )?
+            } else {
+                self.renderer.try_render_virtual(
+                    &frame.texture,
+                    &camera,
+                    asset,
+                    scene,
+                    self.view_mode,
+                )?
+            };
+            if self.presented == 0 && options.progressive {
+                let status = scene.preparation(asset, &camera, frame.texture.height())?;
+                if let PreparationState::Failed(page) = status.state {
+                    return Err(format!(
+                        "initial progressive cover failed: {page:?}: {:?}",
+                        asset.failure(page)
+                    )
+                    .into());
+                }
+                self.preparation_status = Some(status);
+            }
+            if report.is_some() && self.presented == 0 {
+                if !self.first_cover {
+                    self.first_cover = true;
+                    eprintln!(
+                        "virtual_first_cover_us={} ticks={}",
+                        self.startup.elapsed().as_micros(),
+                        self.preparation_ticks
+                    );
+                }
+                eprintln!(
+                    "virtual_first_scene_submitted_us={} ticks={} progressive={} status={:?} stream={:?} renderer={:?}",
+                    self.startup.elapsed().as_micros(),
+                    self.preparation_ticks,
+                    options.progressive,
+                    self.preparation_status,
+                    asset.stats(),
+                    self.renderer.stats()
+                );
+            }
             if options.log_frames {
                 eprintln!("virtual_stats={:?}", asset.stats());
             }

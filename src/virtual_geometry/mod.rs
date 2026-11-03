@@ -66,6 +66,26 @@ pub enum PageStatus {
     Retiring,
     Failed,
 }
+/// Preparation describes attainable work at a fixed view, not a visual-quality certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparationState {
+    Pending,
+    Settled,
+    Degraded,
+    /// A pinned cover page failed. No complete scene image can be presented.
+    Failed(PageId),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewPreparation {
+    pub state: PreparationState,
+    pub cover_ready: bool,
+    pub pending_pages: usize,
+    pub failed_pages: usize,
+    pub unresolved_groups: usize,
+    pub candidate_limited: bool,
+    pub output_limited: bool,
+    pub geometry_limited: bool,
+}
 /// Retained until an internal submission watermark proves its last queue use complete.
 pub(crate) struct GpuPage {
     pub mesh: crate::Mesh,
@@ -206,7 +226,7 @@ pub struct VirtualAsset {
     options: StreamOptions,
     pub(crate) textures: Vec<Texture>,
     pub(crate) materials: Vec<Material>,
-    renderer: Option<Arc<()>>,
+    pub(crate) renderer: Option<Arc<()>>,
     pub(crate) identity: Arc<()>,
     revision: u64,
     outstanding: usize,
@@ -415,6 +435,19 @@ impl VirtualAsset {
     }
     pub fn stats(&self) -> &StreamStats {
         &self.stats
+    }
+    /// One bounded nonblocking preparation tick, through the ordinary streaming path.
+    /// Keep servicing events/polling between ticks. Pending never authorizes a finished first image;
+    /// Degraded permits an explicitly labelled fallback, and Failed has no complete cover.
+    pub fn prepare_view(
+        &mut self,
+        renderer: &mut Renderer,
+        scene: &mut VirtualScene,
+        camera: &Camera,
+        height: u32,
+    ) -> Result<ViewPreparation, Error> {
+        self.advance(renderer, scene, camera, height)?;
+        scene.preparation(self, camera, height)
     }
     /// Nonblocking progress. Call once per frame/wake before rendering. Roots load through the same
     /// worker and charged upload path as detail. No image is published until minimum cover is usable.
@@ -664,7 +697,8 @@ impl VirtualAsset {
     }
 }
 // A previous cut is already a proved complete cover. Keep it while IO is pending only when
-// it has less projected debt AND its pages plus next demand fit the same transition budget.
+// it has less projected debt, or avoids losing a required boundary under saturated debt.
+// Its pages plus next demand must still fit the same transition budget.
 // The metadata selector remains pure and independently comparable; this is publication policy.
 struct RetentionBudget<'a> {
     roots: &'a [PageId],
@@ -705,8 +739,15 @@ fn retain_better_cut(
             maximum = maximum.max(error);
         }
     }
-    if maximum > next.debt.maximum_denied_error
-        || (maximum == next.debt.maximum_denied_error && denied >= next.debt.unresolved_groups)
+    // Near-crossing bounds saturate even for fine groups. A finite aggregate can hide a
+    // newly lost required boundary; refine the useful resident cover instead.
+    let loses_required_boundary = maximum.is_infinite()
+        && previous.cut.active_groups.iter().any(|g| {
+            errors[g.index()] > threshold && next.cut.active_groups.binary_search(g).is_err()
+        });
+    if !loses_required_boundary
+        && (maximum > next.debt.maximum_denied_error
+            || (maximum == next.debt.maximum_denied_error && denied >= next.debt.unresolved_groups))
     {
         return false;
     }
@@ -979,14 +1020,78 @@ impl VirtualScene {
             && self.selections.len() == self.len()
             && asset.materials.len() == asset.package.resources.materials.len()
     }
-    fn select(
-        &mut self,
-        asset: &mut VirtualAsset,
-        available: &[bool],
+    /// Observe preparation for the current camera, viewport height and placement transforms.
+    /// `ready` remains the immediate legal-cover check for progressive callers.
+    pub fn preparation(
+        &self,
+        asset: &VirtualAsset,
         camera: &Camera,
         height: u32,
-    ) -> Result<(), Error> {
-        let key = SelectionKey {
+    ) -> Result<ViewPreparation, Error> {
+        if !Arc::ptr_eq(&asset.identity, &self.asset) {
+            return Err(Error::InvalidInput(
+                "virtual scene belongs to another asset",
+            ));
+        }
+        if height == 0 {
+            return Err(Error::InvalidInput(
+                "virtual viewport height must be positive",
+            ));
+        }
+        use asset::virtual_mesh::DebtReason;
+        let mut status = ViewPreparation {
+            state: PreparationState::Pending,
+            cover_ready: self.ready(asset),
+            pending_pages: 0,
+            failed_pages: 0,
+            unresolved_groups: self
+                .selections
+                .iter()
+                .map(|s| s.debt.unresolved_groups)
+                .sum(),
+            candidate_limited: self
+                .selections
+                .iter()
+                .any(|s| s.debt.reasons.contains(&DebtReason::CandidateCapacity)),
+            output_limited: self
+                .selections
+                .iter()
+                .any(|s| s.debt.reasons.contains(&DebtReason::OutputCapacity)),
+            geometry_limited: self
+                .selections
+                .iter()
+                .any(|s| s.debt.reasons.contains(&DebtReason::GeometryCapacity)),
+        };
+        // Only this view's admitted cover/demand matters. Stale or another scene's reads do not
+        // delay presentation; failed demanded pages require explicit retry, never another tick.
+        for &page in &self.protected {
+            match asset.states[page.index()] {
+                PageState::Resident(_) => {}
+                PageState::Failed(_) => status.failed_pages += 1,
+                _ => status.pending_pages += 1,
+            }
+        }
+        if let Some(&page) = asset
+            .roots
+            .iter()
+            .find(|p| matches!(asset.states[p.index()], PageState::Failed(_)))
+        {
+            status.state = PreparationState::Failed(page);
+        } else if status.cover_ready
+            && self.key.as_ref() == Some(&self.selection_key(asset, camera, height))
+            && !self.continue_selection
+            && status.pending_pages == 0
+        {
+            status.state = if status.unresolved_groups > 0 || status.failed_pages > 0 {
+                PreparationState::Degraded
+            } else {
+                PreparationState::Settled
+            };
+        }
+        Ok(status)
+    }
+    fn selection_key(&self, asset: &VirtualAsset, camera: &Camera, height: u32) -> SelectionKey {
+        SelectionKey {
             camera: crate::mesh::matrix_bytes(camera.view()),
             fov: camera.fov_y().to_bits(),
             near: camera.near().to_bits(),
@@ -994,7 +1099,16 @@ impl VirtualScene {
             revision: asset.revision,
             registry: asset.registry.lock().unwrap().revision,
             transforms: self.transforms,
-        };
+        }
+    }
+    fn select(
+        &mut self,
+        asset: &mut VirtualAsset,
+        available: &[bool],
+        camera: &Camera,
+        height: u32,
+    ) -> Result<(), Error> {
+        let key = self.selection_key(asset, camera, height);
         if self.key.as_ref() == Some(&key) && !self.continue_selection {
             return Ok(());
         }
