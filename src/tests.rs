@@ -746,7 +746,10 @@ fn gpu_batched_culling_oracle() {
         &mut r,
         &[Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0))],
     );
-    let source = SOURCE.replace("output.position = camera.view_projection * model * vec4<f32>(input.position, 1.0);", "output.position = camera.view_projection * (model * vec4<f32>(input.position, 1.0) - vec4<f32>(100.0, 0.0, 0.0, 0.0));");
+    let source = SOURCE.replace(
+        "output.position = camera.view_projection * world;",
+        "output.position = camera.view_projection * (world - vec4<f32>(100.0, 0.0, 0.0, 0.0));",
+    );
     assert_ne!(source, SOURCE);
     r.reload(&source).unwrap();
     let shifted = capture_full(
@@ -1217,3 +1220,6 @@ mod virtual_pages;
 
 #[path = "lighting_tests.rs"]
 mod lighting_tests;
+
+#[path = "shadow_tests.rs"]
+mod shadow_tests;

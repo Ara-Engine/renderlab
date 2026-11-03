@@ -11,6 +11,7 @@ mod normal;
 mod observe;
 mod renderer;
 mod shadow_plan;
+mod shadows;
 pub mod virtual_geometry;
 mod visibility;
 
@@ -25,6 +26,7 @@ pub use observe::*;
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderlab_asset::{self as asset, Vertex};
+pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

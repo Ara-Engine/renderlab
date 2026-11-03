@@ -8,7 +8,7 @@ mod cameras;
 mod fixture;
 #[path = "../../support/hdr_files.rs"]
 mod hdr_files;
-#[path = "../../support/lighting_settings.rs"]
+#[path = "../../support/lighting_controls.rs"]
 mod lighting_settings;
 mod prepared;
 mod surface_probe;
@@ -395,7 +395,7 @@ impl View {
             options.samples as u32,
             options.view,
             if options.view == ViewMode::Lit {
-                "unshadowed_GGX_Lambert_constant_environment_exposed_RGBA16F_resolve_Reinhard_no_normal_maps_no_GI"
+                "GGX_Lambert_constant_environment_optional_hard_shadows_exposed_RGBA16F_resolve_Reinhard_no_normal_maps_no_GI"
             } else {
                 "unlit_depth32float"
             },
@@ -533,6 +533,14 @@ impl View {
                         present.as_secs_f64() * 1e3,
                         sample.frame.0,
                         sample.revision.0
+                    );
+                }
+                if let Some(shadow) = sample.shadow_generation {
+                    eprintln!(
+                        "gpu_shadow_generation_ms={:.6} gpu_render_span_ms={:.6} frame={} shadow_filtering=inside_mesh_pass",
+                        shadow.as_secs_f64() * 1000.0,
+                        sample.render_span.as_secs_f64() * 1000.0,
+                        sample.frame.0
                     );
                 }
                 eprintln!(
@@ -998,9 +1006,13 @@ impl View {
             }
             if options.log_frames {
                 eprintln!(
-                    "lighting_stats={:?} lighting_uploads={:?}",
+                    "lighting_stats={:?} shadows={:?} lighting_uploads={:?} shadow_prepare_ms={:.6} shadow_upload_ms={:.6} shadow_encode_ms={:.6}",
                     self.renderer.lighting_stats(),
-                    report.uploads
+                    self.renderer.shadow_stats(),
+                    report.uploads,
+                    report.cpu.shadow_preparation.as_secs_f64() * 1000.0,
+                    report.cpu.shadow_upload.as_secs_f64() * 1000.0,
+                    report.cpu.shadow_encode.as_secs_f64() * 1000.0
                 );
             }
             self.set_title(format!(

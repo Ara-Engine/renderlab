@@ -12,6 +12,7 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UploadBytes {
+    pub shadows: u64,
     pub geometry: u64,
     pub lights: u64,
     pub lighting: u64,
@@ -34,6 +35,7 @@ pub struct UploadBytes {
 }
 impl UploadBytes {
     pub(crate) fn add(&mut self, other: Self) {
+        self.shadows += other.shadows;
         self.geometry += other.geometry;
         self.lights += other.lights;
         self.lighting += other.lighting;
@@ -57,6 +59,12 @@ impl UploadBytes {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuFrame {
+    /// Full submitted bounds, shadow-view fitting and caster assignment. Disjoint from visibility.
+    pub shadow_preparation: Duration,
+    /// Shadow resource allocation, matrix packing and queue writes, excluded from `upload`.
+    pub shadow_upload: Duration,
+    /// Shadow pass command encoding, excluded from `encode`.
+    pub shadow_encode: Duration,
     /// Input validation and camera preparation. Visibility and byte packing are separate.
     pub preparation: Duration,
     pub visibility: Duration,
@@ -114,6 +122,10 @@ pub struct GpuSample {
     pub mesh_pass: Duration,
     /// Separate HDR presentation pass boundaries; excludes acquire/present and uploads.
     pub present_pass: Option<Duration>,
+    /// First shadow pass begin through final shadow pass end. No CPU wait per frame.
+    pub shadow_generation: Option<Duration>,
+    /// First rendered pass begin through last pass end, measured directly, not a sum.
+    pub render_span: Duration,
 }
 #[derive(Debug, Default)]
 pub struct Events {
@@ -167,8 +179,10 @@ pub struct Ownership {
     pub material_bytes: Count,
     pub target_bytes: Count,
     pub light_bytes: Count,
+    pub shadow_bytes: Count,
     pub lut_bytes: Count,
     pub light_creations: u64,
+    pub shadow_creations: u64,
     pub lut_creations: u64,
     pub material_creations: u64,
     pub texture_creations: u64,
@@ -193,6 +207,7 @@ impl Ledger {
             AllocationKind::Material => ledger.material_creations += 1,
             AllocationKind::Target => ledger.target_creations += 1,
             AllocationKind::Light => ledger.light_creations += 1,
+            AllocationKind::Shadow => ledger.shadow_creations += 1,
             AllocationKind::Lut => ledger.lut_creations += 1,
         }
         let count = allocation_count(&mut ledger, kind);
@@ -239,6 +254,7 @@ pub(crate) enum AllocationKind {
     Material,
     Target,
     Light,
+    Shadow,
     Lut,
 }
 fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count {
@@ -247,6 +263,7 @@ fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count 
         AllocationKind::Material => &mut ledger.material_bytes,
         AllocationKind::Target => &mut ledger.target_bytes,
         AllocationKind::Light => &mut ledger.light_bytes,
+        AllocationKind::Shadow => &mut ledger.shadow_bytes,
         AllocationKind::Lut => &mut ledger.lut_bytes,
     }
 }

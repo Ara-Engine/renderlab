@@ -577,3 +577,20 @@ fn invalid_domains_reject_without_partial_results_or_panics() {
     }
     assert!(spot(Vec3::splat(f32::MAX), Vec3::NEG_Z, 0.01, range, 64, &[]).is_err());
 }
+
+#[test]
+fn shadow_light_basis_crosses_helper_axis_ties_without_roll_jump() {
+    let mut previous = None;
+    for i in 0..100 {
+        let travel = Vec3::new(0.4 + i as f32 * 0.0001, -0.405, -0.82);
+        let basis = transported_orientation(travel, previous).unwrap();
+        if let Some(old) = previous {
+            assert!(basis.transpose().x_axis.dot(old.transpose().x_axis) > 0.9999);
+        }
+        assert!(
+            (basis.transform_vector3(travel.as_dvec3().normalize()) - glam::DVec3::NEG_Z).length()
+                < 1e-10
+        );
+        previous = Some(basis);
+    }
+}

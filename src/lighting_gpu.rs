@@ -2,6 +2,7 @@ use super::*;
 use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
 
 pub(super) struct LightBuffer {
+    shadow_generation: u64,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
     _allocation: Allocation,
@@ -31,8 +32,8 @@ pub(super) struct LightingGpu {
     retired: Vec<(u64, LightBuffer)>,
     pub retired_hdr: Vec<(u64, Hdr)>,
     pub hdr: Option<Hdr>,
-    pending: PackedLighting,
-    source_lights: Vec<Light>,
+    pub(super) pending: PackedLighting,
+    pub(super) source_lights: Vec<Light>,
     published: Vec<u8>,
     uniform_shadow: Option<[u8; 32]>,
     pub max: u32,
@@ -84,6 +85,26 @@ impl LightingGpu {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
+                        },
                         count: None,
                     },
                 ],
@@ -222,6 +243,7 @@ impl Renderer {
                 done: Arc::new(OnceLock::new()),
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -287,6 +309,9 @@ impl Renderer {
     /// Atomic CPU replacement. No queue writes until an admitted Lit submission.
     pub fn set_lighting(&mut self, lighting: &Lighting) -> Result<(), Error> {
         self.check_fault()?;
+        self.shadows
+            .settings
+            .validate(&lighting.lights, self.shadows.limits)?;
         let exposure = PackedLighting::settings(lighting)?;
         if lighting.lights == self.lighting.source_lights {
             // Settings-only edits never normalize/repack the light vector.
@@ -316,11 +341,10 @@ impl Renderer {
     pub(super) fn upload_lighting(&mut self, eye: Vec3, uploads: &mut UploadBytes) {
         let state = &mut self.lighting;
         let needed = state.pending.records.len().max(64) as u64;
-        if state
-            .active
-            .as_ref()
-            .is_none_or(|active| active.buffer.size() < needed)
-        {
+        if state.active.as_ref().is_none_or(|active| {
+            active.buffer.size() < needed
+                || active.shadow_generation != self.shadows.stats.resource_generation
+        }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -352,11 +376,22 @@ impl Renderer {
                             binding: 3,
                             resource: wgpu::BindingResource::Sampler(&state.sampler),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.shadows.sample_view(),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.shadows.records().as_entire_binding(),
+                        },
                     ],
                 }),
                 ResourceKind::BindGroup,
             );
             let next = LightBuffer {
+                shadow_generation: self.shadows.stats.resource_generation,
                 buffer,
                 bind,
                 _allocation: self.ledger.allocate(AllocationKind::Light, needed),
@@ -478,6 +513,9 @@ impl Renderer {
             let mut hash = Sha256::new();
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));
+            if self.shadows.settings.enabled() {
+                hash.update(self.shadows.published_hash);
+            }
             hdr.lighting_hash = hash.finalize().into();
         }
     }

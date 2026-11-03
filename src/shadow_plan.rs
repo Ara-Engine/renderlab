@@ -1,6 +1,5 @@
 //! CPU-only shadow geometry. Inputs are full submitted world bounds, never camera-visible IDs.
 //! This private seam has no lighting, allocation, atlas, cache, or virtual-cut ownership.
-#![allow(dead_code)] // The M6 GPU adapter follows M5-A acceptance.
 
 use crate::{Camera, Error, Mat4, Vec3};
 use glam::{DMat4, DVec3};
@@ -74,10 +73,29 @@ pub(crate) struct ShadowView {
 /// snapping. `split_ends` are strictly increasing positive camera-forward distances;
 /// the first slice starts at camera.near(). The last end is the explicit shadow distance.
 /// It may conservatively exceed the camera far plane (Camera has no far accessor).
+#[cfg(test)]
 pub(crate) fn directional(
     camera: &Camera,
     viewport: [u32; 2],
     travel: Vec3,
+    split_ends: &[f32],
+    resolution: u32,
+    casters: &[Bounds],
+) -> Result<Vec<ShadowView>, Error> {
+    directional_oriented(
+        camera,
+        viewport,
+        orientation(travel)?,
+        split_ends,
+        resolution,
+        casters,
+    )
+}
+
+pub(crate) fn directional_oriented(
+    camera: &Camera,
+    viewport: [u32; 2],
+    rotation: DMat4,
     split_ends: &[f32],
     resolution: u32,
     casters: &[Bounds],
@@ -105,7 +123,6 @@ pub(crate) fn directional(
             "shadow camera must have a finite inverse and FOV",
         ));
     }
-    let rotation = orientation(travel)?;
     // Transform once per light, not once per cascade. Full bounds include offscreen casters.
     let light_bounds: Vec<_> = casters
         .iter()
@@ -199,9 +216,28 @@ pub(crate) fn directional(
 
 /// Square perspective view contains the circular spot cone. 90-degree half angles
 /// cannot be represented by this projection; the lighting adapter must reject or handle them.
+#[cfg(test)]
 pub(crate) fn spot(
     position: Vec3,
     travel: Vec3,
+    outer_half_angle: f32,
+    range: LocalRange,
+    resolution: u32,
+    casters: &[Bounds],
+) -> Result<ShadowView, Error> {
+    spot_oriented(
+        position,
+        orientation(travel)?,
+        outer_half_angle,
+        range,
+        resolution,
+        casters,
+    )
+}
+
+pub(crate) fn spot_oriented(
+    position: Vec3,
+    rotation: DMat4,
     outer_half_angle: f32,
     range: LocalRange,
     resolution: u32,
@@ -221,7 +257,7 @@ pub(crate) fn spot(
     perspective_view(
         ViewKind::Spot,
         position,
-        orientation(travel)?,
+        rotation,
         half,
         [f64::from(range.near) * half.cos(), f64::from(range.far)],
         resolution,
@@ -356,7 +392,7 @@ fn validate_local(
     Ok(())
 }
 
-fn orientation(travel: Vec3) -> Result<DMat4, Error> {
+pub(crate) fn orientation(travel: Vec3) -> Result<DMat4, Error> {
     if !travel.is_finite() || travel == Vec3::ZERO {
         return Err(Error::InvalidInput(
             "shadow travel must be finite and nonzero",
@@ -372,6 +408,35 @@ fn orientation(travel: Vec3) -> Result<DMat4, Error> {
         DVec3::Z
     };
     Ok(DMat4::look_to_rh(DVec3::ZERO, forward, up))
+}
+
+/// Transport the last admitted basis with the light. Small motion never switches
+/// helper axes. A discontinuous antipodal edit rotates around the previous right.
+pub(crate) fn transported_orientation(
+    travel: Vec3,
+    previous: Option<DMat4>,
+) -> Result<DMat4, Error> {
+    let Some(previous) = previous else {
+        return orientation(travel);
+    };
+    if !travel.is_finite() || travel == Vec3::ZERO {
+        return Err(Error::InvalidInput(
+            "shadow travel must be finite and nonzero",
+        ));
+    }
+    let rows = previous.transpose();
+    let old = -rows.z_axis.truncate();
+    let next = travel.as_dvec3().normalize();
+    let rotation = if old.dot(next) < -0.999999999 {
+        glam::DQuat::from_axis_angle(rows.x_axis.truncate(), std::f64::consts::PI)
+    } else {
+        glam::DQuat::from_rotation_arc(old, next)
+    };
+    Ok(DMat4::look_to_rh(
+        DVec3::ZERO,
+        next,
+        rotation * rows.y_axis.truncate(),
+    ))
 }
 
 fn extents(points: [DVec3; 8]) -> (DVec3, DVec3) {

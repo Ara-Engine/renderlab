@@ -1,7 +1,10 @@
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 use lighting_gpu::LightingGpu;
+#[path = "shadow_gpu.rs"]
+mod shadow_gpu;
 use sha2::{Digest, Sha256};
+use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -41,6 +44,7 @@ pub(crate) struct Flight {
     done: Arc<OnceLock<()>>,
     mapped: Option<MapResult>,
     lit: bool,
+    shadowed: bool,
     submission: u64,
     frame: Option<FrameId>,
     revision: Revision,
@@ -140,6 +144,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -165,6 +170,7 @@ impl Renderer {
             done,
             mapped: Some(mapped),
             lit: false,
+            shadowed: false,
             submission: self.submissions,
             frame: Some(FrameId(self.frames)),
             revision: self.revision,
@@ -189,6 +195,7 @@ impl Renderer {
                 done: Arc::new(OnceLock::new()),
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -254,6 +261,7 @@ impl Renderer {
     }
 }
 struct Pipelines {
+    shadow: Owned<wgpu::RenderPipeline>,
     diagnostic: Owned<wgpu::RenderPipeline>,
     lit: Owned<wgpu::RenderPipeline>,
     present: Owned<wgpu::RenderPipeline>,
@@ -297,6 +305,7 @@ pub struct Renderer {
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
+    shadows: ShadowState,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -409,6 +418,16 @@ impl Renderer {
             let _ = lost.set(Fault(format!("device lost ({reason:?}): {message}")));
         });
         limits.validate(&device.limits())?;
+        let device_limits = device.limits();
+        if device_limits.max_bind_groups < 4
+            || device_limits.max_storage_buffers_per_shader_stage < 2
+            || device_limits.max_sampled_textures_per_shader_stage < 4
+            || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
+        {
+            return Err(Error::InvalidInput(
+                "device does not support the lighting/shadow binding ABI",
+            ));
+        }
         let ledger = Ledger::default();
         let scopes = OperationScopes::new(&device);
         let uniform = ledger.own(
@@ -518,13 +537,14 @@ impl Renderer {
             &ledger,
             [&bindings, &instance_bindings, &material_bindings],
         );
+        let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
                 device.create_query_set(&wgpu::QuerySetDescriptor {
                     label: Some("three flights"),
                     ty: wgpu::QueryType::Timestamp,
-                    count: (FLIGHTS * 4) as u32,
+                    count: (FLIGHTS * 6) as u32,
                 }),
                 ResourceKind::QuerySet,
             ),
@@ -544,7 +564,7 @@ impl Renderer {
                 ledger.own(
                     device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("flight timestamps"),
-                        size: 32,
+                        size: 48,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -562,6 +582,7 @@ impl Renderer {
             &ledger,
             &layout,
             &lighting,
+            &shadows,
             color_format,
             options.samples,
             wgsl,
@@ -596,6 +617,7 @@ impl Renderer {
             pipeline,
             shader_hash: Sha256::digest(wgsl.as_bytes()).into(),
             lighting,
+            shadows,
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -666,11 +688,13 @@ impl Renderer {
         Ok(renderer)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile(
         device: &wgpu::Device,
         ledger: &Ledger,
         layout: &wgpu::PipelineLayout,
         lighting: &LightingGpu,
+        shadows: &ShadowState,
         format: wgpu::TextureFormat,
         samples: SampleCount,
         source: &str,
@@ -733,6 +757,43 @@ impl Renderer {
         };
         let diagnostic = mesh(layout, format, "fs");
         let lit = mesh(&lighting.layout, wgpu::TextureFormat::Rgba16Float, "fs_lit");
+        let shadow = ledger.own(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("source-sided shadow depth"),
+                layout: Some(&shadows.layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: 48,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &VERTEX_ATTRIBUTES,
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_shadow"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            }),
+            ResourceKind::RenderPipeline,
+        );
         let present = ledger.own(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("HDR presentation"),
@@ -758,6 +819,7 @@ impl Renderer {
             ResourceKind::RenderPipeline,
         );
         Pipelines {
+            shadow,
             diagnostic,
             lit,
             present,
@@ -787,6 +849,7 @@ impl Renderer {
             &self.ledger,
             &self.layout,
             &self.lighting,
+            &self.shadows,
             self.format,
             self.options.samples,
             wgsl,
@@ -916,6 +979,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1050,6 +1114,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1090,6 +1155,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1369,6 +1435,32 @@ impl Renderer {
             return Ok(None);
         };
         let camera_bytes = matrix_bytes(matrix);
+        let shadow_start = Instant::now();
+        let shadow_frame = if self.shadows.enabled(view_mode) {
+            let bounds = draws
+                .iter()
+                .flat_map(|draw| {
+                    draw.instances
+                        .state
+                        .models
+                        .iter()
+                        .map(move |&model| shadow_gpu::world_bounds(draw.mesh.bounds, model))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(self.shadows.plan(
+                camera,
+                [color.width(), color.height()],
+                &self.lighting.source_lights,
+                &bounds,
+            )?)
+        } else {
+            None
+        };
+        let mut shadow_preparation = if shadow_frame.is_some() {
+            shadow_start.elapsed()
+        } else {
+            Duration::ZERO
+        };
         let mut uploads = UploadBytes::default();
         let mut scene = SceneCounts::default();
         let mut visibility = Duration::ZERO;
@@ -1475,16 +1567,39 @@ impl Renderer {
                 reference_ids: None,
             });
         }
+        let shadow_start = Instant::now();
+        let shadow_draws = if shadow_frame.is_some() {
+            draws
+                .iter()
+                .flat_map(|draw| {
+                    (0..draw.instances.len() as u32).map(move |slot| ShadowDraw {
+                        mesh: draw.mesh,
+                        instances: &*draw.instances,
+                        material: draw.material,
+                        indices: 0..draw.mesh.index_count,
+                        slot,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if shadow_frame.is_some() {
+            shadow_preparation += shadow_start.elapsed();
+        }
         self.submit_prepared(
             color,
             camera_bytes,
             camera,
             view_mode,
             &prepared,
+            shadow_frame,
+            &shadow_draws,
             slot,
             uploads,
             scene,
             CpuFrame {
+                shadow_preparation,
                 preparation,
                 visibility,
                 packing,
@@ -1539,13 +1654,15 @@ impl Renderer {
 
     // Persistent data is prepared once, then borrowed for the shared render pass.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn submit_prepared(
+    fn submit_prepared(
         &mut self,
         color: &wgpu::Texture,
         camera_bytes: [u8; 64],
         camera: &Camera,
         view_mode: ViewMode,
         draws: &[PreparedDraw<'_>],
+        shadow_frame: Option<ShadowFrame>,
+        shadow_draws: &[ShadowDraw<'_>],
         slot: usize,
         mut uploads: UploadBytes,
         scene: SceneCounts,
@@ -1567,9 +1684,14 @@ impl Renderer {
         }
         let lit = view_mode == ViewMode::Lit;
         if lit {
+            let shadow_start = Instant::now();
+            self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
+            if shadow_frame.is_some() {
+                cpu.shadow_upload = shadow_start.elapsed();
+            }
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
-        cpu.upload += start.elapsed();
+        cpu.upload += start.elapsed() - cpu.shadow_upload;
         self.uploads.add(uploads);
         let encode_start = Instant::now();
         if self
@@ -1654,14 +1776,19 @@ impl Renderer {
                 label: Some("mesh frame"),
             });
         let timed = self.timing_status == TimingStatus::Enabled;
+        if let Some(frame) = &shadow_frame {
+            let shadow_start = Instant::now();
+            self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
+            cpu.shadow_encode = shadow_start.elapsed();
+        }
         let timestamps =
             self.timing
                 .as_ref()
                 .filter(|_| timed)
                 .map(|timing| wgpu::RenderPassTimestampWrites {
                     query_set: &timing.queries,
-                    beginning_of_pass_write_index: Some(slot as u32 * 4),
-                    end_of_pass_write_index: Some(slot as u32 * 4 + 1),
+                    beginning_of_pass_write_index: Some(slot as u32 * 6),
+                    end_of_pass_write_index: Some(slot as u32 * 6 + 1),
                 });
         let hdr = self.lighting.hdr.as_ref().filter(|_| lit);
         let msaa = if lit {
@@ -1759,8 +1886,8 @@ impl Renderer {
                 timestamp_writes: self.timing.as_ref().filter(|_| timed).map(|t| {
                     wgpu::RenderPassTimestampWrites {
                         query_set: &t.queries,
-                        beginning_of_pass_write_index: Some(slot as u32 * 4 + 2),
-                        end_of_pass_write_index: Some(slot as u32 * 4 + 3),
+                        beginning_of_pass_write_index: Some(slot as u32 * 6 + 2),
+                        end_of_pass_write_index: Some(slot as u32 * 6 + 3),
                     }
                 }),
                 ..Default::default()
@@ -1775,7 +1902,15 @@ impl Renderer {
             let offset = slot as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
             encoder.resolve_query_set(
                 &timing.queries,
-                slot as u32 * 4..slot as u32 * 4 + if lit { 4 } else { 2 },
+                slot as u32 * 6
+                    ..slot as u32 * 6
+                        + if shadow_frame.is_some() {
+                            6
+                        } else if lit {
+                            4
+                        } else {
+                            2
+                        },
                 &timing.resolve,
                 offset,
             );
@@ -1784,7 +1919,13 @@ impl Renderer {
                 offset,
                 readback,
                 0,
-                if lit { 32 } else { 16 },
+                if shadow_frame.is_some() {
+                    48
+                } else if lit {
+                    32
+                } else {
+                    16
+                },
             );
             let mapped = Arc::new(OnceLock::new());
             let callback = mapped.clone();
@@ -1802,7 +1943,7 @@ impl Renderer {
         });
         let commands = encoder.finish();
         self.check_fault()?;
-        let encode = encode_start.elapsed();
+        let encode = encode_start.elapsed() - cpu.shadow_encode;
         let submitted_at = Instant::now();
         self.queue.submit([commands]);
         let submit = submitted_at.elapsed();
@@ -1816,6 +1957,7 @@ impl Renderer {
                 done,
                 mapped,
                 lit,
+                shadowed: shadow_frame.is_some(),
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
@@ -1823,6 +1965,9 @@ impl Renderer {
             },
         );
         self.check_fault()?;
+        if let Some(frame) = shadow_frame {
+            self.stamp_shadows(frame, shadow_draws);
+        }
         if lit {
             self.stamp_hdr(frame);
         }
@@ -1877,12 +2022,22 @@ impl Renderer {
                             } else {
                                 None
                             };
-                            (begin, end, present)
+                            let shadow = if flight.shadowed {
+                                Some((
+                                    u64::from_ne_bytes(view[32..40].try_into().unwrap()),
+                                    u64::from_ne_bytes(view[40..48].try_into().unwrap()),
+                                ))
+                            } else {
+                                None
+                            };
+                            (begin, end, present, shadow)
                         });
                         readback.unmap();
                         match result {
-                            Ok((begin, end, present))
-                                if end >= begin && present.is_none_or(|(a, b)| b >= a) =>
+                            Ok((begin, end, present, shadow))
+                                if end >= begin
+                                    && present.is_none_or(|(a, b)| b >= a && a >= end)
+                                    && shadow.is_none_or(|(a, b)| b >= a && b <= begin) =>
                             {
                                 let seconds = (end - begin) as f64
                                     * f64::from(self.timing.as_ref().unwrap().period)
@@ -1892,6 +2047,22 @@ impl Renderer {
                                         frame: flight.frame.unwrap(),
                                         revision: flight.revision,
                                         mesh_pass,
+                                        shadow_generation: shadow.map(|(a, b)| {
+                                            Duration::from_secs_f64(
+                                                (b - a) as f64
+                                                    * f64::from(
+                                                        self.timing.as_ref().unwrap().period,
+                                                    )
+                                                    * 1e-9,
+                                            )
+                                        }),
+                                        render_span: Duration::from_secs_f64(
+                                            (present.map_or(end, |(_, b)| b)
+                                                - shadow.map_or(begin, |(a, _)| a))
+                                                as f64
+                                                * f64::from(self.timing.as_ref().unwrap().period)
+                                                * 1e-9,
+                                        ),
                                         present_pass: present.map(|(a, b)| {
                                             Duration::from_secs_f64(
                                                 (b - a) as f64
@@ -1939,6 +2110,7 @@ impl Renderer {
             });
         }
         self.lighting.collect(self.completed_submission);
+        self.shadows.collect(self.completed_submission);
         self.check_fault()?;
         Ok(start.elapsed())
     }

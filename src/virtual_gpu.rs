@@ -157,6 +157,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -251,6 +252,61 @@ impl Renderer {
         let mut packing = Duration::ZERO;
         let mut upload = Duration::ZERO;
         let instances = scene.instances.as_mut().unwrap();
+        if view_mode == ViewMode::Lit && instances.state.invalid_normals > 0 {
+            return Err(Error::InvalidInput(
+                "virtual lit/shadow geometry requires valid affine normal transforms",
+            ));
+        }
+        let shadow_start = Instant::now();
+        // Hierarchy bounds cover every LOD of the submitted placement. The caster
+        // range below is exactly the same published cut used by the camera pass.
+        let placement_bounds = if self.shadows.enabled(view_mode) {
+            scene
+                .meshes
+                .iter()
+                .zip(&instances.state.models)
+                .map(|(&mesh, &model)| {
+                    let mesh = &asset.package.meshes[mesh as usize];
+                    let mut min = Vec3::splat(f32::INFINITY);
+                    let mut max = Vec3::splat(f32::NEG_INFINITY);
+                    for root in mesh.terminal_groups() {
+                        let bounds = mesh.groups[root.index()].simplified;
+                        let center = Vec3::from_array(bounds.center);
+                        min = min.min(Vec3::from_array(std::array::from_fn(|axis| {
+                            ((f64::from(center[axis]) - f64::from(bounds.radius)) as f32)
+                                .next_down()
+                        })));
+                        max = max.max(Vec3::from_array(std::array::from_fn(|axis| {
+                            ((f64::from(center[axis]) + f64::from(bounds.radius)) as f32).next_up()
+                        })));
+                    }
+                    shadow_gpu::world_bounds(
+                        Aabb {
+                            min: min.to_array(),
+                            max: max.to_array(),
+                        },
+                        model,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![]
+        };
+        let mut shadow_frame = if self.shadows.enabled(view_mode) {
+            Some(self.shadows.plan(
+                camera,
+                [color.width(), color.height()],
+                &self.lighting.source_lights,
+                &placement_bounds,
+            )?)
+        } else {
+            None
+        };
+        let mut shadow_preparation = if shadow_frame.is_some() {
+            shadow_start.elapsed()
+        } else {
+            Duration::ZERO
+        };
         self.upload_instance_edits(instances, &mut uploads, &mut packing, &mut upload);
         let mut prepared: Vec<PreparedDraw<'_>> =
             Vec::with_capacity(scene.selections.iter().map(|s| s.cut.clusters.len()).sum());
@@ -302,16 +358,50 @@ impl Renderer {
                 counts.submitted_instances += 1;
             }
         }
+        let shadow_start = Instant::now();
+        if let Some(frame) = &mut shadow_frame {
+            let mut ranges = vec![vec![]; instances.len()];
+            for (index, draw) in prepared.iter().enumerate() {
+                ranges[draw.slots.start as usize].push(index);
+            }
+            for view in &mut frame.views {
+                view.caster_indices = view
+                    .caster_indices
+                    .iter()
+                    .flat_map(|&placement| ranges[placement].iter().copied())
+                    .collect();
+            }
+        }
+        let shadow_draws = if shadow_frame.is_some() {
+            prepared
+                .iter()
+                .map(|draw| ShadowDraw {
+                    mesh: draw.mesh,
+                    instances: draw.instances,
+                    material: draw.material,
+                    indices: draw.indices.clone(),
+                    slot: draw.slots.start,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if shadow_frame.is_some() {
+            shadow_preparation += shadow_start.elapsed();
+        }
         let result = self.submit_prepared(
             color,
             camera_bytes,
             camera,
             view_mode,
             &prepared,
+            shadow_frame,
+            &shadow_draws,
             slot,
             uploads,
             counts,
             CpuFrame {
+                shadow_preparation,
                 preparation,
                 packing,
                 upload,
@@ -491,6 +581,7 @@ impl Renderer {
                 done,
                 mapped: None,
                 lit: false,
+                shadowed: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,

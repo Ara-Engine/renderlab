@@ -32,6 +32,8 @@ The [real quarry result](scan-results.md) now renders twelve scans and 13,034,90
 
 M5-A is accepted as partial M5: direct physical lights, constant environment, exposed HDR/MSAA, editable settings and atomic shader reload are verified on the fixture and quarry. [The checkpoint record](milestone-5a.md) includes independent review, final-source GPU checks, contended costs and development-loop limits. Normal maps, spatial environment maps, direct shadows and the matched Unreal comparison remain open.
 
+The [first M6 shadow checkpoint](m6-shadows.md) is independently reviewed and device-tested as partial M6. Directional, spot and point hard shadows share owned resources and the regular/virtual submission path. The 1024 quarry quality gate fails; 4096 improves inspected results but retains unclassified speckle. Filtering, softness, light-view detail demand and visible native recovery remain open. The [first matched Unreal fixture](unreal-comparison-setup.md) establishes only a direct-light calibration subset, with sharp-highlight disagreement still under investigation.
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.

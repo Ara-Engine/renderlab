@@ -32,12 +32,15 @@ fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scaled=n/max(scale,1e-30);
     return scaled*inverseSqrt(max(dot(scaled,scaled),1e-30));
 }
+fn world_position(position:vec3<f32>, slot:u32) -> vec4<f32> {
+    return models[slot] * vec4<f32>(position, 1.0);
+}
 @vertex fn vs(input: VertexInput) -> VertexOutput {
-    let model = models[input.slot];
     let normal = normals[input.slot];
     var output: VertexOutput;
-    output.position = camera.view_projection * model * vec4<f32>(input.position, 1.0);
-    output.world = (model * vec4<f32>(input.position, 1.0)).xyz;
+    let world = world_position(input.position, input.slot);
+    output.position = camera.view_projection * world;
+    output.world = world.xyz;
     output.color = input.color;
     output.uv = input.uv;
     output.normal = unit_normal(mat3x3<f32>(normal.x.xyz,normal.y.xyz,normal.z.xyz)*unit_normal(input.normal));
@@ -66,6 +69,82 @@ struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<
 @group(3) @binding(1) var<storage,read> lights:array<Light>;
 @group(3) @binding(2) var dfg:texture_2d<f32>;
 @group(3) @binding(3) var dfg_sampler:sampler;
+struct ShadowView {
+    world_to_clip:mat4x4<f32>,
+    // Directional camera-depth interval or local radial interval; normalized and world bias.
+    coverage_bias:vec4<f32>,
+    camera_depth:vec4<f32>,
+    // Reserved for texel-scaled bias experiments; nearest lookup does not read this.
+    texel:vec4<f32>,
+};
+@group(3) @binding(4) var shadow_depth:texture_depth_2d_array;
+@group(3) @binding(5) var<storage,read> shadow_views:array<ShadowView>;
+@group(0) @binding(0) var<uniform> shadow_view:ShadowView;
+struct ShadowVertex {
+    @builtin(position) position:vec4<f32>,
+    @location(0) @interpolate(flat) winding:f32,
+};
+@vertex fn vs_shadow(@location(0) position:vec3<f32>, @builtin(instance_index) slot:u32) -> ShadowVertex {
+    var output:ShadowVertex;
+    output.position=shadow_view.world_to_clip*world_position(position,slot);
+    output.winding=normals[slot].info.x;
+    return output;
+}
+@fragment fn fs_shadow(input:ShadowVertex, @builtin(front_facing) front:bool) {
+    if material.double_sided==0u && front!=(input.winding>0.0) { discard; }
+}
+fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
+    if light.kind.z==0u { return 1.0; }
+    var layer=light.kind.y;
+    let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
+    let biased_world=world+normal*shadow_views[layer].coverage_bias.w;
+    if light.kind.x==0u {
+        let depth=dot(shadow_views[layer].camera_depth,vec4<f32>(world,1.0));
+        var found=false;
+        for(var view=0u;view<light.kind.z;view+=1u) {
+            let coverage=shadow_views[light.kind.y+view].coverage_bias;
+            if depth>=coverage.x && depth<=coverage.y { layer=light.kind.y+view; found=true; break; }
+        }
+        if !found { return 1.0; }
+    } else {
+        let delta=biased_world-light.position_range.xyz;
+        let radial=length(world-light.position_range.xyz);
+        let coverage=shadow_views[layer].coverage_bias;
+        if radial<coverage.x || radial>coverage.y { return 1.0; }
+        if light.kind.x==1u {
+            let a=abs(delta);
+            if a.x>=a.y && a.x>=a.z { layer+=select(1u,0u,delta.x>=0.0); }
+            else if a.y>=a.z { layer+=select(3u,2u,delta.y>=0.0); }
+            else { layer+=select(5u,4u,delta.z>=0.0); }
+        }
+    }
+    let view=shadow_views[layer];
+    let clip=view.world_to_clip*vec4<f32>(biased_world,1.0);
+    if clip.w<=0.0 { return 1.0; }
+    let ndc=clip.xyz/clip.w;
+    if any(abs(ndc.xy)>vec2<f32>(1.0)) || ndc.z<0.0 || ndc.z>1.0 { return 1.0; }
+    let extent=vec2<i32>(textureDimensions(shadow_depth));
+    let uv=ndc.xy*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5);
+    let pixel=clamp(vec2<i32>(uv*vec2<f32>(extent)),vec2<i32>(0),extent-vec2<i32>(1));
+    let stored=textureLoad(shadow_depth,pixel,i32(layer),0);
+    // Compare at the sampled texel centre on this receiver's geometric plane.
+    // A constant bias alone cannot cover the nearest texel's slope-dependent depth error.
+    let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(geometric.x)>0.9);
+    let tangent=unit_normal(cross(geometric,axis));
+    let bitangent=cross(geometric,tangent);
+    let dx=view.world_to_clip*vec4<f32>(tangent,0.0);
+    let dy=view.world_to_clip*vec4<f32>(bitangent,0.0);
+    let plane=cross(dx.xyz-ndc*dx.w,dy.xyz-ndc*dy.w);
+    let sample_ndc=((vec2<f32>(pixel)+vec2<f32>(0.5))/vec2<f32>(extent)-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+    var reference=ndc.z;
+    if plane.z!=0.0 {
+        reference-=dot(plane.xy,sample_ndc-ndc.xy)/plane.z;
+        // Bounds subpixel rounding of the receiver's own plane (at least 4 subpixel bits),
+        // not depth differences from non-planar neighbouring triangles.
+        reference-=dot(abs(plane.xy),2.0/vec2<f32>(extent))/(16.0*abs(plane.z));
+    }
+    return select(0.0,1.0,reference-view.coverage_bias.z<=stored);
+}
 // Presentation uses its own layout and entry points in this same atomic module.
 @group(0) @binding(1) var exposed_hdr:texture_2d<f32>;
 const PI:f32=3.141592653589793;
@@ -145,6 +224,7 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
                 attenuation*=cone*cone;
             }
         }
+        attenuation*=hard_shadow(light,input.world,geometric,l);
         exposed=min(exposed+exposed_product(light.rgb_inner.xyz,brdf(n,v,l,base,metal,rough)*attenuation),vec3<f32>(65504.0));
     }
     return vec4<f32>(exposed,1.0);
