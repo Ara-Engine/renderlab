@@ -3,7 +3,7 @@ use super::*;
 pub fn header(output: &mut impl Write) -> std::io::Result<()> {
     writeln!(
         output,
-        "frame,phase,prep_us,encode_us,submit_us,projection_total_us,selection_total_us,admission_total_us,reads,uploads,geometry,peak,published,retiring,staging,pinned,payload,owned_buffers,metadata,scratch,cpu_ready,cut_clusters,candidates,visits,unresolved,max_error,candidate_debt,output_debt,residency_debt,selection_runs,io_queue_total_us,io_read_total_us,io_verify_total_us,failures,retries,evictions,retained_cuts,selection_calls,completion_total_us,resources_total_us,protection_total_us,stale_ready_total_us,make_room_total_us,upload_admission_total_us,requests_total_us,snapshot_total_us,dropped_ready,page_log_total_us"
+        "frame,phase,prep_us,encode_us,submit_us,projection_total_us,selection_total_us,admission_total_us,reads,uploads,geometry,peak,published,retiring,staging,pinned,payload,owned_buffers,metadata,scratch,cpu_ready,cut_clusters,candidates,visits,unresolved,max_error,candidate_debt,output_debt,residency_debt,selection_runs,io_queue_total_us,io_read_total_us,io_verify_total_us,failures,retries,evictions,retained_cuts,selection_calls,completion_total_us,resources_total_us,protection_total_us,stale_ready_total_us,make_room_total_us,upload_admission_total_us,requests_total_us,snapshot_total_us,dropped_ready,page_log_total_us,draws,triangles"
     )
 }
 
@@ -17,7 +17,7 @@ pub fn row(
 ) -> std::io::Result<()> {
     writeln!(
         output,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         frame,
         phase,
         report.map_or(0, |r| r.cpu.preparation.as_micros()),
@@ -65,7 +65,9 @@ pub fn row(
         s.requests.as_micros(),
         s.snapshot.as_micros(),
         s.dropped_ready,
-        page_log_us
+        page_log_us,
+        report.map_or(0, |r| r.scene.draws),
+        report.map_or(0, |r| r.scene.triangles)
     )
 }
 

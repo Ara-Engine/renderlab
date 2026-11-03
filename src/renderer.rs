@@ -26,6 +26,13 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
 
 type MapResult = Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>;
+/// Records `next` as the state last set in one pass slot. True when the pass must be told.
+/// Identity, not equality: every compared object outlives the pass that references it.
+fn changed<'a, T>(slot: &mut Option<&'a T>, next: &'a T) -> bool {
+    let changed = !slot.is_some_and(|last| std::ptr::eq(last, next));
+    *slot = Some(next);
+    changed
+}
 pub(crate) struct Flight {
     done: Arc<OnceLock<()>>,
     mapped: Option<MapResult>,
@@ -1595,26 +1602,35 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &*self.bind, &[]);
+            // Pass state persists across draws, so unchanged state is never re-encoded.
+            let (mut instances, mut material, mut ids, mut mesh) = (None, None, None, None);
             for draw in draws {
                 if draw.slots.is_empty() {
                     continue;
                 }
-                pass.set_bind_group(1, &*draw.instances.bind, &[]);
-                pass.set_bind_group(
-                    2,
-                    &*draw
-                        .material
-                        .unwrap_or(self.default_material.as_ref().unwrap())
-                        .bind,
-                    &[],
-                );
+                let bind: &wgpu::BindGroup = &draw.instances.bind;
+                if changed(&mut instances, bind) {
+                    pass.set_bind_group(1, bind, &[]);
+                }
+                let bind: &wgpu::BindGroup = &draw
+                    .material
+                    .unwrap_or(self.default_material.as_ref().unwrap())
+                    .bind;
+                if changed(&mut material, bind) {
+                    pass.set_bind_group(2, bind, &[]);
+                }
                 #[cfg(test)]
-                let ids = draw.reference_ids.unwrap_or(&draw.instances.id_buffer);
+                let id_buffer: &wgpu::Buffer =
+                    draw.reference_ids.unwrap_or(&draw.instances.id_buffer);
                 #[cfg(not(test))]
-                let ids = &draw.instances.id_buffer;
-                pass.set_vertex_buffer(1, ids.slice(..));
-                pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                let id_buffer: &wgpu::Buffer = &draw.instances.id_buffer;
+                if changed(&mut ids, id_buffer) {
+                    pass.set_vertex_buffer(1, id_buffer.slice(..));
+                }
+                if changed(&mut mesh, draw.mesh) {
+                    pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                    pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                }
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }

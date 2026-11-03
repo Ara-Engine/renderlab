@@ -17,11 +17,25 @@ class ProcessMemory(ctypes.Structure):
         "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
 
 
+def filetime(value):
+    return (value.dwHighDateTime << 32) + value.dwLowDateTime
+
+
+def cpu_times(handle=None):
+    values = [wintypes.FILETIME() for _ in range(4 if handle else 3)]
+    call = ctypes.windll.kernel32.GetProcessTimes if handle else ctypes.windll.kernel32.GetSystemTimes
+    arguments = [wintypes.HANDLE(handle)] if handle else []
+    if not call(*arguments, *(ctypes.byref(v) for v in values)):
+        return None
+    return [filetime(v) for v in values]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--measurement-label", default="Development baseline observation with validation/capture/monitor overhead. Not controlled performance.")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -53,10 +67,12 @@ def main():
     memory = ProcessMemory()
     memory.cb = ctypes.sizeof(memory)
     stop_reason = None
+    host_previous = None
     with evidence.with_suffix(".stdout.log").open("wb") as stdout, evidence.with_suffix(".stderr.log").open("wb") as stderr:
         process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
         while process.poll() is None:
+            observer_start = time.perf_counter()
             if time.perf_counter() - start > args.timeout:
                 process.kill()
                 process.wait()
@@ -66,6 +82,14 @@ def main():
             row = {"elapsed_seconds": time.perf_counter() - start,
                    "working_set_bytes": memory.WorkingSetSize,
                    "peak_working_set_bytes": memory.PeakWorkingSetSize}
+            host = cpu_times()
+            own = cpu_times(process._handle)
+            if host and host_previous:
+                idle, kernel, user = (a - b for a, b in zip(host, host_previous))
+                total = kernel + user
+                row["host_cpu_busy_percent"] = 100 * (total - idle) / total if total else None
+            host_previous = host
+            row["process_cpu_seconds"] = sum(own[2:]) / 10_000_000 if own else None
             if args.gpu:
                 tasks = subprocess.check_output(["tasklist.exe", "/FO", "CSV"], creationflags=subprocess.CREATE_NO_WINDOW).lower()
                 if any(name in tasks for name in (b"valorant-win64-shipping", b"fortniteclient", b"eldenring")):
@@ -75,6 +99,7 @@ def main():
                     break
                 row["gpu"] = subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
                                                      creationflags=subprocess.CREATE_NO_WINDOW).decode().strip()
+            row["observer_seconds"] = time.perf_counter() - observer_start
             samples.append(row)
             time.sleep(1)
         ctypes.windll.psapi.GetProcessMemoryInfo(wintypes.HANDLE(process._handle), ctypes.byref(memory), memory.cb)
@@ -90,7 +115,7 @@ def main():
               "peak_working_set_bytes": max([memory.PeakWorkingSetSize] + [s["peak_working_set_bytes"] for s in samples]),
               "observations": samples, "sources": sources, "changed_sources": changed,
               "VK_IMPLICIT_LAYER_PATH": env.get("VK_IMPLICIT_LAYER_PATH"),
-              "measurement_label": "Development baseline observation with validation/capture/monitor overhead. Not controlled performance."}
+              "measurement_label": args.measurement_label}
     evidence.with_suffix(".process.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({k: v for k, v in report.items() if k not in ("sources", "observations")}), flush=True)
     if changed or process.returncode:

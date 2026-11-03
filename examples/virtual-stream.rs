@@ -2,6 +2,8 @@
 mod cameras;
 #[path = "m4/diagnostics.rs"]
 mod diagnostics;
+#[path = "m4/game_guard.rs"]
+mod game_guard;
 #[path = "../support/limits.rs"]
 mod policy;
 #[allow(dead_code)]
@@ -37,6 +39,7 @@ struct Options {
     settle_final: usize,
     hold_pose: bool,
     page_log: bool,
+    dump_groups: bool,
     progressive: bool,
     frame_period: Duration,
     repeats: usize,
@@ -68,6 +71,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
         settle_final: 0,
         hold_pose: false,
         page_log: false,
+        dump_groups: false,
         progressive: false,
         frame_period: Duration::ZERO,
         repeats: 5,
@@ -91,6 +95,10 @@ fn parse_args(args: Vec<String>) -> Result<Options, Box<dyn std::error::Error>> 
         }
         if arg == "--page-log" {
             o.page_log = true;
+            continue;
+        }
+        if arg == "--dump-groups" {
+            o.dump_groups = true;
             continue;
         }
         if arg == "--validate" {
@@ -163,24 +171,10 @@ fn guard() -> Result<(), Box<dyn std::error::Error>> {
     if std::path::Path::new("D:/AraBuild/render-v3/quiet-window.lock").exists() {
         return Err("GPU quiet-window lock present".into());
     }
-    let status=std::process::Command::new("powershell.exe").args(["-NoProfile","-Command","if (Get-Process -Name 'VALORANT-Win64-Shipping' -ErrorAction SilentlyContinue) { exit 9 }"]).creation_flags_hidden().status()?;
-    if !status.success() {
+    if game_guard::active()? {
         return Err("gameplay active; GPU work deferred".into());
     }
     Ok(())
-}
-trait Hidden {
-    fn creation_flags_hidden(&mut self) -> &mut Self;
-}
-impl Hidden for std::process::Command {
-    fn creation_flags_hidden(&mut self) -> &mut Self {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            self.creation_flags(0x08000000);
-        }
-        self
-    }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process_start = Instant::now();
@@ -203,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         o.output.join("run.txt"),
         format!(
-            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={} progressive={} verify_cover={}\nargs={:?}\n",
+            "profile={} oracle={} shadow={} profiling={} validation={} period_ms={} page_log={} progressive={} verify_cover={} dump_groups={}\nargs={:?}\n",
             if cfg!(debug_assertions) {
                 "dev"
             } else {
@@ -217,6 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             o.page_log,
             o.progressive,
             o.verify_cover,
+            o.dump_groups,
             std::env::args().collect::<Vec<_>>()
         ),
     )?;
@@ -699,7 +694,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.stats()
         ),
     )?;
-    if let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene) {
+    if o.dump_groups
+        && let (Some(asset), Some(scene)) = (&virtual_asset, &virtual_scene)
+    {
         let index = if o.hold_pose {
             o.start
         } else {

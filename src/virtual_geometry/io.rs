@@ -141,6 +141,8 @@ pub(super) fn load(
     manifest: &Path,
     options: StreamOptions,
 ) -> Result<Package, Box<dyn std::error::Error>> {
+    #[cfg(feature = "selection-profile")]
+    let profile = Instant::now();
     options.validate()?;
     let mut bytes = Vec::new();
     File::open(manifest)?.take(81).read_to_end(&mut bytes)?;
@@ -184,8 +186,19 @@ pub(super) fn load(
         .map_err(|_| "package allocation failed")?;
     file.take((length as u64).saturating_add(1))
         .read_to_end(&mut bytes)?;
+    #[cfg(feature = "selection-profile")]
+    let read_us = profile.elapsed().as_micros();
     if bytes.len() != length || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
         return Err("package extent/digest mismatch".into());
     }
-    Ok(asset::virtual_mesh::decode(&bytes, limits)?)
+    #[cfg(feature = "selection-profile")]
+    let verified_us = profile.elapsed().as_micros();
+    let package = asset::virtual_mesh::decode(&bytes, limits)?;
+    #[cfg(feature = "selection-profile")]
+    eprintln!(
+        "bootstrap_profile bytes={length} read_us={read_us} digest_us={} decode_us={}",
+        verified_us - read_us,
+        profile.elapsed().as_micros() - verified_us
+    );
+    Ok(package)
 }

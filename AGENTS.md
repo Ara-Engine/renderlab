@@ -4,6 +4,7 @@ Read `docs/brief.md` and `docs/project-handoff.md` before implementation. Read `
 
 - This is an independent public-facing Rust renderer. Its own users and development experience drive the design; Ara integration is deferred.
 - Keep dependencies and compilation boundaries deliberate. Measure shader edit-to-image, incremental Rust edit-to-running-viewer, and startup-to-image separately from frame time.
+- Treat verification latency as development latency. Reject experiments with a short targeted reproducer and paired sample first. Reuse valid baseline evidence; reserve broader checks for retained changes and specific unresolved risks. Scale benchmark repetitions to observed variance and the claim, rather than running a fixed large campaign for every edit. Report implementation and verification time separately during optimization work.
 - Establish a small working viewer and shader reload loop before expanding rendering features. Keep the last working pipeline on shader errors.
 - Verify the complete image, including silhouettes, shadows, transparency and motion. Region-average lighting scores alone do not certify visual quality.
 - Keep fast development builds distinct from optimized performance measurements. Record hardware, scene, resolution, quality, build identity and contention with timings.

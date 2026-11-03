@@ -376,8 +376,15 @@ impl VirtualAsset {
         options.validate()?;
         let mut limits = options.limits;
         limits.max_metadata_bytes = limits.max_metadata_bytes.min(options.metadata_bytes);
+        #[cfg(feature = "selection-profile")]
+        let profile = Instant::now();
         let package =
             PreparedPackage::new(package, limits).map_err(|e| Error::InvalidInput(e.0))?;
+        #[cfg(feature = "selection-profile")]
+        eprintln!(
+            "bootstrap_prepared_profile validation_index_us={}",
+            profile.elapsed().as_micros()
+        );
         let roots = roots(&package);
         if options.geometry_bytes < checked_bytes([(roots.len(), PAGE_BYTES), (1, PAGE_BYTES)])? {
             return Err(Error::InvalidInput(

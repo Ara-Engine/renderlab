@@ -265,7 +265,7 @@ impl Renderer {
         }
         let instances = scene.instances.as_mut().unwrap();
         self.upload_instance_edits(instances, &mut uploads, &mut packing, &mut upload);
-        let mut prepared =
+        let mut prepared: Vec<PreparedDraw<'_>> =
             Vec::with_capacity(scene.selections.iter().map(|s| s.cut.clusters.len()).sum());
         let mut counts = SceneCounts {
             collections: 1,
@@ -279,6 +279,7 @@ impl Renderer {
         };
         for (placement, selection) in scene.selections.iter().enumerate() {
             let mesh = &asset.package.meshes[scene.meshes[placement] as usize];
+            let slots = placement as u32..placement as u32 + 1;
             for cluster in &selection.cut.clusters {
                 let cluster = &mesh.clusters[cluster.index()];
                 let crate::virtual_geometry::PageState::Resident(page) =
@@ -286,17 +287,31 @@ impl Renderer {
                 else {
                     return Err(Error::InvalidInput("virtual cut lost its published page"));
                 };
+                let material = &asset.materials[cluster.material as usize];
+                let indices =
+                    cluster.indices.offset..cluster.indices.offset + cluster.indices.count;
+                counts.triangles += u64::from(cluster.indices.count / 3);
+                // The cooker packs a group's clusters contiguously, so consecutive cut clusters
+                // often continue the previous draw. Extending it keeps primitive order intact.
+                if let Some(last) = prepared.last_mut()
+                    && std::ptr::eq(last.mesh, &page.mesh)
+                    && last.material.is_some_and(|m| std::ptr::eq(m, material))
+                    && last.slots == slots
+                    && last.indices.end == indices.start
+                {
+                    last.indices.end = indices.end;
+                    continue;
+                }
                 prepared.push(PreparedDraw {
                     mesh: &page.mesh,
                     instances,
-                    material: Some(&asset.materials[cluster.material as usize]),
-                    indices: cluster.indices.offset..cluster.indices.offset + cluster.indices.count,
-                    slots: placement as u32..placement as u32 + 1,
+                    material: Some(material),
+                    indices,
+                    slots: slots.clone(),
                     #[cfg(test)]
                     reference_ids: None,
                 });
                 counts.draws += 1;
-                counts.triangles += u64::from(cluster.indices.count / 3);
                 counts.submitted_instances += 1;
             }
         }

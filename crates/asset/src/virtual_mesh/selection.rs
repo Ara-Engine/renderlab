@@ -451,6 +451,13 @@ fn select_internal(
             }
             continue;
         }
+        if state.publication_blocked(seed, capacity) {
+            #[cfg(feature = "selection-profile")]
+            {
+                attribution.blocked += 1;
+            }
+            continue;
+        }
         // Publication is a separate transaction inside the admitted plan. Its complete cut
         // must be resident; it cannot introduce IO demand or bypass transition accounting.
         #[cfg(feature = "selection-profile")]
@@ -540,7 +547,7 @@ fn select_internal(
     };
     #[cfg(feature = "selection-profile")]
     eprintln!(
-        "selection_profile initial={} prepared={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={} {}",
+        "selection_profile initial={} prepared={} candidates={} domain_ns={} admission_ns={} index_ns={} sort_ns={} proposals_ns={} emit_ns={} blocked={} {}",
         initial.is_some(),
         matches!(metadata, Metadata::Prepared(_)),
         candidates,
@@ -550,6 +557,7 @@ fn select_internal(
         sorted_ns - indexed_ns,
         proposed_ns - sorted_ns,
         profile.elapsed().as_nanos() - proposed_ns,
+        attribution.blocked,
         attribution.line()
     );
     Ok(selection)
@@ -588,6 +596,7 @@ impl Transactions {
 }
 #[cfg(feature = "selection-profile")]
 struct Attribution {
+    blocked: usize,
     plan: Transactions,
     sync: Transactions,
     publish: Transactions,
@@ -602,6 +611,7 @@ struct Attribution {
 impl Attribution {
     fn new(groups: usize) -> Self {
         Self {
+            blocked: 0,
             plan: Transactions::default(),
             sync: Transactions::default(),
             publish: Transactions::default(),

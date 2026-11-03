@@ -103,6 +103,8 @@ pub(super) struct State<'a> {
     proposal: Vec<bool>,
     deltas: Vec<(PageId, bool)>,
     pub charged: usize,
+    /// Unique pages in this mesh together with pinned and externally protected pages.
+    all_pages: usize,
     pub visits: usize,
     /// Profile only: `visits` when the current proposal first added an unavailable cut page.
     #[cfg(feature = "selection-profile")]
@@ -122,18 +124,21 @@ impl<'a> State<'a> {
         protected: &[PageId],
     ) -> Self {
         let n = mesh.groups.len();
+        let mut fixed = vec![false; available.len()];
+        for p in pinned.iter().chain(protected) {
+            fixed[p.index()] = true;
+        }
+        let mut universe = fixed.clone();
         let mut refs = vec![0; available.len()];
         let mut clusters = 0;
         for c in &mesh.clusters {
+            universe[c.page.index()] = true;
             if active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()]) {
                 refs[c.page.index()] += 1;
                 clusters += 1;
             }
         }
-        let mut fixed = vec![false; available.len()];
-        for p in pinned.iter().chain(protected) {
-            fixed[p.index()] = true;
-        }
+        let all_pages = universe.into_iter().filter(|v| *v).count();
         let charged = fixed
             .iter()
             .zip(&refs)
@@ -161,6 +166,7 @@ impl<'a> State<'a> {
             proposal: vec![false; n],
             deltas: Vec::with_capacity(mesh.clusters.len()),
             charged,
+            all_pages,
             // The initial cover scan. Proposal/publication count each closure/boundary record
             // read below. Rollback replays pages without cluster reads.
             visits: mesh.clusters.len(),
@@ -169,6 +175,28 @@ impl<'a> State<'a> {
             #[cfg(feature = "selection-profile")]
             stopped: false,
         }
+    }
+
+    /// A publication is a subset of the admitted plan. It cannot replace a shard that
+    /// the plan itself still needs. Skip its closure only when capacity cannot deny it,
+    /// so the ordinary path still reports every possible capacity reason.
+    pub fn publication_blocked(&mut self, seed: usize, capacity: Capacity) -> bool {
+        if capacity.clusters < self.mesh.clusters.len()
+            || self.all_pages > capacity.geometry_bytes / PAGE_BYTES
+        {
+            return false;
+        }
+        let span = self.mesh.groups[seed].clusters;
+        for id in span.offset as usize..(span.offset + span.count) as usize {
+            self.visits += 1;
+            let c = &self.mesh.clusters[id];
+            if !self.available[c.page.index()]
+                && c.refined.is_none_or(|r| !self.planned.active[r.index()])
+            {
+                return true;
+            }
+        }
+        false
     }
 
     #[cfg(feature = "selection-profile")]

@@ -171,6 +171,58 @@ fn resident_independent_fin_publishes_while_another_region_waits() {
 }
 
 #[test]
+fn unavailable_planned_shard_can_be_replaced_by_available_deeper_detail() {
+    let mesh = graph(&[&[None], &[Some(0)], &[Some(1)]]);
+    let errors = [10., 100., f64::INFINITY];
+    let available = [true, false, true];
+    for geometry_pages in [2, 3] {
+        let b = SelectionBudget {
+            geometry_bytes: geometry_pages * PAGE_BYTES,
+            max_clusters: 3,
+            ..budget()
+        };
+        let actual = select(&mesh, &errors, 1., &available, b).unwrap();
+        assert_eq!(actual.cut.clusters, [ClusterId(0)]);
+        assert!(actual.demand.requested_pages.is_empty());
+        assert_eq!(actual.debt.unresolved_groups, 0);
+    }
+}
+
+#[test]
+fn doomed_publication_still_reports_capacity_beyond_the_plan() {
+    // Groups P, S, A, R. Sibling P's plan replaces A's clusters 3 and 4. S's doomed publication
+    // also activates A and needs them again, exceeding a cap that every accepted plan fits.
+    let mesh = graph(&[
+        &[None],
+        &[None, None],
+        &[Some(0), Some(0), Some(1)],
+        &[Some(2)],
+    ]);
+    let errors = [60., 50., 100., f64::INFINITY];
+    let available = [true, false, true, true, true, false, true];
+    for (b, reason) in [
+        (
+            SelectionBudget {
+                geometry_bytes: 4 * PAGE_BYTES,
+                ..budget()
+            },
+            DebtReason::GeometryCapacity,
+        ),
+        (
+            SelectionBudget {
+                max_clusters: 3,
+                ..budget()
+            },
+            DebtReason::OutputCapacity,
+        ),
+    ] {
+        let actual = select(&mesh, &errors, 1., &available, b).unwrap();
+        assert_eq!(actual.cut.clusters, [ClusterId(6)]);
+        assert_eq!(actual.debt.reasons, [reason, DebtReason::MissingPages]);
+    }
+}
+
+#[test]
 fn candidate_pressure_refines_highest_error_before_finest_group_id() {
     let mesh = graph(&[
         &[None],
