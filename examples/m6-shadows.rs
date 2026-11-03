@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (policy, args) = policy::Policy::args(std::env::args().skip(1).collect())?;
     let (mut asset_path, mut camera_path, mut light_path) =
         (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
+    let mut shader_path = None::<PathBuf>;
     let mut out = PathBuf::from("measurements/m6-gpu/fixture");
     let mut samples = SampleCount::One;
     let mut validate = false;
@@ -45,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--asset" => asset_path = Some(args.next().ok_or("missing asset")?.into()),
             "--cameras" => camera_path = Some(args.next().ok_or("missing cameras")?.into()),
             "--lighting" => light_path = Some(args.next().ok_or("missing lighting")?.into()),
+            "--shader" => shader_path = Some(args.next().ok_or("missing shader")?.into()),
             "--output" => out = args.next().ok_or("missing output")?.into(),
             "--frames" => frames = args.next().ok_or("missing frames")?.parse()?,
             "--samples" => {
@@ -76,6 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if asset_path.is_some() && motion == "blocker" {
         return Err("blocker motion requires the owned fixture".into());
     }
+    let shader = shader_path
+        .as_deref()
+        .map(fs::read_to_string)
+        .transpose()?
+        .unwrap_or_else(|| include_str!("../shaders/scene.wgsl").to_owned());
     let _validation = validation::begin(validate);
     fs::create_dir_all(&out)?;
     let fixture = shadow_fixture::Fixture::new();
@@ -142,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             samples,
             anisotropy_clamp: 16,
         },
-        include_str!("../shaders/scene.wgsl"),
+        &shader,
     )?;
     let make_shadows = |lighting: &Lighting| Shadows {
         requests: lighting
