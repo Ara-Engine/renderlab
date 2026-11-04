@@ -85,3 +85,5 @@ Evidence: `D:/Coding/renderlab-work/m6-compute-cost/`. It holds `run.py` (prefli
 ## Next boundary
 
 Exact scheduling options at this level are largely spent. The two raster passes now total about 6.5-10 ms, and each re-rasterizes all 13 M triangles; shading could reuse the receiver depth, but that change is in `renderer.rs`, outside this unit. A further large compute reduction needs fewer rays per receiver. That is a quality change and needs an independent non-exact quarry reference gate, which does not exist yet.
+
+The subsequent [receiver-depth sharing screen](m6-raster-share-cost.md) preserves exact output with first-winner tie handling, but establishes no reliable frame-cost reduction. Both production experiments were rejected; each still submits the full geometry twice.

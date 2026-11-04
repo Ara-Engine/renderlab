@@ -483,6 +483,53 @@ fn gpu_fresh_thin_contact_moving_view_equivalence() {
         masks.windows(2).any(|pair| pair[0] != pair[1]),
         "moving views must exercise changed visibility"
     );
+    // Two differently colored primitives at identical depth must retain the first
+    // primitive, including within one indexed draw. Reversing their order must matter.
+    let tie_vertices: Vec<_> = [[1., 0., 0., 1.], [0., 0., 1., 1.]]
+        .into_iter()
+        .flat_map(|color| {
+            [[-8., -8., 0.], [8., -8., 0.], [0., 8., 0.]].map(|position| Vertex {
+                position,
+                normal: [0., 0., 1.],
+                uv: [0.; 2],
+                color,
+            })
+        })
+        .collect();
+    let tie_camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )
+    .unwrap();
+    let mut tie_images = vec![];
+    for (i, indices) in [[0, 1, 2, 3, 4, 5], [3, 4, 5, 0, 1, 2]].iter().enumerate() {
+        let tie_mesh = r
+            .try_upload_mesh(&MeshData {
+                vertices: &tie_vertices,
+                indices,
+            })
+            .unwrap()
+            .unwrap();
+        r.test_drain("fresh equal-depth mesh");
+        compare(
+            &mut r,
+            &color,
+            &tie_camera,
+            &mut [Draw::new(&tie_mesh, &mut receiver)],
+            &out,
+            &format!("tie-{i}"),
+            &mut reference_counts,
+        );
+        tie_images.push(fs::read(out.join(format!("tie-{i}-compute.rgba16f"))).unwrap());
+    }
+    assert_ne!(
+        tie_images[0], tie_images[1],
+        "tie fixture did not distinguish the first winner"
+    );
     let baseline = r.stats().ownership;
     let camera = Camera::look_at(
         Vec3::new(0., 0., 4.),
