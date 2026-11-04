@@ -1,6 +1,6 @@
 # M6 shadow history: contact screen
 
-Experimental implementation, not yet an accepted renderer checkpoint. M6 remains open. This screen extends [the history plan](m6-softness-history-plan.md); it does not establish quarry quality, moving-scene performance or Unreal parity.
+The contact screen passed, but the subsequent [quarry work forecast](m6-history-quarry-screen.md) failed its predeclared feasibility screen. The experimental source is preserved privately and the accepted renderer is restored. M6 remains open. This screen extends [the history plan](m6-softness-history-plan.md); it does not establish quarry quality, moving-scene performance or Unreal parity.
 
 ## Result
 
@@ -32,4 +32,4 @@ Root's initial WGSL-only correction needed no Rust build. Recorded native sessio
 
 Root evidence is in `.refs/m6-history-reconstruction/`. `root-summary.json`, per-frame JSON/raw images, `run-warm-cost/cost.json`, command manifests, source snapshots and preserved executables identify the results. The final Clippy-only conversion removal is behaviorally equivalent to the executed source; the source snapshots explicitly retain that difference. The last executed shader is SHA-256 `26e11d8026d22008ce6b0975718dcfaef7c28fe2f90e908f9952e7d366b82ad3`.
 
-Root inspected complete contact, reveal and changed-light sheets. Broader surface disocclusions, reload/resize lifetime behavior with history enabled, and quarry feasibility remain to be checked before accepting a production checkpoint. Next is a bounded real-quarry feasibility screen, with full-size cold work priced before an expensive render. Do not launch an unconditional 256-ray 1080p 4x quarry cold start.
+Root inspected complete contact, reveal and changed-light sheets. The subsequent sparse quarry screen observed 31 narrow fractional receivers among 1,298 selected receivers and stopped. Its forecast is not a measured moving-frame cost. Broader surface disocclusions and reload/resize lifetime behavior with history enabled remain unverified. An omitted new field in the shared lighting parser also prevents integration; restoring the accepted source removes that incompatibility. The next decision must distinguish the work proxy from actual cost without erasing the failed screen. Do not launch an unconditional 256-ray 1080p 4x quarry cold start.
