@@ -807,6 +807,97 @@ fn wait_map(r: &Renderer, buffer: &wgpu::Buffer) -> Vec<u8> {
     bytes
 }
 
+/// Lower-bound screen: unchanged indexed draws/depth/color with a trivial fragment.
+/// This diagnostic deliberately changes HDR; it is never a production pipeline.
+#[test]
+#[ignore = "GPU slot, experimental acknowledgment and external RENDERLAB_FRESH_MANIFEST; headless"]
+fn gpu_fresh_geometry_cost_screen() {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_FRESH_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let validate = manifest["validate"].as_bool().unwrap_or(false);
+    let _validation = validation::begin(validate);
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = renderer(validate);
+    let (mut asset, cameras) = load_quarry(&manifest, &mut r);
+    let color = target(&r, 1920, 1080);
+    let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
+    let source = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
+    let start = source.find("@fragment fn fs_lit(").unwrap();
+    let end = source[start..].find("@vertex fn vs_present(").unwrap() + start;
+    // Consume every varying so dead-code elimination cannot turn this into a
+    // position-only vertex shader. The optional constant is a separate lower bound.
+    let body = if manifest["constant"].as_bool().unwrap_or(false) {
+        "return vec4<f32>(0.0,0.0,0.0,1.0);"
+    } else {
+        "let value=dot(input.color,vec4<f32>(0.1))+dot(input.uv,vec2<f32>(0.1))+dot(input.normal,vec3<f32>(0.1))+input.winding+dot(input.world,vec3<f32>(0.1))+dot(input.tangent,vec3<f32>(0.1))+input.handedness+f32(front); return vec4<f32>(value,value,value,1.0);"
+    };
+    let trivial = format!(
+        "{}@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {{ {body} }}\n{}",
+        &source[..start],
+        &source[end..]
+    );
+    validate_wgsl(&trivial);
+    let scopes = OperationScopes::new(&r.device);
+    let mut probe = r
+        .fresh
+        .as_ref()
+        .unwrap()
+        .compile(&r.device, &r.ledger, &trivial)
+        .shade;
+    assert!(scopes.finish().is_none());
+    let warmup = manifest["warmup_frames"].as_u64().unwrap_or(12) as usize;
+    let frames = manifest["frames"].as_u64().unwrap_or(48) as usize;
+    let mut pending = std::collections::HashMap::new();
+    let mut samples = vec![];
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mut collect =
+        |r: &mut Renderer, pending: &mut std::collections::HashMap<_, (bool, usize)>| {
+            for gpu in r.poll().unwrap().gpu {
+                if let Some((trivial, pose)) = pending.remove(&gpu.frame.0) {
+                    samples.push(serde_json::json!({"trivial":trivial,"pose":pose,
+                    "receiver_ms":ms(gpu.receiver_pass.unwrap()),"compute_ms":ms(gpu.visibility_compute.unwrap()),
+                    "shading_ms":ms(gpu.mesh_pass),"tone_ms":ms(gpu.present_pass.unwrap()),"span_ms":ms(gpu.render_span)}));
+                }
+            }
+        };
+    for frame in 0..warmup + frames {
+        let k = frame.saturating_sub(warmup);
+        let trivial = k % 2 == 1;
+        let pose = (k / 2) % 2;
+        if trivial {
+            std::mem::swap(&mut r.pipeline.fresh.as_mut().unwrap().shade, &mut probe);
+        }
+        let report = render(
+            &mut r,
+            &color,
+            &poses[pose],
+            &mut asset.draws(Visibility::Frustum),
+        );
+        if trivial {
+            std::mem::swap(&mut r.pipeline.fresh.as_mut().unwrap().shade, &mut probe);
+        }
+        if frame >= warmup {
+            pending.insert(report.frame.0, (trivial, pose));
+        }
+        collect(&mut r, &mut pending);
+    }
+    r.test_drain("paired geometry-cost frames");
+    collect(&mut r, &mut pending);
+    assert!(pending.is_empty(), "missing geometry-cost samples");
+    fs::write(
+        out.join("geometry-cost.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "validation":validate,"warmup_frames":warmup,"samples":samples,
+            "diagnostic_changes_hdr":true,"submitted_triangles_per_pass":13_034_903,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 /// Paired compute-only screen on the real quarry receivers, then complete frames.
 /// Every variant's visibility is compared bit-for-bit with the frozen baseline first.
 #[test]
