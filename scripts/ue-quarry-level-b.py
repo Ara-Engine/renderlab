@@ -155,7 +155,7 @@ def g6_atlases(reference, output):
           layout="each 66x99 tile: rows reference/production/Unreal; columns visibility/signed error x8; 33x33 source pixels per cell"))
 
 
-def main(reference, support, output):
+def main(reference, support, output, vsm_run="vsm-capture-03", hrt_run="hrt-capture-01"):
     score = load("ue-quarry-score")
     gate = score.load_gate(support / "fresh_gate.py")
     manifest = json.loads((ROOT / "manifest.json").read_text())
@@ -195,9 +195,11 @@ def main(reference, support, output):
                           ("production-visibility", visibility_image(production, cover, cover)),
                           ("production-error-x8", error_image(prod_error, cover, cover))):
             Image.fromarray(rgb).save(output / f"pose-{pose}-{name}.png")
-        for mode, run in (("vsm-smrt", "vsm-capture-03"), ("hardware-rt-denoised", "hrt-capture-01")):
+        for mode, run in (("vsm-smrt", vsm_run), ("hardware-rt-denoised", hrt_run)):
             capture = ROOT / "runs" / run / "capture.json"
             files = sorted((ROOT / "extracted" / run).glob(f"pose-{pose}-*-direct.npz"))
+            if not files:
+                raise ValueError("no extracted visibility for " + run)
             for raw_path in files:
                 state = raw_path.name.removeprefix(f"pose-{pose}-").removesuffix("-direct.npz")
                 with np.load(raw_path, allow_pickle=False) as raw:
@@ -266,6 +268,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "level-b")
     parser.add_argument("--temporal-only", action="store_true", help="finish existing pose scores without regenerating images")
     parser.add_argument("--crops-only", action="store_true", help="pack all existing G6 receiver crops")
+    parser.add_argument("--vsm-run", default="vsm-capture-03")
+    parser.add_argument("--hrt-run", default="hrt-capture-01")
     args = parser.parse_args()
     if not args.output.resolve().is_relative_to(ROOT.resolve()):
         parser.error("outputs must remain private")
@@ -275,4 +279,4 @@ if __name__ == "__main__":
         gate = load("ue-quarry-score").load_gate(args.support / "fresh_gate.py")
         temporal(args.reference, args.output, gate)
     else:
-        main(args.reference, args.support, args.output)
+        main(args.reference, args.support, args.output, args.vsm_run, args.hrt_run)

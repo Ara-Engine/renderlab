@@ -140,7 +140,11 @@ def capture(game_world=None):
              "r.Shadow.Virtual.SMRT.SamplesPerRayDirectional": 8, "r.Shadow.Virtual.SMRT.AdaptiveRayCount": 1,
              "r.RayTracing.Shadows": int(mode == "hardware-rt-denoised"), "r.RayTracing.Shadows.SamplesPerPixel": 1,
              "r.Shadow.Denoiser": 1, "r.Shadow.Denoiser.TemporalAccumulation": 1,
-             "r.AntiAliasingMethod": 0, "r.ScreenPercentage": 100, "r.MaxAnisotropy": 16}
+             "r.AntiAliasingMethod": 0, "r.ScreenPercentage": 100, "r.MaxAnisotropy": 16,
+             "r.RayTracing.Nanite.Mode": 1, "r.RayTracing.Nanite.CutError": 0,
+             "r.RayTracing.Nanite.Streaming": 1, "r.RayTracing.Nanite.Streaming.LODBias": 0,
+             "r.RayTracing.Nanite.Streaming.Offscreen.LODBias": 0, "r.RayTracing.Nanite.Streaming.Offscreen.MinCutError": 0,
+             "r.Nanite.MaxPixelsPerEdge": .25}
     if mode not in ("vsm-smrt", "hardware-rt-denoised"):
         raise RuntimeError("unknown shadow mode")
     for key, value in cvars.items():
@@ -165,6 +169,9 @@ def capture(game_world=None):
     disabled = ["GlobalIllumination", "LumenGlobalIllumination", "LumenReflections", "ScreenSpaceReflections", "ReflectionEnvironment",
                 "AmbientOcclusion", "DistanceFieldAO", "ContactShadows", "SkyLighting", "Bloom", "Vignette", "Grain", "MotionBlur",
                 "Fog", "VolumetricFog", "Atmosphere", "EyeAdaptation", "Tonemapper", "AntiAliasing"]
+    environment = MODE == "environment-game"
+    if environment:
+        disabled = [n for n in disabled if n not in ("SkyLighting", "ReflectionEnvironment")]
     component.set_editor_property("show_flag_settings", [unreal.EngineShowFlagsSetting(show_flag_name=n, enabled=False) for n in disabled])
     post = unreal.PostProcessSettings()
     for key, value in (("auto_exposure_method", unreal.AutoExposureMethod.AEM_MANUAL),
@@ -177,17 +184,29 @@ def capture(game_world=None):
     options = unreal.ImageWriteOptions(format=unreal.DesiredImageFormat.EXR, compression_quality=1, overwrite_file=False, async_=False)
     records = []
     if game_world is not None:
-        state = dict(index=0, frame=0)
+        state = dict(index=0, frame=0, warmup=0)
         # Keep shadowed histories contiguous across the registered motion/return.
-        schedule = [(pi, True) for pi in range(3)] + [(pi, False) for pi in range(3)]
+        schedule = [(pi, True) for pi in range(3)] + ([] if environment else [(pi, False) for pi in range(3)])
         def tick(delta):
             try:
+                if state["warmup"] < 64:
+                    pose = MANIFEST["poses"][0]
+                    camera.set_actor_location(position(pose["eye"]), False, False)
+                    camera.set_actor_rotation(unreal.MathLibrary.find_look_at_rotation(position(pose["eye"]), position(pose["target"])), False)
+                    light_component.set_cast_shadows(True)
+                    component.capture_scene()
+                    state["warmup"] += 1
+                    if state["warmup"] == 64:
+                        unreal.SystemLibrary.execute_console_command(world, "D3D12.DumpRayTracingGeometries all")
+                    return True
                 if state["index"] >= len(schedule):
                     save("capture.json", dict(engine=unreal.SystemLibrary.get_engine_version(), shadow_mode=mode,
-                        resolution=[1920, 1080], captures=records, engine_ticks=True, frames_per_pose=64,
+                        resolution=[1920, 1080], captures=records, engine_ticks=True, frames_per_pose=64, warmup_ticks=64,
                         cvars={key: unreal.SystemLibrary.get_console_variable_float_value(key) for key in cvars},
                         camera_fov=component.get_editor_property("fov_angle"), near_cm=.5,
+                        direct_only=not environment, skylight_in_map_but_capture_show_flag_disabled=not environment,
                         timing_scope="capture includes readback/export and extra view; separate main-only profiling required"))
+                    unreal.SystemLibrary.execute_console_command(world, "D3D12.DumpRayTracingGeometries all")
                     unreal.SystemLibrary.quit_game(world, None, unreal.QuitPreference.QUIT, True)
                     return False
                 pi, shadows = schedule[state["index"]]
@@ -198,12 +217,12 @@ def capture(game_world=None):
                     component.set_editor_property("camera_cut_this_frame", state["index"] in (0, 3))
                     light_component.set_cast_shadows(shadows)
                 component.capture_scene()
-                if (shadows and state["frame"] in (0, 1, 7, 31)) or state["frame"] == 63:
+                if (shadows and not environment and state["frame"] in (0, 1, 7, 31)) or state["frame"] == 63:
                     label = (("cut" if pi == 0 else "motion-first") if state["frame"] == 0 else
                              "steady" if state["frame"] == 63 else f"settle-{state['frame']}")
                     path = RUN / f"pose-{pi}-{label}-{'shadowed' if shadows else 'unshadowed'}.exr"
                     unreal.ImageWriteBlueprintLibrary.export_to_disk(target, str(path), options)
-                    records.append(dict(pose=pi, state=label, engine_tick=state["index"] * 64 + state["frame"],
+                    records.append(dict(pose=pi, state=label, engine_tick=64 + state["index"] * 64 + state["frame"],
                         casts_shadows=shadows, path=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                         eye_cm=xyz(camera.get_actor_location()), forward=xyz(camera.get_actor_forward_vector()), up=xyz(camera.get_actor_up_vector())))
                 state["frame"] += 1
@@ -350,6 +369,119 @@ def capture_actors():
     save("capture-actors.json", {"views": [0, 1, 2], "capture_every_frame": False})
 
 
+def correct():
+    """Own the glTF master, enable its Nanite permutations, and fix all saved maps."""
+    library = unreal.MaterialEditingLibrary
+    materials = [unreal.load_asset(f"/Game/M6Quarry/Imported/quarry/Materials/QuarryMaterial_{i:02d}") for i in range(12)]
+    parents = {m.get_editor_property("parent").get_path_name() for m in materials}
+    if len(parents) != 1:
+        raise RuntimeError("material masters differ; inspect before reparenting")
+    original = next(iter(parents))
+    ancestor = unreal.load_asset(original)
+    chain = []
+    while isinstance(ancestor, unreal.MaterialInstanceConstant):
+        chain.append(ancestor)
+        ancestor = ancestor.get_editor_property("parent")
+    if not isinstance(ancestor, unreal.Material):
+        raise RuntimeError("cannot resolve glTF master ancestry")
+    owned = "/Game/M6Quarry/Materials/M_QuarryNaniteMaster"
+    master = unreal.load_asset(owned)
+    if master is None:
+        master = unreal.EditorAssetLibrary.duplicate_asset(ancestor.get_path_name(), owned)
+    if not isinstance(master, unreal.Material):
+        raise RuntimeError("expected a material master")
+    library.set_material_usage(master, unreal.MaterialUsage.MATUSAGE_NANITE)
+    library.recompile_material(master)
+    if not library.has_material_usage(master, unreal.MaterialUsage.MATUSAGE_NANITE):
+        raise RuntimeError("Nanite material usage did not stick")
+    unreal.EditorAssetLibrary.save_loaded_asset(master)
+    private_parent = master
+    for index, source in enumerate(reversed(chain)):
+        path = f"/Game/M6Quarry/Materials/MI_QuarryParent_{index}"
+        instance = unreal.load_asset(path) or unreal.EditorAssetLibrary.duplicate_asset(source.get_path_name(), path)
+        library.set_material_instance_parent(instance, private_parent)
+        library.update_material_instance(instance)
+        unreal.EditorAssetLibrary.save_loaded_asset(instance)
+        private_parent = instance
+    inventory = []
+    for material in materials:
+        before = material.get_editor_property("parent").get_path_name()
+        library.set_material_instance_parent(material, private_parent)
+        library.update_material_instance(material)
+        unreal.EditorAssetLibrary.save_loaded_asset(material)
+        inventory.append(dict(asset=material.get_path_name(), old_parent=before,
+                              parent=material.get_editor_property("parent").get_path_name()))
+    # Imported RGBA32F cube retains every source delta texel through an exact
+    # basis permutation. Intensity 64 reverses its exact /64 storage scaling.
+    cube_path = "/Game/M6Quarry/Environment/quarry-sky-v2"
+    cube = unreal.load_asset(cube_path)
+    if cube is None:
+        task = unreal.AssetImportTask()
+        for key, value in (("filename", str(ROOT / "environment-v2/quarry-sky-v2.dds")),
+                           ("destination_path", "/Game/M6Quarry/Environment"), ("automated", True), ("save", True)):
+            task.set_editor_property(key, value)
+        unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+        cube = unreal.load_asset(cube_path)
+    if not isinstance(cube, unreal.TextureCube):
+        raise RuntimeError("environment import did not produce TextureCube")
+    for key, value in (("srgb", False), ("compression_settings", unreal.TextureCompressionSettings.TC_HDR_F32),
+                       ("max_texture_size", 128), ("never_stream", True)):
+        cube.set_editor_property(key, value)
+    unreal.EditorAssetLibrary.save_loaded_asset(cube)
+    levels = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    maps = [LEVEL] + [f"/Game/M6Quarry/View{p}" for p in range(3)]
+    map_records = []
+    for path in maps:
+        if not levels.load_level(path):
+            raise RuntimeError("missing map " + path)
+        actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+        sky = next((a for a in actors if isinstance(a, unreal.SkyLight)), None) or spawn(unreal.SkyLight, "Environment")
+        sky_component = sky.get_component_by_class(unreal.SkyLightComponent)
+        sky_component.set_mobility(unreal.ComponentMobility.MOVABLE)
+        sky_component.set_editor_property("source_type", unreal.SkyLightSourceType.SLS_SPECIFIED_CUBEMAP)
+        sky_component.set_editor_property("cubemap", cube)
+        sky_component.set_editor_property("cubemap_resolution", 128)
+        sky_component.set_editor_property("lower_hemisphere_is_black", False)
+        sky_component.set_editor_property("real_time_capture", False)
+        sky_component.set_cast_shadows(False)
+        sky_component.set_intensity(64.)
+        sky_component.set_light_color(unreal.LinearColor(1, 1, 1, 1))
+        sky_component.recapture_sky()
+        volume = next((a for a in actors if isinstance(a, unreal.PostProcessVolume)), None) or spawn(unreal.PostProcessVolume, "Exposure")
+        volume.set_editor_property("unbound", True)
+        volume.set_editor_property("priority", 1000.)
+        post = volume.get_editor_property("settings")
+        for key, value in (("auto_exposure_method", unreal.AutoExposureMethod.AEM_MANUAL),
+                           ("auto_exposure_apply_physical_camera_exposure", False), ("auto_exposure_bias", -14.)):
+            post.set_editor_property("override_" + key, True)
+            post.set_editor_property(key, value)
+        volume.set_editor_property("settings", post)
+        levels.save_current_level()
+        map_records.append(dict(map=path, skylight_intensity=sky_component.get_editor_property("intensity"),
+            cube=cube.get_path_name(), exposure_bias=post.get_editor_property("auto_exposure_bias")))
+    save("correction.json", dict(engine=unreal.SystemLibrary.get_engine_version(), master=master.get_path_name(),
+        nanite_usage=library.has_material_usage(master, unreal.MaterialUsage.MATUSAGE_NANITE), materials=inventory,
+        maps=map_records, environment_transport=json.loads((ROOT / "environment-v2/transport.json").read_text())))
+
+
+def full_residency():
+    subsystem = mesh_subsystem()
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    records = []
+    for index in range(12):
+        path = f"/Game/M6Quarry/Imported/quarry/StaticMeshes/Quarry_{index:02d}"
+        mesh = unreal.load_asset(path)
+        settings = subsystem.get_nanite_settings(mesh)
+        settings.set_editor_property("target_minimum_residency_in_kb", 4294967295)
+        subsystem.set_nanite_settings(mesh, settings, True)
+        unreal.EditorAssetLibrary.save_loaded_asset(mesh)
+        asset = registry.get_asset_by_object_path(mesh.get_path_name())
+        triangles = asset.get_tag_value("NaniteTriangles")
+        records.append(dict(asset=mesh.get_path_name(), nanite_triangles=str(triangles),
+                            minimum_residency_kb=settings.get_editor_property("target_minimum_residency_in_kb")))
+        save("full-residency.json", records)
+
+
 try:
     if not unreal.SystemLibrary.get_engine_version().startswith("5.7.4-51494982"):
         raise RuntimeError("UE build differs")
@@ -359,7 +491,7 @@ try:
         capture()
     elif MODE == "views":
         views()
-    elif MODE == "capture-game":
+    elif MODE in ("capture-game", "environment-game"):
         world = unreal.load_object(None, "/Game/M6Quarry/View0.View0")
         if world is None:
             raise RuntimeError("main game world unavailable")
@@ -370,6 +502,10 @@ try:
         filter_textures()
     elif MODE == "capture-actors":
         capture_actors()
+    elif MODE == "correct":
+        correct()
+    elif MODE == "full-residency":
+        full_residency()
     else:
         raise RuntimeError("unknown run mode")
 except Exception:

@@ -84,9 +84,9 @@ def extract(run, output, dependencies):
                             source_only=int((source_cover & ~ue_cover).sum()), ue_only=int((ue_cover & ~source_cover).sum()),
                             source_depth_sha256=digest(depth_path), shadowed_sha256=record["sha256"],
                             unshadowed_sha256=unshadowed["sha256"], raw_npz_sha256=digest(output / f"{label}-direct.npz")))
-    manifest = dict(status="RAW_VISIBILITY_EXTRACTED_REFERENCE_PENDING", capture=str(run / "capture.json"),
+    manifest = dict(status="RAW_VISIBILITY_EXTRACTED_NOT_SCORED", capture=str(run / "capture.json"),
                     capture_sha256=digest(run / "capture.json"), mode=capture["shadow_mode"], pairs=results,
-                    reference="UNAVAILABLE: do not score against one 256-ray shipping draw",
+                    reference="Bind separately to the immutable 16,384-ray reference; never score against one shipping draw",
                     scale="unexposed linear RGB as exported; paired ratio cancels a common scale; no fitted gain",
                     display="-14 stops, per-channel Reinhard then sRGB; magenta denotes undefined source receiver",
                     limits="Requires independent projection/coverage, material and pre-exposure audit; no Level B verdict")

@@ -4,8 +4,33 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import numpy as np
+
+
+def log_evidence(path):
+    text = path.read_text(encoding="utf-8-sig")
+    dumps = []
+    for block in text.split("Tracked FD3D12RayTracingGeometry objects")[1:]:
+        objects = [dict(name=name, mib=float(size), triangles=int(triangles), compaction=bool(int(compaction)))
+            for name, size, triangles, compaction in re.findall(
+                r"D3D12RayTracing: Name: (\S+) - Size: ([\d.]+) MB - Prims: (\d+) - Segments: \d+ -  Compaction: (\d+)", block)]
+        quarry = [o for o in objects if re.fullmatch(r"Quarry_\d+", o["name"]) and not o["compaction"]]
+        dumps.append(dict(objects=objects, native_nanite_quarry_triangles=sum(o["triangles"] for o in quarry),
+                          native_nanite_quarry_blas_mib=sum(o["mib"] for o in quarry)))
+    tree = []
+    for line in text.splitlines():
+        columns = line.split("┃")
+        if len(columns) < 5:
+            continue
+        exclusive = re.search(r"([\d.]+) ms", columns[1])
+        inclusive = re.search(r"([\d.]+) ms", columns[2])
+        if exclusive and inclusive:
+            tree.append(dict(name=columns[3].rstrip(), exclusive_ms=float(exclusive[1]), inclusive_ms=float(inclusive[1])))
+    return dict(log_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), ray_tracing_dumps=dumps, gpu_tree=tree,
+                gpu_tree_scope="one instrumented ProfileGPU frame; inclusive parents overlap and must not be summed",
+                native_geometry_scope="mode-1 noncompacted Quarry BLAS entries; verify exact per-mesh source counts")
 
 
 def summarize(path):
@@ -38,10 +63,14 @@ def summarize(path):
         statistics[name] = dict(n=len(column), median=float(np.median(column)), minimum=float(column.min()),
                                 p95=float(np.quantile(column, .95)), maximum=float(column.max()),
                                 standard_deviation=float(column.std(ddof=1)))
-    return dict(csv=str(path), csv_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    result = dict(csv=str(path), csv_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 captured_rows=len(data), measured_rows_inclusive=[96, 159], statistics=statistics,
                 scope="CSV native fields and units; identify complete GPU frame and CPU thread fields using profiler log/schema before interpreting",
                 cpu_critical_path="Thread/wall measurements alone do not establish a dependency-aware CPU critical path")
+    log = path.parent / "ue.log"
+    if log.is_file():
+        result["log_evidence"] = log_evidence(log)
+    return result
 
 
 if __name__ == "__main__":

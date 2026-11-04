@@ -1,4 +1,6 @@
-# Unreal quarry shadow comparison: captured, acceptance pending
+# Unreal quarry shadow comparison: historical fallback-only captures
+
+**Superseded for full-detail comparison by [the corrected Nanite/RT measurement](unreal-quarry-full-detail-comparison.md).** Review at `d8e3c38` established that these captures and all eight original profile processes used the 131,453-triangle fallback mesh. Asset enablement and CVar readbacks did not establish actual Nanite rendering. Their Level B values and timings are retained as historical fallback evidence only; they cannot establish a matched full-detail denominator. The corrected unit verifies native shading, source triangle counts and RT geometry allocations directly.
 
 2026-11-04, based on `06bf45d`. The real quarry is imported into the existing private UE calibration project. Both requested shadow modes have registered 1920×1080 float32 direct-light pairs, and eight main-view profiler processes completed. **Level B is measured on the observable direct-light domain**, against the adaptive worker's subsequent 16,384-ray reference, with production scored alongside it. Undefined receivers remain explicit. **The combined fidelity/2× acceptance floor is not established.** Main-view screenshots expose an unresolved display/exposure mismatch; these timings are a preliminary direct-black screen, not the final matched denominator.
 

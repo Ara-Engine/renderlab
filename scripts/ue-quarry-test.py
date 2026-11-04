@@ -17,6 +17,68 @@ def load(name):
 
 
 prepare, scoring, profiler = load("ue-quarry-prepare"), load("ue-quarry-score"), load("ue-quarry-profile")
+environment, slot = load("ue-quarry-environment"), load("ue-quarry-slot")
+
+
+class CoordinationTests(unittest.TestCase):
+    def test_gpu_slot_acquire_stale_recovery_and_release_are_private(self):
+        import datetime as dt
+        import json
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(slot, "LOCK", root / "gpu-slot.lock"), patch.object(slot, "PRIVATE", root), patch.object(slot, "processes", return_value=[]):
+                from contextlib import redirect_stdout
+                import io
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(slot.acquire(45), 0)
+                    self.assertEqual(slot.acquire(45), 2)
+                    lease = json.loads((slot.LOCK / "owner.json").read_text())
+                    lease["utc"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=61)).isoformat()
+                    (slot.LOCK / "owner.json").write_text(json.dumps(lease))
+                    self.assertEqual(slot.acquire(45), 0)
+                    slot.release()
+                self.assertFalse(slot.LOCK.exists())
+                self.assertTrue((root / "gpu-released.json").is_file())
+                self.assertEqual(len(list((root / "Quarry/slot-history").glob("*-stale.json"))), 1)
+
+    def test_native_geometry_dumps_remain_separate_and_preserve_source_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ue.log"
+            path.write_text("Tracked FD3D12RayTracingGeometry objects\n"
+                "D3D12RayTracing: Name: Quarry_00 - Size: 66.709 MB - Prims: 1000015 - Segments: 1 -  Compaction: 0\n"
+                "D3D12RayTracing: Name: Quarry_00 - Size: 1.604 MB - Prims: 52555 - Segments: 1 -  Compaction: 1\n"
+                "Tracked FD3D12RayTracingGeometry objects\n"
+                "D3D12RayTracing: Name: Quarry_00 - Size: 66.709 MB - Prims: 1000015 - Segments: 1 -  Compaction: 0\n")
+            dumps = profiler.log_evidence(path)["ray_tracing_dumps"]
+            self.assertEqual(len(dumps), 2)
+            self.assertEqual([d["native_nanite_quarry_triangles"] for d in dumps], [1000015, 1000015])
+            self.assertEqual(dumps[0]["native_nanite_quarry_blas_mib"], 66.709)
+
+    def test_active_foreign_or_expired_gpu_lease_cannot_launch(self):
+        import datetime as dt
+        import json
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory, patch.object(slot, "LOCK", Path(directory)):
+            path = Path(directory) / "owner.json"
+            current = dt.datetime.now(dt.timezone.utc)
+            for owner, age, error in (("primary-ray", 0, "another worker"), ("ue-matched", 46, "expired")):
+                path.write_text(json.dumps(dict(owner=owner, utc=(current - dt.timedelta(minutes=age)).isoformat(), expected_minutes=45)))
+                with self.assertRaisesRegex(RuntimeError, error):
+                    slot.read_lease()
+            path.write_text(json.dumps(dict(owner="ue-matched", utc=current.isoformat(), expected_minutes=45)))
+            lease, seconds = slot.read_lease()
+            self.assertGreater(seconds, 2600)
+
+    def test_environment_basis_is_lossless_and_has_registered_sun_direction(self):
+        size = 8
+        cube = np.arange(6 * size * size * 3).reshape(6, size, size, 3)
+        actual = environment.transport(cube)
+        np.testing.assert_array_equal(np.sort(actual.reshape(-1)), np.sort(cube.reshape(-1)))
+        # UE +X corresponds to source -Z; UE +Z corresponds to source +Y.
+        # Direction-coded radiance must agree across the complete cube basis.
+        dirs = environment.directions(size)
+        np.testing.assert_allclose(environment.transport(dirs), dirs[..., [1, 2, 0]] * [1, 1, -1], atol=1e-14)
 
 
 class TransportTests(unittest.TestCase):

@@ -13,8 +13,19 @@ if (-not $destination.StartsWith($privateRoot, [StringComparison]::OrdinalIgnore
 }
 if (Test-Path -LiteralPath $destination) { throw 'Refusing to overwrite a preflight record.' }
 $processes = @(Get-CimInstance Win32_Process)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UeForegroundReadOnly {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+}
+'@
+$ueForegroundWindow = [UeForegroundReadOnly]::GetForegroundWindow()
+$ueForegroundProcess = [uint32]0
+[UeForegroundReadOnly]::GetWindowThreadProcessId($ueForegroundWindow, [ref]$ueForegroundProcess) | Out-Null
 $gamePattern = '(?i)valorant|eldenring|cyberpunk|helldivers|cs2\.exe|fortniteclient|overwatch|arcraiders|bf6\.exe|league of legends|r5apex|dota2|rocketleague|minecraft|win64-shipping|shipping\.exe'
-$rendererPattern = '(?i)^(renderlab|m6-shadows|quarry-resets|fresh-tests|screen-|sel2shadow|UnrealEditor|ShaderCompileWorker|UnrealLightmass)'
+$rendererPattern = '(?i)^(renderlab|m6-shadows|quarry-resets|fresh-tests|screen-|sel2shadow|UnrealEditor|UnrealGame|ShaderCompileWorker|UnrealLightmass)'
 $conflicts = @($processes | Where-Object {
     $name = $_.Name
     $path = [string]$_.ExecutablePath
@@ -28,13 +39,16 @@ $builds = @($processes | Where-Object { $_.Name -match '(?i)^(cargo|rustc|cl|lin
 $gpu = @(& nvidia-smi --query-gpu=name,driver_version,utilization.gpu,memory.used,memory.total,clocks.gr,temperature.gpu,power.draw --format=csv)
 if ($LASTEXITCODE -ne 0) { throw 'GPU inventory failed; no launch permitted.' }
 $memory = Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory, TotalVisibleMemorySize
+$enoughMemory = [int64]$memory.FreePhysicalMemory -ge 8 * 1024 * 1024
 $record = [ordered]@{
     captured_utc = [DateTime]::UtcNow.ToString('o')
     conflicts = $conflicts
     cpu_builds = $builds
     gpu = $gpu
     memory = $memory
-    status = if ($conflicts.Count) { 'BLOCKED' } else { 'NO_KNOWN_PROCESS_CONFLICTS' }
+    foreground_read_only = @{ window_handle = $ueForegroundWindow.ToInt64(); process_id = $ueForegroundProcess }
+    minimum_free_ram_gib = 8
+    status = if ($conflicts.Count -or -not $enoughMemory) { 'BLOCKED' } else { 'NO_KNOWN_PROCESS_CONFLICTS' }
     scope = 'One process snapshot only. Recheck immediately before launch; coordinate the shared GPU slot. No focus/input/capture performed.'
 }
 $parent = Split-Path -Parent $destination
@@ -44,4 +58,5 @@ if ($conflicts.Count) {
     $conflicts | Format-Table Name, ProcessId -AutoSize
     throw 'Deferred: game or renderer process detected. Do not launch Unreal or use the GPU.'
 }
+if (-not $enoughMemory) { throw 'Deferred: less than 8 GiB physical RAM free. Do not launch Unreal.' }
 Write-Output "Preflight recorded at $destination. Coordinate slot ownership before launching."
