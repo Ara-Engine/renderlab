@@ -249,3 +249,15 @@ Corrections:
 - One attribution indexing error was fixed before its result was used.
 
 Design and editing time overlapped analysis and was not isolated.
+
+## First GPU result, 2026-11-04
+
+The 64-detect adaptive candidate (branch `t3/adaptive-fresh-shadows`, `e1c7822`) is rejected on the GPU.
+
+- Thin/contact fixture: G1-G5 pass on all 5 poses and 16 seeds, and the output is bit-identical to production.
+- Speck/wire stress fixture: G3/G4/G5 fail on several seeds. The candidate misses more faint partial shadows than production on almost every seed (for example 14 vs 6), because no detection ray hits some faint speck shadows.
+- Quarry: 3 of 12 pose/seed runs have one G1 envelope violation where production has none, from the same failure mode. Only 15.7% of covered receivers (54.4k of 346.5k) need the remaining 192 rays, about 37% of production rays, which matches the forecast. Timing was not run because the gate failed first.
+
+Gate implementation correction: G3, G4 and G5 now accept a statistic within either the seed-spread limit or production's value on the same seed. Applied unpaired, the seed-spread limits rejected production's own noisier seeds; candidates identical to production failed 24 thin checks. Both the unpaired results and production's own outcomes are recorded per seed. The thresholds are unchanged.
+
+The quarry 16,384-ray reference (seeds 1-64), the per-pixel 256-ray sigma and the spread draws (seeds 65-80) are in `D:/Coding/renderlab-work/m6-adaptive/gpu-phase-quarry/quarry/` for Level B scoring.
