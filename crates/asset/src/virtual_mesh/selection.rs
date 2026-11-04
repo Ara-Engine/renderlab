@@ -60,17 +60,21 @@ pub struct Selection {
     pub scratch_bound_bytes: usize,
 }
 
+/// Active clusters whose refinement is inactive, in ascending ID order. Validated group spans
+/// partition the clusters in group order, so inactive groups are skipped whole.
 fn cluster_cut(mesh: &VirtualMesh, active: &[bool]) -> Vec<ClusterId> {
     let mut out = Vec::with_capacity(mesh.clusters.len());
-    out.extend(
-        mesh.clusters
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()])
+    for (group, _) in mesh.groups.iter().zip(active).filter(|(_, a)| **a) {
+        let span = group.clusters.offset..group.clusters.offset + group.clusters.count;
+        out.extend(
+            span.filter(|&i| {
+                mesh.clusters[i as usize]
+                    .refined
+                    .is_none_or(|r| !active[r.index()])
             })
-            .map(|(i, _)| ClusterId(i as u32)),
-    );
+            .map(ClusterId),
+        );
+    }
     out
 }
 fn pages(mesh: &VirtualMesh, clusters: &[ClusterId]) -> Vec<PageId> {
@@ -82,12 +86,26 @@ fn pages(mesh: &VirtualMesh, clusters: &[ClusterId]) -> Vec<PageId> {
     out.dedup();
     out
 }
-fn charged_pages(page_count: usize, sets: &[&[PageId]]) -> usize {
-    let mut seen = vec![false; page_count];
-    for page in sets.iter().flat_map(|s| s.iter()) {
-        seen[page.index()] = true;
+/// A set of package pages as one bit per page, with its size. Callers pass in-range pages.
+struct PageSet {
+    words: Vec<u64>,
+    len: usize,
+}
+impl PageSet {
+    fn new(page_count: usize, sets: &[&[PageId]]) -> Self {
+        let mut words = vec![0u64; page_count.div_ceil(64)];
+        for page in sets.iter().flat_map(|s| s.iter()) {
+            words[page.index() / 64] |= 1 << (page.index() % 64);
+        }
+        let len = words.iter().map(|w| w.count_ones() as usize).sum();
+        Self { words, len }
     }
-    seen.into_iter().filter(|v| *v).count()
+    fn contains(&self, page: usize) -> bool {
+        (self.words[page / 64] >> (page % 64)) & 1 != 0
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
 }
 
 /// A package validated once for repeated selection, owning each mesh's incoming-link index.
@@ -330,11 +348,9 @@ fn select_internal(
     }
     let mut selected = cluster_cut(mesh, &active);
     let pinned = pages(mesh, &selected);
+    let fixed = PageSet::new(available.len(), &[&pinned, protected]);
     if selected.len() > budget.max_clusters
-        || product(
-            charged_pages(available.len(), &[&pinned, protected]),
-            PAGE_BYTES,
-        )? > budget.geometry_bytes
+        || product(fixed.len(), PAGE_BYTES)? > budget.geometry_bytes
     {
         return Err(Error("capacity below minimum cover"));
     }
@@ -364,7 +380,11 @@ fn select_internal(
             || selected.len() > budget.max_clusters
             || current_pages.iter().any(|p| !available[p.index()])
             || product(
-                charged_pages(available.len(), &[&pinned, &current_pages, protected]),
+                fixed.len()
+                    + current_pages
+                        .iter()
+                        .filter(|p| !fixed.contains(p.index()))
+                        .count(),
                 PAGE_BYTES,
             )? > budget.geometry_bytes
         {
@@ -382,7 +402,7 @@ fn select_internal(
             (&checked, 2 * c)
         }
     };
-    let mut state = incremental::State::new(mesh, incoming, available, active, &pinned, protected);
+    let mut state = incremental::State::new(mesh, incoming, available, active, fixed);
     #[cfg(feature = "selection-profile")]
     let indexed_ns = profile.elapsed().as_nanos();
     let mut reasons = vec![];
@@ -493,19 +513,32 @@ fn select_internal(
     }
     #[cfg(feature = "selection-profile")]
     let proposed_ns = profile.elapsed().as_nanos();
+    // Cover references and pinned pages all lie in the mesh's page window, and both are
+    // walked in ascending page order.
+    let mut pinned_pages = pinned.iter().map(|p| p.index()).peekable();
     let mut required = Vec::with_capacity(c);
     required.extend(
         state
-            .planned
-            .refs
-            .iter()
-            .enumerate()
-            .filter(|(p, count)| **count > 0 || pinned.binary_search(&PageId(*p as u32)).is_ok())
+            .window
+            .clone()
+            .zip(&state.planned.refs)
+            .filter(|&(p, &count)| pinned_pages.next_if_eq(&p).is_some() || count > 0)
             .map(|(p, _)| PageId(p as u32)),
     );
+    debug_assert!(pinned_pages.next().is_none());
     let mut requested = Vec::with_capacity(c);
     requested.extend(required.iter().copied().filter(|p| !available[p.index()]));
     let selected = cluster_cut(mesh, &state.published.active);
+    let mut cut_pages = Vec::with_capacity(selected.len());
+    cut_pages.extend(
+        state
+            .window
+            .clone()
+            .zip(&state.published.refs)
+            .filter(|&(_, &count)| count > 0)
+            .map(|(p, _)| PageId(p as u32)),
+    );
+    debug_assert_eq!(cut_pages, pages(mesh, &selected));
     let published = &state.published.active;
     // Count cluster predicate/link/shard touches, excluding the unchanged boundary validator,
     // scalar error checks, group/page scans and sorting. The scan oracle counts only cut/closure
@@ -539,7 +572,7 @@ fn select_internal(
     let selection = Selection {
         cut: Cut {
             active_groups,
-            pages: pages(mesh, &selected),
+            pages: cut_pages,
             clusters: selected.into_boxed_slice().into_vec(),
         },
         demand: Demand {

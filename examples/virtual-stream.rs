@@ -179,6 +179,23 @@ fn guard() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+/// Repeats `guard` about once a second on its own thread and keeps its first failure. Its
+/// process snapshot takes tens of milliseconds; on the frame thread that delayed the next frame
+/// and changed how much IO completed between frames.
+fn watch_guard() -> std::sync::Arc<std::sync::OnceLock<String>> {
+    let failure = std::sync::Arc::new(std::sync::OnceLock::new());
+    let report = failure.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if let Err(e) = guard() {
+                let _ = report.set(e.to_string());
+                return;
+            }
+        }
+    });
+    failure
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process_start = Instant::now();
     let o = parse()?;
@@ -328,10 +345,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut accepted = 0;
     let start = Instant::now();
     let total = o.frames + o.warmup + o.settle_final;
+    let guard_failure = watch_guard();
     for n in 0..total {
         let frame_start = Instant::now();
-        if n > 0 && n % 60 == 0 {
-            guard()?;
+        if let Some(failure) = guard_failure.get() {
+            return Err(failure.clone().into());
         }
         let index = if n < o.warmup || o.hold_pose {
             o.start

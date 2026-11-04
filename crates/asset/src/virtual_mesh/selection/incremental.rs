@@ -1,4 +1,5 @@
 use super::*;
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 pub(super) struct Cover {
     pub active: Vec<bool>,
@@ -40,12 +41,14 @@ struct Stop {
     geometry: bool,
 }
 
-/// CSR of the clusters whose `refined` names each group, in ascending cluster order.
-/// Immutable after construction; a prepared package retains one per mesh.
+/// CSR of the clusters whose `refined` names each group, in ascending cluster order, and the
+/// package page range spanned by the mesh's clusters. Per-call page state covers only that
+/// range. Immutable after construction; a prepared package retains one per mesh.
 #[derive(Debug)]
 pub(super) struct Incoming {
     offsets: Vec<usize>,
     links: Vec<u32>,
+    pages: std::ops::Range<usize>,
 }
 
 impl Incoming {
@@ -75,13 +78,25 @@ impl Incoming {
         }
         let mut links = vec![0; offsets[n]];
         let mut cursor = offsets[..n].to_vec();
+        let (mut first, mut last) = (usize::MAX, 0);
         for (id, c) in mesh.clusters.iter().enumerate() {
+            first = first.min(c.page.index());
+            last = last.max(c.page.index());
             if let Some(r) = c.refined {
                 links[cursor[r.index()]] = id as u32;
                 cursor[r.index()] += 1;
             }
         }
-        Self { offsets, links }
+        Self {
+            offsets,
+            links,
+            pages: first.min(last + 1)..last + 1,
+        }
+    }
+
+    /// Package pages from the mesh's lowest to its highest cluster page.
+    pub fn pages(&self) -> std::ops::Range<usize> {
+        self.pages.clone()
     }
 
     pub fn bytes(&self) -> usize {
@@ -91,14 +106,19 @@ impl Incoming {
 }
 
 /// One call owns its covers and journals. No mutable selection state survives the call.
+/// Cover references are indexed from `window.start`; every cluster page lies in `window`.
 pub(super) struct State<'a> {
     mesh: &'a VirtualMesh,
     available: &'a [bool],
     incoming: &'a Incoming,
-    fixed: Vec<bool>,
+    /// Pinned and externally protected package pages.
+    fixed: PageSet,
+    pub window: std::ops::Range<usize>,
     pub planned: Cover,
     pub published: Cover,
     journal: Vec<u32>,
+    /// Discovered but unvisited publication-closure groups, smallest ID first.
+    frontier: BinaryHeap<Reverse<u32>>,
     gap: Vec<u32>,
     proposal: Vec<bool>,
     deltas: Vec<(PageId, bool)>,
@@ -120,35 +140,41 @@ impl<'a> State<'a> {
         incoming: &'a Incoming,
         available: &'a [bool],
         active: Vec<bool>,
-        pinned: &[PageId],
-        protected: &[PageId],
+        fixed: PageSet,
     ) -> Self {
         let n = mesh.groups.len();
-        let mut fixed = vec![false; available.len()];
-        for p in pinned.iter().chain(protected) {
-            fixed[p.index()] = true;
-        }
-        let mut universe = fixed.clone();
-        let mut refs = vec![0; available.len()];
+        let window = incoming.pages();
+        let mut used = vec![false; window.len()];
+        let mut refs = vec![0; window.len()];
         let mut clusters = 0;
         for c in &mesh.clusters {
-            universe[c.page.index()] = true;
+            let i = c.page.index() - window.start;
+            used[i] = true;
             if active[c.owner.index()] && c.refined.is_none_or(|r| !active[r.index()]) {
-                refs[c.page.index()] += 1;
+                refs[i] += 1;
                 clusters += 1;
             }
         }
-        let all_pages = universe.into_iter().filter(|v| *v).count();
-        let charged = fixed
-            .iter()
-            .zip(&refs)
-            .filter(|(f, r)| **f || **r > 0)
-            .count();
+        // Fixed pages are charged once; window pages add only when not already fixed.
+        let unfixed = |p: usize, used: bool| used && !fixed.contains(p);
+        let all_pages = fixed.len()
+            + window
+                .clone()
+                .zip(&used)
+                .filter(|&(p, &u)| unfixed(p, u))
+                .count();
+        let charged = fixed.len()
+            + window
+                .clone()
+                .zip(&refs)
+                .filter(|&(p, &r)| unfixed(p, r > 0))
+                .count();
         Self {
             mesh,
             available,
             incoming,
             fixed,
+            window,
             published: Cover {
                 active: active.clone(),
                 refs: refs.clone(),
@@ -162,6 +188,7 @@ impl<'a> State<'a> {
                 missing: 0,
             },
             journal: Vec::with_capacity(n),
+            frontier: BinaryHeap::with_capacity(n),
             gap: Vec::with_capacity(n),
             proposal: vec![false; n],
             deltas: Vec::with_capacity(mesh.clusters.len()),
@@ -187,22 +214,28 @@ impl<'a> State<'a> {
         {
             return false;
         }
-        // Every inactive owner in the publication closure must become active too. A missing
-        // boundary page in the final plan is therefore a witness for the whole publication;
-        // a publication inside that plan cannot refine away this boundary. No cut changes yet.
+        // Every inactive owner in the publication closure must become active too. Its added cut
+        // clusters are those whose refinement stays inactive; removals cannot introduce a missing
+        // page. Validated IDs order every refined group before its owners, so visiting the
+        // closure in ascending ID order has already found every closure group that a visited
+        // cluster could be refined by. The first added cluster with a missing page therefore
+        // decides the whole publication before the rest of the closure is built. No cut changes.
         self.journal.clear();
         self.journal.push(seed as u32);
         self.proposal[seed] = true;
+        self.frontier.clear();
+        self.frontier.push(Reverse(seed as u32));
         let mut blocked = false;
-        let mut cursor = 0;
-        'closure: while cursor < self.journal.len() {
-            let g = self.journal[cursor] as usize;
+        'closure: while let Some(Reverse(g)) = self.frontier.pop() {
+            let g = g as usize;
             let span = self.mesh.groups[g].clusters;
             for id in span.offset as usize..(span.offset + span.count) as usize {
                 self.visits += 1;
                 let c = &self.mesh.clusters[id];
                 if !self.available[c.page.index()]
-                    && c.refined.is_none_or(|r| !self.planned.active[r.index()])
+                    && c.refined.is_none_or(|r| {
+                        !self.published.active[r.index()] && !self.proposal[r.index()]
+                    })
                 {
                     blocked = true;
                     break 'closure;
@@ -216,26 +249,7 @@ impl<'a> State<'a> {
                 if !self.published.active[owner] && !self.proposal[owner] {
                     self.proposal[owner] = true;
                     self.journal.push(owner as u32);
-                }
-            }
-            cursor += 1;
-        }
-        // The closure is complete. Its added cut clusters are those whose refinement stays
-        // inactive after publication; removals cannot introduce a missing page.
-        if !blocked {
-            'added: for &g in &self.journal {
-                let span = self.mesh.groups[g as usize].clusters;
-                for id in span.offset as usize..(span.offset + span.count) as usize {
-                    self.visits += 1;
-                    let c = &self.mesh.clusters[id];
-                    if !self.available[c.page.index()]
-                        && c.refined.is_none_or(|r| {
-                            !self.published.active[r.index()] && !self.proposal[r.index()]
-                        })
-                    {
-                        blocked = true;
-                        break 'added;
-                    }
+                    self.frontier.push(Reverse(owner as u32));
                 }
             }
         }
@@ -265,9 +279,12 @@ impl<'a> State<'a> {
     }
 
     fn page_delta(&mut self, page: PageId, add: bool, track: Track) {
-        let p = page.index();
-        let before = self.fixed[p] || self.planned.refs[p] > 0 || self.published.refs[p] > 0;
-        let available = self.available[p];
+        let (fixed, available) = (
+            self.fixed.contains(page.index()),
+            self.available[page.index()],
+        );
+        let p = page.index() - self.window.start;
+        let before = fixed || self.planned.refs[p] > 0 || self.published.refs[p] > 0;
         let cover = self.cover_mut(track);
         if !available && cover.refs[p] == u32::from(!add) {
             if add {
@@ -283,7 +300,7 @@ impl<'a> State<'a> {
             cover.refs[p] -= 1;
             cover.clusters -= 1;
         }
-        let after = self.fixed[p] || self.planned.refs[p] > 0 || self.published.refs[p] > 0;
+        let after = fixed || self.planned.refs[p] > 0 || self.published.refs[p] > 0;
         self.charged = self.charged + usize::from(after) - usize::from(before);
     }
 
