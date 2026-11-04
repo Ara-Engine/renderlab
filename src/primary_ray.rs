@@ -27,7 +27,8 @@ pub const TRACED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRA
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 /// Raises `limits` to the per-stage binding-array capacity traced visibility needs per
 /// draw slot: three geometry buffers, one material buffer, three textures and three
-/// samplers (wgpu counts samplers in both limits).
+/// samplers (wgpu counts samplers in both limits). The Interactive trace also binds two
+/// views of the TLAS: camera rays with hit-vertex return and shadow rays without.
 pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_binding_array_elements_per_shader_stage: limits
@@ -36,6 +37,9 @@ pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
         max_binding_array_sampler_elements_per_shader_stage: limits
             .max_binding_array_sampler_elements_per_shader_stage
             .max(3 * TRACED_DRAWS),
+        max_acceleration_structures_per_shader_stage: limits
+            .max_acceleration_structures_per_shader_stage
+            .max(2),
         ..limits
     }
 }
@@ -76,5 +80,6 @@ mod tests {
             limits.max_binding_array_elements_per_shader_stage,
             10 * TRACED_DRAWS
         );
+        assert_eq!(limits.max_acceleration_structures_per_shader_stage, 2);
     }
 }

@@ -287,7 +287,7 @@ fn gpu_soft_shadow_mask_replay() {
             );
             assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);
             r.test_drain("replay traced fixture receivers");
-            let rendered = receivers(&r)[2].clone();
+            let [_, rendered] = interactive_outputs(&r);
             let image = capture(&mut r);
             if index == 0 {
                 original = Some((rendered.clone(), image.clone()));
@@ -300,6 +300,20 @@ fn gpu_soft_shadow_mask_replay() {
                 );
             }
             fs::write(out.join(format!("pose-{index}-interactive.rgba16f")), image).unwrap();
+            // Interactive frames keep receivers in registers; an Exact frame of the same
+            // pose publishes the identical traced receivers the replay reads.
+            r.set_soft_shadows(crate::SoftShadows::Exact);
+            render(
+                &mut r,
+                &color,
+                &camera,
+                &mut [
+                    Draw::new(&mesh, &mut receiver),
+                    Draw::new(&mesh, &mut blockers),
+                ],
+            );
+            r.set_soft_shadows(crate::SoftShadows::Interactive);
+            r.test_drain("replay traced fixture receivers");
             let expected = replay_pose(&r, &out, index, 16);
             assert_eq!(rendered, expected, "fixture public Interactive path");
         }
@@ -320,7 +334,7 @@ fn gpu_soft_shadow_mask_replay() {
         );
         r.test_drain("Interactive removed blocker");
         assert!(
-            words(&receivers(&r)[2]).iter().all(|&v| v == 256),
+            words(&interactive_outputs(&r)[1]).iter().all(|&v| v == 256),
             "removed blocker retained shadow"
         );
         r.set_shadows(&Shadows::default()).unwrap();

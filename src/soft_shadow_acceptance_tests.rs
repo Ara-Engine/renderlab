@@ -41,22 +41,21 @@ fn gpu_soft_shadow_traced_acceptance() {
         fs::write(name("exact.rgba16f"), &exact).unwrap();
         let mut row = vec![];
         for seed in 0..4 {
-            let mut p = r.primary.as_ref().unwrap().fresh_pipeline(
+            let mut p = r.primary.as_ref().unwrap().interactive_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,
-                "fresh_compute",
                 &[("FRESH_SEED", f64::from(seed)), ("FRESH_DIRECTIONS", 8.0)],
             );
             r.set_soft_shadows(crate::SoftShadows::Interactive);
             std::mem::swap(
-                &mut r.pipeline.primary.as_mut().unwrap().interactive_fresh,
+                &mut r.pipeline.primary.as_mut().unwrap().interactive,
                 &mut p,
             );
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);
             let image = capture(&mut r);
-            let counts = receivers(&r)[2].clone();
+            let [_, counts] = interactive_outputs(&r);
             assert_eq!(
                 counts,
                 fs::read(replay.join(format!("pose-{index}-seed-{seed}-1x8.u32"))).unwrap(),
@@ -64,9 +63,13 @@ fn gpu_soft_shadow_traced_acceptance() {
             );
             traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(capture(&mut r), image, "static HDR seed={seed}");
-            assert_eq!(receivers(&r)[2], counts, "static counts seed={seed}");
+            assert_eq!(
+                interactive_outputs(&r)[1],
+                counts,
+                "static counts seed={seed}"
+            );
             std::mem::swap(
-                &mut r.pipeline.primary.as_mut().unwrap().interactive_fresh,
+                &mut r.pipeline.primary.as_mut().unwrap().interactive,
                 &mut p,
             );
             fs::write(name(&format!("seed-{seed}-interactive.rgba16f")), &image).unwrap();
@@ -89,7 +92,7 @@ fn gpu_soft_shadow_traced_acceptance() {
     let camera = cameras.frames[0].camera().unwrap();
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     let accepted = capture(&mut r);
-    let accepted_counts = receivers(&r)[2].clone();
+    let [_, accepted_counts] = interactive_outputs(&r);
     let tinted = edit(
         SOURCE,
         (
@@ -108,7 +111,11 @@ fn gpu_soft_shadow_traced_acceptance() {
         let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
         assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);
         assert_eq!(capture(&mut r) == accepted, !tint, "reload output");
-        assert_eq!(receivers(&r)[2], accepted_counts, "reload changed counts");
+        assert_eq!(
+            interactive_outputs(&r)[1],
+            accepted_counts,
+            "reload changed counts"
+        );
     }
     // A raster frame always uses Exact, retaining the preference for the next traced frame.
     let report = traced_frame(&mut r, &color, &camera, &mut asset, false);

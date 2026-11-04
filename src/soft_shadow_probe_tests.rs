@@ -1,6 +1,8 @@
 //! Test-only Level-B cost screen, independent of the selected production mode.
 use super::*;
 
+#[path = "interactive_climb_tests.rs"]
+mod interactive_climb_tests;
 #[path = "soft_shadow_acceptance_tests.rs"]
 mod soft_shadow_acceptance_tests;
 #[path = "soft_shadow_replay_tests.rs"]

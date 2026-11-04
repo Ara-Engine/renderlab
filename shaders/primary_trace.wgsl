@@ -1,8 +1,9 @@
-// Closest-hit camera rays. Appended after primary_rays.wgsl to the hardware
-// composition, whose TLAS is hardware_scene; custom data is the placement index.
+// Closest-hit camera rays. Appended after primary_rays.wgsl to the hardware composition
+// and, for the Interactive trace, to the soft one; custom data is the placement index.
 // Workgroups match primary_ray_gpu.rs TRACE_TILE.
-// The shared TLAS with hit-triangle positions; hard_shadow keeps hardware_scene.
-@group(0) @binding(2) var primary_scene:acceleration_structure<vertex_return>;
+// The shared TLAS with hit-triangle positions. Binding 2 stays the shadow rays' view
+// (hardware_scene or fresh_scene), so one dispatch can bind both.
+@group(0) @binding(19) var primary_scene:acceleration_structure<vertex_return>;
 @group(0) @binding(13) var primary_hit_output:texture_storage_2d<rgba32uint,write>;
 @group(0) @binding(16) var primary_world_output:texture_storage_2d<rgba32float,write>;
 @group(0) @binding(17) var primary_normal_output:texture_storage_2d<rgba32float,write>;

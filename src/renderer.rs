@@ -57,6 +57,7 @@ pub(crate) struct Flight {
     mapped: Option<MapResult>,
     lit: bool,
     shadowed: bool,
+    /// Receiver and separate visibility compute timestamps follow the frame's own.
     fresh: bool,
     submission: u64,
     frame: Option<FrameId>,
@@ -2127,6 +2128,8 @@ impl Renderer {
         let soft = soft && (traced || !self.fresh_fragment_reference);
         // Raster fresh frames: receiver raster, visibility compute, then raster shading.
         let fresh = soft && !traced;
+        // Traced Interactive frames fuse camera rays and visibility into one dispatch.
+        let interactive = traced && soft && self.soft_mode == crate::SoftShadows::Interactive;
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
@@ -2138,10 +2141,12 @@ impl Renderer {
         cpu.upload += start.elapsed() - cpu.shadow_upload;
         self.uploads.add(uploads);
         let encode_start = Instant::now();
-        if self
-            .depth
-            .as_ref()
-            .is_none_or(|depth| depth.texture.size() != color.size())
+        // Traced frames resolve visibility without raster depth or MSAA targets.
+        if !traced
+            && self
+                .depth
+                .as_ref()
+                .is_none_or(|depth| depth.texture.size() != color.size())
         {
             let texture = self.ledger.own(
                 self.device.create_texture(&wgpu::TextureDescriptor {
@@ -2267,16 +2272,24 @@ impl Renderer {
                         end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
                     })
             };
-            self.encode_primary_visibility(&mut encoder, soft, stamps(6));
-            if soft {
-                let p = self.pipeline.primary.as_ref().unwrap();
-                if self.soft_mode == crate::SoftShadows::Interactive {
-                    self.encode_primary_interactive(&mut encoder, &p.interactive_fresh, stamps(8));
-                } else {
+            let p = self.pipeline.primary.as_ref().unwrap();
+            if interactive {
+                let tile = primary_ray_gpu::TRACE_TILE;
+                self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
+            } else {
+                self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                if soft {
                     self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                 }
             }
-            self.encode_primary_shading(&mut encoder, soft, stamps(0));
+            let shading = if interactive {
+                primary_ray_gpu::Shading::Interactive
+            } else if soft {
+                primary_ray_gpu::Shading::Soft
+            } else {
+                primary_ray_gpu::Shading::Hard
+            };
+            self.encode_primary_shading(&mut encoder, shading, stamps(0));
         }
         let timestamps =
             self.timing
@@ -2459,9 +2472,9 @@ impl Renderer {
                     16
                 },
             );
-            // Receivers (raster or traced), then visibility compute when soft.
+            // Receivers (raster or traced), then visibility compute when soft and separate.
             if soft || traced {
-                let stamps = if soft { 4 } else { 2 };
+                let stamps = if soft && !interactive { 4 } else { 2 };
                 encoder.resolve_query_set(
                     &timing.queries,
                     slot as u32 * 10 + 6..slot as u32 * 10 + 6 + stamps,
@@ -2514,14 +2527,14 @@ impl Renderer {
                 mapped,
                 lit,
                 shadowed: shadow_frame.is_some() && !hardware_shadowed,
-                fresh: soft,
+                fresh: soft && !interactive,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
                 submitted_at,
             },
         );
-        self.slots[slot].traced_receivers = traced && !soft;
+        self.slots[slot].traced_receivers = traced && (!soft || interactive);
         self.check_fault()?;
         if let Some(frame) = shadow_frame {
             self.stamp_shadows(frame, shadow_draws);

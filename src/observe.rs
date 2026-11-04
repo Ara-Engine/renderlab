@@ -129,9 +129,10 @@ pub struct GpuSample {
     /// Traced frames time their deferred compute shading pass here.
     pub mesh_pass: Duration,
     /// Fresh soft-shadow receiver raster, when enabled. Traced frames time their camera
-    /// rays here, including exact receivers when soft.
+    /// rays here, including exact receivers when soft. Traced Interactive frames fuse
+    /// their 8-direction visibility into this pass.
     pub receiver_pass: Option<Duration>,
-    /// Fresh 256-ray compute visibility, when enabled.
+    /// Separate fresh compute visibility (raster soft and traced Exact frames).
     pub visibility_compute: Option<Duration>,
     /// Separate HDR presentation pass boundaries; excludes acquire/present and uploads.
     pub present_pass: Option<Duration>,

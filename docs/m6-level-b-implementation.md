@@ -1,6 +1,6 @@
 # M6 Level-B implementation and verification
 
-2026-11-05 local (2026-11-04 UTC), based on `d021306`. Islam expanded the initial test-only probe authorization to the approved [Level-B unit](m6-level-b.md), steps 1–5. Quality passes; the visibility and complete-frame time targets miss. This is a retained quality checkpoint, not a 2x acceptance. No push.
+2026-11-05 local (2026-11-04 UTC), based on `d021306`. Islam expanded the initial test-only probe authorization to the approved [Level-B unit](m6-level-b.md), steps 1–5. Quality passes; the visibility and complete-frame time targets miss. This is a retained quality checkpoint, not a 2x acceptance. No push. The separate 8-ray layouts below were superseded by the fused pass of the [Interactive cost hillclimb](m6-interactive-climb.md), whose output is byte-identical.
 
 ## Change
 

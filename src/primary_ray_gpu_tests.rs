@@ -72,6 +72,38 @@ fn hit_record(r: &Renderer) -> Vec<u8> {
             .texture,
     )
 }
+/// Hit records and counts of an Interactive frame as complete images. Uncovered tiles
+/// publish neither; every pixel there is a miss, a zero record with count 256.
+fn interactive_outputs(r: &Renderer) -> [Vec<u8>; 2] {
+    let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+    let visibility = &r
+        .fresh
+        .as_ref()
+        .unwrap()
+        .targets
+        .as_ref()
+        .unwrap()
+        .visibility;
+    let (mut hit, mut counts) = (hit_record(r), read_texture(r, &visibility.texture));
+    let tiles = read_texture(r, &t.tiles.texture);
+    let [tw, th] = primary_ray_gpu::TRACE_TILE.map(|v| v as usize);
+    let (width, columns) = (
+        t.hit.texture.width() as usize,
+        t.tiles.texture.width() as usize,
+    );
+    for (i, (record, count)) in hit
+        .chunks_exact_mut(16)
+        .zip(counts.chunks_exact_mut(4))
+        .enumerate()
+    {
+        let tile = (i % width) / tw + (i / width) / th * columns;
+        if tiles[tile * 4..tile * 4 + 4] == [0; 4] {
+            record.fill(0);
+            count.copy_from_slice(&256u32.to_le_bytes());
+        }
+    }
+    [hit, counts]
+}
 /// Swaps the traced fresh estimator, which traced soft frames dispatch.
 fn swap_compute(r: &mut Renderer, pipeline: &mut Owned<wgpu::ComputePipeline>) {
     std::mem::swap(&mut r.pipeline.primary.as_mut().unwrap().fresh, pipeline);
@@ -540,7 +572,8 @@ fn gpu_primary_kernel_screen() {
         let [a, b] = if trace {
             compiled.trace
         } else {
-            compiled.shade
+            let [hard, soft, _] = compiled.shade;
+            [hard, soft]
         };
         variants.push(Variant {
             name: spec["name"].as_str().unwrap().to_owned(),
@@ -556,7 +589,12 @@ fn gpu_primary_kernel_screen() {
         if v.trace {
             r.encode_primary_trace(encoder, &v.pipeline, v.tile, soft, writes);
         } else {
-            r.encode_primary_shade(encoder, &v.pipeline, v.tile, soft, writes);
+            let shading = if soft {
+                primary_ray_gpu::Shading::Soft
+            } else {
+                primary_ray_gpu::Shading::Hard
+            };
+            r.encode_primary_shade(encoder, &v.pipeline, v.tile, shading, writes);
         }
     };
     // Trace: hit records, then world and normal when soft. Shade: the HDR image.

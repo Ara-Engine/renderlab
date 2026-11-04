@@ -45,22 +45,38 @@ fn primary_probe_wgsl_compiles_to_spirv() {
 fn primary_modules_compile_and_reject_lit_seam_drift() {
     let sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
     assert!(sources[0].contains("var hardware_scene") && !sources[0].contains("fresh_visibility:"));
-    assert!(sources[1].contains("fresh_visibility:") && !sources[1].contains("fn primary_trace"));
+    assert!(sources[1].contains("fresh_visibility:") && !sources[1].contains("var hardware_scene"));
     let [[x, y], [u, v]] = [primary_ray_gpu::TRACE_TILE, primary_ray_gpu::SHADE_TILE];
     let grids = [
         ("primary_trace", [x, y, 1]),
         ("primary_trace_receivers", [x, y, 1]),
         ("primary_shade", [u, v, 1]),
+        ("primary_trace_interactive", [x, y, 1]),
+        ("primary_shade_tiles", [u, v, 1]),
     ];
+    // Interactive tile flags cover exactly one trace workgroup each.
+    assert!(sources[1].contains(&format!("const PRIMARY_TILE=vec2<u32>({x}u,{y}u);")));
     for (index, source) in sources.iter().enumerate() {
         let (module, info) = validate_wgsl(source);
-        for (name, grid) in &grids[if index == 0 { 0.. } else { 2.. }] {
+        for (name, grid) in &grids[if index == 0 { 0..3 } else { 2..5 }] {
             let entry = module
                 .entry_points
                 .iter()
                 .find(|e| e.name == *name)
                 .unwrap();
             assert_eq!(entry.workgroup_size, *grid, "{name} dispatch grid drift");
+            // The renderer compiles the soft module's Interactive trace with eight directions.
+            let mut constants = naga::back::PipelineConstants::default();
+            if index == 1 {
+                constants.insert("FRESH_DIRECTIONS".into(), 8.0);
+            }
+            let (module, info) = naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                Some((entry.stage, name)),
+                &constants,
+            )
+            .unwrap();
             naga::back::spv::write_vec(
                 &module,
                 &info,
@@ -89,6 +105,79 @@ fn primary_modules_compile_and_reject_lit_seam_drift() {
     ] {
         assert!(primary_ray_gpu::shader_sources(&drift).is_err());
     }
+}
+
+/// Interactive frames trace only `scene_pixels`: every pixel-centre segment from near
+/// to far that enters the bounds lies inside it. Bounds behind the eye give the image;
+/// no bounds give no pixels.
+#[test]
+fn scene_pixels_contain_every_reaching_ray() {
+    use crate::shadow_plan::Bounds;
+    let (w, h) = (320u32, 180u32);
+    let camera = Camera::look_at(
+        Vec3::new(0.3, 1.0, 4.0),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.0,
+    )
+    .unwrap();
+    let matrix = camera.matrix(w, h);
+    let boxes = [
+        Bounds {
+            min: Vec3::new(-0.5, -0.2, -0.4),
+            max: Vec3::new(0.7, 0.4, 0.3),
+        },
+        Bounds {
+            min: Vec3::new(1.0, -0.1, -1.0),
+            max: Vec3::new(1.2, 0.1, -0.8),
+        },
+    ];
+    let [x0, y0, x1, y1] = primary_ray_gpu::scene_pixels(&boxes, matrix, [w, h]);
+    assert!(
+        x0 > 0 && y0 > 0 && x1 < w && y1 < h,
+        "bounds fill the image"
+    );
+    let inverse = matrix.as_dmat4().inverse();
+    let mut reaching = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let ndc = glam::DVec2::new(
+                (f64::from(x) + 0.5) / f64::from(w) * 2.0 - 1.0,
+                1.0 - (f64::from(y) + 0.5) / f64::from(h) * 2.0,
+            );
+            let near = inverse.project_point3(ndc.extend(1.0));
+            let far = inverse.project_point3(ndc.extend(0.0));
+            let enters = boxes.iter().any(|b| {
+                // Slab test of the segment near + t (far - near), t in [0, 1].
+                let (mut t0, mut t1) = (0f64, 1f64);
+                for axis in 0..3 {
+                    let d = far[axis] - near[axis];
+                    let a = (f64::from(b.min[axis]) - near[axis]) / d;
+                    let c = (f64::from(b.max[axis]) - near[axis]) / d;
+                    t0 = t0.max(a.min(c));
+                    t1 = t1.min(a.max(c));
+                }
+                t0 <= t1
+            });
+            reaching += usize::from(enters);
+            assert!(
+                !enters || (x0..x1).contains(&x) && (y0..y1).contains(&y),
+                "pixel ({x}, {y}) reaches the bounds outside [{x0}, {y0}, {x1}, {y1})"
+            );
+        }
+    }
+    assert!(reaching > 1000);
+    let behind = Bounds {
+        min: Vec3::new(-1.0, 0.0, 3.0),
+        max: Vec3::new(1.0, 2.0, 5.0),
+    };
+    assert_eq!(
+        primary_ray_gpu::scene_pixels(&[boxes[0], behind], matrix, [w, h]),
+        [0, 0, w, h]
+    );
+    assert_eq!(primary_ray_gpu::scene_pixels(&[], matrix, [w, h]), [0; 4]);
 }
 
 struct Image {

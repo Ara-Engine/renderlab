@@ -9,7 +9,7 @@
 - **Where it applies.** Only lit views trace. Diagnostic views and virtual geometry rasterize. A frame may have at most `TRACED_DRAWS` (64) draws. When hardware shadows are enabled, materials must be double-sided, as before. Without shadows, single-sided draws are supported: the trace culls their source-back faces.
 - **Frame structure.** Each stage is one dispatch:
   1. Trace (8x4 groups): a closest-hit camera ray per pixel centre against the existing TLAS. It writes a 16 B hit record (placement+1, primitive, f32 barycentrics). Soft frames also write the exact receivers at hits: the ray point and depth, plus the plane normal from the hit triangle's returned positions.
-  2. Fresh visibility (soft frames only): the unchanged 256-ray estimator. Coverage comes from the hit record, so miss pixels never write receivers.
+  2. Fresh visibility (soft frames only): the unchanged 256-ray estimator. Coverage comes from the hit record, so miss pixels never write receivers. Interactive frames instead fuse their 8 rays into stage 1 and shade with tile flags; see the [cost hillclimb](m6-interactive-climb.md).
   3. Deferred shading (4x4 groups): the unchanged `fs_lit` body, made into a compute function. It uses analytic ray-differential texture gradients and descriptor-indexed geometry and materials. In hard frames, `hard_shadow` traces inline, as the hardware raster path does.
   4. Tone mapping, unchanged.
 
@@ -94,7 +94,7 @@ Remaining shading ideas, not attempted: cheaper miss handling (tile occupancy or
 
 - Hit records take 16 B per pixel (33.2 MB at 1080p).
 - Fresh receivers are unchanged at 36 B per pixel (soft).
-- The raster depth target is still allocated in traced frames.
+- Traced frames no longer allocate the raster depth target (since the [Interactive hillclimb](m6-interactive-climb.md)).
 - Draw tables are rebuilt only when the draw sequence changes.
 - Traced frames require ray-query hardware and the experimental wgpu features named above. Without them, `set_primary_visibility(Traced)` errors and raster is used.
 

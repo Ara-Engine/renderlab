@@ -3,7 +3,8 @@
 // Draw geometry and materials are descriptor-indexed by batch (one per draw), so one
 // dispatch covers every pixel. models/normals are packed by TLAS placement.
 // sided.x: some draw is single-sided, so the trace culls candidate back faces.
-struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32> };
+// scene: [x0, y0, x1, y1) pixels whose camera rays can reach a placement (scene_pixels).
+struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, scene:vec4<u32> };
 // Hit record: placement+1 (zero is a miss), primitive, then f32 barycentrics.
 @group(0) @binding(7) var primary_hit:texture_2d<u32>;
 @group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;
@@ -90,7 +91,11 @@ fn primary_gradients(ray:PrimaryRay,world:vec3<f32>,n:vec3<f32>,e1:vec3<f32>,e2:
 @compute @workgroup_size(4,4) fn primary_shade(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(primary_hit);
     if any(id.xy>=size) {return;}
-    let pixel=vec2<i32>(id.xy);let record=textureLoad(primary_hit,pixel,0);
+    primary_shade_pixel(id.xy,size);
+}
+// One pixel inside the image: its hit record shaded, or the clear colour for a miss.
+fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
+    let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);
     if record.x==0u {textureStore(primary_hdr,pixel,primary_frame.clear);return;}
     let hit=primary_decode(record);
     let ta=primary_input(hit.batch,hit.ia,hit.placement);let tb=primary_input(hit.batch,hit.ib,hit.placement);
@@ -100,7 +105,7 @@ fn primary_gradients(ray:PrimaryRay,world:vec3<f32>,n:vec3<f32>,e1:vec3<f32>,e2:
     var input:VertexOutput;
     input.world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;
     let clip=camera.view_projection*vec4<f32>(input.world,1.0);
-    input.position=vec4<f32>(vec2<f32>(id.xy)+vec2<f32>(0.5),clip.z/clip.w,1.0/clip.w);
+    input.position=vec4<f32>(vec2<f32>(id)+vec2<f32>(0.5),clip.z/clip.w,1.0/clip.w);
     input.uv=a.uv*w.x+b.uv*w.y+c.uv*w.z;input.color=a.color*w.x+b.color*w.y+c.color*w.z;
     input.normal=a.normal*w.x+b.normal*w.y+c.normal*w.z;input.tangent=a.tangent*w.x+b.tangent*w.y+c.tangent*w.z;
     // Flat attributes come from the first vertex, as WebGPU's provoking vertex.
@@ -111,7 +116,7 @@ fn primary_gradients(ray:PrimaryRay,world:vec3<f32>,n:vec3<f32>,e1:vec3<f32>,e2:
     let source_front=dot(geometric,lighting.eye-input.world)>=0.0;
     let m=models[hit.placement];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
     let e1=linear*(tb.position-ta.position);let e2=linear*(tc.position-ta.position);
-    let gradients=primary_gradients(primary_ray(id.xy,size),input.world,geometric,e1,e2,tb.uv-ta.uv,tc.uv-ta.uv);
+    let gradients=primary_gradients(primary_ray(id,size),input.world,geometric,e1,e2,tb.uv-ta.uv,tc.uv-ta.uv);
     // Raster's derivative normal points away from the camera.
     textureStore(primary_hdr,pixel,primary_lit(input,source_front==(input.winding>0.0),select(geometric,-geometric,source_front),gradients[0],gradients[1],hit.batch));
 }
