@@ -181,14 +181,22 @@ fn guard() -> Result<(), Box<dyn std::error::Error>> {
 }
 /// Repeats `guard` about once a second on its own thread and keeps its first failure. Its
 /// process snapshot takes tens of milliseconds; on the frame thread that delayed the next frame
-/// and changed how much IO completed between frames.
-fn watch_guard() -> std::sync::Arc<std::sync::OnceLock<String>> {
+/// and changed how much IO completed between frames. Each check logs its process-relative
+/// start and duration so stalls can be compared against it.
+fn watch_guard(process_start: Instant) -> std::sync::Arc<std::sync::OnceLock<String>> {
     let failure = std::sync::Arc::new(std::sync::OnceLock::new());
     let report = failure.clone();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            if let Err(e) = guard() {
+            let start = Instant::now();
+            let result = guard();
+            eprintln!(
+                "guard_check process_us={} elapsed_us={}",
+                start.duration_since(process_start).as_micros(),
+                start.elapsed().as_micros()
+            );
+            if let Err(e) = result {
                 let _ = report.set(e.to_string());
                 return;
             }
@@ -339,13 +347,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wall = fs::File::create(o.output.join("wall.csv"))?;
     writeln!(
         wall,
-        "frame,render_attempts,advance_draw_wall_us,backpressure_wait_us,work_wall_us,pacing_requested_us,pacing_actual_us"
+        "frame,render_attempts,advance_draw_wall_us,backpressure_wait_us,work_wall_us,pacing_requested_us,pacing_actual_us,start_process_us"
     )?;
     let mut color = None;
     let mut accepted = 0;
     let start = Instant::now();
     let total = o.frames + o.warmup + o.settle_final;
-    let guard_failure = watch_guard();
+    let guard_failure = watch_guard(process_start);
     for n in 0..total {
         let frame_start = Instant::now();
         if let Some(failure) = guard_failure.get() {
@@ -685,12 +693,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(pacing_requested);
         writeln!(
             wall,
-            "{index},{render_attempts},{},{},{},{},{}",
+            "{index},{render_attempts},{},{},{},{},{},{}",
             advance_draw_wall.as_micros(),
             backpressure_wait.as_micros(),
             work_wall.as_micros(),
             pacing_requested.as_micros(),
-            pacing.elapsed().as_micros()
+            pacing.elapsed().as_micros(),
+            frame_start.duration_since(process_start).as_micros()
         )?;
     }
     let deadline = Instant::now() + Duration::from_secs(20);
