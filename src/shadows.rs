@@ -1,6 +1,17 @@
 //! Shadow coverage is explicit and independent of a light's photometric range.
 use crate::{Error, Light};
 
+/// Directional disk visibility on the traced primary path. Raster stays exact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SoftShadows {
+    /// All 256 directions of the deterministic per-pixel sequence.
+    #[default]
+    Exact,
+    /// The first eight directions, without filtering or history. Grain is visible
+    /// inside penumbrae; solid regions and static frames remain deterministic.
+    Interactive,
+}
+
 /// Entries correspond exactly to the current `Lighting::lights` vector.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShadowRequest {

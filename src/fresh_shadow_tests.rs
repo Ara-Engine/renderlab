@@ -78,9 +78,16 @@ fn fresh_shader_reload_seams_and_cpu_spirv() {
             );
         }
         for entry in &module.entry_points {
-            let binary = naga::back::spv::write_vec(
+            let (resolved, resolved_info) = naga::back::pipeline_constants::process_overrides(
                 &module,
                 &info,
+                Some((entry.stage, &entry.name)),
+                &Default::default(),
+            )
+            .unwrap();
+            let binary = naga::back::spv::write_vec(
+                &resolved,
+                &resolved_info,
                 &naga::back::spv::Options {
                     lang_version: (1, 3),
                     ..Default::default()

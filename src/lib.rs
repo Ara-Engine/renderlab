@@ -32,6 +32,7 @@ pub use primary_ray::{PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, traced_l
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderlab_asset::{self as asset, Vertex};
+pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 

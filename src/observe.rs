@@ -86,6 +86,9 @@ pub struct FrameReport {
     pub scene: SceneCounts,
     /// The path that resolved this frame's camera visibility and shading.
     pub primary: crate::PrimaryVisibility,
+    /// Estimator used by this frame. Exact also denotes hard, unshadowed, raster
+    /// and diagnostic frames, where the Interactive preference does not apply.
+    pub soft_shadows: crate::SoftShadows,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SceneCounts {

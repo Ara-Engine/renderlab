@@ -167,6 +167,17 @@ pub(super) fn admit_draws(draws: &[Draw<'_>], matrix: Mat4, shadowed: bool) -> R
 }
 
 impl Renderer {
+    /// Chooses disk-shadow sampling for traced lit 1x frames. Exact is the default.
+    /// The preference survives primary-path changes and reload; raster, hard and
+    /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
+    pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
+        self.soft_mode = mode;
+    }
+
+    pub fn soft_shadows(&self) -> crate::SoftShadows {
+        self.soft_mode
+    }
+
     /// Selects how lit frames resolve camera visibility. Traced compiles its modules
     /// from the installed source now, transactionally; failure keeps the current mode.
     /// Raster releases traced pipelines and targets after in-flight frames.
@@ -346,6 +357,7 @@ pub(super) struct PrimaryPipelines {
     pub trace: [Owned<wgpu::ComputePipeline>; 2],
     /// The production 256-ray estimator with hit-record coverage.
     pub fresh: Owned<wgpu::ComputePipeline>,
+    pub interactive_fresh: Owned<wgpu::ComputePipeline>,
     /// Inline hard-shadow rays (or none); fresh soft-shadow counts.
     pub shade: [Owned<wgpu::ComputePipeline>; 2],
 }
@@ -369,6 +381,14 @@ pub(super) struct PrimaryState {
 }
 
 impl PrimaryState {
+    #[cfg(test)]
+    pub(super) fn test_fresh_bindings(&self) -> (&wgpu::BindGroupLayout, &wgpu::BindGroup) {
+        (
+            &self.fresh_bindings,
+            self.bindings.as_ref().unwrap().fresh.as_ref().unwrap(),
+        )
+    }
+
     /// `lighting` is the group-3 layout shared with raster shading.
     pub fn new(device: &wgpu::Device, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
         use wgpu::TextureFormat as F;
@@ -518,6 +538,13 @@ impl PrimaryState {
         };
         PrimaryPipelines {
             fresh: self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
+            interactive_fresh: self.fresh_pipeline(
+                device,
+                ledger,
+                &soft,
+                "fresh_compute",
+                &[("FRESH_DIRECTIONS", 8.0)],
+            ),
             trace: [
                 pipeline(&hard, "primary_trace", &self.trace_layouts[0]),
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
@@ -963,11 +990,29 @@ impl Renderer {
         pipeline: &wgpu::ComputePipeline,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        self.encode_primary_fresh_tile(encoder, pipeline, fresh_shadow_gpu::TILE, timestamp_writes);
+    }
+
+    pub(super) fn encode_primary_interactive(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        self.encode_primary_fresh_tile(encoder, pipeline, [8, 4], timestamp_writes);
+    }
+
+    fn encode_primary_fresh_tile(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        tile: [u32; 2],
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         let state = self.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
-        let tile = fresh_shadow_gpu::TILE;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("traced fresh 256-ray visibility"),
+            label: Some("traced fresh visibility"),
             timestamp_writes,
         });
         pass.set_pipeline(pipeline);

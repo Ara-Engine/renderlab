@@ -338,6 +338,7 @@ pub struct Renderer {
     /// Exists on hardware-shadow 1x renderers, which can trace primary visibility.
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
+    soft_mode: crate::SoftShadows,
     /// Identity of the traced modules, which also produce the HDR of traced frames.
     primary_hash: [u8; 32],
     /// Last installed scene WGSL, composed again when traced visibility is selected.
@@ -742,6 +743,7 @@ impl Renderer {
             fresh,
             primary,
             primary_mode: PrimaryVisibility::Raster,
+            soft_mode: crate::SoftShadows::Exact,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             depth: None,
@@ -2268,7 +2270,11 @@ impl Renderer {
             self.encode_primary_visibility(&mut encoder, soft, stamps(6));
             if soft {
                 let p = self.pipeline.primary.as_ref().unwrap();
-                self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                if self.soft_mode == crate::SoftShadows::Interactive {
+                    self.encode_primary_interactive(&mut encoder, &p.interactive_fresh, stamps(8));
+                } else {
+                    self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                }
             }
             self.encode_primary_shading(&mut encoder, soft, stamps(0));
         }
@@ -2547,6 +2553,11 @@ impl Renderer {
                 PrimaryVisibility::Traced
             } else {
                 PrimaryVisibility::Raster
+            },
+            soft_shadows: if traced && soft {
+                self.soft_mode
+            } else {
+                crate::SoftShadows::Exact
             },
         }))
     }

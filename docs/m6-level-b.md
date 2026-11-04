@@ -1,5 +1,7 @@
 # M6 Level-B soft shadows
 
+The gate and Interactive API were subsequently approved. The [implementation and verification](m6-level-b-implementation.md) passes the traced-receiver quality checks, exact mask replay and inspection. The retained 1-lane layout misses the 0.30 ms visibility and 1.10 ms frame targets; both 2x Unreal floors remain unmet. Exact remains the default.
+
 Design decision, 2026-11-04, based on `0fd49d7`. CPU evidence only: no renderer change, GPU, Unreal or viewer run, and no build.
 
 Inputs:
