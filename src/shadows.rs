@@ -31,8 +31,10 @@ pub struct Shadows {
     pub depth_bias: f32,
     /// Receiver offset along its geometric surface normal, in metres.
     pub normal_bias: f32,
-    /// Optional map/uniform byte policy per resource generation. Retained in-flight
-    /// generations are charged separately in `Stats::ownership`. Device limits always apply.
+    /// Optional shadow record/map/uniform byte policy per resource generation.
+    /// Hardware shadows charge records/fallback here and AS estimates separately.
+    /// Retained in-flight generations are charged separately in `Stats::ownership`.
+    /// Device limits always apply.
     pub max_bytes: Option<u64>,
 }
 impl Default for Shadows {

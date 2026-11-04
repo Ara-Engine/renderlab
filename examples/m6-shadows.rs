@@ -31,6 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut asset_path, mut camera_path, mut light_path) =
         (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
     let mut shader_path = None::<PathBuf>;
+    let mut hardware = false;
+    let mut experimental_ack = false;
+    let mut hardware_budget = HardwareShadowOptions::default().max_estimated_bytes;
     let mut out = PathBuf::from("measurements/m6-gpu/fixture");
     let mut samples = SampleCount::One;
     let mut validate = false;
@@ -58,6 +61,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--validate" => validate = true,
             "--cost" => cost = true,
+            "--hardware-shadows" => hardware = true,
+            "--ack-experimental-wgpu-risk" => experimental_ack = true,
+            "--hardware-max-estimated-bytes" => {
+                hardware_budget = match args.next().ok_or("missing hardware budget")?.as_str() {
+                    "none" => None,
+                    value => Some(value.parse()?),
+                };
+            }
             "--shadow-resolution" => {
                 shadow_resolution = args.next().ok_or("missing shadow resolution")?.parse()?
             }
@@ -68,6 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--motion" => motion = args.next().ok_or("missing motion")?,
             _ => return Err(format!("unknown {arg}").into()),
         }
+    }
+    if hardware && !experimental_ack {
+        return Err("--hardware-shadows requires --ack-experimental-wgpu-risk: wgpu experimental features may contain undefined behavior".into());
+    }
+    if hardware && (samples != SampleCount::One || ["point", "spot"].contains(&motion.as_str())) {
+        return Err("hardware evidence supports 1x directional shadows only".into());
     }
     if !["camera", "sun", "point", "spot", "blocker", "static"].contains(&motion.as_str()) {
         return Err("motion camera|sun|point|spot|blocker|static".into());
@@ -85,7 +102,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| include_str!("../shaders/scene.wgsl").to_owned());
     let _validation = validation::begin(validate);
     fs::create_dir_all(&out)?;
-    let fixture = shadow_fixture::Fixture::new();
+    let mut fixture = shadow_fixture::Fixture::new();
+    if hardware {
+        // Adapt the owned fixture; prepared scans pass unchanged to library validation.
+        fixture
+            .lighting
+            .lights
+            .retain(|l| matches!(l, Light::Directional { .. }));
+        for object in &mut fixture.objects {
+            object.double_sided = true;
+        }
+    }
     let cameras = camera_path
         .as_deref()
         .map(cameras::Cameras::load)
@@ -136,21 +163,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg!(debug_assertions),
         samples as u32
     );
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let mut requested = wgpu::DeviceDescriptor {
         required_features: wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
-    }))?;
-    let mut r = Renderer::new_with_options(
-        device,
-        queue,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-        runtime_policy::renderer(&policy, Limits::default()),
-        RendererOptions {
-            samples,
-            anisotropy_clamp: 16,
-        },
-        &shader,
-    )?;
+    };
+    if hardware {
+        if !adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        {
+            return Err(
+                "adapter does not support experimental ray query; no fallback was selected".into(),
+            );
+        }
+        requested.required_features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        requested.required_limits.max_blas_primitive_count = 2_000_000;
+        requested.required_limits.max_blas_geometry_count = 1;
+        requested.required_limits.max_tlas_instance_count = 4096;
+        requested
+            .required_limits
+            .max_acceleration_structures_per_shader_stage = 1;
+        if !requested.required_limits.check_limits(&adapter.limits()) {
+            return Err("hardware evidence AS device limits unsupported".into());
+        }
+        // SAFETY: the explicit CLI acknowledgment above accepts wgpu's experimental
+        // implementation risk. This boundary belongs to the tool requesting Device.
+        requested.experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
+    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&requested))?;
+    let limits = runtime_policy::renderer(&policy, Limits::default());
+    let options = RendererOptions {
+        samples,
+        anisotropy_clamp: 16,
+    };
+    let mut r = if hardware {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            limits,
+            options,
+            HardwareShadowOptions {
+                max_estimated_bytes: hardware_budget,
+            },
+            &shader,
+        )
+    } else {
+        Renderer::new_with_options(
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            limits,
+            options,
+            &shader,
+        )
+    }?;
     let make_shadows = |lighting: &Lighting| Shadows {
         requests: lighting
             .lights
@@ -312,7 +379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::yield_now();
             }
             let gpu = gpu.ok_or("missing pass timing")?;
-            rows.push(serde_json::json!({"pose":pose,"pair":pair,"mode":format!("{mode:?}"),"shadowed":shadowed,"motion":motion,"shadow_stats":format!("{:?}",r.shadow_stats()),"shadow_preparation_ms":report.cpu.shadow_preparation.as_secs_f64()*1e3,"shadow_upload_ms":report.cpu.shadow_upload.as_secs_f64()*1e3,"shadow_encode_ms":report.cpu.shadow_encode.as_secs_f64()*1e3,"shadow_generation_ms":gpu.shadow_generation.map(|d|d.as_secs_f64()*1e3),"render_span_ms":gpu.render_span.as_secs_f64()*1e3,"frame":report.frame.0,"cpu_render_admission_ms":cpu.as_secs_f64()*1e3,"mesh_pass_ms":gpu.mesh_pass.as_secs_f64()*1e3,"present_pass_ms":gpu.present_pass.map(|d|d.as_secs_f64()*1e3),"draws":report.scene.draws,"triangles":report.scene.triangles,"camera_bytes":report.uploads.camera,"light_bytes":report.uploads.lights,"lighting_uniform_bytes":report.uploads.lighting}));
+            rows.push(serde_json::json!({"pose":pose,"pair":pair,"mode":format!("{mode:?}"),"shadowed":shadowed,"motion":motion,"shadow_stats":format!("{:?}",r.shadow_stats()),"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadow_preparation_ms":report.cpu.shadow_preparation.as_secs_f64()*1e3,"shadow_upload_ms":report.cpu.shadow_upload.as_secs_f64()*1e3,"shadow_encode_ms":report.cpu.shadow_encode.as_secs_f64()*1e3,"shadow_generation_ms":gpu.shadow_generation.map(|d|d.as_secs_f64()*1e3),"render_span_ms":gpu.render_span.as_secs_f64()*1e3,"frame":report.frame.0,"cpu_render_admission_ms":cpu.as_secs_f64()*1e3,"mesh_pass_ms":gpu.mesh_pass.as_secs_f64()*1e3,"present_pass_ms":gpu.present_pass.map(|d|d.as_secs_f64()*1e3),"draws":report.scene.draws,"triangles":report.scene.triangles,"camera_bytes":report.uploads.camera,"light_bytes":report.uploads.lights,"lighting_uniform_bytes":report.uploads.lighting}));
             if !cost || pair <= 1 {
                 let mut capture = loop {
                     if let Some(c) = r.try_capture_hdr()? {
@@ -340,7 +407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &out.join(prefix),
                     info,
                     &bytes,
-                    serde_json::json!({"asset_path":asset_path,"camera_path":camera_path,"lighting_path":light_path,"pose":pose,"scene":"scene.json","motion":motion,"shadowed":shadowed,"shadow_settings":format!("{:?}",if *shadowed {make_shadows(&lights)} else {Shadows::default()}),"shadows":format!("{:?}",r.shadow_stats()),"camera_view":camera.view().to_cols_array(),"camera_projection":camera.matrix(width,height).to_cols_array()}),
+                    serde_json::json!({"asset_path":asset_path,"camera_path":camera_path,"lighting_path":light_path,"pose":pose,"scene":"scene.json","motion":motion,"hardware_shadows":hardware,"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadowed":shadowed,"shadow_settings":format!("{:?}",if *shadowed {make_shadows(&lights)} else {Shadows::default()}),"shadows":format!("{:?}",r.shadow_stats()),"camera_view":camera.view().to_cols_array(),"camera_projection":camera.matrix(width,height).to_cols_array()}),
                 )?;
             }
         }
@@ -348,7 +415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         out.join("cost.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"adapter":format!("{:?}",adapter.get_info()),"validation":validate,"debug_build":cfg!(debug_assertions),"samples":samples as u32,"anisotropy":16,"width":width,"height":height,"presentation":"none; pass timings exclude uploads/acquire/present; CPU includes any admission retries","rows":rows,"startup_through_evidence_seconds":start.elapsed().as_secs_f64(),"startup_to_ready_seconds":prepared_elapsed.as_secs_f64(),"stats":format!("{:?}",r.stats()),"lighting":format!("{:?}",r.lighting_stats()),"shadow_limits":format!("{:?}",r.shadow_limits()),"shadow_settings":format!("{:?}",make_shadows(&lighting)),"filtering":"nearest hard shadow lookup inseparable from mesh pass; no softness or cascade blend"}),
+            &serde_json::json!({"adapter":format!("{:?}",adapter.get_info()),"validation":validate,"debug_build":cfg!(debug_assertions),"samples":samples as u32,"anisotropy":16,"width":width,"height":height,"presentation":"none; pass timings exclude uploads/acquire/present; CPU includes any admission retries","rows":rows,"startup_through_evidence_seconds":start.elapsed().as_secs_f64(),"startup_to_ready_seconds":prepared_elapsed.as_secs_f64(),"stats":format!("{:?}",r.stats()),"lighting":format!("{:?}",r.lighting_stats()),"shadow_limits":format!("{:?}",r.shadow_limits()),"shadow_settings":format!("{:?}",make_shadows(&lighting)),"hardware_shadows":hardware,"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"filtering":"hard visibility inseparable from mesh pass; no softness or cascade blend; optional AS builds are outside render-pass GPU span"}),
         )?,
     )?;
     eprintln!(

@@ -7,6 +7,9 @@ use lighting_gpu::LightingGpu;
 mod shadow_gpu;
 use sha2::{Digest, Sha256};
 use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
+#[path = "hardware_shadow_gpu.rs"]
+pub(crate) mod hardware_shadow_gpu;
+use hardware_shadow_gpu::HardwareState;
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -264,6 +267,7 @@ impl Renderer {
     }
 }
 struct Pipelines {
+    hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     shadow: Owned<wgpu::RenderPipeline>,
     diagnostic_tangent: Owned<wgpu::RenderPipeline>,
     lit_tangent: Owned<wgpu::RenderPipeline>,
@@ -312,6 +316,7 @@ pub struct Renderer {
     lighting: LightingGpu,
     environment: crate::environment::EnvironmentState,
     shadows: ShadowState,
+    hardware_shadows: Option<HardwareState>,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -380,6 +385,45 @@ impl Renderer {
         options: RendererOptions,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        Self::new_configured(device, queue, color_format, limits, options, None, wgsl)
+    }
+    /// Explicit optional hard shadows. The caller must negotiate the experimental
+    /// device feature and its unsafe acknowledgment before calling this safe API.
+    /// Unsupported configurations fail before renderer allocations or queue writes.
+    pub fn new_with_hardware_shadows(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        limits: Limits,
+        options: RendererOptions,
+        hardware: HardwareShadowOptions,
+        wgsl: &str,
+    ) -> Result<Self, Error> {
+        Self::new_configured(
+            device,
+            queue,
+            color_format,
+            limits,
+            options,
+            Some(hardware),
+            wgsl,
+        )
+    }
+    fn new_configured(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        limits: Limits,
+        options: RendererOptions,
+        hardware: Option<HardwareShadowOptions>,
+        wgsl: &str,
+    ) -> Result<Self, Error> {
+        if let Some(hardware) = hardware {
+            hardware.validate(device.features(), &device.limits(), options.samples)?;
+        }
+        let hardware_source = hardware
+            .map(|_| crate::hardware_shadows::shader_source(wgsl))
+            .transpose()?;
         if !(1..=16).contains(&options.anisotropy_clamp) {
             return Err(Error::InvalidInput("anisotropy_clamp must be in 1..=16"));
         }
@@ -545,6 +589,15 @@ impl Renderer {
             [&bindings, &instance_bindings, &material_bindings],
         );
         let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
+        let hardware_shadows = hardware.map(|options| {
+            HardwareState::new(
+                &device,
+                &ledger,
+                [&bindings, &instance_bindings, &material_bindings],
+                &lighting.bindings,
+                options,
+            )
+        });
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
@@ -590,6 +643,7 @@ impl Renderer {
             &layout,
             &lighting,
             &shadows,
+            hardware_shadows.as_ref().zip(hardware_source.as_deref()),
             color_format,
             options.samples,
             wgsl,
@@ -622,10 +676,12 @@ impl Renderer {
             #[cfg(test)]
             reference_draws: false,
             pipeline,
-            shader_hash: Sha256::digest(wgsl.as_bytes()).into(),
+            shader_hash: Sha256::digest(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
+                .into(),
             lighting,
             environment: Default::default(),
             shadows,
+            hardware_shadows,
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -709,6 +765,7 @@ impl Renderer {
         layout: &wgpu::PipelineLayout,
         lighting: &LightingGpu,
         shadows: &ShadowState,
+        hardware: Option<(&HardwareState, &str)>,
         format: wgpu::TextureFormat,
         samples: SampleCount,
         source: &str,
@@ -720,79 +777,102 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let mesh =
-            |layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, entry, tangent: bool| {
-                ledger.own(
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("mesh"),
-                        layout: Some(layout),
-                        vertex: wgpu::VertexState {
-                            module: &shader,
-                            entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
-                            compilation_options: Default::default(),
-                            buffers: &[
+        let mesh = |shader: &wgpu::ShaderModule,
+                    layout: &wgpu::PipelineLayout,
+                    format: wgpu::TextureFormat,
+                    entry,
+                    tangent: bool| {
+            ledger.own(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mesh"),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 48,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &VERTEX_ATTRIBUTES,
+                            }),
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 4,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &MODEL_ATTRIBUTES,
+                            }),
+                            if tangent {
                                 Some(wgpu::VertexBufferLayout {
-                                    array_stride: 48,
+                                    array_stride: 16,
                                     step_mode: wgpu::VertexStepMode::Vertex,
-                                    attributes: &VERTEX_ATTRIBUTES,
-                                }),
-                                Some(wgpu::VertexBufferLayout {
-                                    array_stride: 4,
-                                    step_mode: wgpu::VertexStepMode::Instance,
-                                    attributes: &MODEL_ATTRIBUTES,
-                                }),
-                                if tangent {
-                                    Some(wgpu::VertexBufferLayout {
-                                        array_stride: 16,
-                                        step_mode: wgpu::VertexStepMode::Vertex,
-                                        attributes: &TANGENT_ATTRIBUTES,
-                                    })
-                                } else {
-                                    None
-                                },
-                            ],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &shader,
-                            entry_point: Some(entry),
-                            compilation_options: Default::default(),
-                            targets: &[Some(format.into())],
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            cull_mode: None,
-                            ..Default::default()
-                        },
-                        depth_stencil: Some(wgpu::DepthStencilState {
-                            format: wgpu::TextureFormat::Depth32Float,
-                            depth_write_enabled: Some(true),
-                            depth_compare: Some(wgpu::CompareFunction::Less),
-                            stencil: Default::default(),
-                            bias: Default::default(),
-                        }),
-                        multisample: wgpu::MultisampleState {
-                            count: samples as u32,
-                            ..Default::default()
-                        },
-                        multiview_mask: None,
-                        cache: None,
+                                    attributes: &TANGENT_ATTRIBUTES,
+                                })
+                            } else {
+                                None
+                            },
+                        ],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(format.into())],
                     }),
-                    ResourceKind::RenderPipeline,
-                )
-            };
-        let diagnostic = mesh(layout, format, "fs", false);
-        let diagnostic_tangent = mesh(layout, format, "fs", true);
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: samples as u32,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                }),
+                ResourceKind::RenderPipeline,
+            )
+        };
+        let diagnostic = mesh(&shader, layout, format, "fs", false);
+        let diagnostic_tangent = mesh(&shader, layout, format, "fs", true);
         let lit = mesh(
+            &shader,
             &lighting.layout,
             wgpu::TextureFormat::Rgba16Float,
             "fs_lit",
             false,
         );
         let lit_tangent = mesh(
+            &shader,
             &lighting.layout,
             wgpu::TextureFormat::Rgba16Float,
             "fs_lit",
             true,
         );
+        let hardware = hardware.map(|(hardware, source)| {
+            let shader = ledger.own(
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("optional live hardware shadow shader"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                }),
+                ResourceKind::ShaderModule,
+            );
+            [false, true].map(|tangent| {
+                mesh(
+                    &shader,
+                    &hardware.layout,
+                    wgpu::TextureFormat::Rgba16Float,
+                    "fs_lit",
+                    tangent,
+                )
+            })
+        });
         let shadow = ledger.own(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("source-sided shadow depth"),
@@ -855,6 +935,7 @@ impl Renderer {
             ResourceKind::RenderPipeline,
         );
         Pipelines {
+            hardware,
             shadow,
             diagnostic_tangent,
             lit_tangent,
@@ -881,6 +962,15 @@ impl Renderer {
         }
         let start = Instant::now();
         self.pipelines.attempts += 1;
+        let hardware_source = self
+            .hardware_shadows
+            .as_ref()
+            .map(|_| crate::hardware_shadows::shader_source(wgsl))
+            .transpose()
+            .map_err(|error| ReloadError::Rejected {
+                diagnostic: error.to_string(),
+                compile: start.elapsed(),
+            })?;
         let scopes = OperationScopes::new(&self.device);
         let candidate = Self::compile(
             &self.device,
@@ -888,6 +978,9 @@ impl Renderer {
             &self.layout,
             &self.lighting,
             &self.shadows,
+            self.hardware_shadows
+                .as_ref()
+                .zip(hardware_source.as_deref()),
             self.format,
             self.options.samples,
             wgsl,
@@ -911,7 +1004,8 @@ impl Renderer {
             return Err(ReloadError::Fault(fault.clone()));
         }
         self.pipeline = candidate;
-        self.shader_hash = Sha256::digest(wgsl.as_bytes()).into();
+        self.shader_hash =
+            Sha256::digest(hardware_source.as_deref().unwrap_or(wgsl).as_bytes()).into();
         self.revision.0 += 1;
         self.pipelines.installations += 1;
         Ok(ReloadReport {
@@ -954,6 +1048,9 @@ impl Renderer {
         }
         let slot = self.free_slot().unwrap();
         let pack_start = Instant::now();
+        if let Some(hardware) = &self.hardware_shadows {
+            hardware.validate_mesh(&self.ledger, &self.device.limits(), sizes.0, sizes.1)?;
+        }
         let mut bytes = Vec::with_capacity((sizes.0 + sizes.1 + tangent_bytes) as usize);
         for vertex in data.vertices {
             let normal = glam::DVec3::new(
@@ -986,24 +1083,36 @@ impl Renderer {
         preparation += pack_start.elapsed();
         let start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
-        let vertex = self.ledger.own(
+        let vertex = Arc::new(self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh vertices"),
                 size: sizes.0,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | if self.hardware_shadows.is_some() {
+                        wgpu::BufferUsages::BLAS_INPUT
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
-        );
-        let index = self.ledger.own(
+        ));
+        let index = Arc::new(self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh indices"),
                 size: sizes.1,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::INDEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | if self.hardware_shadows.is_some() {
+                        wgpu::BufferUsages::BLAS_INPUT
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
-        );
+        ));
         let tangent = tangents.map(|_| {
             self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1015,6 +1124,10 @@ impl Renderer {
                 ResourceKind::Buffer,
             )
         });
+        let acceleration = self
+            .hardware_shadows
+            .as_mut()
+            .map(|hardware| hardware.create_mesh(&self.device, &self.ledger, &vertex, &index));
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
         }
@@ -1040,11 +1153,25 @@ impl Renderer {
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
         let submitted_at = Instant::now();
-        self.queue.submit([]);
+        if let Some(acceleration) = &acceleration {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            acceleration.encode(&mut encoder);
+            self.queue.submit([encoder.finish()]);
+        } else {
+            self.queue.submit([]);
+        }
         self.queue.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
         self.submissions += 1;
+        if let (Some(hardware), Some(acceleration)) = (&mut self.hardware_shadows, &acceleration) {
+            hardware.mesh_submitted(
+                &self.device,
+                &self.ledger,
+                acceleration.clone(),
+                self.submissions,
+            );
+        }
         self.record_flight(
             slot,
             Flight {
@@ -1067,6 +1194,7 @@ impl Renderer {
         };
         self.check_fault()?;
         Ok(Some(Mesh {
+            acceleration,
             tangent,
             renderer: self.identity.clone(),
             vertex,
@@ -1557,7 +1685,7 @@ impl Renderer {
         };
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
-        let shadow_frame = if self.shadows.enabled(view_mode) {
+        let mut shadow_frame = if self.shadows.enabled(view_mode) {
             let bounds = draws
                 .iter()
                 .flat_map(|draw| {
@@ -1577,11 +1705,40 @@ impl Renderer {
         } else {
             None
         };
+        if self.hardware_shadows.is_some()
+            && let Some(frame) = &mut shadow_frame
+        {
+            frame.prepare_hardware_bias(&self.lighting.pending.records)?;
+        }
         let mut shadow_preparation = if shadow_frame.is_some() {
             shadow_start.elapsed()
         } else {
             Duration::ZERO
         };
+        let acceleration_start = Instant::now();
+        let hardware_build = if shadow_frame.is_some() {
+            if let Some(hardware) = &mut self.hardware_shadows {
+                let scopes = OperationScopes::new(&self.device);
+                let result = hardware.prepare_scene(
+                    &self.device,
+                    &self.ledger,
+                    &self.uniform,
+                    draws,
+                    self.submissions,
+                );
+                if let Some(error) = scopes.finish() {
+                    return Err(self.fail(error.to_string()));
+                }
+                result?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if shadow_frame.is_some() && self.hardware_shadows.is_some() {
+            shadow_preparation += acceleration_start.elapsed();
+        }
         let mut uploads = UploadBytes::default();
         let mut scene = SceneCounts::default();
         let mut visibility = Duration::ZERO;
@@ -1716,6 +1873,7 @@ impl Renderer {
             &prepared,
             shadow_frame,
             &shadow_draws,
+            hardware_build,
             slot,
             uploads,
             scene,
@@ -1784,6 +1942,7 @@ impl Renderer {
         draws: &[PreparedDraw<'_>],
         shadow_frame: Option<ShadowFrame>,
         shadow_draws: &[ShadowDraw<'_>],
+        hardware_build: bool,
         slot: usize,
         mut uploads: UploadBytes,
         scene: SceneCounts,
@@ -1804,6 +1963,7 @@ impl Renderer {
             uploads.write_calls += 1;
         }
         let lit = view_mode == ViewMode::Lit;
+        let hardware_shadowed = shadow_frame.is_some() && self.hardware_shadows.is_some();
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
@@ -1897,7 +2057,15 @@ impl Renderer {
                 label: Some("mesh frame"),
             });
         let timed = self.timing_status == TimingStatus::Enabled;
-        if let Some(frame) = &shadow_frame {
+        if hardware_build {
+            let start = Instant::now();
+            self.hardware_shadows
+                .as_ref()
+                .unwrap()
+                .encode_scene(&mut encoder);
+            cpu.shadow_encode += start.elapsed();
+        }
+        if let Some(frame) = shadow_frame.as_ref().filter(|_| !hardware_shadowed) {
             let shadow_start = Instant::now();
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
@@ -1951,7 +2119,9 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
-            pass.set_pipeline(if lit {
+            pass.set_pipeline(if hardware_shadowed {
+                &self.pipeline.hardware.as_ref().unwrap()[0]
+            } else if lit {
                 &self.pipeline.lit
             } else {
                 &self.pipeline.diagnostic
@@ -1959,7 +2129,15 @@ impl Renderer {
             if lit {
                 pass.set_bind_group(3, self.lighting.bind(), &[]);
             }
-            pass.set_bind_group(0, &*self.bind, &[]);
+            pass.set_bind_group(
+                0,
+                if hardware_shadowed {
+                    self.hardware_shadows.as_ref().unwrap().bind()
+                } else {
+                    &*self.bind
+                },
+                &[],
+            );
             // Pass state persists across draws, so unchanged state is never re-encoded.
             let mut pipeline = None;
             let (mut instances, mut material, mut ids, mut mesh) = (None, None, None, None);
@@ -1967,11 +2145,16 @@ impl Renderer {
                 if draw.slots.is_empty() {
                     continue;
                 }
-                let candidate = match (lit, draw.mesh.tangent.is_some()) {
-                    (true, true) => &self.pipeline.lit_tangent,
-                    (false, true) => &self.pipeline.diagnostic_tangent,
-                    (true, false) => &self.pipeline.lit,
-                    (false, false) => &self.pipeline.diagnostic,
+                let candidate = if hardware_shadowed {
+                    &self.pipeline.hardware.as_ref().unwrap()
+                        [usize::from(draw.mesh.tangent.is_some())]
+                } else {
+                    match (lit, draw.mesh.tangent.is_some()) {
+                        (true, true) => &self.pipeline.lit_tangent,
+                        (false, true) => &self.pipeline.diagnostic_tangent,
+                        (true, false) => &self.pipeline.lit,
+                        (false, false) => &self.pipeline.diagnostic,
+                    }
                 };
                 if changed(&mut pipeline, candidate) {
                     pass.set_pipeline(candidate);
@@ -2038,7 +2221,7 @@ impl Renderer {
                 &timing.queries,
                 slot as u32 * 6
                     ..slot as u32 * 6
-                        + if shadow_frame.is_some() {
+                        + if shadow_frame.is_some() && !hardware_shadowed {
                             6
                         } else if lit {
                             4
@@ -2053,7 +2236,7 @@ impl Renderer {
                 offset,
                 readback,
                 0,
-                if shadow_frame.is_some() {
+                if shadow_frame.is_some() && !hardware_shadowed {
                     48
                 } else if lit {
                     32
@@ -2082,6 +2265,13 @@ impl Renderer {
         self.queue.submit([commands]);
         let submit = submitted_at.elapsed();
         self.submissions += 1;
+        if hardware_build {
+            self.hardware_shadows.as_mut().unwrap().scene_submitted(
+                &self.device,
+                &self.ledger,
+                self.submissions,
+            );
+        }
         self.frames += 1;
         self.timed_frames += u64::from(timed);
         let frame = FrameId(self.frames);
@@ -2091,7 +2281,7 @@ impl Renderer {
                 done,
                 mapped,
                 lit,
-                shadowed: shadow_frame.is_some(),
+                shadowed: shadow_frame.is_some() && !hardware_shadowed,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
@@ -2248,6 +2438,9 @@ impl Renderer {
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
         self.shadows.collect(self.completed_submission);
+        if let Some(hardware) = &mut self.hardware_shadows {
+            hardware.collect(self.completed_submission);
+        }
         self.check_fault()?;
         Ok(start.elapsed())
     }

@@ -36,6 +36,7 @@ fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scaled=n/max(scale,1e-30);
     return scaled*inverseSqrt(max(dot(scaled,scaled),1e-30));
 }
+// renderlab: affine vertices begin
 fn world_position(position:vec3<f32>, slot:u32) -> vec4<f32> {
     return models[slot] * vec4<f32>(position, 1.0);
 }
@@ -65,6 +66,7 @@ fn vertex_output(input: VertexInput) -> VertexOutput {
     return output;
 }
 
+// renderlab: affine vertices end
 @fragment fn fs(input: VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
     // Cull by source winding so mirrored slots remain in their original equal-depth order.
     if material.double_sided == 0u && front != (input.winding > 0.0) { discard; }
@@ -94,7 +96,7 @@ struct ShadowView {
     // Directional camera-depth interval or local radial interval; normalized and world bias.
     coverage_bias:vec4<f32>,
     camera_depth:vec4<f32>,
-    // Reserved for texel-scaled bias experiments; nearest lookup does not read this.
+    // x: planner texel extent; optional hardware path uses y for depth/metre.
     texel:vec4<f32>,
 };
 @group(3) @binding(4) var shadow_depth:texture_depth_2d_array;
@@ -113,6 +115,7 @@ struct ShadowVertex {
 @fragment fn fs_shadow(input:ShadowVertex, @builtin(front_facing) front:bool) {
     if material.double_sided==0u && front!=(input.winding>0.0) { discard; }
 }
+// renderlab: direct visibility begin
 fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
     if light.kind.z==0u { return 1.0; }
     var layer=light.kind.y;
@@ -165,6 +168,7 @@ fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -
     }
     return select(0.0,1.0,reference-view.coverage_bias.z<=stored);
 }
+// renderlab: direct visibility end
 // Presentation uses its own layout and entry points in this same atomic module.
 @group(0) @binding(1) var exposed_hdr:texture_2d<f32>;
 const PI:f32=3.141592653589793;

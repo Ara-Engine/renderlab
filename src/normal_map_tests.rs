@@ -572,131 +572,143 @@ fn gpu_normal_maps_integration_replacement_affinity_and_mixed_draws() {
 fn gpu_normal_maps_integration_shadow_plane_is_geometric() {
     let _validation = validation::begin(true);
     for samples in [SampleCount::One, SampleCount::Four] {
-        let (device, queue) = device(false);
-        let source=SOURCE.replace("return vec4<f32>(exposed,1.0);",
-            "return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);");
-        let mut r = Renderer::new_with_options(
+        geometric_shadow_case(samples, false);
+    }
+}
+pub(super) fn geometric_shadow_case(samples: SampleCount, hardware: bool) {
+    let (device, queue) = if hardware {
+        hardware_shadow_tests::hardware_device()
+    } else {
+        device(false)
+    };
+    let source=SOURCE.replace("return vec4<f32>(exposed,1.0);",
+        "return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);");
+    let options = RendererOptions {
+        samples,
+        ..Default::default()
+    };
+    let mut r = if hardware {
+        Renderer::new_with_hardware_shadows(
             device,
             queue,
             FORMAT,
             Limits::default(),
-            RendererOptions {
-                samples,
-                ..Default::default()
-            },
+            options,
+            HardwareShadowOptions::default(),
             &source,
         )
-        .unwrap();
-        let vertices = [
-            ([-1., -1., 0.], [0., 1.]),
-            ([1., -1., 0.], [1., 1.]),
-            ([1., 1., 0.], [1., 0.]),
-            ([-1., 1., 0.], [0., 0.]),
-        ]
-        .map(|(position, uv)| Vertex {
-            position,
-            uv,
-            normal: [0., 0., 1.],
-            color: [1.; 4],
-        });
-        let stream = TangentStream {
-            basis: TangentBasis::Authored,
-            values: vec![[1., 0., 0., -1.]; 4],
-        };
-        let mesh = r
-            .try_upload_mesh_with_tangents(
-                &MeshData {
-                    vertices: &vertices,
-                    indices: &[0, 1, 2, 0, 2, 3],
-                },
-                Some(&stream),
-            )
-            .unwrap()
-            .unwrap();
-        let blocker = upload(&mut r, &triangle([1.; 3]), &INDICES);
-        let mut receiver = instances(&mut r, &[Mat4::IDENTITY]);
-        let mut caster = instances(
-            &mut r,
-            &[Mat4::from_translation(Vec3::new(-0.3, 0., 0.5))
-                * Mat4::from_scale(Vec3::splat(0.3))],
-        );
-        let color = target(r.device(), 129, 97);
-        let camera = camera(0.);
-        r.set_lighting_and_shadows(
-            &Lighting {
-                lights: vec![Light::Directional {
-                    travel: Vec3::new(-0.4, -0.3, -1.),
-                    lux: [2.; 3],
-                }],
-                ..Default::default()
-            },
-            &Shadows {
-                requests: vec![ShadowRequest::Directional {
-                    split_ends: vec![10.],
-                }],
-                resolution: 128,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        r.test_drain("geometric shadow map setup");
-        let tex = r
-            .try_upload_texture(&asset::Texture {
-                role: TextureRole::NormalLinear,
-                mips: vec![Mip {
-                    width: 1,
-                    height: 1,
-                    rgba8: vec![230, 204, 180, 255],
-                }],
-            })
-            .unwrap()
-            .unwrap();
-        r.test_drain("geometric shadow material setup");
-        let mapped = r
-            .try_create_material(&MaterialDescriptor {
-                normal_texture: Some(TextureBinding {
-                    texture: &tex,
-                    sampler: Sampler::default(),
-                }),
-                normal_scale: 5.,
-                double_sided: true,
-                ..Default::default()
-            })
-            .unwrap()
-            .unwrap();
-        lit(
-            &mut r,
-            &color,
-            &camera,
-            &mut [
-                Draw::new(&mesh, &mut receiver),
-                Draw::new(&blocker, &mut caster),
-            ],
-        );
-        let expected = lighting_tests::hdr(&mut r);
-        let interior = (32..64).flat_map(|y| (45..84).map(move |x| (y * 129 + x) * 4));
-        assert!(
-            interior.clone().any(|i| expected[i] == 0.),
-            "receiver interior needs actual occlusion"
-        );
-        assert!(
-            interior.clone().any(|i| expected[i] == 1.),
-            "receiver interior needs an unblocked region"
-        );
-        lit(
-            &mut r,
-            &color,
-            &camera,
-            &mut [
-                Draw::new(&mesh, &mut receiver).with_material(&mapped),
-                Draw::new(&blocker, &mut caster),
-            ],
-        );
-        assert_eq!(
-            expected,
-            lighting_tests::hdr(&mut r),
-            "normal map changed geometric shadow mask"
-        );
-        r.test_drain("geometric shadow final");
+    } else {
+        Renderer::new_with_options(device, queue, FORMAT, Limits::default(), options, &source)
     }
+    .unwrap();
+    let vertices = [
+        ([-1., -1., 0.], [0., 1.]),
+        ([1., -1., 0.], [1., 1.]),
+        ([1., 1., 0.], [1., 0.]),
+        ([-1., 1., 0.], [0., 0.]),
+    ]
+    .map(|(position, uv)| Vertex {
+        position,
+        uv,
+        normal: [0., 0., 1.],
+        color: [1.; 4],
+    });
+    let stream = TangentStream {
+        basis: TangentBasis::Authored,
+        values: vec![[1., 0., 0., -1.]; 4],
+    };
+    let mesh = r
+        .try_upload_mesh_with_tangents(
+            &MeshData {
+                vertices: &vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+            },
+            Some(&stream),
+        )
+        .unwrap()
+        .unwrap();
+    let blocker = upload(&mut r, &triangle([1.; 3]), &INDICES);
+    let mut receiver = instances(&mut r, &[Mat4::IDENTITY]);
+    let mut caster = instances(
+        &mut r,
+        &[Mat4::from_translation(Vec3::new(-0.3, 0., 0.5)) * Mat4::from_scale(Vec3::splat(0.3))],
+    );
+    let color = target(r.device(), 129, 97);
+    let camera = camera(0.);
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(-0.4, -0.3, -1.),
+                lux: [2.; 3],
+            }],
+            ..Default::default()
+        },
+        &Shadows {
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![10.],
+            }],
+            resolution: 128,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    r.test_drain("geometric shadow map setup");
+    let tex = r
+        .try_upload_texture(&asset::Texture {
+            role: TextureRole::NormalLinear,
+            mips: vec![Mip {
+                width: 1,
+                height: 1,
+                rgba8: vec![230, 204, 180, 255],
+            }],
+        })
+        .unwrap()
+        .unwrap();
+    r.test_drain("geometric shadow material setup");
+    let mapped = r
+        .try_create_material(&MaterialDescriptor {
+            normal_texture: Some(TextureBinding {
+                texture: &tex,
+                sampler: Sampler::default(),
+            }),
+            normal_scale: 5.,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    lit(
+        &mut r,
+        &color,
+        &camera,
+        &mut [
+            Draw::new(&mesh, &mut receiver),
+            Draw::new(&blocker, &mut caster),
+        ],
+    );
+    let expected = lighting_tests::hdr(&mut r);
+    let interior = (32..64).flat_map(|y| (45..84).map(move |x| (y * 129 + x) * 4));
+    assert!(
+        interior.clone().any(|i| expected[i] == 0.),
+        "receiver interior needs actual occlusion"
+    );
+    assert!(
+        interior.clone().any(|i| expected[i] == 1.),
+        "receiver interior needs an unblocked region"
+    );
+    lit(
+        &mut r,
+        &color,
+        &camera,
+        &mut [
+            Draw::new(&mesh, &mut receiver).with_material(&mapped),
+            Draw::new(&blocker, &mut caster),
+        ],
+    );
+    assert_eq!(
+        expected,
+        lighting_tests::hdr(&mut r),
+        "normal map changed geometric shadow mask"
+    );
+    r.test_drain("geometric shadow final");
 }

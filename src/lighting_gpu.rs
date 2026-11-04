@@ -317,9 +317,7 @@ impl Renderer {
     /// Atomic CPU replacement. No queue writes until an admitted Lit submission.
     pub fn set_lighting(&mut self, lighting: &Lighting) -> Result<(), Error> {
         self.check_fault()?;
-        self.shadows
-            .settings
-            .validate(&lighting.lights, self.shadows.limits)?;
+        self.validate_shadow_settings(&lighting.lights, &self.shadows.settings)?;
         let exposure = PackedLighting::settings(lighting)?;
         if lighting.lights == self.lighting.source_lights {
             // Settings-only edits never normalize/repack the light vector.

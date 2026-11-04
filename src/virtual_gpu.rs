@@ -192,10 +192,11 @@ impl Renderer {
         self.check_fault()?;
         Ok(Some(crate::virtual_geometry::GpuPage {
             mesh: Mesh {
+                acceleration: None,
                 tangent,
                 renderer: self.identity.clone(),
-                vertex,
-                index,
+                vertex: Arc::new(vertex),
+                index: Arc::new(index),
                 index_count: data.indices.len() as u32,
                 bounds: Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap(),
             },
@@ -214,6 +215,7 @@ impl Renderer {
         scene: &mut crate::virtual_geometry::VirtualScene,
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
+        self.reject_virtual_hardware_shadows(view_mode)?;
         self.validate_color(color)?;
         if !Arc::ptr_eq(&asset.identity, &scene.asset) {
             return Err(Error::InvalidInput(
@@ -234,6 +236,7 @@ impl Renderer {
         scene: &mut crate::virtual_geometry::VirtualScene,
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
+        self.reject_virtual_hardware_shadows(view_mode)?;
         self.validate_color(color)?;
         self.virtual_identity(&mut asset.renderer)?;
         use crate::virtual_geometry::PreparationState;
@@ -422,6 +425,7 @@ impl Renderer {
             &prepared,
             shadow_frame,
             &shadow_draws,
+            false,
             slot,
             uploads,
             counts,

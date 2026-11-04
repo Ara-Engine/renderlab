@@ -167,8 +167,10 @@ pub enum ResourceKind {
     ShaderModule,
     QuerySet,
     Sampler,
+    Blas,
+    Tlas,
 }
-const RESOURCE_KINDS: usize = 10;
+const RESOURCE_KINDS: usize = 12;
 
 /// Renderlab ownership only. No driver residency claim. Caller-owned colors are excluded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -184,6 +186,11 @@ pub struct Ownership {
     pub target_bytes: Count,
     pub light_bytes: Count,
     pub shadow_bytes: Count,
+    /// Conservative AS admission estimates, separate from observed allocator bytes.
+    pub hardware_as_estimated_bytes: Count,
+    /// Only allocations positively identified by the safe allocator report.
+    pub hardware_as_observed_bytes: Count,
+    pub hardware_scratch_estimated_bytes: Count,
     pub lut_bytes: Count,
     pub light_creations: u64,
     pub shadow_creations: u64,
@@ -214,6 +221,9 @@ impl Ledger {
             AllocationKind::Light => ledger.light_creations += 1,
             AllocationKind::Shadow => ledger.shadow_creations += 1,
             AllocationKind::Lut => ledger.lut_creations += 1,
+            AllocationKind::HardwareAsEstimate
+            | AllocationKind::HardwareAsObserved
+            | AllocationKind::HardwareScratchEstimate => {}
         }
         let count = allocation_count(&mut ledger, kind);
         count.created += bytes;
@@ -262,6 +272,9 @@ pub(crate) enum AllocationKind {
     Light,
     Shadow,
     Lut,
+    HardwareAsEstimate,
+    HardwareAsObserved,
+    HardwareScratchEstimate,
 }
 fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count {
     match kind {
@@ -272,6 +285,9 @@ fn allocation_count(ledger: &mut Ownership, kind: AllocationKind) -> &mut Count 
         AllocationKind::Light => &mut ledger.light_bytes,
         AllocationKind::Shadow => &mut ledger.shadow_bytes,
         AllocationKind::Lut => &mut ledger.lut_bytes,
+        AllocationKind::HardwareAsEstimate => &mut ledger.hardware_as_estimated_bytes,
+        AllocationKind::HardwareAsObserved => &mut ledger.hardware_as_observed_bytes,
+        AllocationKind::HardwareScratchEstimate => &mut ledger.hardware_scratch_estimated_bytes,
     }
 }
 pub(crate) struct Allocation {

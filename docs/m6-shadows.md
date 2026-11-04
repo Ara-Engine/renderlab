@@ -84,7 +84,9 @@ Shadow planning/upload/encoding CPU medians are respectively .018/.166/.020 ms, 
 
 A bounded background native viewer run accepted lighting/shadow edits, rejected malformed and mismatched settings, rejected a missing shadow shader entry point while continuing frames, installed a corrected bundle, and observed 1/5/arrow controls. It exited normally with active clean validation. PID-bound window capture shows the initial owned viewer, but repeated window captures remained byte-identical even after tint/camera changes, including a delayed retry. Those captures are stale for later states and cannot certify visible native reload or motion. The live logs and headless image tests are separate evidence. No foreground activation, physical input, desktop/game capture or foreign-app shutdown occurred.
 
-## Acceptance gaps
+## Optional hardware path and acceptance gaps
+
+The [optional hardware directional-shadow unit](m6-hardware-shadows.md) now integrates the regular 1x path with owned acceleration structures, in-flight retirement and transactional reload. Its focused tests and quarry controls pass, with independent Opus acceptance limited to this regular 1x directional subset. The experiments below record why this path was selected and retain their original failures and scope.
 
 A later private full-image receiver-coverage prototype rendered the same twelve-scan, 13,034,903-triangle quarry at 1920x1080, 1x, with unchanged lighting and bias. Exact caster coverage at actual camera receivers clears the three registered false shadows and preserves the registered contact, all with zero display-code error. Root inspected the full candidate and unknown overlay. Broad stippling improves, but 1,215 of 346,520 receivers remain numerically unresolved. Two selected source-ray checks classify unknowns differently, so replacing unknown with light is unsound. No capacity overflow occurred. This prototype is rejected for promotion; regular-path evidence does not establish virtual-cut integration or motion quality.
 

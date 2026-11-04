@@ -16,6 +16,39 @@ pub(super) struct ShadowFrame {
     bases: Vec<Option<DMat4>>,
     records: Vec<u8>,
 }
+impl ShadowFrame {
+    pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
+        for (light, &[first, count]) in light_records.chunks_exact(64).zip(&self.light_ranges) {
+            let sun = Vec3::from_array(std::array::from_fn(|i| {
+                -f32::from_ne_bytes(light[16 + i * 4..20 + i * 4].try_into().unwrap())
+            }));
+            for layer in first..first + count {
+                let view = &self.views[layer as usize];
+                let offset = layer as usize * VIEW_BYTES as usize;
+                let bias =
+                    f32::from_ne_bytes(self.records[offset + 72..offset + 76].try_into().unwrap());
+                let rate = hardware_depth_rate(view.world_to_clip, sun, bias)?;
+                self.records[offset + 100..offset + 104].copy_from_slice(&rate.to_ne_bytes());
+            }
+        }
+        Ok(())
+    }
+}
+/// Conversion uses the exact f32 matrix/light bytes that the query will receive.
+fn hardware_depth_rate(matrix: Mat4, sun: Vec3, bias: f32) -> Result<f32, Error> {
+    if matrix.transpose().w_axis != glam::Vec4::W {
+        return Err(Error::InvalidInput(
+            "hardware directional shadows require affine orthographic light matrices",
+        ));
+    }
+    let rate = -matrix.transpose().z_axis.truncate().dot(sun);
+    if !rate.is_normal() || rate <= 0.0 || !(1.0 / rate).is_finite() || !(bias / rate).is_finite() {
+        return Err(Error::InvalidInput(
+            "hardware shadow depth bias/range cannot be represented as finite ray distances",
+        ));
+    }
+    Ok(rate)
+}
 struct ShadowResources {
     _texture: Owned<wgpu::Texture>,
     sample_view: Owned<wgpu::TextureView>,
@@ -25,6 +58,9 @@ struct ShadowResources {
     binds: Vec<Owned<wgpu::BindGroup>>,
     _allocation: Allocation,
     resolution: u32,
+    views: u32,
+    raster: bool,
+    bytes: u64,
 }
 pub(super) struct ShadowState {
     pub settings: Shadows,
@@ -80,7 +116,7 @@ impl ShadowState {
         );
         // Start with a tiny fallback. After use, disabling retains the last full generation;
         // disabled frames perform no shadow raster, matrix uploads or sampling.
-        let active = Self::resources(device, ledger, &bindings, limits, 1, 1);
+        let active = Self::resources(device, ledger, &bindings, limits, 1, 1, true);
         Self {
             settings: Shadows::default(),
             limits,
@@ -101,14 +137,16 @@ impl ShadowState {
         limits: ShadowLimits,
         resolution: u32,
         views: u32,
+        raster: bool,
     ) -> ShadowResources {
+        let (map_resolution, map_layers) = if raster { (resolution, views) } else { (1, 1) };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("redrawn hard shadow depth array"),
                 size: wgpu::Extent3d {
-                    width: resolution,
-                    height: resolution,
-                    depth_or_array_layers: views,
+                    width: map_resolution,
+                    height: map_resolution,
+                    depth_or_array_layers: map_layers,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -127,7 +165,7 @@ impl ShadowState {
             }),
             ResourceKind::TextureView,
         );
-        let layers = (0..views)
+        let layers = (0..if raster { views } else { 0 })
             .map(|layer| {
                 ledger.own(
                     texture.create_view(&wgpu::TextureViewDescriptor {
@@ -160,10 +198,14 @@ impl ShadowState {
         );
         let uniforms = buffer(
             "disjoint shadow raster matrices",
-            u64::from(views) * stride,
+            if raster {
+                u64::from(views) * stride
+            } else {
+                VIEW_BYTES
+            },
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let binds = (0..views)
+        let binds = (0..if raster { views } else { 0 })
             .map(|i| {
                 ledger.own(
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -182,6 +224,13 @@ impl ShadowState {
                 )
             })
             .collect();
+        let bytes = u64::from(map_layers) * 4 * u64::from(map_resolution).pow(2)
+            + u64::from(views) * VIEW_BYTES
+            + if raster {
+                u64::from(views) * stride
+            } else {
+                VIEW_BYTES
+            };
         ShadowResources {
             _texture: texture,
             sample_view,
@@ -189,11 +238,11 @@ impl ShadowState {
             records,
             uniforms,
             binds,
-            _allocation: ledger.allocate(
-                AllocationKind::Shadow,
-                u64::from(views) * (4 * u64::from(resolution).pow(2) + stride + VIEW_BYTES),
-            ),
+            _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
             resolution,
+            views,
+            raster,
+            bytes,
         }
     }
     pub fn sample_view(&self) -> &wgpu::TextureView {
@@ -373,6 +422,28 @@ fn validate_local_casters(position: Vec3, near: f32, bounds: &[Bounds]) -> Resul
 }
 
 impl Renderer {
+    pub(crate) fn validate_shadow_settings(
+        &self,
+        lights: &[Light],
+        shadows: &Shadows,
+    ) -> Result<(), Error> {
+        if self.hardware_shadows.is_none() {
+            shadows.validate(lights, self.shadows.limits)?;
+            return Ok(());
+        }
+        crate::hardware_shadows::validate_requests(lights, shadows)?;
+        let mut coverage = shadows.clone();
+        coverage.max_bytes = None;
+        let views = coverage.validate(lights, self.shadows.limits)?;
+        // Hardware uses sampling records plus a tiny featureless fallback, no maps.
+        let bytes = u64::from(views) * VIEW_BYTES + VIEW_BYTES + 4;
+        if views > 0 && shadows.max_bytes.is_some_and(|max| bytes > max) {
+            return Err(Error::InvalidInput(
+                "hardware shadow sampling records exceed max_bytes",
+            ));
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn test_shadow_admission(
         &mut self,
@@ -444,8 +515,13 @@ impl Renderer {
     }
     pub fn set_shadows(&mut self, shadows: &Shadows) -> Result<(), Error> {
         self.check_fault()?;
-        shadows.validate(&self.lighting.source_lights, self.shadows.limits)?;
+        self.validate_shadow_settings(&self.lighting.source_lights, shadows)?;
         self.shadows.settings.clone_from(shadows);
+        if !shadows.enabled()
+            && let Some(hardware) = &mut self.hardware_shadows
+        {
+            hardware.release_scene(self.submissions);
+        }
         Ok(())
     }
     /// Replace lights and their corresponding shadow requests as one CPU transaction.
@@ -464,7 +540,7 @@ impl Renderer {
                 self.max_lights(),
             )?)
         };
-        shadows.validate(&lighting.lights, self.shadows.limits)?;
+        self.validate_shadow_settings(&lighting.lights, shadows)?;
         if let Some(packed) = packed {
             self.lighting.pending = packed;
             self.lighting.source_lights.clone_from(&lighting.lights);
@@ -473,6 +549,11 @@ impl Renderer {
             self.lighting.pending.exposure = exposure;
         }
         self.shadows.settings.clone_from(shadows);
+        if !shadows.enabled()
+            && let Some(hardware) = &mut self.hardware_shadows
+        {
+            hardware.release_scene(self.submissions);
+        }
         Ok(())
     }
     pub fn shadow_limits(&self) -> ShadowLimits {
@@ -490,6 +571,7 @@ impl Renderer {
         uploads: &mut UploadBytes,
     ) -> Result<(), Error> {
         let state = &mut self.shadows;
+        let raster = self.hardware_shadows.is_none();
         if frame.is_none() && !state.ranges_published {
             return Ok(());
         }
@@ -510,7 +592,8 @@ impl Renderer {
             return Ok(());
         };
         if state.active.resolution != state.settings.resolution
-            || state.active.layers.len() != frame.views.len()
+            || state.active.views as usize != frame.views.len()
+            || state.active.raster != raster
         {
             let scopes = OperationScopes::new(&self.device);
             let next = ShadowState::resources(
@@ -520,6 +603,7 @@ impl Renderer {
                 state.limits,
                 state.settings.resolution,
                 frame.views.len() as u32,
+                raster,
             );
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -530,6 +614,11 @@ impl Renderer {
         }
         self.queue
             .write_buffer(&state.active.records, 0, &frame.records);
+        uploads.shadows += frame.records.len() as u64;
+        uploads.write_calls += 1;
+        if !raster {
+            return Ok(());
+        }
         let stride = VIEW_BYTES.div_ceil(u64::from(state.limits.uniform_alignment))
             * u64::from(state.limits.uniform_alignment);
         let mut uniforms = vec![0; frame.views.len() * stride as usize];
@@ -541,8 +630,8 @@ impl Renderer {
         }
         self.queue
             .write_buffer(&state.active.uniforms, 0, &uniforms);
-        uploads.shadows += (frame.records.len() + uniforms.len()) as u64;
-        uploads.write_calls += 2;
+        uploads.shadows += uniforms.len() as u64;
+        uploads.write_calls += 1;
         Ok(())
     }
     pub(super) fn encode_shadows(
@@ -605,7 +694,11 @@ impl Renderer {
     pub(super) fn stamp_shadows(&mut self, frame: ShadowFrame, draws: &[ShadowDraw<'_>]) {
         let mut count = 0;
         let mut triangles = 0;
-        for view in &frame.views {
+        for view in frame
+            .views
+            .iter()
+            .filter(|_| self.hardware_shadows.is_none())
+        {
             for &caster in &view.caster_indices {
                 count += 1;
                 triangles +=
@@ -620,12 +713,12 @@ impl Renderer {
         let stats = &mut self.shadows.stats;
         stats.generation += 1;
         stats.views = frame.views.len() as u32;
-        stats.resolution = self.shadows.settings.resolution;
-        stats.bytes = self
-            .shadows
-            .settings
-            .bytes(stats.views, self.shadows.limits)
-            .expect("validated shadow bytes");
+        stats.resolution = if self.hardware_shadows.is_some() {
+            0
+        } else {
+            self.shadows.settings.resolution
+        };
+        stats.bytes = self.shadows.active.bytes;
         stats.caster_draws = count;
         stats.caster_triangles = triangles;
     }
@@ -634,6 +727,15 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hardware_bias_uses_actual_matrix_and_finite_light_volume() {
+        let matrix = Mat4::orthographic_rh(-5., 5., -5., 5., 0.1, 10.1);
+        let rate = hardware_depth_rate(matrix, Vec3::Z, 0.00002).unwrap();
+        assert!((rate - 0.1).abs() < 1e-7);
+        assert!((0.00002 / rate - 0.0002).abs() < 1e-9);
+        assert!(hardware_depth_rate(matrix, -Vec3::Z, 0.00002).is_err());
+        assert!(hardware_depth_rate(Mat4::ZERO, Vec3::Z, 0.00002).is_err());
+    }
     #[test]
     fn shadow_near_domain_and_mirrored_bounds() {
         let b = world_bounds(

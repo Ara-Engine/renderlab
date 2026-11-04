@@ -52,9 +52,11 @@ impl Limits {
 /// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
     pub(crate) renderer: std::sync::Arc<()>,
+    pub(crate) acceleration:
+        Option<std::sync::Arc<crate::renderer::hardware_shadow_gpu::MeshAcceleration>>,
     pub(crate) tangent: Option<Owned<wgpu::Buffer>>,
-    pub(crate) vertex: Owned<wgpu::Buffer>,
-    pub(crate) index: Owned<wgpu::Buffer>,
+    pub(crate) vertex: std::sync::Arc<Owned<wgpu::Buffer>>,
+    pub(crate) index: std::sync::Arc<Owned<wgpu::Buffer>>,
     pub(crate) index_count: u32,
     pub(crate) bounds: Aabb,
 }

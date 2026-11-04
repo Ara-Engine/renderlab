@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate self as renderlab;
 mod environment;
+mod hardware_shadows;
 mod instances;
 mod lighting;
 mod material;
@@ -18,6 +19,7 @@ mod visibility;
 
 pub use environment::{EnvironmentLimits, EnvironmentMap, EnvironmentParameters};
 pub use glam::{Mat4, Vec3};
+pub use hardware_shadows::{HardwareShadowOptions, HardwareShadowStats};
 pub use instances::{Instances, Visibility};
 pub use lighting::{Light, Lighting, decode_f16};
 pub use material::{
