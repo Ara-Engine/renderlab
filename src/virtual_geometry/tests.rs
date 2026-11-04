@@ -169,6 +169,31 @@ fn page_union_matches_sorted_dedup_for_ordered_and_unordered_sets() {
     }
 }
 #[test]
+fn page_pool_leases_lowest_free_slots_within_the_charged_page_count() {
+    // A slot holds any page the codec admits, on a vertex boundary.
+    assert!(pool::SLOT_BYTES >= PAGE_BYTES as u64);
+    assert_eq!(pool::SLOT_BYTES % 48, 0);
+    let mut pool = pool::PagePool::new(4 * PAGE_BYTES + PAGE_BYTES - 1);
+    let mut held: Vec<_> = (0..4).map(|_| pool.acquire().unwrap()).collect();
+    assert_eq!(
+        held.iter().map(|s| s.index).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert!(pool.acquire().is_none(), "one slot per whole charged page");
+    held.remove(2);
+    held.remove(0);
+    let first = pool.acquire().unwrap();
+    let second = pool.acquire().unwrap();
+    assert_eq!(
+        (first.index, second.index),
+        (0, 2),
+        "dropped leases return, lowest first"
+    );
+    assert!(pool.acquire().is_none());
+    drop(second);
+    assert_eq!(pool.acquire().map(|s| s.index), Some(2));
+}
+#[test]
 fn aggregate_admission_shared_pages_offscreen_and_deterministic_demand() {
     let (package, _) = fixture(3);
     let dir = directory("admission");
@@ -431,7 +456,7 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
         a.states
             .iter()
             .filter_map(PageState::gpu)
-            .map(|p| PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize))
+            .map(|p| PAGE_BYTES + p.staging)
             .sum()
     }
     fn scan_policy(a: &mut VirtualAsset, charge: usize, protected: &[PageId], completed: u64) {
@@ -462,8 +487,7 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
                 let p = s.gpu();
                 (
                     s.status(),
-                    p.and_then(|p| p.staging.as_ref())
-                        .map_or(0, |b| b.size() as usize),
+                    p.map_or(0, |p| p.staging),
                     p.is_some_and(|p| p.upload <= completed),
                     p.is_some_and(|p| p.last_use <= completed),
                 )
@@ -490,13 +514,13 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
         for id in [0, 1, 2, 3, 5, 6, 9] {
             let mut batch = None;
             let mut page = r
-                .try_upload_virtual_page(&data, &mut batch)
+                .try_upload_virtual_page(&data, &mut a.pool, &mut batch)
                 .unwrap()
                 .unwrap();
             r.submit_virtual_uploads(batch).unwrap();
             r.test_drain("admission fixture upload");
             if id != 3 {
-                page.staging = None;
+                page.staging = 0;
             }
             a.set_state(
                 id,
@@ -510,7 +534,7 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
         let completed = r.completed_submission();
         let mut batch = None;
         let page = r
-            .try_upload_virtual_page(&data, &mut batch)
+            .try_upload_virtual_page(&data, &mut a.pool, &mut batch)
             .unwrap()
             .unwrap();
         r.submit_virtual_uploads(batch).unwrap();
@@ -595,7 +619,7 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
             assert_eq!(actual.status(PageId(9)), Some(PageStatus::Resident));
             assert_eq!(actual.status(PageId(4)), Some(PageStatus::Uploading));
             assert_eq!(actual.status(PageId(6)), Some(PageStatus::Retiring));
-            assert!(actual.states[4].gpu().unwrap().staging.is_some());
+            assert!(actual.states[4].gpu().unwrap().staging > 0);
             if charge == 5 * PAGE_BYTES {
                 assert!(actual.geometry_charge() + charge > actual.options.geometry_bytes);
             }

@@ -29,3 +29,11 @@ Opus's hillclimb roughly halves full-path p95 but misses the 8 ms target. On the
 Retained mechanisms: one upload submission per tick, running page-state totals (checked against full recounts over the whole path), linear merge of sorted page lists, up-front rejection of doomed selector publications, and sorting only refinable groups. Selector outputs match on all 59 frozen calls.
 
 The remaining limiter is upload frames. 72-76 of 277 motion frames upload 48-64 pages; their median is 14.7 ms (selection 4.7, uploads 4.3, draw encoding 4.1). Frames without uploads have a median of 6.26 ms. The next candidate is pooling page buffers, which touches the shared `Mesh` ownership. Host contention from other builds inflates the absolute numbers. Evidence: `D:/Coding/renderlab-work/m4-stream-renewed-t3-0298b78f/`.
+
+## Streaming page pool, 2026-11-04
+
+Opus's second hillclimb pools virtual page geometry into shared 32 MiB buffers with fixed slots, queues one write per page and packs in place. Over 8 interleaved full-path runs against 7f756d6, p95 drops 19.27 -> 9.16 ms at about 56% host load and 21.61 -> 10.55 ms at about 70%. The best final run is 8.46 ms p95 / 7.13 ms p50 at 33% load. The 8 ms target remains narrowly unmet under heavy foreign contention.
+
+Final state matches: debt 0, 3,981,802 triangles, and late/upload-window captures 4/4 byte-identical including mid-stream frames, with zero validation errors. Live buffers drop from 15,755 to 43. Page memory rises from 497.7 to 536.6 MB because each page takes a full slot, still within the 536.9 MB budget. Larger 134 MB chunks were rejected because their dedicated allocations caused blocked uploads.
+
+Selection is now the limiter: 4.6-4.9 ms median per frame and 6-7 ms on the grazing frames that set p95. About 35% of that is the blocked-publication check. A 49-call grazing corpus is captured for the next pass. Separately, the replay harness's 60-frame game-process check (about 24 ms) couples to page reading and can shift the final cut under contention. Evidence: `D:/Coding/renderlab-work/m4-stream-pool-t3-3c27758a/`.

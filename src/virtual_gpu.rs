@@ -1,10 +1,14 @@
 use super::*;
-/// Page copies recorded during one `VirtualAsset::advance` tick, holding one reserved flight slot.
+use crate::virtual_geometry::pool::{CHUNK_BYTES, PagePool, SLOT_BYTES, SLOT_VERTICES};
+/// Page writes queued during one `VirtualAsset::advance` tick, holding one reserved flight slot.
+/// Queue writes execute at the start of the batch submission, so its completion covers them.
 pub(crate) struct VirtualUploadBatch {
     encoder: wgpu::CommandEncoder,
     scopes: OperationScopes,
     slot: usize,
     submission: u64,
+    /// Reused host packing space for one page at a time.
+    scratch: Vec<u8>,
 }
 // Renderer-private integration: virtual geometry uses the same pass as ordinary Draw.
 impl Renderer {
@@ -72,12 +76,14 @@ impl Renderer {
         Ok(())
     }
     /// Caller reserves a full page slot plus staging before entering this allocator. The first
-    /// admitted page opens `batch` on a free flight slot; later pages only record their copies.
+    /// admitted page opens `batch` on a free flight slot; later pages only queue their writes.
     /// Every page completes with the batch, so the caller must pass it to `submit_virtual_uploads`
-    /// before any other submission.
+    /// before any other submission. Tangent-free pages take a `pool` slot; tangent pages keep
+    /// their own buffers, because a shared tangent stream would exceed their slot charge.
     pub(crate) fn try_upload_virtual_page(
         &mut self,
         data: &asset::virtual_mesh::PageGeometry,
+        pool: &mut PagePool,
         batch: &mut Option<VirtualUploadBatch>,
     ) -> Result<Option<crate::virtual_geometry::GpuPage>, Error> {
         self.check_fault()?;
@@ -99,91 +105,124 @@ impl Renderer {
                 scopes: OperationScopes::new(&self.device),
                 encoder: self.device.create_command_encoder(&Default::default()),
                 submission: self.submissions + 1,
+                scratch: Vec::with_capacity(SLOT_BYTES as usize),
             });
         }
         let batch = batch.as_mut().unwrap();
-        let buffer = |label, size, usage| {
-            self.ledger.own(
-                self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size,
-                    usage,
-                    mapped_at_creation: false,
-                }),
-                ResourceKind::Buffer,
+        // Slots per chunk. A chunk is one mesh, so it also obeys the mesh byte limit, which keeps
+        // its index offsets and rebased index values within u32.
+        let chunk_slots = (CHUNK_BYTES.min(self.limits.max_mesh_bytes) / SLOT_BYTES) as u32;
+        let slot = if tangents.is_none() && chunk_slots > 0 && sizes.0 + sizes.1 <= SLOT_BYTES {
+            Some(
+                pool.acquire()
+                    .ok_or(Error::InvalidInput("virtual page pool exhausted"))?,
             )
+        } else {
+            None
         };
-        let vertex = buffer(
-            "virtual page vertices",
-            sizes.0,
-            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        );
-        let index = buffer(
-            "virtual page indices",
-            sizes.1,
-            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        );
-        let tangent = tangents.map(|_| {
-            buffer(
-                "virtual page tangents",
-                tangent_bytes,
-                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            )
+        let (chunk, local) = slot.as_ref().map_or((0, 0), |s| {
+            ((s.index / chunk_slots) as usize, s.index % chunk_slots)
         });
-        let staging = self.ledger.own(
-            self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("charged virtual page staging"),
-                size: sizes.0 + sizes.1 + tangent_bytes,
-                usage: wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: true,
-            }),
-            ResourceKind::Buffer,
-        );
-        {
-            let mut view = staging
-                .get_mapped_range_mut(..)
-                .map_err(|e| self.fail(e.to_string()))?;
-            let mut offset = 0;
-            for v in data.vertices {
-                let normal = glam::DVec3::from_array(v.normal.map(f64::from))
-                    .normalize()
-                    .as_vec3()
-                    .to_array();
-                for value in v
-                    .position
-                    .into_iter()
-                    .chain(normal)
-                    .chain(v.uv)
-                    .chain(v.color)
-                {
-                    view.slice(offset..offset + 4)
-                        .copy_from_slice(&value.to_ne_bytes());
-                    offset += 4;
-                }
-            }
-            for value in data.indices {
-                view.slice(offset..offset + 4)
-                    .copy_from_slice(&value.to_ne_bytes());
-                offset += 4;
-            }
-            if let Some(t) = tangents {
-                for value in t.values.iter().flatten() {
-                    view.slice(offset..offset + 4)
-                        .copy_from_slice(&value.to_ne_bytes());
-                    offset += 4;
-                }
+        // Size once and fill fixed records in place; per-value appends cost several times more.
+        let scratch = &mut batch.scratch;
+        scratch.clear();
+        scratch.resize((sizes.0 + sizes.1 + tangent_bytes) as usize, 0);
+        let (vertex_bytes, rest) = scratch.split_at_mut(sizes.0 as usize);
+        let (index_bytes, tangent_values) = rest.split_at_mut(sizes.1 as usize);
+        for (out, v) in vertex_bytes.chunks_exact_mut(48).zip(data.vertices) {
+            let n = glam::DVec3::from_array(v.normal.map(f64::from))
+                .normalize()
+                .as_vec3();
+            let p = v.position;
+            let words = [
+                p[0], p[1], p[2], n.x, n.y, n.z, v.uv[0], v.uv[1], v.color[0], v.color[1],
+                v.color[2], v.color[3],
+            ];
+            for (out, value) in out.chunks_exact_mut(4).zip(words) {
+                out.copy_from_slice(&value.to_ne_bytes());
             }
         }
-        staging.unmap();
-        let encoder = &mut batch.encoder;
-        encoder.copy_buffer_to_buffer(&staging, 0, &vertex, 0, sizes.0);
-        encoder.copy_buffer_to_buffer(&staging, sizes.0, &index, 0, sizes.1);
-        if let Some(t) = &tangent {
-            encoder.copy_buffer_to_buffer(&staging, sizes.0 + sizes.1, t, 0, tangent_bytes);
+        // Pooled indices address the chunk's vertex numbering, so draws need no base vertex.
+        let base = local * SLOT_VERTICES;
+        for (out, value) in index_bytes.chunks_exact_mut(4).zip(data.indices) {
+            out.copy_from_slice(&(value + base).to_ne_bytes());
         }
-        self.uploads.geometry += sizes.0 + sizes.1 + tangent_bytes;
-        Ok(Some(crate::virtual_geometry::GpuPage {
-            mesh: Mesh {
+        if let Some(t) = tangents {
+            for (out, value) in tangent_values
+                .chunks_exact_mut(4)
+                .zip(t.values.iter().flatten())
+            {
+                out.copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let (mesh, first_index) = if slot.is_some() {
+            if chunk == pool.chunks.len() {
+                let slots = (pool.capacity - chunk as u32 * chunk_slots).min(chunk_slots);
+                let buffer = Arc::new(self.ledger.own(
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("virtual page slots"),
+                        size: u64::from(slots) * SLOT_BYTES,
+                        usage: wgpu::BufferUsages::VERTEX
+                            | wgpu::BufferUsages::INDEX
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    ResourceKind::Buffer,
+                ));
+                pool.chunks.push(Arc::new(Mesh {
+                    acceleration: None,
+                    tangent: None,
+                    renderer: self.identity.clone(),
+                    vertex: buffer.clone(),
+                    index: buffer,
+                    index_count: 0,
+                    bounds: Aabb {
+                        min: [0.; 3],
+                        max: [0.; 3],
+                    },
+                }));
+            }
+            let mesh = pool.chunks[chunk].clone();
+            let offset = u64::from(local) * SLOT_BYTES;
+            self.queue.write_buffer(&mesh.vertex, offset, scratch);
+            (mesh, ((offset + sizes.0) / 4) as u32)
+        } else {
+            let buffer = |label, size, usage| {
+                self.ledger.own(
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size,
+                        usage,
+                        mapped_at_creation: false,
+                    }),
+                    ResourceKind::Buffer,
+                )
+            };
+            let vertex = buffer(
+                "virtual page vertices",
+                sizes.0,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            );
+            let index = buffer(
+                "virtual page indices",
+                sizes.1,
+                wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            );
+            let tangent = tangents.map(|_| {
+                buffer(
+                    "virtual page tangents",
+                    tangent_bytes,
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                )
+            });
+            let (vertices, rest) = scratch.split_at(sizes.0 as usize);
+            let (indices, tangent_values) = rest.split_at(sizes.1 as usize);
+            self.queue.write_buffer(&vertex, 0, vertices);
+            self.queue.write_buffer(&index, 0, indices);
+            if let Some(t) = &tangent {
+                self.queue.write_buffer(t, 0, tangent_values);
+            }
+            let mesh = Mesh {
                 acceleration: None,
                 tangent,
                 renderer: self.identity.clone(),
@@ -191,13 +230,22 @@ impl Renderer {
                 index: Arc::new(index),
                 index_count: data.indices.len() as u32,
                 bounds: Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap(),
-            },
-            staging: Some(staging),
+            };
+            (Arc::new(mesh), 0)
+        };
+        let bytes = sizes.0 + sizes.1 + tangent_bytes;
+        self.uploads.geometry += bytes;
+        Ok(Some(crate::virtual_geometry::GpuPage {
+            mesh,
+            first_index,
+            bytes: bytes as usize,
+            staging: bytes as usize,
+            _slot: slot,
             upload: batch.submission,
             last_use: batch.submission,
         }))
     }
-    /// Submit one tick's page copies as one flight. Their pages were issued its index.
+    /// Submit one tick's page writes as one flight. Their pages were issued its index.
     pub(crate) fn submit_virtual_uploads(
         &mut self,
         batch: Option<VirtualUploadBatch>,
@@ -207,6 +255,7 @@ impl Renderer {
             scopes,
             slot,
             submission,
+            ..
         }) = batch
         else {
             return Ok(());
@@ -397,13 +446,14 @@ impl Renderer {
                     return Err(Error::InvalidInput("virtual cut lost its published page"));
                 };
                 let material = &asset.materials[cluster.material as usize];
-                let indices =
-                    cluster.indices.offset..cluster.indices.offset + cluster.indices.count;
+                let start = page.first_index + cluster.indices.offset;
+                let indices = start..start + cluster.indices.count;
                 counts.triangles += u64::from(cluster.indices.count / 3);
                 // The cooker packs a group's clusters contiguously, so consecutive cut clusters
                 // often continue the previous draw. Extending it keeps primitive order intact.
+                // Pages sharing a chunk mesh also share its bindings across draws.
                 if let Some(last) = prepared.last_mut()
-                    && std::ptr::eq(last.mesh, &page.mesh)
+                    && std::ptr::eq(last.mesh, &*page.mesh)
                     && last.material.is_some_and(|m| std::ptr::eq(m, material))
                     && last.slots == slots
                     && last.indices.end == indices.start

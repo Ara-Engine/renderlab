@@ -2,6 +2,7 @@
 //! One asset/package is one explicit geometry pool. A scene submits all its instances together;
 //! simultaneous independent pools must be budgeted by their caller. No hidden global cache exists.
 mod io;
+pub(crate) mod pool;
 mod projection;
 mod reference;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,8 +147,16 @@ pub struct ViewPreparation {
 }
 /// Retained until an internal submission watermark proves its last queue use complete.
 pub(crate) struct GpuPage {
-    pub mesh: crate::Mesh,
-    pub staging: Option<crate::observe::Owned<crate::wgpu::Buffer>>,
+    /// The shared chunk mesh of a pooled page, or the page's own buffers.
+    pub mesh: Arc<crate::Mesh>,
+    /// Offset of this page's indices within `mesh`; cluster index spans are relative to it.
+    pub first_index: u32,
+    /// Vertex, index and tangent bytes of this page, excluding unused slot space.
+    pub bytes: usize,
+    /// Charged staging bytes while the upload is in flight, then zero.
+    pub staging: usize,
+    /// Pool lease, held only so dropping the page returns its slot.
+    pub _slot: Option<pool::PageSlot>,
     pub upload: u64,
     pub last_use: u64,
 }
@@ -214,16 +223,8 @@ impl Totals {
         };
         step(&mut self.states[state.status() as usize], 1);
         if let Some(p) = state.gpu() {
-            step(
-                &mut self.owned_gpu,
-                p.mesh.vertex.size() as usize
-                    + p.mesh.index.size() as usize
-                    + p.mesh.tangent.as_ref().map_or(0, |t| t.size() as usize),
-            );
-            step(
-                &mut self.staging,
-                p.staging.as_ref().map_or(0, |s| s.size() as usize),
-            );
+            step(&mut self.owned_gpu, p.bytes);
+            step(&mut self.staging, p.staging);
             step(&mut self.payload, payload);
         }
         if let PageState::Ready(g) = state {
@@ -272,7 +273,8 @@ pub struct StreamStats {
     pub selection_runs: u64,
     pub selection_calls: u64,
     pub retained_cuts: u64,
-    /// Logical reserved geometry, including 64KiB page slots and actual staging buffer bytes.
+    /// Logical reserved geometry: 64KiB per GPU page plus the staging bytes of in-flight uploads.
+    /// Pooled pages occupy one 64KiB+32B slot each, created in chunks up to this budget.
     pub geometry_bytes: usize,
     pub geometry_peak: usize,
     pub published_bytes: usize,
@@ -326,6 +328,7 @@ pub struct VirtualAsset {
     pub(crate) package: PreparedPackage,
     pub(crate) states: Vec<PageState>,
     totals: Totals,
+    pub(crate) pool: pool::PagePool,
     io: PageIo,
     roots: Vec<PageId>,
     options: StreamOptions,
@@ -548,6 +551,7 @@ impl VirtualAsset {
             package,
             states,
             totals,
+            pool: pool::PagePool::new(options.geometry_bytes),
             io,
             roots,
             options,
@@ -726,7 +730,9 @@ impl VirtualAsset {
             }
             let section = Instant::now();
             let uploaded = match &self.states[page.index()] {
-                PageState::Ready(data) => renderer.try_upload_virtual_page(data, &mut batch),
+                PageState::Ready(data) => {
+                    renderer.try_upload_virtual_page(data, &mut self.pool, &mut batch)
+                }
                 _ => Ok(None),
             };
             // Pages already recorded in the batch complete only with its submission.
@@ -738,7 +744,8 @@ impl VirtualAsset {
                 }
             };
             if let Some(gpu) = uploaded {
-                // All memory was reserved before renderer allocation. Staging is explicit COPY_SRC.
+                // All memory was reserved before renderer allocation, including the staging charge
+                // for the queue write that carries this page until its batch completes.
                 self.set_state(page.index(), PageState::Uploading(gpu));
                 self.outstanding -= 1;
                 self.stats.uploads += 1;
@@ -777,7 +784,7 @@ impl VirtualAsset {
                     let PageState::Uploading(mut p) = self.set_state(id, PageState::Missing) else {
                         unreachable!()
                     };
-                    p.staging = None;
+                    p.staging = 0;
                     self.set_state(id, PageState::Resident(p));
                     self.revision += 1;
                 }
@@ -814,7 +821,7 @@ impl VirtualAsset {
                     unreachable!()
                 };
                 let releasable = p.last_use <= completed;
-                let allocation = PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize);
+                let allocation = PAGE_BYTES + p.staging;
                 self.stats.inflight_retirements += u64::from(p.last_use > completed);
                 self.set_state(id, PageState::Retiring(p));
                 self.stats.evictions += 1;
