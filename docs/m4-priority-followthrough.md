@@ -2,7 +2,7 @@
 
 Islam renewed the request on 2026-11-04 after the streaming and resize issues remained open through the M5/M6 shadow work. Root let those workstreams become inactive. Their earlier improvements do not close either issue.
 
-The original M4 milestone scope is accepted. The real-scan follow-through remains unfinished. Soft-shadow experiments pause while the two M4 workstreams regain priority. Existing shadow candidates and evidence stay preserved.
+The original M4 milestone scope is accepted. The real-scan follow-through remains unfinished. Islam then asked for M5/M6 to continue at the same time. A third worker (GPT-6.1 Sol) owns the bounded fresh compute shadow unit in its own worktree. It does source and CPU work, and stays out of streaming internals and viewer resize code until root transfers the GPU slot. Reuse heuristics and soft-4x expansion remain paused. Existing shadow candidates and evidence stay preserved.
 
 ## Streaming owner: Opus 5.5
 
