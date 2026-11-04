@@ -26,7 +26,12 @@ fn fresh_direction(index:u32,shift:vec2<f32>,l:vec3<f32>,u:vec3<f32>,v:vec3<f32>
     let a=6.283185307179586*r.y;
     return normalize(l+slope*sqrt(r.x)*(cos(a)*u+sin(a)*v));
 }
-fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u32) -> u32 {
+// Lanes sharing one receiver; each traces every FRESH_LANES-th of its 256 directions.
+const FRESH_LANES:u32=8u;
+// Receiver outside every cascade or light-space box: shaded as fully visible.
+const FRESH_SKIP:u32=0xffffffffu;
+// Visible rays among this lane's share, or FRESH_SKIP. Every lane takes the same exits.
+fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {
     let light=lights[0];
     let l=-light.travel_outer.xyz;
     var layer=light.kind.y;
@@ -36,19 +41,19 @@ fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u
         let coverage=shadow_views[light.kind.y+i].coverage_bias;
         if depth>=coverage.x && depth<=coverage.y {layer=light.kind.y+i;found=true;break;}
     }
-    if !found {return 256u;}
+    if !found {return FRESH_SKIP;}
     let view=shadow_views[layer];
     let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
     let origin=world+normal*view.coverage_bias.w;
     let projected=(view.world_to_clip*vec4<f32>(origin,1.0)).xyz;
-    if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 {return 256u;}
+    if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 {return FRESH_SKIP;}
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
     let seed=fresh_hash(pixel.x+pixel.y*width);
     let shift=vec2<f32>(f32(seed>>8u),f32(fresh_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
     var visible=0u;
     // Function scope avoids Naga 30's loop-local opaque null initializer.
     var query:ray_query;
-    for(var j=0u;j<256u;j+=1u) {
+    for(var j=lane;j<256u;j+=FRESH_LANES) {
         let direction=fresh_direction(j,shift,l,u,v,view.texel.z);
         let delta=(view.world_to_clip*vec4<f32>(direction,0.0)).xyz;
         let rate=-delta.z;
@@ -61,7 +66,10 @@ fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u
                 if delta[axis]<0.0 {tmax=min(tmax,(-1.0-projected[axis])/delta[axis]);}
             }
             if tmax>tmin {
-                rayQueryInitialize(&query,fresh_scene,RayDesc(0u,255u,tmin,tmax,origin,direction));
+                // Any hit decides visibility. A closest hit at t=0 would count as visible,
+                // so stop at the first hit only when tmin>0 excludes that case.
+                let flags=select(RAY_FLAG_FORCE_OPAQUE,RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,tmin>0.0);
+                rayQueryInitialize(&query,fresh_scene,RayDesc(flags,255u,tmin,tmax,origin,direction));
                 while rayQueryProceed(&query) {}
                 let hit=rayQueryGetCommittedIntersection(&query);
                 distance=select(hit.t,0.0,hit.kind==0u);
@@ -71,15 +79,28 @@ fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u
     }
     return visible;
 }
-@compute @workgroup_size(8,8) fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>) {
+// Receiver pixels per workgroup; fresh_shadow_gpu.rs TILE must match.
+const FRESH_TILE=vec2<u32>(2u,2u);
+var<workgroup> fresh_counts:array<atomic<u32>,4>;
+// One 32-lane group traces a 2x2 receiver tile, eight lanes per receiver. Lanes sharing a
+// ray origin keep traversal local; the integer sum is independent of the lane split.
+@compute @workgroup_size(32) fn fresh_compute(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) index:u32) {
     let size=textureDimensions(fresh_world);
-    if any(id.xy>=size) {return;}
-    let p=vec2<i32>(id.xy);
-    let normal=textureLoad(fresh_normal,p,0);
-    var visible=256u;
-    if normal.w!=0.0 {
-        visible=fresh_estimate(textureLoad(fresh_world,p,0).xyz,normal.xyz,id.xy,size.x);
+    let slot=index/FRESH_LANES;
+    let id=group.xy*FRESH_TILE+vec2<u32>(slot%FRESH_TILE.x,slot/FRESH_TILE.x);
+    let inside=all(id<size);
+    let p=vec2<i32>(id);
+    var partial=FRESH_SKIP;
+    if inside {
+        let normal=textureLoad(fresh_normal,p,0);
+        if normal.w!=0.0 {
+            partial=fresh_estimate(textureLoad(fresh_world,p,0).xyz,normal.xyz,id,size.x,index%FRESH_LANES);
+        }
     }
-    // Write uncovered pixels too: no earlier frame can supply visibility.
-    textureStore(fresh_output,p,vec4<u32>(visible));
+    atomicAdd(&fresh_counts[slot],select(partial,0u,partial==FRESH_SKIP));
+    workgroupBarrier();
+    if inside && index%FRESH_LANES==0u {
+        // Write uncovered pixels too: no earlier frame can supply visibility.
+        textureStore(fresh_output,p,vec4<u32>(select(atomicLoad(&fresh_counts[slot]),256u,partial==FRESH_SKIP)));
+    }
 }

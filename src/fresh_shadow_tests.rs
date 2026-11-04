@@ -29,6 +29,18 @@ fn reference_source(width: u32, visibility_only: bool) -> String {
     }
 }
 
+fn validate_wgsl(source: &str) -> (naga::Module, naga::valid::ModuleInfo) {
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    (module, info)
+}
+
 #[test]
 fn fresh_shader_reload_seams_and_cpu_spirv() {
     let source = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
@@ -52,14 +64,19 @@ fn fresh_shader_reload_seams_and_cpu_spirv() {
         ("fragment", reference_source(256, false)),
         ("counts", reference_source(256, true)),
     ] {
-        let module = naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        let info = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        let (module, info) = validate_wgsl(&source);
+        if name == "compute" {
+            let entry = module
+                .entry_points
+                .iter()
+                .find(|e| e.name == "fresh_compute");
+            let [x, y] = fresh_shadow_gpu::TILE;
+            assert_eq!(entry.unwrap().workgroup_size, [32, 1, 1]);
+            assert!(
+                source.contains(&format!("const FRESH_TILE=vec2<u32>({x}u,{y}u);")),
+                "dispatch tile drift"
+            );
+        }
         for entry in &module.entry_points {
             let binary = naga::back::spv::write_vec(
                 &module,
@@ -509,22 +526,12 @@ mod policy;
 #[path = "../viewer/src/prepared.rs"]
 mod prepared;
 
-#[test]
-#[ignore = "root GPU slot, experimental acknowledgment and external RENDERLAB_FRESH_MANIFEST; headless"]
-fn gpu_fresh_quarry_equivalence_and_complete_frame() {
-    let startup = Instant::now();
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(std::env::var("RENDERLAB_FRESH_MANIFEST").unwrap()).unwrap(),
-    )
-    .unwrap();
-    // Timing is a separate process after the unchanged validation-on quality gates.
-    let timing_only = manifest["timing_only"].as_bool().unwrap_or(false);
-    let validate = !timing_only;
-    let _validation = validation::begin(validate);
+/// Loads the registered quarry inputs named by `manifest` and uploads them fully.
+fn load_quarry(
+    manifest: &serde_json::Value,
+    r: &mut Renderer,
+) -> (prepared::Prepared, cameras::Cameras) {
     let path = |key: &str| PathBuf::from(manifest[key].as_str().unwrap());
-    let out = path("output");
-    fs::create_dir_all(&out).unwrap();
-    let mut r = renderer(validate);
     let (policy, _) = policy::Policy::args(vec![
         "--limits".into(),
         path("limits").to_string_lossy().into_owned(),
@@ -557,14 +564,465 @@ fn gpu_fresh_quarry_equivalence_and_complete_frame() {
         prepared::Prepared::load_with_limits(&path("asset"), policy.prepared(), 1_000_000).unwrap();
     let started = Instant::now();
     while !asset.ready() {
-        asset.advance(&mut r).unwrap();
+        asset.advance(r).unwrap();
         r.collect().unwrap();
         assert!(started.elapsed() < Duration::from_secs(120));
     }
     r.test_drain("fresh quarry upload");
-    let prepared_ready_ms = startup.elapsed().as_secs_f64() * 1e3;
     let cameras = cameras::Cameras::load(&path("cameras")).unwrap();
     assert!(cameras.frames.len() >= 2);
+    (asset, cameras)
+}
+
+/// A compute-only experiment: text edits applied once each to a composed fresh source.
+struct Variant {
+    name: String,
+    edits: Vec<(String, String)>,
+    tile: [u32; 2],
+}
+
+const RAY_INIT: &str =
+    "rayQueryInitialize(&query,fresh_scene,RayDesc(0u,255u,tmin,tmax,origin,direction));";
+const ENTRY_TAIL: &str = "fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>) {";
+const STORE: &str = "    textureStore(fresh_output,p,vec4<u32>(visible));";
+
+/// Parses `atom+atom+...` into edits of the frozen baseline body. `base` has no edits.
+/// Atoms prefixed `diag` change results and only locate the limiter.
+fn variant(spec: &str) -> Variant {
+    let mut edits: Vec<(String, String)> = vec![];
+    let mut tile = [8, 8];
+    let mut edit = |a: &str, b: String| edits.push((a.to_owned(), b));
+    for atom in spec.split('+').filter(|a| *a != "base") {
+        let flags = |f: &str| RAY_INIT.replace("RayDesc(0u,", &format!("RayDesc({f},"));
+        if let Some(size) = atom.strip_prefix("wg") {
+            let (x, y) = size.split_once('x').unwrap();
+            tile = [x.parse().unwrap(), y.parse().unwrap()];
+            edit("@workgroup_size(8,8)", format!("@workgroup_size({x},{y})"));
+        } else if let Some(lanes) = atom.strip_prefix("ppx") {
+            // One 32-lane group: `lanes` lanes share each pixel's 256 rays, summed exactly.
+            let lanes: u32 = lanes.parse().unwrap();
+            let pixels = 32 / lanes;
+            let (tw, th) = match pixels {
+                1 => (1, 1),
+                2 => (2, 1),
+                4 => (2, 2),
+                8 => (4, 2),
+                _ => panic!("ppx lanes must be 4, 8, 16 or 32"),
+            };
+            tile = [tw, th];
+            edit(
+                "fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u32) -> u32 {",
+                "fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u32, sub:u32) -> u32 {".into(),
+            );
+            edit(
+                "if !found {return 256u;}",
+                "if !found {return 0xffffffffu;}".into(),
+            );
+            edit(
+                "projected.z>1.0 {return 256u;}",
+                "projected.z>1.0 {return 0xffffffffu;}".into(),
+            );
+            edit(
+                "for(var j=0u;j<256u;j+=1u) {\n        let direction",
+                format!("for(var j=sub;j<256u;j+={lanes}u) {{\n        let direction"),
+            );
+            edit(
+                "@compute @workgroup_size(8,8) fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>) {\n    let size=textureDimensions(fresh_world);\n    if any(id.xy>=size) {return;}\n    let p=vec2<i32>(id.xy);\n    let normal=textureLoad(fresh_normal,p,0);\n    var visible=256u;\n    if normal.w!=0.0 {\n        visible=fresh_estimate(textureLoad(fresh_world,p,0).xyz,normal.xyz,id.xy,size.x);\n    }\n",
+                format!(
+                    "var<workgroup> fresh_sum:array<atomic<u32>,{pixels}>;\n@compute @workgroup_size(32) fn fresh_compute(@builtin(workgroup_id) w:vec3<u32>,@builtin(local_invocation_index) li:u32) {{\n    let size=textureDimensions(fresh_world);\n    let slot=li/{lanes}u;\n    let id=vec2<u32>(w.x*{tw}u+slot%{tw}u,w.y*{th}u+slot/{tw}u);\n    let inside=all(id<size);\n    let p=vec2<i32>(id);\n    var partial=0xffffffffu;\n    if inside {{\n        let normal=textureLoad(fresh_normal,p,0);\n        if normal.w!=0.0 {{\n            partial=fresh_estimate(textureLoad(fresh_world,p,0).xyz,normal.xyz,id,size.x,li%{lanes}u);\n        }}\n    }}\n    atomicAdd(&fresh_sum[slot],select(partial,0u,partial==0xffffffffu));\n    workgroupBarrier();\n    if !inside || li%{lanes}u!=0u {{return;}}\n    // Every lane of a pixel takes the same early exits, so lane zero's sentinel is the pixel's.\n    let visible=select(atomicLoad(&fresh_sum[slot]),256u,partial==0xffffffffu);\n"
+                ),
+            );
+        } else if let Some(kib) = atom.strip_prefix("diagpad") {
+            // Workgroup memory caps resident groups per SM: an occupancy probe.
+            let entries = kib.parse::<u32>().unwrap() * 64;
+            edit(
+                "fn fresh_hash(input:u32) -> u32 {",
+                format!(
+                    "var<workgroup> fresh_pad:array<vec4<u32>,{entries}>;\nfn fresh_hash(input:u32) -> u32 {{"
+                ),
+            );
+            edit(
+                ENTRY_TAIL,
+                format!(
+                    "fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) li:u32) {{\n    fresh_pad[li%{entries}u]=vec4<u32>(id.xyxy);"
+                ),
+            );
+            edit(
+                STORE,
+                format!(
+                    "    if id.x==0xffffffffu {{visible+=fresh_pad[(li+1u)%{entries}u].x;}}\n{STORE}"
+                ),
+            );
+        } else {
+            match atom {
+                // First-hit termination is exact only when every hit has t >= tmin > 0;
+                // a closest hit at t == 0 counts as visible in the reference.
+                "fh" => edit(RAY_INIT, flags("select(1u,5u,tmin>0.0)")),
+                "fh0" => edit(RAY_INIT, flags("select(0u,4u,tmin>0.0)")),
+                // Each lane starts at the index whose R2 point lies nearest the shared
+                // origin, so lanes trace similar directions at the same step. The traced
+                // set is unchanged and the integer sum is order independent.
+                "rot" => {
+                    edit(
+                        "    var visible=0u;",
+                        "    var offset=0u;\n    var best=4.0;\n    for(var j=0u;j<256u;j+=1u) {\n        let r=fract(vec2<f32>(f32(j))*vec2<f32>(0.7548776662466927,0.5698402909980532)+shift);\n        let d=min(r,vec2<f32>(1.0)-r);\n        if dot(d,d)<best {best=dot(d,d);offset=j;}\n    }\n    var visible=0u;".into(),
+                    );
+                    edit(
+                        "fresh_direction(j,shift,",
+                        "fresh_direction((j+offset)&255u,shift,".into(),
+                    );
+                }
+                "diagshift0" => edit(
+                    "let shift=vec2<f32>(f32(seed>>8u),f32(fresh_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);",
+                    "let shift=vec2<f32>(0.0)*f32(seed);".into(),
+                ),
+                "diagalu" => edit("while rayQueryProceed(&query) {}", String::new()),
+                "diagrays128" => edit(
+                    "j<256u;j+=1u) {\n        let direction",
+                    "j<128u;j+=1u) {\n        let direction".into(),
+                ),
+                "diagshort" => edit(
+                    "            if tmax>tmin {",
+                    "            tmax=min(tmax,tmin+0.25);\n            if tmax>tmin {".into(),
+                ),
+                _ => panic!("unknown variant atom {atom}"),
+            }
+        }
+    }
+    Variant {
+        name: spec.into(),
+        edits,
+        tile,
+    }
+}
+
+const SCREEN_BASELINE: &str = include_str!("../support/fresh_screen_baseline.wgsl");
+
+#[test]
+fn fresh_screen_atoms_compose_valid_wgsl() {
+    let base = fresh_shadow_gpu::compose(SOURCE, SCREEN_BASELINE).unwrap();
+    for spec in [
+        "base",
+        "wg8x4+fh+rot",
+        "fh0",
+        "ppx32+fh",
+        "ppx8",
+        "wg8x4+diagpad8",
+        "diagshift0",
+        "diagalu",
+        "diagrays128",
+        "diagshort",
+    ] {
+        let v = variant(spec);
+        let (module, _) = validate_wgsl(&variant_source(&base, &v));
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "fresh_compute");
+        let size = entry.unwrap().workgroup_size;
+        // ppx groups are one warp; `tile` is their receiver pixel extent.
+        assert!(
+            size == [v.tile[0], v.tile[1], 1] || size == [32, 1, 1],
+            "{spec}"
+        );
+    }
+}
+
+fn variant_source(base: &str, v: &Variant) -> String {
+    let mut source = base.to_owned();
+    for (find, replace) in &v.edits {
+        assert_eq!(
+            source.matches(find.as_str()).count(),
+            1,
+            "{}: {find}",
+            v.name
+        );
+        source = source.replacen(find.as_str(), replace, 1);
+    }
+    source
+}
+
+fn wait_map(r: &Renderer, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let done = Arc::new(OnceLock::new());
+    let callback = done.clone();
+    buffer.map_async(wgpu::MapMode::Read, .., move |result| {
+        callback.set(result).unwrap();
+    });
+    r.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(20)),
+        })
+        .unwrap();
+    done.get().unwrap().as_ref().unwrap();
+    let bytes = buffer.get_mapped_range(..).unwrap().to_vec();
+    buffer.unmap();
+    bytes
+}
+
+/// Paired compute-only screen on the real quarry receivers, then complete frames.
+/// Every variant's visibility is compared bit-for-bit with the frozen baseline first.
+#[test]
+#[ignore = "GPU slot, experimental acknowledgment and external RENDERLAB_FRESH_MANIFEST; headless"]
+fn gpu_fresh_compute_cost_screen() {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_FRESH_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let validate = manifest["validate"].as_bool().unwrap_or(false);
+    let _validation = validation::begin(validate);
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let reps = manifest["reps"].as_u64().unwrap_or(6) as usize;
+    let warmup = manifest["warmup_reps"].as_u64().unwrap_or(1) as usize;
+    let warmup_frames = manifest["warmup_frames"].as_u64().unwrap_or(0) as usize;
+    let frames = manifest["frames"].as_u64().unwrap_or(0) as usize;
+    let mut r = renderer(validate);
+    let (mut asset, cameras) = load_quarry(&manifest, &mut r);
+    let color = target(&r, 1920, 1080);
+    let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
+    render(
+        &mut r,
+        &color,
+        &poses[1],
+        &mut asset.draws(Visibility::Frustum),
+    );
+    r.test_drain("fresh screen receivers");
+    let base = fresh_shadow_gpu::compose(SOURCE, SCREEN_BASELINE).unwrap();
+    let mut variants: Vec<_> = std::iter::once("base")
+        .chain(
+            manifest["variants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap()),
+        )
+        .map(variant)
+        .collect();
+    variants.push(Variant {
+        name: "production".into(),
+        edits: vec![],
+        tile: fresh_shadow_gpu::TILE,
+    });
+    let production = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
+    let mut pipelines: Vec<_> = variants
+        .iter()
+        .map(|v| {
+            let source = if v.name == "production" {
+                production.clone()
+            } else {
+                variant_source(&base, v)
+            };
+            let scopes = OperationScopes::new(&r.device);
+            let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&v.name),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline = r
+                .fresh
+                .as_ref()
+                .unwrap()
+                .compute_pipeline(&r.device, &r.ledger, &module);
+            assert!(scopes.finish().is_none(), "{} failed to compile", v.name);
+            pipeline
+        })
+        .collect();
+    // Exactness first: every covered and uncovered output count, bit-for-bit.
+    let visibility = |r: &Renderer, pipeline: &wgpu::ComputePipeline, tile| {
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        r.encode_fresh_compute(&mut encoder, pipeline, tile, None);
+        r.queue.submit([encoder.finish()]);
+        let texture = &r
+            .fresh
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap()
+            .visibility
+            .texture;
+        read_texture(r, texture)
+    };
+    let reference = visibility(&r, &pipelines[0], variants[0].tile);
+    let mut differences = vec![];
+    for (v, p) in variants.iter().zip(&pipelines) {
+        let counts = visibility(&r, p, v.tile);
+        let differing = counts
+            .chunks_exact(4)
+            .zip(reference.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        let rays: u64 = counts
+            .chunks_exact(4)
+            .map(|c| u64::from(u32::from_le_bytes(c.try_into().unwrap())))
+            .sum();
+        eprintln!(
+            "fresh_screen_exact variant={} differing_pixels={differing} visible_sum={rays}",
+            v.name
+        );
+        differences.push(differing);
+    }
+    // Interleaved compute-only timing; the order rotates every repetition.
+    let n = variants.len();
+    let queries = r.device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("fresh screen"),
+        ty: wgpu::QueryType::Timestamp,
+        count: 2 * n as u32,
+    });
+    let buffer = |usage| {
+        r.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fresh screen timestamps"),
+            size: 16 * n as u64,
+            usage,
+            mapped_at_creation: false,
+        })
+    };
+    let resolve = buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+    let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+    let period = f64::from(r.queue.get_timestamp_period());
+    let mut samples = vec![vec![]; n];
+    for rep in 0..reps + warmup {
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        for k in 0..n {
+            let i = (k + rep) % n;
+            r.encode_fresh_compute(
+                &mut encoder,
+                &pipelines[i],
+                variants[i].tile,
+                Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &queries,
+                    beginning_of_pass_write_index: Some(2 * i as u32),
+                    end_of_pass_write_index: Some(2 * i as u32 + 1),
+                }),
+            );
+        }
+        encoder.resolve_query_set(&queries, 0..2 * n as u32, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16 * n as u64);
+        r.queue.submit([encoder.finish()]);
+        let stamps: Vec<u64> = wait_map(&r, &read)
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Repetition zero warms clocks and caches and is reported separately.
+        for i in 0..n {
+            let ms = (stamps[2 * i + 1] - stamps[2 * i]) as f64 * period * 1e-6;
+            if rep >= warmup {
+                samples[i].push(ms);
+            } else {
+                eprintln!(
+                    "fresh_screen_warmup variant={} ms={ms:.4}",
+                    variants[i].name
+                );
+            }
+        }
+    }
+    let summary: Vec<_> = variants
+        .iter()
+        .zip(&samples)
+        .zip(&differences)
+        .map(|((v, s), d)| {
+            let mut sorted = s.clone();
+            sorted.sort_by(f64::total_cmp);
+            let median = sorted[sorted.len() / 2];
+            eprintln!(
+                "fresh_screen variant={} median_ms={median:.4} min_ms={:.4} max_ms={:.4} differing_pixels={d}",
+                v.name,
+                sorted[0],
+                sorted[sorted.len() - 1]
+            );
+            serde_json::json!({"variant": v.name, "tile": v.tile, "differing_pixels": d,
+                "median_ms": median, "samples_ms": s})
+        })
+        .collect();
+    // Complete frames: named compute variants take turns on each pose, then the pose alternates.
+    let frame_variants: Vec<usize> = manifest["frame_variants"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|name| {
+                    variants
+                        .iter()
+                        .position(|v| v.name == name.as_str().unwrap())
+                        .unwrap()
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![n - 1]);
+    // Pipelined like an application: no per-frame drain, samples matched by frame id.
+    let mut pending = std::collections::HashMap::new();
+    let mut complete = vec![];
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mut collect =
+        |r: &mut Renderer, pending: &mut std::collections::HashMap<_, (usize, usize)>| {
+            for gpu in r.poll().unwrap().gpu {
+                if let Some((i, pose)) = pending.remove(&gpu.frame.0) {
+                    complete.push(serde_json::json!({"variant": variants[i].name, "pose": pose,
+                    "receiver_ms": ms(gpu.receiver_pass.unwrap()), "compute_ms": ms(gpu.visibility_compute.unwrap()),
+                    "shading_ms": ms(gpu.mesh_pass), "tone_ms": ms(gpu.present_pass.unwrap()), "span_ms": ms(gpu.render_span)}));
+                }
+            }
+        };
+    for frame in 0..warmup_frames + frames {
+        let k = frame.saturating_sub(warmup_frames);
+        let i = frame_variants[k % frame_variants.len()];
+        let pose = (k / frame_variants.len()) % 2;
+        let swap = |r: &mut Renderer, p: &mut Owned<wgpu::ComputePipeline>, tile: &mut [u32; 2]| {
+            let fresh = r.pipeline.fresh.as_mut().unwrap();
+            std::mem::swap(&mut fresh.compute, p);
+            std::mem::swap(&mut fresh.compute_tile, tile);
+        };
+        let mut tile = variants[i].tile;
+        swap(&mut r, &mut pipelines[i], &mut tile);
+        let report = render(
+            &mut r,
+            &color,
+            &poses[pose],
+            &mut asset.draws(Visibility::Frustum),
+        );
+        swap(&mut r, &mut pipelines[i], &mut tile);
+        if frame >= warmup_frames {
+            pending.insert(report.frame.0, (i, pose));
+        }
+        collect(&mut r, &mut pending);
+    }
+    r.test_drain("fresh screen frames");
+    collect(&mut r, &mut pending);
+    assert!(
+        pending.is_empty(),
+        "missing GPU samples for {} frames",
+        pending.len()
+    );
+    eprintln!(
+        "fresh_screen_complete {}",
+        serde_json::to_string(&complete).unwrap()
+    );
+    fs::write(
+        out.join("screen.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"validation": validate, "reps": reps,
+            "warmup_reps": warmup, "warmup_frames": warmup_frames, "variants": summary, "complete_frames": complete}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "root GPU slot, experimental acknowledgment and external RENDERLAB_FRESH_MANIFEST; headless"]
+fn gpu_fresh_quarry_equivalence_and_complete_frame() {
+    let startup = Instant::now();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_FRESH_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    // Timing is a separate process after the unchanged validation-on quality gates.
+    let timing_only = manifest["timing_only"].as_bool().unwrap_or(false);
+    let validate = !timing_only;
+    let _validation = validation::begin(validate);
+    let path = |key: &str| PathBuf::from(manifest[key].as_str().unwrap());
+    let out = path("output");
+    fs::create_dir_all(&out).unwrap();
+    let mut r = renderer(validate);
+    let (mut asset, cameras) = load_quarry(&manifest, &mut r);
+    let prepared_ready_ms = startup.elapsed().as_secs_f64() * 1e3;
     let color = target(&r, 1920, 1080);
     if timing_only {
         let cold_start = Instant::now();

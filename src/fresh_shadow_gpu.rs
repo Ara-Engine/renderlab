@@ -3,8 +3,17 @@ use super::*;
 const PIXEL_SEAM: &str = "    let source_front=front==(input.winding>0.0);";
 const GEOMETRIC_SEAM: &str = "    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));";
 
+/// Receiver pixels per `fresh_compute` workgroup; WGSL `FRESH_TILE` must match.
+pub(super) const TILE: [u32; 2] = [2, 2];
+
 /// Compose only after the hardware path has checked affine geometry and marker order.
 pub(super) fn shader_source(source: &str) -> Result<String, Error> {
+    compose(source, include_str!("../shaders/fresh_shadows.wgsl"))
+}
+
+/// Splices a fresh visibility body into the checked scene source. Tests use this to
+/// compare frozen or experimental bodies against the production one.
+pub(super) fn compose(source: &str, fresh: &str) -> Result<String, Error> {
     crate::hardware_shadows::shader_source(source, SampleCount::One)?;
     if source.matches(PIXEL_SEAM).count() != 1 || source.matches(GEOMETRIC_SEAM).count() != 1 {
         return Err(Error::InvalidInput(
@@ -17,15 +26,13 @@ pub(super) fn shader_source(source: &str) -> Result<String, Error> {
     let (_, after) = rest
         .split_once(crate::hardware_shadows::VISIBILITY_END)
         .unwrap();
-    Ok(format!(
-        "enable wgpu_ray_query;\n{before}\n{}\n{after}",
-        include_str!("../shaders/fresh_shadows.wgsl")
+    Ok(
+        format!("enable wgpu_ray_query;\n{before}\n{fresh}\n{after}").replacen(
+            PIXEL_SEAM,
+            &format!("    fresh_pixel=vec2<i32>(input.position.xy);\n{PIXEL_SEAM}"),
+            1,
+        ),
     )
-    .replacen(
-        PIXEL_SEAM,
-        &format!("    fresh_pixel=vec2<i32>(input.position.xy);\n{PIXEL_SEAM}"),
-        1,
-    ))
 }
 
 /// Two float32 receiver attachments and one uint visibility count per output pixel.
@@ -62,6 +69,8 @@ pub(super) struct FreshPipelines {
     pub receiver: Owned<wgpu::RenderPipeline>,
     pub shade: [Owned<wgpu::RenderPipeline>; 2],
     pub compute: Owned<wgpu::ComputePipeline>,
+    /// Receiver pixels per `compute` workgroup, which sets the dispatch grid.
+    pub compute_tile: [u32; 2],
 }
 struct ComputeBinding {
     bind: Owned<wgpu::BindGroup>,
@@ -279,22 +288,31 @@ impl FreshState {
                 ResourceKind::RenderPipeline,
             )
         };
-        let compute = ledger.own(
+        FreshPipelines {
+            receiver: mesh(false, true),
+            shade: [false, true].map(|t| mesh(t, false)),
+            compute: self.compute_pipeline(device, ledger, &shader),
+            compute_tile: TILE,
+        }
+    }
+    /// `fresh_compute` from a composed module, on the persistent compute ABI.
+    pub fn compute_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        shader: &wgpu::ShaderModule,
+    ) -> Owned<wgpu::ComputePipeline> {
+        ledger.own(
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("fresh 256 closest-hit rays"),
+                label: Some("fresh 256 visibility rays"),
                 layout: Some(&self.compute_layout),
-                module: &shader,
+                module: shader,
                 entry_point: Some("fresh_compute"),
                 compilation_options: Default::default(),
                 cache: None,
             }),
             ResourceKind::ComputePipeline,
-        );
-        FreshPipelines {
-            receiver: mesh(false, true),
-            shade: [false, true].map(|t| mesh(t, false)),
-            compute,
-        }
+        )
     }
     pub fn release(&mut self, last: u64) {
         if let Some(old) = self.targets.take() {
@@ -491,22 +509,40 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fresh 256 closest-hit visibility"),
-            timestamp_writes: self.timing.as_ref().filter(|_| timed).map(|t| {
-                wgpu::ComputePassTimestampWrites {
+        self.encode_fresh_compute(
+            encoder,
+            &p.compute,
+            p.compute_tile,
+            self.timing
+                .as_ref()
+                .filter(|_| timed)
+                .map(|t| wgpu::ComputePassTimestampWrites {
                     query_set: &t.queries,
                     beginning_of_pass_write_index: Some(slot as u32 * 10 + 8),
                     end_of_pass_write_index: Some(slot as u32 * 10 + 9),
-                }
-            }),
+                }),
+        );
+    }
+    /// One visibility dispatch over the current receiver targets. `tile` is the receiver
+    /// pixel extent of one pipeline workgroup; tests pass experimental pipelines here.
+    pub(super) fn encode_fresh_compute(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        tile: [u32; 2],
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        let t = self.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fresh 256-ray visibility"),
+            timestamp_writes,
         });
-        pass.set_pipeline(&p.compute);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &*t.compute.as_ref().unwrap().bind, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         pass.dispatch_workgroups(
-            t.world.texture.width().div_ceil(8),
-            t.world.texture.height().div_ceil(8),
+            t.world.texture.width().div_ceil(tile[0]),
+            t.world.texture.height().div_ceil(tile[1]),
             1,
         );
     }
