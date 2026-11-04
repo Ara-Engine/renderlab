@@ -204,6 +204,8 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
 mod primary_ray_gpu_tests;
 #[path = "primary_ray_tests.rs"]
 mod primary_ray_tests;
+#[path = "quarry_frame_loop_tests.rs"]
+mod quarry_frame_loop_tests;
 
 fn target(r: &Renderer, width: u32, height: u32) -> wgpu::Texture {
     r.device.create_texture(&wgpu::TextureDescriptor {

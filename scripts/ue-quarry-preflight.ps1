@@ -4,7 +4,7 @@ Record game/renderer contention before ANY Unreal launch, including NullRHI impo
 This is a read-only check, not a GPU-slot reservation or permission to steal focus.
 #>
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$Output)
+param([Parameter(Mandatory = $true)][string]$Output, [ValidateRange(0, 64)][double]$MinimumAvailableGiB = 0)
 $ErrorActionPreference = 'Stop'
 $destination = [IO.Path]::GetFullPath($Output)
 $privateRoot = [IO.Path]::GetFullPath('D:/Coding/renderlab-work/ue-m5') + [IO.Path]::DirectorySeparatorChar
@@ -39,7 +39,8 @@ $builds = @($processes | Where-Object { $_.Name -match '(?i)^(cargo|rustc|cl|lin
 $gpu = @(& nvidia-smi --query-gpu=name,driver_version,utilization.gpu,memory.used,memory.total,clocks.gr,temperature.gpu,power.draw --format=csv)
 if ($LASTEXITCODE -ne 0) { throw 'GPU inventory failed; no launch permitted.' }
 $memory = Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory, TotalVisibleMemorySize
-$enoughMemory = [int64]$memory.FreePhysicalMemory -ge 8 * 1024 * 1024
+$availableMiB = (Get-Counter -Counter '\Memory\Available MBytes').CounterSamples.CookedValue
+$enoughMemory = if ($MinimumAvailableGiB -gt 0) { $availableMiB -ge $MinimumAvailableGiB * 1024 } else { [int64]$memory.FreePhysicalMemory -ge 8 * 1024 * 1024 }
 $record = [ordered]@{
     captured_utc = [DateTime]::UtcNow.ToString('o')
     conflicts = $conflicts
@@ -47,7 +48,10 @@ $record = [ordered]@{
     gpu = $gpu
     memory = $memory
     foreground_read_only = @{ window_handle = $ueForegroundWindow.ToInt64(); process_id = $ueForegroundProcess }
-    minimum_free_ram_gib = 8
+    minimum_free_ram_gib = if ($MinimumAvailableGiB -gt 0) { $null } else { 8 }
+    minimum_available_ram_gib = if ($MinimumAvailableGiB -gt 0) { $MinimumAvailableGiB } else { $null }
+    available_memory_mib = $availableMiB
+    available_memory_counter = '\Memory\Available MBytes'
     status = if ($conflicts.Count -or -not $enoughMemory) { 'BLOCKED' } else { 'NO_KNOWN_PROCESS_CONFLICTS' }
     scope = 'One process snapshot only. Recheck immediately before launch; coordinate the shared GPU slot. No focus/input/capture performed.'
 }
@@ -58,5 +62,5 @@ if ($conflicts.Count) {
     $conflicts | Format-Table Name, ProcessId -AutoSize
     throw 'Deferred: game or renderer process detected. Do not launch Unreal or use the GPU.'
 }
-if (-not $enoughMemory) { throw 'Deferred: less than 8 GiB physical RAM free. Do not launch Unreal.' }
+if (-not $enoughMemory) { throw 'Deferred: RAM is below the recorded launch floor. Do not launch Unreal.' }
 Write-Output "Preflight recorded at $destination. Coordinate slot ownership before launching."

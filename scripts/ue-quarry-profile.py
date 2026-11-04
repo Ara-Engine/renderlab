@@ -24,10 +24,13 @@ def log_evidence(path):
         columns = line.split("┃")
         if len(columns) < 5:
             continue
-        exclusive = re.search(r"([\d.]+) ms", columns[1])
-        inclusive = re.search(r"([\d.]+) ms", columns[2])
-        if exclusive and inclusive:
-            tree.append(dict(name=columns[3].rstrip(), exclusive_ms=float(exclusive[1]), inclusive_ms=float(inclusive[1])))
+        # UE 5.7 also emits wide trees with draw/dispatch/primitive/percentage
+        # columns before each time. Select the two time cells, not fixed offsets.
+        times = [(i, match) for i, column in enumerate(columns)
+                 if (match := re.search(r"([\d.]+) ms", column))]
+        if len(times) == 2:
+            (i, exclusive), (j, inclusive) = times
+            tree.append(dict(name=columns[j + 1].rstrip(), exclusive_ms=float(exclusive[1]), inclusive_ms=float(inclusive[1])))
     return dict(log_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), ray_tracing_dumps=dumps, gpu_tree=tree,
                 gpu_tree_scope="one instrumented ProfileGPU frame; inclusive parents overlap and must not be summed",
                 native_geometry_scope="mode-1 noncompacted Quarry BLAS entries; verify exact per-mesh source counts")

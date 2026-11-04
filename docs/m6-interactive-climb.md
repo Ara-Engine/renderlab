@@ -1,6 +1,6 @@
 # M6 Interactive soft-shadow cost hillclimb
 
-2026-11-05 local (2026-11-04 UTC), based on `3b7e05c`. One measured mechanism at a time on the traced quarry's [Interactive](m6-level-b-implementation.md) frame. Every retained step reproduces the gated Interactive output byte for byte, and Exact and hard output are unchanged, so the Level-B gate results carry over without a rescore. **The 2x HRT goal is met (span 0.861–0.862 ms against ≤1.075). The 2x VSM stretch (≤0.80 ms) misses by 0.062–0.063 ms.** No push.
+2026-11-05 local (2026-11-04 UTC), based on `3b7e05c`. One measured mechanism at a time on the traced quarry's [Interactive](m6-level-b-implementation.md) frame. Every retained step reproduces the gated Interactive output byte for byte, and Exact and hard output are unchanged, so the Level-B gate results carry over without a rescore. **The GPU-span HRT target is met against the stored anchor (0.861–0.862 ms against ≤1.075); the VSM span target (≤0.80 ms) misses by 0.062–0.063 ms.** These were not same-session end-to-end throughput measurements. The subsequent [matched frame-loop comparison](quarry-end-to-end-comparison.md) measures CPU, GPU and complete offscreen throughput with explicit contention and fidelity limits. No push.
 
 ## Result
 

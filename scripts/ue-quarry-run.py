@@ -20,7 +20,8 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), csv_commands=None):
+def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), csv_commands=None,
+        minimum_available_gib=None):
     if not label or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in label):
         raise ValueError("use a lowercase alphanumeric run label")
     if packaged and (mode not in ("profile", "verify") or not packaged.is_file()):
@@ -35,7 +36,8 @@ def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), 
     launch = ROOT / "launches" / label
     launch.mkdir(parents=True, exist_ok=False)
     preflight = Path(__file__).with_name("ue-quarry-preflight.ps1")
-    subprocess.run(["powershell", "-NoProfile", "-File", str(preflight), "-Output", str(launch / "preflight.json")], check=True,
+    memory_guard = [] if minimum_available_gib is None else ["-MinimumAvailableGiB", str(minimum_available_gib)]
+    subprocess.run(["powershell", "-NoProfile", "-File", str(preflight), "-Output", str(launch / "preflight.json"), *memory_guard], check=True,
                    creationflags=subprocess.CREATE_NO_WINDOW)
     script = launch / "ue-quarry-editor.py"
     shutil.copyfile(Path(__file__).with_name("ue-quarry-editor.py"), script)
@@ -97,6 +99,7 @@ def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), 
     record = dict(start_utc=now(), command=args, mode=mode, shadow=shadow, gpu_lease=lease,
                   executable_sha256=hashlib.sha256(Path(args[0]).read_bytes()).hexdigest(), packaged=bool(packaged),
                   script_sha256=hashlib.sha256(script.read_bytes()).hexdigest(), timeout_seconds=timeout)
+    record["minimum_available_gib"] = minimum_available_gib
     start = time.perf_counter()
     stop = threading.Event()
     samples = []
@@ -140,7 +143,7 @@ def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), 
                 stop_owned_tree(proc)
     record.update(end_utc=now(), elapsed_seconds=time.perf_counter() - start, exit_code=proc.returncode, gpu_samples=samples,
                   scope="whole process, including import/shader/loading/readback/export; NOT GPU frame time")
-    postflight = subprocess.run(["powershell", "-NoProfile", "-File", str(preflight), "-Output", str(launch / "postflight.json")],
+    postflight = subprocess.run(["powershell", "-NoProfile", "-File", str(preflight), "-Output", str(launch / "postflight.json"), *memory_guard],
         capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     record["postflight_exit_code"] = postflight.returncode
     before = json.loads((launch / "preflight.json").read_text(encoding="utf-8-sig"))
