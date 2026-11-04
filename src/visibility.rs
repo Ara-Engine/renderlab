@@ -320,6 +320,30 @@ mod tests {
     }
 
     #[test]
+    fn reversed_camera_near_far_and_mirrored_bounds() {
+        let clip = Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1., 0.1, 100.)
+            .unwrap()
+            .matrix(641, 479);
+        let volume = ClipVolume::new(&clip);
+        let evaluate = |plane: usize, z: f64| volume.planes[plane][2] * z + volume.planes[plane][3];
+        assert!(evaluate(4, -101.) < 0.); // Z >= 0 is the far plane.
+        assert!(evaluate(5, -0.05) < 0.); // W-Z >= 0 is the near plane.
+        for (z, visible) in [
+            (-0.1, true),
+            (-100., true),
+            (-0.05, false),
+            (-101., false),
+            (-20., true),
+            (1., false),
+        ] {
+            let model = Mat4::from_translation(Vec3::new(0., 0., z))
+                * Mat4::from_scale(Vec3::new(-0.004, 0.006, 0.002));
+            assert_eq!(may_be_visible(&clip, &model, &cube()), visible, "z={z}");
+            assert_rejection_is_conservative(clip, model, cube());
+        }
+    }
+
+    #[test]
     fn visibility_matches_independent_f32_evaluation() {
         let clip = Camera::look_at(
             Vec3::new(0.0, 0.0, 4.0),

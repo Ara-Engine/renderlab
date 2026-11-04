@@ -441,7 +441,7 @@ fn rotated_camera_slices_cover_independently_unprojected_rays() {
                 };
                 for x in [-1.0, 1.0] {
                     for y in [-1.0, 1.0] {
-                        let h = inverse_clip * glam::DVec4::new(x, y, 0.0, 1.0);
+                        let h = inverse_clip * glam::DVec4::new(x, y, 1.0, 1.0);
                         let p = h.truncate() / h.w;
                         let forward_depth = -camera_view.transform_point3(p).z;
                         for depth in [near, far] {

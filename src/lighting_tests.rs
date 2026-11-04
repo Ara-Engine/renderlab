@@ -713,7 +713,7 @@ fn gpu_lit_photometry_1x_4x() {
                 .matrix(128, 96)
                 .inverse()
                 .as_dmat4()
-                .project_point3(DVec3::new(2. * 64.5 / 128. - 1., 1. - 2. * 48.5 / 96., 0.));
+                .project_point3(DVec3::new(2. * 64.5 / 128. - 1., 1. - 2. * 48.5 / 96., 1.));
             let ray = (near - eye.as_dvec3()).normalize();
             let p = eye.as_dvec3() + ray * (-n.dot(eye.as_dvec3()) / n.dot(ray));
             let v = (eye.as_dvec3() - p).normalize();

@@ -478,7 +478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &out.join(prefix),
                     info,
                     &bytes,
-                    serde_json::json!({"asset_path":asset_path,"camera_path":camera_path,"lighting_path":light_path,"pose":pose,"scene":"scene.json","motion":motion,"hardware_shadows":hardware,"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadowed":shadowed,"shadow_settings":format!("{:?}",if *shadowed {make_shadows(&lights)} else {Shadows::default()}),"shadows":format!("{:?}",r.shadow_stats()),"camera_view":camera.view().to_cols_array(),"camera_projection":camera.matrix(width,height).to_cols_array()}),
+                    serde_json::json!({"asset_path":asset_path,"camera_path":camera_path,"lighting_path":light_path,"pose":pose,"scene":"scene.json","motion":motion,"hardware_shadows":hardware,"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadowed":shadowed,"shadow_settings":format!("{:?}",if *shadowed {make_shadows(&lights)} else {Shadows::default()}),"shadows":format!("{:?}",r.shadow_stats()),"camera_view":camera.view().to_cols_array(),"camera_projection":camera.matrix(width,height).to_cols_array(),"camera_depth_convention":"finite_reversed_z_near_1_far_0"}),
                 )?;
             }
         }

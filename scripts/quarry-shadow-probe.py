@@ -211,7 +211,9 @@ def main():
         if args.rays:
             camera_points = [inverse_camera @ [2 * (x + .5) / 1920 - 1,
                                                1 - 2 * (y + .5) / 1080, z, 1] for z in [0, 1]]
-            a, b = [p[:3] / p[3] for p in camera_points]
+            # Archived captures use forward depth; current captures use reversed depth.
+            a, b = sorted((p[:3] / p[3] for p in camera_points),
+                          key=lambda p: -(view @ np.r_[p, 1])[2])
             ray = unit(b - a)
             distance, receiver, normal = source.intersect(a, ray)
             if not math.isfinite(distance):

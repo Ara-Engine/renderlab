@@ -166,8 +166,8 @@ fn cpu_boundaries_and_projection() {
     }
     let camera = Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1.0, 0.1, 10.0).unwrap();
     let matrix = camera.matrix(640, 320);
-    assert!(matrix.project_point3(Vec3::new(0.0, 0.0, -0.1)).z.abs() < 1e-6);
-    assert!((matrix.project_point3(Vec3::new(0.0, 0.0, -10.0)).z - 1.0).abs() < 1e-6);
+    assert!((matrix.project_point3(Vec3::new(0.0, 0.0, -0.1)).z - 1.0).abs() < 1e-6);
+    assert!(matrix.project_point3(Vec3::new(0.0, 0.0, -10.0)).z.abs() < 1e-6);
     assert_eq!(mesh::matrix_bytes(Mat4::IDENTITY).len(), 64);
     let vertices = triangle([1.0, 0.0, 0.0]);
     for indices in [&[][..], &[0, 1][..], &[0, 1, 3][..]] {
@@ -240,6 +240,153 @@ fn cpu_boundaries_and_projection() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn cpu_camera_reversed_depth_and_unchanged_xyw() {
+    for (near, far) in [(0.005, 100.0), (0.1, 10.0), (1e20, 1e30), (1e-30, 1e-20)] {
+        let camera = Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1.0, near, far).unwrap();
+        let matrix = camera.matrix(1920, 1080);
+        assert!(matrix.is_finite());
+        assert!((matrix.project_point3(Vec3::new(0., 0., -near)).z - 1.).abs() < 2e-7);
+        assert!(matrix.project_point3(Vec3::new(0., 0., -far)).z.abs() < 2e-7);
+        let mut previous = f32::INFINITY;
+        for step in 0..=128 {
+            let distance = (f64::from(near)
+                * (f64::from(far) / f64::from(near)).powf(f64::from(step) / 128.))
+                as f32;
+            let depth = matrix.project_point3(Vec3::new(0., 0., -distance)).z;
+            assert!(
+                depth < previous,
+                "{near} {far} {distance} {depth} {previous}"
+            );
+            previous = depth;
+        }
+    }
+    for eye in [Vec3::ZERO, Vec3::new(2., 3., 4.)] {
+        let camera = Camera::look_at(
+            eye,
+            eye - Vec3::new(0.2, 0.3, 1.),
+            Vec3::Y,
+            0.78,
+            0.005,
+            100.,
+        )
+        .unwrap();
+        for (width, height) in [(1920, 1080), (3, 7), (7, 3)] {
+            let actual = camera.matrix(width, height).to_cols_array();
+            let forward = (Mat4::perspective_rh(0.78, width as f32 / height as f32, 0.005, 100.)
+                * camera.view())
+            .to_cols_array();
+            for i in (0..16).filter(|i| i % 4 != 2) {
+                assert_eq!(actual[i].to_bits(), forward[i].to_bits(), "XYW entry {i}");
+            }
+        }
+    }
+    let matrix = Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1., 0.005, 100.)
+        .unwrap()
+        .matrix(1920, 1080);
+    let front = matrix.project_point3(Vec3::new(0., 0., -20.)).z;
+    let back = matrix.project_point3(Vec3::new(0., 0., -20.0001)).z;
+    assert!(front > back);
+    let forward = Mat4::perspective_rh(1., 1920. / 1080., 0.005, 100.);
+    assert_eq!(
+        forward.project_point3(Vec3::new(0., 0., -20.)).z,
+        forward.project_point3(Vec3::new(0., 0., -20.0001)).z
+    );
+}
+
+#[test]
+fn cpu_camera_rejects_unrepresentable_depth_coefficients() {
+    for (near, far) in [
+        (f32::from_bits(1), f32::MAX),
+        (f32::MAX / 2., f32::MAX * 0.75),
+    ] {
+        assert!(matches!(
+            Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1., near, far),
+            Err(Error::InvalidInput(
+                "camera depth coefficients unrepresentable"
+            ))
+        ));
+    }
+    // No arbitrary minimum near plane: the smallest normal coefficient is legal.
+    assert!(Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1., f32::MIN_POSITIVE, 1.).is_ok());
+}
+
+#[test]
+#[ignore = "Vulkan GPU; close receiver separation, equal-depth order and reload"]
+fn gpu_main_depth_order_and_reload() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(false);
+    let near = upload(&mut r, &triangle([1., 0., 0.]), &INDICES);
+    let far = upload(&mut r, &triangle([0., 0., 1.]), &INDICES);
+    let mut a = instances(&mut r, &[Mat4::from_translation(Vec3::new(0., 0., -20.))]);
+    let mut b = instances(
+        &mut r,
+        &[Mat4::from_translation(Vec3::new(0., 0., -20.0001))],
+    );
+    let camera = Camera::look_at(Vec3::ZERO, -Vec3::Z, Vec3::Y, 1., 0.005, 100.).unwrap();
+    let color = target(r.device(), 129, 97);
+    let first = capture_full(
+        &mut r,
+        &color,
+        &camera,
+        &mut [Draw::new(&far, &mut b), Draw::new(&near, &mut a)],
+    );
+    let center = (48 * 129 + 64) * 4;
+    assert_eq!(&first.0[center..center + 4], &[255, 0, 0, 255]);
+    let depth = f32::from_ne_bytes(first.1[center..center + 4].try_into().unwrap());
+    let n = f64::from(0.005_f32);
+    let expected = n * (100. / 20. - 1.) / (100. - n);
+    assert!((f64::from(depth) - expected).abs() < 1e-10);
+    assert_eq!(
+        first,
+        capture_full(
+            &mut r,
+            &color,
+            &camera,
+            &mut [Draw::new(&near, &mut a), Draw::new(&far, &mut b)]
+        )
+    );
+    assert_eq!(f32::from_ne_bytes(first.1[..4].try_into().unwrap()), 0.);
+    assert!(r.reload("invalid WGSL").is_err());
+    assert_eq!(
+        first,
+        capture_full(
+            &mut r,
+            &color,
+            &camera,
+            &mut [Draw::new(&far, &mut b), Draw::new(&near, &mut a)]
+        )
+    );
+    r.reload(&SOURCE.replace("vec3<f32>(1.0, 1.0, 1.0)", "vec3<f32>(0.5, 1.0, 1.0)"))
+        .unwrap();
+    let tinted = capture_full(
+        &mut r,
+        &color,
+        &camera,
+        &mut [Draw::new(&far, &mut b), Draw::new(&near, &mut a)],
+    );
+    assert_ne!(first.0, tinted.0);
+    assert_eq!(first.1, tinted.1);
+    r.reload(SOURCE).unwrap();
+    b.set(0, Mat4::from_translation(Vec3::new(0., 0., -20.)))
+        .unwrap();
+    let tied = capture_full(
+        &mut r,
+        &color,
+        &camera,
+        &mut [Draw::new(&near, &mut a), Draw::new(&far, &mut b)],
+    );
+    let reversed = capture_full(
+        &mut r,
+        &color,
+        &camera,
+        &mut [Draw::new(&far, &mut b), Draw::new(&near, &mut a)],
+    );
+    assert_eq!(&tied.0[center..center + 4], &[255, 0, 0, 255]);
+    assert_eq!(&reversed.0[center..center + 4], &[0, 0, 255, 255]);
+    assert_eq!(tied.1, reversed.1);
 }
 
 #[test]
@@ -584,7 +731,7 @@ fn gpu_batched_culling_oracle() {
             image
                 .1
                 .chunks_exact(4)
-                .any(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()) < 1.0),
+                .any(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()) > 0.0),
             "isolated fixture must cover pixels: {label}"
         );
     }

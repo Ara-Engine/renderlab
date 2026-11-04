@@ -36,6 +36,8 @@ The [M5-C environment checkpoint](m5-environment-runtime.md) adds prepared HDR d
 
 The [first M6 shadow checkpoint](m6-shadows.md) is independently reviewed and device-tested as partial M6. Directional, spot and point hard shadows share owned resources and the regular/virtual submission path. The raster path's 1024 quarry quality gate fails; 4096 improves inspected results but retains unclassified speckle. An [optional hardware directional-shadow unit](m6-hardware-shadows.md) now passes focused regular-geometry tests and the quarry controls at 1x, followed by the independently accepted [per-sample 4x extension](m6-hardware-msaa.md). Acceptance remains limited to regular opaque double-sided directional shadows. Filtering, softness, light-view detail demand and broader native motion verification remain open. The [first matched Unreal fixture](unreal-comparison-setup.md) establishes only a direct-light calibration subset, with sharp-highlight disagreement still under investigation.
 
+The [main-camera depth correction](camera-depth.md) uses finite reversed-Z to separate near-coincident scan surfaces. Actual GPU receiver observations confirm that it fixes two previously tied backface/front-face pixels while preserving contact-shadow controls. `Camera::matrix` now exposes near=1/far=0; callers that unproject depth must migrate. Light-space shadow depth is unchanged.
+
 ## Milestone 0: development environment (complete)
 
 The analytic viewer established shader reload, editable parameters, a persistent window, and measured development loops. Preserve its results in [milestone-0.md](milestone-0.md). It did not establish a mesh renderer or production image-quality claims.

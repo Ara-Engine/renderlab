@@ -1,5 +1,7 @@
 # Milestone 1 selected design
 
+Historical depth convention: the later [main-camera correction](camera-depth.md) supersedes this document's clear 1 / Less policy with finite reversed-Z, clear 0 / Greater.
+
 Status: implemented and accepted for M1; see milestone-1.md for verification and limitations. This document preserves the design-selection rationale. Pstack architect compared independent Sol and Astra sketches. Opus 5.5 independently scored Astra 12/15 and Sol 11/15 and selected Astra. The root agrees after reading both proposals and the review. Local proposal/review artifacts are under .refs/m1-design/.
 
 ## Caller and ownership

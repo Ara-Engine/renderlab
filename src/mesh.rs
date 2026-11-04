@@ -138,13 +138,14 @@ impl MeshData<'_> {
     }
 }
 
-/// Right-handed camera with WebGPU's 0..1 depth range. Aspect follows the color texture.
+/// Right-handed camera with finite reversed depth (near 1, far 0).
+/// Aspect follows the color texture. View-space forward is -Z.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     view: Mat4,
     fov_y: f32,
     near: f32,
-    far: f32,
+    depth: [f32; 2],
 }
 impl Camera {
     pub fn look_at(
@@ -174,11 +175,21 @@ impl Camera {
                 "invalid look-at vectors or perspective planes/FOV",
             ));
         }
+        // Construct before rounding. Subtracting a rounded forward-Z row loses
+        // the precision that reversed depth is meant to preserve.
+        let n = f64::from(near);
+        let f = f64::from(far);
+        let depth = [(n / (f - n)) as f32, (n * f / (f - n)) as f32];
+        if depth.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(Error::InvalidInput(
+                "camera depth coefficients unrepresentable",
+            ));
+        }
         let camera = Self {
             view: Mat4::look_at_rh(eye, target, up),
             fov_y,
             near,
-            far,
+            depth,
         };
         if !camera.matrix(1, 1).is_finite() {
             return Err(Error::InvalidInput("camera matrix overflow"));
@@ -195,12 +206,20 @@ impl Camera {
     pub fn near(self) -> f32 {
         self.near
     }
+    /// Actual world-to-clip matrix uploaded by both main raster paths.
+    /// After division by W, near maps to 1 and far to 0 in WebGPU's clip volume.
+    /// Depth uses strict Greater with clear 0. Unproject near at Z=1, far at Z=0.
+    /// Width and height must be nonzero.
     pub fn matrix(self, width: u32, height: u32) -> Mat4 {
-        Mat4::perspective_rh(
-            self.fov_y,
-            width as f32 / height as f32,
-            self.near,
-            self.far,
+        // Keep glam::Mat4::perspective_rh's X/Y/W arithmetic unchanged.
+        let (sin_fov, cos_fov) = (0.5 * self.fov_y).sin_cos();
+        let h = cos_fov / sin_fov;
+        let w = h / (width as f32 / height as f32);
+        Mat4::from_cols(
+            glam::Vec4::new(w, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, h, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, self.depth[0], -1.0),
+            glam::Vec4::new(0.0, 0.0, self.depth[1], 0.0),
         ) * self.view
     }
 }
