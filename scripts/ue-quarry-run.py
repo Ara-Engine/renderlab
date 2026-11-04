@@ -20,7 +20,7 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def run(mode, label, shadow, timeout, pose=0, packaged=None):
+def run(mode, label, shadow, timeout, pose=0, packaged=None, extra_commands=(), csv_commands=None):
     if not label or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in label):
         raise ValueError("use a lowercase alphanumeric run label")
     if packaged and (mode not in ("profile", "verify") or not packaged.is_file()):
@@ -74,12 +74,16 @@ def run(mode, label, shadow, timeout, pose=0, packaged=None):
                  "r.RayTracing.Nanite.Streaming.Offscreen.LODBias 0,r.RayTracing.Nanite.Streaming.Offscreen.MinCutError 0,"
                  "ShowFlag.EyeAdaptation 1,r.EyeAdaptationQuality 2,r.EyeAdaptation.MethodOverride 3,"
                  "r.Shadow.Virtual.Enable,r.RayTracing,r.RayTracing.Shadows,r.Nanite,r.AntiAliasingMethod,r.ScreenPercentage")
+        commands += "".join("," + command for command in extra_commands)
         if mode in ("profile", "profile-motion", "verify"):
             args += ["-csvGpuStats", "-csvCompression=0", "-ExitAfterCsvProfiling",
                      f"-csvExecCmds=64:ProfileGPU,72:HighResShot 1920x1080 filename={launch / 'main.png'},90:D3D12.DumpRayTracingGeometries all"]
             if mode == "verify":
                 args = [a for a in args if not a.startswith("-csvExecCmds=")]
                 args += [f"-csvExecCmds=32:NaniteStats,64:ProfileGPU,72:HighResShot 1920x1080 filename={launch / 'nanite-stats.png'},80:r.Nanite.ShowStats 0,81:r.ShaderPrintEnable 0,88:HighResShot 1920x1080 filename={launch / 'main.png'},90:D3D12.DumpRayTracingGeometries all"]
+            if csv_commands is not None:
+                args = [a for a in args if not a.startswith("-csvExecCmds=")]
+                args += ["-csvExecCmds=" + ",".join(f"{frame}:{command}" for frame, command in csv_commands)]
             if mode == "profile-motion":
                 args += ["-EnablePython", "-ExecCmds=" + commands + ",py " + str(script) + ",csvprofile frames=160"]
             else:

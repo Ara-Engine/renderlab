@@ -1,5 +1,7 @@
 # Why the full-detail Unreal quarry shadows disagree
 
+Follow-up: the [native main-view mask run](unreal-native-shadow-mask.md) now records the GPU rerun, effective controls, receiver isolations, denoiser histories and fresh packaged timings. This document preserves the preceding CPU-only diagnosis.
+
 2026-11-04, CPU-only investigation of main `76d920e`. No GPU use, Unreal/viewer launch, desktop access or new capture. The saved reference and captures were not changed. This report supersedes speculation that the roughly 55–59x partial RMS gap is principally an EXR extraction error or a half-angle mistake.
 
 **The main causes are unmatched shadow receiver rules and sampling.** VSM deliberately moves the lookup away from contact geometry much farther than Renderlab does. HRT retains approximately single-ray variance on these predominantly narrow penumbrae, despite its denoiser and 64 warmup ticks. Its different receiver offset also changes actual visibility, including persistent self-shadowing. Full source triangle counts and a matching light diameter do not match these estimands.
