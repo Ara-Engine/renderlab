@@ -5,6 +5,7 @@ use renderlab_asset::environment::{
 };
 use sha2::{Digest, Sha256};
 use std::f64::consts::{PI, TAU};
+mod specular;
 
 /// Linear Rec.709, row-major equirectangular RGB32F. No exposure, transfer curve or clipping.
 /// Pixel centres: phi=2*pi*((x+.5)/width-.5), theta=pi*(y+.5)/height;
@@ -122,6 +123,7 @@ pub struct PreparationSettings {
     pub diffuse_size: u32,
     pub specular_size: u32,
     pub diffuse_samples: u32,
+    /// Total samples per convolved texel, split between GGX and source-radiance proposals.
     pub specular_samples: u32,
 }
 impl Default for PreparationSettings {
@@ -138,7 +140,7 @@ impl Default for PreparationSettings {
 #[derive(Clone, Copy, Debug)]
 pub struct CookCost {
     pub sample_evaluations: u64,
-    /// Input pixels + complete output + largest reusable quadrature table (f64).
+    /// Input pixels + complete output + peak reusable quadrature/proposal buffers.
     pub owned_working_bytes: u64,
     pub prepared_pixel_bytes: u64,
 }
@@ -170,18 +172,36 @@ pub fn estimate_cost(
     )?;
     let diffuse_n = asset::cube_texels(settings.diffuse_size, limits.prepared)?;
     let base_n = asset::cube_texels(settings.specular_size, limits.prepared)?;
+    let source_count = input.pixels.len() as u64;
+    let convolved = n - diffuse_n - base_n;
+    let (ggx_count, hdr_count) = specular::sample_counts(settings.specular_samples);
+    let proposal_work = if convolved == 0 {
+        0
+    } else {
+        // Minima and CDF source passes, plus the shared HDR radiance sample table.
+        source_count * 2 + u64::from(hdr_count)
+    };
     let samples = diffuse_n
         .checked_mul(settings.diffuse_samples as u64)
         .and_then(|d| {
-            (n - diffuse_n - base_n)
+            convolved
                 .checked_mul(settings.specular_samples as u64)
                 .and_then(|s| s.checked_add(d))
         })
         .and_then(|s| s.checked_add(base_n))
         .and_then(|s| s.checked_add(settings.diffuse_samples as u64))
+        .and_then(|s| s.checked_add(proposal_work))
         .ok_or_else(|| Error("environment sample count overflow".into()))?;
-    let table_bytes =
-        (u64::from(settings.diffuse_samples) * 48).max(u64::from(settings.specular_samples) * 32);
+    let specular_bytes = if convolved == 0 {
+        0
+    } else {
+        source_count
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(u64::from(hdr_count) * 56))
+            .and_then(|n| n.checked_add(u64::from(ggx_count) * 32))
+            .ok_or_else(|| Error("environment proposal byte overflow".into()))?
+    };
+    let table_bytes = (u64::from(settings.diffuse_samples) * 48).max(specular_bytes);
     if table_bytes > isize::MAX as u64 {
         return Err(Error("environment sample table address-space limit".into()));
     }
@@ -211,7 +231,8 @@ pub fn prepare_environment(
     metadata.validate()?;
     estimate_cost(input, settings, limits)?;
     let mut identity = Sha256::new();
-    identity.update(b"renderlab-environment-fibonacci-diffuse-hammersley-ggx-bilinear-polar-v1");
+    identity
+        .update(b"renderlab-environment-fibonacci-diffuse-ggx-sqrt-hdr-mis-exact-norm-control-v3");
     for v in [
         input.width,
         input.height,
@@ -283,7 +304,7 @@ pub fn convolve_diffuse_irradiance(
     })
 }
 
-/// Split-sum radiance factor: N=V=R; H~GGX D(H)*NoH, reflected L, normalized NoL weights.
+/// Split-sum radiance factor, N=V=R. Balanced GGX/HDR MIS with exact kernel normalization.
 /// This is an approximation for nonconstant input, even with a converged matching DFG LUT.
 /// Mip zero directly samples source; no PDF-based source-mip blur or half-float conversion.
 pub fn prefilter_ggx_radiance(
@@ -296,18 +317,28 @@ pub fn prefilter_ggx_radiance(
     check_scale(scale)?;
     let levels = settings.specular_size.ilog2() + 1;
     let mut out = Vec::new();
+    // Delta-only maps need neither proposal storage nor source preprocessing.
+    let quadrature = if levels > 1 {
+        Some(specular::Quadrature::new(input, settings.specular_samples)?)
+    } else {
+        None
+    };
     for i in 0..levels {
         let size = settings.specular_size >> i;
+        let roughness = i as f64 / (levels - 1).max(1) as f64;
         let table = if i == 0 {
             Vec::new()
         } else {
-            samples(settings.specular_samples, i as f64 / (levels - 1) as f64)?
+            specular::ggx_samples(
+                specular::sample_counts(settings.specular_samples).0,
+                roughness,
+            )?
         };
         out.push(make_cube(size, limits, |n| {
             (if i == 0 {
                 input.sample(n)
             } else {
-                integrate(input, n, &table)
+                quadrature.as_ref().unwrap().integrate(n, roughness, &table)
             })
             .map(|v| v * scale)
         })?);
@@ -320,62 +351,6 @@ fn check_scale(scale: f64) -> Result<()> {
         return Err(Error("invalid environment convolution scale".into()));
     }
     Ok(())
-}
-
-// Each entry is a local angular direction + weight. One table is reused across all cube texels.
-fn samples(count: u32, roughness: f64) -> Result<Vec<([f64; 3], f64)>> {
-    let mut table = Vec::new();
-    table
-        .try_reserve_exact(count as usize)
-        .map_err(|_| Error("environment quadrature allocation".into()))?;
-    for i in 0..count {
-        let u = (i as f64 + 0.5) / count as f64;
-        let v = i.reverse_bits() as f64 / 4294967296.0;
-        let phi = TAU * u;
-        let alpha = (roughness * roughness).max(asset::GGX_ALPHA_FLOOR);
-        let cos_h = ((1.0 - v) / (1.0 + (alpha * alpha - 1.0) * v)).sqrt();
-        let sin_h = (1.0 - cos_h * cos_h).max(0.0).sqrt();
-        let l = [
-            2.0 * cos_h * sin_h * phi.cos(),
-            2.0 * cos_h * sin_h * phi.sin(),
-            2.0 * cos_h * cos_h - 1.0,
-        ];
-        let (direction, weight) = (l, l[2].max(0.0));
-        if weight > 0.0 {
-            table.push((direction, weight));
-        }
-    }
-    Ok(table)
-}
-
-fn integrate(input: &LinearEnvironment, n: [f64; 3], samples: &[([f64; 3], f64)]) -> [f64; 3] {
-    let up = if n[1].abs() < 0.99 {
-        [0.0, 1.0, 0.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let cross = |a: [f64; 3], b: [f64; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let t = cross(up, n);
-    let length = t.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let t = t.map(|v| v / length);
-    let b = cross(n, t);
-    let mut rgb = [0.0; 3];
-    let mut weights = 0.0;
-    for &(d, weight) in samples {
-        let world = std::array::from_fn(|i| t[i] * d[0] + b[i] * d[1] + n[i] * d[2]);
-        let value = input.sample(world);
-        for i in 0..3 {
-            rgb[i] += value[i] * weight;
-        }
-        weights += weight;
-    }
-    rgb.map(|v| v / weights)
 }
 
 fn make_cube(
