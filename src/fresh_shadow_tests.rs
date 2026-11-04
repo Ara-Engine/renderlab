@@ -110,14 +110,19 @@ fn fresh_target_budget_counts_all_cascades_and_checked_extent() {
     assert!(admit_targets(&settings, 1920, 1080).is_ok());
 }
 
-fn renderer() -> Renderer {
+fn renderer(validate: bool) -> Renderer {
+    let startup = Instant::now();
     assert_eq!(
         std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
         Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
     );
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::debugging(),
+        flags: if validate {
+            wgpu::InstanceFlags::debugging()
+        } else {
+            wgpu::InstanceFlags::empty()
+        },
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -136,7 +141,9 @@ fn renderer() -> Renderer {
         ..Default::default()
     }))
     .unwrap();
-    Renderer::new_with_hardware_shadows(
+    let device_ms = startup.elapsed().as_secs_f64() * 1e3;
+    let pipelines = Instant::now();
+    let renderer = Renderer::new_with_hardware_shadows(
         device,
         queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -154,7 +161,12 @@ fn renderer() -> Renderer {
         },
         SOURCE,
     )
-    .unwrap()
+    .unwrap();
+    eprintln!(
+        "fresh_startup validation={validate} instance_device_ms={device_ms:.6} all_renderer_pipeline_setup_ms={:.6}",
+        pipelines.elapsed().as_secs_f64() * 1e3
+    );
+    renderer
 }
 
 fn target(r: &Renderer, width: u32, height: u32) -> wgpu::Texture {
@@ -361,7 +373,7 @@ mod validation;
 #[ignore = "root must transfer exclusive GPU slot; explicit experimental acknowledgment; headless"]
 fn gpu_fresh_thin_contact_moving_view_equivalence() {
     let _validation = validation::begin(true);
-    let mut r = renderer();
+    let mut r = renderer(true);
     let out = std::env::var_os("RENDERLAB_FRESH_EVIDENCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| "measurements/m6-fresh/fixture".into());
@@ -500,15 +512,19 @@ mod prepared;
 #[test]
 #[ignore = "root GPU slot, experimental acknowledgment and external RENDERLAB_FRESH_MANIFEST; headless"]
 fn gpu_fresh_quarry_equivalence_and_complete_frame() {
-    let _validation = validation::begin(true);
+    let startup = Instant::now();
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(std::env::var("RENDERLAB_FRESH_MANIFEST").unwrap()).unwrap(),
     )
     .unwrap();
+    // Timing is a separate process after the unchanged validation-on quality gates.
+    let timing_only = manifest["timing_only"].as_bool().unwrap_or(false);
+    let validate = !timing_only;
+    let _validation = validation::begin(validate);
     let path = |key: &str| PathBuf::from(manifest[key].as_str().unwrap());
     let out = path("output");
     fs::create_dir_all(&out).unwrap();
-    let mut r = renderer();
+    let mut r = renderer(validate);
     let (policy, _) = policy::Policy::args(vec![
         "--limits".into(),
         path("limits").to_string_lossy().into_owned(),
@@ -546,32 +562,60 @@ fn gpu_fresh_quarry_equivalence_and_complete_frame() {
         assert!(started.elapsed() < Duration::from_secs(120));
     }
     r.test_drain("fresh quarry upload");
+    let prepared_ready_ms = startup.elapsed().as_secs_f64() * 1e3;
     let cameras = cameras::Cameras::load(&path("cameras")).unwrap();
     assert!(cameras.frames.len() >= 2);
     let color = target(&r, 1920, 1080);
-    let reference = reference_pipelines(&r, color.width(), false);
-    let _hard = std::mem::replace(r.pipeline.hardware.as_mut().unwrap(), reference);
-    let mut reference_counts = reference_pipelines(&r, color.width(), true);
-    // Stop at the first quality failure. Forward/return views expose stale visibility.
-    for (index, pose) in [0, 1, 0].into_iter().enumerate() {
-        compare(
+    if timing_only {
+        let cold_start = Instant::now();
+        let cold = render(
             &mut r,
             &color,
-            &cameras.frames[pose].camera().unwrap(),
+            &cameras.frames[0].camera().unwrap(),
             &mut asset.draws(Visibility::Frustum),
-            &out,
-            &format!("pose-{index}"),
-            &mut reference_counts,
         );
+        r.test_drain("fresh startup first image completion proxy");
+        let cold_completion_ms = cold_start.elapsed().as_secs_f64() * 1e3;
+        let startup_completion_ms = startup.elapsed().as_secs_f64() * 1e3;
+        let cold_gpu = r.poll().unwrap().gpu;
+        fs::write(
+            out.join("startup.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "validation": validate, "prepared_ready_ms": prepared_ready_ms,
+                "startup_to_first_completed_image_proxy_ms": startup_completion_ms,
+                "cold_frame_cpu_to_completion_ms": cold_completion_ms,
+                "cold_frame": format!("{cold:?}"), "cold_gpu": format!("{cold_gpu:?}")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    } else {
+        let reference = reference_pipelines(&r, color.width(), false);
+        let _hard = std::mem::replace(r.pipeline.hardware.as_mut().unwrap(), reference);
+        let mut reference_counts = reference_pipelines(&r, color.width(), true);
+        // Stop at the first quality failure. Forward/return views expose stale visibility.
+        for (index, pose) in [0, 1, 0].into_iter().enumerate() {
+            compare(
+                &mut r,
+                &color,
+                &cameras.frames[pose].camera().unwrap(),
+                &mut asset.draws(Visibility::Frustum),
+                &out,
+                &format!("pose-{index}"),
+                &mut reference_counts,
+            );
+        }
     }
     r.poll().unwrap();
     let before = r.stats();
     let started = Instant::now();
+    let mut draws = asset.draws(Visibility::Frustum);
+    let scene_draws = started.elapsed();
     let report = render(
         &mut r,
         &color,
         &cameras.frames[1].camera().unwrap(),
-        &mut asset.draws(Visibility::Frustum),
+        &mut draws,
     );
     let admission = started.elapsed();
     r.test_drain("fresh complete frame cost");
@@ -590,10 +634,47 @@ fn gpu_fresh_quarry_equivalence_and_complete_frame() {
         "steady frame recreated targets"
     );
     fs::write(out.join("complete-frame.json"),serde_json::to_vec_pretty(&serde_json::json!({
-        "validation":true,"samples":1,"width":1920,"height":1080,"disk_angle":0.04,"queries_per_covered_receiver":256,
+        "validation":validate,"samples":1,"width":1920,"height":1080,"disk_angle":0.04,"queries_per_covered_receiver":256,
+        "cpu_scene_draws_ms":scene_draws.as_secs_f64()*1e3,
         "cpu_admission_ms":admission.as_secs_f64()*1e3,"cpu_submission_to_observed_completion_ms":completion.as_secs_f64()*1e3,
         "receiver_ms":gpu.receiver_pass.unwrap().as_secs_f64()*1e3,"compute_ms":gpu.visibility_compute.unwrap().as_secs_f64()*1e3,
         "shading_ms":gpu.mesh_pass.as_secs_f64()*1e3,"present_shader_ms":gpu.present_pass.unwrap().as_secs_f64()*1e3,"render_span_ms":gpu.render_span.as_secs_f64()*1e3,
         "fresh_target_logical_bytes":fresh_shadow_gpu::target_bytes(1920,1080).unwrap(),"frame":format!("{report:?}"),"before":format!("{before:?}"),"after":format!("{:?}",r.stats())
     })).unwrap()).unwrap();
+    if timing_only {
+        let expected = fs::read(path("expected_hdr")).unwrap();
+        let differences = |actual: &[u8]| {
+            assert_eq!(actual.len(), expected.len());
+            actual
+                .chunks_exact(8)
+                .zip(expected.chunks_exact(8))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        assert_eq!(
+            differences(&capture(&mut r)),
+            0,
+            "timing image differs from validated reference"
+        );
+        let reload_start = Instant::now();
+        let reload = r.reload(SOURCE).unwrap();
+        render(
+            &mut r,
+            &color,
+            &cameras.frames[1].camera().unwrap(),
+            &mut draws,
+        );
+        r.test_drain("fresh successful reload completed image proxy");
+        let reload_completion_ms = reload_start.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(
+            differences(&capture(&mut r)),
+            0,
+            "reloaded image differs from validated reference"
+        );
+        fs::write(out.join("reload.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "validation": validate, "all_renderer_pipeline_reload_compile_ms": reload.compile.as_secs_f64()*1e3,
+            "reload_to_first_completed_image_proxy_ms": reload_completion_ms,
+            "hdr_pixel_differences": 0
+        })).unwrap()).unwrap();
+    }
 }
