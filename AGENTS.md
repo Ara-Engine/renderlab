@@ -10,7 +10,7 @@ Read `docs/brief.md` and `docs/project-handoff.md` before implementation. Read `
 - Keep fast development builds distinct from optimized performance measurements. Record hardware, scene, resolution, quality, build identity and contention with timings.
 - Prefer simple typed APIs and owned resources. Add focused tests at meaningful boundaries; run checks on affected crates.
 - Questions are read-only. When asked for advice or feasibility, answer before editing.
-- Use the configured pstack workflow. Islam permits GPT-6.1 Sol, Astra, and Opus 5.5, with a large (xhigh) reasoning budget. Give parallel workers separate file ownership; Opus owns hillclimb attempts.
+- Use the configured pstack workflow with GPT-6.1 Sol and Opus 5.5 only, at large (xhigh) reasoning. Sol handles routine implementation, fixes and verification; Opus handles selected hard implementations, hillclimbs and consolidated reviews. Give parallel workers separate file ownership. This 2026-11-04 choice supersedes older Astra assignments.
 - Historical Ara plans are evidence, not inherited architectural decisions. Record proposals and measured reasons before choosing an approach.
 - Keep captures and generated measurements in ignored directories. Do not import private assets or third-party source without checking redistribution rights and preserving attribution.
 - Public repository: https://github.com/Ara-Engine/renderlab. The project license remains undecided; Ara integration is still deferred.

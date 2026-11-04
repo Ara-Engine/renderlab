@@ -46,7 +46,7 @@ The analytic viewer established shader reload, editable parameters, a persistent
 
 Completed and verified on Windows/Vulkan. [The M1 record](milestone-1.md) contains validation-layer evidence, live-window checks, measurements, review corrections and accepted limitations. The scope below records its contract; later layers still require discussion and authorization.
 
-Follow the scope and acceptance in [project-handoff.md](project-handoff.md). Use the installed pstack workflow with the confirmed large reasoning budget and GPT-6.1 Sol, Astra, and Opus 5.5. This thread owns implementation and decisions directly with Islam.
+Follow the scope and acceptance in [project-handoff.md](project-handoff.md). The current pstack model choice is GPT-6.1 Sol and Opus 5.5 only, with the confirmed large (xhigh) budget. This 2026-11-04 instruction supersedes older Astra assignments. This thread owns implementation and decisions directly with Islam.
 
 Implement real triangles/cubes, camera and depth, owned persistent GPU resources, transform-only movement, safe in-flight replacement, responsive resize/minimize and shader recovery. Measure CPU preparation, GPU execution, acquisition/presentation and waits separately. Account for uploads, allocations and pipeline creation without forcing per-frame GPU completion waits.
 
