@@ -387,7 +387,13 @@ fn select_internal(
     let indexed_ns = profile.elapsed().as_nanos();
     let mut reasons = vec![];
     let mut candidates = 0;
-    let mut order: Vec<u32> = (0..n as u32).collect();
+    // Published groups never deactivate below, and groups within the threshold never seed,
+    // so only the remaining groups need the (total) candidate order.
+    let mut order: Vec<u32> = (0..n as u32)
+        .filter(|&g| {
+            !state.published.active[g as usize] && projected_errors[g as usize] > threshold
+        })
+        .collect();
     order.sort_unstable_by(|&a, &b| {
         projected_errors[b as usize]
             .total_cmp(&projected_errors[a as usize])

@@ -178,8 +178,9 @@ impl<'a> State<'a> {
     }
 
     /// A publication is a subset of the admitted plan. It cannot replace a shard that
-    /// the plan itself still needs. Skip its closure only when capacity cannot deny it,
-    /// so the ordinary transaction still reports every possible capacity reason.
+    /// the plan itself still needs. Decide it here only when capacity cannot deny it,
+    /// so the ordinary transaction still reports every possible capacity reason. Then the
+    /// transaction succeeds exactly when none of its added cut clusters has a missing page.
     pub fn publication_blocked(&mut self, seed: usize, capacity: Capacity) -> bool {
         if capacity.clusters < self.mesh.clusters.len()
             || self.all_pages > capacity.geometry_bytes / PAGE_BYTES
@@ -218,6 +219,25 @@ impl<'a> State<'a> {
                 }
             }
             cursor += 1;
+        }
+        // The closure is complete. Its added cut clusters are those whose refinement stays
+        // inactive after publication; removals cannot introduce a missing page.
+        if !blocked {
+            'added: for &g in &self.journal {
+                let span = self.mesh.groups[g as usize].clusters;
+                for id in span.offset as usize..(span.offset + span.count) as usize {
+                    self.visits += 1;
+                    let c = &self.mesh.clusters[id];
+                    if !self.available[c.page.index()]
+                        && c.refined.is_none_or(|r| {
+                            !self.published.active[r.index()] && !self.proposal[r.index()]
+                        })
+                    {
+                        blocked = true;
+                        break 'added;
+                    }
+                }
+            }
         }
         for &g in &self.journal {
             self.proposal[g as usize] = false;

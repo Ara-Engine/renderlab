@@ -197,6 +197,52 @@ impl PageState {
         }
     }
 }
+/// Exact sums over every page state, so bookkeeping does not rescan all pages per upload.
+/// Every state write goes through `VirtualAsset::set_state`; `count` is the full recount.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Totals {
+    states: [usize; 7],
+    staging: usize,
+    owned_gpu: usize,
+    payload: usize,
+    cpu_ready: usize,
+}
+impl Totals {
+    fn apply(&mut self, state: &PageState, payload: usize, add: bool) {
+        let step = |total: &mut usize, value: usize| {
+            *total = if add { *total + value } else { *total - value }
+        };
+        step(&mut self.states[state.status() as usize], 1);
+        if let Some(p) = state.gpu() {
+            step(
+                &mut self.owned_gpu,
+                p.mesh.vertex.size() as usize
+                    + p.mesh.index.size() as usize
+                    + p.mesh.tangent.as_ref().map_or(0, |t| t.size() as usize),
+            );
+            step(
+                &mut self.staging,
+                p.staging.as_ref().map_or(0, |s| s.size() as usize),
+            );
+            step(&mut self.payload, payload);
+        }
+        if let PageState::Ready(g) = state {
+            step(
+                &mut self.cpu_ready,
+                g.vertices.capacity() * 48
+                    + g.indices.capacity() * 4
+                    + g.tangents.as_ref().map_or(0, |t| t.values.capacity() * 16),
+            );
+        }
+    }
+    fn count(states: &[PageState], pages: &[Page]) -> Self {
+        let mut totals = Self::default();
+        for (state, page) in states.iter().zip(pages) {
+            totals.apply(state, page.payload_bytes as usize, true);
+        }
+        totals
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct StreamStats {
     pub projection: Duration,
@@ -279,6 +325,7 @@ impl Drop for SceneLease {
 pub struct VirtualAsset {
     pub(crate) package: PreparedPackage,
     pub(crate) states: Vec<PageState>,
+    totals: Totals,
     io: PageIo,
     roots: Vec<PageId>,
     options: StreamOptions,
@@ -349,7 +396,24 @@ fn minimum_clusters(mesh: &VirtualMesh) -> usize {
         .map(|g| mesh.groups[g.index()].clusters.count as usize)
         .sum()
 }
+/// Sorted, deduplicated union. Page sets here are already strictly increasing, so they merge
+/// in linear time; any other input takes the general sort.
 fn union_into(a: &mut Vec<PageId>, b: &[PageId]) {
+    let increasing = |s: &[PageId]| s.windows(2).all(|w| w[0] < w[1]);
+    if increasing(a) && increasing(b) {
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            let next = a[i].min(b[j]);
+            i += usize::from(a[i] == next);
+            j += usize::from(b[j] == next);
+            out.push(next);
+        }
+        out.extend_from_slice(&a[i..]);
+        out.extend_from_slice(&b[j..]);
+        *a = out;
+        return;
+    }
     a.extend(b);
     a.sort_unstable();
     a.dedup();
@@ -459,9 +523,10 @@ impl VirtualAsset {
                 "virtual retained metadata capacity exceeds metadata_bytes",
             ));
         }
-        let states = (0..package.pages.len())
+        let states: Vec<_> = (0..package.pages.len())
             .map(|_| PageState::Missing)
             .collect();
+        let totals = Totals::count(&states, &package.pages);
         let stats = StreamStats {
             metadata_bytes,
             texture_bytes,
@@ -482,6 +547,7 @@ impl VirtualAsset {
         Ok(Self {
             package,
             states,
+            totals,
             io,
             roots,
             options,
@@ -522,14 +588,22 @@ impl VirtualAsset {
     pub fn retry(&mut self, page: PageId) -> Result<(), Error> {
         let state = self
             .states
-            .get_mut(page.index())
+            .get(page.index())
             .ok_or(Error::InvalidInput("retry page outside package"))?;
         if matches!(state, PageState::Failed(_)) {
-            *state = PageState::Missing;
+            self.set_state(page.index(), PageState::Missing);
             self.stats.retries += 1;
             self.revision += 1;
         }
         Ok(())
+    }
+    /// The only page-state write, keeping `totals` exact. Returns the replaced state.
+    pub(crate) fn set_state(&mut self, page: usize, state: PageState) -> PageState {
+        let payload = self.package.pages[page].payload_bytes as usize;
+        self.totals.apply(&state, payload, true);
+        let old = std::mem::replace(&mut self.states[page], state);
+        self.totals.apply(&old, payload, false);
+        old
     }
     pub fn stats(&self) -> &StreamStats {
         &self.stats
@@ -571,9 +645,11 @@ impl VirtualAsset {
             self.stats.io_read += result.read;
             self.stats.io_verify += result.verify;
             match result.geometry {
-                Ok(geometry) => self.states[result.page.index()] = PageState::Ready(geometry),
+                Ok(geometry) => {
+                    self.set_state(result.page.index(), PageState::Ready(geometry));
+                }
                 Err(e) => {
-                    self.states[result.page.index()] = PageState::Failed(PageFailure::new(&e));
+                    self.set_state(result.page.index(), PageState::Failed(PageFailure::new(&e)));
                     self.outstanding -= 1;
                     self.stats.failures += 1;
                 }
@@ -616,11 +692,11 @@ impl VirtualAsset {
         self.stats.protection += section.elapsed();
         let section = Instant::now();
         // Drop stale CPU completions; queued reads finish into the same bounded slots.
-        for (id, state) in self.states.iter_mut().enumerate() {
-            if matches!(state, PageState::Ready(_))
+        for id in 0..self.states.len() {
+            if matches!(self.states[id], PageState::Ready(_))
                 && protected.binary_search(&PageId(id as u32)).is_err()
             {
-                *state = PageState::Missing;
+                self.set_state(id, PageState::Missing);
                 self.outstanding -= 1;
                 self.stats.dropped_ready += 1;
             }
@@ -628,6 +704,7 @@ impl VirtualAsset {
         self.stats.stale_ready += section.elapsed();
         let start = Instant::now();
         let mut admitted = 0;
+        let mut batch = None;
         for &page in protected {
             if admitted == self.options.uploads_per_tick {
                 break;
@@ -648,11 +725,21 @@ impl VirtualAsset {
                 continue;
             }
             let section = Instant::now();
-            if let PageState::Ready(data) = &self.states[page.index()]
-                && let Some(gpu) = renderer.try_upload_virtual_page(data)?
-            {
+            let uploaded = match &self.states[page.index()] {
+                PageState::Ready(data) => renderer.try_upload_virtual_page(data, &mut batch),
+                _ => Ok(None),
+            };
+            // Pages already recorded in the batch complete only with its submission.
+            let uploaded = match uploaded {
+                Ok(gpu) => gpu,
+                Err(e) => {
+                    renderer.submit_virtual_uploads(batch)?;
+                    return Err(e);
+                }
+            };
+            if let Some(gpu) = uploaded {
                 // All memory was reserved before renderer allocation. Staging is explicit COPY_SRC.
-                self.states[page.index()] = PageState::Uploading(gpu);
+                self.set_state(page.index(), PageState::Uploading(gpu));
                 self.outstanding -= 1;
                 self.stats.uploads += 1;
                 self.stats.uploaded_bytes +=
@@ -662,6 +749,9 @@ impl VirtualAsset {
             }
             self.stats.upload_admission += section.elapsed();
         }
+        let section = Instant::now();
+        renderer.submit_virtual_uploads(batch)?;
+        self.stats.upload_admission += section.elapsed();
         self.stats.admission += start.elapsed();
         let section = Instant::now();
         for &page in protected {
@@ -671,7 +761,7 @@ impl VirtualAsset {
             if matches!(self.states[page.index()], PageState::Missing)
                 && self.io.request(page, &self.package.pages[page.index()])
             {
-                self.states[page.index()] = PageState::Queued;
+                self.set_state(page.index(), PageState::Queued);
                 self.outstanding += 1;
                 self.stats.reads += 1;
             }
@@ -681,30 +771,31 @@ impl VirtualAsset {
         Ok(())
     }
     fn complete(&mut self, completed: u64) {
-        for state in &mut self.states {
-            match state {
+        for id in 0..self.states.len() {
+            match &self.states[id] {
                 PageState::Uploading(p) if p.upload <= completed => {
-                    let PageState::Uploading(mut p) = std::mem::replace(state, PageState::Missing)
-                    else {
+                    let PageState::Uploading(mut p) = self.set_state(id, PageState::Missing) else {
                         unreachable!()
                     };
                     p.staging = None;
-                    *state = PageState::Resident(p);
+                    self.set_state(id, PageState::Resident(p));
                     self.revision += 1;
                 }
                 PageState::Retiring(p) if p.last_use <= completed => {
-                    *state = PageState::Missing;
+                    self.set_state(id, PageState::Missing);
                 }
                 _ => {}
             }
         }
     }
+    /// Page slots of every GPU-owned state plus their staging bytes.
     fn geometry_charge(&self) -> usize {
-        self.states
-            .iter()
-            .filter_map(PageState::gpu)
-            .map(|p| PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize))
-            .sum()
+        let states = &self.totals.states;
+        (states[PageStatus::Uploading as usize]
+            + states[PageStatus::Resident as usize]
+            + states[PageStatus::Retiring as usize])
+            * PAGE_BYTES
+            + self.totals.staging
     }
     fn make_room(&mut self, charge: usize, protected: &[PageId], completed: u64) {
         self.snapshot();
@@ -719,22 +810,20 @@ impl VirtualAsset {
                 continue;
             }
             if matches!(self.states[id], PageState::Resident(_)) {
-                let PageState::Resident(p) =
-                    std::mem::replace(&mut self.states[id], PageState::Missing)
-                else {
+                let PageState::Resident(p) = self.set_state(id, PageState::Missing) else {
                     unreachable!()
                 };
                 let releasable = p.last_use <= completed;
                 let allocation = PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize);
                 self.stats.inflight_retirements += u64::from(p.last_use > completed);
-                self.states[id] = PageState::Retiring(p);
+                self.set_state(id, PageState::Retiring(p));
                 self.stats.evictions += 1;
                 self.revision += 1;
                 // Observe the transient retirement even when its last use is already complete.
                 retiring += PAGE_BYTES;
                 self.stats.retiring_peak = self.stats.retiring_peak.max(retiring);
                 if completed_once && releasable {
-                    self.states[id] = PageState::Missing;
+                    self.set_state(id, PageState::Missing);
                     used -= allocation;
                     retiring -= PAGE_BYTES;
                 }
@@ -755,41 +844,23 @@ impl VirtualAsset {
     }
     fn snapshot(&mut self) {
         let section = Instant::now();
-        self.stats.states = [0; 7];
-        self.stats.published_bytes = 0;
-        self.stats.retiring_bytes = 0;
-        self.stats.staging_bytes = 0;
-        self.stats.owned_gpu_geometry_bytes = 0;
-        self.stats.cpu_ready_bytes = 0;
-        self.stats.payload_bytes = 0;
-        for (i, s) in self.states.iter().enumerate() {
-            self.stats.states[s.status() as usize] += 1;
-            if matches!(s, PageState::Resident(_)) {
-                self.stats.published_bytes += PAGE_BYTES;
-            }
-            if matches!(s, PageState::Retiring(_)) {
-                self.stats.retiring_bytes += PAGE_BYTES;
-            }
-            if let Some(p) = s.gpu() {
-                self.stats.owned_gpu_geometry_bytes += p.mesh.vertex.size() as usize
-                    + p.mesh.index.size() as usize
-                    + p.mesh.tangent.as_ref().map_or(0, |t| t.size() as usize);
-                self.stats.staging_bytes += p.staging.as_ref().map_or(0, |s| s.size() as usize);
-                self.stats.payload_bytes += self.package.pages[i].payload_bytes as usize;
-            }
-            if let PageState::Ready(g) = s {
-                self.stats.cpu_ready_bytes += g.vertices.capacity() * 48
-                    + g.indices.capacity() * 4
-                    + g.tangents.as_ref().map_or(0, |t| t.values.capacity() * 16);
-            }
-        }
+        #[cfg(test)]
+        assert_eq!(
+            self.totals,
+            Totals::count(&self.states, &self.package.pages),
+            "incremental page totals"
+        );
+        let totals = self.totals;
+        self.stats.states = totals.states;
+        self.stats.published_bytes = totals.states[PageStatus::Resident as usize] * PAGE_BYTES;
+        self.stats.retiring_bytes = totals.states[PageStatus::Retiring as usize] * PAGE_BYTES;
+        self.stats.staging_bytes = totals.staging;
+        self.stats.owned_gpu_geometry_bytes = totals.owned_gpu;
+        self.stats.cpu_ready_bytes = totals.cpu_ready;
+        self.stats.payload_bytes = totals.payload;
         self.stats.retiring_peak = self.stats.retiring_peak.max(self.stats.retiring_bytes);
         self.stats.staging_peak = self.stats.staging_peak.max(self.stats.staging_bytes);
-        self.stats.geometry_bytes = (self.stats.states[PageStatus::Uploading as usize]
-            + self.stats.states[PageStatus::Resident as usize]
-            + self.stats.states[PageStatus::Retiring as usize])
-            * PAGE_BYTES
-            + self.stats.staging_bytes;
+        self.stats.geometry_bytes = self.geometry_charge();
         self.stats.geometry_peak = self.stats.geometry_peak.max(self.stats.geometry_bytes);
         self.stats.pinned_bytes = self
             .roots

@@ -139,6 +139,36 @@ fn camera(distance: f32) -> Camera {
     .unwrap()
 }
 #[test]
+fn page_union_matches_sorted_dedup_for_ordered_and_unordered_sets() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    for case in 0..4000 {
+        let set = |next: &mut dyn FnMut(u64) -> u64| -> Vec<PageId> {
+            (0..next(40)).map(|_| PageId(next(64) as u32)).collect()
+        };
+        let (mut a, mut b) = (set(&mut next), set(&mut next));
+        // Most runtime inputs are already strictly increasing; keep both kinds.
+        if case % 4 != 0 {
+            for s in [&mut a, &mut b] {
+                s.sort_unstable();
+                s.dedup();
+            }
+        }
+        let mut expected = a.clone();
+        expected.extend(&b);
+        expected.sort_unstable();
+        expected.dedup();
+        let mut actual = a.clone();
+        union_into(&mut actual, &b);
+        assert_eq!(actual, expected, "a={a:?} b={b:?}");
+    }
+}
+#[test]
 fn aggregate_admission_shared_pages_offscreen_and_deterministic_demand() {
     let (package, _) = fixture(3);
     let dir = directory("admission");
@@ -396,22 +426,28 @@ pub(crate) fn retire_for_inflight_test(a: &mut VirtualAsset, completed: u64) {
 // A frozen conservative watermark isolates admission from asynchronous queue progress. The
 // separate wave test still requires real unfinished draws while evicting their last-use pages.
 pub(crate) fn admission_accounting(r: &mut Renderer) {
+    // Recounted from every state, independently of the incremental totals.
+    fn scanned_charge(a: &VirtualAsset) -> usize {
+        a.states
+            .iter()
+            .filter_map(PageState::gpu)
+            .map(|p| PAGE_BYTES + p.staging.as_ref().map_or(0, |s| s.size() as usize))
+            .sum()
+    }
     fn scan_policy(a: &mut VirtualAsset, charge: usize, protected: &[PageId], completed: u64) {
         for id in 0..a.states.len() {
-            if a.geometry_charge() + charge <= a.options.geometry_bytes {
+            if scanned_charge(a) + charge <= a.options.geometry_bytes {
                 break;
             }
             if protected.binary_search(&PageId(id as u32)).is_ok() {
                 continue;
             }
             if matches!(a.states[id], PageState::Resident(_)) {
-                let PageState::Resident(p) =
-                    std::mem::replace(&mut a.states[id], PageState::Missing)
-                else {
+                let PageState::Resident(p) = a.set_state(id, PageState::Missing) else {
                     unreachable!()
                 };
                 a.stats.inflight_retirements += u64::from(p.last_use > completed);
-                a.states[id] = PageState::Retiring(p);
+                a.set_state(id, PageState::Retiring(p));
                 a.stats.evictions += 1;
                 a.revision += 1;
                 a.snapshot();
@@ -452,30 +488,43 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
         )
         .unwrap();
         for id in [0, 1, 2, 3, 5, 6, 9] {
-            let mut page = r.try_upload_virtual_page(&data).unwrap().unwrap();
+            let mut batch = None;
+            let mut page = r
+                .try_upload_virtual_page(&data, &mut batch)
+                .unwrap()
+                .unwrap();
+            r.submit_virtual_uploads(batch).unwrap();
             r.test_drain("admission fixture upload");
             if id != 3 {
                 page.staging = None;
             }
-            a.states[id] = match id {
-                3 => PageState::Uploading(page),
-                5 | 6 => PageState::Retiring(page),
-                _ => PageState::Resident(page),
-            };
+            a.set_state(
+                id,
+                match id {
+                    3 => PageState::Uploading(page),
+                    5 | 6 => PageState::Retiring(page),
+                    _ => PageState::Resident(page),
+                },
+            );
         }
         let completed = r.completed_submission();
-        let page = r.try_upload_virtual_page(&data).unwrap().unwrap();
+        let mut batch = None;
+        let page = r
+            .try_upload_virtual_page(&data, &mut batch)
+            .unwrap()
+            .unwrap();
+        r.submit_virtual_uploads(batch).unwrap();
         let later = page.upload;
         assert!(later > completed);
-        a.states[4] = PageState::Uploading(page);
+        a.set_state(4, PageState::Uploading(page));
         if let PageState::Resident(p) = &mut a.states[1] {
             p.last_use = later;
         }
         if let PageState::Retiring(p) = &mut a.states[6] {
             p.last_use = later;
         }
-        a.states[7] = PageState::Queued;
-        a.states[8] = PageState::Ready(data);
+        a.set_state(7, PageState::Queued);
+        a.set_state(8, PageState::Ready(data));
         a.outstanding = 2;
         a.snapshot();
         r.test_drain("admission frozen watermark fixture complete");
@@ -540,6 +589,7 @@ pub(crate) fn admission_accounting(r: &mut Renderer) {
             );
             assert_eq!(actual.revision, expected.revision);
             assert_eq!(a.geometry_bytes, actual.geometry_charge());
+            assert_eq!(scanned_charge(&actual), actual.geometry_charge());
             assert!(a.geometry_peak <= actual.options.geometry_bytes);
             assert_eq!(actual.status(PageId(0)), Some(PageStatus::Resident));
             assert_eq!(actual.status(PageId(9)), Some(PageStatus::Resident));

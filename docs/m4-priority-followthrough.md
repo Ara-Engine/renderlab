@@ -21,3 +21,11 @@ Prepare one bounded native/API or scheduling observation that separates the poss
 Each worker owns a separate tool-created worktree and ignored evidence. Root owns this record, integration, acceptance and pushes. Opus first owns the shared GPU/heavy-build slot; Sol does source and light CPU work until root transfers that slot explicitly. Their files do not overlap. Use GPT-6.1 Sol and Opus 5.5 only, with xhigh reasoning and two Cargo jobs.
 
 Report actual source/binary/content identities, focused image or equivalence evidence, costs and remaining failures. Separate implementation from verification time. Preserve rejected evidence and avoid repeated campaigns after a decisive result. Root must either publish the verified fix or state the concrete remaining blocker; these workstreams must not silently disappear behind another milestone again.
+
+## Streaming result, 2026-11-04
+
+Opus's hillclimb roughly halves full-path p95 but misses the 8 ms target. On the full 338-frame quarry path, interleaved base/final runs at 47-51% host load give p95 34.06 ms -> 17.28 ms and p50 18.25 ms -> 10.09 ms. At 72% load p95 goes 47.96 ms -> 19.29 ms. Final debt, triangles (3,981,802), upload counts and geometry peak are unchanged. Late-window captures are byte-identical to base with zero validation errors.
+
+Retained mechanisms: one upload submission per tick, running page-state totals (checked against full recounts over the whole path), linear merge of sorted page lists, up-front rejection of doomed selector publications, and sorting only refinable groups. Selector outputs match on all 59 frozen calls.
+
+The remaining limiter is upload frames. 72-76 of 277 motion frames upload 48-64 pages; their median is 14.7 ms (selection 4.7, uploads 4.3, draw encoding 4.1). Frames without uploads have a median of 6.26 ms. The next candidate is pooling page buffers, which touches the shared `Mesh` ownership. Host contention from other builds inflates the absolute numbers. Evidence: `D:/Coding/renderlab-work/m4-stream-renewed-t3-0298b78f/`.

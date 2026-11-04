@@ -1,4 +1,11 @@
 use super::*;
+/// Page copies recorded during one `VirtualAsset::advance` tick, holding one reserved flight slot.
+pub(crate) struct VirtualUploadBatch {
+    encoder: wgpu::CommandEncoder,
+    scopes: OperationScopes,
+    slot: usize,
+    submission: u64,
+}
 // Renderer-private integration: virtual geometry uses the same pass as ordinary Draw.
 impl Renderer {
     pub(crate) fn virtual_admit_scene(&self, count: usize) -> Result<(), Error> {
@@ -64,10 +71,14 @@ impl Renderer {
         }
         Ok(())
     }
-    /// Caller reserves a full page slot plus staging before entering this allocator.
+    /// Caller reserves a full page slot plus staging before entering this allocator. The first
+    /// admitted page opens `batch` on a free flight slot; later pages only record their copies.
+    /// Every page completes with the batch, so the caller must pass it to `submit_virtual_uploads`
+    /// before any other submission.
     pub(crate) fn try_upload_virtual_page(
         &mut self,
         data: &asset::virtual_mesh::PageGeometry,
+        batch: &mut Option<VirtualUploadBatch>,
     ) -> Result<Option<crate::virtual_geometry::GpuPage>, Error> {
         self.check_fault()?;
         let tangents = data.tangents.as_ref();
@@ -77,13 +88,20 @@ impl Renderer {
         };
         let sizes = data.validate(self.limits)?;
         let tangent_bytes = self.validate_mesh_tangents(&data, tangents, sizes)?;
-        self.collect()?;
-        if self.occupied() >= FLIGHTS - 1 {
-            self.busy_uploads += 1;
-            return Ok(None);
+        if batch.is_none() {
+            self.collect()?;
+            if self.occupied() >= FLIGHTS - 1 {
+                self.busy_uploads += 1;
+                return Ok(None);
+            }
+            *batch = Some(VirtualUploadBatch {
+                slot: self.free_slot().unwrap(),
+                scopes: OperationScopes::new(&self.device),
+                encoder: self.device.create_command_encoder(&Default::default()),
+                submission: self.submissions + 1,
+            });
         }
-        let slot = self.free_slot().unwrap();
-        let scopes = OperationScopes::new(&self.device);
+        let batch = batch.as_mut().unwrap();
         let buffer = |label, size, usage| {
             self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -157,39 +175,13 @@ impl Renderer {
             }
         }
         staging.unmap();
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let encoder = &mut batch.encoder;
         encoder.copy_buffer_to_buffer(&staging, 0, &vertex, 0, sizes.0);
         encoder.copy_buffer_to_buffer(&staging, sizes.0, &index, 0, sizes.1);
         if let Some(t) = &tangent {
             encoder.copy_buffer_to_buffer(&staging, sizes.0 + sizes.1, t, 0, tangent_bytes);
         }
-        let done = Arc::new(OnceLock::new());
-        let callback = done.clone();
-        encoder.on_submitted_work_done(move || {
-            let _ = callback.set(());
-        });
-        let commands = encoder.finish();
-        if let Some(error) = scopes.finish() {
-            return Err(self.fail(error.to_string()));
-        }
-        let submitted_at = Instant::now();
-        self.queue.submit([commands]);
-        self.submissions += 1;
-        self.record_flight(
-            slot,
-            Flight {
-                done,
-                mapped: None,
-                lit: false,
-                shadowed: false,
-                submission: self.submissions,
-                frame: None,
-                revision: self.revision,
-                submitted_at,
-            },
-        );
         self.uploads.geometry += sizes.0 + sizes.1 + tangent_bytes;
-        self.check_fault()?;
         Ok(Some(crate::virtual_geometry::GpuPage {
             mesh: Mesh {
                 acceleration: None,
@@ -201,9 +193,55 @@ impl Renderer {
                 bounds: Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap(),
             },
             staging: Some(staging),
-            upload: self.submissions,
-            last_use: self.submissions,
+            upload: batch.submission,
+            last_use: batch.submission,
         }))
+    }
+    /// Submit one tick's page copies as one flight. Their pages were issued its index.
+    pub(crate) fn submit_virtual_uploads(
+        &mut self,
+        batch: Option<VirtualUploadBatch>,
+    ) -> Result<(), Error> {
+        let Some(VirtualUploadBatch {
+            encoder,
+            scopes,
+            slot,
+            submission,
+        }) = batch
+        else {
+            return Ok(());
+        };
+        let done = Arc::new(OnceLock::new());
+        let callback = done.clone();
+        encoder.on_submitted_work_done(move || {
+            let _ = callback.set(());
+        });
+        let commands = encoder.finish();
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        assert_eq!(
+            submission,
+            self.submissions + 1,
+            "virtual page batch must be the next submission"
+        );
+        let submitted_at = Instant::now();
+        self.queue.submit([commands]);
+        self.submissions += 1;
+        self.record_flight(
+            slot,
+            Flight {
+                done,
+                mapped: None,
+                lit: false,
+                shadowed: false,
+                submission,
+                frame: None,
+                revision: self.revision,
+                submitted_at,
+            },
+        );
+        self.check_fault()
     }
     /// One bounded streaming wake followed by the ordinary material/depth/MSAA/timestamp pass.
     /// None is nonblocking startup or submission backpressure; retain the previously presented image.
