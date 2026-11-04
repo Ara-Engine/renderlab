@@ -6,7 +6,7 @@ This partial M6 unit moves the verified ray-query experiment into ordinary regul
 
 `Renderer::new_with_hardware_shadows` adds `HardwareShadowOptions` to the existing renderer construction arguments. Existing constructors retain raster shadows and do not require ray-query features. Device creation belongs to the caller, which must request `EXPERIMENTAL_RAY_QUERY`, negotiate acceleration-structure limits, and acknowledge wgpu's experimental safety contract. The library adds no unsafe operation or dependency.
 
-The current path supports regular immutable meshes, affine transforms, opaque double-sided materials, directional hard shadows and one sample per pixel. Unsupported sample counts fail at construction. Unsupported material or transform inputs fail before frame writes. Local shadow requests fail atomically; unshadowed point and spot lights remain usable. Shadowed virtual rendering fails before streaming advances. It never substitutes full source geometry for a virtual cut.
+The path supports regular immutable meshes, affine transforms, opaque double-sided materials and directional hard shadows. The original checkpoint uses one sample per pixel. The [4x follow-up](m6-hardware-msaa.md) adds per-sample receiver queries and records its combined verification and review status. Unsupported material or transform inputs fail before frame writes. Local shadow requests fail atomically; unshadowed point and spot lights remain usable. Shadowed virtual rendering fails before streaming advances. It never substitutes full source geometry for a virtual cut.
 
 `examples/m6-shadows.rs --hardware-shadows --ack-experimental-wgpu-risk` exercises the path on the owned fixture or an existing prepared scan. `--hardware-max-estimated-bytes <bytes|none>` sets the estimate policy. In hardware mode the example removes the fixture's local lights and marks its objects double-sided. Its fixture images therefore cannot be compared directly with raster fixture images. Prepared scans pass through unchanged for library validation.
 
@@ -20,7 +20,7 @@ A top-level acceleration structure, or TLAS, contains every submitted instance, 
 
 Visibility queries run inside ordinary lit fragment shading. The production path has no diagnostic receiver textures, visibility-mask pass, hit readback or ordinary-frame completion wait. Ray origins use the light-facing derivative geometric normal, independent of normal maps. Bias magnitude and finite directional coverage retain the raster planner's settings. Hardware shadows use sampling records and a one-texel fallback texture instead of allocating the raster shadow maps.
 
-The optional acceleration structure uses group 0 binding 2. Environment bindings and the lighting uniform remain unchanged. Group 3 binding 9 remains available for the independent environment reconstruction work.
+The optional acceleration structure uses group 0 binding 2. The original hardware unit leaves environment bindings and the lighting uniform unchanged. The subsequent [RLE2 integration](m5-independent-integration.md) uses group 3 binding 9 for its second environment bank and passes combined device verification.
 
 ## Memory and observations
 
@@ -50,6 +50,6 @@ The host is Windows/Vulkan on Ryzen 7 7800X3D and RTX 4070 SUPER with NVIDIA 617
 
 ## Remaining M6 work
 
-The raster path's scan undersampling remains a known quality failure. Hardware shadows provide a separate supported option for this bounded subset. Single-sided materials, virtual-cut integration, 4x samples, local ray shadows, softness and broad motion/contact acceptance remain open. Native interaction and development-loop timings were not rerun for this unit. The final matched Unreal quality and performance gates remain unmet.
+The raster path's scan undersampling remains a known quality failure. Hardware shadows provide a separate supported option for this bounded subset. Single-sided materials, virtual-cut integration, local ray shadows, softness and broad motion/contact acceptance remain open. The 4x follow-up is device-verified and independently accepted as partial M6. Native interaction and development-loop timings were not rerun for this unit. The final matched Unreal quality and performance gates remain unmet.
 
-The review also records bounded follow-ups. Normalize shader line endings in the protected affine comparison, make allocator labels unique across renderers sharing a device, and rename `actual_as_bytes` to reflect allocator observation. Empty-scene and re-enable device coverage remain unverified. TLAS preparation currently depends on every later frame failure being terminal; adding a recoverable failure there requires explicit pending-build state or installation after submission. These findings do not invalidate the tested checkpoint.
+The 4x follow-up normalizes shader line endings in the protected affine comparison, gives allocator labels a renderer-specific nonce, and renames `actual_as_bytes` to `observed_as_bytes`. Empty-scene and re-enable device coverage remain unverified. TLAS preparation currently depends on every later frame failure being terminal; adding a recoverable failure there requires explicit pending-build state or installation after submission. These findings do not invalidate the tested checkpoint.

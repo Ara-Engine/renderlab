@@ -12,6 +12,8 @@ pub(crate) struct EnvironmentInner {
     pub renderer: Arc<()>,
     pub diffuse: EnvironmentCube,
     pub specular: EnvironmentCube,
+    pub specular_second: Option<EnvironmentCube>,
+    pub independent: bool,
     pub yaw: f32,
     pub levels: u32,
     pub hash: [u8; 32],
@@ -98,7 +100,11 @@ impl EnvironmentState {
                 cos as f32,
                 sin as f32,
                 self.parameters.intensity,
-                map.0.levels as f32,
+                if map.0.independent {
+                    -(map.0.levels as f32)
+                } else {
+                    map.0.levels as f32
+                },
             ]) {
                 dst.copy_from_slice(&value.to_ne_bytes());
             }

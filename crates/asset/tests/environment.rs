@@ -22,6 +22,123 @@ fn prepared() -> PreparedEnvironment {
     .unwrap()
 }
 
+fn field() -> PreparedEnvironment {
+    let limits = Limits::default();
+    PreparedEnvironment::new_independent(
+        metadata(),
+        CubeLevel::new(1, vec![[1e-20, 2.0, 1e30]; 6], limits).unwrap(),
+        (0..FIELD_LEVELS)
+            .map(|i| CubeLevel::new(2, vec![[i as f32, 1e6, 1e-20]; 24], limits).unwrap())
+            .collect(),
+        roughness_knots(),
+        FieldGenerator::F64HostF32GpuV1,
+        limits,
+    )
+    .unwrap()
+}
+
+#[test]
+fn independent_roundtrip_and_exact_roughness_brackets() {
+    let p = field();
+    let bytes = encode(&p, Limits::default()).unwrap();
+    assert_eq!(&bytes[..4], b"RLE2");
+    assert_eq!(bytes.len(), RLE2_HEADER_BYTES + p.pixel_bytes() as usize);
+    assert_eq!(p, decode(&bytes, Limits::default()).unwrap());
+    assert_eq!(
+        bytes,
+        encode(
+            &decode(&bytes, Limits::default()).unwrap(),
+            Limits::default()
+        )
+        .unwrap()
+    );
+    assert!(matches!(
+        prepared().specular_layout(),
+        SpecularLayout::LegacyMipChain
+    ));
+    let knots = roughness_knots();
+    for i in 0..64 {
+        let (lo, hi, t) = roughness_bracket(knots[i]).unwrap();
+        assert_eq!((lo, hi, t), (i, i + 1, 0.0));
+        let r = (knots[i] + knots[i + 1]) * 0.5;
+        let (lo, hi, t) = roughness_bracket(r).unwrap();
+        assert_eq!((lo, hi), (i, i + 1));
+        let recovered = (1.0 - t) * knots[lo].powi(4) + t * knots[hi].powi(4);
+        assert!((recovered - r.powi(4)).abs() < 1e-6);
+    }
+    assert_eq!(roughness_bracket(1.0).unwrap(), (64, 64, 0.0));
+    for r in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        assert!(roughness_bracket(r).is_err());
+    }
+    assert_eq!(
+        field_texels(16, 128, Limits::default()).unwrap() * 12,
+        76_695_552
+    );
+}
+
+#[test]
+fn independent_rejects_conventions_knots_payload_dimensions_and_policy() {
+    let p = field();
+    let bytes = encode(&p, Limits::default()).unwrap();
+    for (at, v) in [
+        (4, 1_u32),
+        (8, 2),
+        (12, 2),
+        (20, 1),
+        (64, 0),
+        (68, 3),
+        (72, 64),
+        (76, 1),
+        (80, u32::MAX),
+        (88, u32::MAX),
+        (96, 2),
+        (100, 2),
+        (104, 2),
+        (108, 2),
+        (112, 64),
+        (116, 1),
+        (120, 0),
+        (128, (-0.0_f32).to_bits()),
+        (132, f32::NAN.to_bits()),
+        (136, 1.0_f32.to_bits()),
+        (RLE2_HEADER_BYTES, f32::INFINITY.to_bits()),
+        (bytes.len() - 4, (-1.0_f32).to_bits()),
+    ] {
+        let mut bad = bytes.clone();
+        bad[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        assert!(decode(&bad, Limits::unbounded()).is_err(), "offset {at}");
+    }
+    for len in [0, 95, 96, 127, 128, RLE2_HEADER_BYTES - 1, bytes.len() - 1] {
+        assert!(decode(&bytes[..len], Limits::default()).is_err());
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode(&trailing, Limits::default()).is_err());
+    for limits in [
+        Limits {
+            max_dimension: 1,
+            ..Limits::default()
+        },
+        Limits {
+            max_texels: p.texel_count() - 1,
+            ..Limits::default()
+        },
+        Limits {
+            max_payload_bytes: p.pixel_bytes() - 1,
+            ..Limits::default()
+        },
+    ] {
+        assert!(decode(&bytes, limits).is_err());
+        assert!(encode(&p, limits).is_err());
+    }
+    let mut legacy = encode(&prepared(), Limits::default()).unwrap();
+    legacy[..4].copy_from_slice(b"RLE2");
+    assert!(decode(&legacy, Limits::default()).is_err());
+    let mut new = bytes;
+    new[..4].copy_from_slice(b"RLE1");
+    assert!(decode(&new, Limits::default()).is_err());
+}
+
 #[test]
 fn deterministic_roundtrip_keeps_f32_range_and_metadata() {
     let p = prepared();

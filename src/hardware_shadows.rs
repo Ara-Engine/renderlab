@@ -6,7 +6,8 @@ use crate::{Error, Light, SampleCount, ShadowRequest, Shadows};
 /// safety contract in its own `DeviceDescriptor`. Renderlab never enables it implicitly.
 ///
 /// Initial support: regular, immutable geometry; opaque double-sided materials;
-/// directional hard shadows; 1x samples. Virtual geometry is rejected while shadowed.
+/// directional hard shadows; 1x or per-sample 4x visibility. Virtual geometry is
+/// rejected while shadowed. 4x requires the adapter's MULTISAMPLED_SHADING capability.
 #[derive(Clone, Copy, Debug)]
 pub struct HardwareShadowOptions {
     /// Admission estimate for all owned AS generations and pending build scratch,
@@ -26,7 +27,6 @@ impl HardwareShadowOptions {
         self,
         features: wgpu::Features,
         limits: &wgpu::Limits,
-        samples: SampleCount,
     ) -> Result<(), Error> {
         if !features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             || limits.max_acceleration_structures_per_shader_stage < 1
@@ -36,11 +36,6 @@ impl HardwareShadowOptions {
         {
             return Err(Error::InvalidInput(
                 "hardware shadows require caller-enabled EXPERIMENTAL_RAY_QUERY and nonzero AS device limits",
-            ));
-        }
-        if samples != SampleCount::One {
-            return Err(Error::InvalidInput(
-                "hardware shadows currently require 1x samples",
             ));
         }
         Ok(())
@@ -76,8 +71,9 @@ pub struct HardwareShadowStats {
     pub estimated_as_bytes: u64,
     /// Build scratch estimates awaiting submission completion.
     pub estimated_pending_scratch_bytes: u64,
-    /// Named allocator attribution for live structures, not physical residency.
-    pub actual_as_bytes: Option<u64>,
+    /// Named allocator attribution for this renderer's live structures. Labels are
+    /// unique across renderers, but these bytes do not establish physical residency.
+    pub observed_as_bytes: Option<u64>,
     /// All currently reported wgpu scratch allocations immediately after the latest
     /// build submission; may include other internal work. None means unavailable.
     pub observed_build_scratch_bytes: Option<u64>,
@@ -101,15 +97,18 @@ pub(crate) fn validate_requests(lights: &[Light], shadows: &Shadows) -> Result<(
 
 pub(crate) const VISIBILITY_BEGIN: &str = "// renderlab: direct visibility begin";
 pub(crate) const VISIBILITY_END: &str = "// renderlab: direct visibility end";
+const RECEIVER_WORLD: &str = "@location(4) world:vec3<f32>,";
+const SAMPLE_RECEIVER_WORLD: &str =
+    "@location(4) @interpolate(perspective, sample) world:vec3<f32>,";
 
 /// A small, explicit shader seam keeps the normal one-file reload. The optional
 /// extension and AS binding exist only in the hardware pipeline's shader module.
-pub(crate) fn shader_source(source: &str) -> Result<String, Error> {
+pub(crate) fn shader_source(source: &str, samples: SampleCount) -> Result<String, Error> {
     let vertices = |text: &str| {
         text.split_once("// renderlab: affine vertices begin")
             .and_then(|(_, rest)| {
                 rest.split_once("// renderlab: affine vertices end")
-                    .map(|(body, _)| body.to_owned())
+                    .map(|(body, _)| body.replace("\r\n", "\n"))
             })
     };
     if vertices(source).is_none()
@@ -135,17 +134,29 @@ pub(crate) fn shader_source(source: &str) -> Result<String, Error> {
             "hardware shadow visibility markers must occur exactly once, in order",
         ));
     }
-    Ok(format!(
+    let composed = format!(
         "enable wgpu_ray_query;\n{before}\n{}\n{after}",
         include_str!("../shaders/hardware_shadows.wgsl")
-    ))
+    );
+    match samples {
+        SampleCount::One => Ok(composed),
+        SampleCount::Four => {
+            if composed.matches(RECEIVER_WORLD).count() != 1 {
+                return Err(Error::InvalidInput(
+                    "4x hardware shadows require the unchanged receiver world declaration",
+                ));
+            }
+            // Sample-rate execution alone would still query pixel-centre world positions.
+            Ok(composed.replacen(RECEIVER_WORLD, SAMPLE_RECEIVER_WORLD, 1))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn hardware_policy_requires_explicit_device_feature_and_one_sample() {
+    fn hardware_policy_requires_explicit_device_feature_and_limits() {
         let options = HardwareShadowOptions::default();
         let limits = wgpu::Limits {
             max_blas_primitive_count: 1,
@@ -154,27 +165,18 @@ mod tests {
             max_acceleration_structures_per_shader_stage: 1,
             ..Default::default()
         };
-        assert!(
-            options
-                .validate(wgpu::Features::empty(), &limits, SampleCount::One)
-                .is_err()
-        );
+        assert!(options.validate(wgpu::Features::empty(), &limits).is_err());
         assert!(
             options
                 .validate(
                     wgpu::Features::EXPERIMENTAL_RAY_QUERY,
-                    &limits,
-                    SampleCount::Four
+                    &wgpu::Limits::default(),
                 )
                 .is_err()
         );
         assert!(
             options
-                .validate(
-                    wgpu::Features::EXPERIMENTAL_RAY_QUERY,
-                    &limits,
-                    SampleCount::One
-                )
+                .validate(wgpu::Features::EXPERIMENTAL_RAY_QUERY, &limits,)
                 .is_ok()
         );
     }
@@ -194,24 +196,53 @@ mod tests {
     #[test]
     fn hardware_reload_seam_rejects_missing_markers_and_displacement() {
         let source = include_str!("../shaders/scene.wgsl");
-        let composed = shader_source(source).unwrap();
+        let composed = shader_source(source, SampleCount::One).unwrap();
         assert!(composed.starts_with("enable wgpu_ray_query;"));
         assert_eq!(composed.matches("fn hard_shadow(").count(), 1);
-        assert!(shader_source(&source.replace(VISIBILITY_END, "")).is_err());
-        assert!(shader_source(&source.replace(VISIBILITY_BEGIN, "")).is_err());
+        assert!(shader_source(&source.replace(VISIBILITY_END, ""), SampleCount::One).is_err());
+        assert!(shader_source(&source.replace(VISIBILITY_BEGIN, ""), SampleCount::One).is_err());
         assert!(
             shader_source(
-                &source.replace("vec4<f32>(position, 1.0)", "vec4<f32>(position*2.0, 1.0)")
+                &source.replace("vec4<f32>(position, 1.0)", "vec4<f32>(position*2.0, 1.0)"),
+                SampleCount::One,
             )
             .is_err()
         );
         assert!(
-            shader_source(&source.replace(
-                "const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);",
-                "const TINT: vec3<f32> = vec3<f32>(0.5);"
-            ))
+            shader_source(
+                &source.replace(
+                    "const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);",
+                    "const TINT: vec3<f32> = vec3<f32>(0.5);"
+                ),
+                SampleCount::One
+            )
             .is_ok()
         );
+    }
+    #[test]
+    fn hardware_reload_accepts_lf_and_crlf_but_still_rejects_displacement() {
+        let lf = include_str!("../shaders/scene.wgsl").replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        for samples in [SampleCount::One, SampleCount::Four] {
+            let a = shader_source(&lf, samples).unwrap();
+            let b = shader_source(&crlf, samples).unwrap();
+            assert_eq!(a.replace("\r\n", "\n"), b.replace("\r\n", "\n"));
+            let displaced =
+                crlf.replace("vec4<f32>(position, 1.0)", "vec4<f32>(position*2.0, 1.0)");
+            assert!(shader_source(&displaced, samples).is_err());
+        }
+    }
+    #[test]
+    fn hardware_four_samples_interpolate_receiver_at_each_sample() {
+        let source = include_str!("../shaders/scene.wgsl");
+        let one = shader_source(source, SampleCount::One).unwrap();
+        let four = shader_source(source, SampleCount::Four).unwrap();
+        assert!(!one.contains(SAMPLE_RECEIVER_WORLD));
+        assert_eq!(four.matches(SAMPLE_RECEIVER_WORLD).count(), 1);
+        assert_eq!(four.replace(SAMPLE_RECEIVER_WORLD, RECEIVER_WORLD), one);
+        assert!(shader_source(&source.replace(RECEIVER_WORLD, ""), SampleCount::Four).is_err());
+        let duplicate = format!("{source}\n{RECEIVER_WORLD}");
+        assert!(shader_source(&duplicate, SampleCount::Four).is_err());
     }
     #[test]
     fn hardware_rejects_local_shadow_requests() {

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+gpu-environment = ["dep:wgpu", "dep:pollster"]
+
 [dependencies]
 renderlab-asset = { path = "../asset" }
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
@@ -12,3 +15,12 @@ sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 serde_json = "=1.0.149"
 meshopt = "=0.7.0"
 mikktspace = { version = "=0.3.0", default-features = false, features = ["glam"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"], optional = true }
+pollster = { version = "0.4", optional = true }
+
+[dev-dependencies]
+log = "0.4"
+
+[[example]]
+name = "environment_field"
+required-features = ["gpu-environment"]

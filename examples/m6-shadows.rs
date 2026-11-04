@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 #[path = "m4/cameras.rs"]
 mod cameras;
+#[allow(dead_code)]
+#[path = "../support/environment_controls.rs"]
+mod environment_controls;
 #[path = "../support/hdr_files.rs"]
 mod hdr_files;
 #[allow(dead_code)]
@@ -31,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut asset_path, mut camera_path, mut light_path) =
         (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
     let mut shader_path = None::<PathBuf>;
+    let mut environment_path = None::<PathBuf>;
     let mut hardware = false;
     let mut experimental_ack = false;
     let mut hardware_budget = HardwareShadowOptions::default().max_estimated_bytes;
@@ -50,6 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--cameras" => camera_path = Some(args.next().ok_or("missing cameras")?.into()),
             "--lighting" => light_path = Some(args.next().ok_or("missing lighting")?.into()),
             "--shader" => shader_path = Some(args.next().ok_or("missing shader")?.into()),
+            "--environment" => {
+                environment_path = Some(args.next().ok_or("missing environment")?.into())
+            }
             "--output" => out = args.next().ok_or("missing output")?.into(),
             "--frames" => frames = args.next().ok_or("missing frames")?.parse()?,
             "--samples" => {
@@ -83,8 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if hardware && !experimental_ack {
         return Err("--hardware-shadows requires --ack-experimental-wgpu-risk: wgpu experimental features may contain undefined behavior".into());
     }
-    if hardware && (samples != SampleCount::One || ["point", "spot"].contains(&motion.as_str())) {
-        return Err("hardware evidence supports 1x directional shadows only".into());
+    if hardware && ["point", "spot"].contains(&motion.as_str()) {
+        return Err("hardware evidence supports directional shadows only".into());
     }
     if !["camera", "sun", "point", "spot", "blocker", "static"].contains(&motion.as_str()) {
         return Err("motion camera|sun|point|spot|blocker|static".into());
@@ -168,6 +175,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     if hardware {
+        if samples == SampleCount::Four
+            && !adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::MULTISAMPLED_SHADING)
+        {
+            return Err("4x hardware shadows require sample-rate shading support".into());
+        }
         if !adapter
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
@@ -259,6 +274,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view_formats: &[],
     });
     let deadline = Instant::now() + Duration::from_secs(180);
+    if let Some(path) = &environment_path {
+        let data = environment_controls::load_environment(
+            path,
+            asset::environment::Limits {
+                max_dimension: policy.dimension("environment", "max_dimension", 4096),
+                max_texels: policy.size("environment", "max_texels", 64 * 1024 * 1024) as u64,
+                max_payload_bytes: policy.size(
+                    "environment",
+                    "max_payload_bytes",
+                    128 * 1024 * 1024,
+                ) as u64,
+            },
+        )?;
+        let map = loop {
+            if let Some(map) = r.try_upload_environment(&data)? {
+                break map;
+            }
+            progress(&mut r, deadline)?;
+        };
+        r.set_environment(Some(&map), EnvironmentParameters::default())?;
+        fs::write(
+            out.join("environment.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "path": path, "generator_hash": format!("{:?}", data.metadata().generator_hash),
+                "layout": format!("{:?}", data.specular_layout()),
+                "parameters": "default intensity=1 yaw=0; metadata yaw retained"
+            }))?,
+        )?;
+    }
     let mut asset = asset_path
         .as_deref()
         .map(|p| {

@@ -86,6 +86,7 @@ impl LightingGpu {
                     texture_entry(2),
                     cube_entry(6),
                     cube_entry(7),
+                    cube_entry(9),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -390,6 +391,16 @@ impl Renderer {
                             ),
                         },
                         wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.environment
+                                    .selected
+                                    .as_ref()
+                                    .and_then(|map| map.0.specular_second.as_ref())
+                                    .map_or(&state.dummy_environment.view, |cube| &cube.view),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
                             binding: 0,
                             resource: state.uniform.as_entire_binding(),
                         },
@@ -561,8 +572,8 @@ impl Renderer {
 fn cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     let mut entry = texture_entry(binding);
     entry.ty = wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-        view_dimension: wgpu::TextureViewDimension::Cube,
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2Array,
         multisampled: false,
     };
     entry

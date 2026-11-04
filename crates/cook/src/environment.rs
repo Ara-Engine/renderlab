@@ -5,7 +5,57 @@ use renderlab_asset::environment::{
 };
 use sha2::{Digest, Sha256};
 use std::f64::consts::{PI, TAU};
+#[cfg(feature = "gpu-environment")]
+pub mod gpu;
 mod specular;
+
+/// Candidate A's fixed production recipe. Selecting it does not override any caller policy.
+pub const FIELD_SETTINGS: PreparationSettings = PreparationSettings {
+    diffuse_size: 16,
+    specular_size: asset::FIELD_FACE_SIZE,
+    diffuse_samples: 16384,
+    specular_samples: 16384,
+};
+
+/// Full field admission retains all 103 billion evaluations, including redundant alpha-floor knots.
+pub fn estimate_field_cost(input: &LinearEnvironment, limits: CookLimits) -> Result<CookCost> {
+    source_texels(input.width, input.height, limits)?;
+    let n = asset::field_texels(16, asset::FIELD_FACE_SIZE, limits.prepared)?;
+    let source = input.pixels.len() as u64;
+    let samples = 64_u64 * 6 * 128 * 128 * 16384
+        + 6 * 16 * 16 * 16384
+        + 6 * 128 * 128
+        + 16384
+        + source * 2
+        + 8192;
+    // Source + final RGB + f64 CDF/shared tables + rounded upload tables + one level + tile staging.
+    // GPU allocations are separately device-admitted; driver bookkeeping is excluded.
+    let bytes = source
+        .checked_mul(36)
+        .and_then(|s| s.checked_add(n * 12))
+        .and_then(|s| {
+            s.checked_add(
+                64 * 8192 * 16
+                    + 8192 * 56
+                    + 8192 * 32
+                    + 8192 * 32
+                    + 6 * 128 * 128 * 12
+                    + 1024 * (48 + 16)
+                    + 16384 * 48,
+            )
+        })
+        .ok_or_else(|| Error("environment field working size overflow".into()))?;
+    if samples > limits.max_sample_evaluations || bytes > limits.max_working_bytes {
+        return Err(Error(format!(
+            "environment field policy rejected: {samples} sample evaluations, {bytes} owned working bytes"
+        )));
+    }
+    Ok(CookCost {
+        sample_evaluations: samples,
+        owned_working_bytes: bytes,
+        prepared_pixel_bytes: n * 12,
+    })
+}
 
 /// Linear Rec.709, row-major equirectangular RGB32F. No exposure, transfer curve or clipping.
 /// Pixel centres: phi=2*pi*((x+.5)/width-.5), theta=pi*(y+.5)/height;

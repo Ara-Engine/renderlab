@@ -1,4 +1,4 @@
-//! File boundary for RLE1 loading and small, live yaw/intensity edits.
+//! File boundary for RLE1/RLE2 loading and small, live yaw/intensity edits.
 use renderlab::{EnvironmentMap, EnvironmentParameters, Renderer, asset::environment};
 use serde::Deserialize;
 use std::path::Path;
@@ -34,7 +34,10 @@ impl EnvironmentFile {
         limits: environment::Limits,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if path.is_some() && !renderer.environment_supported() {
-            return Err("RLE1 environment requires adapter FLOAT32_FILTERABLE; omit --environment for constant fallback".into());
+            return Err(
+                "environment requires six array layers; omit --environment for constant fallback"
+                    .into(),
+            );
         }
         let pending = path.map(|p| load_environment(p, limits)).transpose()?;
         Ok(Self {
@@ -55,7 +58,7 @@ impl EnvironmentFile {
             self.map = Some(map);
             self.pending = None;
             eprintln!(
-                "environment_uploaded f32_filtered=true owned_bytes={} upload_bytes={}",
+                "environment_uploaded f32_manual_filter=true owned_bytes={} upload_bytes={}",
                 renderer.stats().ownership.environment_bytes.live,
                 renderer.stats().uploads.environment
             );
@@ -102,7 +105,7 @@ pub fn load_environment(
     let file = std::fs::File::open(path)?;
     let cap = limits
         .max_payload_bytes
-        .saturating_add(environment::HEADER_BYTES as u64);
+        .saturating_add(environment::MAX_HEADER_BYTES as u64);
     if file.metadata()?.len() > cap {
         return Err("environment file exceeds payload limit".into());
     }

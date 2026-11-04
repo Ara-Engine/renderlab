@@ -1,12 +1,13 @@
 use super::*;
 use crate::environment::{EnvironmentCube, EnvironmentInner, pack_level, upload_bytes};
-use renderlab_asset::environment::PreparedEnvironment;
+use renderlab_asset::environment::{PreparedEnvironment, SpecularLayout};
 
 fn cube(
     device: &wgpu::Device,
     ledger: &Ledger,
     size: u32,
     levels: u32,
+    layers: u32,
     format: wgpu::TextureFormat,
     bytes: u64,
 ) -> EnvironmentCube {
@@ -16,7 +17,7 @@ fn cube(
             size: wgpu::Extent3d {
                 width: size,
                 height: size,
-                depth_or_array_layers: 6,
+                depth_or_array_layers: layers,
             },
             mip_level_count: levels,
             sample_count: 1,
@@ -29,7 +30,7 @@ fn cube(
     );
     let view = ledger.own(
         texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::Cube),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         }),
         ResourceKind::TextureView,
@@ -46,8 +47,15 @@ pub(super) fn dummy_cube(
     queue: &wgpu::Queue,
     ledger: &Ledger,
 ) -> EnvironmentCube {
-    // This filterable zero cube keeps the constant/direct ABI available without optional features.
-    let cube = cube(device, ledger, 1, 1, wgpu::TextureFormat::Rgba16Float, 48);
+    let cube = cube(
+        device,
+        ledger,
+        1,
+        1,
+        6,
+        wgpu::TextureFormat::Rgba16Float,
+        48,
+    );
     queue.write_texture(
         cube._texture.as_image_copy(),
         &[0; 48],
@@ -115,9 +123,7 @@ impl Renderer {
     }
 
     pub fn environment_supported(&self) -> bool {
-        self.device
-            .features()
-            .contains(wgpu::Features::FLOAT32_FILTERABLE)
+        self.device.limits().max_texture_array_layers >= 6
     }
     pub fn environment_limits(&self) -> EnvironmentLimits {
         EnvironmentLimits {
@@ -140,15 +146,20 @@ impl Renderer {
         Ok(())
     }
     /// Bounded immediate upload. Busy performs no packing, allocation or queue write.
-    /// Requires FLOAT32_FILTERABLE on the caller-created device; no range-losing fallback.
+    /// Uses textureLoad on RGB32F arrays, without optional float filtering features.
     pub fn try_upload_environment(
         &mut self,
         data: &PreparedEnvironment,
     ) -> Result<Option<EnvironmentMap>, Error> {
         self.check_fault()?;
-        if !self.environment_supported() {
+        let independent = matches!(
+            data.specular_layout(),
+            SpecularLayout::IndependentRoughness { .. }
+        );
+        let required_layers = if independent { 252 } else { 6 };
+        if self.device.limits().max_texture_array_layers < required_layers {
             return Err(Error::InvalidInput(
-                "mapped environments require device FLOAT32_FILTERABLE; constant lighting remains available",
+                "environment exceeds device array layers",
             ));
         }
         let started = Instant::now();
@@ -184,6 +195,7 @@ impl Renderer {
             &self.ledger,
             data.diffuse_irradiance().size(),
             1,
+            6,
             wgpu::TextureFormat::Rgba32Float,
             diffuse_bytes,
         );
@@ -192,21 +204,52 @@ impl Renderer {
             &self.device,
             &self.ledger,
             data.specular_radiance()[0].size(),
-            levels,
+            if independent { 1 } else { levels },
+            if independent { 252 } else { 6 },
             wgpu::TextureFormat::Rgba32Float,
-            bytes - diffuse_bytes,
+            if independent {
+                42 * data.specular_radiance()[0].texels().len() as u64 * 16
+            } else {
+                bytes - diffuse_bytes
+            },
         );
+        let specular_second = independent.then(|| {
+            cube(
+                &self.device,
+                &self.ledger,
+                data.specular_radiance()[0].size(),
+                1,
+                138,
+                wgpu::TextureFormat::Rgba32Float,
+                23 * data.specular_radiance()[0].texels().len() as u64 * 16,
+            )
+        });
         let mut hash = Sha256::new();
         for (target, mips) in [
             (&diffuse, std::slice::from_ref(data.diffuse_irradiance())),
             (&specular, data.specular_radiance()),
         ] {
             for (mip, level) in mips.iter().enumerate() {
+                let is_specular = std::ptr::eq(target, &specular);
+                let (target, mip, layer) = if independent && is_specular {
+                    if mip < 42 {
+                        (target, 0, mip as u32 * 6)
+                    } else {
+                        (specular_second.as_ref().unwrap(), 0, (mip as u32 - 42) * 6)
+                    }
+                } else {
+                    (target, mip as u32, 0)
+                };
                 let packed = pack_level(level);
                 hash.update(&packed);
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        mip_level: mip as u32,
+                        mip_level: mip,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
                         ..target._texture.as_image_copy()
                     },
                     &packed,
@@ -227,10 +270,13 @@ impl Renderer {
         }
         hash.update(data.diffuse_irradiance().size().to_ne_bytes());
         hash.update(data.specular_radiance()[0].size().to_ne_bytes());
+        hash.update([u8::from(independent)]);
         let map = EnvironmentMap(Arc::new(EnvironmentInner {
             renderer: self.identity.clone(),
             diffuse,
             specular,
+            specular_second,
+            independent,
             levels,
             yaw: data.metadata().rotation_y_radians,
             hash: hash.finalize().into(),

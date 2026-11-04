@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_RENDERER_LABEL: AtomicU64 = AtomicU64::new(1);
 
 /// Immutable source inputs are retained with the BLAS through builds and every TLAS
 /// generation. Safe wgpu owns submitted backend lifetimes.
@@ -57,6 +60,7 @@ pub(super) struct HardwareState {
     active: Option<SceneAcceleration>,
     retired: Vec<(u64, SceneAcceleration)>,
     pending: Vec<(u64, PendingBuild)>,
+    renderer_label: u64,
     next_label: u64,
     accounting_available: bool,
     pub stats: HardwareShadowStats,
@@ -139,6 +143,7 @@ impl HardwareState {
             active: None,
             retired: vec![],
             pending: vec![],
+            renderer_label: NEXT_RENDERER_LABEL.fetch_add(1, Ordering::Relaxed),
             next_label: 0,
             accounting_available: device.generate_allocator_report().is_some(),
             stats: HardwareShadowStats::default(),
@@ -146,7 +151,10 @@ impl HardwareState {
     }
     fn label(&mut self, kind: &str) -> String {
         self.next_label += 1;
-        format!("renderlab hardware {kind} {}", self.next_label)
+        format!(
+            "renderlab hardware {} {kind} {}",
+            self.renderer_label, self.next_label
+        )
     }
     fn observed(
         &mut self,
@@ -424,7 +432,7 @@ impl HardwareState {
             pending_builds: self.pending.len(),
             estimated_as_bytes: owned.hardware_as_estimated_bytes.live,
             estimated_pending_scratch_bytes: owned.hardware_scratch_estimated_bytes.live,
-            actual_as_bytes: self
+            observed_as_bytes: self
                 .accounting_available
                 .then_some(owned.hardware_as_observed_bytes.live),
             ..self.stats

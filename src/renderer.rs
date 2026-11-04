@@ -389,7 +389,8 @@ impl Renderer {
     }
     /// Explicit optional hard shadows. The caller must negotiate the experimental
     /// device feature and its unsafe acknowledgment before calling this safe API.
-    /// Unsupported configurations fail before renderer allocations or queue writes.
+    /// 4x needs sample-rate shading support; shader/pipeline validation rejects its
+    /// absence transactionally. Device-feature/AS-limit checks precede allocations.
     pub fn new_with_hardware_shadows(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -419,10 +420,10 @@ impl Renderer {
         wgsl: &str,
     ) -> Result<Self, Error> {
         if let Some(hardware) = hardware {
-            hardware.validate(device.features(), &device.limits(), options.samples)?;
+            hardware.validate(device.features(), &device.limits())?;
         }
         let hardware_source = hardware
-            .map(|_| crate::hardware_shadows::shader_source(wgsl))
+            .map(|_| crate::hardware_shadows::shader_source(wgsl, options.samples))
             .transpose()?;
         if !(1..=16).contains(&options.anisotropy_clamp) {
             return Err(Error::InvalidInput("anisotropy_clamp must be in 1..=16"));
@@ -472,7 +473,7 @@ impl Renderer {
         if device_limits.max_texture_array_layers < 6
             || device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 7
+            || device_limits.max_sampled_textures_per_shader_stage < 8
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(
@@ -965,7 +966,7 @@ impl Renderer {
         let hardware_source = self
             .hardware_shadows
             .as_ref()
-            .map(|_| crate::hardware_shadows::shader_source(wgsl))
+            .map(|_| crate::hardware_shadows::shader_source(wgsl, self.options.samples))
             .transpose()
             .map_err(|error| ReloadError::Rejected {
                 diagnostic: error.to_string(),

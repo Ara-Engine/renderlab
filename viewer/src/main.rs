@@ -412,18 +412,17 @@ impl View {
             options.samples as u32,
             options.view,
             if options.view == ViewMode::Lit {
-                "GGX_Lambert_constant_or_RLE1_environment_optional_normal_maps_hard_shadows_exposed_RGBA16F_resolve_Reinhard_no_GI"
+                "GGX_Lambert_constant_or_RLE1_RLE2_environment_optional_normal_maps_hard_shadows_exposed_RGBA16F_resolve_Reinhard_no_GI"
             } else {
                 "unlit_depth32float"
             },
             cfg!(debug_assertions)
         );
-        let required_features = (adapter.features() & wgpu::Features::FLOAT32_FILTERABLE)
-            | if options.timestamps {
-                adapter.features() & wgpu::Features::TIMESTAMP_QUERY
-            } else {
-                wgpu::Features::empty()
-            };
+        let required_features = if options.timestamps {
+            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features,

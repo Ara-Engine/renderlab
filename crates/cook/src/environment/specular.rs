@@ -246,6 +246,130 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// The compute ABI rounds only after accepted f64 proposal/sample/frame construction.
+#[cfg(feature = "gpu-environment")]
+pub(super) fn gpu_tables(input: &LinearEnvironment) -> Result<[Vec<u8>; 4]> {
+    let q = Quadrature::new(input, 16384)?;
+    let mut source = Vec::with_capacity(input.pixels.len() * 16);
+    for (i, p) in input.pixels.iter().enumerate() {
+        let pdf = if q.proposal.total == 0.0 {
+            0.0
+        } else {
+            q.proposal.bin_pdf(i, (i / input.width as usize) as u32)
+        };
+        gpu_record(
+            &mut source,
+            [f64::from(p[0]), f64::from(p[1]), f64::from(p[2]), pdf],
+        )?;
+    }
+    let mut hdr = Vec::with_capacity(8192 * 32);
+    for sample in &q.radiance {
+        gpu_record(
+            &mut hdr,
+            [
+                sample.direction[0],
+                sample.direction[1],
+                sample.direction[2],
+                sample.pdf,
+            ],
+        )?;
+        gpu_record(
+            &mut hdr,
+            [sample.value[0], sample.value[1], sample.value[2], 0.0],
+        )?;
+    }
+    // Constant controls use the same kernel and full counts, with zero residual on both proposals.
+    if hdr.is_empty() {
+        for _ in 0..8192 {
+            gpu_record(&mut hdr, [0.0, 1.0, 0.0, 1.0])?;
+            gpu_record(
+                &mut hdr,
+                [
+                    q.proposal.baseline[0],
+                    q.proposal.baseline[1],
+                    q.proposal.baseline[2],
+                    0.0,
+                ],
+            )?;
+        }
+    }
+    let mut ggx = Vec::with_capacity(64 * 8192 * 16);
+    for r in asset::roughness_knots().into_iter().skip(1) {
+        for (d, pdf) in ggx_samples(8192, f64::from(r))? {
+            gpu_record(&mut ggx, [d[0], d[1], d[2], pdf])?;
+        }
+    }
+    let mut config = Vec::with_capacity(64);
+    gpu_record(
+        &mut config,
+        [
+            q.proposal.baseline[0],
+            q.proposal.baseline[1],
+            q.proposal.baseline[2],
+            0.0,
+        ],
+    )?;
+    for row in [0, input.height as usize - 1] {
+        let mut mean = [0.0; 3];
+        for p in &input.pixels[row * input.width as usize..(row + 1) * input.width as usize] {
+            for c in 0..3 {
+                mean[c] += f64::from(p[c]) / f64::from(input.width);
+            }
+        }
+        gpu_record(&mut config, [mean[0], mean[1], mean[2], 0.0])?;
+    }
+    gpu_record(
+        &mut config,
+        [f64::from(input.width), f64::from(input.height), 0.0, 0.0],
+    )?;
+    Ok([source, hdr, ggx, config])
+}
+
+#[cfg(feature = "gpu-environment")]
+pub(super) fn gpu_record(out: &mut Vec<u8>, values: impl IntoIterator<Item = f64>) -> Result<()> {
+    for value in values {
+        let rounded = value as f32;
+        if !rounded.is_finite() || (value != 0.0 && rounded == 0.0) {
+            return Err(Error(
+                "environment GPU input outside f32 range; no CPU fallback".into(),
+            ));
+        }
+        out.extend_from_slice(&rounded.to_le_bytes());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gpu-environment")]
+pub(super) fn gpu_query(out: &mut Vec<u8>, n: [f64; 3], level: u32) -> Result<()> {
+    let r = f64::from(asset::roughness_knots()[level as usize]);
+    let up = if n[1].abs() < 0.99 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let t = cross(up, n);
+    let length = dot(t, t).sqrt();
+    let t = t.map(|v| v / length);
+    let b = cross(n, t);
+    gpu_record(
+        out,
+        [
+            n[0],
+            n[1],
+            n[2],
+            1.0 / kernel_integral(r),
+            t[0],
+            t[1],
+            t[2],
+            (r * r).max(asset::GGX_ALPHA_FLOOR).powi(2),
+            b[0],
+            b[1],
+            b[2],
+            f64::from((level - 1) * 8192),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,12 @@ pub(super) fn hardware_device() -> (wgpu::Device, wgpu::Queue) {
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
     );
+    assert!(
+        adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::MULTISAMPLED_SHADING)
+    );
     let limits = wgpu::Limits {
         max_blas_primitive_count: 4096,
         max_blas_geometry_count: 1,
@@ -192,13 +198,20 @@ fn gpu_hardware_shadow_orientation_blocker_motion_reload_and_release() {
         "rejected reload retained all pipelines"
     );
     r.reload(SOURCE).unwrap();
+    b.set(0, Mat4::from_translation(Vec3::new(2., 0., 2.)))
+        .unwrap();
     lit(
         &mut r,
         &color,
         &camera,
         &mut [Draw::new(&receiver, &mut a), Draw::new(&blocker, &mut b)],
     );
-    assert_eq!(r.test_capture_color(&color), disabled);
+    assert!(
+        center(&r.test_capture_color(&color)) < 3,
+        "corrected reload must restore positive hardware occlusion"
+    );
+    b.set(0, Mat4::from_translation(Vec3::new(4., 0., 2.)))
+        .unwrap();
     let finite = Shadows {
         requests: vec![ShadowRequest::Directional {
             split_ends: vec![1.],
@@ -325,24 +338,12 @@ fn gpu_hardware_shadow_rejects_unsupported_before_writes_and_preserves_featurele
         samples: SampleCount::Four,
         ..Default::default()
     };
-    assert!(
-        Renderer::new_with_hardware_shadows(
-            device.clone(),
-            queue.clone(),
-            FORMAT,
-            Limits::default(),
-            options,
-            HardwareShadowOptions::default(),
-            SOURCE
-        )
-        .is_err()
-    );
     let mut r = Renderer::new_with_hardware_shadows(
         device,
         queue,
         FORMAT,
         Limits::default(),
-        RendererOptions::default(),
+        options,
         HardwareShadowOptions::default(),
         SOURCE,
     )
@@ -397,5 +398,194 @@ fn gpu_hardware_shadow_rejects_unsupported_before_writes_and_preserves_featurele
 #[ignore = "root GPU slot; normal map must not move hardware ray origin"]
 fn gpu_hardware_shadow_normal_map_uses_geometric_origin() {
     let _validation = validation::begin(true);
-    normal_maps::geometric_shadow_case(SampleCount::One, true);
+    for samples in [SampleCount::One, SampleCount::Four] {
+        normal_maps::geometric_shadow_case(samples, true);
+    }
+}
+
+#[test]
+#[ignore = "root GPU slot; analytical per-sample edge, moving thin grazing contact, centre impostor"]
+fn gpu_hardware_shadow_msaa_sample_receivers() {
+    let _validation = validation::begin(true);
+    let camera = camera(0.);
+    let pixel_world = 8. * (55_f32.to_radians() * 0.5).tan() / 97.;
+    let visibility = SOURCE.replace(
+        "return vec4<f32>(exposed,1.0);",
+        "return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);",
+    );
+    let reference = SOURCE.replace(
+        "return vec4<f32>(exposed,1.0);",
+        "return vec4<f32>(input.color.rgb,1.0);",
+    );
+    for samples in [SampleCount::One, SampleCount::Four] {
+        let (device, queue) = hardware_device();
+        let mut r = Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            RendererOptions {
+                samples,
+                ..Default::default()
+            },
+            HardwareShadowOptions::default(),
+            &visibility,
+        )
+        .unwrap();
+        let color = target(r.device(), 129, 97);
+        let receiver = upload(&mut r, &quad(1.5), &[0, 1, 2, 0, 2, 3]);
+        let blocker = upload(&mut r, &quad(1.), &[0, 1, 2, 0, 2, 3]);
+        let mut receivers = instances(&mut r, &[Mat4::IDENTITY]);
+        let mut blockers = instances(&mut r, &[Mat4::IDENTITY]);
+        let mut proxies = instances(&mut r, &[Mat4::IDENTITY]);
+        let settings = Shadows {
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![10.],
+            }],
+            ..Default::default()
+        };
+        let mut moving_images = vec![];
+        for pose in 0..4 {
+            let (to_light, height, half_width, offset) = if pose == 0 {
+                (
+                    Vec3::new(1., 0., 1.).normalize(),
+                    2.,
+                    0.5,
+                    0.5 + pixel_world * 0.05,
+                )
+            } else {
+                (
+                    Vec3::new(1., 0., 0.12).normalize(),
+                    0.03,
+                    pixel_world * 0.15,
+                    pixel_world * (pose - 1) as f32 * 0.5 - settings.normal_bias / 0.12,
+                )
+            };
+            let model = Mat4::from_translation(Vec3::new(
+                height * to_light.x / to_light.z + offset,
+                0.,
+                height,
+            )) * Mat4::from_scale(Vec3::new(half_width, 0.7, 1.));
+            blockers.set(0, model).unwrap();
+            let mut footprint = quad(1.);
+            for vertex in &mut footprint {
+                let p = model.transform_point3(Vec3::from_array(vertex.position));
+                // Intersect the light ray with the receiver's biased geometric plane.
+                let origin_offset = Vec3::Z * settings.normal_bias;
+                vertex.position =
+                    (p - origin_offset - to_light * ((p.z - origin_offset.z) / to_light.z))
+                        .to_array();
+                vertex.color = [0., 0., 0., 1.];
+            }
+            let proxy = upload(&mut r, &footprint, &[0, 1, 2, 0, 2, 3]);
+            let lights = Lighting {
+                lights: vec![Light::Directional {
+                    travel: -to_light,
+                    lux: [1000.; 3],
+                }],
+                exposure_stops: -5.,
+                ..Default::default()
+            };
+            r.reload(&visibility).unwrap();
+            r.set_lighting_and_shadows(&lights, &settings).unwrap();
+            lit(
+                &mut r,
+                &color,
+                &camera,
+                &mut [
+                    Draw::new(&receiver, &mut receivers),
+                    Draw::new(&blocker, &mut blockers),
+                ],
+            );
+            let actual = lighting_tests::hdr(&mut r);
+            let display = r.test_capture_color(&color);
+            let name = format!("hardware-msaa-{pose}-{}x", samples as u32);
+            save(
+                &name,
+                129,
+                97,
+                &display
+                    .chunks_exact(4)
+                    .flat_map(|p| p[..3].iter().copied())
+                    .collect::<Vec<_>>(),
+            );
+            fs::create_dir_all(evidence_dir()).unwrap();
+            fs::write(
+                evidence_dir().join(format!("{name}.hdr-f32")),
+                actual
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            r.reload(&reference).unwrap();
+            r.set_shadows(&Shadows::default()).unwrap();
+            // Equal-depth first-winner coverage is independent of interpolated receiver values.
+            lit(
+                &mut r,
+                &color,
+                &camera,
+                &mut [
+                    Draw::new(&proxy, &mut proxies),
+                    Draw::new(&receiver, &mut receivers),
+                    Draw::new(&blocker, &mut blockers),
+                ],
+            );
+            let expected = lighting_tests::hdr(&mut r);
+            let region = (30..67).flat_map(|y| (40..89).map(move |x| (y * 129 + x) * 4));
+            let max_error = region
+                .clone()
+                .map(|i| (actual[i] - expected[i]).abs())
+                .fold(0_f32, f32::max);
+            assert!(
+                max_error < 0.001,
+                "sample={} pose={pose} footprint error={max_error}",
+                samples as u32
+            );
+            let middle = (48 * 129 + 64) * 4;
+            if pose == 0 {
+                if samples == SampleCount::One {
+                    assert_eq!(actual[middle], 1., "1x centre lies outside the shadow");
+                } else {
+                    assert_eq!(
+                        expected[middle], 0.5,
+                        "analytical edge splits four covered samples"
+                    );
+                    assert_eq!(actual[middle], 0.5);
+                    assert!(
+                        (i16::from(display[middle]) - 85).abs() <= 1,
+                        "visibility resolves in HDR before tone mapping"
+                    );
+                    let impostor = visibility.replace(
+                        "hard_shadow(lights[0],input.world,geometric,",
+                        &format!("hard_shadow(lights[0],vec3<f32>((floor(input.position.x)+0.5-64.5)*{pixel_world},(48.5-floor(input.position.y)-0.5)*{pixel_world},0.0),geometric,"),
+                    );
+                    r.reload(&impostor).unwrap();
+                    r.set_shadows(&settings).unwrap();
+                    lit(
+                        &mut r,
+                        &color,
+                        &camera,
+                        &mut [
+                            Draw::new(&receiver, &mut receivers),
+                            Draw::new(&blocker, &mut blockers),
+                        ],
+                    );
+                    let wrong = lighting_tests::hdr(&mut r);
+                    assert_eq!(
+                        wrong[middle], 1.,
+                        "centre impostor must differ from the half-visible reference"
+                    );
+                }
+            } else {
+                moving_images.push(actual);
+            }
+        }
+        assert!(
+            moving_images.windows(2).all(|pair| pair[0] != pair[1]),
+            "thin contact motion must change the observed mask"
+        );
+        r.test_drain("analytical hardware MSAA complete");
+    }
 }

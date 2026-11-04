@@ -105,14 +105,8 @@ fn environment_renderer(samples: SampleCount) -> Renderer {
             .features()
             .contains(wgpu::Features::FLOAT32_FILTERABLE)
     );
-    assert!(
-        adapter
-            .features()
-            .contains(wgpu::Features::FLOAT32_FILTERABLE)
-    );
     let (d, q) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::FLOAT32_FILTERABLE
-            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     }))
     .unwrap();
@@ -318,7 +312,7 @@ fn probe_source(probes: &[Probe]) -> String {
     let start = SOURCE.find("@fragment fn fs_lit(").unwrap();
     let end = SOURCE.find("@vertex fn vs_present(").unwrap();
     format!(
-        "{}\n@fragment fn fs_lit(input:VertexOutput)->@location(0) vec4<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(u32(input.position.x),{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=textureSampleLevel(environment_specular,dfg_sampler,d,max(probe.w,0.0)).rgb;\n if probe.w<0.0 {{ rgb=textureSampleLevel(environment_diffuse,dfg_sampler,d,0.0).rgb; }}\n return vec4<f32>(environment_product(rgb,vec3<f32>(1.0)),1.0);\n}}\n{}",
+        "{}\n@fragment fn fs_lit(input:VertexOutput)->@location(0) vec4<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(u32(input.position.x),{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=vec3<f32>(0.0);\n if lighting.map.w<0.0 {{ rgb=environment_radiance(d,max(probe.w,0.0)); }} else {{ rgb=environment_legacy_lod(d,max(probe.w,0.0)); }}\n if probe.w<0.0 {{ rgb=environment_bilinear(environment_diffuse,d,0,0); }}\n return vec4<f32>(environment_product(rgb,vec3<f32>(1.0)),1.0);\n}}\n{}",
         &SOURCE[..start],
         probes.len(),
         probes.len() - 1,
@@ -328,11 +322,13 @@ fn probe_source(probes: &[Probe]) -> String {
 fn run_probes(r: &mut Renderer, probes: &[Probe]) -> Vec<[f32; 3]> {
     r.reload(&probe_source(probes)).unwrap();
     let color = target(r.device(), probes.len() as u32, 1);
+    // The camera's horizontal frustum grows with this deliberately one-row target's aspect ratio.
+    let span = (probes.len() as f32 * 4.0).max(1000.0);
     let vertices = [
-        [-1000., -1000., 0.],
-        [1000., -1000., 0.],
-        [1000., 1000., 0.],
-        [-1000., 1000., 0.],
+        [-span, -1000., 0.],
+        [span, -1000., 0.],
+        [span, 1000., 0.],
+        [-span, 1000., 0.],
     ]
     .map(|position| Vertex {
         position,
@@ -353,6 +349,179 @@ fn run_probes(r: &mut Renderer, probes: &[Probe]) -> Vec<[f32; 3]> {
         .chunks_exact(4)
         .map(|p| [p[0], p[1], p[2]])
         .collect()
+}
+
+#[test]
+#[ignore = "exclusive Vulkan slot; featureless RLE2 bank split, r^4 interpolation and replacement"]
+fn gpu_environment_independent_banks_without_float_filter_feature() {
+    let _validation = validation::begin(true);
+    let mut r = environment_renderer(SampleCount::One);
+    assert!(
+        !r.device()
+            .features()
+            .contains(wgpu::Features::FLOAT32_FILTERABLE)
+    );
+    let knots = env::roughness_knots();
+    let data = PreparedEnvironment::new_independent(
+        constant([1.; 3]).metadata().clone(),
+        level(2, |_| [1.; 3]),
+        knots
+            .iter()
+            .map(|k| level(2, |_| [1.0 + k.powi(4), 2.0, 1e-20]))
+            .collect(),
+        knots,
+        env::FieldGenerator::F64HostF32GpuV1,
+        env::Limits::default(),
+    )
+    .unwrap();
+    let map = upload_environment(&mut r, &data);
+    r.set_environment(Some(&map), Default::default()).unwrap();
+    let probes: Vec<_> = [0., 0.009, 0.011, 0.137, 0.42, 0.43, 0.573, 0.941, 1.]
+        .into_iter()
+        .flat_map(|rough| {
+            [[1., 0., 0.], [1., 1., 1.], [-1., -1., -1.], [0., 1., 0.]]
+                .into_iter()
+                .map(move |direction| Probe {
+                    direction,
+                    lod: rough,
+                    diffuse: false,
+                })
+        })
+        .collect();
+    let values = run_probes(&mut r, &probes);
+    for (p, value) in probes.iter().zip(values) {
+        assert!(
+            (f64::from(value[0]) - (1.0 + p.lod.powi(4))).abs() < 0.0011,
+            "r={} value={value:?}",
+            p.lod
+        );
+        assert_eq!(value[1], 2.0);
+    }
+    r.reload(SOURCE).unwrap();
+    r.set_environment(None, Default::default()).unwrap();
+    drop(map);
+    r.test_drain("RLE2 retirement");
+    let settled = r.stats().ownership.environment_bytes.live;
+    for _ in 0..3 {
+        let map = upload_environment(&mut r, &data);
+        r.set_environment(Some(&map), Default::default()).unwrap();
+        r.set_environment(None, Default::default()).unwrap();
+        drop(map);
+        r.test_drain("RLE2 replacement");
+        assert_eq!(r.stats().ownership.environment_bytes.live, settled);
+    }
+}
+
+#[test]
+#[ignore = "exclusive Vulkan slot; complete RLE2 artifact against 538 fixed independent reconstruction references"]
+fn gpu_environment_independent_registered_runtime_reconstruction() {
+    let _validation = validation::begin(true);
+    let path = std::env::var_os("RENDERLAB_ENVIRONMENT_FIELD").expect("RLE2 field path");
+    let references = std::env::var_os("RENDERLAB_ENVIRONMENT_FIELD_REFERENCES")
+        .expect("accepted a-screen.json path");
+    let data = env::decode(&fs::read(path).unwrap(), env::Limits::default()).unwrap();
+    assert!(matches!(
+        data.specular_layout(),
+        env::SpecularLayout::IndependentRoughness { .. }
+    ));
+    assert_eq!(data.specular_radiance()[0].size(), 128);
+    let references: serde_json::Value =
+        serde_json::from_slice(&fs::read(references).unwrap()).unwrap();
+    let mut unique = std::collections::BTreeMap::new();
+    for row in references["rows"].as_array().unwrap() {
+        let d: [f64; 3] = std::array::from_fn(|c| row["direction"][c].as_f64().unwrap());
+        let rough = row["roughness"].as_f64().unwrap();
+        unique.insert(
+            [
+                d[0].to_bits(),
+                d[1].to_bits(),
+                d[2].to_bits(),
+                rough.to_bits(),
+            ],
+            (row, d, rough),
+        );
+    }
+    assert_eq!(unique.len(), 538);
+    let probes: Vec<_> = unique
+        .values()
+        .map(|(_, direction, r)| Probe {
+            direction: *direction,
+            lod: *r,
+            diffuse: false,
+        })
+        .collect();
+    let mut r = environment_renderer(SampleCount::One);
+    let map = upload_environment(&mut r, &data);
+    r.set_environment(Some(&map), Default::default()).unwrap();
+    r.set_lighting(&Lighting {
+        exposure_stops: -8.,
+        ..Default::default()
+    })
+    .unwrap();
+    let values = run_probes(&mut r, &probes);
+    let mut maximum = 0.0_f64;
+    let mut output = vec![];
+    for (((row, _, rough), value), probe) in unique.values().zip(values).zip(&probes) {
+        let actual = value.map(|v| f64::from(v) * 256.0);
+        for c in 0..3 {
+            let reference = row["reference_rgb"][c].as_f64().unwrap();
+            let ratio = (actual[c] - reference).abs() / (0.04 * reference + 0.001);
+            maximum = maximum.max(ratio);
+            assert!(
+                ratio <= 1.0,
+                "runtime r={rough} d={:?} actual={actual:?} reference={} c={c} allowance={ratio}",
+                probe.direction,
+                row["reference_rgb"]
+            );
+        }
+        output.push(serde_json::json!({"case":row["case"],"r":rough,"direction":probe.direction,"actual":actual,"reference":row["reference_rgb"]}));
+    }
+    let sun = glam::DVec3::new(0.36, 0.48, 0.8);
+    let tangent = sun.cross(glam::DVec3::Y).normalize();
+    let bitangent = sun.cross(tangent);
+    let delta: Vec<_> = (-8..=8)
+        .flat_map(|y| {
+            (-8..=8).map(move |x| Probe {
+                direction: (sun
+                    + tangent * (f64::from(x) * 0.035)
+                    + bitangent * (f64::from(y) * 0.035))
+                    .normalize()
+                    .to_array(),
+                lod: 0.,
+                diffuse: false,
+            })
+        })
+        .collect();
+    let values = run_probes(&mut r, &delta);
+    let mut peak_fraction = 0.0_f64;
+    let mut peak = (f32::NEG_INFINITY, glam::DVec3::ZERO);
+    for (p, value) in delta.iter().zip(values) {
+        let reference = sun_sky(glam::DVec3::from_array(p.direction));
+        for c in 0..3 {
+            peak_fraction = peak_fraction
+                .max((f64::from(value[c]) * 256.0 - reference[c]).abs() / [2e6, 1.6e6, 1e6][c]);
+        }
+        if value[0] > peak.0 {
+            peak = (value[0], glam::DVec3::from_array(p.direction));
+        }
+    }
+    let peak_angle = peak.1.dot(sun).clamp(-1.0, 1.0).acos().to_degrees();
+    assert!(
+        peak_angle <= 1.0,
+        "mip-zero sun peak direction {peak_angle} degrees"
+    );
+    assert!(
+        peak_fraction <= 0.03,
+        "mip-zero sun peak-relative error {peak_fraction}"
+    );
+    fs::create_dir_all(evidence_dir()).unwrap();
+    fs::write(evidence_dir().join("rle2-runtime-reconstruction.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "queries":538,"max_allowance_ratio":maximum,"delta_queries":289,"mip0_peak_fraction":peak_fraction,"mip0_peak_angle_degrees":peak_angle,
+        "float32_filter_feature":false,"lookup":"actual renderer WGSL with r^4 and seam-aware textureLoad; exposed f16 readback", "rows":output
+    })).unwrap()).unwrap();
+    eprintln!(
+        "RLE2 actual runtime 538 queries max allowance={maximum}; delta 289 peak fraction={peak_fraction}"
+    );
 }
 
 #[test]
@@ -650,7 +819,7 @@ fn gpu_environment_ownership_admission_and_reload() {
     for source in [
         SOURCE.to_owned() + "\nnot_wgsl",
         SOURCE.replace(
-            "var environment_diffuse:texture_cube<f32>",
+            "var environment_diffuse:texture_2d_array<f32>",
             "var environment_diffuse:texture_2d<f32>",
         ),
     ] {
@@ -797,18 +966,37 @@ fn gpu_environment_ownership_admission_and_reload() {
     drop(map);
     r.test_drain("environment caller release");
     assert_eq!(r.stats().ownership.environment_bytes.live, 48);
-    // A device without the optional feature still renders constant/direct/shadow lighting.
-    let mut unsupported = renderer(false);
-    unsupported.test_drain("unsupported environment");
-    let before = unsupported.stats();
-    assert!(unsupported.try_upload_environment(&data).is_err());
-    assert_eq!(before.uploads, unsupported.stats().uploads);
-    assert_eq!(before.ownership, unsupported.stats().ownership);
+    let mut featureless = renderer(false);
+    featureless.test_drain("featureless environment");
+    let map = upload_environment(&mut featureless, &data);
+    featureless
+        .set_environment(Some(&map), Default::default())
+        .unwrap();
+    assert_eq!(
+        featureless.stats().ownership.environment_bytes.live,
+        48 + map_bytes
+    );
 }
 
 #[test]
 #[ignore = "exclusive Vulkan slot; corrected normal fixture with active shadows and mapped environment"]
 fn gpu_environment_normal_shadow_regular_virtual_images() {
+    normal_shadow_images(&constant([0.2, 0.3, 0.4]), 0.0);
+}
+
+#[test]
+#[ignore = "exclusive Vulkan slot; complete independent field, normal/shadow regular-virtual parity at 1x/4x"]
+fn gpu_environment_independent_normal_shadow_regular_virtual_images() {
+    let path = std::env::var_os("RENDERLAB_ENVIRONMENT_FIELD").expect("RLE2 field path");
+    let data = env::decode(&fs::read(path).unwrap(), env::Limits::default()).unwrap();
+    assert!(matches!(
+        data.specular_layout(),
+        env::SpecularLayout::IndependentRoughness { .. }
+    ));
+    normal_shadow_images(&data, -14.0);
+}
+
+fn normal_shadow_images(data: &PreparedEnvironment, exposure_stops: f32) {
     use super::materials::prepared::Prepared;
     use crate::virtual_geometry::*;
     let _validation = validation::begin(true);
@@ -818,6 +1006,7 @@ fn gpu_environment_normal_shadow_regular_virtual_images() {
     for samples in [SampleCount::One, SampleCount::Four] {
         let mut r = environment_renderer(samples);
         r.set_lighting(&Lighting {
+            exposure_stops,
             lights: vec![Light::Directional {
                 travel: Vec3::new(-0.4, -0.7, -1.),
                 lux: [2.; 3],
@@ -833,7 +1022,7 @@ fn gpu_environment_normal_shadow_regular_virtual_images() {
             ..Default::default()
         })
         .unwrap();
-        let map = upload_environment(&mut r, &constant([0.2, 0.3, 0.4]));
+        let map = upload_environment(&mut r, data);
         r.set_environment(
             Some(&map),
             EnvironmentParameters {

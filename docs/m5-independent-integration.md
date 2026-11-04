@@ -1,0 +1,43 @@
+# Independent roughness integration record
+
+The RLE2 environment field corrects the registered rough-reflection sun leak without lowering the numerical gates. Preparation, device reconstruction and images passed in the isolated M5 unit. Root has integrated it with optional 1x and 4x hardware shadows and verified that combination on the real quarry. Independent Opus review accepts both the M5 field and the combined 4x shadow checkpoint after documentation corrections. This remains partial M5.
+
+## Source identity and merge
+
+The delivered patch is based on `50b5d086d389d21b4661236788af9191e9d64136`, SHA-256 `a398e723e41ffbf66148efdf5bc4f3408a7c142a434398fa95549d81606cc30d`. It applies cleanly to hardware-shadow checkpoint `7a87f69ea6b41acfc3725b368fc231533faf60c5`. Root's audit verifies seventeen of twenty files exactly against the worker's normalized source hashes, plus eleven retained artifacts including executables and the prepared field.
+
+The three overlapping files retain both changes. `renderer.rs` adds the eighth sampled-texture requirement while keeping the optional hardware pipelines. `lighting_gpu.rs` adds the second environment bank and keeps hardware shadow-setting validation. `scene.wgsl` adds manual environment reconstruction while preserving the hardware composition markers, affine vertices and raster shadow function. The hardware acceleration structure remains group 0 binding 2. The second environment bank occupies group 3 binding 9.
+
+The original RLE1 format remains decodable with its original roughness convention. Both formats now use manual texture-load filtering, so optional float32 filtering is no longer required. The importer and GPU cooker remain outside the viewer dependency graph. The [format and runtime document](m5-environment-field.md) records the API, fixed production recipe, memory policies and CLI.
+
+## Evidence and cost
+
+The worker froze production sources before the full cook and cost observations. Later edits changed only tests and the feature document. Three final independent GPU gates pass together on the final test binary. They cover bank selection and replacement, regular/virtual equality with normal maps and raster shadows at 1x/4x, and all 538 reference lookups through actual runtime WGSL. Five retained environment gates and targeted direct-light, raster-shadow and geometric-normal checks also pass. Exact per-run binaries and source hashes remain in the delivery. These results precede root's hardware-shadow merge.
+
+The 538-query device result reaches at most 0.648956 of the unchanged per-channel allowance, `0.04 * reference + 0.001`. The 289-direction sharp-sun probe has 0.835258% peak-relative error under the 3% gate. The sampled peak does not shift; its angular resolution remains limited by the probe spacing. These references measure the N=V prefiltered radiance lookup, excluding the split-sum BRDF composition, Fresnel, material response and its N!=V error. The earlier roughness-one dark-side leak reads the dim-sky reference to float16 readback accuracy. These are sampled reference results, not certification of arbitrary HDR sources or every direction.
+
+One complete cook produced `sun128.rle2`, SHA-256 `3ccd61b142d26b7c04571242eb620729366847674522ef990b06661bd54c1764`. It took 18.005 seconds end to end in the development profile under contention. All 103,105,552,384 declared evaluations remain in the recipe. GPU timestamps total 2.980 seconds within 8.406 seconds of drained dispatch/readback. CPU query construction takes 6.201 seconds. This is a measured cook, not a speed ratio against the earlier unexecuted CPU estimate.
+
+The quality trade-off is memory. Prepared pixels occupy 73.14 MiB and runtime pixels 97.52 MiB, about 170.67 MiB together before packing and overhead. Each fits its separate 128 MiB policy. The existing 384 MiB live GPU policy remains unchanged and includes retained generations. The cooker uses bounded output tiles; its logical GPU buffers total 17,121,632 bytes. No second full cook is needed for integration.
+
+Root inspected the complete 4x material fixture and quarry image, plus the quarry's six-frame 1x/4x motion sheet. The worker inspected the corrected boulder and recovered native window as well. The quarry images use 1280x720, all 13,034,903 original triangles and the existing 4K texture chains. The fixture and boulder use 960x640. All eighteen retained resolved HDR images are finite and unsaturated. Short nearby-camera captures and live yaw edits do not establish independent temporal quality.
+
+Short runtime observations remain inconclusive under contention. First shader edit-to-observed-completion was 1.985 seconds and restoration took 0.110 seconds. One representative Rust label edit built in 6.311 seconds and reached observed completion in 13.377 seconds including restart. These are material development-loop costs that remain open, not latency superiority claims. Full measurements and overlap labels are in the feature document and retained handoff.
+
+Delivery evidence is local and ignored under `D:/Coding/renderlab-work/m5-independent-production/`. It includes `handoff.md`, `source-freeze.json`, `source-identities.json`, `manifest.json`, logs, raw HDR images and preserved binaries. Root's audit is `.refs/m5-independent-integration/audit.py` with `root-audit.json`.
+
+## Combined verification
+
+Root's combined-source test binary passes 58 CPU tests, all eight environment GPU gates, all five hardware-shadow GPU gates, the raster geometric-normal gate and the raster offscreen/local/reload gate. The 538 field references and 289-direction sun probe retain their exact results above. Workspace all-target Clippy with the optional GPU-cooker feature, formatting and whitespace checks pass. There was no recook or repeated numerical campaign.
+
+The release example loads the actual `sun128.rle2` and renders the unchanged twelve-scan quarry at 1920x1080 with hardware directional shadows at both 1x and 4x. Root inspected both full images. The existing -8-stop lighting preset washes out much of the display under this bright map, although the HDR channels remain finite and unsaturated. One additional 4x capture changes only exposure to -14 stops, revealing the material and silhouette detail. Root inspected that full image too. The two presets and all three captures are retained. This proves the binding and shading combination, not balanced scene lighting or environmental visibility. The field remains unoccluded and can dominate the separately shadowed direct light.
+
+All eighteen validation summaries across these tests and captures positively activate Khronos and report zero errors or missing layers. Existing unused vertex-attribute performance warnings remain. A raw half-float audit proves all three captures finite and unsaturated. Their maximum resolved values are also below `65504 / sample_count`, excluding hidden clipping of nonnegative samples in these captures.
+
+The test executable is SHA-256 `5a407046a917ea46fff0809d59ff447874ae6359895cb37295449455dfccf1ab`; the release example is `5285afc79239d803ac2a5bfdca3b3beb4e12f2fbe8557cac89428a37dba0a1fa`. All 107 recorded Rust, shader and manifest files remained byte-identical through verification. Source identities, commands, logs, binaries, images and the audit are in `.refs/m5-m6-combined/`. The original seventeen-file worker comparison above records the pre-correction import; final combined identities supersede it.
+
+Successful verification commands took 123.248 seconds, including 23.808 seconds for the test build, 15.120 seconds for the release example build and 9.148 seconds for Clippy. A preceding 5.508-second compile failed because the reused target considered an older worktree's asset library fresh. Touching the local source inputs forced the correct rebuild without changing bytes. That failure is retained separately. The GPU snapshot before verification was 19% utilization and 3,246 MiB used on RTX 4070 SUPER, NVIDIA 617.14. Other project builds were active. These are contended verification costs, not throughput or optimization measurements. Image inspection and documentation time are outside the command total.
+
+## Remaining acceptance
+
+M5 still needs broader glossy-motion quality, controlled optimized runtime measurements, practical development latency and matched Unreal acceptance. Environment visibility and local bounce are not implemented by this field. M6 retains its separate virtual, softness and broader contact/motion work. Independent Opus review accepts this bounded combined checkpoint with no code blocker. The review independently verified all 107 source hashes, both binaries, the actual field hash, validation logs and per-sample outputs.

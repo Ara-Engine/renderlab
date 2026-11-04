@@ -109,8 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features()
-            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::FLOAT32_FILTERABLE),
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     }))?;
     let mut r = Renderer::new_with_options(

@@ -89,8 +89,9 @@ struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<
 @group(3) @binding(1) var<storage,read> lights:array<Light>;
 @group(3) @binding(2) var dfg:texture_2d<f32>;
 @group(3) @binding(3) var dfg_sampler:sampler;
-@group(3) @binding(6) var environment_diffuse:texture_cube<f32>;
-@group(3) @binding(7) var environment_specular:texture_cube<f32>;
+@group(3) @binding(6) var environment_diffuse:texture_2d_array<f32>;
+@group(3) @binding(7) var environment_specular:texture_2d_array<f32>;
+@group(3) @binding(9) var environment_specular_second:texture_2d_array<f32>;
 struct ShadowView {
     world_to_clip:mat4x4<f32>,
     // Directional camera-depth interval or local radial interval; normalized and world bias.
@@ -190,6 +191,85 @@ fn exposed_product(a:vec3<f32>, b:vec3<f32>) -> vec3<f32> {
 fn environment_direction(world:vec3<f32>) -> vec3<f32> {
     return vec3<f32>(lighting.map.x*world.x-lighting.map.y*world.z,world.y,lighting.map.y*world.x+lighting.map.x*world.z);
 }
+// Identical face selection and three-face corner support to the accepted reconstruction probe.
+fn environment_face_uv(d:vec3<f32>) -> vec3<f32> {
+    let a=abs(d);
+    if a.x>=a.y && a.x>=a.z {
+        if d.x>0.0 { return vec3<f32>(0.0,-d.z/a.x,-d.y/a.x); }
+        return vec3<f32>(1.0,d.z/a.x,-d.y/a.x);
+    }
+    if a.y>=a.z {
+        if d.y>0.0 { return vec3<f32>(2.0,d.x/a.y,d.z/a.y); }
+        return vec3<f32>(3.0,d.x/a.y,-d.z/a.y);
+    }
+    if d.z>0.0 { return vec3<f32>(4.0,d.x/a.z,-d.y/a.z); }
+    return vec3<f32>(5.0,-d.x/a.z,-d.y/a.z);
+}
+fn environment_face_direction(face:i32, uv:vec2<f32>) -> vec3<f32> {
+    switch face {
+        case 0: { return vec3<f32>(1.0,-uv.y,-uv.x); }
+        case 1: { return vec3<f32>(-1.0,-uv.y,uv.x); }
+        case 2: { return vec3<f32>(uv.x,1.0,uv.y); }
+        case 3: { return vec3<f32>(uv.x,-1.0,-uv.y); }
+        case 4: { return vec3<f32>(uv.x,-uv.y,1.0); }
+        default: { return vec3<f32>(-uv.x,-uv.y,-1.0); }
+    }
+}
+fn environment_remap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32, mip:i32, bank:i32) -> vec3<f32> {
+    if all(p>=vec2<i32>(0)) && all(p<vec2<i32>(size)) { return textureLoad(tex,p,bank+face,mip).rgb; }
+    let d=environment_face_direction(face,2.0*(vec2<f32>(p)+vec2<f32>(0.5))/f32(size)-vec2<f32>(1.0));
+    let next=environment_face_uv(d);
+    let q=clamp(vec2<i32>((next.yz+vec2<f32>(1.0))*f32(size)*0.5),vec2<i32>(0),vec2<i32>(size-1));
+    return textureLoad(tex,q,bank+i32(next.x),mip).rgb;
+}
+fn environment_tap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32, mip:i32, bank:i32) -> vec3<f32> {
+    let outside_x=p.x<0 || p.x>=size;
+    let outside_y=p.y<0 || p.y>=size;
+    if outside_x && outside_y {
+        let q=clamp(p,vec2<i32>(0),vec2<i32>(size-1));
+        return (environment_remap(tex,face,q,size,mip,bank)
+            +environment_remap(tex,face,vec2<i32>(p.x,q.y),size,mip,bank)
+            +environment_remap(tex,face,vec2<i32>(q.x,p.y),size,mip,bank))/3.0;
+    }
+    return environment_remap(tex,face,p,size,mip,bank);
+}
+fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i32) -> vec3<f32> {
+    let size=i32(textureDimensions(tex,mip).x);
+    let face=environment_face_uv(d);
+    let xy=(face.yz+vec2<f32>(1.0))*f32(size)*0.5-vec2<f32>(0.5);
+    let p=vec2<i32>(floor(xy));
+    let t=fract(xy);
+    let a=environment_tap(tex,i32(face.x),p,size,mip,bank);
+    let b=environment_tap(tex,i32(face.x),p+vec2<i32>(1,0),size,mip,bank);
+    let c=environment_tap(tex,i32(face.x),p+vec2<i32>(0,1),size,mip,bank);
+    let e=environment_tap(tex,i32(face.x),p+vec2<i32>(1,1),size,mip,bank);
+    return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
+}
+fn environment_level(d:vec3<f32>, level:i32) -> vec3<f32> {
+    if lighting.map.w>0.0 { return environment_bilinear(environment_specular,d,level,0); }
+    if level<42 { return environment_bilinear(environment_specular,d,0,level*6); }
+    return environment_bilinear(environment_specular_second,d,0,(level-42)*6);
+}
+fn environment_legacy_lod(d:vec3<f32>, lod:f32) -> vec3<f32> {
+    let x=clamp(lod,0.0,lighting.map.w-1.0);
+    let lo=i32(floor(x));
+    let hi=min(lo+1,i32(lighting.map.w)-1);
+    return environment_level(d,lo)*(1.0-fract(x))+environment_level(d,hi)*fract(x);
+}
+fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
+    let r=clamp(roughness,0.0,1.0);
+    if lighting.map.w>0.0 { return environment_legacy_lod(d,r*(lighting.map.w-1.0)); }
+    if r>=1.0 { return environment_level(d,64); }
+    let lo=min(i32(floor(64.0*sqrt(r))),63);
+    let a=f32(lo)/64.0;
+    let b=f32(lo+1)/64.0;
+    let a2=a*a; let b2=b*b;
+    let a4=a2*a2; let b4=b2*b2;
+    let a8=a4*a4; let b8=b4*b4;
+    let r2=r*r;
+    let t=clamp((r2*r2-a8)/(b8-a8),0.0,1.0);
+    return environment_level(d,lo)*(1.0-t)+environment_level(d,lo+1)*t;
+}
 fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
     let a=frexp(energy);
     let b=frexp(response);
@@ -260,10 +340,10 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
     let ab=textureSample(dfg,dfg_sampler,uv).rg;
     let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
     var exposed=exposed_product(lighting.environment,base*(1.0-metal)+f0*ab.x+vec3<f32>(ab.y));
-    if lighting.map.w>0.0 {
-        let irradiance=textureSampleLevel(environment_diffuse,dfg_sampler,environment_direction(n),0.0).rgb;
+    if lighting.map.w!=0.0 {
+        let irradiance=environment_bilinear(environment_diffuse,environment_direction(n),0,0);
         let reflected=reflect(-v,n);
-        let radiance=textureSampleLevel(environment_specular,dfg_sampler,environment_direction(reflected),rough*(lighting.map.w-1.0)).rgb;
+        let radiance=environment_radiance(environment_direction(reflected),rough);
         exposed=min(environment_product(irradiance,base*((1.0-metal)/PI))+
             environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
     }

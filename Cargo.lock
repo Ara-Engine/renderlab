@@ -1453,11 +1453,14 @@ version = "0.1.0"
 dependencies = [
  "gltf",
  "image",
+ "log",
  "meshopt",
  "mikktspace",
+ "pollster",
  "renderlab-asset",
  "serde_json",
  "sha2",
+ "wgpu",
 ]
 
 [[package]]
