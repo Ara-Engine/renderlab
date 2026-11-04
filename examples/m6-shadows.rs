@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shader_path = None::<PathBuf>;
     let mut environment_path = None::<PathBuf>;
     let mut hardware = false;
+    let mut soft_disk = 0.0f32;
     let mut experimental_ack = false;
     let mut hardware_budget = HardwareShadowOptions::default().max_estimated_bytes;
     let mut out = PathBuf::from("measurements/m6-gpu/fixture");
@@ -73,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--cost" => cost = true,
             "--ordinary-cost" => ordinary_cost = true,
             "--hardware-shadows" => hardware = true,
+            "--soft-disk" => soft_disk = args.next().ok_or("missing disk angle")?.parse()?,
             "--ack-experimental-wgpu-risk" => experimental_ack = true,
             "--hardware-max-estimated-bytes" => {
                 hardware_budget = match args.next().ok_or("missing hardware budget")?.as_str() {
@@ -263,6 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect(),
         resolution: shadow_resolution,
+        directional_disk_angle: soft_disk,
         ..Default::default()
     };
     r.set_lighting_and_shadows(&lighting, &make_shadows(&lighting))?;
@@ -450,7 +453,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::yield_now();
             }
             let gpu = gpu.ok_or("missing pass timing")?;
-            rows.push(serde_json::json!({"pose":pose,"pair":pair,"mode":format!("{mode:?}"),"shadowed":shadowed,"motion":motion,"shadow_stats":format!("{:?}",r.shadow_stats()),"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadow_preparation_ms":report.cpu.shadow_preparation.as_secs_f64()*1e3,"shadow_upload_ms":report.cpu.shadow_upload.as_secs_f64()*1e3,"shadow_encode_ms":report.cpu.shadow_encode.as_secs_f64()*1e3,"shadow_generation_ms":gpu.shadow_generation.map(|d|d.as_secs_f64()*1e3),"render_span_ms":gpu.render_span.as_secs_f64()*1e3,"frame":report.frame.0,"cpu_render_admission_ms":cpu.as_secs_f64()*1e3,"mesh_pass_ms":gpu.mesh_pass.as_secs_f64()*1e3,"present_pass_ms":gpu.present_pass.map(|d|d.as_secs_f64()*1e3),"draws":report.scene.draws,"triangles":report.scene.triangles,"camera_bytes":report.uploads.camera,"light_bytes":report.uploads.lights,"lighting_uniform_bytes":report.uploads.lighting}));
+            rows.push(serde_json::json!({"pose":pose,"pair":pair,"mode":format!("{mode:?}"),"shadowed":shadowed,"motion":motion,"shadow_stats":format!("{:?}",r.shadow_stats()),"hardware_shadow_stats":format!("{:?}",r.hardware_shadow_stats()),"shadow_preparation_ms":report.cpu.shadow_preparation.as_secs_f64()*1e3,"shadow_upload_ms":report.cpu.shadow_upload.as_secs_f64()*1e3,"shadow_encode_ms":report.cpu.shadow_encode.as_secs_f64()*1e3,"shadow_generation_ms":gpu.shadow_generation.map(|d|d.as_secs_f64()*1e3),"receiver_ms":gpu.receiver_pass.map(|d|d.as_secs_f64()*1e3),"visibility_compute_ms":gpu.visibility_compute.map(|d|d.as_secs_f64()*1e3),"render_span_ms":gpu.render_span.as_secs_f64()*1e3,"frame":report.frame.0,"cpu_render_admission_ms":cpu.as_secs_f64()*1e3,"mesh_pass_ms":gpu.mesh_pass.as_secs_f64()*1e3,"present_pass_ms":gpu.present_pass.map(|d|d.as_secs_f64()*1e3),"draws":report.scene.draws,"triangles":report.scene.triangles,"camera_bytes":report.uploads.camera,"light_bytes":report.uploads.lights,"lighting_uniform_bytes":report.uploads.lighting}));
             if !cost || pair <= 1 {
                 let mut capture = loop {
                     if let Some(c) = r.try_capture_hdr()? {

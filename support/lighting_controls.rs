@@ -43,6 +43,7 @@ struct ShadowSettings {
     resolution: u32,
     depth_bias: f32,
     normal_bias: f32,
+    directional_disk_angle: f32,
     max_bytes: Option<u64>,
 }
 impl Default for ShadowSettings {
@@ -53,6 +54,7 @@ impl Default for ShadowSettings {
             resolution: value.resolution,
             depth_bias: value.depth_bias,
             normal_bias: value.normal_bias,
+            directional_disk_angle: value.directional_disk_angle,
             max_bytes: value.max_bytes,
         }
     }
@@ -84,6 +86,7 @@ pub fn parse_with_shadows(source: &str) -> Result<(Lighting, Shadows), serde_jso
         resolution: value.resolution,
         depth_bias: value.depth_bias,
         normal_bias: value.normal_bias,
+        directional_disk_angle: value.directional_disk_angle,
         max_bytes: value.max_bytes,
     };
     let lighting = Lighting {

@@ -20,7 +20,7 @@ pub enum ShadowRequest {
     },
 }
 
-/// Hard, nearest-depth shadows. No finite-source softness or cascade blending.
+/// Hard shadows by default. Optional fresh directional disk visibility on hardware 1x.
 /// An empty request vector explicitly disables shadows for the entire lighting set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shadows {
@@ -31,8 +31,12 @@ pub struct Shadows {
     pub depth_bias: f32,
     /// Receiver offset along its geometric surface normal, in metres.
     pub normal_bias: f32,
+    /// Directional visibility disk half-angle in radians, in [0, 0.1]. Zero uses hard shadows.
+    /// Nonzero requires hardware 1x, one shadowed directional light and regular opaque double-sided geometry.
+    pub directional_disk_angle: f32,
     /// Optional shadow record/map/uniform byte policy per resource generation.
-    /// Hardware shadows charge records/fallback here and AS estimates separately.
+    /// Fresh compute also charges its receiver/visibility targets here at frame admission.
+    /// Hardware AS estimates use a separate policy.
     /// Retained in-flight generations are charged separately in `Stats::ownership`.
     /// Device limits always apply.
     pub max_bytes: Option<u64>,
@@ -44,6 +48,7 @@ impl Default for Shadows {
             resolution: 1024,
             depth_bias: 0.00002,
             normal_bias: 0.001,
+            directional_disk_angle: 0.0,
             max_bytes: Some(256 * 1024 * 1024),
         }
     }
@@ -78,6 +83,13 @@ impl Shadows {
             .any(|r| !matches!(r, ShadowRequest::None))
     }
     pub(crate) fn validate(&self, lights: &[Light], limits: ShadowLimits) -> Result<u32, Error> {
+        if !self.directional_disk_angle.is_finite()
+            || !(0.0..=0.1).contains(&self.directional_disk_angle)
+        {
+            return Err(Error::InvalidInput(
+                "directional disk angle must be finite and in [0,0.1] radians",
+            ));
+        }
         if !self.requests.is_empty() && self.requests.len() != lights.len() {
             return Err(Error::InvalidInput(
                 "shadow requests must match the current light vector; replace lighting and shadows together",

@@ -10,6 +10,9 @@ use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
 #[path = "hardware_shadow_gpu.rs"]
 pub(crate) mod hardware_shadow_gpu;
 use hardware_shadow_gpu::HardwareState;
+#[path = "fresh_shadow_gpu.rs"]
+mod fresh_shadow_gpu;
+use fresh_shadow_gpu::{FreshPipelines, FreshState};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -51,6 +54,7 @@ pub(crate) struct Flight {
     mapped: Option<MapResult>,
     lit: bool,
     shadowed: bool,
+    fresh: bool,
     submission: u64,
     frame: Option<FrameId>,
     revision: Revision,
@@ -151,6 +155,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -177,6 +182,7 @@ impl Renderer {
             mapped: Some(mapped),
             lit: false,
             shadowed: false,
+            fresh: false,
             submission: self.submissions,
             frame: Some(FrameId(self.frames)),
             revision: self.revision,
@@ -202,6 +208,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -267,6 +274,7 @@ impl Renderer {
     }
 }
 struct Pipelines {
+    fresh: Option<FreshPipelines>,
     hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     shadow: Owned<wgpu::RenderPipeline>,
     diagnostic_tangent: Owned<wgpu::RenderPipeline>,
@@ -311,12 +319,15 @@ pub struct Renderer {
     identity: Arc<()>,
     #[cfg(test)]
     reference_draws: bool,
+    #[cfg(test)]
+    fresh_fragment_reference: bool,
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
     environment: crate::environment::EnvironmentState,
     shadows: ShadowState,
     hardware_shadows: Option<HardwareState>,
+    fresh: Option<FreshState>,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -424,6 +435,9 @@ impl Renderer {
         }
         let hardware_source = hardware
             .map(|_| crate::hardware_shadows::shader_source(wgsl, options.samples))
+            .transpose()?;
+        let fresh_source = (hardware.is_some() && options.samples == SampleCount::One)
+            .then(|| fresh_shadow_gpu::shader_source(wgsl))
             .transpose()?;
         if !(1..=16).contains(&options.anisotropy_clamp) {
             return Err(Error::InvalidInput("anisotropy_clamp must be in 1..=16"));
@@ -599,13 +613,25 @@ impl Renderer {
                 options,
             )
         });
+        let fresh = (hardware.is_some() && options.samples == SampleCount::One).then(|| {
+            FreshState::new(
+                &device,
+                &ledger,
+                [
+                    &bindings,
+                    &instance_bindings,
+                    &material_bindings,
+                    &lighting.bindings,
+                ],
+            )
+        });
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
                 device.create_query_set(&wgpu::QuerySetDescriptor {
                     label: Some("three flights"),
                     ty: wgpu::QueryType::Timestamp,
-                    count: (FLIGHTS * 6) as u32,
+                    count: (FLIGHTS * 10) as u32,
                 }),
                 ResourceKind::QuerySet,
             ),
@@ -625,7 +651,7 @@ impl Renderer {
                 ledger.own(
                     device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("flight timestamps"),
-                        size: 48,
+                        size: 80,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -645,6 +671,7 @@ impl Renderer {
             &lighting,
             &shadows,
             hardware_shadows.as_ref().zip(hardware_source.as_deref()),
+            fresh.as_ref().zip(fresh_source.as_deref()),
             color_format,
             options.samples,
             wgsl,
@@ -676,13 +703,19 @@ impl Renderer {
             identity: Arc::new(()),
             #[cfg(test)]
             reference_draws: false,
+            #[cfg(test)]
+            fresh_fragment_reference: false,
             pipeline,
-            shader_hash: Sha256::digest(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
+            shader_hash: Sha256::new()
+                .chain_update(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
+                .chain_update(fresh_source.as_deref().unwrap_or("").as_bytes())
+                .finalize()
                 .into(),
             lighting,
             environment: Default::default(),
             shadows,
             hardware_shadows,
+            fresh,
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -767,6 +800,7 @@ impl Renderer {
         lighting: &LightingGpu,
         shadows: &ShadowState,
         hardware: Option<(&HardwareState, &str)>,
+        fresh: Option<(&FreshState, &str)>,
         format: wgpu::TextureFormat,
         samples: SampleCount,
         source: &str,
@@ -936,6 +970,7 @@ impl Renderer {
             ResourceKind::RenderPipeline,
         );
         Pipelines {
+            fresh: fresh.map(|(f, source)| f.compile(device, ledger, source)),
             hardware,
             shadow,
             diagnostic_tangent,
@@ -972,6 +1007,15 @@ impl Renderer {
                 diagnostic: error.to_string(),
                 compile: start.elapsed(),
             })?;
+        let fresh_source = self
+            .fresh
+            .as_ref()
+            .map(|_| fresh_shadow_gpu::shader_source(wgsl))
+            .transpose()
+            .map_err(|error| ReloadError::Rejected {
+                diagnostic: error.to_string(),
+                compile: start.elapsed(),
+            })?;
         let scopes = OperationScopes::new(&self.device);
         let candidate = Self::compile(
             &self.device,
@@ -982,6 +1026,7 @@ impl Renderer {
             self.hardware_shadows
                 .as_ref()
                 .zip(hardware_source.as_deref()),
+            self.fresh.as_ref().zip(fresh_source.as_deref()),
             self.format,
             self.options.samples,
             wgsl,
@@ -1005,8 +1050,11 @@ impl Renderer {
             return Err(ReloadError::Fault(fault.clone()));
         }
         self.pipeline = candidate;
-        self.shader_hash =
-            Sha256::digest(hardware_source.as_deref().unwrap_or(wgsl).as_bytes()).into();
+        self.shader_hash = Sha256::new()
+            .chain_update(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
+            .chain_update(fresh_source.as_deref().unwrap_or("").as_bytes())
+            .finalize()
+            .into();
         self.revision.0 += 1;
         self.pipelines.installations += 1;
         Ok(ReloadReport {
@@ -1180,6 +1228,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1343,6 +1392,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1384,6 +1434,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -1643,6 +1694,9 @@ impl Renderer {
         self.check_fault()?;
         let preparation_start = Instant::now();
         self.validate_color(color)?;
+        if self.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
+            fresh_shadow_gpu::admit_targets(&self.shadows.settings, color.width(), color.height())?;
+        }
         if draws.iter().any(|draw| {
             !Arc::ptr_eq(&self.identity, &draw.instances.renderer)
                 || !Arc::ptr_eq(&self.identity, &draw.mesh.renderer)
@@ -1965,6 +2019,9 @@ impl Renderer {
         }
         let lit = view_mode == ViewMode::Lit;
         let hardware_shadowed = shadow_frame.is_some() && self.hardware_shadows.is_some();
+        let fresh = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
+        #[cfg(test)]
+        let fresh = fresh && !self.fresh_fragment_reference;
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
@@ -2048,6 +2105,13 @@ impl Renderer {
         if lit {
             self.ensure_hdr(color);
         }
+        if fresh {
+            let scopes = OperationScopes::new(&self.device);
+            self.ensure_fresh_targets(color.size(), hardware_build);
+            if let Some(error) = scopes.finish() {
+                return Err(self.fail(error.to_string()));
+            }
+        }
         self.check_fault()?;
         let view = self
             .ledger
@@ -2071,14 +2135,17 @@ impl Renderer {
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
         }
+        if fresh {
+            self.encode_fresh(&mut encoder, draws, slot, timed);
+        }
         let timestamps =
             self.timing
                 .as_ref()
                 .filter(|_| timed)
                 .map(|timing| wgpu::RenderPassTimestampWrites {
                     query_set: &timing.queries,
-                    beginning_of_pass_write_index: Some(slot as u32 * 6),
-                    end_of_pass_write_index: Some(slot as u32 * 6 + 1),
+                    beginning_of_pass_write_index: Some(slot as u32 * 10),
+                    end_of_pass_write_index: Some(slot as u32 * 10 + 1),
                 });
         let hdr = self.lighting.hdr.as_ref().filter(|_| lit);
         let msaa = if lit {
@@ -2120,7 +2187,9 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
-            pass.set_pipeline(if hardware_shadowed {
+            pass.set_pipeline(if fresh {
+                &self.pipeline.fresh.as_ref().unwrap().shade[0]
+            } else if hardware_shadowed {
                 &self.pipeline.hardware.as_ref().unwrap()[0]
             } else if lit {
                 &self.pipeline.lit
@@ -2132,7 +2201,9 @@ impl Renderer {
             }
             pass.set_bind_group(
                 0,
-                if hardware_shadowed {
+                if fresh {
+                    &self.fresh.as_ref().unwrap().targets.as_ref().unwrap().shade
+                } else if hardware_shadowed {
                     self.hardware_shadows.as_ref().unwrap().bind()
                 } else {
                     &*self.bind
@@ -2146,7 +2217,10 @@ impl Renderer {
                 if draw.slots.is_empty() {
                     continue;
                 }
-                let candidate = if hardware_shadowed {
+                let candidate = if fresh {
+                    &self.pipeline.fresh.as_ref().unwrap().shade
+                        [usize::from(draw.mesh.tangent.is_some())]
+                } else if hardware_shadowed {
                     &self.pipeline.hardware.as_ref().unwrap()
                         [usize::from(draw.mesh.tangent.is_some())]
                 } else {
@@ -2204,8 +2278,8 @@ impl Renderer {
                 timestamp_writes: self.timing.as_ref().filter(|_| timed).map(|t| {
                     wgpu::RenderPassTimestampWrites {
                         query_set: &t.queries,
-                        beginning_of_pass_write_index: Some(slot as u32 * 6 + 2),
-                        end_of_pass_write_index: Some(slot as u32 * 6 + 3),
+                        beginning_of_pass_write_index: Some(slot as u32 * 10 + 2),
+                        end_of_pass_write_index: Some(slot as u32 * 10 + 3),
                     }
                 }),
                 ..Default::default()
@@ -2220,8 +2294,8 @@ impl Renderer {
             let offset = slot as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
             encoder.resolve_query_set(
                 &timing.queries,
-                slot as u32 * 6
-                    ..slot as u32 * 6
+                slot as u32 * 10
+                    ..slot as u32 * 10
                         + if shadow_frame.is_some() && !hardware_shadowed {
                             6
                         } else if lit {
@@ -2245,6 +2319,15 @@ impl Renderer {
                     16
                 },
             );
+            if fresh {
+                encoder.resolve_query_set(
+                    &timing.queries,
+                    slot as u32 * 10 + 6..slot as u32 * 10 + 10,
+                    &timing.resolve,
+                    offset,
+                );
+                encoder.copy_buffer_to_buffer(&timing.resolve, offset, readback, 48, 32);
+            }
             let mapped = Arc::new(OnceLock::new());
             let callback = mapped.clone();
             encoder.map_buffer_on_submit(readback, wgpu::MapMode::Read, .., move |result| {
@@ -2283,6 +2366,7 @@ impl Renderer {
                 mapped,
                 lit,
                 shadowed: shadow_frame.is_some() && !hardware_shadowed,
+                fresh,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
@@ -2355,14 +2439,24 @@ impl Renderer {
                             } else {
                                 None
                             };
-                            (begin, end, present, shadow)
+                            let fresh = flight.fresh.then(|| {
+                                std::array::from_fn::<_, 4, _>(|i| {
+                                    u64::from_ne_bytes(
+                                        view[48 + i * 8..56 + i * 8].try_into().unwrap(),
+                                    )
+                                })
+                            });
+                            (begin, end, present, shadow, fresh)
                         });
                         readback.unmap();
                         match result {
-                            Ok((begin, end, present, shadow))
+                            Ok((begin, end, present, shadow, fresh))
                                 if end >= begin
                                     && present.is_none_or(|(a, b)| b >= a && a >= end)
-                                    && shadow.is_none_or(|(a, b)| b >= a && b <= begin) =>
+                                    && shadow.is_none_or(|(a, b)| b >= a && b <= begin)
+                                    && fresh.is_none_or(|[a, b, c, d]| {
+                                        b >= a && c >= b && d >= c && begin >= d
+                                    }) =>
                             {
                                 let seconds = (end - begin) as f64
                                     * f64::from(self.timing.as_ref().unwrap().period)
@@ -2372,6 +2466,24 @@ impl Renderer {
                                         frame: flight.frame.unwrap(),
                                         revision: flight.revision,
                                         mesh_pass,
+                                        receiver_pass: fresh.map(|[a, b, _, _]| {
+                                            Duration::from_secs_f64(
+                                                (b - a) as f64
+                                                    * f64::from(
+                                                        self.timing.as_ref().unwrap().period,
+                                                    )
+                                                    * 1e-9,
+                                            )
+                                        }),
+                                        visibility_compute: fresh.map(|[_, _, a, b]| {
+                                            Duration::from_secs_f64(
+                                                (b - a) as f64
+                                                    * f64::from(
+                                                        self.timing.as_ref().unwrap().period,
+                                                    )
+                                                    * 1e-9,
+                                            )
+                                        }),
                                         shadow_generation: shadow.map(|(a, b)| {
                                             Duration::from_secs_f64(
                                                 (b - a) as f64
@@ -2383,7 +2495,10 @@ impl Renderer {
                                         }),
                                         render_span: Duration::from_secs_f64(
                                             (present.map_or(end, |(_, b)| b)
-                                                - shadow.map_or(begin, |(a, _)| a))
+                                                - fresh.map_or_else(
+                                                    || shadow.map_or(begin, |(a, _)| a),
+                                                    |[a, _, _, _]| a,
+                                                ))
                                                 as f64
                                                 * f64::from(self.timing.as_ref().unwrap().period)
                                                 * 1e-9,
@@ -2439,6 +2554,9 @@ impl Renderer {
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
         self.shadows.collect(self.completed_submission);
+        if let Some(fresh) = &mut self.fresh {
+            fresh.collect(self.completed_submission);
+        }
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(self.completed_submission);
         }
@@ -2507,3 +2625,7 @@ impl Renderer {
 #[path = "virtual_gpu.rs"]
 mod virtual_gpu;
 pub use virtual_gpu::{Capture, CaptureInfo};
+
+#[cfg(test)]
+#[path = "fresh_shadow_tests.rs"]
+mod fresh_shadow_tests;

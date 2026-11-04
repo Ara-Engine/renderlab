@@ -409,6 +409,9 @@ impl HardwareState {
                     .filter(|n| *n > 0)
             });
     }
+    pub fn scene(&self) -> &wgpu::Tlas {
+        &self.active.as_ref().unwrap().tlas
+    }
     pub fn bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().bind
     }
@@ -473,6 +476,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,

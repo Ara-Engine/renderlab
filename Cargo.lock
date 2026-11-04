@@ -1434,6 +1434,7 @@ version = "0.1.0"
 dependencies = [
  "glam 0.30.10",
  "log",
+ "naga",
  "png",
  "pollster",
  "renderlab-asset",

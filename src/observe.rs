@@ -122,6 +122,10 @@ pub struct GpuSample {
     /// Render-pass boundary timestamps, including material shading and configured samples.
     /// Excludes uploads, timestamp-query resolve, acquire and present. Attachment resolve is not isolated.
     pub mesh_pass: Duration,
+    /// Fresh soft-shadow receiver raster, when enabled.
+    pub receiver_pass: Option<Duration>,
+    /// Fresh 256-ray compute visibility, when enabled.
+    pub visibility_compute: Option<Duration>,
     /// Separate HDR presentation pass boundaries; excludes acquire/present and uploads.
     pub present_pass: Option<Duration>,
     /// First shadow pass begin through final shadow pass end. No CPU wait per frame.
@@ -169,8 +173,9 @@ pub enum ResourceKind {
     Sampler,
     Blas,
     Tlas,
+    ComputePipeline,
 }
-const RESOURCE_KINDS: usize = 12;
+const RESOURCE_KINDS: usize = 13;
 
 /// Renderlab ownership only. No driver residency claim. Caller-owned colors are excluded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

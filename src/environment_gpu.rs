@@ -86,6 +86,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,

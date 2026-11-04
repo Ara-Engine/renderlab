@@ -349,8 +349,12 @@ impl ShadowState {
             ]
             .into_iter()
             .chain(camera_depth.to_array())
-            .chain([view.world_units_per_texel.unwrap_or(0.0), 0.0, 0.0, 0.0])
-            {
+            .chain([
+                view.world_units_per_texel.unwrap_or(0.0),
+                0.0,
+                self.settings.directional_disk_angle.tan(),
+                0.0,
+            ]) {
                 records.extend_from_slice(&value.to_ne_bytes());
             }
         }
@@ -427,6 +431,18 @@ impl Renderer {
         lights: &[Light],
         shadows: &Shadows,
     ) -> Result<(), Error> {
+        if shadows.directional_disk_angle > 0.0
+            && (self.fresh.is_none()
+                || !matches!(lights, [Light::Directional { .. }])
+                || !matches!(
+                    shadows.requests.as_slice(),
+                    [ShadowRequest::Directional { .. }]
+                ))
+        {
+            return Err(Error::InvalidInput(
+                "soft visibility requires hardware 1x and exactly one shadowed directional light",
+            ));
+        }
         if self.hardware_shadows.is_none() {
             shadows.validate(lights, self.shadows.limits)?;
             return Ok(());
@@ -459,6 +475,7 @@ impl Renderer {
                 mapped: None,
                 lit: false,
                 shadowed: false,
+                fresh: false,
                 submission: self.submissions,
                 frame: None,
                 revision: self.revision,
@@ -517,6 +534,11 @@ impl Renderer {
         self.check_fault()?;
         self.validate_shadow_settings(&self.lighting.source_lights, shadows)?;
         self.shadows.settings.clone_from(shadows);
+        if (!shadows.enabled() || shadows.directional_disk_angle == 0.0)
+            && let Some(fresh) = &mut self.fresh
+        {
+            fresh.release(self.submissions);
+        }
         if !shadows.enabled()
             && let Some(hardware) = &mut self.hardware_shadows
         {
@@ -549,6 +571,11 @@ impl Renderer {
             self.lighting.pending.exposure = exposure;
         }
         self.shadows.settings.clone_from(shadows);
+        if (!shadows.enabled() || shadows.directional_disk_angle == 0.0)
+            && let Some(fresh) = &mut self.fresh
+        {
+            fresh.release(self.submissions);
+        }
         if !shadows.enabled()
             && let Some(hardware) = &mut self.hardware_shadows
         {
@@ -660,9 +687,9 @@ impl Renderer {
                     .filter(|_| timed && (index == 0 || index + 1 == frame.views.len()))
                     .map(|t| wgpu::RenderPassTimestampWrites {
                         query_set: &t.queries,
-                        beginning_of_pass_write_index: (index == 0).then_some(slot as u32 * 6 + 4),
+                        beginning_of_pass_write_index: (index == 0).then_some(slot as u32 * 10 + 4),
                         end_of_pass_write_index: (index + 1 == frame.views.len())
-                            .then_some(slot as u32 * 6 + 5),
+                            .then_some(slot as u32 * 10 + 5),
                     }),
                 ..Default::default()
             });
