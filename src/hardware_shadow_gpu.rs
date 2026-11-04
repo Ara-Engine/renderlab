@@ -55,6 +55,8 @@ struct PendingBuild {
 
 pub(super) struct HardwareState {
     pub options: HardwareShadowOptions,
+    /// Every AS this renderer builds allows hit-vertex return (traced visibility).
+    flags: wgpu::AccelerationStructureFlags,
     bindings: Owned<wgpu::BindGroupLayout>,
     pub layout: Owned<wgpu::PipelineLayout>,
     active: Option<SceneAcceleration>,
@@ -96,6 +98,7 @@ impl HardwareState {
         groups: [&wgpu::BindGroupLayout; 3],
         lighting: &wgpu::BindGroupLayout,
         options: HardwareShadowOptions,
+        vertex_return: bool,
     ) -> Self {
         let bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -138,6 +141,12 @@ impl HardwareState {
         );
         Self {
             options,
+            flags: if vertex_return {
+                wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE
+                    | wgpu::AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN
+            } else {
+                wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE
+            },
             bindings,
             layout,
             active: None,
@@ -227,7 +236,7 @@ impl HardwareState {
             device.create_blas(
                 &wgpu::CreateBlasDescriptor {
                     label: Some(&label),
-                    flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                    flags: self.flags,
                     update_mode: wgpu::AccelerationStructureUpdateMode::Build,
                 },
                 wgpu::BlasGeometrySizeDescriptors::Triangles {
@@ -269,7 +278,13 @@ impl HardwareState {
         self.stats.blas_builds += 1;
         self.observe_scratch(device);
     }
-    fn placements(draws: &[Draw<'_>], max_instances: u32) -> Result<Vec<Placement>, Error> {
+    /// `casters`: the placements also cast hardware shadows, which need double-sided
+    /// opaque materials. Traced primary visibility alone culls single-sided back faces.
+    fn placements(
+        draws: &[Draw<'_>],
+        max_instances: u32,
+        casters: bool,
+    ) -> Result<Vec<Placement>, Error> {
         let count = draws
             .iter()
             .try_fold(0usize, |n, d| n.checked_add(d.instances.len()))
@@ -281,7 +296,7 @@ impl HardwareState {
         }
         let mut placements = Vec::with_capacity(count);
         for draw in draws {
-            if draw.material.is_some_and(|m| !m.double_sided) {
+            if casters && draw.material.is_some_and(|m| !m.double_sided) {
                 return Err(Error::InvalidInput(
                     "hardware shadows currently require opaque double-sided materials",
                 ));
@@ -312,8 +327,9 @@ impl HardwareState {
         camera: &wgpu::Buffer,
         draws: &[Draw<'_>],
         submission: u64,
+        casters: bool,
     ) -> Result<bool, Error> {
-        let placements = Self::placements(draws, device.limits().max_tlas_instance_count)?;
+        let placements = Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
         if self.active.as_ref().is_some_and(|active| {
             active.placements.len() == placements.len()
                 && active
@@ -337,7 +353,7 @@ impl HardwareState {
         let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
             label: Some(&label),
             max_instances: placements.len().max(1) as u32,
-            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+            flags: self.flags,
             update_mode: wgpu::AccelerationStructureUpdateMode::Build,
         });
         for (i, p) in placements.iter().enumerate() {

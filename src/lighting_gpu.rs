@@ -62,10 +62,11 @@ impl LightingGpu {
         let bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("lighting group 3"),
+                // Compute visibility serves fresh visibility and traced deferred shading.
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -83,19 +84,19 @@ impl LightingGpu {
                         },
                         count: None,
                     },
-                    texture_entry(2),
-                    cube_entry(6),
-                    cube_entry(7),
-                    cube_entry(9),
+                    computed(texture_entry(2)),
+                    computed(cube_entry(6)),
+                    computed(cube_entry(7)),
+                    computed(cube_entry(9)),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
                             view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -224,6 +225,10 @@ impl LightingGpu {
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
     }
+}
+fn computed(mut entry: wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupLayoutEntry {
+    entry.visibility |= wgpu::ShaderStages::COMPUTE;
+    entry
 }
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -525,6 +530,12 @@ impl Renderer {
                         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC
                     } else {
                         wgpu::TextureUsages::empty()
+                    }
+                    // Traced deferred shading writes the resolved HDR from compute.
+                    | if samples == 1 && self.primary.is_some() {
+                        wgpu::TextureUsages::STORAGE_BINDING
+                    } else {
+                        wgpu::TextureUsages::empty()
                     },
                 view_formats: &[],
             }),
@@ -549,12 +560,13 @@ impl Renderer {
             .environment
             .map(|v| (f64::from(v) * f64::from(self.lighting.pending.exposure)).min(65504.0))
     }
-    pub(super) fn stamp_hdr(&mut self, frame: FrameId) {
+    /// `shader_hash` names the modules that wrote this HDR (raster or traced).
+    pub(super) fn stamp_hdr(&mut self, frame: FrameId, shader_hash: [u8; 32]) {
         if let Some(hdr) = &mut self.lighting.hdr {
             hdr.exposure = self.lighting.pending.exposure;
             hdr.frame = frame;
             hdr.revision = self.revision;
-            hdr.shader_hash = self.shader_hash;
+            hdr.shader_hash = shader_hash;
             let mut hash = Sha256::new();
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));

@@ -13,6 +13,9 @@ use hardware_shadow_gpu::HardwareState;
 #[path = "fresh_shadow_gpu.rs"]
 mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
+#[path = "primary_ray_gpu.rs"]
+mod primary_ray_gpu;
+use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -275,6 +278,8 @@ impl Renderer {
 }
 struct Pipelines {
     fresh: Option<FreshPipelines>,
+    /// Present exactly while traced primary visibility is selected.
+    primary: Option<PrimaryPipelines>,
     hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     shadow: Owned<wgpu::RenderPipeline>,
     diagnostic_tangent: Owned<wgpu::RenderPipeline>,
@@ -286,6 +291,8 @@ struct Pipelines {
 struct Slot {
     readback: Option<Owned<wgpu::Buffer>>,
     flight: Option<Flight>,
+    /// The frame in flight timed traced receivers without a visibility compute pass.
+    traced_receivers: bool,
 }
 struct Timing {
     queries: Owned<wgpu::QuerySet>,
@@ -328,6 +335,13 @@ pub struct Renderer {
     shadows: ShadowState,
     hardware_shadows: Option<HardwareState>,
     fresh: Option<FreshState>,
+    /// Exists on hardware-shadow 1x renderers, which can trace primary visibility.
+    primary: Option<PrimaryState>,
+    primary_mode: PrimaryVisibility,
+    /// Identity of the traced modules, which also produce the HDR of traced frames.
+    primary_hash: [u8; 32],
+    /// Last installed scene WGSL, composed again when traced visibility is selected.
+    source: String,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -548,9 +562,11 @@ impl Renderer {
             }),
             ResourceKind::BindGroupLayout,
         );
+        // Compute visibility lets traced primary shading bind each material unchanged.
+        let material_stages = wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
         let mut entries = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: material_stages,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -561,7 +577,7 @@ impl Renderer {
         for binding in [1, 3, 5] {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: material_stages,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -573,7 +589,7 @@ impl Renderer {
         for binding in [2, 4, 6] {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: material_stages,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             });
@@ -604,6 +620,10 @@ impl Renderer {
             [&bindings, &instance_bindings, &material_bindings],
         );
         let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
+        // Traced visibility reads hit-triangle positions back from the shared AS.
+        let traced = hardware.is_some()
+            && options.samples == SampleCount::One
+            && primary_ray_gpu::supported(&device);
         let hardware_shadows = hardware.map(|options| {
             HardwareState::new(
                 &device,
@@ -611,6 +631,7 @@ impl Renderer {
                 [&bindings, &instance_bindings, &material_bindings],
                 &lighting.bindings,
                 options,
+                traced,
             )
         });
         let fresh = (hardware.is_some() && options.samples == SampleCount::One).then(|| {
@@ -625,6 +646,7 @@ impl Renderer {
                 ],
             )
         });
+        let primary = traced.then(|| PrimaryState::new(&device, &ledger, &lighting.bindings));
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
@@ -659,6 +681,7 @@ impl Renderer {
                 )
             }),
             flight: None,
+            traced_receivers: false,
         });
         if let Some(error) = scopes.finish() {
             return Err(Error::Fault(Fault(error.to_string())));
@@ -672,6 +695,7 @@ impl Renderer {
             &shadows,
             hardware_shadows.as_ref().zip(hardware_source.as_deref()),
             fresh.as_ref().zip(fresh_source.as_deref()),
+            None,
             color_format,
             options.samples,
             wgsl,
@@ -716,6 +740,10 @@ impl Renderer {
             shadows,
             hardware_shadows,
             fresh,
+            primary,
+            primary_mode: PrimaryVisibility::Raster,
+            primary_hash: [0; 32],
+            source: wgsl.to_owned(),
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -801,6 +829,7 @@ impl Renderer {
         shadows: &ShadowState,
         hardware: Option<(&HardwareState, &str)>,
         fresh: Option<(&FreshState, &str)>,
+        primary: Option<(&PrimaryState, &[String; 2])>,
         format: wgpu::TextureFormat,
         samples: SampleCount,
         source: &str,
@@ -971,6 +1000,7 @@ impl Renderer {
         );
         Pipelines {
             fresh: fresh.map(|(f, source)| f.compile(device, ledger, source)),
+            primary: primary.map(|(p, sources)| p.compile(device, ledger, sources)),
             hardware,
             shadow,
             diagnostic_tangent,
@@ -1016,6 +1046,17 @@ impl Renderer {
                 diagnostic: error.to_string(),
                 compile: start.elapsed(),
             })?;
+        // Traced modules are part of the same transaction while they are selected.
+        let primary_sources = self
+            .pipeline
+            .primary
+            .as_ref()
+            .map(|_| primary_ray_gpu::shader_sources(wgsl))
+            .transpose()
+            .map_err(|error| ReloadError::Rejected {
+                diagnostic: error.to_string(),
+                compile: start.elapsed(),
+            })?;
         let scopes = OperationScopes::new(&self.device);
         let candidate = Self::compile(
             &self.device,
@@ -1027,6 +1068,7 @@ impl Renderer {
                 .as_ref()
                 .zip(hardware_source.as_deref()),
             self.fresh.as_ref().zip(fresh_source.as_deref()),
+            self.primary.as_ref().zip(primary_sources.as_ref()),
             self.format,
             self.options.samples,
             wgsl,
@@ -1055,6 +1097,10 @@ impl Renderer {
             .chain_update(fresh_source.as_deref().unwrap_or("").as_bytes())
             .finalize()
             .into();
+        if let Some(sources) = &primary_sources {
+            self.primary_hash = primary_ray_gpu::sources_hash(sources);
+        }
+        wgsl.clone_into(&mut self.source);
         self.revision.0 += 1;
         self.pipelines.installations += 1;
         Ok(ReloadReport {
@@ -1132,17 +1178,22 @@ impl Renderer {
         preparation += pack_start.elapsed();
         let start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
+        // Traced shading reads the same buffers as storage; no second geometry copy.
+        let traced = if self.primary.is_some() {
+            wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::empty()
+        };
+        let blas = if self.hardware_shadows.is_some() {
+            wgpu::BufferUsages::BLAS_INPUT
+        } else {
+            wgpu::BufferUsages::empty()
+        };
         let vertex = Arc::new(self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh vertices"),
                 size: sizes.0,
-                usage: wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST
-                    | if self.hardware_shadows.is_some() {
-                        wgpu::BufferUsages::BLAS_INPUT
-                    } else {
-                        wgpu::BufferUsages::empty()
-                    },
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | blas | traced,
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
@@ -1151,13 +1202,7 @@ impl Renderer {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh indices"),
                 size: sizes.1,
-                usage: wgpu::BufferUsages::INDEX
-                    | wgpu::BufferUsages::COPY_DST
-                    | if self.hardware_shadows.is_some() {
-                        wgpu::BufferUsages::BLAS_INPUT
-                    } else {
-                        wgpu::BufferUsages::empty()
-                    },
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas | traced,
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
@@ -1167,7 +1212,7 @@ impl Renderer {
                 self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("mesh tangents"),
                     size: tangent_bytes,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | traced,
                     mapped_at_creation: false,
                 }),
                 ResourceKind::Buffer,
@@ -1600,7 +1645,14 @@ impl Renderer {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("immutable material factors"),
                 size: 48,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                // Traced shading reads every draw's factors from a storage binding array.
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::COPY_DST
+                    | if self.primary.is_some() {
+                        wgpu::BufferUsages::STORAGE
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
@@ -1732,6 +1784,15 @@ impl Renderer {
                 "camera aspect produces nonfinite projection",
             ));
         }
+        let traced = self.primary_mode == PrimaryVisibility::Traced && view_mode == ViewMode::Lit;
+        if traced {
+            primary_ray_gpu::admit_draws(draws, matrix, self.shadows.enabled(view_mode))?;
+            #[cfg(test)]
+            assert!(
+                !self.reference_draws,
+                "traced frames have no per-slot oracle"
+            );
+        }
         let preparation = preparation_start.elapsed();
         let poll = self.collect()?;
         let Some(slot) = self.free_slot() else {
@@ -1771,7 +1832,8 @@ impl Renderer {
             Duration::ZERO
         };
         let acceleration_start = Instant::now();
-        let hardware_build = if shadow_frame.is_some() {
+        // Traced frames need the TLAS for camera rays even without shadows.
+        let hardware_build = if shadow_frame.is_some() || traced {
             if let Some(hardware) = &mut self.hardware_shadows {
                 let scopes = OperationScopes::new(&self.device);
                 let result = hardware.prepare_scene(
@@ -1780,6 +1842,7 @@ impl Renderer {
                     &self.uniform,
                     draws,
                     self.submissions,
+                    shadow_frame.is_some(),
                 );
                 if let Some(error) = scopes.finish() {
                     return Err(self.fail(error.to_string()));
@@ -1791,7 +1854,7 @@ impl Renderer {
         } else {
             false
         };
-        if shadow_frame.is_some() && self.hardware_shadows.is_some() {
+        if (shadow_frame.is_some() || traced) && self.hardware_shadows.is_some() {
             shadow_preparation += acceleration_start.elapsed();
         }
         let mut uploads = UploadBytes::default();
@@ -1920,7 +1983,7 @@ impl Renderer {
         if shadow_frame.is_some() {
             shadow_preparation += shadow_start.elapsed();
         }
-        self.submit_prepared(
+        self.submit_frame(
             color,
             camera_bytes,
             camera,
@@ -1929,6 +1992,7 @@ impl Renderer {
             shadow_frame,
             &shadow_draws,
             hardware_build,
+            traced,
             slot,
             uploads,
             scene,
@@ -1986,7 +2050,7 @@ impl Renderer {
         }
     }
 
-    // Persistent data is prepared once, then borrowed for the shared render pass.
+    /// Raster submission for virtual geometry, which never traces primary visibility.
     #[allow(clippy::too_many_arguments)]
     fn submit_prepared(
         &mut self,
@@ -1998,6 +2062,43 @@ impl Renderer {
         shadow_frame: Option<ShadowFrame>,
         shadow_draws: &[ShadowDraw<'_>],
         hardware_build: bool,
+        slot: usize,
+        uploads: UploadBytes,
+        scene: SceneCounts,
+        cpu: CpuFrame,
+    ) -> Result<Option<FrameReport>, Error> {
+        self.submit_frame(
+            color,
+            camera_bytes,
+            camera,
+            view_mode,
+            draws,
+            shadow_frame,
+            shadow_draws,
+            hardware_build,
+            false,
+            slot,
+            uploads,
+            scene,
+            cpu,
+        )
+    }
+
+    // Persistent data is prepared once, then borrowed for the shared render pass.
+    // `traced` frames replace both raster geometry passes with camera rays and
+    // deferred compute shading; the TLAS for this draw sequence is current.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_frame(
+        &mut self,
+        color: &wgpu::Texture,
+        camera_bytes: [u8; 64],
+        camera: &Camera,
+        view_mode: ViewMode,
+        draws: &[PreparedDraw<'_>],
+        shadow_frame: Option<ShadowFrame>,
+        shadow_draws: &[ShadowDraw<'_>],
+        hardware_build: bool,
+        traced: bool,
         slot: usize,
         mut uploads: UploadBytes,
         scene: SceneCounts,
@@ -2019,9 +2120,11 @@ impl Renderer {
         }
         let lit = view_mode == ViewMode::Lit;
         let hardware_shadowed = shadow_frame.is_some() && self.hardware_shadows.is_some();
-        let fresh = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
+        let soft = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
         #[cfg(test)]
-        let fresh = fresh && !self.fresh_fragment_reference;
+        let soft = soft && (traced || !self.fresh_fragment_reference);
+        // Raster fresh frames: receiver raster, visibility compute, then raster shading.
+        let fresh = soft && !traced;
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
@@ -2105,12 +2208,25 @@ impl Renderer {
         if lit {
             self.ensure_hdr(color);
         }
-        if fresh {
+        if soft {
             let scopes = OperationScopes::new(&self.device);
             self.ensure_fresh_targets(color.size(), hardware_build);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
             }
+        }
+        if traced {
+            let scopes = OperationScopes::new(&self.device);
+            let hardware = self.hardware_shadows.as_ref().unwrap();
+            let scene_generation = hardware.stats.tlas_builds + u64::from(hardware_build);
+            let mut primary = UploadBytes::default();
+            let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
+            if let Some(error) = scopes.finish() {
+                return Err(self.fail(error.to_string()));
+            }
+            result?;
+            uploads.add(primary);
+            self.uploads.add(primary);
         }
         self.check_fault()?;
         let view = self
@@ -2138,6 +2254,24 @@ impl Renderer {
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
+        if traced {
+            let stamps = |first: u32| {
+                self.timing
+                    .as_ref()
+                    .filter(|_| timed)
+                    .map(|t| wgpu::ComputePassTimestampWrites {
+                        query_set: &t.queries,
+                        beginning_of_pass_write_index: Some(slot as u32 * 10 + first),
+                        end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
+                    })
+            };
+            self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+            if soft {
+                let p = self.pipeline.primary.as_ref().unwrap();
+                self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+            }
+            self.encode_primary_shading(&mut encoder, soft, stamps(0));
+        }
         let timestamps =
             self.timing
                 .as_ref()
@@ -2155,7 +2289,7 @@ impl Renderer {
         };
         let resolved = hdr.map_or(&*view, |h| &*h.resolved.view);
         let clear = if lit { self.lit_clear() } else { CLEAR_COLOR };
-        {
+        if !traced {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2319,14 +2453,22 @@ impl Renderer {
                     16
                 },
             );
-            if fresh {
+            // Receivers (raster or traced), then visibility compute when soft.
+            if soft || traced {
+                let stamps = if soft { 4 } else { 2 };
                 encoder.resolve_query_set(
                     &timing.queries,
-                    slot as u32 * 10 + 6..slot as u32 * 10 + 10,
+                    slot as u32 * 10 + 6..slot as u32 * 10 + 6 + stamps,
                     &timing.resolve,
                     offset,
                 );
-                encoder.copy_buffer_to_buffer(&timing.resolve, offset, readback, 48, 32);
+                encoder.copy_buffer_to_buffer(
+                    &timing.resolve,
+                    offset,
+                    readback,
+                    48,
+                    u64::from(stamps) * 8,
+                );
             }
             let mapped = Arc::new(OnceLock::new());
             let callback = mapped.clone();
@@ -2366,19 +2508,27 @@ impl Renderer {
                 mapped,
                 lit,
                 shadowed: shadow_frame.is_some() && !hardware_shadowed,
-                fresh,
+                fresh: soft,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
                 submitted_at,
             },
         );
+        self.slots[slot].traced_receivers = traced && !soft;
         self.check_fault()?;
         if let Some(frame) = shadow_frame {
             self.stamp_shadows(frame, shadow_draws);
         }
         if lit {
-            self.stamp_hdr(frame);
+            self.stamp_hdr(
+                frame,
+                if traced {
+                    self.primary_hash
+                } else {
+                    self.shader_hash
+                },
+            );
         }
         self.camera_shadow = Some(camera_bytes);
         self.view_mode = view_mode;
@@ -2393,6 +2543,11 @@ impl Renderer {
             uploads,
             timed,
             scene,
+            primary: if traced {
+                PrimaryVisibility::Traced
+            } else {
+                PrimaryVisibility::Raster
+            },
         }))
     }
 
@@ -2413,6 +2568,7 @@ impl Renderer {
                 continue;
             }
             let flight = slot.flight.take().unwrap();
+            let traced_receivers = std::mem::take(&mut slot.traced_receivers);
             // Completion of N proves completion of every earlier queue submission.
             self.completed_submission = self.completed_submission.max(flight.submission);
             let mut gpu = None;
@@ -2439,79 +2595,51 @@ impl Renderer {
                             } else {
                                 None
                             };
-                            let fresh = flight.fresh.then(|| {
-                                std::array::from_fn::<_, 4, _>(|i| {
-                                    u64::from_ne_bytes(
-                                        view[48 + i * 8..56 + i * 8].try_into().unwrap(),
-                                    )
-                                })
-                            });
-                            (begin, end, present, shadow, fresh)
+                            let stamp = |i: usize| {
+                                u64::from_ne_bytes(view[48 + i * 8..56 + i * 8].try_into().unwrap())
+                            };
+                            // Receivers precede any visibility compute; both precede shading.
+                            let receivers =
+                                (flight.fresh || traced_receivers).then(|| (stamp(0), stamp(1)));
+                            let compute = flight.fresh.then(|| (stamp(2), stamp(3)));
+                            (begin, end, present, shadow, receivers, compute)
                         });
                         readback.unmap();
                         match result {
-                            Ok((begin, end, present, shadow, fresh))
+                            Ok((begin, end, present, shadow, receivers, compute))
                                 if end >= begin
                                     && present.is_none_or(|(a, b)| b >= a && a >= end)
                                     && shadow.is_none_or(|(a, b)| b >= a && b <= begin)
-                                    && fresh.is_none_or(|[a, b, c, d]| {
-                                        b >= a && c >= b && d >= c && begin >= d
+                                    && receivers.is_none_or(|(a, b)| b >= a && begin >= b)
+                                    && compute.is_none_or(|(c, d)| {
+                                        receivers.is_some_and(|(_, b)| c >= b)
+                                            && d >= c
+                                            && begin >= d
                                     }) =>
                             {
                                 let seconds = (end - begin) as f64
                                     * f64::from(self.timing.as_ref().unwrap().period)
                                     * 1e-9;
+                                let period = f64::from(self.timing.as_ref().unwrap().period);
+                                let span = |(a, b): (u64, u64)| {
+                                    Duration::from_secs_f64((b - a) as f64 * period * 1e-9)
+                                };
                                 if let Ok(mesh_pass) = Duration::try_from_secs_f64(seconds) {
                                     gpu = Some(GpuSample {
                                         frame: flight.frame.unwrap(),
                                         revision: flight.revision,
                                         mesh_pass,
-                                        receiver_pass: fresh.map(|[a, b, _, _]| {
-                                            Duration::from_secs_f64(
-                                                (b - a) as f64
-                                                    * f64::from(
-                                                        self.timing.as_ref().unwrap().period,
-                                                    )
-                                                    * 1e-9,
-                                            )
-                                        }),
-                                        visibility_compute: fresh.map(|[_, _, a, b]| {
-                                            Duration::from_secs_f64(
-                                                (b - a) as f64
-                                                    * f64::from(
-                                                        self.timing.as_ref().unwrap().period,
-                                                    )
-                                                    * 1e-9,
-                                            )
-                                        }),
-                                        shadow_generation: shadow.map(|(a, b)| {
-                                            Duration::from_secs_f64(
-                                                (b - a) as f64
-                                                    * f64::from(
-                                                        self.timing.as_ref().unwrap().period,
-                                                    )
-                                                    * 1e-9,
-                                            )
-                                        }),
-                                        render_span: Duration::from_secs_f64(
-                                            (present.map_or(end, |(_, b)| b)
-                                                - fresh.map_or_else(
-                                                    || shadow.map_or(begin, |(a, _)| a),
-                                                    |[a, _, _, _]| a,
-                                                ))
-                                                as f64
-                                                * f64::from(self.timing.as_ref().unwrap().period)
-                                                * 1e-9,
-                                        ),
-                                        present_pass: present.map(|(a, b)| {
-                                            Duration::from_secs_f64(
-                                                (b - a) as f64
-                                                    * f64::from(
-                                                        self.timing.as_ref().unwrap().period,
-                                                    )
-                                                    * 1e-9,
-                                            )
-                                        }),
+                                        receiver_pass: receivers.map(span),
+                                        visibility_compute: compute.map(span),
+                                        shadow_generation: shadow.map(span),
+                                        render_span: span((
+                                            receivers.map_or_else(
+                                                || shadow.map_or(begin, |(a, _)| a),
+                                                |(a, _)| a,
+                                            ),
+                                            present.map_or(end, |(_, b)| b),
+                                        )),
+                                        present_pass: present.map(span),
                                     });
                                 } else {
                                     self.timing_status = TimingStatus::Disabled {
@@ -2556,6 +2684,9 @@ impl Renderer {
         self.shadows.collect(self.completed_submission);
         if let Some(fresh) = &mut self.fresh {
             fresh.collect(self.completed_submission);
+        }
+        if let Some(primary) = &mut self.primary {
+            primary.collect(self.completed_submission);
         }
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(self.completed_submission);

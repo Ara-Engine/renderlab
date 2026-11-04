@@ -6,11 +6,10 @@ pub(super) mod prepared;
 const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 fn material_renderer(samples: SampleCount) -> Renderer {
     let (device, queue) = device(true);
-    Renderer::new_with_options(
+    suite_renderer(
         device,
         queue,
         SRGB,
-        Limits::default(),
         RendererOptions {
             samples,
             ..Default::default()

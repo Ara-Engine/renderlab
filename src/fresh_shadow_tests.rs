@@ -128,6 +128,10 @@ fn fresh_target_budget_counts_all_cascades_and_checked_extent() {
 }
 
 fn renderer(validate: bool) -> Renderer {
+    renderer_with_features(validate, wgpu::Features::empty())
+}
+
+fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     let startup = Instant::now();
     assert_eq!(
         std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
@@ -145,14 +149,17 @@ fn renderer(validate: bool) -> Renderer {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     eprintln!("fresh_adapter={:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY,
-        required_limits: wgpu::Limits {
+        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY
+            | crate::TRACED_FEATURES
+            | extra,
+        required_limits: crate::traced_limits(wgpu::Limits {
             max_blas_primitive_count: 2_000_000,
             max_blas_geometry_count: 1,
             max_tlas_instance_count: 4096,
             max_acceleration_structures_per_shader_stage: 1,
             ..Default::default()
-        },
+        }),
         // The test caller explicitly accepts the experimental device contract above.
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
@@ -185,6 +192,11 @@ fn renderer(validate: bool) -> Renderer {
     );
     renderer
 }
+
+#[path = "primary_ray_gpu_tests.rs"]
+mod primary_ray_gpu_tests;
+#[path = "primary_ray_tests.rs"]
+mod primary_ray_tests;
 
 fn target(r: &Renderer, width: u32, height: u32) -> wgpu::Texture {
     r.device.create_texture(&wgpu::TextureDescriptor {
@@ -250,6 +262,7 @@ fn reference_pipelines(
             r.hardware_shadows.as_ref().unwrap(),
             &reference_source(width, visibility_only),
         )),
+        None,
         None,
         r.format,
         SampleCount::One,
@@ -956,11 +969,13 @@ fn gpu_fresh_compute_cost_screen() {
                 label: Some(&v.name),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
-            let pipeline = r
-                .fresh
-                .as_ref()
-                .unwrap()
-                .compute_pipeline(&r.device, &r.ledger, &module);
+            let pipeline = r.fresh.as_ref().unwrap().compute_pipeline(
+                &r.device,
+                &r.ledger,
+                &module,
+                "fresh_compute",
+                &[],
+            );
             assert!(scopes.finish().is_none(), "{} failed to compile", v.name);
             pipeline
         })

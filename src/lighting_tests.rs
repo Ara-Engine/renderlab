@@ -162,11 +162,10 @@ fn dfg_lut_matches_f64() {
 }
 fn lit_renderer(samples: SampleCount) -> Renderer {
     let (d, q) = device(true);
-    Renderer::new_with_options(
+    suite_renderer(
         d,
         q,
         FORMAT,
-        Limits::default(),
         RendererOptions {
             samples,
             ..Default::default()

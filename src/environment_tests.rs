@@ -105,16 +105,14 @@ fn environment_renderer(samples: SampleCount) -> Renderer {
             .features()
             .contains(wgpu::Features::FLOAT32_FILTERABLE)
     );
-    let (d, q) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
-        ..Default::default()
-    }))
-    .unwrap();
-    Renderer::new_with_options(
+    let (d, q) = request(
+        &adapter,
+        adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+    );
+    suite_renderer(
         d,
         q,
         FORMAT,
-        Limits::default(),
         RendererOptions {
             samples,
             ..Default::default()

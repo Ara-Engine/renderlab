@@ -1,7 +1,7 @@
 use super::*;
 
 const PIXEL_SEAM: &str = "    let source_front=front==(input.winding>0.0);";
-const GEOMETRIC_SEAM: &str = "    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));";
+pub(super) const GEOMETRIC_SEAM: &str = "    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));";
 
 /// Receiver pixels per `fresh_compute` workgroup; WGSL `FRESH_TILE` must match.
 pub(super) const TILE: [u32; 2] = [2, 2];
@@ -291,24 +291,30 @@ impl FreshState {
         FreshPipelines {
             receiver: mesh(false, true),
             shade: [false, true].map(|t| mesh(t, false)),
-            compute: self.compute_pipeline(device, ledger, &shader),
+            compute: self.compute_pipeline(device, ledger, &shader, "fresh_compute", &[]),
             compute_tile: TILE,
         }
     }
-    /// `fresh_compute` from a composed module, on the persistent compute ABI.
+    /// `entry` from a composed module, on the persistent compute ABI, with optional
+    /// pipeline-constant overrides (tests seed or replace the production estimator).
     pub fn compute_pipeline(
         &self,
         device: &wgpu::Device,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
+        entry: &str,
+        constants: &[(&str, f64)],
     ) -> Owned<wgpu::ComputePipeline> {
         ledger.own(
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("fresh 256 visibility rays"),
                 layout: Some(&self.compute_layout),
                 module: shader,
-                entry_point: Some("fresh_compute"),
-                compilation_options: Default::default(),
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants,
+                    ..Default::default()
+                },
                 cache: None,
             }),
             ResourceKind::ComputePipeline,
@@ -326,6 +332,13 @@ impl FreshState {
 }
 impl Renderer {
     pub(super) fn ensure_fresh_targets(&mut self, size: wgpu::Extent3d, hardware_build: bool) {
+        // Traced frames write the same receivers from compute.
+        let receiver_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | if self.primary.is_some() {
+                wgpu::TextureUsages::STORAGE_BINDING
+            } else {
+                wgpu::TextureUsages::empty()
+            };
         let state = self.fresh.as_mut().unwrap();
         let ledger = &self.ledger;
         let device = &self.device;
@@ -345,8 +358,9 @@ impl Renderer {
                         format,
                         usage: usage
                             | wgpu::TextureUsages::TEXTURE_BINDING
+                            // Tests read receivers and inject reference visibility.
                             | if cfg!(test) {
-                                wgpu::TextureUsages::COPY_SRC
+                                wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST
                             } else {
                                 wgpu::TextureUsages::empty()
                             },
@@ -372,12 +386,12 @@ impl Renderer {
             let world = target(
                 "fresh exact world position and depth",
                 wgpu::TextureFormat::Rgba32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                receiver_usage,
             );
             let normal = target(
                 "fresh geometric normal and coverage",
                 wgpu::TextureFormat::Rgba32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                receiver_usage,
             );
             let visibility = target(
                 "fresh visible ray counts",

@@ -50,11 +50,66 @@ fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
     } else {
         wgpu::Features::empty()
     };
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: features,
-        ..Default::default()
-    }))
-    .unwrap()
+    request(&adapter, features)
+}
+/// `RENDERLAB_TEST_PRIMARY=traced` reruns the lit suites on traced primary visibility:
+/// 1x renderers become hardware renderers with it selected; 4x renderers stay raster.
+fn traced_suite() -> bool {
+    std::env::var("RENDERLAB_TEST_PRIMARY").as_deref() == Ok("traced")
+}
+/// The suite device: `features`, plus ray queries and traced binding arrays when
+/// `traced_suite`, whose experimental contract the caller accepts explicitly.
+fn request(adapter: &wgpu::Adapter, features: wgpu::Features) -> (wgpu::Device, wgpu::Queue) {
+    let descriptor = if traced_suite() {
+        assert_eq!(
+            std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
+            Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+        );
+        wgpu::DeviceDescriptor {
+            required_features: features
+                | wgpu::Features::EXPERIMENTAL_RAY_QUERY
+                | crate::TRACED_FEATURES,
+            required_limits: crate::traced_limits(wgpu::Limits {
+                max_blas_primitive_count: 1 << 20,
+                max_blas_geometry_count: 1,
+                max_tlas_instance_count: 4096,
+                max_acceleration_structures_per_shader_stage: 1,
+                ..Default::default()
+            }),
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        }
+    } else {
+        wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }
+    };
+    pollster::block_on(adapter.request_device(&descriptor)).unwrap()
+}
+/// Raster renderer, or under `traced_suite` at 1x a hardware renderer with traced
+/// primary visibility selected.
+fn suite_renderer(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    format: wgpu::TextureFormat,
+    options: RendererOptions,
+    source: &str,
+) -> Result<Renderer, Error> {
+    if traced_suite() && options.samples == SampleCount::One {
+        let mut r = Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            format,
+            Limits::default(),
+            options,
+            HardwareShadowOptions::default(),
+            source,
+        )?;
+        r.set_primary_visibility(PrimaryVisibility::Traced)?;
+        return Ok(r);
+    }
+    Renderer::new_with_options(device, queue, format, Limits::default(), options, source)
 }
 fn renderer(timing: bool) -> Renderer {
     let (device, queue) = device(timing);

@@ -84,6 +84,8 @@ pub struct FrameReport {
     pub uploads: UploadBytes,
     pub timed: bool,
     pub scene: SceneCounts,
+    /// The path that resolved this frame's camera visibility and shading.
+    pub primary: crate::PrimaryVisibility,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SceneCounts {
@@ -121,8 +123,10 @@ pub struct GpuSample {
     pub revision: Revision,
     /// Render-pass boundary timestamps, including material shading and configured samples.
     /// Excludes uploads, timestamp-query resolve, acquire and present. Attachment resolve is not isolated.
+    /// Traced frames time their deferred compute shading pass here.
     pub mesh_pass: Duration,
-    /// Fresh soft-shadow receiver raster, when enabled.
+    /// Fresh soft-shadow receiver raster, when enabled. Traced frames time their camera
+    /// rays here, including exact receivers when soft.
     pub receiver_pass: Option<Duration>,
     /// Fresh 256-ray compute visibility, when enabled.
     pub visibility_compute: Option<Duration>,

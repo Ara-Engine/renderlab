@@ -1,5 +1,7 @@
 # M6 primary visibility: probe passes, integration rejected
 
+Superseded for integration by the [production path](m6-primary-ray-production.md): the prototype's budget miss was recorded as a miss, and the retained path passes quality acceptance.
+
 2026-11-04, based on `d8e3c38`. The [first-unit](m6-path-to-2x.md#4-first-unit-traced-primary-visibility) closest-hit probe passes its 0.75 ms stop gate: **0.294 ms**, versus **3.481 ms** for the current receiver raster. Every enumerated receiver difference is explained. The subsequent deferred-shading prototype misses the integration budgets, including **11.085 ms soft** and **2.096 ms hard** GPU spans. It is rejected and removed from the working implementation. This is not M6 acceptance or a performance comparison with Unreal.
 
 Only the isolated test probe, its shaders, and this record are retained. Production renderer and fresh-shadow implementation files match the base. Streaming and viewer files were not changed. The failed prototype remains available as a separate local patch and frozen source/binary snapshots.

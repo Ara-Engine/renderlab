@@ -19,11 +19,10 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
     let _validation = validation::begin(true);
     for samples in [SampleCount::One, SampleCount::Four] {
         let (device, queue) = device(false);
-        let mut r = Renderer::new_with_options(
+        let mut r = suite_renderer(
             device,
             queue,
             FORMAT,
-            Limits::default(),
             RendererOptions {
                 samples,
                 ..Default::default()
@@ -250,11 +249,10 @@ fn gpu_normal_maps_prepared_regular_virtual_exact_resident_images() {
         .expect("run the CPU normal_render_fixture example first");
     for samples in [SampleCount::One, SampleCount::Four] {
         let (device, queue) = device(false);
-        let mut r = Renderer::new_with_options(
+        let mut r = suite_renderer(
             device,
             queue,
             FORMAT,
-            Limits::default(),
             RendererOptions {
                 samples,
                 ..Default::default()
@@ -361,11 +359,10 @@ fn gpu_normal_maps_integration_replacement_affinity_and_mixed_draws() {
     let _validation = validation::begin(true);
     for samples in [SampleCount::One, SampleCount::Four] {
         let (device, queue) = device(false);
-        let mut r = Renderer::new_with_options(
+        let mut r = suite_renderer(
             device,
             queue,
             FORMAT,
-            Limits::default(),
             RendererOptions {
                 samples,
                 ..Default::default()
@@ -469,7 +466,16 @@ fn gpu_normal_maps_integration_replacement_affinity_and_mixed_draws() {
         );
         r.test_drain("normal ownership setup");
         let baseline = r.stats();
-        assert_eq!(baseline.ownership.get(ResourceKind::RenderPipeline).live, 6);
+        // A traced-suite 1x renderer adds the hardware (2) and fresh raster (3) pipelines.
+        let raster = if traced_suite() && samples == SampleCount::One {
+            11
+        } else {
+            6
+        };
+        assert_eq!(
+            baseline.ownership.get(ResourceKind::RenderPipeline).live,
+            raster
+        );
         let mut overlap = [0; 3];
         let mut peaks = [HighWater::default(); 2];
         for frame in 0..36 {
@@ -598,7 +604,7 @@ pub(super) fn geometric_shadow_case(samples: SampleCount, hardware: bool) {
             &source,
         )
     } else {
-        Renderer::new_with_options(device, queue, FORMAT, Limits::default(), options, &source)
+        suite_renderer(device, queue, FORMAT, options, &source)
     }
     .unwrap();
     let vertices = [
