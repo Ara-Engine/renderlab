@@ -10,6 +10,8 @@ mod hdr_files;
 #[allow(dead_code)]
 #[path = "../support/lighting_settings.rs"]
 mod lighting_settings;
+#[path = "m6/ordinary_cost.rs"]
+mod ordinary_cost;
 #[path = "../support/limits.rs"]
 mod policy;
 #[allow(dead_code)]
@@ -43,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut validate = false;
     let mut frames = 12usize;
     let mut cost = false;
+    let mut ordinary_cost = false;
     let mut shadow_resolution = 1024u32;
     let mut shadow_distance = 40.0f32;
     let mut shadow_near = 0.05f32;
@@ -68,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--validate" => validate = true,
             "--cost" => cost = true,
+            "--ordinary-cost" => ordinary_cost = true,
             "--hardware-shadows" => hardware = true,
             "--ack-experimental-wgpu-risk" => experimental_ack = true,
             "--hardware-max-estimated-bytes" => {
@@ -98,6 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if frames == 0 || frames > 120 {
         return Err("frames must be 1..120".into());
+    }
+    if ordinary_cost && (!hardware || samples != SampleCount::Four || cost) {
+        return Err("ordinary cost requires hardware shadows, samples 4, and no --cost".into());
     }
     if asset_path.is_some() && motion == "blocker" {
         return Err("blocker motion requires the owned fixture".into());
@@ -356,6 +363,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let prepared_elapsed = start.elapsed();
+    if ordinary_cost {
+        ordinary_cost::run(
+            &mut r,
+            &color,
+            asset
+                .as_mut()
+                .ok_or("ordinary cost requires a prepared asset")?,
+            cameras
+                .as_ref()
+                .ok_or("ordinary cost requires registered cameras")?,
+            &lighting,
+            &make_shadows(&lighting),
+            &shader,
+            frames,
+            &out,
+        )?;
+        // Keep one unchanged candidate capture outside all timed blocks.
+        frames = 1;
+        motion = "static".to_owned();
+    }
     let mut rows = vec![];
     for pose in 0..frames {
         let camera = if let Some(c) = &cameras {
