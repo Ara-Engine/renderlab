@@ -12,6 +12,7 @@ Read `docs/brief.md` and `docs/project-handoff.md` before implementation. Read `
 - Questions are read-only. When asked for advice or feasibility, answer before editing.
 - Use the configured pstack workflow with GPT-6.1 Sol and Opus 5.5 only, at large (xhigh) reasoning. Sol handles routine implementation, fixes and verification; Opus handles selected hard implementations, hillclimbs and consolidated reviews. Give parallel workers separate file ownership. This 2026-11-04 choice supersedes older Astra assignments.
 - Historical Ara plans are evidence, not inherited architectural decisions. Record proposals and measured reasons before choosing an approach.
+- Disk is shared and D: has filled twice. Put bulk GPU dumps and per-run images on E:/renderlab-work. Once a result is summarized, delete raw dumps larger than 5 MB and keep only the JSON/CSV/log summaries and the inspected PNGs. Delete each worker's own Cargo target directory when its unit finishes; targets can always be rebuilt.
 - Keep captures and generated measurements in ignored directories. Do not import private assets or third-party source without checking redistribution rights and preserving attribution.
 - Public repository: https://github.com/Ara-Engine/renderlab. The project license remains undecided; Ara integration is still deferred.
 - Commit and push validated checkpoints to the configured remote routinely; the user has authorized this. Report the pushed SHA and any failed push. Never force-push or include another agent's uncommitted work.
