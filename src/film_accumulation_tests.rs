@@ -9,10 +9,14 @@
 //! - `gpu_film_t1_temporal`: T1a acceptance data. T-0 identity against Interactive,
 //!   static accumulation checkpoints with the standard, sun-only and visibility programs,
 //!   cuts, and in-process static repeats.
+//! - `gpu_film_t1_motion`: T1b acceptance data. A registered camera sequence from cold
+//!   with each scored program, film captures, per-pixel ages and an in-process replay.
 //!
 //! Manifest: the quarry fields of `load_quarry`, `output`, `t1_cameras` (a cameras file
-//! whose frames are the scored poses), `poses`, and for the temporal test `frames`,
-//! `checkpoints`, `repeats` and `cut` ([from, to] pose indices).
+//! whose frames are the scored poses; a sequence's frames for its references), `poses`,
+//! optionally `centre_seeds` ([Exact, Interactive] seed counts), and for the temporal test
+//! `frames`, `checkpoints`, `repeats` and `cut` ([from, to] pose indices). The motion test
+//! reads `sequence` (a cameras file), `scored` (frame indices) and `replay`.
 use super::*;
 use primary_ray_gpu::film_accumulation;
 
@@ -109,14 +113,15 @@ fn per_sample_shading(r: &Renderer, program: &str) -> Owned<wgpu::ComputePipelin
     let source = black_clear(&film_edit(
         film_accumulation::compose_shading(&head, program, false).source,
     ));
-    let signature = "fn film_store(pixel:vec2<i32>,sample:vec3<f32>,placement:u32,distance:f32) {";
+    let signature =
+        "fn film_write(pixel:vec2<i32>,sample:vec3<f32>,k:u32,s:FilmSurface,prior:vec4<f32>) {";
     let source = format!(
         "{}\n{signature}textureStore(primary_hdr,pixel,vec4<f32>(sample,1.0));}}\n",
         edit(
             &source,
             (
                 signature,
-                &signature.replace("film_store", "film_store_history")
+                &signature.replace("film_write", "film_write_history")
             )
         )
     );
@@ -633,7 +638,10 @@ fn gpu_film_t1_reference() {
             fs::write(out.join("complete"), b"").unwrap();
             continue;
         }
-        centre_frames(&mut r, &mut asset, &color, camera, &out, [8, 4]);
+        let seeds = m["centre_seeds"]
+            .as_array()
+            .map_or([8, 4], |s| [0, 1].map(|i| s[i].as_u64().unwrap() as u32));
+        centre_frames(&mut r, &mut asset, &color, camera, &out, seeds);
         fs::write(out.join("complete"), b"").unwrap();
         eprintln!("T1 reference pose={pose} done");
     }
@@ -804,6 +812,7 @@ fn gpu_film_t1_temporal() {
         }
     }
     for (segment, pose) in [("cut", to), ("back", from)] {
+        r.cut_film();
         for n in 1..=32 {
             traced_frame(&mut r, &color, &cameras[pose], &mut asset, true);
             if checkpoints.contains(&n) {
@@ -911,9 +920,156 @@ fn gpu_film_t1_temporal() {
     );
 }
 
+/// The film weight (history colour w) and tile flags of the frame just rendered.
+fn film_weights(r: &Renderer) -> (Vec<f32>, Vec<u8>) {
+    let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+    let [colour, _, tiles] = film.history(film.parity);
+    let colour = read_texture(r, colour);
+    let weights = colour
+        .chunks_exact(16)
+        .map(|c| f32::from_le_bytes(c[12..16].try_into().unwrap()))
+        .collect();
+    (weights, read_texture(r, tiles))
+}
+
+/// T1b camera-motion data (docs/m6-temporal-gpu.md): the registered `sequence` from cold
+/// with each scored program, the film captured at the `scored` frames. The full program's
+/// run also records per frame whether it moved, how many pixels restarted (no valid tap,
+/// weight 1) and the kept tiles, and writes each scored frame's ages: frames since the
+/// pixel's history last restarted, capped at 255 (pixels of tiles without history count from
+/// the reset). `replay` renders the full program's sequence again for F8.
+#[test]
+#[ignore = "owned GPU lease; T1b camera motion data, offscreen"]
+fn gpu_film_t1_motion() {
+    let m = manifest();
+    let _validation = validation::begin(m["validate"].as_bool().unwrap_or(true));
+    let mut r = renderer(m["validate"].as_bool().unwrap_or(true));
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let (mut asset, _) = load_quarry(&m, &mut r);
+    let [w, h] = [1920u32, 1080];
+    let color = target(&r, w, h);
+    let path: Vec<Camera> = cameras::Cameras::load(&PathBuf::from(m["sequence"].as_str().unwrap()))
+        .unwrap()
+        .frames
+        .iter()
+        .map(|f| f.camera().unwrap())
+        .collect();
+    let scored: Vec<usize> = m["scored"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    r.set_soft_shadows(crate::SoftShadows::Temporal);
+    traced_frame(&mut r, &color, &path[0], &mut asset, true);
+    let pixels = (w * h) as usize;
+    let tile_width = w.div_ceil(8) as usize;
+    let mut frames = vec![];
+    let mut identity = vec![];
+    let mut digests = serde_json::Map::new();
+    let start = Instant::now();
+    for (name, program, black) in programs() {
+        let mut centre = centre_shading(&r, &program, black);
+        let mut temporal = temporal_shading(&r, &program, black);
+        r.set_soft_shadows(crate::SoftShadows::Interactive);
+        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut centre);
+        traced_frame(&mut r, &color, &path[0], &mut asset, true);
+        let interactive = settled(&mut r);
+        std::mem::swap(r.test_standard().temporal.as_mut().unwrap(), &mut temporal);
+        let runs = if name == "full" && m["replay"].as_bool().unwrap_or(true) {
+            2
+        } else {
+            1
+        };
+        let mut replays: Vec<Vec<String>> = vec![];
+        for run in 0..runs {
+            reset_film(&mut r);
+            let record = name == "full" && run == 0;
+            let mut ages = vec![0u8; pixels];
+            let mut run_digests = vec![];
+            for (f, camera) in path.iter().enumerate() {
+                traced_frame(&mut r, &color, camera, &mut asset, true);
+                let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+                let (reset, moving) = (film.reset, film.moving);
+                assert_eq!(
+                    reset,
+                    f == 0,
+                    "frame {f} of {name}: only the first frame resets"
+                );
+                if f == 0 {
+                    let same = settled(&mut r) == interactive;
+                    identity
+                        .push(serde_json::json!({"program":name,"run":run,"hdr_identical":same}));
+                    assert!(same, "T-0 {name} run {run}");
+                }
+                if record {
+                    r.test_drain("T1b weights");
+                    let (weights, tiles) = film_weights(&r);
+                    let (mut restarted, mut kept, mut sum, mut count) =
+                        (0usize, 0usize, 0f64, 0usize);
+                    for (i, age) in ages.iter_mut().enumerate() {
+                        let tile = (i % w as usize) / 8 + (i / w as usize) / 4 * tile_width;
+                        let flagged = tiles[tile * 4..tile * 4 + 4] != [0; 4];
+                        let restart = f == 0 || (flagged && weights[i] == 1.0);
+                        *age = if restart { 0 } else { age.saturating_add(1) };
+                        if flagged {
+                            kept += 1;
+                            restarted += usize::from(restart);
+                            sum += f64::from(weights[i]);
+                            count += 1;
+                        }
+                    }
+                    let matrix = camera.matrix(w, h).to_cols_array();
+                    let eye = camera.view().inverse().w_axis.truncate().to_array();
+                    frames.push(serde_json::json!({"frame":f,"reset":reset,"moving":moving,
+                        "kept_pixels":kept,"restarted_pixels":restarted,
+                        "mean_kept_weight":if count > 0 { sum / count as f64 } else { 0.0 },
+                        "matrix":matrix,"eye":eye}));
+                }
+                if scored.contains(&f) {
+                    let hdr = settled(&mut r);
+                    run_digests.push(digest(&hdr));
+                    if run == 0 {
+                        fs::write(out.join(format!("{name}-f{f:03}.rgba16f")), hdr).unwrap();
+                        if record {
+                            fs::write(out.join(format!("age-f{f:03}.u8")), &ages).unwrap();
+                        }
+                    }
+                }
+            }
+            r.test_drain("T1b history");
+            run_digests.push(digest(&history(&r)));
+            replays.push(run_digests);
+        }
+        std::mem::swap(r.test_standard().temporal.as_mut().unwrap(), &mut temporal);
+        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut centre);
+        digests.insert(name.to_owned(), serde_json::json!(replays));
+        eprintln!(
+            "T1b motion program={name} done {:.1} s",
+            start.elapsed().as_secs_f64()
+        );
+    }
+    let replay = digests["full"].as_array().unwrap();
+    let identical = replay.len() == 2 && replay[0] == replay[1];
+    fs::write(
+        out.join("motion.json"),
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"sequence":m["sequence"],"scored":scored,
+            "frames":frames,"identity":identity,"digests":digests,"replay_identical":identical,
+            "seconds":start.elapsed().as_secs_f64()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(replay.len() < 2 || identical, "T1b replay differs");
+}
+
 /// Paired complete-frame timing on one renderer: production Interactive and Temporal frames
-/// alternate (order rotating per pair) at the first manifest pose, after warmup pairs.
-/// Temporal frames keep accumulating, the steady static state. Validation is off.
+/// alternate (order rotating per pair) at the first manifest pose, or along `sequence`
+/// (one camera per pair, cycling), after warmup pairs. Temporal frames keep accumulating:
+/// the steady static state, or steady motion. Validation is off.
 #[test]
 #[ignore = "owned GPU lease; T1 paired frame timing, offscreen"]
 fn gpu_film_t1_timing() {
@@ -923,7 +1079,16 @@ fn gpu_film_t1_timing() {
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let (mut asset, _) = load_quarry(&m, &mut r);
     let color = target(&r, 1920, 1080);
-    let camera = t1_cameras(&m)[poses(&m)[0]];
+    // A `sequence` manifest steps both modes through its cameras, so Temporal frames move.
+    let path: Vec<Camera> = match m["sequence"].as_str() {
+        Some(file) => cameras::Cameras::load(&PathBuf::from(file))
+            .unwrap()
+            .frames
+            .iter()
+            .map(|f| f.camera().unwrap())
+            .collect(),
+        None => vec![t1_cameras(&m)[poses(&m)[0]]],
+    };
     let warmup = m["warmup_pairs"].as_u64().unwrap_or(24) as usize;
     let pairs = m["pairs"].as_u64().unwrap_or(48) as usize;
     let modes = [
@@ -950,6 +1115,7 @@ fn gpu_film_t1_timing() {
             // set_soft_shadows would release the film history when leaving Temporal; the
             // field keeps it, so Temporal frames stay in their steady static state.
             r.soft_mode = modes[mode];
+            let camera = path[pair % path.len()];
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, modes[mode]);
             if pair >= warmup {

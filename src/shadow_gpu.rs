@@ -18,9 +18,6 @@ pub(super) struct ShadowFrame {
 }
 impl ShadowFrame {
     /// The packed view records this frame uploads (temporal film accumulation keys on them).
-    pub fn records(&self) -> &[u8] {
-        &self.records
-    }
     pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
         for (light, &[first, count]) in light_records.chunks_exact(64).zip(&self.light_ranges) {
             let sun = Vec3::from_array(std::array::from_fn(|i| {

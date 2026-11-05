@@ -2508,8 +2508,8 @@ impl Renderer {
             self.uploads.add(primary);
             if temporal {
                 self.ensure_film_kernel()?;
-                let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
-                self.prepare_film(key);
+                let key = self.film_key();
+                self.prepare_film(key, camera);
             }
         }
         self.check_fault()?;
