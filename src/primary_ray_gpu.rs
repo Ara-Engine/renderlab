@@ -10,7 +10,10 @@ use crate::shadow_plan::Bounds;
 
 #[path = "film_accumulation.rs"]
 pub(super) mod film_accumulation;
+#[path = "film_records.rs"]
+pub(super) mod film_records;
 use film_accumulation::{FilmLayouts, FilmState};
+use film_records::{RecordLayouts, RecordPipelines};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
@@ -234,6 +237,24 @@ impl Renderer {
         self.soft_mode
     }
 
+    /// Chooses how `SoftShadows::Temporal` treats camera motion; `Restart` is the default.
+    /// A change releases the film history after in-flight frames.
+    pub fn set_film_motion(&mut self, motion: crate::FilmMotion) {
+        if motion != self.film_motion
+            && let Some(state) = &mut self.primary
+            && let Some(film) = state.film.take()
+        {
+            state
+                .retired
+                .push((self.submissions, Retired::Film(Box::new(film))));
+        }
+        self.film_motion = motion;
+    }
+
+    pub fn film_motion(&self) -> crate::FilmMotion {
+        self.film_motion
+    }
+
     /// Selects how lit frames resolve camera visibility. Traced compiles its kernels and
     /// every program's traced modules from the installed source now, transactionally;
     /// failure keeps the current mode. Program traced pipelines compile when a traced
@@ -438,6 +459,7 @@ enum Retired {
     Bindings(#[allow(dead_code)] Bindings),
     Film(#[allow(dead_code)] Box<FilmState>),
     FilmGroups(#[allow(dead_code)] Box<[[Owned<wgpu::BindGroup>; 3]; 2]>),
+    RecordGroups(#[allow(dead_code)] Vec<Owned<wgpu::BindGroup>>),
 }
 
 /// The engine's traced kernels, compiled while traced visibility is selected and with
@@ -471,6 +493,16 @@ pub(super) struct PrimaryState {
     /// Temporal history kept in every tile instead of only where rays have hit (tests).
     #[cfg(test)]
     pub test_film_materialize: bool,
+    /// The background record frames contribute instead of the lit clear colour (tests
+    /// black it out for sun-only and visibility images, as their shading modules do).
+    #[cfg(test)]
+    pub test_film_background: Option<[f64; 3]>,
+    /// Record frames write film_records_kernel.wgsl's per-pixel diagnostics (tests).
+    #[cfg(test)]
+    pub test_record_diagnostics: bool,
+    /// Moving frames shade with this pipeline instead of the frame program's (tests).
+    #[cfg(test)]
+    pub test_record_shading: Option<Owned<wgpu::ComputePipeline>>,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
@@ -502,6 +534,11 @@ pub(super) struct PrimaryState {
     geometry_generation: u64,
     bindings_generation: u64,
     film_layouts: FilmLayouts,
+    record_layouts: RecordLayouts,
+    /// Record kernels and motion shading, compiled on the first record frame of a revision.
+    record_pipelines: Option<RecordPipelines>,
+    /// Placements of the last prepared frame (records hold placement + 1 in 16 bits).
+    placement_count: usize,
     /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
     pub film: Option<FilmState>,
     retired: Vec<(u64, Retired)>,
@@ -663,6 +700,12 @@ impl PrimaryState {
             test_fresh_tile: None,
             #[cfg(test)]
             test_film_materialize: false,
+            #[cfg(test)]
+            test_film_background: None,
+            #[cfg(test)]
+            test_record_diagnostics: false,
+            #[cfg(test)]
+            test_record_shading: None,
             trace_layouts: [&trace[0], &trace[1]]
                 .map(|g| layout("primary trace ABI", &[Some(g), Some(&array_bindings)])),
             shade_layouts: shade_bindings.each_ref().map(|g| {
@@ -696,6 +739,15 @@ impl PrimaryState {
                 &material_bindings,
                 lighting,
             ),
+            record_layouts: RecordLayouts::new(
+                device,
+                ledger,
+                &array_bindings,
+                &material_bindings,
+                lighting,
+            ),
+            record_pipelines: None,
+            placement_count: 0,
             interactive_bindings,
             fresh_bindings,
             trace_bindings: trace,
@@ -997,6 +1049,7 @@ impl Renderer {
         }
         let state = self.primary.as_mut().unwrap();
         state.scene = scene;
+        state.placement_count = placements.len();
         if state.region != region {
             let words: Vec<u8> = region.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue

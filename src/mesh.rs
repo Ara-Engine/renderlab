@@ -206,6 +206,24 @@ impl Camera {
     pub fn near(self) -> f32 {
         self.near
     }
+    /// The far plane distance the depth coefficients encode.
+    pub(crate) fn far(self) -> f32 {
+        (f64::from(self.depth[1]) / f64::from(self.depth[0])) as f32
+    }
+    /// `matrix` with the far plane at infinity: the same x, y and w rows, and reversed depth
+    /// near / view depth, so a point at infinity (a direction) has depth 0. Temporal sample
+    /// records are expressed in it (film_records.rs).
+    pub(crate) fn infinite_matrix(self, width: u32, height: u32) -> Mat4 {
+        let (sin_fov, cos_fov) = (0.5 * self.fov_y).sin_cos();
+        let h = cos_fov / sin_fov;
+        let w = h / (width as f32 / height as f32);
+        Mat4::from_cols(
+            glam::Vec4::new(w, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, h, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+            glam::Vec4::new(0.0, 0.0, self.near, 0.0),
+        ) * self.view
+    }
     /// Actual world-to-clip matrix uploaded by both main raster paths.
     /// After division by W, near maps to 1 and far to 0 in WebGPU's clip volume.
     /// Depth uses strict Greater with clear 0. Unproject near at Z=1, far at Z=0.

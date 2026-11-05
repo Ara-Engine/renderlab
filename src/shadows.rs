@@ -13,10 +13,36 @@ pub enum SoftShadows {
     /// Opt-in temporal film accumulation (docs/m6-temporal-primaries.md): each frame
     /// traces one jittered primary per pixel with eight rotated directions and the frame's
     /// program output is averaged per pixel, integrating the pixel footprint and the disk.
-    /// A reset pixel's first frame equals Interactive. This unit holds a static view:
-    /// any camera, scene, lighting, shadow, program or parameter change resets every
-    /// pixel. History costs 48 bytes per pixel.
+    /// A reset pixel's first frame equals Interactive. Any scene, lighting, shadow, program
+    /// or parameter change resets every pixel, and so does camera motion unless
+    /// `FilmMotion` keeps sample records. History costs 48 bytes per pixel.
     Temporal,
+}
+
+/// How `SoftShadows::Temporal` treats camera motion (docs/m6-motion-aa.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilmMotion {
+    /// Any camera change restarts every pixel from the Interactive image (T1a).
+    #[default]
+    Restart,
+    /// Each pixel keeps its last K samples as world-anchored records (K = 4 or 8): exact
+    /// camera-ray hits that move as points with the camera and count only in the pixel they
+    /// land in, after geometric validation, so a moving frame averages up to K samples per
+    /// pixel without interpolation. Static frames are T1a's. Records cost 32 K bytes per
+    /// pixel, plus 16 bytes of per-frame planes; `Renderer::cut_film` marks a camera cut.
+    /// This is the T2a candidate under measurement, not yet accepted as meeting the film bar.
+    Records4,
+    Records8,
+}
+impl FilmMotion {
+    /// K, the records per pixel, or 0 without records.
+    pub fn records(self) -> u32 {
+        match self {
+            Self::Restart => 0,
+            Self::Records4 => 4,
+            Self::Records8 => 8,
+        }
+    }
 }
 
 /// Entries correspond exactly to the current `Lighting::lights` vector.

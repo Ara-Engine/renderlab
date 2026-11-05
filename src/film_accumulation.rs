@@ -8,13 +8,15 @@
 //!
 //! The temporal modules are the Interactive kernel and Soft shading compositions with the
 //! `FILM_*_SEAM` edits applied, so Exact, Interactive and hard modules are unchanged.
-//! This unit (T1a) accumulates a static view: any change to the camera, scene, lighting,
-//! shadows, programs or parameters resets every pixel.
+//! T1a accumulates a static view: with `FilmMotion::Restart` any change to the camera, scene,
+//! lighting, shadows, programs or parameters resets every pixel. With sample records
+//! (`film_records.rs`, T2) camera changes move the records instead, and static frames are T1a's.
 use super::*;
 use crate::program::{self, Composed, Stage};
+use super::film_records::FilmRecords;
 
 /// Sample sequence, `film_index`/`film_offset`/`film_begin`, appended to both modules.
-const FILM_SEQUENCE: &str = include_str!("../shaders/film_accumulation.wgsl");
+pub(super) const FILM_SEQUENCE: &str = include_str!("../shaders/film_accumulation.wgsl");
 /// `film_store`, between the program and the temporal shading entry.
 const FILM_STORE: &str = include_str!("../shaders/film_store.wgsl");
 /// `film_init`, the reset frames' history start, in the temporal kernel module.
@@ -24,12 +26,12 @@ const FILM_INIT: &str = include_str!("../shaders/film_init.wgsl");
 const GENERATOR: u32 = 71;
 
 /// The camera ray through `film_sample` instead of the pixel centre (primary_ray).
-const FILM_RAY_SEAM: (&str, &str) = (
+pub(super) const FILM_RAY_SEAM: (&str, &str) = (
     "(vec2<f32>(pixel)+vec2<f32>(0.5))",
     "(vec2<f32>(pixel)+film_sample)",
 );
 /// Disk directions 8 (k mod 32) onward of the pixel's Exact sequence (fresh_estimate).
-const FILM_ROTATION_SEAM: (&str, &str) = (
+pub(super) const FILM_ROTATION_SEAM: (&str, &str) = (
     "let direction=fresh_direction(j,shift,l,u,v,view.texel.z);",
     "let direction=fresh_direction(j+film_rotation,shift,l,u,v,view.texel.z);",
 );
@@ -72,7 +74,7 @@ const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
     ),
 ];
 
-fn seam(source: &str, (find, replace): (&str, &str)) -> Result<String, Error> {
+pub(super) fn seam(source: &str, (find, replace): (&str, &str)) -> Result<String, Error> {
     if source.matches(find).count() != 1 {
         return Err(Error::InvalidInput(
             "temporal film accumulation requires the unchanged engine seams it edits",
@@ -253,10 +255,26 @@ impl FilmLayouts {
     }
 }
 
+/// The camera a temporal frame was rendered with, as the record passes reproject it.
+#[derive(Clone, Copy)]
+struct FilmView {
+    /// View-projection at the HDR size (primary_frame's matrix before inversion).
+    matrix: Mat4,
+    /// The same with the far plane at infinity, which records are expressed in.
+    infinite: Mat4,
+    /// The far plane's depth in `infinite`: near / far.
+    far_depth: f32,
+    /// The eye the lighting uniform holds.
+    eye: Vec3,
+    /// Radians per pixel at the image centre: 2 tan(fov / 2) / height.
+    angle: f32,
+}
+
 /// Per-pixel film history at the HDR size, ping-ponged by frame: the running mean of the
 /// program's exposed output with its sample weight (Rgba32Float) and the anchor
 /// (Rg32Uint, film_accumulation.wgsl), 48 bytes per pixel, used only in trace tiles a camera
 /// ray has hit since the last reset (`tiles`, one R32Uint flag per tile, also ping-ponged).
+/// With `FilmMotion` records it also holds the sample records (`records`).
 pub(in crate::renderer) struct FilmState {
     colour: [Depth; 2],
     anchor: [Depth; 2],
@@ -264,8 +282,17 @@ pub(in crate::renderer) struct FilmState {
     frame: Buffer,
     /// The FilmFrame words the frame buffer holds.
     written: Option<[u32; 4]>,
-    /// Frames since the last reset.
+    /// Frames at the current camera before this one since the last reset or camera motion
+    /// (T1a's `frames`: with `FilmMotion::Restart` the camera never moves without a reset).
     frames: u32,
+    /// The last frame's camera.
+    view: Option<FilmView>,
+    /// `cut_film` was called: the next frame resets.
+    cut: bool,
+    /// This frame moved the camera without a reset (records only).
+    pub moving: bool,
+    /// Sample records, with `FilmMotion::Records4` or `Records8`.
+    pub records: Option<FilmRecords>,
     /// Keep history in every tile (tests compare it with the production tile rule).
     #[cfg(test)]
     pub materialize: bool,
@@ -280,7 +307,8 @@ pub(in crate::renderer) struct FilmState {
     groups: Option<(u64, [[Owned<wgpu::BindGroup>; 3]; 2])>,
 }
 impl FilmState {
-    fn new(r: &Renderer, size: wgpu::Extent3d) -> Self {
+    /// `records` is K, the records per pixel, or 0 without records.
+    fn new(r: &Renderer, size: wgpu::Extent3d, records: u32) -> Self {
         let target = |label, size: wgpu::Extent3d, format: wgpu::TextureFormat| {
             let texture = r.ledger.own(
                 r.device.create_texture(&wgpu::TextureDescriptor {
@@ -341,6 +369,10 @@ impl FilmState {
             frame: Buffer::new(r, "film frame state", 16, wgpu::BufferUsages::STORAGE),
             written: None,
             frames: 0,
+            view: None,
+            cut: false,
+            moving: false,
+            records: (records > 0).then(|| FilmRecords::new(r, size, records)),
             #[cfg(test)]
             materialize: r.primary.as_ref().unwrap().test_film_materialize,
             parity: 0,
@@ -351,6 +383,14 @@ impl FilmState {
     }
     fn size(&self) -> wgpu::Extent3d {
         self.colour[0].texture.size()
+    }
+    /// The history colour, anchor and tile-flag views of `side`.
+    pub(super) fn views(&self, side: usize) -> [&wgpu::TextureView; 3] {
+        [
+            &self.colour[side].view,
+            &self.anchor[side].view,
+            &self.tiles[side].view,
+        ]
     }
     /// The history and tile-flag textures of `side` (tests).
     #[cfg(test)]
@@ -373,7 +413,10 @@ impl Renderer {
     /// counter: the camera, prelude/program revision and program, every GPU write that
     /// changes geometry, transforms, materials, parameters, textures, lights, lighting,
     /// exposure or the environment, the shadow settings and views, the TLAS and draw
-    /// tables. T1a resets every pixel when it changes.
+    /// tables. Every pixel resets when it changes. With sample records the camera moves the
+    /// records instead, so the key leaves out what follows the camera: the camera itself, the
+    /// lighting uniform's eye and the camera-fitted shadow views, whose light-dependent
+    /// content follows the light records and settings.
     pub(in crate::renderer) fn film_key(
         &self,
         camera_bytes: &[u8; 64],
@@ -381,18 +424,27 @@ impl Renderer {
     ) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
+        let moves = self.film_motion.records() > 0;
         let mut hash = Sha256::new()
-            .chain_update(camera_bytes)
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.shadows.settings).as_bytes());
+        if moves {
+            hash.update(self.lighting.pending.uniform(Vec3::ZERO));
+            hash.update(self.environment.uniform());
+        } else {
+            hash.update(camera_bytes);
+            hash.update(u.lighting.to_ne_bytes());
+            if let Some(records) = shadow {
+                hash.update(records);
+            }
+        }
         for v in [
             u.environment,
             u.geometry,
             u.lights,
-            u.lighting,
             u.lut,
             u.textures,
             u.materials,
@@ -402,26 +454,38 @@ impl Renderer {
         ] {
             hash.update(v.to_ne_bytes());
         }
-        if let Some(records) = shadow {
-            hash.update(records);
-        }
         hash.finalize().into()
     }
 
+    /// Camera cut: the next temporal frame reads no history and restarts every pixel from
+    /// the Interactive image. With sample records, camera changes are otherwise motion.
+    pub fn cut_film(&mut self) {
+        if let Some(film) = self.primary.as_mut().and_then(|p| p.film.as_mut()) {
+            film.cut = true;
+        }
+    }
+
     /// Publishes a temporal frame's history after `prepare_primary`: allocates it at the
-    /// HDR size, resets every pixel when `key` changed, flips the written side and binds
-    /// the frame's targets.
-    pub(in crate::renderer) fn prepare_film(&mut self, key: [u8; 32]) {
+    /// HDR size, resets every pixel when `key` changed or on a cut, otherwise marks camera
+    /// motion for the records, flips the written side and binds the frame's targets.
+    pub(in crate::renderer) fn prepare_film(
+        &mut self,
+        key: [u8; 32],
+        camera: &Camera,
+    ) -> Result<(), Error> {
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let records = self.film_motion.records();
         let stale = self
             .primary
             .as_ref()
             .unwrap()
             .film
             .as_ref()
-            .is_none_or(|f| f.size() != size);
+            .is_none_or(|f| {
+                f.size() != size || f.records.as_ref().map_or(0, |r| r.count) != records
+            });
         if stale {
-            let next = FilmState::new(self, size);
+            let next = FilmState::new(self, size, records);
             let submissions = self.submissions;
             let state = self.primary.as_mut().unwrap();
             if let Some(old) = state.film.replace(next) {
@@ -432,11 +496,30 @@ impl Renderer {
         }
         let state = self.primary.as_mut().unwrap();
         let generation = state.bindings_generation;
+        let placements = state.placement_count;
         let film = state.film.as_mut().unwrap();
-        film.reset = film.key != Some(key);
+        // The same matrix and eye as primary_frame and the lighting uniform.
+        let view = FilmView {
+            matrix: camera.matrix(size.width, size.height),
+            infinite: camera.infinite_matrix(size.width, size.height),
+            far_depth: camera.near() / camera.far(),
+            eye: camera.view().inverse().w_axis.truncate(),
+            angle: 2.0 * (0.5 * camera.fov_y()).tan() / size.height as f32,
+        };
+        let previous = film.view.replace(view);
+        film.reset = film.key != Some(key) || film.cut || previous.is_none();
         film.key = Some(key);
+        film.cut = false;
+        let previous = previous.filter(|_| !film.reset).unwrap_or(view);
+        let was_moving = film.moving;
+        // Without records the key holds the camera, so a camera change always resets.
+        film.moving = !film.reset && matrix_bytes(previous.matrix) != matrix_bytes(view.matrix);
+        if let Some(records) = film.records.as_mut() {
+            records.moving = film.moving;
+            records.seed = !film.reset && !film.moving && was_moving;
+        }
         film.parity = 1 - film.parity;
-        film.frames = if film.reset {
+        film.frames = if film.reset || film.moving {
             0
         } else {
             film.frames.saturating_add(1)
@@ -464,6 +547,17 @@ impl Renderer {
                     .push((self.submissions, Retired::FilmGroups(Box::new(old))));
             }
         }
+        if records > 0 {
+            self.prepare_records(
+                previous.infinite,
+                view.infinite,
+                view.eye,
+                view.angle,
+                view.far_depth,
+                placements,
+            )?;
+        }
+        Ok(())
     }
 
     /// Trace, shading and reset groups for each written side over the current targets.
@@ -569,11 +663,14 @@ impl Renderer {
 
     /// One temporal frame: the jittered trace with its rotated eight-direction counts, then
     /// the program's temporal shading over the scene region and clear blocks. A reset frame
-    /// is the production Interactive frame followed by `film_init`.
+    /// is the production Interactive frame followed by `film_init` (and the records' start).
+    /// With records, a moving frame is the record passes, and the first static frame after
+    /// motion seeds T1a's history from the records first.
     pub(in crate::renderer) fn encode_film(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         trace_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        compute_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         shade_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.primary.as_ref().unwrap();
@@ -602,7 +699,18 @@ impl Renderer {
                 size.height.div_ceil(TRACE_TILE[1]),
                 1,
             );
+            drop(pass);
+            if film.records.is_some() {
+                self.encode_records_init(encoder);
+            }
             return;
+        }
+        if film.moving {
+            self.encode_records_motion(encoder, trace_stamps, compute_stamps, shade_stamps);
+            return;
+        }
+        if film.records.as_ref().is_some_and(|r| r.seed) {
+            self.encode_records_seed(encoder, 1 - film.parity);
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

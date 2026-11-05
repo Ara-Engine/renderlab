@@ -498,6 +498,8 @@ pub struct Renderer {
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
     soft_mode: crate::SoftShadows,
+    /// How temporal frames treat camera motion (`set_film_motion`).
+    film_motion: crate::FilmMotion,
     /// Identity of the traced modules, which also produce the HDR of traced frames.
     primary_hash: [u8; 32],
     /// Last installed prelude WGSL, composed again when traced visibility is selected.
@@ -955,6 +957,7 @@ impl Renderer {
             primary,
             primary_mode: PrimaryVisibility::Raster,
             soft_mode: crate::SoftShadows::Exact,
+            film_motion: crate::FilmMotion::Restart,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2509,8 +2512,12 @@ impl Renderer {
             self.uploads.add(primary);
             if temporal {
                 self.ensure_film_kernel()?;
+                let records = self.film_motion.records();
+                if records > 0 {
+                    self.ensure_record_pipelines(records)?;
+                }
                 let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
-                self.prepare_film(key);
+                self.prepare_film(key, camera)?;
             }
         }
         self.check_fault()?;
@@ -2552,7 +2559,7 @@ impl Renderer {
             };
             let p = self.pipeline.primary.as_ref().unwrap();
             if temporal {
-                self.encode_film(&mut encoder, stamps(6), stamps(0));
+                self.encode_film(&mut encoder, stamps(6), stamps(8), stamps(0));
             } else {
                 if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
@@ -2804,7 +2811,15 @@ impl Renderer {
                 mapped,
                 lit,
                 shadowed: shadow_frame.is_some() && !hardware_shadowed,
-                fresh: soft && !interactive && !temporal,
+                // Record frames time their validation and centre retrace as visibility compute.
+                fresh: soft
+                    && !interactive
+                    && (!temporal
+                        || self
+                            .primary
+                            .as_ref()
+                            .and_then(|p| p.film.as_ref())
+                            .is_some_and(|f| f.moving)),
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
