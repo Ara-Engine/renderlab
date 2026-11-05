@@ -9,11 +9,11 @@ fn disk_direction(index:u32, shift:vec2<f32>, l:vec3<f32>, u:vec3<f32>, v:vec3<f
     let a=6.283185307179586*r.y;
     return normalize(l+slope*sqrt(r.x)*(cos(a)*u+sin(a)*v));
 }
-fn nearest_shadow_hit(view:ShadowView, origin:vec3<f32>, projected:vec3<f32>, direction:vec3<f32>) -> f32 {
+fn nearest_shadow_hit(view:ShadowView, origin:vec3<f32>, projected:vec3<f32>, direction:vec3<f32>,epsilon:f32) -> f32 {
     let delta=(view.world_to_clip*vec4<f32>(direction,0.0)).xyz;
     let rate=-delta.z;
     if rate<=0.0 { return 0.0; }
-    let tmin=view.coverage_bias.z/rate;
+    let tmin=epsilon;
     var tmax=projected.z/rate;
     for(var a=0u;a<2u;a+=1u) {
         if delta[a]>0.0 { tmax=min(tmax,(1.0-projected[a])/delta[a]); }
@@ -39,8 +39,7 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     }
     if !found { return 1.0; }
     let view=shadow_views[layer];
-    let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
-    let origin=world+normal*view.coverage_bias.w;
+    let origin=shadow_origin(receiver,l);
     let projected=(view.world_to_clip*vec4<f32>(origin,1.0)).xyz;
     if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 { return 1.0; }
     let rows=transpose(view.world_to_clip); let u=normalize(rows[0].xyz); let v=normalize(rows[1].xyz);
@@ -49,7 +48,9 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     var visible=0.0;
     for(var j=0u;j<256u;j+=1u) {
         let direction=disk_direction(j,shift,l,u,v,view.texel.z);
-        let distance=nearest_shadow_hit(view,origin,projected,direction);
+        let ray_origin=shadow_origin(receiver,direction);
+        let ray_projected=(view.world_to_clip*vec4<f32>(ray_origin,1.0)).xyz;
+        let distance=nearest_shadow_hit(view,ray_origin,ray_projected,direction,receiver.epsilon);
         visible+=select(0.0,1.0,distance==0.0);
     }
     return visible/256.0;

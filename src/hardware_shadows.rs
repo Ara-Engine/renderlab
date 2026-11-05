@@ -141,13 +141,13 @@ pub(crate) fn shader_source(source: &str, samples: SampleCount) -> Result<String
     match samples {
         SampleCount::One => Ok(composed),
         SampleCount::Four => {
-            if composed.matches(RECEIVER_WORLD).count() != 1 {
+            if composed.matches(RECEIVER_WORLD).count() != 2 {
                 return Err(Error::InvalidInput(
                     "4x hardware shadows require the unchanged receiver world declaration",
                 ));
             }
             // Sample-rate execution alone would still query pixel-centre world positions.
-            Ok(composed.replacen(RECEIVER_WORLD, SAMPLE_RECEIVER_WORLD, 1))
+            Ok(composed.replace(RECEIVER_WORLD, SAMPLE_RECEIVER_WORLD))
         }
     }
 }
@@ -238,7 +238,7 @@ mod tests {
         let one = shader_source(source, SampleCount::One).unwrap();
         let four = shader_source(source, SampleCount::Four).unwrap();
         assert!(!one.contains(SAMPLE_RECEIVER_WORLD));
-        assert_eq!(four.matches(SAMPLE_RECEIVER_WORLD).count(), 1);
+        assert_eq!(four.matches(SAMPLE_RECEIVER_WORLD).count(), 2);
         assert_eq!(four.replace(SAMPLE_RECEIVER_WORLD, RECEIVER_WORLD), one);
         assert!(shader_source(&source.replace(RECEIVER_WORLD, ""), SampleCount::Four).is_err());
         let duplicate = format!("{source}\n{RECEIVER_WORLD}");

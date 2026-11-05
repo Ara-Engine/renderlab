@@ -35,7 +35,7 @@ pub(super) fn hardware_device() -> (wgpu::Device, wgpu::Queue) {
     // SAFETY: the test caller explicitly accepts wgpu's experimental implementation risk.
     let experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+        required_features: crate::RECEIVER_FEATURES | wgpu::Features::EXPERIMENTAL_RAY_QUERY,
         required_limits: limits,
         experimental_features,
         ..Default::default()
@@ -455,7 +455,7 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
                     Vec3::new(1., 0., 0.12).normalize(),
                     0.03,
                     pixel_world * 0.15,
-                    pixel_world * (pose - 1) as f32 * 0.5 - settings.normal_bias / 0.12,
+                    pixel_world * (pose - 1) as f32 * 0.5 - 1e-5 / 0.12,
                 )
             };
             let model = Mat4::from_translation(Vec3::new(
@@ -468,7 +468,8 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
             for vertex in &mut footprint {
                 let p = model.transform_point3(Vec3::from_array(vertex.position));
                 // Intersect the light ray with the receiver's biased geometric plane.
-                let origin_offset = Vec3::Z * settings.normal_bias;
+                // Receiver vertices are within 2 m, so the policy's 10 um floor wins.
+                let origin_offset = Vec3::Z * 1e-5;
                 vertex.position =
                     (p - origin_offset - to_light * ((p.z - origin_offset.z) / to_light.z))
                         .to_array();
@@ -556,7 +557,7 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
                     );
                     let impostor = visibility.replace(
                         "hard_shadow(lights[0],input.receiver,",
-                        &format!("hard_shadow(lights[0],Receiver(vec3<f32>((floor(f32(input.pixel.x))+0.5-64.5)*{pixel_world},(48.5-floor(f32(input.pixel.y))-0.5)*{pixel_world},0.0),input.receiver.geometric,input.receiver.pixel,0u),"),
+                        &format!("hard_shadow(lights[0],Receiver(vec3<f32>((floor(f32(input.pixel.x))+0.5-64.5)*{pixel_world},(48.5-floor(f32(input.pixel.y))-0.5)*{pixel_world},0.0),input.receiver.geometric,input.receiver.pixel,0u,input.receiver.epsilon,input.receiver.thin),"),
                     );
                     r.test_reload_standard(&impostor).unwrap();
                     r.set_shadows(&settings).unwrap();

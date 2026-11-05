@@ -38,6 +38,10 @@ pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 
+/// Raster shadow receivers read the actual triangle's world-space vertices.
+/// Callers must request this native Vulkan device feature.
+pub const RECEIVER_FEATURES: wgpu::Features = wgpu::Features::SHADER_PER_VERTEX;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fault(pub String);
 

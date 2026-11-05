@@ -618,6 +618,11 @@ impl Renderer {
         hardware: Option<HardwareShadowOptions>,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        if !device.features().contains(crate::RECEIVER_FEATURES) {
+            return Err(Error::InvalidInput(
+                "receiver policy requires caller-enabled RECEIVER_FEATURES",
+            ));
+        }
         if let Some(hardware) = hardware {
             hardware.validate(device.features(), &device.limits())?;
         }
@@ -1092,7 +1097,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_compare: Some(wgpu::CompareFunction::Greater),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -1893,6 +1898,7 @@ impl Renderer {
             normal_mapped: data.normal_texture.is_some(),
             renderer: self.identity.clone(),
             double_sided: data.double_sided,
+            thin: data.thin,
             bind,
             _uniform: uniform,
             _samplers: samplers,

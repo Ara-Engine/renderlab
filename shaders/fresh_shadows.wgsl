@@ -13,10 +13,11 @@ struct FreshReceiver {
     @location(0) world:vec4<f32>,
     @location(1) normal:vec4<f32>,
 };
-@fragment fn fs_receiver(input:VertexOutput) -> FreshReceiver {
-    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));
-    // Float32 retains the winning fragment's inputs without reconstruction.
-    return FreshReceiver(vec4<f32>(input.world,input.position.z),vec4<f32>(geometric,1.0));
+@fragment fn fs_receiver(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool) -> FreshReceiver {
+    if material.double_sided==0u && front!=(input.winding>0.0) {discard;}
+    let receiver=raster_receiver(input.world,triangle,vec2<i32>(input.position.xy),material.thin!=0u);
+    // world.w is epsilon; normal.w is coverage with the material's thin sign.
+    return FreshReceiver(vec4<f32>(receiver.world,receiver.epsilon),vec4<f32>(receiver.geometric,select(1.0,-1.0,receiver.thin)));
 }
 fn fresh_hash(input:u32) -> u32 {
     var x=input;x=(x^(x>>16u))*0x7feb352du;x=(x^(x>>15u))*0x846ca68bu;return x^(x>>16u);
@@ -32,7 +33,8 @@ const FRESH_LANES:u32=8u;
 // Receiver outside every cascade or light-space box: shaded as fully visible.
 const FRESH_SKIP:u32=0xffffffffu;
 // Visible rays among this lane's share, or FRESH_SKIP. Every lane takes the same exits.
-fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {
+fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {
+    let world=receiver.world;
     let light=lights[0];
     let l=-light.travel_outer.xyz;
     var layer=light.kind.y;
@@ -44,8 +46,7 @@ fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u
     }
     if !found {return FRESH_SKIP;}
     let view=shadow_views[layer];
-    let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
-    let origin=world+normal*view.coverage_bias.w;
+    let origin=shadow_origin(receiver,l);
     let projected=(view.world_to_clip*vec4<f32>(origin,1.0)).xyz;
     if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 {return FRESH_SKIP;}
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
@@ -56,27 +57,31 @@ fn fresh_estimate(world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<u32>, width:u
     var query:ray_query;
     for(var j=lane;j<FRESH_DIRECTIONS;j+=select(FRESH_LANES,1u,FRESH_DIRECTIONS==8u)) {
         let direction=fresh_direction(j,shift,l,u,v,view.texel.z);
+        var ray_origin=origin;var ray_projected=projected;
+        if receiver.thin {
+            ray_origin=shadow_origin(receiver,direction);
+            ray_projected=(view.world_to_clip*vec4<f32>(ray_origin,1.0)).xyz;
+        }
         let delta=(view.world_to_clip*vec4<f32>(direction,0.0)).xyz;
         let rate=-delta.z;
-        var distance=0.0;
+        var blocked=false;
         if rate>0.0 {
-            let tmin=view.coverage_bias.z/rate;
-            var tmax=projected.z/rate;
+            let tmin=receiver.epsilon;
+            var tmax=ray_projected.z/rate;
             for(var axis=0u;axis<2u;axis+=1u) {
-                if delta[axis]>0.0 {tmax=min(tmax,(1.0-projected[axis])/delta[axis]);}
-                if delta[axis]<0.0 {tmax=min(tmax,(-1.0-projected[axis])/delta[axis]);}
+                if delta[axis]>0.0 {tmax=min(tmax,(1.0-ray_projected[axis])/delta[axis]);}
+                if delta[axis]<0.0 {tmax=min(tmax,(-1.0-ray_projected[axis])/delta[axis]);}
             }
             if tmax>tmin {
-                // Any hit decides visibility. A closest hit at t=0 would count as visible,
-                // so stop at the first hit only when tmin>0 excludes that case.
-                let flags=select(RAY_FLAG_FORCE_OPAQUE,RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,tmin>0.0);
-                rayQueryInitialize(&query,fresh_scene,RayDesc(flags,255u,tmin,tmax,origin,direction));
+                // Epsilon is strictly positive: any committed hit blocks this ray.
+                // Neither a closest distance nor a dynamic first-hit flag is needed.
+                let flags=RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT;
+                rayQueryInitialize(&query,fresh_scene,RayDesc(flags,255u,tmin,tmax,ray_origin,direction));
                 while rayQueryProceed(&query) {}
-                let hit=rayQueryGetCommittedIntersection(&query);
-                distance=select(hit.t,0.0,hit.kind==0u);
+                blocked=rayQueryGetCommittedIntersection(&query).kind!=0u;
             }
         }
-        visible+=select(0u,1u,distance==0.0);
+        visible+=select(1u,0u,blocked);
     }
     return visible;
 }
@@ -97,7 +102,8 @@ var<workgroup> fresh_counts:array<atomic<u32>,32>;
     if inside {
         let normal=textureLoad(fresh_normal,p,0);
         if normal.w!=0.0 {
-            partial=fresh_estimate(textureLoad(fresh_world,p,0).xyz,normal.xyz,id,size.x,index%lanes);
+            let world=textureLoad(fresh_world,p,0);
+            partial=fresh_estimate(Receiver(world.xyz,normal.xyz,p,0u,world.w,normal.w<0.0),id,size.x,index%lanes);
         }
     }
     atomicAdd(&fresh_counts[slot],select(partial,0u,partial==FRESH_SKIP));

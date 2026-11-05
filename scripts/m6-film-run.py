@@ -71,12 +71,16 @@ def main():
     p.add_argument("--manifest", type=Path)
     p.add_argument("--minutes", type=float, default=10)
     p.add_argument("--wait-seconds", type=float, default=0, help="bounded resource queue wait, at most 45 seconds")
+    p.add_argument("--runtime-memory-mbytes", type=float, default=6144,
+                   help="runtime available-memory floor; 0 permits owned allocation transients (preflight always requires 6144)")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
     if not 0 < a.minutes <= 45:
         p.error("lease must be at most 45 minutes")
     if not 0 <= a.wait_seconds <= 45:
         p.error("resource queue wait must be at most 45 seconds")
+    if a.runtime_memory_mbytes < 0:
+        p.error("runtime memory floor cannot be negative")
     cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
     if not cmd:
         p.error("command required")
@@ -126,8 +130,8 @@ def main():
                     try:
                         s = state((child.pid,))
                         samples.append(s)
-                        if s["games"] or s["gpu_processes"] or s["available_mbytes"] < 6144:
-                            failure.append("contention or available memory below 6144 MiB")
+                        if s["games"] or s["gpu_processes"] or s["available_mbytes"] < a.runtime_memory_mbytes:
+                            failure.append(f"contention or available memory below {a.runtime_memory_mbytes:g} MiB")
                             terminate_owned_tree()
                             return
                     except Exception as e:
@@ -149,6 +153,7 @@ def main():
         record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start,
                       exit=child.returncode, failures=failure, samples=samples,
                       manifest=json.loads(a.manifest.read_text()) if a.manifest else None,
+                      runtime_memory_floor_mbytes=a.runtime_memory_mbytes,
                       executable_sha256=hashlib.file_digest(binary.open("rb"), "sha256").hexdigest() if binary.is_file() else None)
         save(runs / f"{a.label}.json", record)
         print(a.label, "exit", child.returncode, "seconds", record["seconds"], "failures", failure, flush=True)

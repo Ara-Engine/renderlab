@@ -60,6 +60,7 @@ fn traced_suite() -> bool {
 /// The suite device: `features`, plus ray queries and traced binding arrays when
 /// `traced_suite`, whose experimental contract the caller accepts explicitly.
 fn request(adapter: &wgpu::Adapter, features: wgpu::Features) -> (wgpu::Device, wgpu::Queue) {
+    let features = features | crate::RECEIVER_FEATURES;
     let descriptor = if traced_suite() {
         assert_eq!(
             std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),

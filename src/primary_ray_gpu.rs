@@ -184,7 +184,11 @@ pub(super) fn admit_draws(
             "traced primary visibility requires meshes uploaded to this hardware renderer",
         ));
     }
-    placement_table(draws.iter().map(|d| (d.instances.len(), false, false)))?;
+    placement_table(
+        draws
+            .iter()
+            .map(|d| (d.instances.len(), false, false, false)),
+    )?;
     if !matrix.inverse().is_finite() {
         return Err(Error::InvalidInput("traced camera inverse is nonfinite"));
     }
@@ -811,8 +815,13 @@ impl Renderer {
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
         let default = self.default_material.as_ref().unwrap();
         let placements = placement_table(draws.iter().map(|d| {
-            let single_sided = !d.material.unwrap_or(default).double_sided;
-            (d.instances.len(), d.mesh.tangent.is_some(), single_sided)
+            let material = d.material.unwrap_or(default);
+            (
+                d.instances.len(),
+                d.mesh.tangent.is_some(),
+                !material.double_sided,
+                material.thin,
+            )
         }))?;
         // Admission guarantees one program; an empty frame shades nothing.
         let program = draws.first().map_or(self.standard.id(), |d| {

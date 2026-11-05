@@ -177,7 +177,7 @@ impl FreshState {
             receiver_layout: ledger.own(
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("fresh receiver ABI"),
-                    bind_group_layouts: &[Some(groups[0]), Some(groups[1])],
+                    bind_group_layouts: &[Some(groups[0]), Some(groups[1]), Some(groups[2])],
                     immediate_size: 0,
                 }),
                 ResourceKind::PipelineLayout,
@@ -536,6 +536,14 @@ impl Renderer {
                 }
                 pass.set_pipeline(&p.receiver);
                 pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                pass.set_bind_group(
+                    2,
+                    &*draw
+                        .material
+                        .unwrap_or(self.default_material.as_ref().unwrap())
+                        .bind,
+                    &[],
+                );
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                 #[cfg(test)]
                 let ids = draw.reference_ids.unwrap_or(&draw.instances.id_buffer);

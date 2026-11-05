@@ -2,7 +2,7 @@
 // One covered pixel's triangle: batch, placement (the packed instance slot) and indices.
 struct PrimaryHit {batch:u32,placement:u32,tangent:bool,ia:u32,ib:u32,ic:u32,bary:vec2<f32>};
 fn primary_decode(record:vec4<u32>)->PrimaryHit {
-    let placement=record.x-1u;let info=primary_placements[placement];let batch=info&0x3fffffffu;
+    let placement=record.x-1u;let info=primary_placements[placement];let batch=info&0x1fffffffu;
     let i=record.y*3u;
     return PrimaryHit(batch,placement,(info>>31u)!=0u,primary_indices[batch].data[i],
         primary_indices[batch].data[i+1u],primary_indices[batch].data[i+2u],bitcast<vec2<f32>>(record.zw));
@@ -85,6 +85,9 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
     var input:VertexOutput;
     input.world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;
+    // Keep the program's interpolation arithmetic while pinning the engine's
+    // shadow point to R1's accepted barycentric contraction order.
+    let receiver_world=world_position(receiver_point(ta.position,tb.position,tc.position,w),hit.placement).xyz;
     let clip=camera.view_projection*vec4<f32>(input.world,1.0);
     input.position=vec4<f32>(vec2<f32>(id)+vec2<f32>(0.5),clip.z/clip.w,1.0/clip.w);
     input.uv=a.uv*w.x+b.uv*w.y+c.uv*w.z;input.color=a.color*w.x+b.color*w.y+c.color*w.z;
@@ -109,7 +112,7 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     rl_load_parameters(hit.batch);
     let surface_input=SurfaceInput(input.world,source_geometric,input.normal,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
-        Receiver(input.world,receiver_geometric,vec2<i32>(input.position.xy),hit.batch));
+        primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel));
     let surface_output=surface(surface_input);
     // Unreachable: traced frames cull the source-back faces of single-sided draws.
     if material.double_sided==0u && !lit_front {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}

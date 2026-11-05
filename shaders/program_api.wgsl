@@ -28,7 +28,7 @@ struct SurfaceInput {
     eye:vec3<f32>,
     // Screen pixel, for stylisation only.
     pixel:vec2<u32>,
-    // Engine-owned imported glTF factors.
+    // Engine-owned material factors and `thin` shadow declaration (0 or 1).
     material:Material,
     // Engine-private: pass `input` to the services below, never read it.
     receiver:Receiver,

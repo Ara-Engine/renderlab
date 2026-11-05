@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg!(debug_assertions)
     );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        required_features: renderlab::RECEIVER_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     }))?;
     let color = device.create_texture(&wgpu::TextureDescriptor {
