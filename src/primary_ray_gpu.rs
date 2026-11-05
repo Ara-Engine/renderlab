@@ -449,6 +449,35 @@ pub(super) struct PrimaryState {
 }
 
 impl PrimaryState {
+    /// F0's test-only jittered reference uses three existing ABIs. Other entry
+    /// points intentionally do not acquire the reference camera scratch fields.
+    #[cfg(test)]
+    pub(super) fn test_film_pipelines(
+        &self,
+        device: &wgpu::Device,
+        source: &str,
+    ) -> [wgpu::ComputePipeline; 3] {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("test-only F0 film reference"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        [
+            ("primary_trace_receivers", &self.trace_layouts[1]),
+            ("fresh_compute", &self.fresh_layout),
+            ("primary_shade", &self.shade_layouts[1]),
+        ]
+        .map(|(entry, layout)| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn test_fresh_bindings(&self) -> (&wgpu::BindGroupLayout, &wgpu::BindGroup) {
         (
