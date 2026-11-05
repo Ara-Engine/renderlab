@@ -65,6 +65,22 @@ pub(crate) struct Flight {
     submitted_at: Instant,
 }
 
+/// Byte-identity evidence for the GPU suites: with `RENDERLAB_TEST_CAPTURE_DIR` set, every
+/// test readback is also written there as `<test>-<sequence>-<kind>.bin`, in process order.
+#[cfg(test)]
+pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let Some(dir) = std::env::var_os("RENDERLAB_TEST_CAPTURE_DIR") else {
+        return;
+    };
+    let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or("main").replace("::", ".");
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{test}-{index:04}-{kind}.bin")), bytes).unwrap();
+}
+
 #[cfg(test)]
 impl Renderer {
     pub(crate) fn test_drain(&mut self, label: &str) {
@@ -175,6 +191,7 @@ impl Renderer {
         }
         drop(view);
         buffer.unmap();
+        test_record_capture(if depth { "depth" } else { "color" }, &bytes);
         bytes
     }
     pub(crate) fn test_failed_map(&mut self) {

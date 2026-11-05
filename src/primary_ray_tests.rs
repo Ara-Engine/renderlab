@@ -739,3 +739,27 @@ fn gpu_primary_ray_quarry_probe() {
     fs::write(out.join("timing.json"),serde_json::to_vec_pretty(&serde_json::json!({"warmup_frames":WARMUP,"pairs":FRAMES/2,"validation":validate,"samples":samples,"stats":format!("{:?}",r.stats())})).unwrap()).unwrap();
     eprintln!("primary_probe_complete output={}", out.display());
 }
+
+/// Writes the composed lit and traced modules to `RENDERLAB_DUMP_MODULES` for offline
+/// diffs (frozen-module screens and SPIR-V comparison); a no-op otherwise.
+#[test]
+fn dump_composed_modules() {
+    let Some(dir) = std::env::var_os("RENDERLAB_DUMP_MODULES") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir).unwrap();
+    let [hard, soft] = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    for (name, source) in [
+        ("raster", SOURCE.to_owned()),
+        (
+            "hardware-1x",
+            crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap(),
+        ),
+        ("fresh", fresh_shadow_gpu::shader_source(SOURCE).unwrap()),
+        ("traced-hard", hard),
+        ("traced-soft", soft),
+    ] {
+        fs::write(dir.join(format!("{name}.wgsl")), source).unwrap();
+    }
+}

@@ -193,10 +193,9 @@ pub(super) fn hdr(r: &mut Renderer) -> Vec<f32> {
     r.test_drain("HDR copy admission");
     let mut capture = r.try_capture_hdr().unwrap().unwrap();
     r.test_drain("HDR copy");
-    capture
-        .try_read()
-        .unwrap()
-        .unwrap()
+    let bytes = capture.try_read().unwrap().unwrap();
+    crate::renderer::test_record_capture("hdr", &bytes);
+    bytes
         .chunks_exact(2)
         .map(|b| decode_f16(u16::from_le_bytes(b.try_into().unwrap())))
         .collect()
