@@ -500,6 +500,16 @@ pub(super) struct PrimaryState {
     /// Record frames write film_records_kernel.wgsl's per-pixel diagnostics (tests).
     #[cfg(test)]
     pub test_record_diagnostics: bool,
+    /// Pixels a probed validation kernel reports record by record, as (x + 1) | y << 16, zero
+    /// for none (support/film_t2_probe.wgsl; tests).
+    #[cfg(test)]
+    pub test_record_probe: [u32; 3],
+    /// The scatter variant of the record gathers (`Renderer::test_record_scatter`), which
+    /// moving frames use while `test_scatter_active` is set (tests).
+    #[cfg(test)]
+    pub test_scatter: Option<film_records::ScatterPrototype>,
+    #[cfg(test)]
+    pub test_scatter_active: bool,
     /// Moving frames shade with this pipeline instead of the frame program's (tests).
     #[cfg(test)]
     pub test_record_shading: Option<Owned<wgpu::ComputePipeline>>,
@@ -704,6 +714,12 @@ impl PrimaryState {
             test_film_background: None,
             #[cfg(test)]
             test_record_diagnostics: false,
+            #[cfg(test)]
+            test_record_probe: [0; 3],
+            #[cfg(test)]
+            test_scatter: None,
+            #[cfg(test)]
+            test_scatter_active: false,
             #[cfg(test)]
             test_record_shading: None,
             trace_layouts: [&trace[0], &trace[1]]

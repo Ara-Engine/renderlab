@@ -24,7 +24,8 @@
 //     w the camera's far plane depth, where camera rays end;
 //   size: width, height, trace mode (0 the motion trace, 1 the centre retrace), and the
 //     implied-record frame index;
-//   flags: x = test diagnostics (film_diagnostics).
+//   flags: x = test diagnostics (film_diagnostics); y, z, w = test probe pixels
+//     (support/film_t2_probe.wgsl), zero otherwise.
 struct FilmMotion {
     reproject:mat4x4<f32>,
     current:mat4x4<f32>,

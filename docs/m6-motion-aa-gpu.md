@@ -17,6 +17,14 @@
 - **Also failing:** F3 (edge bias) and F5 (ghost bias and hidden records).
 - **Status of the records modes:** `Records4` and `Records8` remain registered candidates, off by default. They are never presented as meeting the bar.
 
+**Follow-up (2026-11-06, [§9](#9-follow-up-the-outliers-and-the-scatter-price)).**
+
+- **The outliers:** no T2 defect was found.
+  - The umbra outlier is a correct sample of a second surface in an edge pixel.
+  - The lit-side solids are receiver-defect samples just outside the 1e-4 band test, plus two single-ray blocks of unknown cause from the production trace.
+- **The scatter** reproduces the gathers bit for bit and does not depend on arrival order. It saves only 0.39 ms (K = 4) and 1.25 ms (K = 8): K = 8 moving frames take 4.25 ms.
+- **Verdict:** K = 8 cannot plausibly reach 1.075 ms. The unit stopped there: nothing was built and defaults are unchanged.
+
 ## 1. What T2a implements
 
 API: `Renderer::set_film_motion(FilmMotion)` takes one of:
@@ -285,3 +293,135 @@ py -3 -B scripts/m6-motion-aa-timing.py E:/renderlab-work/t2a/timing-walk-k8-1 .
     - One lease, `timing-walk-k4-nogap`, stayed stale for 433 s. Its run was a 5-s preflight deferral, but its release hit a Windows share violation on `owner.json`. It was removed by hand, the ledger and schedule record it, and the release now retries.
   - **CPU scoring:** 13.6 minutes.
   - **Coordination:** most of the wall time went to the receiver-origin worker's reserved windows, memory floors while other workers compiled, and one CPU job at a time.
+
+## 9. Follow-up: the outliers and the scatter price
+
+2026-11-06, on this branch at `ff7b949` with main `400baaf` merged.
+
+- **Run:** one batched GPU process, `gpu_film_t2_batch` (build c2, release, two Cargo jobs). It loads the quarry once and runs the per-record probes, the scatter identity check and the paired timing.
+- **Lease:** 89 s (22:26:38–22:28:07 UTC) under the fast-check guard, 4 GiB to start and a 2 GiB in-run abort.
+- **Contended:** available memory fell to 3.9 GiB, and up to 5 rustc and 7 build processes ran. Validation was off. No window or capture.
+
+**Result: no T2 defect was found, so nothing was fixed in T2.**
+
+- **Cost:** the scatter variant is exact and deterministic, but K = 8 moving frames still take 4.25 ms. K = 8 cannot plausibly reach 1.075 ms, so the brief's stop applies.
+- **Not done:** no production build and no Q-walk gate rerun. `Records4` and `Records8` and the defaults are unchanged.
+
+### 9.1 The outliers, record by record (M)
+
+`support/film_t2_probe.wgsl` is test-only. It is applied to the production record kernels through exact-once seams (`PROBE_EDITS`).
+
+- **What it writes:** at up to three probe pixels per frame, every landed record in gather order:
+  - its source pixel, slot and age;
+  - its landing point and world point;
+  - both sides of the five plane tests, and the exact-ray result;
+  - the closest hits of camera rays through the landing point, from the near plane and around the record's own point.
+- **Window dumps** around each case give the hit record, visible rays, plane, records and T1a history per frame. `scripts/m6-motion-aa-probe.py` traces each kept record back to its birth sample.
+- **Reproduction:** the probe run reproduces the gate's values: 0.25, 0.75, 0.875 and 0.984375 at the four moving-frame pixels.
+
+| Case | The opposite sample | Its origin | Verdict |
+|---|---|---|---|
+| K = 4, frame 60, (780, 555), umbra, +0.25 | Kept record, placement 7, V = 1, landed at (780.997, 555.012) | Fresh sample of (781, 555) at frame 59: 0.034 barycentric from an edge, 8 of 8 rays visible | **Correct sample of a second surface** (below) |
+| K = 4, frame 60, (890, 370), lit, −0.25 | Kept record, V = 0 | Frame 57, triangle 832578, barycentrics (1.28e-4, 0.084), 0 of 8 rays | Receiver-band signature, 1.28e-4 from an edge |
+| K = 8, frame 60, (991, 782), lit, −0.125 | Kept record, V = 0 | Frame 55, triangle 910138, barycentrics (1.94e-4, 0.342), 0 of 8 rays | Receiver-band signature, 1.94e-4 from an edge |
+| Hold: K = 4 (978, 589) frame 68; K = 8 (978, 589) frame 94, (933, 641) frame 84, (1323, 442) frame 95 | A T1a static sample after the seed. Every seed mean was exactly 1.0 | 0 of 8 rays, at 7.9e-4, 7.9e-4, 4.5e-5 and 2.6e-5 barycentric from an edge | Receiver-band signature, in T1a's static path |
+| K = 8, frames 60 and 100, (1412, 689), lit, −1/64 | Frame 60's own fresh sample, kept as a record to frame 100 | Triangle 440454, barycentrics (0.510, 0.087), 7 of 8 rays | Not the band; unexplained |
+| Hold: K = 8, (1148, 711), frame 91 | A T1a static sample | 0.041 from an edge, 7 of 8 rays | As (1412, 689) |
+
+**The umbra outlier is not a T2 error.** Every test the record passed is correct.
+
+- **Placement:** it carries placement 7, the placement of the pixel's up and right neighbours' fresh planes. It passed the plane test against both.
+- **Visibility:** the exact camera ray to its point was unoccluded.
+- **Position:** the closest-hit camera ray through its landing point, at frame 60's camera (pose 60's), hits its own triangle (592087) at t/L = 1.000000. So placement 7 is visible inside this pixel, 0.003 px from its right edge.
+- **Why the reference calls it solid:**
+  - All 1,024 reference samples landed on placement 1, so the pixel counts as single-surface.
+  - Its own centre placements put placement 7 at the right and top-right neighbours, so it is in the edge population.
+  - The 16 replicas condition on the centre surface. They confirm that surface's visibility (0), not that the pixel has a single surface.
+- **What it is:** a two-surface edge pixel. The lit placement-7 sliver is too thin for 1,024 samples. T2 holds one of its four samples there, at weight 1/4.
+- **First wrong decision:** classifying the pixel as a film-solid, not a record decision.
+- **Crop:** `outlier-k4-f60-780-555.png` shows the instance boundary along the pixel's top-right, with the lit record on its right edge.
+
+**The lit-side solids are the receiver defect class, outside the band test (I for concavity).**
+
+- **The signature:** all 8 rays blocked, on a hit 2.6e-5 to 7.9e-4 barycentric from a triangle edge, in a replica-verified lit footprint. This is T1a §0.3's signature.
+- **Not checked here:** concavity. T1a's micro-grids established it for its three cases.
+- **Why they count:** the diagnostic's 1e-4 band is narrower than these cases. The moving-frame cases are records born at those samples. The hold cases are T1a's own static samples.
+- **Status:** they stay counted under the frozen rule until the receiver-origin fix lands. T2 cannot fix them: the samples are the production trace's.
+
+**Two single-ray blocks are unexplained.** Each is a production-trace sample with 1 of 8 rays blocked, 0.04–0.09 barycentric from any edge. Each lies in a footprint whose replicas (524,288 rays) are all lit.
+
+- **Possible causes:** a partial region below the replicas' resolution, or another receiver-origin case.
+- **Not a T2 decision:** the motion trace's fresh sample is Interactive's ray at a jittered position.
+- **Handed over:** to the receiver-origin worker, with the frame, pixel, triangle and barycentrics.
+
+**Recommendation for the next gate.**
+
+- Verify solids for single-surface coverage as well as visibility, through replica acceptance or a placement-coverage check, so a two-surface edge pixel is not scored as a solid.
+- Classify the receiver signature by geometry, not the 1e-4 band.
+
+Neither changes a threshold. The rule itself is unchanged here.
+
+### 9.2 The scatter price (M)
+
+**Design.** `support/film_t2_scatter.wgsl` and `Renderer::test_record_scatter` are test-only.
+
+- **`film_scatter`:** reprojects each previous record once, fresh and moved, explicit or implied. It appends the record's gather-order key (source pixel index × K + slot) to the pixel it lands in, with one atomic per record. Capacity is 2K keys per pixel.
+- **Gap choice and validation:** these read only those keys and keep a key only if its source lies in the production source window. They recompute the landing with the production code.
+- **Order:** validation sorts the keys into gather order, then keeps records exactly as `film_validate_pixel` does. The output therefore cannot depend on arrival order.
+- **Fallbacks:** a pixel with more than 2K arrivals gathers instead. Validation zeroes each pixel's count for the next frame.
+
+**Identity (M).** For K = 4 and K = 8, 64 Q-walk frames from cold, run with the gathers, the scatter, the scatter and the gathers:
+
+- every frame's HDR image and the final records (fresh, moved and planes) were identical by hash in all four runs;
+- so over these frames the scatter's images are T2a's. Static frames run no record pass, and the scatter's two runs agree.
+
+The first identity attempt, before counts were zeroed, read stale keys. It was deterministic, and differed from the gathers from frame 2.
+
+**Paired timing (M, contended).** Q-walk frames 8–55, all moving. Gather and scatter Temporal frames alternate, each paired with an Interactive frame, in the same process. Times are p50 in ms:
+
+| K | Variant | n | Interactive | Moving | Trace incl. scatter and gap | Validation and retrace | Shading | Paired ratio |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 4 | gathers | 24 | 0.907 | **3.889** | 1.984 | 1.332 | 0.423 | 4.16 |
+| 4 | scatter | 24 | 0.907 | **3.497** | 1.832 | 0.877 | 0.420 | 3.51 |
+| 8 | gathers | 24 | 0.863 | **5.504** | 2.841 | 2.017 | 0.474 | 6.18 |
+| 8 | scatter | 24 | 0.863 | **4.251** | 2.458 | 1.262 | 0.470 | 4.88 |
+| 8 | scatter without exact rays (attribution only) | 48 | 0.876 | 4.754 | 3.269 | 0.824 | 0.473 | 4.73 |
+
+- **Savings:** the scatter saves 0.39 ms (K = 4) and 1.25 ms (K = 8).
+- **Exact rays:** in scatter validation they cost about 0.44 ms at K = 8 (1.262 − 0.824). Only the validation span is compared: the no-ray run's trace span was slower in its own GPU state.
+- **Why K = 8 cannot plausibly reach 1.075 ms:**
+  - The budget over Interactive is 0.21 ms.
+  - Parts no scatter removes take more than that on their own, all measured. T2a's no-gap, no-ray variant has its trace at +0.13 ms and its motion shading at +0.13 ms over Interactive's, about 0.26 ms together.
+  - The scatter's validation without rays is 0.82 ms, and the exact rays add 0.44.
+  - Even a free scatter and gap choice leaves about 0.86 + 0.26 + 0.82 + 0.44 ≈ 2.4 ms.
+  - Halving validation and tracing the rays densely (about 0.13 ms, I) would still leave about 1.7 ms. Reading and writing each K = 8 record once is about 90 MB, about 0.2 ms (I).
+- **Prototype limits:** the prototype scatters every source pixel, implied background tiles included: 16.6 M atomics at K = 8. Scatter and gap choice take about 2.0 ms of the trace span. Skipping implied sources would cut that, but not below the floor above.
+
+### 9.3 Evidence, reproduction and time
+
+**Evidence** is in `E:/renderlab-work/t2b/`:
+
+- `batch.json` (the manifest) and `batch/batch.json` (identity rows and timing samples);
+- `timing-summary.json`;
+- `batch/probe-k{4,8}/probe.json` and `probe-f*.bin`, with `batch/probe-k{4,8}-report.json` (every record and birth above);
+- the inspected crops `batch/outlier-*.png`;
+- `runs/` (lease records with memory and process context);
+- `builds/c2`.
+
+The 140 MB of window dumps were deleted after the reports.
+
+```text
+cargo test -p renderlab --lib --release --no-run -j 2 --target-dir <own target>
+py -3 -B scripts/m6-motion-aa-gpu-run.py --fast-check --label t2b-batch --manifest E:/renderlab-work/t2b/batch.json -- <test binary> gpu_film_t2_batch --ignored --nocapture --test-threads=1
+#   (RENDERLAB_T2_OUT=E:/renderlab-work/t2b, RENDERLAB_T2_OWNER=t2-scatter-pricing)
+py -3 -B scripts/m6-motion-aa-probe.py E:/renderlab-work/t2b/batch/probe-k4 --out <report.json>
+py -3 -B scripts/m6-motion-aa-timing.py E:/renderlab-work/t2b/batch/batch.json
+```
+
+**Time (UTC).**
+
+- **Implementation:** 21:52–22:26: the probe, the scatter prototype and the batch test. Release builds took 51–135 s.
+- **Verification:**
+  - Per-job attempts before the batch, 22:17–22:21: three aborted on the memory floor within 8 s, two deferred at preflight, and one was stopped. One scatter identity run completed (47 s) and found the stale-count bug.
+  - The batch lease took 89 s.
+  - CPU analysis took about 10 minutes.

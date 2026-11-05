@@ -14,6 +14,8 @@
 //!   with sample records against T1a, byte for byte.
 //! - `gpu_film_t2_motion`: T2a camera-motion data: a registered sequence from cold with each
 //!   scored program, record diagnostics, T-0 on pixels without records, and replays.
+//! - `gpu_film_t2_batch`: T2's follow-up checks in one process: per-record probes, the scatter
+//!   variant's identity with the gathers, and paired gather and scatter timing.
 //!
 //! Manifest: the quarry fields of `load_quarry`, `output`, `t1_cameras` (a cameras file
 //! whose frames are the scored poses), `poses`, and for the temporal test `frames`,
@@ -945,59 +947,20 @@ fn gpu_film_t1_timing() {
     };
     let warmup = m["warmup_pairs"].as_u64().unwrap_or(24) as usize;
     let pairs = m["pairs"].as_u64().unwrap_or(48) as usize;
-    let modes = [
-        crate::SoftShadows::Interactive,
-        crate::SoftShadows::Temporal,
-    ];
     // Cost attribution: `record_edits` ([find, replace] pairs) recompile the record kernels.
     if let Some(edits) = m["record_edits"].as_array() {
         r.soft_mode = crate::SoftShadows::Temporal;
         traced_frame(&mut r, &color, &path[0], &mut asset, true);
-        let edits: Vec<(String, String)> = edits
-            .iter()
-            .map(|e| [0, 1].map(|i| e[i].as_str().unwrap().to_owned()).into())
-            .collect();
-        r.test_record_kernel_edits(&edits);
+        r.test_record_kernel_edits(&string_pairs(&serde_json::json!(edits)));
     }
-    let mut pending = std::collections::HashMap::new();
-    let mut samples = vec![];
-    let ms = |d: Duration| d.as_secs_f64() * 1e3;
-    let mut collect =
-        |r: &mut Renderer, pending: &mut std::collections::HashMap<u64, (usize, usize, bool)>| {
-            for g in r.poll().unwrap().gpu {
-                if let Some((pair, mode, moving)) = pending.remove(&g.frame.0) {
-                    samples.push(serde_json::json!({"pair":pair,"mode":format!("{:?}",modes[mode]),
-                    "moving":moving,
-                    "host_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
-                    "trace_ms":g.receiver_pass.map(ms),"compute_ms":g.visibility_compute.map(ms),"shading_ms":ms(g.mesh_pass),
-                    "tone_ms":g.present_pass.map(ms),"span_ms":ms(g.render_span)}));
-                }
-            }
-        };
-    for pair in 0..warmup + pairs {
-        let camera = path[pair % path.len()];
-        for j in 0..2 {
-            let mode = (pair + j) % 2;
-            // set_soft_shadows would release the film history when leaving Temporal; the
-            // field keeps it, so Temporal frames stay in their steady state.
-            r.soft_mode = modes[mode];
-            let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
-            assert_eq!(report.soft_shadows, modes[mode]);
-            let moving = mode == 1 && r.primary.as_ref().unwrap().film.as_ref().unwrap().moving;
-            if pair >= warmup {
-                pending.insert(report.frame.0, (pair - warmup, mode, moving));
-            }
-            collect(&mut r, &mut pending);
-        }
+    // Scatter pricing: `scatter` "only" or "alternate", `scatter_edits` its module edits.
+    let scatter = m["scatter"].as_str();
+    if scatter.is_some() {
+        r.soft_mode = crate::SoftShadows::Temporal;
+        traced_frame(&mut r, &color, &path[0], &mut asset, true);
+        r.test_record_scatter(&string_pairs(&m["scatter_edits"]));
     }
-    r.test_drain("T1 paired timing");
-    collect(&mut r, &mut pending);
-    assert!(
-        pending.is_empty(),
-        "{} frames without GPU samples; timing {:?}",
-        pending.len(),
-        r.timing_status
-    );
+    let samples = paired_timing(&mut r, &color, &mut asset, &path, [warmup, pairs], scatter);
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     fs::write(
@@ -1008,6 +971,92 @@ fn gpu_film_t1_timing() {
         .unwrap(),
     )
     .unwrap();
+}
+
+/// `[[find, replace], ...]` as owned pairs (absent: none).
+fn string_pairs(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| [0, 1].map(|i| e[i].as_str().unwrap().to_owned()).into())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Paired Interactive and Temporal frames along `path`: `warmup` then `pairs` pairs, the order
+/// within a pair alternating, with each measured frame's GPU pass times. Temporal frames keep
+/// their history between pairs. `scatter` "only" runs every Temporal frame on the scatter variant
+/// (`Renderer::test_record_scatter`), "alternate" every other one, so gather and scatter moving
+/// frames share the process, the path and the Interactive pairing.
+fn paired_timing(
+    r: &mut Renderer,
+    color: &wgpu::Texture,
+    asset: &mut prepared::Prepared,
+    path: &[Camera],
+    [warmup, pairs]: [usize; 2],
+    scatter: Option<&str>,
+) -> Vec<serde_json::Value> {
+    assert!(matches!(scatter, None | Some("only" | "alternate")), "scatter {scatter:?}");
+    let modes = [
+        crate::SoftShadows::Interactive,
+        crate::SoftShadows::Temporal,
+    ];
+    type Pending = std::collections::HashMap<u64, (usize, usize, bool, &'static str)>;
+    fn collect(r: &mut Renderer, pending: &mut Pending, samples: &mut Vec<serde_json::Value>) {
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        for g in r.poll().unwrap().gpu {
+            if let Some((pair, mode, moving, variant)) = pending.remove(&g.frame.0) {
+                samples.push(serde_json::json!({"pair":pair,
+                    "mode":if mode == 0 {"Interactive"} else {"Temporal"},
+                    "moving":moving,"variant":variant,
+                    "host_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
+                    "trace_ms":g.receiver_pass.map(ms),"compute_ms":g.visibility_compute.map(ms),"shading_ms":ms(g.mesh_pass),
+                    "tone_ms":g.present_pass.map(ms),"span_ms":ms(g.render_span)}));
+            }
+        }
+    }
+    let (mut pending, mut samples) = (Pending::new(), vec![]);
+    let mut temporal_frames = 0usize;
+    for pair in 0..warmup + pairs {
+        let camera = path[pair % path.len()];
+        for j in 0..2 {
+            let mode = (pair + j) % 2;
+            // set_soft_shadows would release the film history when leaving Temporal; the
+            // field keeps it, so Temporal frames stay in their steady state.
+            r.soft_mode = modes[mode];
+            let scattered = mode == 1
+                && match scatter {
+                    Some("only") => true,
+                    Some(_) => temporal_frames % 2 == 1,
+                    None => false,
+                };
+            temporal_frames += mode;
+            r.primary.as_mut().unwrap().test_scatter_active = scattered;
+            let report = traced_frame(r, color, &camera, asset, true);
+            assert_eq!(report.soft_shadows, modes[mode]);
+            let moving = mode == 1 && r.primary.as_ref().unwrap().film.as_ref().unwrap().moving;
+            let variant = match (mode, scattered) {
+                (0, _) => "interactive",
+                (_, true) => "scatter",
+                _ => "gather",
+            };
+            if pair >= warmup {
+                pending.insert(report.frame.0, (pair - warmup, mode, moving, variant));
+            }
+            collect(r, &mut pending, &mut samples);
+        }
+    }
+    r.test_drain("T1 paired timing");
+    collect(r, &mut pending, &mut samples);
+    r.primary.as_mut().unwrap().test_scatter_active = false;
+    assert!(
+        pending.is_empty(),
+        "{} frames without GPU samples; timing {:?}",
+        pending.len(),
+        r.timing_status
+    );
+    samples
 }
 
 /// G2-style local verification of reference-solid pixels where T1 deviates: manifest
@@ -1245,9 +1294,16 @@ fn record_shading(
 /// Every layer of `texture`, tightly packed.
 fn read_layers(r: &mut Renderer, texture: &wgpu::Texture) -> Vec<u8> {
     let size = texture.size();
-    let tight = size.width * texture.format().block_copy_size(None).unwrap();
+    read_window(r, texture, [0, 0, size.width, size.height])
+}
+
+/// The `[x0, y0, width, height]` window of every layer of `texture`, tightly packed (layer,
+/// row, column).
+fn read_window(r: &mut Renderer, texture: &wgpu::Texture, [x0, y0, w, h]: [u32; 4]) -> Vec<u8> {
+    let layers = texture.size().depth_or_array_layers;
+    let tight = w * texture.format().block_copy_size(None).unwrap();
     let row = tight.div_ceil(256) * 256;
-    let bytes = u64::from(row) * u64::from(size.height) * u64::from(size.depth_or_array_layers);
+    let bytes = u64::from(row) * u64::from(h) * u64::from(layers);
     let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("T2 record readback"),
         size: bytes,
@@ -1256,16 +1312,25 @@ fn read_layers(r: &mut Renderer, texture: &wgpu::Texture) -> Vec<u8> {
     });
     let mut encoder = r.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(row),
-                rows_per_image: Some(size.height),
+                rows_per_image: Some(h),
             },
         },
-        size,
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: layers,
+        },
     );
     let done = Arc::new(OnceLock::new());
     let callback = done.clone();
@@ -1305,7 +1370,8 @@ fn record_diagnostics(r: &mut Renderer) -> Vec<[u32; 2]> {
     let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
     let records = film.records.as_ref().unwrap();
     let buffer = records.test_resources(0).2.clone();
-    let size = buffer.size();
+    // The record probes follow the per-pixel words.
+    let size = buffer.size() - film_records::PROBE_BYTES;
     read_buffer(r, &buffer, size)
         .chunks_exact(8)
         .map(|w| [0, 1].map(|i| u32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap())))
@@ -1746,3 +1812,334 @@ fn gpu_film_t2_motion() {
     .unwrap();
     assert_eq!(identical, replays, "T2 replays differ");
 }
+
+/// The probed validation kernel (support/film_t2_probe.wgsl): the production record kernels
+/// with every landed record's acceptance-test values written at the probe pixels.
+const PROBE_EDITS: [(&str, &str); 4] = [
+    (
+        "    let discontinuity=(geometry>0u && background>0u) || far-near>4.0*film_motion.eye.w*near;\n",
+        "    let discontinuity=(geometry>0u && background>0u) || far-near>4.0*film_motion.eye.w*near;\n    let probe=film_probe_slot(p);\n    if probe>=0 {film_probe_header(u32(probe),p,&planes,geometry,background,near,far,discontinuity);}\n",
+    ),
+    (
+        "                if !valid {continue;}\n",
+        "                if probe>=0 {film_probe_entry(u32(probe),s,slot,listed,r,moved,valid,&planes,discontinuity,v.count);}\n                if !valid {continue;}\n",
+    ),
+    (
+        "    for(var k=0u;k<v.count;k+=1u) {geometric=geometric || film_placement(v.kept[k])!=0u;}\n",
+        "    if probe>=0 {film_probe_final(u32(probe),&v);}\n    for(var k=0u;k<v.count;k+=1u) {geometric=geometric || film_placement(v.kept[k])!=0u;}\n",
+    ),
+    (
+        "// ---- end of the T2 kernel passes ----",
+        concat!(
+            include_str!("../support/film_t2_probe.wgsl"),
+            "// ---- end of the T2 kernel passes ----"
+        ),
+    ),
+];
+
+#[test]
+fn t2_probe_and_scatter_kernels_compile() {
+    let kernels = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let kernel = film_records::kernel_source(&kernels[1]).unwrap();
+    let mut probed = kernel.clone();
+    for e in PROBE_EDITS {
+        probed = edit(&probed, e);
+    }
+    validate_wgsl(&probed);
+    validate_wgsl(&format!(
+        "{kernel}\n{}",
+        include_str!("../support/film_t2_scatter.wgsl")
+    ));
+}
+
+/// A registered cameras file's frames.
+fn sequence(file: &str) -> Vec<Camera> {
+    cameras::Cameras::load(&PathBuf::from(file))
+        .unwrap()
+        .frames
+        .iter()
+        .map(|f| f.camera().unwrap())
+        .collect()
+}
+
+/// T2a's per-record probe (support/film_t2_probe.wgsl) for one `spec`: `path` from cold with
+/// `records` per pixel and the visibility program (or `program`), test diagnostics on and
+/// PROBE_EDITS' validation kernel, restored to production afterwards. Under `output`:
+/// - at each frame of `probes` ({"frame": [[x, y], ...]}, at most three pixels),
+///   `probe-f<frame>.bin`, the three probe slots;
+/// - at every frame of each `windows` entry ([x, y, first, last]), `f<frame>-w<index>.bin`, the
+///   `size` x `size` window around (x, y) of the arrays `probe.json` lists, row-major (moved
+///   records layer-major).
+fn probe_records(
+    r: &mut Renderer,
+    color: &wgpu::Texture,
+    asset: &mut prepared::Prepared,
+    path: &[Camera],
+    spec: &serde_json::Value,
+) {
+    let [w, h] = [1920u32, 1080];
+    let motion = film_motion(spec);
+    let count = motion.records();
+    let out = PathBuf::from(spec["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let numbers = |v: &serde_json::Value| -> Vec<u32> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap() as u32)
+            .collect()
+    };
+    let probes: std::collections::BTreeMap<usize, [u32; 3]> = spec["probes"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(f, pixels)| {
+                    let mut words = [0u32; 3];
+                    for (word, p) in words.iter_mut().zip(pixels.as_array().unwrap()) {
+                        let p = numbers(p);
+                        *word = (p[0] + 1) | (p[1] << 16);
+                    }
+                    (f.parse().unwrap(), words)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let windows: Vec<Vec<u32>> = spec["windows"]
+        .as_array()
+        .map(|a| a.iter().map(numbers).collect())
+        .unwrap_or_default();
+    let size = spec["size"].as_u64().unwrap_or(48) as u32;
+    let last = probes
+        .keys()
+        .copied()
+        .chain(windows.iter().map(|w| w[3] as usize))
+        .max()
+        .unwrap();
+    let program_name = spec["program"].as_str().unwrap_or("visibility");
+    let (_, program, black) = programs()
+        .into_iter()
+        .find(|p| p.0 == program_name)
+        .unwrap();
+    r.set_soft_shadows(crate::SoftShadows::Temporal);
+    r.set_film_motion(motion);
+    for camera in &path[..2] {
+        traced_frame(r, color, camera, asset, true);
+    }
+    let edits: Vec<(String, String)> = PROBE_EDITS
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    r.test_record_kernel_edits(&edits);
+    let mut scored = ScoredProgram::new(r, &program, black, count);
+    scored.swap(r);
+    r.primary.as_mut().unwrap().test_record_diagnostics = true;
+    reset_film(r);
+    let pixels = (w * h) as usize;
+    let crop = |data: &[u8], bytes: usize, [x0, y0, cw, ch]: [u32; 4]| -> Vec<u8> {
+        (y0..y0 + ch)
+            .flat_map(|y| {
+                let start = (y * w + x0) as usize * bytes;
+                data[start..start + cw as usize * bytes].to_vec()
+            })
+            .collect()
+    };
+    let mut rows = vec![];
+    for (f, camera) in path.iter().enumerate().take(last + 1) {
+        r.primary.as_mut().unwrap().test_record_probe = probes.get(&f).copied().unwrap_or([0; 3]);
+        traced_frame(r, color, camera, asset, true);
+        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let (reset, moving, parity) = (film.reset, film.moving, film.parity);
+        let records = film.records.as_ref().unwrap();
+        let seed = records.seed;
+        let (fresh, moved, diagnostics) = records.test_resources(records.side);
+        let (fresh, moved, diagnostics) = (fresh.clone(), moved.clone(), diagnostics.clone());
+        let planes = records.test_planes().clone();
+        let [colour, anchor, _] = film.history(parity).map(|t| t.clone());
+        let active: Vec<usize> = (0..windows.len())
+            .filter(|&i| (windows[i][2] as usize..=windows[i][3] as usize).contains(&f))
+            .collect();
+        if !active.is_empty() || probes.contains_key(&f) {
+            let hdr = settled(r);
+            let diagnostics = read_buffer(r, &diagnostics, diagnostics.size());
+            if probes.contains_key(&f) {
+                fs::write(
+                    out.join(format!("probe-f{f:03}.bin")),
+                    &diagnostics[8 * pixels..],
+                )
+                .unwrap();
+            }
+            let primary = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+            let (hit, tiles) = (primary.hit.texture.clone(), primary.tiles.texture.clone());
+            let fresh_targets = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+            let visibility = fresh_targets.visibility.texture.clone();
+            let planes = read_buffer(r, &planes, planes.size());
+            let tiles = read_texture(r, &tiles);
+            for i in active {
+                let [x, y] = [windows[i][0], windows[i][1]];
+                let x0 = x.saturating_sub(size / 2).min(w - size);
+                let y0 = y.saturating_sub(size / 2).min(h - size);
+                let window = [x0, y0, size, size];
+                // Per-pixel coverage of the 8 x 4 trace tiles.
+                let covered: Vec<u8> = (y0..y0 + size)
+                    .flat_map(|py| {
+                        let tiles = &tiles;
+                        (x0..x0 + size).flat_map(move |px| {
+                            let t = ((py / 4) * w.div_ceil(8) + px / 8) as usize * 4;
+                            tiles[t..t + 4].to_vec()
+                        })
+                    })
+                    .collect();
+                let mut bytes = crop(&hdr, 8, window);
+                bytes.extend(read_window(r, &hit, window));
+                bytes.extend(read_window(r, &visibility, window));
+                bytes.extend(covered);
+                bytes.extend(crop(&planes, 16, window));
+                bytes.extend(crop(&diagnostics[..8 * pixels], 8, window));
+                bytes.extend(read_window(r, &fresh, window));
+                bytes.extend(read_window(r, &moved, window));
+                bytes.extend(read_window(r, &colour, window));
+                bytes.extend(read_window(r, &anchor, window));
+                fs::write(out.join(format!("f{f:03}-w{i}.bin")), bytes).unwrap();
+            }
+        }
+        rows.push(serde_json::json!({"frame":f,"reset":reset,"moving":moving,"seed":seed,
+            "matrix":camera.matrix(w, h).to_cols_array(),
+            "infinite":camera.infinite_matrix(w, h).to_cols_array(),
+            "eye":camera.view().inverse().w_axis.truncate().to_array()}));
+    }
+    scored.swap(r);
+    let state = r.primary.as_mut().unwrap();
+    state.test_record_diagnostics = false;
+    state.test_record_probe = [0; 3];
+    r.test_record_kernel_edits(&[]);
+    fs::write(
+        out.join("probe.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"records":count,
+            "program":program_name,"probes":spec["probes"],"windows":windows,"size":size,
+            "window_arrays":[["hdr","rgba16f",8],["hit","rgba32uint",16],["counts","r32uint",4],
+                ["covered","r32uint",4],["planes","4xu32",16],["diagnostics","2xu32",8],
+                ["fresh","rgba32uint",16],["moved","rgba32uint",16*(count-1)],
+                ["colour","rgba32float",16],["anchor","rg32uint",8]],
+            "frames":rows}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// The scatter variant's identity check (support/film_t2_scatter.wgsl) at the current K: the
+/// first `frames` of `path` from cold with the full program, run with the gathers, the
+/// scatter, the scatter and the gathers. Every frame's HDR image and the final records (fresh,
+/// moved and planes) are compared by hash with the first run's.
+fn scatter_identity(
+    r: &mut Renderer,
+    color: &wgpu::Texture,
+    asset: &mut prepared::Prepared,
+    path: &[Camera],
+    frames: usize,
+) -> Vec<serde_json::Value> {
+    r.test_record_scatter(&[]);
+    let mut runs: Vec<(bool, Vec<String>, String)> = vec![];
+    for scattered in [false, true, true, false] {
+        r.primary.as_mut().unwrap().test_scatter_active = scattered;
+        reset_film(r);
+        let images = path
+            .iter()
+            .take(frames)
+            .map(|camera| {
+                traced_frame(r, color, camera, asset, true);
+                digest(&settled(r))
+            })
+            .collect();
+        runs.push((scattered, images, record_digest(r)));
+    }
+    r.primary.as_mut().unwrap().test_scatter_active = false;
+    let first = &runs[0];
+    runs.iter()
+        .map(|(scattered, images, records)| {
+            serde_json::json!({"scatter":scattered,"frames":images.len(),
+                "frames_identical":first.1.iter().zip(images).filter(|(a, b)| a == b).count(),
+                "first_differing_frame":first.1.iter().zip(images).position(|(a, b)| a != b),
+                "records_identical":first.2 == *records})
+        })
+        .collect()
+}
+
+/// T2's follow-up checks in one process, the quarry loaded once (AGENTS.md: batched checks):
+/// - `probes`: probe_records per spec (each with its own `records` and `output`);
+/// - `identity`: {"records": [K...], "frames": n}, scatter_identity per K;
+/// - `timing`: {"warmup", "pairs", "runs": [{"label", "records", "scatter", "scatter_edits"}]},
+///   paired_timing per run along `sequence`.
+///
+/// Validation is off. Writes `batch.json` (identity rows and timing samples) under `output`,
+/// then asserts every identity run matched.
+#[test]
+#[ignore = "owned GPU lease; T2 batched probes, scatter identity and timing, offscreen"]
+fn gpu_film_t2_batch() {
+    let m = manifest();
+    let _validation = validation::begin(false);
+    let mut r = renderer(false);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let (mut asset, _) = load_quarry(&m, &mut r);
+    let color = target(&r, 1920, 1080);
+    let path = sequence(m["sequence"].as_str().unwrap());
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let start = Instant::now();
+    let stage = |name: &str| eprintln!("T2 batch {name} {:.1} s", start.elapsed().as_secs_f64());
+    for spec in m["probes"].as_array().into_iter().flatten() {
+        probe_records(&mut r, &color, &mut asset, &path, spec);
+        stage(&format!("probe K={}", spec["records"]));
+    }
+    // Compiles K's production record pipelines (two frames: reset, then moving).
+    let use_records = |r: &mut Renderer, asset: &mut prepared::Prepared, k: &serde_json::Value| {
+        r.set_soft_shadows(crate::SoftShadows::Temporal);
+        r.set_film_motion(film_motion(&serde_json::json!({"records":k})));
+        for camera in &path[..2] {
+            traced_frame(r, &color, camera, asset, true);
+        }
+    };
+    let mut identity = vec![];
+    let frames = m["identity"]["frames"].as_u64().unwrap_or(64) as usize;
+    for k in m["identity"]["records"].as_array().into_iter().flatten() {
+        use_records(&mut r, &mut asset, k);
+        let runs = scatter_identity(&mut r, &color, &mut asset, &path, frames);
+        eprintln!("T2 batch identity K={k} {}", serde_json::json!(runs));
+        identity.push(serde_json::json!({"records":k,"runs":runs}));
+        stage(&format!("identity K={k}"));
+    }
+    let mut timing = vec![];
+    let t = &m["timing"];
+    let counts = [
+        t["warmup"].as_u64().unwrap_or(8) as usize,
+        t["pairs"].as_u64().unwrap_or(48) as usize,
+    ];
+    for run in t["runs"].as_array().into_iter().flatten() {
+        use_records(&mut r, &mut asset, &run["records"]);
+        let scatter = run["scatter"].as_str();
+        if scatter.is_some() {
+            r.test_record_scatter(&string_pairs(&run["scatter_edits"]));
+        }
+        let samples = paired_timing(&mut r, &color, &mut asset, &path, counts, scatter);
+        timing.push(serde_json::json!({"label":run["label"],"records":run["records"],
+            "scatter":scatter,"scatter_edits":run["scatter_edits"],"warmup_pairs":counts[0],
+            "pairs":counts[1],"sequence":m["sequence"],"samples":samples}));
+        stage(&format!("timing {}", run["label"]));
+    }
+    fs::write(
+        out.join("batch.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"sequence":m["sequence"],
+            "identity":identity,"timing":timing,"seconds":start.elapsed().as_secs_f64()}))
+        .unwrap(),
+    )
+    .unwrap();
+    for row in &identity {
+        for run in row["runs"].as_array().unwrap() {
+            assert!(
+                run["frames_identical"] == run["frames"] && run["records_identical"] == true,
+                "scatter identity failed: {row}"
+            );
+        }
+    }
+}
+
+

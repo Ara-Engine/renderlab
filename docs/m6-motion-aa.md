@@ -11,6 +11,11 @@ It answers [T1b's failure](m6-temporal-gpu.md#s2-t1b-camera-motion) under the ba
 - **Revealed pixels** fail F2.
 - **What held:** silhouettes are antialiased in motion, and F1 radiance is within 0.84–0.85× of the bar. F4 and the CPU-model check pass, as do the static byte identity, T-0 and F8.
 - **Defaults are unchanged.** The quality-first fallback in [§6](#6-verdict) stands.
+- **Follow-up (2026-11-06, [GPU §9](m6-motion-aa-gpu.md#9-follow-up-the-outliers-and-the-scatter-price)):**
+  - No T2 defect was found.
+  - The umbra outlier is a correct second-surface sample in an edge pixel that the reference misclassified as solid.
+  - The lit-side solids are receiver-defect samples outside the 1e-4 band test, plus two unexplained single-ray blocks from the production trace.
+  - A scatter replacing both gathers is bit-identical and deterministic, but K = 8 moving frames still take 4.25 ms (K = 4: 3.50 ms). T2's per-pixel work cannot fit the 1.075 ms stop.
 
 ## Decisions
 

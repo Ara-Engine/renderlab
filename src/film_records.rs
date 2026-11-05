@@ -27,6 +27,8 @@ const STORE: &str = include_str!("../shaders/film_records_store.wgsl");
 pub(super) const MOTION_BYTES: usize = 3 * 64 + 4 * 16;
 /// Records carry placement + 1 in 16 bits.
 const MAX_PLACEMENTS: usize = 0xfffe;
+/// Test diagnostics end with three record probes of 8,192 u32 (support/film_t2_probe.wgsl).
+pub(crate) const PROBE_BYTES: u64 = 3 * 8192 * 4;
 
 /// The motion trace: the fused Interactive trace choosing each pixel's sample from the
 /// records that land in it (mode 0), or retracing cold pixels at the centre (mode 1), and
@@ -439,7 +441,7 @@ impl FilmRecords {
             diagnostics: Buffer::new(
                 r,
                 "film record diagnostics",
-                if cfg!(test) { 8 * pixels } else { 8 },
+                if cfg!(test) { 8 * pixels + PROBE_BYTES } else { 8 },
                 storage,
             ),
             side: 0,
@@ -644,18 +646,18 @@ impl Renderer {
         .chain([far_depth])
         .map(f32::to_bits);
         #[cfg(test)]
-        let diagnose = state.test_record_diagnostics;
+        let (diagnose, probe) = (state.test_record_diagnostics, state.test_record_probe);
         #[cfg(not(test))]
-        let diagnose = false;
+        let (diagnose, probe) = (false, [0; 3]);
         let words = [
             size.width,
             size.height,
             0,
             records.frames,
             u32::from(diagnose),
-            0,
-            0,
-            0,
+            probe[0],
+            probe[1],
+            probe[2],
         ];
         let mut bytes = [0; MOTION_BYTES];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(floats.chain(words)) {
@@ -902,6 +904,15 @@ impl Renderer {
         compute_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         shade_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        #[cfg(test)]
+        if self.primary.as_ref().unwrap().test_scatter_active {
+            return self.test_encode_scatter_motion(
+                encoder,
+                trace_stamps,
+                compute_stamps,
+                shade_stamps,
+            );
+        }
         let state = self.primary.as_ref().unwrap();
         let records = state.film.as_ref().unwrap().records.as_ref().unwrap();
         let groups = &records.groups.as_ref().unwrap().1[records.side];
@@ -971,6 +982,190 @@ impl Renderer {
             .unwrap()
             .kernel = kernel;
     }
+
+    /// Compiles the scatter variant of the record gathers (support/film_t2_scatter.wgsl) for the
+    /// frame's K, with exact-once text `edits` of its module (cost attribution). Moving frames
+    /// use it while `PrimaryState::test_scatter_active` is set. The record pipelines must
+    /// already be compiled.
+    pub(in crate::renderer) fn test_record_scatter(&mut self, edits: &[(String, String)]) {
+        let count = self.film_motion.records();
+        let mut source = format!(
+            "{}\n{}",
+            kernel_source(&self.primary_sources.as_ref().unwrap().0[1]).unwrap(),
+            include_str!("../support/film_t2_scatter.wgsl")
+        );
+        for (find, replace) in edits {
+            source = seam(&source, (find, replace)).unwrap();
+        }
+        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let pixels = u64::from(size.width) * u64::from(size.height);
+        let state = self.primary.as_ref().unwrap();
+        let device = &self.device;
+        let uint = wgpu::TextureSampleType::Uint;
+        let arrivals = [read_write(43, 4), read_write(44, 4)];
+        let motion = read(31, MOTION_BYTES as u64);
+        let planes = read_write(32, 16);
+        let sources = [texture(33, uint), array_texture(34)];
+        let frame = uniform(10, FRAME_BYTES as u64);
+        let entries: [Vec<wgpu::BindGroupLayoutEntry>; 3] = [
+            [motion].into_iter().chain(sources).chain(arrivals).collect(),
+            [frame, motion, planes]
+                .into_iter()
+                .chain(sources)
+                .chain(arrivals)
+                .collect(),
+            [scene(2), frame, motion, planes]
+                .into_iter()
+                .chain(sources)
+                .chain([array_image(35), read_write(36, 8)])
+                .chain(arrivals)
+                .collect(),
+        ];
+        let layouts = entries.map(|entries| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("film records scatter"),
+                entries: &entries,
+            })
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("film records scatter"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipelines = [
+            ("film_scatter", false),
+            ("film_scatter_gap", false),
+            ("film_scatter_validate", true),
+        ]
+        .into_iter()
+        .zip(&layouts)
+        .map(|((entry, geometry), bindings)| {
+            let groups: &[Option<&wgpu::BindGroupLayout>] = if geometry {
+                &[Some(bindings), Some(&*state.array_bindings)]
+            } else {
+                &[Some(bindings)]
+            };
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("film records scatter ABI"),
+                bind_group_layouts: groups,
+                immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("FRESH_DIRECTIONS", 8.0), ("FILM_RECORDS", f64::from(count))],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+        let buffer = |label, size| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        // Arrival counts start zeroed; scatter validation zeroes each pixel's after reading it.
+        let capacity = u64::from((2 * count).min(16));
+        let prototype = ScatterPrototype {
+            counts: buffer("film records scatter counts", 4 * pixels),
+            keys: buffer("film records scatter keys", 4 * capacity * pixels),
+            layouts,
+            pipelines,
+        };
+        self.primary.as_mut().unwrap().test_scatter = Some(prototype);
+    }
+
+    /// The scatter variant of `encode_records_motion`: the scatter and its gap choice in place
+    /// of film_gap, and scatter validation in place of film_validate, with the same timestamps.
+    fn test_encode_scatter_motion(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        trace_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        compute_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        shade_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        use wgpu::BindingResource as R;
+        let state = self.primary.as_ref().unwrap();
+        let records = state.film.as_ref().unwrap().records.as_ref().unwrap();
+        let groups = &records.groups.as_ref().unwrap().1[records.side];
+        let pipelines = state.record_pipelines.as_ref().unwrap();
+        let scatter = state.test_scatter.as_ref().unwrap();
+        let (written, read_side) = (&records.sides[records.side], &records.sides[1 - records.side]);
+        let frame = &state.frame.as_ref().unwrap().0.value;
+        let scene = self.hardware_shadows.as_ref().unwrap().scene();
+        let common = [
+            (31, records.motion[0].value.as_entire_binding()),
+            (33, R::TextureView(&read_side.fresh.view)),
+            (34, R::TextureView(&read_side.moved.view)),
+            (43, scatter.counts.as_entire_binding()),
+            (44, scatter.keys.as_entire_binding()),
+        ];
+        let planes = (32, records.planes.value.as_entire_binding());
+        let extra: [Vec<(u32, R<'_>)>; 3] = [
+            vec![],
+            vec![(10, frame.as_entire_binding()), planes.clone()],
+            vec![
+                (2, scene.as_binding()),
+                (10, frame.as_entire_binding()),
+                planes,
+                (35, R::TextureView(&written.moved.view)),
+                (36, records.diagnostics.value.as_entire_binding()),
+            ],
+        ];
+        let binds: Vec<wgpu::BindGroup> = scatter
+            .layouts
+            .iter()
+            .zip(extra)
+            .map(|(layout, extra)| {
+                let entries: Vec<_> = common
+                    .iter()
+                    .cloned()
+                    .chain(extra)
+                    .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+                    .collect();
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("film records scatter"),
+                    layout,
+                    entries: &entries,
+                })
+            })
+            .collect();
+        let trace: &wgpu::ComputePipeline = &pipelines.kernel[0];
+        let [begin, end] = split_stamps(trace_stamps);
+        let [validated, retraced] = split_stamps(compute_stamps);
+        let passes: [(&str, &wgpu::ComputePipeline, &wgpu::BindGroup, Binds, _); 5] = [
+            ("film records scatter", &scatter.pipelines[0], &binds[0], Binds::Own, begin),
+            ("film records scatter gap choice", &scatter.pipelines[1], &binds[1], Binds::Own, None),
+            ("film records motion trace", trace, &groups[0], Binds::Lit, end),
+            ("film records scatter validation", &scatter.pipelines[2], &binds[2], Binds::Geometry, validated),
+            ("film records centre retrace", trace, &groups[1], Binds::Lit, retraced),
+        ];
+        for (label, pipeline, group, kind, stamps) in passes {
+            self.record_pass(encoder, label, pipeline, group, kind, stamps);
+        }
+        let production = &pipelines.shading.as_ref().unwrap().1;
+        let shading = state.test_record_shading.as_deref().unwrap_or(production);
+        self.encode_shade_group(encoder, shading, &groups[3], SHADE_TILE, shade_stamps);
+    }
+}
+
+/// Test-only scatter variant of the record gathers (support/film_t2_scatter.wgsl): per-pixel
+/// arrival counts and gather-order keys (capacity 2K, at most 16), and the scatter, gap-choice and
+/// validation pipelines.
+#[cfg(test)]
+pub(in crate::renderer) struct ScatterPrototype {
+    counts: wgpu::Buffer,
+    keys: wgpu::Buffer,
+    layouts: [wgpu::BindGroupLayout; 3],
+    pipelines: [wgpu::ComputePipeline; 3],
 }
 
 #[cfg(test)]
