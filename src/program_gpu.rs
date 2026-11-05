@@ -736,3 +736,116 @@ impl Renderer {
         self.shader_hash = hash.finalize().into();
     }
 }
+
+#[cfg(test)]
+mod compile_profile {
+    use super::*;
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    /// Time every production shading pipeline separately, including Fresh and traced
+    /// pairs. Each pipeline gets a different live tint, salted per process, so neither
+    /// an earlier process nor the other member of a pair can supply its driver compile.
+    #[test]
+    #[ignore = "offscreen; GPU slot, >=6 GiB available RAM, experimental acknowledgment and RENDERLAB_PRIMARY_MANIFEST"]
+    fn gpu_program_pipeline_compile_profile() {
+        assert_eq!(
+            std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
+            Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(std::env::var("RENDERLAB_PRIMARY_MANIFEST").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let source = manifest["prelude"].as_str().map_or_else(
+            || include_str!("../shaders/scene.wgsl").to_owned(),
+            |path| fs::read_to_string(path).unwrap(),
+        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            flags: wgpu::InstanceFlags::empty(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: crate::RECEIVER_FEATURES
+                | crate::TRACED_FEATURES
+                | wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+            required_limits: crate::traced_limits(wgpu::Limits {
+                max_blas_primitive_count: 2_000_000,
+                max_blas_geometry_count: 1,
+                max_tlas_instance_count: 4096,
+                max_acceleration_structures_per_shader_stage: 1,
+                ..Default::default()
+            }),
+            // The test caller explicitly accepts wgpu's experimental device contract.
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        }))
+        .unwrap();
+        let mut renderer = Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            Limits::default(),
+            RendererOptions {
+                samples: SampleCount::One,
+                anisotropy_clamp: 16,
+            },
+            HardwareShadowOptions::default(),
+            &source,
+        )
+        .unwrap();
+        renderer
+            .set_primary_visibility(PrimaryVisibility::Traced)
+            .unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let salt = now.subsec_nanos() ^ (now.as_secs() as u32) ^ std::process::id();
+        assert_eq!(STANDARD_PROGRAM.matches("*sampled.rgb*TINT").count(), 1);
+        let mut serial = 0u32;
+        let mut rows = vec![];
+        for rep in 0..manifest["reps"].as_u64().unwrap_or(3) {
+            for variant in [
+                Variant::Lit,
+                Variant::Hardware,
+                Variant::Fresh,
+                Variant::Traced,
+            ] {
+                for index in 0..2 {
+                    serial += 1;
+                    let tint =
+                        f32::from_bits(0x3f000000 | (salt.wrapping_add(serial) & 0x003fffff));
+                    let program = STANDARD_PROGRAM
+                        .replace("*sampled.rgb*TINT", &format!("*sampled.rgb*TINT*{tint:.9}"));
+                    let abi = renderer.program_abi();
+                    let start = Instant::now();
+                    let compiled =
+                        compile_program(&abi, &renderer.preludes(), "profile", &program).unwrap();
+                    let module_ms = start.elapsed().as_secs_f64() * 1e3;
+                    let scopes = OperationScopes::new(&renderer.device);
+                    let start = Instant::now();
+                    let pipeline = compiled.modules.pipeline(&abi, variant, index);
+                    let pipeline_ms = start.elapsed().as_secs_f64() * 1e3;
+                    assert!(scopes.finish().is_none(), "{variant:?} {index}");
+                    drop(pipeline);
+                    let row = serde_json::json!({"rep": rep, "variant": format!("{variant:?}"),
+                        "index": index, "tint": tint, "module_ms": module_ms, "pipeline_ms": pipeline_ms});
+                    eprintln!("program_pipeline_profile {row}");
+                    rows.push(row);
+                }
+            }
+        }
+        let out = PathBuf::from(manifest["output"].as_str().unwrap());
+        fs::create_dir_all(&out).unwrap();
+        let report = serde_json::json!({
+            "adapter": format!("{:?}", adapter.get_info()), "salt": salt,
+            "prelude_sha256": format!("{:x}", Sha256::digest(source.as_bytes())), "samples": rows
+        });
+        fs::write(
+            out.join("pipeline-profile.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
+}
