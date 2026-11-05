@@ -41,8 +41,16 @@ fn film_shading(program: &str) -> String {
 
 fn film_shading_with(program: &str, jitter: &str) -> String {
     let soft = if let Some(frozen) = frozen_reference_modules() {
-        let source = fs::read_to_string(frozen.join("traced-soft.wgsl")).unwrap();
-        edit(&source, (STANDARD, program))
+        let source = fs::read_to_string(frozen.join("traced-soft.wgsl"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        edit(
+            &source,
+            (
+                &STANDARD.replace("\r\n", "\n"),
+                &program.replace("\r\n", "\n"),
+            ),
+        )
     } else {
         primary_ray_gpu::shading_sources(SOURCE, program).unwrap()[1].clone()
     };
@@ -71,12 +79,12 @@ fn film_sources_with(jitter: &str) -> FilmSources {
     let mut kernels = edit(
         &jittered_with(&soft, jitter),
         (
-            if frozen.is_some() {
+            if !soft.contains("textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));") {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));"
             } else {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));"
             },
-            if frozen.is_some() {
+            if !soft.contains("textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));") {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,f32(camera.view_mode.y)));"
             } else {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,select(f32(camera.view_mode.y),-f32(camera.view_mode.y),receiver.thin)));"
@@ -493,7 +501,10 @@ fn gpu_film_reference() {
         None => None,
         _ => panic!("unknown receiver policy"),
     };
-    if matches!(m["workload"].as_str(), Some("flat" | "convex" | "sawtooth")) {
+    if matches!(
+        m["workload"].as_str(),
+        Some("flat" | "convex" | "sawtooth" | "contact")
+    ) {
         receiver_policy_tests::analytic_fixture(&mut r, &m, receiver_policy.unwrap());
         return;
     }
@@ -505,24 +516,7 @@ fn gpu_film_reference() {
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         integrate_with(&mut r, &camera, &out, pose, minimal, receiver_policy);
     } else {
-        let (mesh, mut ground, mut blockers, camera, rects) =
-            rect_scene(&mut r, m["workload"] == "stress");
-        let color = target(&r, 256, 192);
-        render(
-            &mut r,
-            &color,
-            &camera,
-            &mut [
-                Draw::new(&mesh, &mut ground),
-                Draw::new(&mesh, &mut blockers),
-            ],
-        );
-        integrate_with(&mut r, &camera, &out, 0, minimal, receiver_policy);
-        fs::write(
-            out.join("rectangles.json"),
-            serde_json::to_vec_pretty(&rects).unwrap(),
-        )
-        .unwrap();
+        rectangle_fixture(&mut r, &m, receiver_policy);
     }
 }
 
@@ -583,4 +577,30 @@ fn rect_scene(
     )
     .unwrap();
     (mesh, ground, blockers, camera, rects)
+}
+
+fn rectangle_fixture(
+    r: &mut Renderer,
+    m: &serde_json::Value,
+    receiver_policy: Option<receiver_policy_tests::Policy>,
+) {
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    let minimal = m["minimal"].as_bool().unwrap_or(false);
+    let (mesh, mut ground, mut blockers, camera, rects) = rect_scene(r, m["workload"] == "stress");
+    let color = target(r, 256, 192);
+    render(
+        r,
+        &color,
+        &camera,
+        &mut [
+            Draw::new(&mesh, &mut ground),
+            Draw::new(&mesh, &mut blockers),
+        ],
+    );
+    integrate_with(r, &camera, &out, 0, minimal, receiver_policy);
+    fs::write(
+        out.join("rectangles.json"),
+        serde_json::to_vec_pretty(&rects).unwrap(),
+    )
+    .unwrap();
 }

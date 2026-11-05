@@ -359,7 +359,7 @@ struct Pipelines {
 }
 impl Pipelines {
     fn count(&self) -> u64 {
-        4 + 2 * u64::from(self.fresh.is_some()) + 4 * u64::from(self.primary.is_some())
+        4 + 2 * u64::from(self.fresh.is_some()) + self.primary.as_ref().map_or(0, |p| p.count())
     }
 }
 /// A lit or diagnostic mesh pipeline on the 48-byte vertex ABI, with the optional
@@ -1361,6 +1361,23 @@ impl Renderer {
         if let Some(hardware) = &self.hardware_shadows {
             hardware.validate_mesh(&self.ledger, &self.device.limits(), sizes.0, sizes.1)?;
         }
+        // Keep source indices first, followed by three neighbours per triangle and
+        // one padding word. The suffix's length modulo three identifies its presence
+        // to traced kernels; raster draws and BLASes retain the source index count.
+        let adjacency_bytes = sizes.1 + 4;
+        let adjacency_fits = self.primary.is_some()
+            && sizes.1 + adjacency_bytes <= self.device.limits().max_storage_buffer_binding_size
+            && sizes.1 + adjacency_bytes <= self.device.limits().max_buffer_size
+            && sizes.0 + sizes.1 + tangent_bytes + adjacency_bytes <= self.limits.max_mesh_bytes;
+        let adjacency_started = Instant::now();
+        let adjacency = adjacency_fits.then(|| crate::receiver_adjacency::build(data));
+        let adjacency_build = adjacency_started.elapsed();
+        let adjacency_bytes = if adjacency.is_some() {
+            adjacency_bytes
+        } else {
+            0
+        };
+        let index_bytes = sizes.1 + adjacency_bytes;
         let mut bytes = Vec::with_capacity((sizes.0 + sizes.1 + tangent_bytes) as usize);
         for vertex in data.vertices {
             let normal = glam::DVec3::new(
@@ -1416,7 +1433,7 @@ impl Renderer {
         let index = Arc::new(self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh indices"),
-                size: sizes.1,
+                size: index_bytes,
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas | traced,
                 mapped_at_creation: false,
             }),
@@ -1433,10 +1450,16 @@ impl Renderer {
                 ResourceKind::Buffer,
             )
         });
-        let acceleration = self
-            .hardware_shadows
-            .as_mut()
-            .map(|hardware| hardware.create_mesh(&self.device, &self.ledger, &vertex, &index));
+        let acceleration = self.hardware_shadows.as_mut().map(|hardware| {
+            hardware.create_mesh(
+                &self.device,
+                &self.ledger,
+                &vertex,
+                &index,
+                data.indices.len() as u32,
+                adjacency_bytes,
+            )
+        });
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
         }
@@ -1450,6 +1473,37 @@ impl Renderer {
             0,
             &bytes[sizes.0 as usize..(sizes.0 + sizes.1) as usize],
         );
+        if let Some(adjacency) = adjacency {
+            let mut suffix: Vec<u8> = adjacency
+                .neighbours
+                .iter()
+                .flat_map(|n| n.to_ne_bytes())
+                .collect();
+            suffix.extend_from_slice(&0u32.to_ne_bytes());
+            let started = Instant::now();
+            self.queue.write_buffer(&index, sizes.1, &suffix);
+            let adjacency_upload = started.elapsed();
+            self.uploads.geometry += adjacency_bytes;
+            self.uploads.write_calls += 1;
+            #[cfg(test)]
+            eprintln!(
+                "receiver_adjacency triangles={} bytes={} boundary_halfedges={} ambiguous_halfedges={} degenerate_halfedges={} build_ms={:.6} upload_call_ms={:.6}",
+                data.indices.len() / 3,
+                adjacency_bytes,
+                adjacency.boundary_halfedges,
+                adjacency.ambiguous_halfedges,
+                adjacency.degenerate_halfedges,
+                adjacency_build.as_secs_f64() * 1000.,
+                adjacency_upload.as_secs_f64() * 1000.
+            );
+            let _ = (
+                adjacency_build,
+                adjacency_upload,
+                adjacency.boundary_halfedges,
+                adjacency.ambiguous_halfedges,
+                adjacency.degenerate_halfedges,
+            );
+        }
         if let Some(t) = &tangent {
             self.queue
                 .write_buffer(t, 0, &bytes[(sizes.0 + sizes.1) as usize..]);

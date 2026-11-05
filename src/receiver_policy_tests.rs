@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "receiver_diagnostic_tests.rs"]
 mod receiver_diagnostic_tests;
+#[path = "receiver_fold_tests.rs"]
+mod receiver_fold_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Policy {
@@ -237,11 +239,23 @@ fn gpu_receiver_material_thin() {
 #[ignore = "owned GPU lease; in-process paired old/new complete traced frames"]
 fn gpu_receiver_policy_paired_timing() {
     let m = manifest();
-    let _validation = validation::begin(false);
-    let mut r = renderer(false);
+    let validate = m["validate"].as_bool().unwrap_or(false);
+    let _validation = validation::begin(validate);
+    let mut r = renderer(validate);
     let (mut asset, cameras) = load_quarry(&m, &mut r);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
+    receiver_paired_with(&m, &mut r, &mut asset, &cameras, &color);
+}
+
+pub(super) fn receiver_paired_with(
+    m: &serde_json::Value,
+    r: &mut Renderer,
+    asset: &mut prepared::Prepared,
+    cameras: &cameras::Cameras,
+    color: &wgpu::Texture,
+) {
+    let validate = m["validate"].as_bool().unwrap_or(false);
     let frozen = PathBuf::from(m["frozen_modules"].as_str().unwrap());
     let read = |names: [&str; 2]| {
         names.map(|n| fs::read_to_string(frozen.join(format!("{n}.wgsl"))).unwrap())
@@ -251,7 +265,7 @@ fn gpu_receiver_policy_paired_timing() {
         &r.ledger,
         &read(["kernels-hard", "kernels-soft"]),
     );
-    let mut old_shade = shading_pipelines(&r, &read(["traced-hard", "traced-soft"]));
+    let mut old_shade = shading_pipelines(r, &read(["traced-hard", "traced-soft"]));
     if let Some(directory) = m["candidate_modules"].as_str() {
         let directory = PathBuf::from(directory);
         let read = |names: [&str; 2]| {
@@ -263,7 +277,7 @@ fn gpu_receiver_policy_paired_timing() {
             &read(["kernels-hard", "kernels-soft"]),
         ));
         *r.test_standard().traced.as_mut().unwrap() =
-            shading_pipelines(&r, &read(["traced-hard", "traced-soft"]));
+            shading_pipelines(r, &read(["traced-hard", "traced-soft"]));
     }
     let mut separate = m["separate_interactive"].as_str().map(|path| {
         let source = fs::read_to_string(path).unwrap();
@@ -287,6 +301,7 @@ fn gpu_receiver_policy_paired_timing() {
     hard.directional_disk_angle = 0.;
     let mut pending = std::collections::HashMap::new();
     let mut samples = vec![];
+    let mut edge_counts = vec![];
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let mut collect =
         |r: &mut Renderer, pending: &mut std::collections::HashMap<u64, (usize, usize, bool)>| {
@@ -332,7 +347,31 @@ fn gpu_receiver_policy_paired_timing() {
                     std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
                     std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
                 }
-                let report = traced_frame(&mut r, &color, &poses[pair % 2], &mut asset, true);
+                let report = traced_frame(r, color, &poses[pair % 2], asset, true);
+                if pair < 2
+                    && mode == 2
+                    && !baseline
+                    && r.pipeline
+                        .primary
+                        .as_ref()
+                        .unwrap()
+                        .interactive_repair
+                        .is_some()
+                {
+                    let buffer = (*r
+                        .primary
+                        .as_ref()
+                        .unwrap()
+                        .targets
+                        .as_ref()
+                        .unwrap()
+                        .repairs
+                        .value)
+                        .clone();
+                    let bytes = read_buffer(r, &buffer, 16);
+                    let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+                    edge_counts.push(serde_json::json!({"pose":pair%2,"near_edge_pixels":count,"image_pixels":1920*1080}));
+                }
                 if split {
                     std::mem::swap(
                         &mut r.pipeline.primary.as_mut().unwrap().fresh,
@@ -342,14 +381,23 @@ fn gpu_receiver_policy_paired_timing() {
                 // Two complete poses before timing; retained candidates must keep
                 // hit records, receiver exports, counts and HDR exactly unchanged.
                 if m["require_identity"].as_bool().unwrap_or(false) && pair < 2 {
-                    let mut actual = vec![hit_record(&r), capture(&mut r)];
+                    let mut actual = vec![hit_record(r), capture(r)];
                     if mode != 0 {
-                        actual.extend(receivers(&r));
+                        actual.extend(receivers(r));
                     }
                     if let Some(expected) = identity.take() {
                         assert!(
                             actual == expected,
-                            "candidate byte identity pose={pair} mode={mode}"
+                            "candidate byte identity pose={pair} mode={mode}; differing buffers {:?}",
+                            actual
+                                .iter()
+                                .zip(&expected)
+                                .enumerate()
+                                .filter_map(|(i, (a, b))| (a != b).then_some((
+                                    i,
+                                    a.iter().zip(b).filter(|(a, b)| a != b).count()
+                                )))
+                                .collect::<Vec<_>>()
                         );
                     } else {
                         identity = Some(actual);
@@ -362,24 +410,289 @@ fn gpu_receiver_policy_paired_timing() {
                 if pair >= warmup {
                     pending.insert(report.frame.0, (pair - warmup, mode, baseline));
                 }
-                collect(&mut r, &mut pending);
+                collect(r, &mut pending);
             }
         }
     }
     r.test_drain("receiver policy paired frames");
-    collect(&mut r, &mut pending);
+    collect(r, &mut pending);
     assert!(pending.is_empty());
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     fs::write(
         out.join("paired-timing.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"warmup_pairs":warmup,"pairs":pairs,"samples":samples,
+            &serde_json::json!({"warmup_pairs":warmup,"pairs":pairs,"samples":samples,"edge_counts":edge_counts,"validation":validate,
                 "identity_poses":if m["require_identity"].as_bool().unwrap_or(false) {2} else {0}}),
         )
         .unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+#[ignore = "owned GPU lease; complete deferred Interactive repeats per pose"]
+fn gpu_receiver_deferred_repeats() {
+    let m = manifest();
+    let repeats = m["repeats"].as_u64().unwrap_or(8);
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    let (mut asset, cameras) = load_quarry(&m, &mut r);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    r.set_soft_shadows(crate::SoftShadows::Interactive);
+    let color = target(&r, 1920, 1080);
+    let mut rows = vec![];
+    let mut return_reference = None;
+    for (pose, frame) in [0, 1, 0].into_iter().enumerate() {
+        let camera = cameras.frames[frame].camera().unwrap();
+        let mut first = None;
+        for repeat in 0..repeats {
+            traced_frame(&mut r, &color, &camera, &mut asset, true);
+            let hdr = capture(&mut r);
+            let [hit, counts] = interactive_outputs(&r);
+            let actual = [hdr, hit, counts];
+            if let Some(expected) = &first {
+                assert_eq!(&actual, expected, "deferred repeat {pose}/{repeat}");
+            } else {
+                first = Some(actual);
+            }
+        }
+        let first = first.unwrap();
+        if pose == 0 {
+            return_reference = Some(first.clone());
+        }
+        if pose == 2 {
+            assert_eq!(
+                Some(&first),
+                return_reference.as_ref(),
+                "deferred return pose"
+            );
+        }
+        let buffer = (*r
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap()
+            .repairs
+            .value)
+            .clone();
+        let counter = read_buffer(&mut r, &buffer, 16);
+        let near = u32::from_le_bytes(counter[12..16].try_into().unwrap());
+        let covered = first[1]
+            .chunks_exact(16)
+            .filter(|h| h[..4] != [0; 4])
+            .count();
+        let hashes: Vec<String> = first
+            .iter()
+            .map(|b| {
+                Sha256::digest(b)
+                    .iter()
+                    .map(|v| format!("{v:02x}"))
+                    .collect()
+            })
+            .collect();
+        rows.push(serde_json::json!({"pose":pose,"repeats":repeats,"byte_identical":true,"near_edge_pixels":near,"covered_pixels":covered,"sha256_hdr_hit_counts":hashes}));
+    }
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    fs::write(
+        out.join("deferred-repeats.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "owned GPU lease; same-frame hot, barrier and cold timestamps"]
+fn gpu_receiver_pass_timing() {
+    let m = manifest();
+    let validate = m["validate"].as_bool().unwrap_or(false);
+    let _validation = validation::begin(validate);
+    let mut r = renderer(validate);
+    let (mut asset, cameras) = load_quarry(&m, &mut r);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    r.set_soft_shadows(crate::SoftShadows::Interactive);
+    let color = target(&r, 1920, 1080);
+    let pose = m["pose"].as_u64().unwrap_or(0) as usize;
+    let camera = cameras.frames[pose].camera().unwrap();
+    traced_frame(&mut r, &color, &camera, &mut asset, true);
+    r.test_drain("pass-timing setup");
+    receiver_pass_with(&m, &mut r, &mut asset, &cameras, &color);
+}
+
+pub(super) fn receiver_pass_with(
+    m: &serde_json::Value,
+    r: &mut Renderer,
+    asset: &mut prepared::Prepared,
+    cameras: &cameras::Cameras,
+    color: &wgpu::Texture,
+) {
+    let validate = m["validate"].as_bool().unwrap_or(false);
+    let pose = m["pose"].as_u64().unwrap_or(0) as usize;
+    let camera = cameras.frames[pose].camera().unwrap();
+    traced_frame(r, color, &camera, asset, true);
+    r.test_drain("batched stage timestamps");
+    let compile = |path: &str| {
+        let path = PathBuf::from(path);
+        let sources = ["kernels-hard", "kernels-soft"]
+            .map(|name| fs::read_to_string(path.join(format!("{name}.wgsl"))).unwrap());
+        r.primary
+            .as_ref()
+            .unwrap()
+            .compile(&r.device, &r.ledger, &sources)
+    };
+    let mut old = compile(m["frozen_modules"].as_str().unwrap());
+    if let Some(path) = m["candidate_modules"].as_str() {
+        r.pipeline.primary = Some(compile(path));
+    }
+    r.primary
+        .as_mut()
+        .unwrap()
+        .test_split_interactive_timestamps = true;
+    let queries = r.device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("Interactive hot and cold"),
+        ty: wgpu::QueryType::Timestamp,
+        count: 6,
+    });
+    let resolved = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Interactive pass stamps"),
+        size: 48,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let warmup = m["warmup_pairs"].as_u64().unwrap_or(8) as usize;
+    let pairs = m["pairs"].as_u64().unwrap_or(12) as usize;
+    let period_ms = f64::from(r.queue.get_timestamp_period()) * 1e-6;
+    let mut samples = vec![];
+    let mut raw_hits = None;
+    let mut changed_hits = 0;
+    let mut near_edges = 0;
+    let mut retry_pixels = 0;
+    let mut retry_fallback_pixels = 0;
+    let mut fallback_pixels = 0;
+    let mut fallback_queries = 0u64;
+    for pair in 0..warmup + pairs {
+        for j in 0..2 {
+            let baseline = (pair + j) % 2 == 0;
+            if baseline {
+                std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
+            }
+            let deferred = r
+                .pipeline
+                .primary
+                .as_ref()
+                .unwrap()
+                .interactive_repair
+                .is_some();
+            let mut encoder = r.device.create_command_encoder(&Default::default());
+            r.encode_primary_interactive(
+                &mut encoder,
+                &r.pipeline.primary.as_ref().unwrap().interactive,
+                primary_ray_gpu::TRACE_TILE,
+                Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &queries,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }),
+            );
+            encoder.resolve_query_set(&queries, 0..if deferred { 6 } else { 2 }, &resolved, 0);
+            r.queue.submit([encoder.finish()]);
+            let bytes = read_buffer(r, &resolved, 48);
+            let t: Vec<_> = bytes
+                .chunks_exact(8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            assert!(t[1] >= t[0]);
+            if deferred {
+                assert!(t[5] >= t[4] && t[4] >= t[3] && t[3] >= t[2] && t[2] >= t[1]);
+            }
+            if pair == 0 {
+                let hits = hit_record(r);
+                if baseline {
+                    raw_hits = Some(hits);
+                } else {
+                    changed_hits = hits
+                        .chunks_exact(16)
+                        .zip(raw_hits.as_ref().unwrap().chunks_exact(16))
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    if deferred {
+                        let queue = (*r
+                            .primary
+                            .as_ref()
+                            .unwrap()
+                            .targets
+                            .as_ref()
+                            .unwrap()
+                            .repairs
+                            .value)
+                            .clone();
+                        let header = read_buffer(r, &queue, 16);
+                        near_edges = u32::from_le_bytes(header[12..16].try_into().unwrap());
+                        let retries = (*r
+                            .primary
+                            .as_ref()
+                            .unwrap()
+                            .targets
+                            .as_ref()
+                            .unwrap()
+                            .retries
+                            .value)
+                            .clone();
+                        let retry_header = read_buffer(r, &retries, 16);
+                        retry_pixels = u32::from_le_bytes(retry_header[12..16].try_into().unwrap());
+                        if retry_pixels != 0 {
+                            let list = read_buffer(r, &retries, 16 + u64::from(retry_pixels) * 4);
+                            let records = read_buffer(r, &queue, 16 + u64::from(near_edges) * 36);
+                            for bytes in list[16..].chunks_exact(4) {
+                                let i = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
+                                let base = 16 + i * 36 + 32;
+                                retry_fallback_pixels += usize::from(
+                                    u32::from_le_bytes(records[base..base + 4].try_into().unwrap())
+                                        != 0,
+                                );
+                            }
+                        }
+
+                        if m["probe_stats"].as_bool().unwrap_or(false) {
+                            let counts = interactive_outputs(r)[1].clone();
+                            for bytes in counts.chunks_exact(4) {
+                                let value = u32::from_le_bytes(bytes.try_into().unwrap());
+                                if value >= 65536 {
+                                    let n = value - 65536;
+                                    fallback_pixels += usize::from(n != 0);
+                                    fallback_queries += u64::from(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if pair >= warmup {
+                samples.push(serde_json::json!({"pair":pair-warmup,"baseline":baseline,
+                    "hot_ms":(t[1]-t[0]) as f64*period_ms,
+                    "gap_ms":if deferred {(t[2]-t[1]) as f64*period_ms} else {0.},
+                    "check_ms":if deferred {(t[3]-t[2]) as f64*period_ms} else {0.},
+                    "retry_ms":if deferred {(t[5]-t[4]) as f64*period_ms} else {0.},
+                    "gap2_ms":if deferred {(t[4]-t[3]) as f64*period_ms} else {0.},
+                    "cold_ms":if deferred {(t[3]-t[2]+t[5]-t[4]) as f64*period_ms} else {0.},
+                    "total_ms":(t[if deferred {5} else {1}]-t[0]) as f64*period_ms,
+                    "host_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()}));
+            }
+            if baseline {
+                std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
+            }
+        }
+    }
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    fs::write(out.join("kernel-screen.json"),serde_json::to_vec_pretty(&serde_json::json!({"samples":samples,"validation":validate,"warmup_pairs":warmup,"pairs":pairs,"pose":pose,"near_edge_pixels":near_edges,"changed_hit_records":changed_hits,"retry_pixels":retry_pixels,"retry_fallback_pixels":retry_fallback_pixels,"fallback_pixels":fallback_pixels,"fallback_queries":fallback_queries,"probe_stats":m["probe_stats"].as_bool().unwrap_or(false)})).unwrap()).unwrap();
+    r.primary
+        .as_mut()
+        .unwrap()
+        .test_split_interactive_timestamps = false;
 }
 
 #[test]
@@ -502,6 +815,15 @@ pub(super) fn analytic_scene(
                 profile.push([x, 0.]);
             }
         }
+    } else if workload == "contact" {
+        profile = vec![
+            [-0.08, 0.],
+            [-0.006, 0.],
+            [-0.006, 0.004],
+            [0.006, 0.004],
+            [0.006, 0.],
+            [0.08, 0.],
+        ];
     } else {
         profile = vec![
             [-2., if workload == "convex" { -0.004 } else { 0. }],
@@ -558,17 +880,40 @@ pub(super) fn analytic_scene(
         },
     )
     .unwrap();
-    let eye = if workload == "sawtooth" { 0.15 } else { 4. };
+    let normal_distance = if workload == "sawtooth" {
+        0.15
+    } else if workload == "contact" {
+        0.1
+    } else {
+        4.
+    };
+    let view_angle = m["view_incidence"].as_f64().unwrap_or(0.) as f32;
+    let view = view_angle.to_radians();
+    let underside = m["underside"].as_bool().unwrap_or(false);
+    let eye = if view_angle > 0. && !underside {
+        (if workload == "sawtooth" { 0.06 } else { 0.02 }) / view.cos()
+    } else {
+        normal_distance
+    };
+    // Preserve the world-space pixel footprint while keeping front-side grazing
+    // views above the groove planes. The below-peak view remains a control.
+    let fov = 2. * ((55f32.to_radians() * 0.5).tan() * normal_distance / eye).atan();
+    let view_target = if workload == "contact" {
+        Vec3::new(-0.009, 0., 0.)
+    } else {
+        Vec3::ZERO
+    };
+    let offset = Vec3::new(0., view.sin(), view.cos());
     let camera = Camera::look_at(
-        translation + Vec3::Z * eye,
-        translation,
+        translation + view_target + offset * eye,
+        translation + view_target,
         Vec3::Y,
-        55f32.to_radians(),
+        fov,
         0.01,
         100.,
     )
     .unwrap();
-    let geometry = serde_json::json!({"profile":profile,"translation":translation.to_array(),"incidence":incidence,"disk_angle":if workload=="sawtooth" {0.04} else {0.001},"workload":workload});
+    let geometry = serde_json::json!({"profile":profile,"translation":translation.to_array(),"incidence":incidence,"view_incidence":view_angle,"underside":underside,"disk_angle":if workload=="sawtooth" {0.04} else {0.001},"workload":workload});
     (mesh, instances, camera, geometry)
 }
 
@@ -583,4 +928,25 @@ pub(super) fn analytic_fixture(r: &mut Renderer, m: &serde_json::Value, policy: 
         serde_json::to_vec_pretty(&geometry).unwrap(),
     )
     .unwrap();
+}
+
+/// Rectangle controls share a renderer and never load the quarry asset.
+#[test]
+#[ignore = "owned GPU lease; receiver thin and stress controls"]
+fn gpu_receiver_rectangle_fixtures() {
+    let m = manifest();
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    for kind in ["thin", "stress"] {
+        let mut case = m.clone();
+        case["workload"] = serde_json::json!(kind);
+        case["minimal"] = serde_json::json!(false);
+        case["output"] = serde_json::json!(
+            PathBuf::from(m["output"].as_str().unwrap()).join(format!("{kind}-viewed"))
+        );
+        super::rectangle_fixture(&mut r, &case, Some(Policy::Production));
+        r.test_drain("receiver rectangle fixture");
+        r.collect().unwrap();
+    }
 }

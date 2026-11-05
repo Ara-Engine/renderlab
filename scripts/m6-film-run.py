@@ -20,6 +20,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path("D:/Coding/renderlab-work/m6-exact-quality/f0")
 OWNER = "m6-film-reference-f0"
+PREFLIGHT_MEMORY_MBYTES = None
+RUNTIME_MEMORY_MBYTES = None
 LOCK = Path("D:/Coding/renderlab-work/gpu-slot.lock")
 FLAGS = subprocess.CREATE_NO_WINDOW
 GAMES = ("eldenring", "cyberpunk", "helldivers", "cs2.exe", "valorant", "fortniteclient", "overwatch",
@@ -110,7 +112,7 @@ def main():
     p.add_argument("--fast-check", action="store_true", help="correctness batch: 4 GiB preflight, 2 GiB runtime abort")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
-    preflight_floor = 5120 if a.contended_screen else 6144
+    preflight_floor = PREFLIGHT_MEMORY_MBYTES if PREFLIGHT_MEMORY_MBYTES is not None else (5120 if a.contended_screen else 6144)
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
         a.record_resources = True
@@ -118,6 +120,8 @@ def main():
         preflight_floor = 4096
         a.runtime_memory_mbytes = 2048
         a.record_resources = True
+    if RUNTIME_MEMORY_MBYTES is not None:
+        a.runtime_memory_mbytes = RUNTIME_MEMORY_MBYTES
     if not 0 < a.minutes <= 45:
         p.error("lease must be at most 45 minutes")
     if not 0 <= a.wait_seconds <= 45:
