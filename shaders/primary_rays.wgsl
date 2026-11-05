@@ -30,11 +30,14 @@ struct PrimaryMaterial { value:Material };
 struct PrimaryRay {near:vec3<f32>,far:vec3<f32>,dx_near:vec3<f32>,dy_near:vec3<f32>,dx_far:vec3<f32>,dy_far:vec3<f32>};
 fn primary_ray(pixel:vec2<u32>,size:vec2<u32>)->PrimaryRay {
     let step=vec2<f32>(2.0,-2.0)/vec2<f32>(size);
-    let ndc=(vec2<f32>(pixel)+vec2<f32>(0.5))/vec2<f32>(size)*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0);
+    let ndc=fma((vec2<f32>(pixel)+vec2<f32>(0.5))/vec2<f32>(size),vec2<f32>(2.0,-2.0),vec2<f32>(-1.0,1.0));
     let inverse=primary_frame.inverse;
     // Reversed Z: near is 1, far is 0.
-    let a=inverse*vec4<f32>(ndc,1.0,1.0);
-    let b=inverse*vec4<f32>(ndc,0.0,1.0);
+    // Fix the contraction order: NVIDIA 617.14 changed an implicit matrix
+    // multiply's arithmetic mid-run. This order preserves the accepted image.
+    let xy=fma(inverse[0],vec4<f32>(ndc.x),inverse[1]*ndc.y);
+    let a=xy+inverse[2]+inverse[3];
+    let b=xy+inverse[3];
     let da=inverse[0]*step.x;let db=inverse[1]*step.y;
     let near=a.xyz/a.w;let far=b.xyz/b.w;
     return PrimaryRay(near,far,(da.xyz-near*da.w)/a.w,(db.xyz-near*db.w)/a.w,
