@@ -4,6 +4,14 @@ Design decision, 2026-11-05, base `113b31e` (`t3/temporal-primary-rays`, T1b rev
 
 It answers [T1b's failure](m6-temporal-gpu.md#s2-t1b-camera-motion) under the bar in AGENTS.md: the final image against a film reference, static and in motion, with Unreal's high-fidelity rendering as the minimum. The frozen criteria are [T1 §7](m6-temporal-primaries.md#7-level-f-gate-for-t1)'s F1–F10, including the 0.002 R_F maximum on film-solid pixels. None is relaxed here.
 
+**Status (2026-11-06): T2a ran on the GPU and stopped under three frozen rules for both K ([GPU result](m6-motion-aa-gpu.md)).**
+
+- **Cost:** moving frames take 3.55 ms (K = 4) and 5.76 ms (K = 8), contended, against the 1.075 ms stop. The record gathers and exact rays cost 10–25x this design's estimate.
+- **Replica-confirmed solids** fail F1.
+- **Revealed pixels** fail F2.
+- **What held:** silhouettes are antialiased in motion, and F1 radiance is within 0.84–0.85× of the bar. F4 and the CPU-model check pass, as do the static byte identity, T-0 and F8.
+- **Defaults are unchanged.** The quality-first fallback in [§6](#6-verdict) stands.
+
 ## Decisions
 
 1. **Per-pixel resampled radiance history cannot meet the bar in motion on these scans (M, I).** A pixel's history is the integral over the footprint it had. A fractional-offset fetch mixes in neighbouring footprints. Next to a hard shadow edge, the leak into a film-solid pixel is 0.16–0.24 at T1b's window and stays above 0.002 out to 2–4 px. Keeping the leak under 0.002 needs a history weight of about 1%, which is no history ([§1](#1-why-resampled-pixel-history-fails)).
