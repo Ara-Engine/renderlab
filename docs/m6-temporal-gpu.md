@@ -1,8 +1,10 @@
-# M6 T1 on the GPU: references and static film accumulation (T1a)
+# M6 T1 on the GPU: references, static film accumulation (T1a) and the motion candidate (T1b)
 
 2026-11-05, base main `43d9184` (viewed-side receiver policy, programmable shading phase 1, the determinism FMA fix and fast reload), branch `t3/temporal-primary-rays`. This implements and measures the first unit of [T1](m6-temporal-primaries.md#9-gpu-implementation-plan-and-stop-rules). RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu/naga 30.0.1, release library test binaries built with two Cargo jobs, the registered full-resident quarry (12 draws, 13,034,903 triangles) at 1920×1080 1x, 16x anisotropy, a 0.04-rad disk. Every GPU run was offscreen under the shared lease; no window, viewer, desktop input, game capture or Unreal launch.
 
-**Result (second round, build b12).** Root's decisions are applied: the corner-free lattice is the production sequence, and history is kept only in trace tiles a ray has hit, byte-identical to keeping it everywhere. T1a now passes every check except the F1 solid maximum at **three pixels**, one per pose. There a single sample of 128 lies within about 10⁻⁶ px of a concave triangle edge, where the **production receiver origin** is blocked by the adjacent triangle ([§0.3](#03-solids-verified-locally-and-the-remaining-cause)). The fixtures (thin, stress, all 12 acne cases) pass. Cost is +0.025 ms per frame over Interactive on a contended screen. Stage 2 (T1b) has not started, because the gate is not passed while those three pixels fail. Defaults are unchanged.
+**Result (T1b, builds b15 and b16).** The camera-motion candidate **failed its gate on Q-walk and is not kept** ([§S2](#s2-t1b-camera-motion)). Commit `b8fa1f3` holds it; the next commit reverts it, so the opt-in temporal mode still restarts on any camera change, as T1a does. Under motion it beats Exact on lit, partial, occluded and all-covered radiance: 0.6–0.7× Exact's error, where section 4's model predicted about 0.5–0.6×. It fails wherever history crosses a silhouette or a shadow edge. Silhouettes leave visible ghost trails 5–8 px into the sky. Shadow edges blur, so the R_F solid maximum reaches 0.10–0.61 against 0.002. On the return path, from frame 108 onwards, R_D +4 has more pixels over 16 codes than Exact on every scored frame, a frozen stop. Cost screened at +0.205 ms per frame over Interactive, above the 1.075 ms stop.
+
+**Result (second round, build b12).** Root's decisions are applied: the corner-free lattice is the production sequence, and history is kept only in trace tiles a ray has hit, byte-identical to keeping it everywhere. T1a now passes every check except the F1 solid maximum at **three pixels**, one per pose. There a single sample of 128 lies within about 10⁻⁶ px of a concave triangle edge, where the **production receiver origin** is blocked by the adjacent triangle ([§0.3](#03-solids-verified-locally-and-the-remaining-cause)). The fixtures (thin, stress, all 12 acne cases) pass. Cost is +0.025 ms per frame over Interactive on a contended screen. Root then recorded the band as a known production receiver defect and started stage 2 (T1b). Defaults are unchanged.
 
 The first round's text from §1 onwards is kept as measured; where §0 differs, §0 supersedes it.
 
@@ -81,8 +83,161 @@ Three processes of 48 paired frames, with the method of §5. Two had no foreign 
 
 ### 0.6 Next
 
-- **Decision needed:** whether the concave-edge receiver band is fixed in the receiver policy first, or accepted as a recorded production defect so that T1b may start.
-- **Ready for T1b:** registered Q-walk and Q-zoom camera sequences (`sequences/`, hashes in `registered.json`) and a shader draft (`wip/film_motion.wgsl`).
+- **Decided (root, 2026-11-05):** the concave-edge band is a **known production receiver defect**. A separate worker fixes it at the root in the receiver-origin code (the primary trace and shadow shaders), which this unit does not touch. Stage 1's three failing pixels are rescored once that fix lands; every other stage 1 check passed. T1b started under this decision ([§S2](#s2-t1b-camera-motion)).
+
+## S2. T1b: camera motion
+
+Root's decision (2026-11-05): start T1b with the concave-edge band recorded as a known production receiver defect ([§0.6](#06-next)), keeping T1b only if its gate passes. It did not pass.
+
+### S2.1 What the candidate implements (commit `b8fa1f3`)
+
+It follows the design's [section 3](m6-temporal-primaries.md#3-reprojection-at-the-registered-1-cm-step) and [section 4](m6-temporal-primaries.md#4-history-weighting-under-motion).
+
+**Reprojection and validation.**
+
+- **Fetch position.** History is fetched where the current sample's surface point was in the previous frame. Background moves by direction.
+- **Tap validation.** A tap is valid by the forward test or the reverse test:
+  - forward: the same instance, the same side for thin materials, and view distance within 4 footprints;
+  - reverse: the tap's anchor point, rebuilt from its own sample ray, projects within 1.5 px, and the current trace there hit the same instance at a distance within 2%.
+- **Fetch.** Catmull-Rom over 4×4 taps when all 16 are valid, clamped at zero. Otherwise bilinear over the valid inner taps, renormalised, with the history weight set to the bilinear-weighted tap count.
+- **Window.** n' = min(n + 1, W), with W = 1 + 1/Σf(1 − f), the blur budget at v_max = 1 px².
+
+**Restarts and frame state.**
+
+- **Cold pixels.** In the trace, a sample whose fetch finds no inner tap by the forward test is traced again at the pixel centre with index 0. A revealed pixel's first sample is therefore Interactive's.
+- **Reset key.** The key leaves out the camera, the lighting uniform's eye and the camera-fitted shadow views. Any other change still restarts every pixel. `cut_film()` is an explicit cut.
+- **Never-hit tiles.** Their implied history is weighted by the frames rendered at the previous frame's camera, so static behaviour is T1a's exactly.
+- **Determinism.** Explicit multiply-adds are used for every history decision.
+
+**Resources.**
+
+- **Sample record.** The trace writes each covered pixel's sample index and view distance into a 4-byte-per-pixel storage buffer, for the reverse test. A texture would exceed the traced device contract: it allows four storage textures per stage, and the trace already binds four. The shading then binds 8 of the 8 storage buffers it allows.
+- **Memory.** 52 bytes per pixel, 108 MB at 1080p.
+
+**Not built.** The per-placement generation table: any non-camera change still restarts globally. Moving lights and objects (T1c).
+
+### S2.2 Q-walk gate
+
+**Method.**
+
+- **Sequence.** The registered 161-frame Q-walk: 64 steps of 1 cm with 0.05° of yaw per frame, a 32-frame hold, then the reverse path. It was rendered from cold with the full, sun-only and visibility programs.
+- **Scoring.** 60 frames are scored against Level F references at the 26 distinct cameras. Holds and the return share the walk's references, because their cameras are identical.
+- **Bars.** Exact seed 0 on the same frame and pixels, times 1 + the static 2-s.d. seed spread (at most 0.0014).
+- **Ages.** A pixel's age counts frames since its history last restarted: frame 0, or no valid tap. F1 uses pixels aged 32 or more.
+- **R_F.** Scored on single-surface pixels, where T1's visibility film has the reference's estimand.
+- **Script.** `scripts/m6-temporal-motion-score.py` in `b8fa1f3`.
+
+| Check | Result |
+|---|---|
+| T-0 | Pass, 4/4: frame 0 is byte-identical to Interactive for each program and the replay |
+| F8 | Pass. An in-process replay is identical at all 60 scored frames and in the final history. The b16 refactor (below) is identical to b15 at all 60 frames of all three programs |
+| F1 converged | **Fail.** See the next table |
+| F2 transient | **Fail**, 509 pools: 446 above Interactive, the rest above the bar at age 7. Revealed pixels start equal to Interactive at age 0 (16.277 against 16.270 codes on all-covered L0). Then they worsen: 18.0 against 11.4 at age 3, and 13.4 against 8.3 at age 7. On background-centre pixels at age 7 it is 39.4 against 11.3. From the start event, all-covered beats Interactive (4.14 against 5.87 at age 1), but background-centre does not (1.23 against 1.04 at age 7) |
+| F3 bias | **Fail**, 996 cases, mostly R_D and R_F on edges and occluded pixels |
+| F4 | **Fail, frozen stop.** On the walk, R_D +4 has fewer pixels over 16 codes than Exact (2,685 against 3,233 at frame 48). On every return frame from 108 to 160 it has more (3,934 against 3,356 at frame 128). The R_F missed-plus-false count stays below Exact's. Frame 0 is Interactive and is excluded |
+| F5 | The changed-pixel RMS 8 frames after motion stops passes: 2.75 against 7.97 codes on L0. Ghost bias on changed pixels fails on 30 frame/channel cases, mostly D0 and F. The exact zero-weight-from-hidden-surface output was not built |
+| F6 | Pass. The motion residual is 3.1–3.8 codes against Exact's 7.0–7.2 at the registered exposure. Hold steps are 0.28 and 0.33 codes |
+| F7 | Not run |
+| Section 4 diagnostic | **Fail.** At the measured median offsets (0.46, 0.89) px, with W = 4.6, measured error exceeds the model on every population. Lit, partial and all-covered are 1.2–1.6× the model, above the 1.25× stop. Background-centre R_D is 3.2–3.6× and multi-surface L4 is 2.9×; the model has no parallax at silhouettes and no accumulated misregistration |
+| F9 cost | Screening above the stop ([§S2.4](#s24-cost-contended-screen)) |
+
+F1 on pixels aged 32 or more: T1 RMS as a multiple of the bar.
+
+| Population | Walk, frames 48 and 64 | Hold, frame 96 | Return, frame 120 |
+|---|---|---|---|
+| all-covered, L0 / L4 / D4 | 0.65–0.69 / 0.60–0.64 / 0.74–0.79 | 0.12 / 0.13 / 0.14 | 0.62 / 0.58 / 0.71 |
+| partial, L0 / D4 | 0.61–0.65 / 0.64–0.68 | 0.13 / 0.13 | 0.60 / 0.62 |
+| occluded, L0 / D4 | 0.71–0.72 / **1.57–1.69** | 0.13 / 0.25 | 0.65 / **1.45** |
+| multi-surface, L0 / L4 | 0.97–**1.14** / 0.93–**1.18** | 0.14 / 0.12 | 0.89 / 0.89 |
+| edge, L0 / L4 | **1.06–1.08** / **1.01–1.04** | 0.20 / 0.24 | **1.10** / **1.03** |
+| background-centre, L0 / L4 / D4 | **1.37–1.42** / **1.46–1.49** / **1.44–1.46** | 0.39 / 0.51 / 0.33 | **2.21** / **2.13** / **1.81** |
+| R_F all-covered / partial | 0.59–0.63 / 0.56–0.59 | 0.13 / 0.13 | 0.59 / 0.55 |
+| R_F solid maximum (bound 0.002) | **0.40–0.61** | **0.10–0.28** | **0.31–0.59** |
+
+Bold marks a failure. Once the camera stops, the hold converges far below the RMS bars. The solid maximum still fails, because the motion's blur decays only as 1/n.
+
+### S2.3 Where the error is
+
+Frame 64 (end of the walk), pixels aged 32 or more, by distance to the nearest centre-placement boundary:
+
+| Population, channel | 0–1.5 px | 1.5–3 px | 3–6 px | ≥ 6 px |
+|---|---|---|---|---|
+| background-centre L0, T1 / Exact | 20.9 / 18.2 | **9.80 / 0.00** | **7.09 / 0.00** | **0.46 / 0.00** (1.7 M px) |
+| all-covered L0, T1 / Exact | 9.40 / 8.96 | 3.85 / 6.40 | 3.90 / 6.73 | 3.42 / 5.53 |
+| occluded D4, T1 / Exact | 4.94 / 4.41 | 2.22 / 1.57 | 2.12 / 0.86 | **2.52 / 0.32** |
+| multi-surface L4, T1 / Exact | 28.1 / 22.2 | 12.1 / 23.9 | 9.94 / 30.5 | 9.18 / 19.1 |
+
+Three mechanisms, confirmed in the crops `scores-walk/silhouette-crops-f064.png` and `overview-f064-f128.png`:
+
+1. **Silhouette ghost trails.**
+   - Mechanism: an edge pixel's history mixes foreground and background, while its anchor records only the latest sample. A background pixel accepts that tap by the forward test (both background) and carries the foreground share with the background's motion. The foreground itself moves with parallax.
+   - Extent: the trail decays at 1/W per frame, so it reaches about W × the motion, 5–8 px. It is visible as a halo of cliff colour in the sky on the trailing side. It switches sides on the return.
+   - Tile edges: never-hit 8×4 sky tiles stay exactly background, so on the return the halo shows tile-shaped steps.
+   - The design's single-step test (section 3) measured one step, so it could not see this accumulation.
+2. **Catmull-Rom undershoot.** Dark specks line the bright silhouettes. The negative lobes clamp at zero against the sky.
+3. **Shadow-edge blur.** Within the window, repeated resampling spreads visibility by about the budget's 1 px² across shadow boundaries.
+   - It is not a silhouette effect: occluded pixels 6 px or more from any silhouette show D4 2.52 against Exact's 0.32.
+   - Solid pixels within a pixel of a hard shadow edge cannot meet the 0.002 R_F maximum under any resampled history. Exact meets it because it does not resample.
+
+### S2.4 Cost (contended screen)
+
+Paired frames along Q-walk (8 warm-up and 56 measured pairs per process; moving frames). Another worker's Cargo build was running, but there was no other GPU process and at least 9.5 GiB was available. Builds b14–b16 were unoptimised (debug) test binaries. GPU timestamps are unaffected: Interactive matched the stage 1 contended 0.906 ms.
+
+| Build, process | Interactive span | Temporal span | Ratio | Delta | Shading, I / T | Trace, T |
+|---|---:|---:|---:|---:|---|---:|
+| b15, 1 | 0.905 | 1.108 | 1.225 | +0.203 | 0.369 / 0.581 | 0.481 |
+| b15, 2 | 0.904 | 1.108 | 1.225 | +0.205 | 0.368 / 0.581 | 0.481 |
+| b15, 3 | 0.903 | 1.110 | 1.230 | +0.207 | 0.367 / 0.583 | 0.482 |
+| b16, 3 (1 and 2 ran in a slow GPU state) | 0.906 | 1.128 | 1.247 | +0.223 | 0.365 / 0.598 | 0.485 |
+
+- **Where the cost is.** All of it is in the shading's fetch and validation. The cold-pixel test and sample record leave the trace unchanged.
+- **The b16 refactor did not help.** It fetches history before the program runs, makes one flag, anchor and colour load per tap, and reuses the inner taps. It was byte-identical but no faster.
+- **Spikes.** Temporal maxima reached 1.3–11 ms; spikes were not investigated.
+- **Against the stop.** On the quiet 0.865 ms Interactive base, T1b would be about 1.07 ms, against the 1.075 ms stop.
+
+### S2.5 Next (root decision)
+
+The frozen stop rules name the next candidates: a ±1 px reverse search, then two-layer silhouette history. On this evidence:
+
+- **Trails.** A ±1 px reverse search adds history for the current surface, but it does not stop background pixels accepting mixed edge history, which is the trails' source. Two-layer silhouette history addresses that directly. So would a cheaper restriction to test first: an anchor bit marking history that mixes surfaces, which only that history's own surface may accept. Edge pixels would then restart, like Interactive, instead of trailing.
+- **Shadow-edge blur.** This is the v_max = 1 px² budget at work. Within a pixel of a hard shadow edge, no resampled history keeps solid visibility within 0.002 under continuous motion. A decision is needed between two options:
+  - a tighter budget near visibility edges, which costs noise there;
+  - a motion-specific solid criterion.
+- **Cost.** About 0.2 ms of fetch and validation must be recovered as well.
+- **Not run:**
+  - Q-zoom;
+  - Q-disocclusion, registered as a 2 cm/frame pure translation from pose 0 (`sequences/registered.json`, SHA-256 `cbb40f2b…`);
+  - F7;
+  - quiet timing.
+
+### S2.6 Evidence, reproduction and time
+
+Evidence root `E:/renderlab-work/t1-gpu/`:
+
+- `builds/b14`–`b16`: each binary with its SHA-256, HEAD and `source.diff`. b14 exceeded the storage-texture limit at bind group creation.
+- `walk-b15/motion.json` and `walk-b16/motion.json`: per-frame motion records, T-0 and the replay digests.
+- `walk-ref/ref-p*/compact.json`: reference summaries and the section 4 model at the measured offsets.
+- `scores-walk/`: `score.json` with every frame, population and pool, `silhouette-split.json`, the inspected crop sheet and overview, and the per-frame images.
+- `timing-walk-{1,2,3}/` and `timing-walk-b16-{1,2,3}/`: `paired-timing.json` for each process.
+- `sequences/registered.json`.
+
+Captures, ages and compact references were deleted after scoring.
+
+```powershell
+git checkout b8fa1f3
+cargo test -p renderlab --lib --no-run -j 2 --target-dir E:/renderlab-work/t1-gpu/target
+# gpu_film_t1_motion with walk-b15.json; gpu_film_t1_reference with walk-ref.json; gpu_film_t1_timing with timing-walk-{1,2,3}.json
+$env:OPENBLAS_NUM_THREADS='2'; py -3 -B scripts/m6-temporal-motion-score.py --ref E:/renderlab-work/t1-gpu/walk-ref --t1 E:/renderlab-work/t1-gpu/walk-b15 --out E:/renderlab-work/t1-gpu/scores-walk
+```
+
+**Time (M, UTC).**
+
+- **Implementation:** shaders, the Rust frame state, tests and the scorer, about 15:40–16:01. The scorer and the b16 refactor were also written while GPU runs and scoring proceeded, until about 16:17.
+- **Verification:**
+  - three debug test builds of 25 s–2 min with two jobs, plus CPU tests and Clippy;
+  - GPU: 10 leases of 596.4 s, all released, from 16:01:22 to 16:20:04. The longest was the 26 references at 272.1 s;
+  - CPU: reference compaction of about 150 s, scoring of 349 s and the silhouette split of about 60 s, with two math threads.
+- **Not run:** no window, viewer, desktop input, game capture or Unreal launch.
 
 ## 1. Film references under the adopted policy
 
