@@ -85,7 +85,10 @@ const ENTRY_SEAMS: [(&str, &str); 6] = [
 /// The motion kernel module from the soft kernel module (`shader_sources()[1]`).
 pub(crate) fn kernel_source(soft_kernels: &str) -> Result<String, Error> {
     let mut source = soft_kernels.to_owned();
-    for edit in [FILM_RAY_SEAM, FILM_ROTATION_SEAM].into_iter().chain(MOTION_SEAMS) {
+    for edit in [FILM_RAY_SEAM, FILM_ROTATION_SEAM]
+        .into_iter()
+        .chain(MOTION_SEAMS)
+    {
         source = seam(&source, edit)?;
     }
     Ok(format!("{source}\n{FILM_SEQUENCE}\n{SHARED}\n{KERNEL}"))
@@ -127,6 +130,16 @@ fn split_stamps(
             end_of_pass_write_index: t.end_of_pass_write_index,
         }),
     ]
+}
+
+/// The bind groups a record pass uses besides its own group 0.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Binds {
+    Own,
+    /// The draw geometry (group 1).
+    Geometry,
+    /// The draw geometry and the lighting (group 3).
+    Lit,
 }
 
 fn array_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -357,7 +370,11 @@ pub(in crate::renderer) struct FilmRecords {
     /// Per written side: trace mode 0, trace mode 1, validation, shading, reset, gap choice;
     /// and seed groups per (record side, T1a read side).
     #[allow(clippy::type_complexity)]
-    groups: Option<(u64, [[Owned<wgpu::BindGroup>; 6]; 2], [[Owned<wgpu::BindGroup>; 2]; 2])>,
+    groups: Option<(
+        u64,
+        [[Owned<wgpu::BindGroup>; 6]; 2],
+        [[Owned<wgpu::BindGroup>; 2]; 2],
+    )>,
 }
 impl FilmRecords {
     pub(super) fn new(r: &Renderer, size: wgpu::Extent3d, count: u32) -> Self {
@@ -547,10 +564,12 @@ impl Renderer {
         let state = self.primary.as_ref().unwrap();
         let kernel = kernel_text
             .map(|source| state.record_kernel(&self.device, &self.ledger, &source, count));
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(slot.label.as_str()),
-            source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
-        });
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(slot.label.as_str()),
+                source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
+            });
         let shading = state.record_shade_pipeline(&self.device, &self.ledger, &module, count);
         if let Some(error) = scopes.finish() {
             return Err(match error {
@@ -628,7 +647,16 @@ impl Renderer {
         let diagnose = state.test_record_diagnostics;
         #[cfg(not(test))]
         let diagnose = false;
-        let words = [size.width, size.height, 0, records.frames, u32::from(diagnose), 0, 0, 0];
+        let words = [
+            size.width,
+            size.height,
+            0,
+            records.frames,
+            u32::from(diagnose),
+            0,
+            0,
+            0,
+        ];
         let mut bytes = [0; MOTION_BYTES];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(floats.chain(words)) {
             dst.copy_from_slice(&v.to_ne_bytes());
@@ -650,7 +678,10 @@ impl Renderer {
             let records = state.film.as_mut().unwrap().records.as_mut().unwrap();
             if let Some((_, sides, seeds)) = records.groups.replace((generation, sides, seeds)) {
                 // Frames in flight may still bind them.
-                let old = sides.into_iter().flatten().chain(seeds.into_iter().flatten());
+                let old = sides
+                    .into_iter()
+                    .flatten()
+                    .chain(seeds.into_iter().flatten());
                 state
                     .retired
                     .push((self.submissions, Retired::RecordGroups(old.collect())));
@@ -792,16 +823,15 @@ impl Renderer {
         (sides, seeds)
     }
 
-    /// Dispatches `pipeline` over the image in trace tiles with group 0 `group`, the draw
-    /// geometry and, when `lit`, the lighting.
+    /// Dispatches `pipeline` over the image in trace tiles with group 0 `group` and the groups
+    /// `binds` names.
     fn record_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         label: &str,
         pipeline: &wgpu::ComputePipeline,
         group: &wgpu::BindGroup,
-        arrays: bool,
-        lit: bool,
+        binds: Binds,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.primary.as_ref().unwrap();
@@ -812,10 +842,10 @@ impl Renderer {
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[]);
-        if arrays {
+        if binds != Binds::Own {
             pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
         }
-        if lit {
+        if binds == Binds::Lit {
             pass.set_bind_group(3, self.lighting.bind(), &[]);
         }
         pass.dispatch_workgroups(
@@ -836,8 +866,7 @@ impl Renderer {
             "film records reset",
             &kernel[2],
             &groups[4],
-            true,
-            false,
+            Binds::Geometry,
             None,
         );
     }
@@ -858,8 +887,7 @@ impl Renderer {
             "film records seed",
             &kernel[3],
             group,
-            false,
-            false,
+            Binds::Own,
             None,
         );
     }
@@ -886,8 +914,7 @@ impl Renderer {
             "film records gap choice",
             gap,
             &groups[5],
-            false,
-            false,
+            Binds::Own,
             begin,
         );
         self.record_pass(
@@ -895,8 +922,7 @@ impl Renderer {
             "film records motion trace",
             trace,
             &groups[0],
-            true,
-            true,
+            Binds::Lit,
             end,
         );
         self.record_pass(
@@ -904,8 +930,7 @@ impl Renderer {
             "film records validation",
             validate,
             &groups[2],
-            true,
-            false,
+            Binds::Geometry,
             validated,
         );
         self.record_pass(
@@ -913,16 +938,38 @@ impl Renderer {
             "film records centre retrace",
             trace,
             &groups[1],
-            true,
-            true,
+            Binds::Lit,
             retraced,
         );
+        let production = &pipelines.shading.as_ref().unwrap().1;
         #[cfg(test)]
-        let shading = state.test_record_shading.as_deref();
+        let shading = state.test_record_shading.as_deref().unwrap_or(production);
         #[cfg(not(test))]
-        let shading = None;
-        let shading = shading.unwrap_or(&pipelines.shading.as_ref().unwrap().1);
+        let shading = production;
         self.encode_shade_group(encoder, shading, &groups[3], SHADE_TILE, shade_stamps);
+    }
+}
+
+#[cfg(test)]
+impl Renderer {
+    /// Recompiles the record kernels with exact-once text edits of their source, for cost
+    /// attribution (variants that drop the exact rays or the gap gather). The frame's record
+    /// pipelines must already be compiled; a reload or a K change restores the production ones.
+    pub(in crate::renderer) fn test_record_kernel_edits(&mut self, edits: &[(String, String)]) {
+        let count = self.film_motion.records();
+        let mut source = kernel_source(&self.primary_sources.as_ref().unwrap().0[1]).unwrap();
+        for (find, replace) in edits {
+            source = seam(&source, (find, replace)).unwrap();
+        }
+        let state = self.primary.as_ref().unwrap();
+        let kernel = state.record_kernel(&self.device, &self.ledger, &source, count);
+        self.primary
+            .as_mut()
+            .unwrap()
+            .record_pipelines
+            .as_mut()
+            .unwrap()
+            .kernel = kernel;
     }
 }
 

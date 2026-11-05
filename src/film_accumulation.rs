@@ -11,9 +11,9 @@
 //! T1a accumulates a static view: with `FilmMotion::Restart` any change to the camera, scene,
 //! lighting, shadows, programs or parameters resets every pixel. With sample records
 //! (`film_records.rs`, T2) camera changes move the records instead, and static frames are T1a's.
+use super::film_records::FilmRecords;
 use super::*;
 use crate::program::{self, Composed, Stage};
-use super::film_records::FilmRecords;
 
 /// Sample sequence, `film_index`/`film_offset`/`film_begin`, appended to both modules.
 pub(super) const FILM_SEQUENCE: &str = include_str!("../shaders/film_accumulation.wgsl");

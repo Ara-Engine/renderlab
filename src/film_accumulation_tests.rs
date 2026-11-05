@@ -949,6 +949,16 @@ fn gpu_film_t1_timing() {
         crate::SoftShadows::Interactive,
         crate::SoftShadows::Temporal,
     ];
+    // Cost attribution: `record_edits` ([find, replace] pairs) recompile the record kernels.
+    if let Some(edits) = m["record_edits"].as_array() {
+        r.soft_mode = crate::SoftShadows::Temporal;
+        traced_frame(&mut r, &color, &path[0], &mut asset, true);
+        let edits: Vec<(String, String)> = edits
+            .iter()
+            .map(|e| [0, 1].map(|i| e[i].as_str().unwrap().to_owned()).into())
+            .collect();
+        r.test_record_kernel_edits(&edits);
+    }
     let mut pending = std::collections::HashMap::new();
     let mut samples = vec![];
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -973,8 +983,7 @@ fn gpu_film_t1_timing() {
             r.soft_mode = modes[mode];
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, modes[mode]);
-            let moving = mode == 1
-                && r.primary.as_ref().unwrap().film.as_ref().unwrap().moving;
+            let moving = mode == 1 && r.primary.as_ref().unwrap().film.as_ref().unwrap().moving;
             if pair >= warmup {
                 pending.insert(report.frame.0, (pair - warmup, mode, moving));
             }
@@ -994,7 +1003,8 @@ fn gpu_film_t1_timing() {
     fs::write(
         out.join("paired-timing.json"),
         serde_json::to_vec_pretty(&serde_json::json!({"warmup_pairs":warmup,"pairs":pairs,
-            "sequence":m["sequence"],"records":r.film_motion().records(),"samples":samples}))
+            "sequence":m["sequence"],"records":r.film_motion().records(),
+            "record_edits":m["record_edits"],"samples":samples}))
         .unwrap(),
     )
     .unwrap();
@@ -1220,12 +1230,15 @@ fn record_shading(
         label: Some("test motion shading"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
-    let pipeline =
-        r.primary
-            .as_ref()
-            .unwrap()
-            .record_shade_pipeline(&r.device, &r.ledger, &module, count);
-    assert!(scopes.finish().is_none(), "motion shading failed to compile");
+    let pipeline = r
+        .primary
+        .as_ref()
+        .unwrap()
+        .record_shade_pipeline(&r.device, &r.ledger, &module, count);
+    assert!(
+        scopes.finish().is_none(),
+        "motion shading failed to compile"
+    );
     pipeline
 }
 
@@ -1295,9 +1308,7 @@ fn record_diagnostics(r: &mut Renderer) -> Vec<[u32; 2]> {
     let size = buffer.size();
     read_buffer(r, &buffer, size)
         .chunks_exact(8)
-        .map(|w| {
-            [0, 1].map(|i| u32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap()))
-        })
+        .map(|w| [0, 1].map(|i| u32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap())))
         .collect()
 }
 
@@ -1321,7 +1332,10 @@ impl ScoredProgram {
     }
     fn swap(&mut self, r: &mut Renderer) {
         std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut self.centre);
-        std::mem::swap(r.test_standard().temporal.as_mut().unwrap(), &mut self.temporal);
+        std::mem::swap(
+            r.test_standard().temporal.as_mut().unwrap(),
+            &mut self.temporal,
+        );
         let state = r.primary.as_mut().unwrap();
         std::mem::swap(&mut state.test_record_shading, &mut self.motion);
         state.test_film_background = match state.test_film_background {
@@ -1331,6 +1345,12 @@ impl ScoredProgram {
     }
 }
 
+/// T2a's static regression: Q-static (`frames` frames at each manifest pose from cold) for each
+/// scored program (or those named in `programs`), once per entry of `modes` ("restart": T1a;
+/// "records": `records`; default both). Every run's HDR images and final T1a history must equal
+/// the first run's byte for byte. With `detail`, each frame's hit records and counts are also
+/// compared, and a differing image is compared pixel by pixel (the first run's images are kept
+/// on disk under `output` meanwhile).
 #[test]
 #[ignore = "owned GPU lease; T2a static regression against T1a, offscreen"]
 fn gpu_film_t2_static() {
@@ -1345,6 +1365,26 @@ fn gpu_film_t2_static() {
     let motion = film_motion(&m);
     let count = motion.records();
     assert!(count > 0, "the static regression compares records with T1a");
+    let modes: Vec<(String, crate::FilmMotion)> = m["modes"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_str().unwrap().to_owned()).collect())
+        .unwrap_or_else(|| vec!["restart".into(), "records".into()])
+        .into_iter()
+        .map(|name| {
+            let mode = match name.as_str() {
+                "restart" => crate::FilmMotion::Restart,
+                "records" => motion,
+                other => panic!("unknown mode {other}"),
+            };
+            (name, mode)
+        })
+        .collect();
+    let only: Option<Vec<String>> = m["programs"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_str().unwrap().to_owned()).collect());
+    let detail = m["detail"].as_bool().unwrap_or(false);
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
     // Compile the temporal and record pipelines once, then swap scored programs into them.
     r.set_soft_shadows(crate::SoftShadows::Temporal);
     r.set_film_motion(motion);
@@ -1355,41 +1395,82 @@ fn gpu_film_t2_static() {
     for pose in poses(&m) {
         let camera = &cameras[pose];
         for (name, program, black) in programs() {
+            if only.as_ref().is_some_and(|o| !o.iter().any(|p| p == name)) {
+                continue;
+            }
             let mut scored = ScoredProgram::new(&r, &program, black, count);
             scored.swap(&mut r);
-            let mut runs = vec![];
-            for mode in [crate::FilmMotion::Restart, motion] {
-                r.set_film_motion(mode);
+            let mut runs: Vec<(Vec<String>, Vec<String>, String)> = vec![];
+            let mut mismatches = vec![];
+            for (run, (mode_name, mode)) in modes.iter().enumerate() {
+                r.set_film_motion(*mode);
                 reset_film(&mut r);
-                let mut digests = vec![];
-                for _ in 1..=frames {
+                let (mut images, mut traces) = (vec![], vec![]);
+                for n in 1..=frames {
                     traced_frame(&mut r, &color, camera, &mut asset, true);
-                    digests.push(digest(&settled(&mut r)));
+                    let hdr = settled(&mut r);
+                    images.push(digest(&hdr));
+                    if detail {
+                        traces.push(digest(&interactive_outputs(&r).concat()));
+                        let kept = out.join(format!("first-p{pose}-{name}-n{n:03}.rgba16f"));
+                        if run == 0 {
+                            fs::write(&kept, &hdr).unwrap();
+                        } else if images.last() != runs[0].0.get(n as usize - 1) {
+                            // Pixel-level comparison with the first run's image of this frame.
+                            let first = fs::read(&kept).unwrap();
+                            let (mut pixels, mut largest) = (0usize, 0f32);
+                            for (a, b) in first.chunks_exact(8).zip(hdr.chunks_exact(8)) {
+                                if a != b {
+                                    pixels += 1;
+                                    for c in 0..3 {
+                                        let v = |x: &[u8]| {
+                                            decode_f16(u16::from_le_bytes([x[c * 2], x[c * 2 + 1]]))
+                                        };
+                                        largest = largest.max((v(a) - v(b)).abs());
+                                    }
+                                }
+                            }
+                            mismatches.push(
+                                serde_json::json!({"run":run,"mode":mode_name,"frame":n,
+                                "trace_identical":traces.last() == runs[0].1.get(n as usize - 1),
+                                "differing_pixels":pixels,"largest_difference":largest}),
+                            );
+                        }
+                    }
                 }
                 r.test_drain("T2 static history");
-                runs.push((digests, digest(&history(&r))));
+                runs.push((images, traces, digest(&history(&r))));
             }
             scored.swap(&mut r);
-            let identical = runs[0].0.iter().zip(&runs[1].0).filter(|(a, b)| a == b).count();
-            let row = serde_json::json!({"pose":pose,"program":name,"frames":frames,
-                "frames_identical":identical,"history_identical":runs[0].1 == runs[1].1,
-                "first_differing_frame":runs[0].0.iter().zip(&runs[1].0).position(|(a, b)| a != b).map(|i| i + 1)});
-            eprintln!("T2 static {row}");
-            results.push(row);
+            if detail {
+                for n in 1..=frames {
+                    let _ =
+                        fs::remove_file(out.join(format!("first-p{pose}-{name}-n{n:03}.rgba16f")));
+                }
+            }
+            for (run, (images, _, history)) in runs.iter().enumerate().skip(1) {
+                let identical = runs[0].0.iter().zip(images).filter(|(a, b)| a == b).count();
+                let row = serde_json::json!({"pose":pose,"program":name,"frames":frames,
+                    "compared":[modes[0].0, modes[run].0],"run":run,
+                    "frames_identical":identical,"history_identical":runs[0].2 == *history,
+                    "first_differing_frame":runs[0].0.iter().zip(images).position(|(a, b)| a != b).map(|i| i + 1),
+                    "mismatches":mismatches.iter().filter(|x| x["run"] == run).take(20).collect::<Vec<_>>()});
+                eprintln!("T2 static {row}");
+                results.push(row);
+            }
         }
     }
-    let out = PathBuf::from(m["output"].as_str().unwrap());
-    fs::create_dir_all(&out).unwrap();
     fs::write(
         out.join("static.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({"records":count,"results":results}))
-            .unwrap(),
+        serde_json::to_vec_pretty(&serde_json::json!({"records":count,"modes":modes.iter().map(|m| &m.0).collect::<Vec<_>>(),
+            "results":results}))
+        .unwrap(),
     )
     .unwrap();
     for row in &results {
         assert!(
             row["frames_identical"] == row["frames"] && row["history_identical"] == true,
-            "static output differs from T1a: {row}"
+            "static output differs between runs: {row}"
         );
     }
 }
@@ -1462,18 +1543,27 @@ fn gpu_film_t2_motion() {
                 let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
                 let (reset, moving) = (film.reset, film.moving);
                 let seed = film.records.as_ref().unwrap().seed;
-                assert_eq!(reset, f == 0, "frame {f} of {name}: only the first frame resets");
+                assert_eq!(
+                    reset,
+                    f == 0,
+                    "frame {f} of {name}: only the first frame resets"
+                );
                 let t0 = record && moving && t0_frames.contains(&f);
                 // The frame's image, read before any T-0 reference frame overwrites it.
                 let hdr = (f == 0 || t0 || scored.contains(&f)).then(|| settled(&mut r));
                 if f == 0 {
                     let same = hdr.as_ref() == Some(&interactive);
-                    identity.push(serde_json::json!({"program":name,"run":run,"hdr_identical":same}));
+                    identity
+                        .push(serde_json::json!({"program":name,"run":run,"hdr_identical":same}));
                     assert!(same, "T-0 {name} run {run}");
                 }
                 let mut flags = vec![];
                 if record {
-                    let diagnostics = if moving { record_diagnostics(&mut r) } else { vec![] };
+                    let diagnostics = if moving {
+                        record_diagnostics(&mut r)
+                    } else {
+                        vec![]
+                    };
                     let mut stats = [0u64; 12];
                     let mut kept_histogram = [0u64; 9];
                     for (i, age) in ages.iter_mut().enumerate() {
@@ -1506,15 +1596,27 @@ fn gpu_film_t2_motion() {
                         flags = diagnostics
                             .iter()
                             .map(|&[x, y]| {
-                                ((x & 0xff) | ((y & 1) << 8) | (u32::from((x >> 16) & 0xff > 0) << 9))
+                                ((x & 0xff)
+                                    | ((y & 1) << 8)
+                                    | (u32::from((x >> 16) & 0xff > 0) << 9))
                                     as u16
                             })
                             .collect();
                     }
-                    let keys = ["explicit_pixels", "empty_pixels", "cold_pixels",
-                        "discontinuity_pixels", "landed", "kept", "hidden_records",
-                        "hidden_pixels", "validation_rays", "kept_band_pixels",
-                        "own_band_pixels", "kept_band_records"];
+                    let keys = [
+                        "explicit_pixels",
+                        "empty_pixels",
+                        "cold_pixels",
+                        "discontinuity_pixels",
+                        "landed",
+                        "kept",
+                        "hidden_records",
+                        "hidden_pixels",
+                        "validation_rays",
+                        "kept_band_pixels",
+                        "own_band_pixels",
+                        "kept_band_records",
+                    ];
                     let mut row = serde_json::json!({"frame":f,"reset":reset,"moving":moving,"seed":seed,
                         "kept_histogram":kept_histogram,"matrix":camera.matrix(w, h).to_cols_array(),
                         "eye":camera.view().inverse().w_axis.truncate().to_array()});
@@ -1538,9 +1640,16 @@ fn gpu_film_t2_motion() {
                                 continue;
                             }
                             empty += 1;
-                            differ[0] += usize::from(hdr[i * 8..i * 8 + 8] != reference[i * 8..i * 8 + 8]);
-                            differ[1] += usize::from(outputs[0][i * 16..i * 16 + 16] != reference_outputs[0][i * 16..i * 16 + 16]);
-                            differ[2] += usize::from(outputs[1][i * 4..i * 4 + 4] != reference_outputs[1][i * 4..i * 4 + 4]);
+                            differ[0] +=
+                                usize::from(hdr[i * 8..i * 8 + 8] != reference[i * 8..i * 8 + 8]);
+                            differ[1] += usize::from(
+                                outputs[0][i * 16..i * 16 + 16]
+                                    != reference_outputs[0][i * 16..i * 16 + 16],
+                            );
+                            differ[2] += usize::from(
+                                outputs[1][i * 4..i * 4 + 4]
+                                    != reference_outputs[1][i * 4..i * 4 + 4],
+                            );
                         }
                         let check = serde_json::json!({"frame":f,"empty_pixels":empty,
                             "hdr_differing":differ[0],"hit_differing":differ[1],"counts_differing":differ[2]});
@@ -1557,7 +1666,8 @@ fn gpu_film_t2_motion() {
                         if record {
                             fs::write(out.join(format!("age-f{f:03}.u8")), &ages).unwrap();
                             if !flags.is_empty() {
-                                let bytes: Vec<u8> = flags.iter().flat_map(|v| v.to_le_bytes()).collect();
+                                let bytes: Vec<u8> =
+                                    flags.iter().flat_map(|v| v.to_le_bytes()).collect();
                                 fs::write(out.join(format!("flags-f{f:03}.u16")), bytes).unwrap();
                             }
                         }
@@ -1566,26 +1676,38 @@ fn gpu_film_t2_motion() {
             }
             run_digests.push(record_digest(&mut r));
             if name == "full" {
-                eprintln!("T2 motion run {run} of {runs} {:.1} s", start.elapsed().as_secs_f64());
+                eprintln!(
+                    "T2 motion run {run} of {runs} {:.1} s",
+                    start.elapsed().as_secs_f64()
+                );
             }
             replay.push(run_digests);
         }
         r.primary.as_mut().unwrap().test_record_diagnostics = false;
         program.swap(&mut r);
         digests.insert(name.to_owned(), serde_json::json!(replay));
-        eprintln!("T2 motion program={name} done {:.1} s", start.elapsed().as_secs_f64());
+        eprintln!(
+            "T2 motion program={name} done {:.1} s",
+            start.elapsed().as_secs_f64()
+        );
     }
     let replay = digests["full"].as_array().unwrap();
-    let identical = replay.iter().skip(1).filter(|run| *run == &replay[0]).count();
+    let identical = replay
+        .iter()
+        .skip(1)
+        .filter(|run| *run == &replay[0])
+        .count();
     let t0_passed = empty_identity
         .iter()
         .all(|c| c["hdr_differing"] == 0 && c["hit_differing"] == 0 && c["counts_differing"] == 0);
     fs::write(
         out.join("motion.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({"sequence":m["sequence"],"records":count,
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"sequence":m["sequence"],"records":count,
             "scored":scored,"frames":frames,"identity":identity,"empty_identity":empty_identity,
             "t0_empty_passed":t0_passed,"digests":digests,"replays":replays,
-            "replays_identical":identical,"seconds":start.elapsed().as_secs_f64()}))
+            "replays_identical":identical,"seconds":start.elapsed().as_secs_f64()}),
+        )
         .unwrap(),
     )
     .unwrap();

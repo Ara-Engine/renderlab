@@ -51,9 +51,10 @@ def camera_key(frame):
     return json.dumps([frame[k] for k in ("eye", "target", "up", "fov_y_radians", "near", "far", "width", "height")])
 
 
-def reference_of(sequence, poses):
-    """Scored frame -> the reference pose with the same camera."""
-    keys = {camera_key(sequence[p]): p for p in poses}
+def reference_of(sequence, cameras, poses):
+    """Scored frame -> the reference pose (a frame of the references' camera file) with the same
+    camera."""
+    keys = {camera_key(cameras[p]): p for p in poses}
     return {i: keys.get(camera_key(f)) for i, f in enumerate(sequence)}
 
 
@@ -180,18 +181,14 @@ def crop_sheet(panels, path, box=SILHOUETTE, zoom=2):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ref", type=Path, required=True)
-    ap.add_argument("--run", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--run", type=Path)
+    ap.add_argument("--out", type=Path)
     ap.add_argument("--verify", type=Path)
     ap.add_argument("--compact-only", action="store_true")
     ap.add_argument("--images", default="0,1,3,7,31,48,64,72,96,99,104,128,160")
     a = ap.parse_args(); start = time.perf_counter()
-    run = json.loads((a.run / "motion.json").read_text())
-    sequence = json.loads(Path(run["sequence"]).read_text())["frames"]
     manifest = json.loads((a.ref.parent / f"{a.ref.name}.json").read_text())
     poses = manifest["poses"]
-    ref_of = reference_of(sequence, poses)
-    motion = {f["frame"]: f for f in run["frames"]}
     for pose in poses:
         directory = a.ref / f"ref-p{pose}"
         if (directory / "complete").exists() and not (directory / "compact.npz").exists():
@@ -200,6 +197,11 @@ def main():
             print("compacted", pose, round(time.perf_counter() - t, 1), "s", flush=True)
     if a.compact_only:
         return
+    run = json.loads((a.run / "motion.json").read_text())
+    sequence = json.loads(Path(run["sequence"]).read_text())["frames"]
+    cameras = json.loads(Path(manifest["t1_cameras"]).read_text())["frames"]
+    ref_of = reference_of(sequence, cameras, poses)
+    motion = {f["frame"]: f for f in run["frames"]}
     a.out.mkdir(parents=True, exist_ok=True); images = a.out / "images"; images.mkdir(exist_ok=True)
     spread = json.loads(STATIC_SPREAD.read_text())["poses"]["0"]["bars"]
     bar = lambda ch, p, e: e * (1 + spread.get(ch, {}).get(p, {}).get("spread_2sd", 0.))
