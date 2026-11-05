@@ -71,7 +71,7 @@ pub struct MaterialDescriptor<'a> {
     /// The material's shading program; None is the renderer's standard program.
     pub program: Option<&'a Program>,
     /// Named values for the program's `struct Parameters`, checked by name and type.
-    /// Omitted members are zero.
+    /// Omitted members use the program's DEFAULT_PARAMETERS (zero when absent).
     pub parameters: &'a [(&'a str, Value)],
 }
 impl Default for MaterialDescriptor<'_> {

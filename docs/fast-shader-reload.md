@@ -1,5 +1,9 @@
 # Fast shader reload
 
+Follow-up: the [programmable-shading API update](programmable-shading-api-gaps.md)
+exposes the viewer's watcher to library callers and registers arbitrary program
+handles/files. Measurements below remain the historical fast-reload campaign.
+
 2026-11-05 (08:40–12:05 UTC), based on main `767c28c`. RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, Ryzen 7 7800X3D (8 cores, 16 threads). Release test binaries were built with two Cargo jobs, and validation was off for timing. Everything ran offscreen except two `--background` viewer runs. The scene is the registered full-resident quarry (12 draws, 13,034,903 triangles) at 1920×1080 1x on the traced-capable hardware-shadow renderer, as in [phase 1](programmable-shading-phase-1.md). Labels: **M** measured here, **I** inference.
 
 **Result.**

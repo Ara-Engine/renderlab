@@ -581,8 +581,7 @@ fn gpu_reload_profile() {
     .unwrap();
 }
 
-#[path = "../viewer/src/shader_watch.rs"]
-mod shader_watch;
+use crate::program_watch as shader_watch;
 
 /// One watched file's edit: kind, path, the edited source for a tint value, the original.
 type FileEdit<'a> = (&'a str, &'a PathBuf, fn(&str) -> String, &'a str);

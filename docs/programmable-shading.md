@@ -2,6 +2,9 @@
 
 **Status:** Phase 1 is implemented and recorded in [programmable-shading-phase-1.md](programmable-shading-phase-1.md), with its gate result and open constraints. Reload latency and C17 are followed up in [fast-shader-reload.md](fast-shader-reload.md). Sections 1 and 4 describe the code before it.
 
+The [API follow-through](programmable-shading-api-gaps.md) adds caller-owned program
+file watches, WGSL parameter defaults, fixed arrays and shared normal mapping.
+
 The subsequent [receiver-policy adoption](m6-receiver-adoption.md) adds
 `MaterialDescriptor::thin` (false by default), exposed as `input.material.thin`,
 and requires callers to enable `renderlab::RECEIVER_FEATURES` for raster triangle

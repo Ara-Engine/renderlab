@@ -13,6 +13,7 @@ mod normal;
 mod observe;
 mod primary_ray;
 mod program;
+pub mod program_watch;
 mod renderer;
 mod shadow_plan;
 mod shadows;

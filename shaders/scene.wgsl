@@ -310,17 +310,34 @@ fn environment_legacy_lod(d:vec3<f32>, lod:f32) -> vec3<f32> {
 }
 fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
     let r=clamp(roughness,0.0,1.0);
-    if lighting.map.w>0.0 { return environment_legacy_lod(d,r*(lighting.map.w-1.0)); }
-    if r>=1.0 { return environment_level(d,64); }
-    let lo=min(i32(floor(64.0*sqrt(r))),63);
-    let a=f32(lo)/64.0;
-    let b=f32(lo+1)/64.0;
-    let a2=a*a; let b2=b*b;
-    let a4=a2*a2; let b4=b2*b2;
-    let a8=a4*a4; let b8=b4*b4;
-    let r2=r*r;
-    let t=clamp((r2*r2-a8)/(b8-a8),0.0,1.0);
-    return environment_level(d,lo)*(1.0-t)+environment_level(d,lo+1)*t;
+    // Choose levels before filtering: the driver then inlines the large lookup twice,
+    // rather than five times across the legacy, fully rough and blended paths. Keep
+    // each path's arithmetic order, including the unblended fully rough return.
+    var lo=64;
+    var hi=64;
+    var t=0.0;
+    var single=false;
+    if lighting.map.w>0.0 {
+        let x=clamp(r*(lighting.map.w-1.0),0.0,lighting.map.w-1.0);
+        lo=i32(floor(x));
+        hi=min(lo+1,i32(lighting.map.w)-1);
+        t=fract(x);
+    } else if r>=1.0 {
+        single=true;
+    } else {
+        lo=min(i32(floor(64.0*sqrt(r))),63);
+        hi=lo+1;
+        let a=f32(lo)/64.0;
+        let b=f32(lo+1)/64.0;
+        let a2=a*a; let b2=b*b;
+        let a4=a2*a2; let b4=b2*b2;
+        let a8=a4*a4; let b8=b4*b4;
+        let r2=r*r;
+        t=clamp((r2*r2-a8)/(b8-a8),0.0,1.0);
+    }
+    let first=environment_level(d,lo);
+    if single { return first; }
+    return first*(1.0-t)+environment_level(d,hi)*t;
 }
 fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
     let a=frexp(energy);

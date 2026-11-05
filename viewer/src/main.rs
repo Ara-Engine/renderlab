@@ -531,6 +531,13 @@ impl View {
                 start.elapsed().as_micros()
             );
         }
+        let mut shaders = shader_watch::ShaderWatch::programs_only();
+        shaders.watch_prelude(options.shader.clone(), &source);
+        shaders.watch_program(
+            renderer.standard_program(),
+            options.program.clone(),
+            renderlab::STANDARD_PROGRAM,
+        );
         Ok(Self {
             surface_probe: surface_probe::SurfaceProbe::new(options.trace_surface),
             window,
@@ -550,11 +557,7 @@ impl View {
             keys: HashSet::new(),
             input_stamp: None,
             applied_input_stamp: None,
-            shaders: shader_watch::ShaderWatch::new(
-                options.shader.clone(),
-                source,
-                options.program.clone(),
-            ),
+            shaders,
             shader_rejected: false,
             shader_check: Instant::now(),
             lighting_file,

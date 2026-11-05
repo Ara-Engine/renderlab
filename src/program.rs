@@ -25,8 +25,11 @@ const TRACED_NO_PARAMETERS: &str = "fn rl_load_parameters(slot:u32) {}\n";
 /// Source of a shading program: WGSL without bindings that defines
 /// `fn surface(input: SurfaceInput) -> Surface` and
 /// `fn shade(s: Surface, input: SurfaceInput) -> vec3<f32>` (exposed linear HDR), and may
-/// declare `struct Parameters` of f32, vec2/3/4<f32>, u32 and i32 members, read as
-/// `params`. The API is shaders/program_api.wgsl plus its raster and traced stages.
+/// declare `struct Parameters` of f32, vec2/3/4<f32>, u32, i32 and fixed arrays of
+/// these types, read as `params`. Arrays must satisfy WGSL uniform layout (e.g.
+/// `array<vec4<f32>, 2>`). Optional `const DEFAULT_PARAMETERS: Parameters = ...`
+/// supplies omitted material values. The API is shaders/program_api.wgsl plus its
+/// raster and traced stages.
 #[derive(Clone, Copy, Debug)]
 pub struct ProgramDescriptor<'a> {
     pub label: &'a str,
@@ -63,7 +66,7 @@ impl std::fmt::Debug for Program {
 }
 
 /// One `Parameters` member's value, checked against the member's name and type.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     F32(f32),
     Vec2([f32; 2]),
@@ -71,19 +74,38 @@ pub enum Value {
     Vec4([f32; 4]),
     U32(u32),
     I32(i32),
+    /// A fixed array, checked for element type and exact length. For scalar
+    /// thresholds, pack four per vec4 to satisfy WGSL's uniform array stride.
+    Array(Vec<Value>),
 }
 impl Value {
-    fn kind(self) -> Kind {
-        match self {
-            Self::F32(_) => Kind::F32,
-            Self::Vec2(_) => Kind::Vec2,
-            Self::Vec3(_) => Kind::Vec3,
-            Self::Vec4(_) => Kind::Vec4,
-            Self::U32(_) => Kind::U32,
-            Self::I32(_) => Kind::I32,
+    fn matches(&self, kind: &Kind) -> bool {
+        match (self, kind) {
+            (Self::F32(_), Kind::F32)
+            | (Self::Vec2(_), Kind::Vec2)
+            | (Self::Vec3(_), Kind::Vec3)
+            | (Self::Vec4(_), Kind::Vec4)
+            | (Self::U32(_), Kind::U32)
+            | (Self::I32(_), Kind::I32) => true,
+            (Self::Array(values), Kind::Array { element, len, .. }) => {
+                values.len() == *len as usize && values.iter().all(|v| v.matches(element))
+            }
+            _ => false,
         }
     }
-    fn write(self, out: &mut [u8]) {
+    fn write(&self, kind: &Kind, out: &mut [u8]) {
+        if let (
+            Self::Array(values),
+            Kind::Array {
+                element, stride, ..
+            },
+        ) = (self, kind)
+        {
+            for (value, dst) in values.iter().zip(out.chunks_mut(*stride as usize)) {
+                value.write(element, dst);
+            }
+            return;
+        }
         let words: Vec<[u8; 4]> = match self {
             Self::F32(v) => vec![v.to_ne_bytes()],
             Self::Vec2(v) => v.map(f32::to_ne_bytes).to_vec(),
@@ -91,6 +113,7 @@ impl Value {
             Self::Vec4(v) => v.map(f32::to_ne_bytes).to_vec(),
             Self::U32(v) => vec![v.to_ne_bytes()],
             Self::I32(v) => vec![v.to_ne_bytes()],
+            Self::Array(_) => unreachable!("array type checked before packing"),
         };
         for (dst, word) in out.chunks_exact_mut(4).zip(words) {
             dst.copy_from_slice(&word);
@@ -98,7 +121,7 @@ impl Value {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     F32,
     Vec2,
@@ -106,6 +129,22 @@ pub(crate) enum Kind {
     Vec4,
     U32,
     I32,
+    Array {
+        element: Box<Kind>,
+        len: u32,
+        stride: u32,
+    },
+}
+impl Kind {
+    fn size(&self) -> usize {
+        match self {
+            Self::F32 | Self::U32 | Self::I32 => 4,
+            Self::Vec2 => 8,
+            Self::Vec3 => 12,
+            Self::Vec4 => 16,
+            Self::Array { len, stride, .. } => (*len * *stride) as usize,
+        }
+    }
 }
 
 /// Bytes of every material's parameter block; `Parameters` may use at most this many.
@@ -122,6 +161,7 @@ pub(crate) struct Field {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ParameterLayout {
     pub fields: Vec<Field>,
+    pub defaults: [u8; PARAMETER_BYTES],
 }
 impl ParameterLayout {
     /// Every named value must name a member of the same type.
@@ -135,7 +175,7 @@ impl ParameterLayout {
                 .ok_or(Error::InvalidInput(
                     "material parameter is not a member of its program's Parameters",
                 ))?;
-            if field.kind != value.kind() {
+            if !value.matches(&field.kind) {
                 return Err(Error::InvalidInput(
                     "material parameter type differs from its Parameters member",
                 ));
@@ -143,30 +183,39 @@ impl ParameterLayout {
         }
         Ok(())
     }
-    /// The parameter block: each value at its member's offset and omitted members zero.
+    /// Program defaults, then explicit overrides at naga-reflected offsets/strides.
     /// Values naming no member of the same type are skipped.
     pub fn pack(layout: Option<&Self>, values: &[(String, Value)]) -> [u8; PARAMETER_BYTES] {
-        let mut block = [0; PARAMETER_BYTES];
+        let mut block = layout.map_or([0; PARAMETER_BYTES], |l| l.defaults);
         for (name, value) in values {
             if let Some(f) = layout
                 .and_then(|l| l.fields.iter().find(|f| f.name == *name))
-                .filter(|f| f.kind == value.kind())
+                .filter(|f| value.matches(&f.kind))
             {
-                value.write(&mut block[f.offset as usize..]);
+                let offset = f.offset as usize;
+                // Explicit arrays also clear any default padding bytes.
+                block[offset..offset + f.kind.size()].fill(0);
+                value.write(&f.kind, &mut block[offset..offset + f.kind.size()]);
             }
         }
         block
     }
-    /// Members of `next` that are new or retyped relative to `previous`.
+    /// New or retyped members without a nonzero program default.
     pub fn changed(previous: Option<&Self>, next: Option<&Self>) -> Vec<String> {
-        next.map_or(&[][..], |l| &l.fields)
+        let Some(next) = next else {
+            return vec![];
+        };
+        next.fields
             .iter()
             .filter(|f| {
-                !previous.is_some_and(|p| {
-                    p.fields
-                        .iter()
-                        .any(|o| o.name == f.name && o.kind == f.kind)
-                })
+                next.defaults[f.offset as usize..f.offset as usize + f.kind.size()]
+                    .iter()
+                    .all(|&b| b == 0)
+                    && !previous.is_some_and(|p| {
+                        p.fields
+                            .iter()
+                            .any(|o| o.name == f.name && o.kind == f.kind)
+                    })
             })
             .map(|f| f.name.clone())
             .collect()
@@ -336,7 +385,19 @@ pub(crate) fn analyse(label: &str, program: &str, composed: &Composed) -> Result
             message = format!("{message}: {next}");
             cause = next.source();
         }
-        diagnostic(label, composed, e.location(source), &message)
+        let location = e
+            .spans()
+            .find(|(s, _)| in_program(composed, *s))
+            .map(|(s, _)| s.location(source))
+            .or_else(|| match e.as_inner() {
+                naga::valid::ValidationError::GlobalVariable { handle, .. } => {
+                    let span = module.types.get_span(module.global_variables[*handle].ty);
+                    in_program(composed, span).then(|| span.location(source))
+                }
+                _ => None,
+            })
+            .or_else(|| e.location(source));
+        diagnostic(label, composed, location, &message)
     })?;
     let parameters = module
         .types
@@ -345,13 +406,25 @@ pub(crate) fn analyse(label: &str, program: &str, composed: &Composed) -> Result
             ty.name.as_deref() == Some("Parameters")
                 && in_program(composed, module.types.get_span(*h))
         })
-        .map(|(_, ty)| reflect(&module, ty))
-        .transpose()
-        .map_err(|message| diagnostic(label, composed, None, message))?;
+        .map(|(handle, ty)| {
+            reflect(&module, handle, ty).map_err(|message| {
+                diagnostic(
+                    label,
+                    composed,
+                    Some(module.types.get_span(handle).location(source)),
+                    message,
+                )
+            })
+        })
+        .transpose()?;
     Ok(Analysis { parameters })
 }
 
-fn reflect(module: &naga::Module, ty: &naga::Type) -> Result<ParameterLayout, &'static str> {
+fn reflect(
+    module: &naga::Module,
+    handle: naga::Handle<naga::Type>,
+    ty: &naga::Type,
+) -> Result<ParameterLayout, &'static str> {
     let naga::TypeInner::Struct { members, span } = &ty.inner else {
         return Err("Parameters must be a struct");
     };
@@ -361,19 +434,7 @@ fn reflect(module: &naga::Module, ty: &naga::Type) -> Result<ParameterLayout, &'
     let fields = members
         .iter()
         .map(|m| {
-            let kind = match module.types[m.ty].inner {
-                naga::TypeInner::Scalar(s) if s == naga::Scalar::F32 => Kind::F32,
-                naga::TypeInner::Scalar(s) if s == naga::Scalar::U32 => Kind::U32,
-                naga::TypeInner::Scalar(s) if s == naga::Scalar::I32 => Kind::I32,
-                naga::TypeInner::Vector { size, scalar } if scalar == naga::Scalar::F32 => {
-                    match size {
-                        naga::VectorSize::Bi => Kind::Vec2,
-                        naga::VectorSize::Tri => Kind::Vec3,
-                        naga::VectorSize::Quad => Kind::Vec4,
-                    }
-                }
-                _ => return Err("Parameters members must be f32, vec2/3/4<f32>, u32 or i32"),
-            };
+            let kind = reflect_kind(module, m.ty)?;
             Ok(Field {
                 name: m.name.clone().unwrap_or_default(),
                 kind,
@@ -381,7 +442,108 @@ fn reflect(module: &naga::Module, ty: &naga::Type) -> Result<ParameterLayout, &'
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok(ParameterLayout { fields })
+    let mut defaults = [0; PARAMETER_BYTES];
+    if let Some((_, constant)) = module
+        .constants
+        .iter()
+        .find(|(_, c)| c.name.as_deref() == Some("DEFAULT_PARAMETERS"))
+    {
+        if constant.ty != handle {
+            return Err("DEFAULT_PARAMETERS must be a const of type Parameters");
+        }
+        write_constant(module, constant.init, &mut defaults)?;
+    }
+    Ok(ParameterLayout { fields, defaults })
+}
+
+fn reflect_kind(module: &naga::Module, ty: naga::Handle<naga::Type>) -> Result<Kind, &'static str> {
+    Ok(match module.types[ty].inner {
+        naga::TypeInner::Scalar(s) if s == naga::Scalar::F32 => Kind::F32,
+        naga::TypeInner::Scalar(s) if s == naga::Scalar::U32 => Kind::U32,
+        naga::TypeInner::Scalar(s) if s == naga::Scalar::I32 => Kind::I32,
+        naga::TypeInner::Vector { size, scalar } if scalar == naga::Scalar::F32 => match size {
+            naga::VectorSize::Bi => Kind::Vec2,
+            naga::VectorSize::Tri => Kind::Vec3,
+            naga::VectorSize::Quad => Kind::Vec4,
+        },
+        naga::TypeInner::Array {
+            base,
+            size: naga::ArraySize::Constant(len),
+            stride,
+        } => {
+            let element = reflect_kind(module, base)?;
+            if matches!(element, Kind::Array { .. }) {
+                return Err("Parameters supports one-dimensional fixed arrays only");
+            }
+            Kind::Array {
+                element: Box::new(element),
+                len: len.get(),
+                stride,
+            }
+        }
+        _ => {
+            return Err(
+                "Parameters members must be f32, vec2/3/4<f32>, u32, i32 or fixed arrays of these",
+            );
+        }
+    })
+}
+
+/// WGSL's frontend evaluates const expressions; pack that IR, never parse WGSL values
+/// or reimplement its expression evaluator. Struct offsets and array strides come
+/// from the same naga types that validate both GPU bindings.
+fn write_constant(
+    module: &naga::Module,
+    init: naga::Handle<naga::Expression>,
+    out: &mut [u8],
+) -> Result<usize, &'static str> {
+    use naga::{Expression as E, Literal as L, TypeInner as T};
+    Ok(match &module.global_expressions[init] {
+        E::Constant(c) => write_constant(module, module.constants[*c].init, out)?,
+        E::ZeroValue(ty) => {
+            let size = module.types[*ty].inner.size(module.to_ctx()) as usize;
+            out[..size].fill(0);
+            size
+        }
+        E::Literal(l) => {
+            out[..4].copy_from_slice(&match l {
+                L::F32(v) => v.to_ne_bytes(),
+                L::U32(v) => v.to_ne_bytes(),
+                L::I32(v) => v.to_ne_bytes(),
+                _ => return Err("unsupported DEFAULT_PARAMETERS scalar"),
+            });
+            4
+        }
+        E::Splat { size, value } => {
+            for dst in out.chunks_exact_mut(4).take(*size as usize) {
+                write_constant(module, *value, dst)?;
+            }
+            *size as usize * 4
+        }
+        E::Compose { ty, components } => {
+            match &module.types[*ty].inner {
+                T::Struct { members, .. } => {
+                    for (member, value) in members.iter().zip(components) {
+                        write_constant(module, *value, &mut out[member.offset as usize..])?;
+                    }
+                }
+                T::Array { stride, .. } => {
+                    for (value, dst) in components.iter().zip(out.chunks_mut(*stride as usize)) {
+                        write_constant(module, *value, dst)?;
+                    }
+                }
+                T::Vector { .. } => {
+                    let mut offset = 0;
+                    for value in components {
+                        offset += write_constant(module, *value, &mut out[offset..])?;
+                    }
+                }
+                _ => return Err("unsupported DEFAULT_PARAMETERS composition"),
+            }
+            module.types[*ty].inner.size(module.to_ctx()) as usize
+        }
+        _ => return Err("DEFAULT_PARAMETERS must be a WGSL const expression"),
+    })
 }
 
 /// Names the program location of a traced-stage rejection: implicit-derivative sampling
@@ -516,6 +678,100 @@ mod tests {
             .parameters;
         assert_eq!(ParameterLayout::changed(l, next.as_ref()), ["rim_power"]);
         assert!(ParameterLayout::changed(l, l).is_empty());
+    }
+
+    #[test]
+    fn program_defaults_and_fixed_arrays_use_naga_layout() {
+        let source = format!(
+            "{}\n{STANDARD_PROGRAM}",
+            r#"
+struct Parameters { gain:f32, thresholds:array<vec3<f32>,2>, count:u32, signed:i32, tail:vec2<f32> };
+const BASE:vec3<f32> = vec3<f32>(0.125,0.25,0.5);
+const DEFAULT_PARAMETERS:Parameters = Parameters(
+    2.0*0.25, array<vec3<f32>,2>(BASE,vec3<f32>(0.75)), 3u, -2, vec2<f32>(1.0,2.0));
+"#
+        );
+        let layout = analyse("arrays", &source, &raster(&source))
+            .unwrap()
+            .parameters
+            .unwrap();
+        assert_eq!(
+            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 16, 48, 52, 56]
+        );
+        let block = ParameterLayout::pack(Some(&layout), &[]);
+        let word = |offset| f32::from_ne_bytes(block[offset..offset + 4].try_into().unwrap());
+        assert_eq!(
+            [word(0), word(16), word(20), word(24), word(32)],
+            [0.5, 0.125, 0.25, 0.5, 0.75]
+        );
+        assert_eq!(&block[48..52], &3u32.to_ne_bytes());
+        assert_eq!(&block[52..56], &(-2i32).to_ne_bytes());
+        assert_eq!([word(56), word(60)], [1.0, 2.0]);
+        assert!(block[28..32].iter().chain(&block[44..48]).all(|&v| v == 0));
+        let array = Value::Array(vec![Value::Vec3([1., 2., 3.]), Value::Vec3([4., 5., 6.])]);
+        ParameterLayout::check(Some(&layout), [("thresholds", array.clone())]).unwrap();
+        for invalid in [
+            Value::Array(vec![]),
+            Value::Array(vec![Value::Vec3([1.; 3])]),
+            Value::Array(vec![Value::Vec4([1.; 4]); 2]),
+            Value::Vec3([1.; 3]),
+        ] {
+            assert!(ParameterLayout::check(Some(&layout), [("thresholds", invalid)]).is_err());
+        }
+        let overridden = ParameterLayout::pack(
+            Some(&layout),
+            &[
+                ("thresholds".into(), array),
+                ("gain".into(), Value::F32(0.)),
+            ],
+        );
+        assert_eq!(&overridden[..4], &[0; 4]);
+        assert_eq!(&overridden[32..36], &4f32.to_ne_bytes());
+        assert_eq!(&overridden[48..64], &block[48..64]);
+        let next_source = source.replace("2.0*0.25", "0.75");
+        let next = analyse("arrays", &next_source, &raster(&next_source))
+            .unwrap()
+            .parameters
+            .unwrap();
+        assert_ne!(layout, next, "default edits trigger material repacking");
+        assert!(ParameterLayout::changed(Some(&layout), Some(&next)).is_empty());
+        assert!(
+            rejection(
+                "arrays",
+                &format!(
+                    "struct Parameters {{ oversized:array<vec4<f32>,17> }};\n{STANDARD_PROGRAM}"
+                )
+            )
+            .contains("Parameters")
+        );
+        let scalar_array = format!("struct Parameters {{ a:array<f32,2> }};\n{STANDARD_PROGRAM}");
+        let error = rejection("arrays", &scalar_array);
+        assert!(error.contains("program `arrays` line 1:"), "{error}");
+        let wrong = source.replace("const DEFAULT_PARAMETERS:Parameters = Parameters(\n    2.0*0.25, array<vec3<f32>,2>(BASE,vec3<f32>(0.75)), 3u, -2, vec2<f32>(1.0,2.0));", "const DEFAULT_PARAMETERS:f32 = 1.0;");
+        assert!(rejection("arrays", &wrong).contains("DEFAULT_PARAMETERS"));
+    }
+
+    #[test]
+    fn toon_defaults_equal_the_original_application_values() {
+        let source = include_str!("../shaders/programs/toon.wgsl");
+        let layout = analyse("toon", source, &raster(source))
+            .unwrap()
+            .parameters
+            .unwrap();
+        let explicit = [
+            ("shadow_tint".into(), Value::Vec3([0.12, 0.08, 0.24])),
+            ("bands".into(), Value::F32(4.)),
+            ("rim_color".into(), Value::Vec3([0.12, 0.2, 0.3])),
+            ("rim_power".into(), Value::F32(4.)),
+            ("thresholds".into(), Value::Vec2([0.12, 0.9])),
+            ("fill".into(), Value::F32(0.25)),
+            ("flat_shaded".into(), Value::U32(0)),
+        ];
+        assert_eq!(
+            ParameterLayout::pack(Some(&layout), &[]),
+            ParameterLayout::pack(Some(&layout), &explicit)
+        );
     }
 
     #[test]

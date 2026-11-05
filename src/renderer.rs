@@ -1303,6 +1303,7 @@ impl Renderer {
             .count(program_gpu::pipeline_count(&built));
         self.pipeline = candidate;
         for (slot, c) in self.programs.iter_mut().zip(compiled) {
+            slot.install_parameters(c.layout, &self.queue, &mut self.uploads);
             slot.modules = c.modules;
             slot.pipelines = Default::default();
         }
