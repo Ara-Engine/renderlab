@@ -97,6 +97,12 @@ unchanged in the origin control, so they do not explain that recovery. Removing
 traversal leaves about 1.01 ms of Exact visibility work, versus 8.99 ms with it.
 These are diagnostic, contended screens, not production alternatives.
 
+A final post-rebase control keeps epsilon dynamic and multiplies only its origin
+distance by 100, leaving t_min unchanged. Its paired ratios are hard 0.95156,
+Interactive 0.95229 and Exact 0.90147. This also recovers the traversal cost while
+retaining the precision dataflow and adding a multiply; the conclusion does not
+depend on replacing that dataflow with an immediate constant.
+
 **Retained change:** hard camera hits publish their exact triangle epsilon in an
 R32Float texture; programmable hard shading reads that scalar. The hit record
 remains 16 bytes. Epsilon uses the same transformed vertices and expression,
@@ -152,3 +158,75 @@ reconstructs diagnostic shader variants from the immutable composed policy
 modules. Some early screens preceded per-sample telemetry; their complete
 runner resource logs identify contention. Only the two `quiet-*` runs establish
 the retained performance claim.
+
+## Rebase and retained-source verification
+
+The branch was rebased onto main `d4d77d8` (including fast reload `cc8ae53`)
+without conflicts. The rebased implementation checkpoint is `311fdf9`.
+
+- Release Clippy for the library and tests passes with warnings denied; all
+  84 CPU tests pass.
+- The complete rebased acceptance run passes with Core + Synchronization
+  validation active and zero errors. There are 32 repeats for each of four
+  Interactive seeds at poses 0, 1, 0: **384 byte-identical HDR/count repeats**.
+  Return, rejected reload preservation, tint/revert and raster fallback pass.
+- **36/36 complete captured buffers** (HDR, visibility, world and normals) match
+  the inspected `2268105` production captures byte for byte. File sizes and SHA256
+  hashes are retained in `byte-identity.json`.
+- All 15 R1 fixtures pass on the rebased production renderer. Their film/direct
+  buffers are byte-identical to R1; acne has zero false-shadow pixels. The
+  sawtooth, thin and stress analytic checks pass. Stress retains the previously
+  documented 16 one-sample accepted-count mismatches, within sigma_F.
+- The three quarry R1 replays also match byte for byte: **36/36 film/direct
+  buffers** across the 15 fixtures plus three poses. The explicit material-thin
+  suite passes all raster/traced hard, Exact and Interactive cases. The rebased
+  blocking-ray witness and all 4096 replica masks also match the earlier probe
+  byte for byte.
+- The complete native hard images at both camera poses and the G2 crops were
+  inspected. Exact/Interactive images and the remaining inspected adoption images
+  are unchanged by the 36-buffer identity check. Level B and film results remain
+  the recorded [adoption measurements](m6-receiver-adoption.md); neither image
+  output nor those frozen references changed in this optimization.
+
+The repeat harness compares saved return captures one pair at a time rather than
+retaining all three poses in memory. Its byte assertions and repetition count are
+unchanged; this saves roughly 300 MiB during the guard. An earlier attempt stopped
+below 3 GiB amid foreign builds before completing the return pose; it reported no
+image mismatch. The reduced-memory rebased run completes in 89.63 seconds.
+
+The unchanged old/new Level B maxima are partial RMS 0.081751 → 0.080903,
+faint RMS 0.055783 → 0.054770, contact RMS 0.043088 → 0.042651,
+motion RMS 0.099844 → 0.099625 and contour rho 1.266903 → 1.267512;
+solid flips and lost contacts remain 0/0. The composite gate passes for all
+three poses and four seeds.
+
+| Pose | Mode | R_F partial RMS, old policy → adopted policy |
+|---|---|---:|
+| 0 | Hard | 0.266478 → 0.253246 |
+| 0 | Exact | 0.231586 → 0.203344 |
+| 0 | Interactive | 0.234188 → 0.207204 |
+| 1 | Hard | 0.267065 → 0.254196 |
+| 1 | Exact | 0.232030 → 0.204690 |
+| 1 | Interactive | 0.234588 → 0.208537 |
+
+These use each policy's own film reference/populations, as in the adoption
+record; the different populations do not establish a policy-independent
+perceptual improvement. Exact's whole-image R_L RMS codes remain
+2.581593 → 2.581746 and 2.625275 → 2.625478; its sun-only R_D RMS codes at
++4 stops remain 1.418587 → 1.415564 and 1.408939 → 1.415159.
+
+Disk hygiene: Cargo's native cleanup removed this worker's target (1618 files,
+667.5 MiB). Automatic approval review rejected both the guarded bulk raw-dump
+cleanup and a narrower file-only cleanup as **"blocked by policy"**. Those raw
+dumps remain; `cleanup-candidates.csv` lists their exact paths and sizes, and
+`cleanup.json` records the block. JSON/CSV/log summaries, compact receiver
+evidence, source modules and inspected PNGs remain on E:.
+The fixture collector accepts `--output-root`
+and `--runner` so a retained source can be checked without overwriting earlier
+evidence.
+
+The follow-up ledger records 70 short leases from 10:38:43 to 12:35:27 UTC:
+403.18 seconds of build/check holds and 769.37 seconds of GPU-run holds
+(startup, uploads and readback included). The longest hold is 89.65 seconds;
+all leases were released. These verification times exclude editing, shared-slot
+waits and CPU-only scoring; they are separate from the frame timings above.

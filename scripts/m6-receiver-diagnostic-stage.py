@@ -49,6 +49,7 @@ def variant(name, transform, identity=False):
 if __name__ == "__main__":
     variant("diag-floor", lambda s: edit(s, "receiver_epsilon(a,b,c),(primary_placements", "1e-5,(primary_placements"), True)
     variant("diag-origin", lambda s: edit(s, "return fma(normal,vec3<f32>(receiver.epsilon),receiver.world);", "return fma(normal,vec3<f32>(0.001),receiver.world);"))
+    variant("dynamic-origin", lambda s: edit(s, "return fma(normal,vec3<f32>(receiver.epsilon),receiver.world);", "return fma(normal,vec3<f32>(receiver.epsilon*100.0),receiver.world);"))
     variant("diag-tmin", lambda s: s.replace("let tmin=receiver.epsilon;", "let tmin=view.coverage_bias.z/rate;"))
     variant("diag-no-traversal", lambda s: s.replace("while rayQueryProceed(&query) {}", ""))
     variant("split-loop", split_loop, True)

@@ -4,6 +4,11 @@
 approved [Q2 policy](m6-film-gap.md#6-receiver-policy) and promotes the
 [R1 viewed experiment](m6-receiver-policy.md) into production.
 
+Follow-up: [the receiver investigation](m6-receiver-followup.md) resolves G2's
+finite-reference classification, recovers hard cost and verifies the rebase onto
+current main. Interactive/Exact cost remains an explicit miss. The numbers below
+record the original adoption checkpoint.
+
 **Implementation is complete; acceptance has two explicit misses.** Every R1
 fixture passes, all 36 fixture/quarry film and direct buffers reproduce R1 byte
 for byte, Level B passes, and the final-source 32-repeat test passes. Frozen
