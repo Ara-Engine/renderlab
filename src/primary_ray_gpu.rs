@@ -8,6 +8,10 @@ use super::*;
 use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
 use crate::shadow_plan::Bounds;
 
+#[path = "film_accumulation.rs"]
+pub(super) mod film_accumulation;
+use film_accumulation::{FilmLayouts, FilmState};
+
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
 const FRAME_BYTES: usize = 112;
@@ -213,7 +217,16 @@ impl Renderer {
     /// Chooses disk-shadow sampling for traced lit 1x frames. Exact is the default.
     /// The preference survives primary-path changes and reload; raster, hard and
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
+    /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
+        if mode != crate::SoftShadows::Temporal
+            && let Some(state) = &mut self.primary
+            && let Some(film) = state.film.take()
+        {
+            state
+                .retired
+                .push((self.submissions, Retired::Film(Box::new(film))));
+        }
         self.soft_mode = mode;
     }
 
@@ -236,7 +249,9 @@ impl Renderer {
                 self.pipeline.primary = None;
                 for slot in &mut self.programs {
                     slot.modules.traced = None;
+                    slot.modules.temporal = None;
                     slot.pipelines.traced = None;
+                    slot.pipelines.temporal = None;
                 }
                 self.primary_sources = None;
                 self.primary.as_mut().unwrap().release(self.submissions);
@@ -258,9 +273,11 @@ impl Renderer {
                 let traced = self.compile_traced_modules(&heads)?;
                 self.check_fault()?;
                 self.pipelines.created += 4;
-                for (slot, modules) in self.programs.iter_mut().zip(traced) {
+                for (slot, (modules, temporal)) in self.programs.iter_mut().zip(traced) {
                     slot.modules.traced = Some(modules);
+                    slot.modules.temporal = Some(temporal);
                     slot.pipelines.traced = None;
+                    slot.pipelines.temporal = None;
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -419,6 +436,8 @@ enum Retired {
     Targets(#[allow(dead_code)] Box<Targets>),
     Geometry(#[allow(dead_code)] Geometry),
     Bindings(#[allow(dead_code)] Bindings),
+    Film(#[allow(dead_code)] Box<FilmState>),
+    FilmGroups(#[allow(dead_code)] Box<[[Owned<wgpu::BindGroup>; 3]; 2]>),
 }
 
 /// The engine's traced kernels, compiled while traced visibility is selected and with
@@ -431,6 +450,10 @@ pub(super) struct PrimaryPipelines {
     pub fresh: Owned<wgpu::ComputePipeline>,
     /// Interactive soft frames: camera rays and their 8-direction counts in one dispatch.
     pub interactive: Owned<wgpu::ComputePipeline>,
+    /// Temporal soft frames: the jittered, direction-rotated Interactive trace and the
+    /// reset frames' history start (`film_init`), compiled on the first such frame
+    /// (`ensure_film_kernel`).
+    pub film: Option<[Owned<wgpu::ComputePipeline>; 2]>,
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -472,6 +495,12 @@ pub(super) struct PrimaryState {
     pub targets: Option<Targets>,
     geometry: Option<Geometry>,
     bindings: Option<Bindings>,
+    /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
+    geometry_generation: u64,
+    bindings_generation: u64,
+    film_layouts: FilmLayouts,
+    /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
+    pub film: Option<FilmState>,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -655,6 +684,13 @@ impl PrimaryState {
                     Some(lighting),
                 ],
             ),
+            film_layouts: FilmLayouts::new(
+                device,
+                ledger,
+                &array_bindings,
+                &material_bindings,
+                lighting,
+            ),
             interactive_bindings,
             fresh_bindings,
             trace_bindings: trace,
@@ -670,6 +706,9 @@ impl PrimaryState {
             targets: None,
             geometry: None,
             bindings: None,
+            geometry_generation: 0,
+            bindings_generation: 0,
+            film: None,
             retired: vec![],
         }
     }
@@ -715,7 +754,64 @@ impl PrimaryState {
                 pipeline(&hard, "primary_trace", &self.trace_layouts[0]),
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
             ],
+            film: None,
         }
+    }
+
+    /// The temporal trace and reset (`film_init`) pipelines from one
+    /// `film_accumulation::kernel_source` module.
+    pub fn film_kernel(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        source: &str,
+    ) -> [Owned<wgpu::ComputePipeline>; 2] {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("temporal film trace"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        [
+            ("primary_trace_interactive", &self.film_layouts.trace),
+            ("film_init", &self.film_layouts.init),
+        ]
+        .map(|(entry, layout)| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("FRESH_DIRECTIONS", 8.0)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        })
+    }
+
+    /// A program's temporal shading pipeline from its `film_accumulation::compose_shading`
+    /// module, through `cache` when given.
+    pub fn film_shade_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::ComputePipeline> {
+        ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("temporal program shading"),
+                layout: Some(&self.film_layouts.shade),
+                module,
+                entry_point: Some("primary_shade_tiles"),
+                compilation_options: Default::default(),
+                cache,
+            }),
+            ResourceKind::ComputePipeline,
+        )
     }
 
     /// One program's shading pipelines from its composed modules, indexed by `Shading`.
@@ -812,6 +908,9 @@ impl PrimaryState {
         }
         if let Some(b) = self.bindings.take() {
             self.retired.push((last, Retired::Bindings(b)));
+        }
+        if let Some(f) = self.film.take() {
+            self.retired.push((last, Retired::Film(Box::new(f))));
         }
         self.frame = None;
         self.region_buffer = None;
@@ -1054,6 +1153,7 @@ impl Renderer {
                 materials,
             };
             let state = self.primary.as_mut().unwrap();
+            state.geometry_generation += 1;
             if let Some(old) = state.geometry.replace(next) {
                 state
                     .retired
@@ -1263,6 +1363,7 @@ impl Renderer {
                 key,
             };
             let state = self.primary.as_mut().unwrap();
+            state.bindings_generation += 1;
             if let Some(old) = state.bindings.replace(next) {
                 state
                     .retired
@@ -1408,20 +1509,28 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        let bindings = self.primary.as_ref().unwrap().bindings.as_ref().unwrap();
+        let group = bindings.shade[shading as usize].as_ref().unwrap();
+        self.encode_shade_group(encoder, pipeline, group, tile, timestamp_writes);
+    }
+    /// `encode_primary_shade` with an explicit group 0, which temporal shading extends.
+    pub(super) fn encode_shade_group(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        group: &wgpu::BindGroup,
+        tile: [u32; 2],
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         let state = self.primary.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
-        let bindings = state.bindings.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("traced deferred shading"),
             timestamp_writes,
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(
-            0,
-            &**bindings.shade[shading as usize].as_ref().unwrap(),
-            &[],
-        );
+        pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &*g.materials, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);

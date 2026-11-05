@@ -10,6 +10,7 @@ use super::*;
 use crate::program::{
     self, Composed, MaterialParameters, ParameterLayout, ProgramShared, STANDARD_PROGRAM, Stage,
 };
+use primary_ray_gpu::film_accumulation;
 use std::sync::{Mutex, Weak};
 
 /// A program pipeline set a frame shades with. Raster sets are pairs indexed by tangent
@@ -24,6 +25,14 @@ pub(crate) enum Variant {
     Fresh,
     /// Traced primary visibility: Hard and Soft shading.
     Traced,
+    /// Traced temporal film accumulation (`SoftShadows::Temporal`): one shading pipeline.
+    Temporal,
+}
+impl Variant {
+    /// Pipelines in the set: raster sets by tangent stream, traced by `Shading`.
+    pub fn len(self) -> usize {
+        if self == Variant::Temporal { 1 } else { 2 }
+    }
 }
 
 /// One program's pipeline sets, each present once a frame needed it or a reload
@@ -34,6 +43,7 @@ pub(crate) struct ProgramPipelines {
     pub hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub traced: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    pub temporal: Option<Owned<wgpu::ComputePipeline>>,
 }
 impl ProgramPipelines {
     pub fn has(&self, variant: Variant) -> bool {
@@ -42,25 +52,27 @@ impl ProgramPipelines {
             Variant::Hardware => self.hardware.is_some(),
             Variant::Fresh => self.fresh.is_some(),
             Variant::Traced => self.traced.is_some(),
+            Variant::Temporal => self.temporal.is_some(),
         }
     }
-    pub(super) fn install(&mut self, variant: Variant, pair: [Built; 2]) {
-        let render = |pair: [Built; 2]| {
-            Some(pair.map(|b| match b {
-                Built::Render(p) => p,
-                Built::Compute(_) => unreachable!("raster sets hold render pipelines"),
-            }))
+    /// Installs a set `create_sets` built: `variant.len()` pipelines.
+    pub(super) fn install(&mut self, variant: Variant, set: Vec<Built>) {
+        let render = |b: Built| match b {
+            Built::Render(p) => p,
+            Built::Compute(_) => unreachable!("raster sets hold render pipelines"),
         };
+        let compute = |b: Built| match b {
+            Built::Compute(p) => p,
+            Built::Render(_) => unreachable!("traced sets hold compute pipelines"),
+        };
+        let mut set = set.into_iter();
+        let mut next = || set.next().unwrap();
         match variant {
-            Variant::Lit => self.lit = render(pair),
-            Variant::Hardware => self.hardware = render(pair),
-            Variant::Fresh => self.fresh = render(pair),
-            Variant::Traced => {
-                self.traced = Some(pair.map(|b| match b {
-                    Built::Compute(p) => p,
-                    Built::Render(_) => unreachable!("the traced set holds compute pipelines"),
-                }))
-            }
+            Variant::Lit => self.lit = Some([render(next()), render(next())]),
+            Variant::Hardware => self.hardware = Some([render(next()), render(next())]),
+            Variant::Fresh => self.fresh = Some([render(next()), render(next())]),
+            Variant::Traced => self.traced = Some([compute(next()), compute(next())]),
+            Variant::Temporal => self.temporal = Some(compute(next())),
         }
     }
 }
@@ -127,6 +139,8 @@ pub(super) struct ProgramModules {
     fresh: Option<Owned<wgpu::ShaderModule>>,
     /// Hard and Soft shading, present exactly while traced primary visibility is selected.
     pub traced: Option<[Owned<wgpu::ShaderModule>; 2]>,
+    /// Temporal film shading, present with `traced`; its pipeline compiles on first use.
+    pub temporal: Option<Owned<wgpu::ShaderModule>>,
 }
 impl ProgramModules {
     pub fn has(&self, variant: Variant) -> bool {
@@ -135,6 +149,7 @@ impl ProgramModules {
             Variant::Hardware => self.hardware.is_some(),
             Variant::Fresh => self.fresh.is_some(),
             Variant::Traced => self.traced.is_some(),
+            Variant::Temporal => self.temporal.is_some(),
         }
     }
     /// Pipeline `index` of `variant`: the tangent stream, or `Shading` for traced.
@@ -167,6 +182,12 @@ impl ProgramModules {
                 abi.ledger,
                 &self.traced.as_ref().unwrap()[index],
                 index,
+                abi.cache,
+            )),
+            Variant::Temporal => Built::Compute(abi.primary.unwrap().film_shade_pipeline(
+                abi.device,
+                abi.ledger,
+                self.temporal.as_ref().unwrap(),
                 abi.cache,
             )),
         }
@@ -251,13 +272,20 @@ pub(super) fn compile_program(
             "program `{label}`: struct Parameters must be declared at module scope"
         )));
     }
-    let traced_sources: Vec<Composed> = abi
+    let mut traced_sources: Vec<Composed> = abi
         .primary
         .and(preludes.traced)
         .into_iter()
         .flatten()
         .map(|head| program::compose(head, source, Stage::Traced, parameters))
         .collect();
+    // The temporal module follows the Soft one; naga checks it in the same transaction.
+    if let Some(heads) = abi.primary.and(preludes.traced) {
+        let head = film_accumulation::shading_head(&heads[1])?;
+        traced_sources.push(film_accumulation::compose_shading(
+            &head, source, parameters,
+        ));
+    }
     let scopes = OperationScopes::new(abi.device);
     let raster_variant = |head: &str| {
         module(
@@ -272,6 +300,7 @@ pub(super) fn compile_program(
         fresh: abi.fresh.and(preludes.fresh).map(raster_variant),
         traced: (!traced_sources.is_empty())
             .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i]))),
+        temporal: traced_sources.get(2).map(|c| module(abi, label, c)),
     };
     if let Some(error) = scopes.finish() {
         return Err(scope_error(label, error, &traced_sources));
@@ -306,26 +335,35 @@ pub(super) fn in_parallel<T: Send, F: FnOnce() -> T + Send>(
 pub(super) fn create_sets(
     abi: &ProgramAbi<'_>,
     sets: &[(&ProgramModules, &str, Variant)],
-) -> Result<Vec<[Built; 2]>, Error> {
+) -> Result<Vec<Vec<Built>>, Error> {
     let jobs = sets.iter().flat_map(|&(modules, _, variant)| {
-        [0, 1].map(move |index| move || modules.pipeline(abi, variant, index))
+        (0..variant.len()).map(move |index| move || modules.pipeline(abi, variant, index))
     });
     let mut built = in_parallel(abi.device, jobs).into_iter();
     let mut out = Vec::with_capacity(sets.len());
     let mut failure = None;
     for &(_, label, variant) in sets {
-        let [(a, ea), (b, eb)] = [built.next().unwrap(), built.next().unwrap()];
-        if let Some(error) = ea.or(eb).filter(|_| failure.is_none()) {
-            failure = Some(match error {
-                wgpu::Error::Validation { .. } => {
-                    Error::Shader(format!("program `{label}`, {variant:?} pipelines: {error}"))
-                }
-                _ => Error::Fault(Fault(error.to_string())),
-            });
+        let mut set = Vec::with_capacity(variant.len());
+        for _ in 0..variant.len() {
+            let (pipeline, error) = built.next().unwrap();
+            if let Some(error) = error.filter(|_| failure.is_none()) {
+                failure = Some(match error {
+                    wgpu::Error::Validation { .. } => {
+                        Error::Shader(format!("program `{label}`, {variant:?} pipelines: {error}"))
+                    }
+                    _ => Error::Fault(Fault(error.to_string())),
+                });
+            }
+            set.push(pipeline);
         }
-        out.push([a, b]);
+        out.push(set);
     }
     failure.map_or(Ok(out), Err)
+}
+
+/// Pipelines in `built` sets, for `PipelineStats::created`.
+pub(super) fn pipeline_count(built: &[Vec<Built>]) -> u64 {
+    built.iter().map(|set| set.len() as u64).sum()
 }
 
 /// The standard program's handle and slot for a new renderer, whose ids start at 0.
@@ -448,8 +486,8 @@ impl Renderer {
         }
         self.pipelines.successes += 1;
         self.pipelines.installations += 1;
-        self.pipelines.created += 2 * built.len() as u64;
-        self.program_cache.count(2 * built.len() as u64);
+        self.pipelines.created += pipeline_count(&built);
+        self.program_cache.count(pipeline_count(&built));
         let slot = self.programs.iter_mut().find(|s| s.id == p.id()).unwrap();
         let zeroed = ParameterLayout::changed(slot.layout.as_ref(), compiled.layout.as_ref());
         let repack = slot.layout != compiled.layout;
@@ -497,8 +535,9 @@ impl Renderer {
 
     /// The sets a frame draws with: `variant` (None for unlit, diagnostic frames) of each
     /// program its draws' materials use (none: the standard program). A traced frame
-    /// shades with its first draw's program (admission rejects mixed ones); raster frames
-    /// also bind the standard program first.
+    /// shades with its first draw's program (admission rejects mixed ones); a temporal frame
+    /// also needs that program's traced set, which its reset frames shade with; raster
+    /// frames also bind the standard program first.
     pub(super) fn frame_sets<'a>(
         &self,
         draws: impl IntoIterator<Item = Option<&'a Material>>,
@@ -511,14 +550,18 @@ impl Renderer {
         let mut programs = draws
             .into_iter()
             .map(|m| m.map_or(standard, |m| m.program.id()));
-        let mut programs: Vec<u64> = if variant == Variant::Traced {
+        let mut programs: Vec<u64> = if matches!(variant, Variant::Traced | Variant::Temporal) {
             vec![programs.next().unwrap_or(standard)]
         } else {
             std::iter::once(standard).chain(programs).collect()
         };
         programs.sort_unstable();
         programs.dedup();
-        programs.into_iter().map(|id| (id, variant)).collect()
+        let reset = (variant == Variant::Temporal).then_some(Variant::Traced);
+        programs
+            .into_iter()
+            .flat_map(|id| std::iter::once((id, variant)).chain(reset.map(|v| (id, v))))
+            .collect()
     }
 
     /// Creates the sets in `sets` that their programs lack, every pipeline concurrently,
@@ -545,8 +588,8 @@ impl Renderer {
                 Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
                 other => other?,
             };
-            self.pipelines.created += 2 * built.len() as u64;
-            self.program_cache.count(2 * built.len() as u64);
+            self.pipelines.created += pipeline_count(&built);
+            self.program_cache.count(pipeline_count(&built));
             for (&(id, variant), pair) in missing.iter().zip(built) {
                 let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
                 slot.pipelines.install(variant, pair);
@@ -663,28 +706,33 @@ impl Renderer {
         self.programs.iter().find(|s| s.id == id).unwrap()
     }
 
-    /// Every program's traced Hard and Soft shading modules on `heads`, in slot order;
-    /// their pipelines compile when a traced frame first draws with the program.
+    /// Every program's traced Hard and Soft shading modules on `heads`, and its temporal
+    /// module, in slot order; their pipelines compile when a traced frame first draws with
+    /// the program.
+    #[allow(clippy::type_complexity)]
     pub(super) fn compile_traced_modules(
         &self,
         heads: &[String; 2],
-    ) -> Result<Vec<[Owned<wgpu::ShaderModule>; 2]>, Error> {
+    ) -> Result<Vec<([Owned<wgpu::ShaderModule>; 2], Owned<wgpu::ShaderModule>)>, Error> {
         let abi = self.program_abi();
+        let temporal = film_accumulation::shading_head(&heads[1])?;
         let mut out = vec![];
         for slot in &self.programs {
             let parameters = program::declares_parameters(&slot.source);
-            let sources = heads
-                .each_ref()
-                .map(|h| program::compose(h, &slot.source, Stage::Traced, parameters));
+            let sources = [
+                program::compose(&heads[0], &slot.source, Stage::Traced, parameters),
+                program::compose(&heads[1], &slot.source, Stage::Traced, parameters),
+                film_accumulation::compose_shading(&temporal, &slot.source, parameters),
+            ];
             let scopes = OperationScopes::new(&self.device);
-            let modules = sources.each_ref().map(|c| module(&abi, &slot.label, c));
+            let [hard, soft, film] = sources.each_ref().map(|c| module(&abi, &slot.label, c));
             if let Some(error) = scopes.finish() {
                 return Err(match scope_error(&slot.label, error, &sources) {
                     Error::Fault(Fault(message)) => self.fail(message),
                     other => other,
                 });
             }
-            out.push(modules);
+            out.push(([hard, soft], film));
         }
         Ok(out)
     }

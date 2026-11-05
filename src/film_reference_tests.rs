@@ -8,13 +8,22 @@ mod fixture;
 #[path = "receiver_policy_tests.rs"]
 mod receiver_policy_tests;
 
+#[path = "film_accumulation_tests.rs"]
+mod film_accumulation_tests;
+
 /// Trace/visibility and program shading have separate production modules and ABIs.
 struct FilmSources {
     kernels: String,
     shading: String,
 }
 
-fn jittered(source: &str) -> String {
+/// Randomized point within each of the 16x16 footprint strata. Odd/even indices
+/// interleave across the footprint, rather than splitting it in two.
+const R1_JITTER: &str = "\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n";
+
+/// The camera ray through `film_jitter(sample)` (`jitter` defines it) instead of the
+/// pixel centre; the sample index is camera.view_mode.y - 1.
+fn jittered_with(source: &str, jitter: &str) -> String {
     let mut source = edit(
         source,
         (
@@ -22,13 +31,15 @@ fn jittered(source: &str) -> String {
             "(vec2<f32>(pixel)+film_jitter(camera.view_mode.y-1u))",
         ),
     );
-    // Randomized point within each of the 16x16 footprint strata. Odd/even
-    // indices interleave across the footprint, rather than splitting it in two.
-    source.push_str("\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n");
+    source.push_str(jitter);
     source
 }
 
 fn film_shading(program: &str) -> String {
+    film_shading_with(program, R1_JITTER)
+}
+
+fn film_shading_with(program: &str, jitter: &str) -> String {
     let soft = if let Some(frozen) = frozen_reference_modules() {
         let source = fs::read_to_string(frozen.join("traced-soft.wgsl")).unwrap();
         edit(&source, (STANDARD, program))
@@ -36,7 +47,7 @@ fn film_shading(program: &str) -> String {
         primary_ray_gpu::shading_sources(SOURCE, program).unwrap()[1].clone()
     };
     // The hit-plane gradients must use the same jittered ray as primary tracing.
-    jittered(&soft)
+    jittered_with(&soft, jitter)
 }
 
 fn frozen_reference_modules() -> Option<PathBuf> {
@@ -47,6 +58,10 @@ fn frozen_reference_modules() -> Option<PathBuf> {
 }
 
 fn film_sources() -> FilmSources {
+    film_sources_with(R1_JITTER)
+}
+
+fn film_sources_with(jitter: &str) -> FilmSources {
     let frozen = frozen_reference_modules();
     let soft = if let Some(frozen) = &frozen {
         fs::read_to_string(frozen.join("kernels-soft.wgsl")).unwrap()
@@ -54,7 +69,7 @@ fn film_sources() -> FilmSources {
         primary_ray_gpu::shader_sources(SOURCE).unwrap()[1].clone()
     };
     let mut kernels = edit(
-        &jittered(&soft),
+        &jittered_with(&soft, jitter),
         (
             if frozen.is_some() {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));"
@@ -75,7 +90,7 @@ fn film_sources() -> FilmSources {
     );
     let mut sources = FilmSources {
         kernels,
-        shading: film_shading(STANDARD),
+        shading: film_shading_with(STANDARD, jitter),
     };
     // A bounded arithmetic reducer for receiver-equivalence investigations.
     // Registered production references omit this field entirely.
