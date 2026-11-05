@@ -2,6 +2,11 @@
 
 **Status:** Phase 1 is implemented and recorded in [programmable-shading-phase-1.md](programmable-shading-phase-1.md), with its gate result and open constraints. Sections 1 and 4 describe the code before it.
 
+The subsequent [receiver-policy adoption](m6-receiver-adoption.md) adds
+`MaterialDescriptor::thin` (false by default), exposed as `input.material.thin`,
+and requires callers to enable `renderlab::RECEIVER_FEATURES` for raster triangle
+vertices. Visibility remains independent of the program's lighting model.
+
 Design decision, 2026-11-05, based on `48eabf5`. This is CPU-only design: no renderer change, no GPU or window run and no repository build. The one piece of new evidence is a naga 30.0.1 composition probe outside the repository ([evidence](#evidence-and-time)). It uses the same naga that wgpu 30 validates with. Labels: **M** is measured, either in the cited records or by the probe; **I** is an inference.
 
 Islam's requirement: users write their own shaders to give games completely different looks, as in other engines. Examples are photoreal PBR, toon or cel shading, painterly rendering, stylised outlines, flat-shaded low-poly and custom lighting models. Programmability must not reduce quality, and the realistic path must stay very fast. The realistic-path quality bar (AGENTS.md at `48eabf5`) is the final image, static and in motion, judged against a high-sample, film-quality reference such as a path tracer, Cycles or Unreal's path tracer. Unreal's high-fidelity game rendering is the minimum. Temporal accumulation, caching and denoising are allowed. Core lighting, shadows and GI must not be screen-space.

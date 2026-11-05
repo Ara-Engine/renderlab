@@ -65,6 +65,9 @@ pub struct MaterialDescriptor<'a> {
     pub normal_texture: Option<TextureBinding<'a>>,
     pub normal_scale: f32,
     pub double_sided: bool,
+    /// Shadow rays may leave either side toward the light. False keeps opaque
+    /// receivers on the camera-viewed side, independently of the shading normal.
+    pub thin: bool,
     /// The material's shading program; None is the renderer's standard program.
     pub program: Option<&'a Program>,
     /// Named values for the program's `struct Parameters`, checked by name and type.
@@ -82,6 +85,7 @@ impl Default for MaterialDescriptor<'_> {
             normal_texture: None,
             normal_scale: 1.,
             double_sided: false,
+            thin: false,
             program: None,
             parameters: &[],
         }
@@ -92,6 +96,7 @@ pub struct Material {
     pub(crate) renderer: Arc<()>,
     pub(crate) normal_mapped: bool,
     pub(crate) double_sided: bool,
+    pub(crate) thin: bool,
     pub(crate) bind: Owned<wgpu::BindGroup>,
     pub(crate) _uniform: Owned<wgpu::Buffer>,
     pub(crate) _samplers: [Owned<wgpu::Sampler>; 3],
@@ -145,6 +150,7 @@ impl MaterialDescriptor<'_> {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
         bytes[24..28].copy_from_slice(&u32::from(self.double_sided).to_ne_bytes());
+        bytes[28..32].copy_from_slice(&u32::from(self.thin).to_ne_bytes());
         bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
         bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
         bytes
@@ -237,6 +243,17 @@ pub(crate) fn sampler_descriptor(
 mod tests {
     use super::*;
     use renderlab_asset::{Mip, Texture as Data};
+    #[test]
+    fn thin_is_explicit_and_independent_of_double_sided_shading() {
+        let mut descriptor = MaterialDescriptor::default();
+        assert!(!descriptor.thin);
+        assert_eq!(&descriptor.bytes()[28..32], &0u32.to_ne_bytes());
+        descriptor.double_sided = true;
+        assert_eq!(&descriptor.bytes()[28..32], &0u32.to_ne_bytes());
+        descriptor.thin = true;
+        assert_eq!(&descriptor.bytes()[28..32], &1u32.to_ne_bytes());
+        assert_eq!(descriptor.bytes().len(), 48);
+    }
     #[test]
     fn anisotropy_preserves_explicit_sampler_choices() {
         let linear = Sampler::default();

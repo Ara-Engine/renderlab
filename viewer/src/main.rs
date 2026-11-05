@@ -425,7 +425,7 @@ impl View {
         };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features,
+                required_features: required_features | renderlab::RECEIVER_FEATURES,
                 ..Default::default()
             }))?;
         let size = window.inner_size();

@@ -13,15 +13,13 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     }
     if !found { return 1.0; }
     let view=shadow_views[layer];
-    // The geometric plane keeps normal maps from moving shadow origins.
-    let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
-    let origin=world+normal*view.coverage_bias.w;
+    let origin=shadow_origin(receiver,l);
     let projected=(view.world_to_clip*vec4<f32>(origin,1.0)).xyz;
     if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 { return 1.0; }
     let delta=(view.world_to_clip*vec4<f32>(l,0.0)).xyz;
     // texel.y is the CPU-validated rate from this exact rounded matrix and light.
     let rate=view.texel.y;
-    let tmin=view.coverage_bias.z/rate;
+    let tmin=receiver.epsilon;
     var tmax=projected.z/rate;
     for(var a=0u;a<2u;a+=1u) {
         if delta[a]>0.0 { tmax=min(tmax,(1.0-projected[a])/delta[a]); }

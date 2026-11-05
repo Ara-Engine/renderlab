@@ -45,20 +45,23 @@ pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
 }
 
 /// Per TLAS placement, in placement order: its draw (batch) index, with bit 31 set when
-/// that draw has a tangent stream and bit 30 when its material is single-sided.
-/// `draws` yields instance count, tangent presence and single-sidedness.
+/// that draw has a tangent stream, bit 30 for single-sided, bit 29 for thin.
+/// `draws` yields instance count, tangent presence, single-sidedness and thinness.
 pub(crate) fn placement_table(
-    draws: impl Iterator<Item = (usize, bool, bool)>,
+    draws: impl Iterator<Item = (usize, bool, bool, bool)>,
 ) -> Result<Vec<u32>, Error> {
     let mut table = vec![];
-    for (batch, (instances, tangent, single_sided)) in draws.enumerate() {
+    for (batch, (instances, tangent, single_sided, thin)) in draws.enumerate() {
         if batch >= TRACED_DRAWS as usize {
             return Err(Error::InvalidInput(
                 "traced primary visibility supports at most TRACED_DRAWS draws",
             ));
         }
         table.extend(std::iter::repeat_n(
-            batch as u32 | (u32::from(tangent) << 31) | (u32::from(single_sided) << 30),
+            batch as u32
+                | (u32::from(tangent) << 31)
+                | (u32::from(single_sided) << 30)
+                | (u32::from(thin) << 29),
             instances,
         ));
     }
@@ -70,10 +73,14 @@ mod tests {
     use super::*;
     #[test]
     fn placements_name_their_draw_and_tangent_stream() {
-        let draws = [(2, false, false), (0, true, true), (1, true, true)];
+        let draws = [
+            (2, false, false, false),
+            (0, true, true, false),
+            (1, true, true, true),
+        ];
         let table = placement_table(draws.into_iter()).unwrap();
-        assert_eq!(table, [0, 0, 2 | 1 << 31 | 1 << 30]);
-        let many = std::iter::repeat_n((1, false, false), TRACED_DRAWS as usize + 1);
+        assert_eq!(table, [0, 0, 2 | 1 << 31 | 1 << 30 | 1 << 29]);
+        let many = std::iter::repeat_n((1, false, false, false), TRACED_DRAWS as usize + 1);
         assert!(placement_table(many).is_err());
         let limits = traced_limits(wgpu::Limits::default());
         assert_eq!(

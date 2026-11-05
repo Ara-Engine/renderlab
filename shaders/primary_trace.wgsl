@@ -37,8 +37,11 @@ fn primary_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
     }
     let hit=rayQueryGetCommittedIntersection(&query);
     if hit.kind==0u {return PrimaryTrace(vec4<u32>(0u),vec3<f32>(0.0),array<vec3<f32>,3>());}
-    return PrimaryTrace(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),
-        ray.near+direction*hit.t,getCommittedHitVertexPositions(&query));
+    let v=getCommittedHitVertexPositions(&query);
+    let w=vec3<f32>(1.0-hit.barycentrics.x-hit.barycentrics.y,hit.barycentrics);
+    // Reconstruct on the hit triangle rather than the rounded primary-ray segment.
+    let point=world_position(receiver_point(v[0],v[1],v[2],w),hit.instance_custom_data).xyz;
+    return PrimaryTrace(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),point,v);
 }
 // The pixel's camera ray, or a miss without a ray outside the image or primary_frame.scene.
 fn primary_scene_trace(id:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
@@ -63,7 +66,7 @@ fn primary_tile_covered(hit:bool,id:vec2<u32>,group:vec2<u32>)->bool {
     if !primary_tile_covered(record.x!=0u,id.xy,group.xy) || any(id.xy>=size) {return;}
     textureStore(primary_hit_output,vec2<i32>(id.xy),record);
 }
-// Exact soft frames also publish exact fresh receivers at hits: the ray point, its depth
+// Exact soft frames also publish exact fresh receivers at hits: the triangle point, epsilon
 // and the hit triangle's plane normal from its returned positions (no vertex gather).
 // Misses leave both receivers stale; traced fresh visibility reads coverage from the
 // tile flag and hit record instead (primary_ray_gpu.rs COVERAGE_SEAM).
@@ -74,9 +77,8 @@ fn primary_tile_covered(hit:bool,id:vec2<u32>,group:vec2<u32>)->bool {
     let p=vec2<i32>(id.xy);
     textureStore(primary_hit_output,p,trace.record);
     if trace.record.x==0u {return;}
-    let clip=camera.view_projection*vec4<f32>(trace.point,1.0);
-    textureStore(primary_world_output,p,vec4<f32>(trace.point,clip.z/clip.w));
-    let v=trace.positions;
-    let normal=primary_geometric(v[0],v[1],v[2],trace.record.x-1u);
-    textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));
+    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);
+    textureStore(primary_world_output,p,vec4<f32>(receiver.world,receiver.epsilon));
+    let normal=receiver.geometric;
+    textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));
 }

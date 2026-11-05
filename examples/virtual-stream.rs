@@ -266,7 +266,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let info = adapter.get_info();
     eprintln!("adapter={info:?} samples={:?}", o.samples);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        required_features: renderlab::RECEIVER_FEATURES
+            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
         ..Default::default()
     }))?;
     let mut r = Renderer::new_with_options(

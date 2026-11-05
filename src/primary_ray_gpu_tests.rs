@@ -68,6 +68,22 @@ fn traced_frame(
 fn receivers(r: &Renderer) -> [Vec<u8>; 3] {
     let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let mut out = [&t.world, &t.normal, &t.visibility].map(|d| read_texture(r, &d.texture));
+    // Evidence retains the registered world.xyz + reversed-Z depth format. The
+    // production attachment's fourth channel now carries receiver epsilon.
+    let matrix = Mat4::from_cols_array(&std::array::from_fn(|i| {
+        f32::from_ne_bytes(
+            r.camera_shadow.unwrap()[i * 4..i * 4 + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }));
+    for world in out[0].chunks_exact_mut(16) {
+        let xyz = Vec3::from_array(std::array::from_fn(|i| {
+            f32::from_ne_bytes(world[i * 4..i * 4 + 4].try_into().unwrap())
+        }));
+        let clip = matrix * xyz.extend(1.0);
+        world[12..16].copy_from_slice(&(clip.z / clip.w).to_ne_bytes());
+    }
     if r.primary_mode == PrimaryVisibility::Traced {
         let hit = hit_record(r);
         for (i, record) in hit.chunks_exact(16).enumerate() {

@@ -25,7 +25,7 @@ fn reference_source(width: u32, visibility_only: bool) -> String {
         .split_once(crate::hardware_shadows::VISIBILITY_END)
         .unwrap();
     let prelude = format!(
-        "enable wgpu_ray_query;\nconst REFERENCE_WIDTH:u32={width}u;\n{before}\n{}\n{after}",
+        "enable wgpu_ray_query;\n{before}\nconst REFERENCE_WIDTH:u32={width}u;\n{}\n{after}",
         include_str!("../support/fresh_fragment_reference.wgsl")
     );
     let program = if visibility_only {
@@ -167,7 +167,8 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     eprintln!("fresh_adapter={:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY
+        required_features: crate::RECEIVER_FEATURES
+            | wgpu::Features::EXPERIMENTAL_RAY_QUERY
             | wgpu::Features::TIMESTAMP_QUERY
             | crate::TRACED_FEATURES
             | extra,

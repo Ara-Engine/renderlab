@@ -38,9 +38,11 @@ pub struct Shadows {
     pub requests: Vec<ShadowRequest>,
     /// Common square resolution for the owned depth array.
     pub resolution: u32,
-    /// Receiver depth offset in normalized map depth, in [0, 1).
+    /// Legacy compatibility value, validated and uploaded but ignored by visibility.
+    /// Receivers now use the triangle-scaled policy; this cannot change ray t_min.
     pub depth_bias: f32,
-    /// Receiver offset along its geometric surface normal, in metres.
+    /// Legacy compatibility value, validated and uploaded but ignored by visibility.
+    /// Receiver offsets are max(10 micrometres, 16 vertex-coordinate float ULPs).
     pub normal_bias: f32,
     /// Directional visibility disk half-angle in radians, in [0, 0.1]. Zero uses hard shadows.
     /// Nonzero requires hardware 1x, one shadowed directional light and regular opaque double-sided geometry.

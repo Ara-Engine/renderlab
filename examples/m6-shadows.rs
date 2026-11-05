@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         samples as u32
     );
     let mut requested = wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        required_features: renderlab::RECEIVER_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     };
     if hardware {

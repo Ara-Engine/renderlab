@@ -21,8 +21,8 @@ fn diagnostic_source() -> String {
     let s = edit(
         &s,
         (
-            "        visible+=select(0u,1u,distance==0.0);",
-            "        visible+=select(0u,1u,distance==0.0);\n        if distance!=0.0 {atomicOr(&probe_masks[(pixel.x+pixel.y*width)*8u+j/32u],1u<<(j%32u));}",
+            "        visible+=select(1u,0u,blocked);",
+            "        visible+=select(1u,0u,blocked);\n        if blocked {atomicOr(&probe_masks[(pixel.x+pixel.y*width)*8u+j/32u],1u<<(j%32u));}",
         ),
     );
     format!(

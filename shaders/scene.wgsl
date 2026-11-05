@@ -1,9 +1,10 @@
+enable wgpu_per_vertex;
 struct Camera { view_projection: mat4x4<f32>, view_mode: vec4<u32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<storage, read> models: array<mat4x4<f32>>;
 struct NormalTransform { x:vec4<f32>, y:vec4<f32>, z:vec4<f32>, info:vec4<f32> };
 @group(1) @binding(1) var<storage, read> normals: array<NormalTransform>;
-struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, pad:u32, normal_scale:f32, normal_mapped:u32, pad2:vec2<u32> };
+struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, thin:u32, normal_scale:f32, normal_mapped:u32, pad2:vec2<u32> };
 @group(2) @binding(0) var<uniform> material:Material;
 @group(2) @binding(1) var base_color:texture_2d<f32>;
 @group(2) @binding(2) var base_sampler:sampler;
@@ -30,11 +31,53 @@ struct VertexOutput {
     @location(4) world:vec3<f32>,
     @location(5) tangent:vec3<f32>,
     @location(6) @interpolate(flat) handedness:f32,
+    @location(7) receiver_vertex:vec3<f32>,
+};
+// Fragment interpolants omit location 7: RasterTriangle consumes it per vertex.
+struct RasterInput {
+    @builtin(position) position:vec4<f32>,
+    @location(0) color:vec4<f32>,
+    @location(1) uv:vec2<f32>,
+    @location(2) normal:vec3<f32>,
+    @location(3) @interpolate(flat) winding:f32,
+    @location(4) world:vec3<f32>,
+    @location(5) tangent:vec3<f32>,
+    @location(6) @interpolate(flat) handedness:f32,
 };
 // Engine-private receiver of one shaded pixel; every visibility variant reads it.
-// geometric: the receiver plane's unit normal as raster derivatives give it, pointing
-// away from the camera. pixel: the shaded pixel. slot: the traced draw's material slot.
-struct Receiver { world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, slot:u32 };
+// geometric: the hit triangle's unit plane normal (either orientation). pixel: the
+// shaded pixel. slot: the traced material slot. Epsilon and thinness are geometry/
+// material declarations shared by every shading program, independent of its BRDF.
+struct Receiver { world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, slot:u32, epsilon:f32, thin:bool };
+// These are the rasterizer's hit triangle, not neighbouring pixels or mesh bounds.
+struct RasterTriangle {
+    @location(7) @interpolate(per_vertex) vertices:array<vec3<f32>,3>,
+};
+// Vertex-coordinate precision scale, including translated and transformed triangles.
+fn receiver_epsilon(a:vec3<f32>,b:vec3<f32>,c:vec3<f32>)->f32 {
+    let extent=max(abs(a),max(abs(b),abs(c)));
+    let m=max(extent.x,max(extent.y,extent.z));
+    let ulp=bitcast<f32>(bitcast<u32>(m)+1u)-m;
+    return max(1e-5,16.0*ulp);
+}
+// Pin the barycentric contraction order; camera-ray contraction is pinned separately.
+fn receiver_point(a:vec3<f32>,b:vec3<f32>,c:vec3<f32>,w:vec3<f32>)->vec3<f32> {
+    return fma(c,vec3<f32>(w.z),fma(b,vec3<f32>(w.y),a*w.x));
+}
+fn raster_receiver(world:vec3<f32>,triangle:RasterTriangle,pixel:vec2<i32>,thin:bool)->Receiver {
+    let a=triangle.vertices[0];let b=triangle.vertices[1];let c=triangle.vertices[2];
+    // The rasterizer interpolates this point on the winning triangle, including
+    // sample interpolation at 4x. Per-vertex inputs supply its precision scale.
+    let normal=unit_normal(cross(unit_normal(b-a),unit_normal(c-a)));
+    return Receiver(world,normal,pixel,0u,receiver_epsilon(a,b,c),thin);
+}
+// Opaque receivers stay on the viewed side even under backlighting. Thinness is
+// declared per material, not inferred from double-sided shading or the BRDF.
+fn shadow_origin(receiver:Receiver,l:vec3<f32>)->vec3<f32> {
+    let toward=select(lighting.eye-receiver.world,l,receiver.thin);
+    let normal=select(-receiver.geometric,receiver.geometric,dot(receiver.geometric,toward)>=0.0);
+    return fma(normal,vec3<f32>(receiver.epsilon),receiver.world);
+}
 fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
     let scaled=n/max(scale,1e-30);
@@ -50,6 +93,7 @@ fn vertex_output(input: VertexInput) -> VertexOutput {
     let world = world_position(input.position, input.slot);
     output.position = camera.view_projection * world;
     output.world = world.xyz;
+    output.receiver_vertex = world.xyz;
     output.color = input.color;
     output.uv = input.uv;
     output.normal = unit_normal(mat3x3<f32>(normal.x.xyz,normal.y.xyz,normal.z.xyz)*unit_normal(input.normal));
@@ -127,8 +171,9 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     let geometric=receiver.geometric;
     if light.kind.z==0u { return 1.0; }
     var layer=light.kind.y;
-    let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
-    let biased_world=world+normal*shadow_views[layer].coverage_bias.w;
+    // Shadow-map comparison at the ray's positive epsilon near point. Raster's
+    // receiver-plane texel correction below remains a sampling precision guard.
+    let biased_world=fma(l,vec3<f32>(receiver.epsilon),shadow_origin(receiver,l));
     if light.kind.x==0u {
         let depth=dot(shadow_views[layer].camera_depth,vec4<f32>(world,1.0));
         var found=false;
@@ -172,9 +217,9 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         reference-=dot(plane.xy,sample_ndc-ndc.xy)/plane.z;
         // Bounds subpixel rounding of the receiver's own plane (at least 4 subpixel bits),
         // not depth differences from non-planar neighbouring triangles.
-        reference-=dot(abs(plane.xy),2.0/vec2<f32>(extent))/(16.0*abs(plane.z));
+        reference+=dot(abs(plane.xy),2.0/vec2<f32>(extent))/(16.0*abs(plane.z));
     }
-    return select(0.0,1.0,reference-view.coverage_bias.z<=stored);
+    return select(0.0,1.0,reference>=stored);
 }
 // renderlab: direct visibility end
 // Presentation uses its own layout and entry points in this same atomic module.

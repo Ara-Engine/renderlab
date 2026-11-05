@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         samples as u32
     );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        required_features: renderlab::RECEIVER_FEATURES | wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     }))?;
     let mut r = Renderer::new_with_options(

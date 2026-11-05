@@ -21,9 +21,8 @@
     textureStore(primary_hit_output,p,trace.record);
     var visible=FRESH_SKIP;
     if trace.record.x!=0u {
-        let v=trace.positions;
-        let normal=primary_geometric(v[0],v[1],v[2],trace.record.x-1u);
-        visible=fresh_estimate(trace.point,normal,id.xy,size.x,0u);
+        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);
+        visible=fresh_estimate(receiver,id.xy,size.x,0u);
     }
     textureStore(fresh_output,p,vec4<u32>(select((256u/FRESH_DIRECTIONS)*visible,256u,visible==FRESH_SKIP)));
 }

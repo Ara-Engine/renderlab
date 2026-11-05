@@ -1,5 +1,10 @@
 # M6 R1: receiver policy and radiance references
 
+**Subsequent adoption:** Islam approved the viewed-side policy. Its production
+implementation, regenerated gates, measured cost misses and API/device changes
+are recorded in [production receiver policy](m6-receiver-adoption.md). The R1
+experiment and decision-pending statements below remain frozen historical evidence.
+
 2026-11-05. Test-only, base `eff3553`, branch `t3/m6-receiver-policy-tests`. No production files/defaults changed. Committed locally; no push. Binding scope and stop rules: [film gap §§6–7](m6-film-gap.md). [F0](m6-film-reference.md) and [the exact-quality design](m6-exact-quality-fast-shadows.md) remain frozen evidence.
 
 **Magnitude verdict: passes the frozen per-population difference gate.** This authorizes no production policy change. The viewed-side variant is an estimand change presented for Islam’s decision and is **not adopted**. The production default remains Exact with its existing receiver policy.

@@ -29,48 +29,74 @@ fn jittered(source: &str) -> String {
 }
 
 fn film_shading(program: &str) -> String {
-    let [_, soft] = primary_ray_gpu::shading_sources(SOURCE, program).unwrap();
+    let soft = if let Some(frozen) = frozen_reference_modules() {
+        let source = fs::read_to_string(frozen.join("traced-soft.wgsl")).unwrap();
+        edit(&source, (STANDARD, program))
+    } else {
+        primary_ray_gpu::shading_sources(SOURCE, program).unwrap()[1].clone()
+    };
     // The hit-plane gradients must use the same jittered ray as primary tracing.
     jittered(&soft)
 }
 
-fn film_sources(minimal: bool) -> FilmSources {
-    let [_, soft] = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+fn frozen_reference_modules() -> Option<PathBuf> {
+    std::env::var_os("RENDERLAB_PRIMARY_MANIFEST")?;
+    manifest()["film_frozen_modules"]
+        .as_str()
+        .map(PathBuf::from)
+}
+
+fn film_sources() -> FilmSources {
+    let frozen = frozen_reference_modules();
+    let soft = if let Some(frozen) = &frozen {
+        fs::read_to_string(frozen.join("kernels-soft.wgsl")).unwrap()
+    } else {
+        primary_ray_gpu::shader_sources(SOURCE).unwrap()[1].clone()
+    };
     let mut kernels = edit(
         &jittered(&soft),
         (
-            "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));",
-            "textureStore(primary_normal_output,p,vec4<f32>(normal,f32(camera.view_mode.y)));",
+            if frozen.is_some() {
+                "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));"
+            } else {
+                "textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));"
+            },
+            if frozen.is_some() {
+                "textureStore(primary_normal_output,p,vec4<f32>(normal,f32(camera.view_mode.y)));"
+            } else {
+                "textureStore(primary_normal_output,p,vec4<f32>(normal,select(f32(camera.view_mode.y),-f32(camera.view_mode.y),receiver.thin)));"
+            },
         ),
     );
     kernels = edit(&kernels, SEED_EDIT);
     kernels = kernels.replace(
         "FRESH_SEED",
-        "(u32(textureLoad(fresh_normal,vec2<i32>(pixel),0).w))",
+        "(u32(abs(textureLoad(fresh_normal,vec2<i32>(pixel),0).w)))",
     );
-    if minimal {
-        kernels = edit(
-            &kernels,
-            (
-                "let origin=world+normal*view.coverage_bias.w;",
-                "let origin=world+normal*1e-5;",
-            ),
-        );
-        kernels = edit(
-            &kernels,
-            ("let tmin=view.coverage_bias.z/rate;", "let tmin=1e-5;"),
-        );
-    }
-    FilmSources {
+    let mut sources = FilmSources {
         kernels,
         shading: film_shading(STANDARD),
+    };
+    // A bounded arithmetic reducer for receiver-equivalence investigations.
+    // Registered production references omit this field entirely.
+    if std::env::var_os("RENDERLAB_PRIMARY_MANIFEST").is_some()
+        && let Some(edits) = manifest()["film_shader_edits"].as_array()
+    {
+        for pair in edits {
+            let find = pair[0].as_str().unwrap();
+            let replace = pair[1].as_str().unwrap();
+            for source in [&mut sources.kernels, &mut sources.shading] {
+                *source = edit(source, (find, replace));
+            }
+        }
     }
+    sources
 }
 
 #[test]
 fn film_reference_sources_compile() {
-    for minimal in [false, true] {
-        let sources = film_sources(minimal);
+    {
+        let sources = film_sources();
         for source in [sources.kernels, sources.shading] {
             validate_wgsl(&source);
         }
@@ -123,7 +149,19 @@ fn integrate_with(
         fs::write(prefix.with_extension(suffix), data).unwrap();
     }
     fs::write(prefix.with_extension("exact.rgba16f"), capture(r)).unwrap();
-    let centre: Vec<u8> = world
+    // R1 comparisons keep the same registered surface-acceptance anchor: moving
+    // the centre from the old rounded ray point onto its triangle can otherwise
+    // change a few 2%-depth boundary memberships, independently of shadow rays.
+    // R_L/R_D never use this acceptance mask. Production receivers above are
+    // still captured unchanged, and all shadow origins use production code.
+    let anchor = std::env::var_os("RENDERLAB_PRIMARY_MANIFEST")
+        .and_then(|_| manifest()["r1_reference"].as_str().map(PathBuf::from))
+        .filter(|path| path.join(format!("pose-{pose}.world.f32")).is_file());
+    let anchor_world = anchor.as_ref().map_or_else(
+        || world.clone(),
+        |p| fs::read(p.join(format!("pose-{pose}.world.f32"))).unwrap(),
+    );
+    let centre: Vec<u8> = anchor_world
         .chunks_exact(16)
         .zip(hit.chunks_exact(16))
         .flat_map(|(w, h)| w[..12].iter().chain(h[..4].iter()).copied())
@@ -257,7 +295,7 @@ fn integrate_with(
         layout: &accumulator.get_bind_group_layout(0),
         entries: &entries,
     });
-    let sources = policy.map_or_else(|| film_sources(minimal), receiver_policy_tests::sources);
+    let sources = policy.map_or_else(film_sources, receiver_policy_tests::sources);
     let pipelines = r.primary.as_ref().unwrap().test_film_pipelines(
         &r.device,
         &sources.kernels,
@@ -391,18 +429,18 @@ fn integrate_with(
         .unwrap();
     }
     r.queue.write_buffer(&r.uniform, 68, &0u32.to_le_bytes());
-    fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"pose":pose,"minimal":minimal,"size":[w,h],"samples":256,"rays_per_sample":256,"seconds":start.elapsed().as_secs_f64(),"camera_inverse":camera.matrix(w,h).inverse().to_cols_array(),"eye":eye.to_array(),"forward":forward.to_array(),"normal_bias":if minimal {1e-5} else {0.001},"tmin":if minimal {"1e-5 m"} else {"unchanged projected-depth policy"}})).unwrap()).unwrap();
+    fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"pose":pose,"size":[w,h],"samples":256,"rays_per_sample":256,"seconds":start.elapsed().as_secs_f64(),"camera_inverse":camera.matrix(w,h).inverse().to_cols_array(),"eye":eye.to_array(),"forward":forward.to_array(),"receiver_policy":if frozen_reference_modules().is_some() {"frozen-767c28c"} else {"Production"},"normal_bias":if frozen_reference_modules().is_some() {"0.001 m"} else {"max(10um,16ulp(max abs world triangle vertex))"},"tmin":if frozen_reference_modules().is_some() {"frozen projected-depth policy"} else {"epsilon (ray distance)"}})).unwrap()).unwrap();
     if let Some(policy) = policy {
         let path = prefix.with_extension("json");
         let mut info: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        info["receiver_policy"] = serde_json::json!(format!("{policy:?}"));
-        info["normal_bias"] = if matches!(policy, receiver_policy_tests::Policy::Minimal) {
-            serde_json::json!("1e-5 m (F0 replay)")
-        } else {
-            serde_json::json!("max(10um,16ulp(max abs world triangle vertex))")
-        };
-        info["tmin"] = serde_json::json!("epsilon (ray distance)");
+        if frozen_reference_modules().is_none() {
+            info["receiver_policy"] = serde_json::json!(format!("{policy:?}"));
+        }
+        info["acceptance_anchor"] = serde_json::json!(anchor.map_or_else(
+            || "production centre".to_owned(),
+            |p| p.display().to_string()
+        ));
         info["saved_strata"] = serde_json::json!(
             (0..16u32)
                 .map(|i| i * 16 + (i * 7) % 16)
@@ -419,12 +457,24 @@ fn gpu_film_reference() {
     let _validation = validation::begin(true);
     let mut r = renderer(true);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    // The immutable old modules supply a same-process old-policy control, including
+    // direct film radiance which F0 did not save. No production pipeline uses it.
+    if let Some(frozen) = frozen_reference_modules() {
+        let read = |names: [&str; 2]| {
+            names.map(|n| fs::read_to_string(frozen.join(format!("{n}.wgsl"))).unwrap())
+        };
+        r.pipeline.primary = Some(r.primary.as_ref().unwrap().compile(
+            &r.device,
+            &r.ledger,
+            &read(["kernels-hard", "kernels-soft"]),
+        ));
+        *r.test_standard().traced.as_mut().unwrap() =
+            shading_pipelines(&r, &read(["traced-hard", "traced-soft"]));
+    }
     let out = PathBuf::from(m["output"].as_str().unwrap());
     let minimal = m["minimal"].as_bool().unwrap();
     let receiver_policy = match m["receiver_policy"].as_str() {
-        Some("minimal") => Some(receiver_policy_tests::Policy::Minimal),
-        Some("magnitude") => Some(receiver_policy_tests::Policy::Magnitude),
-        Some("viewed") => Some(receiver_policy_tests::Policy::Viewed),
+        Some("production") => Some(receiver_policy_tests::Policy::Production),
         None => None,
         _ => panic!("unknown receiver policy"),
     };

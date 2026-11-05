@@ -25,6 +25,10 @@ impl ShadowFrame {
             for layer in first..first + count {
                 let view = &self.views[layer as usize];
                 let offset = layer as usize * VIEW_BYTES as usize;
+                // Ray distances use the forward light volume; raster maps use
+                // the independently constructed reversed-depth record instead.
+                self.records[offset..offset + 64]
+                    .copy_from_slice(&matrix_bytes(view.world_to_clip));
                 let bias =
                     f32::from_ne_bytes(self.records[offset + 72..offset + 76].try_into().unwrap());
                 let rate = hardware_depth_rate(view.world_to_clip, sun, bias)?;
@@ -48,6 +52,30 @@ fn hardware_depth_rate(matrix: Mat4, sun: Vec3, bias: f32) -> Result<f32, Error>
         ));
     }
     Ok(rate)
+}
+
+/// Raster maps need reversed depth too: a forward perspective map with a 1 mm
+/// near plane cannot resolve a 10 um receiver offset several metres away. Build
+/// the depth row before f32 rounding; subtracting two rounded clip rows loses it.
+/// XY/W stay the planner's authoritative values. Ray-query records stay forward.
+fn raster_depth_matrix(view: &ShadowView) -> Mat4 {
+    let near = f64::from(view.depth[0]);
+    let far = f64::from(view.depth[1]);
+    let perspective = !matches!(view.kind, plan::ViewKind::Cascade { .. });
+    let z = view.world_to_view.as_dmat4().transpose().z_axis;
+    let w = view.world_to_view.as_dmat4().transpose().w_axis;
+    let row = if perspective {
+        (z * near + w * (near * far)) / (far - near)
+    } else {
+        (z + w * far) / (far - near)
+    }
+    .as_vec4();
+    let mut matrix = view.world_to_clip;
+    matrix.x_axis.z = row.x;
+    matrix.y_axis.z = row.y;
+    matrix.z_axis.z = row.z;
+    matrix.w_axis.z = row.w;
+    matrix
 }
 struct ShadowResources {
     _texture: Owned<wgpu::Texture>,
@@ -336,7 +364,7 @@ impl ShadowState {
             debug_assert_eq!(view.resolution, self.settings.resolution);
             debug_assert!(view.world_to_view.is_finite() && view.view_to_clip.is_finite());
             debug_assert!(view.depth[1] > view.depth[0]);
-            records.extend_from_slice(&matrix_bytes(view.world_to_clip));
+            records.extend_from_slice(&matrix_bytes(raster_depth_matrix(view)));
             let (near, far) = match view.kind {
                 plan::ViewKind::Cascade { near, far } => (near, far),
                 _ => (0.0, 0.0),
@@ -676,7 +704,7 @@ impl Renderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadows.active.layers[index],
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -754,6 +782,31 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raster_perspective_depth_resolves_the_receiver_floor() {
+        for near in [0.001, 0.05] {
+            let view = plan::spot(
+                Vec3::Z * 4.0,
+                -Vec3::Z,
+                0.6,
+                LocalRange { near, far: 20.0 },
+                1024,
+                &[],
+            )
+            .unwrap();
+            let matrix = raster_depth_matrix(&view);
+            let depth = |point: Vec3| {
+                let p = matrix * point.extend(1.0);
+                p.z / p.w
+            };
+            assert!((depth(Vec3::Z * (4.0 - view.depth[0])) - 1.0).abs() < 2e-4);
+            assert!(depth(Vec3::Z * (4.0 - view.depth[1])).abs() < 1e-7);
+            assert!(
+                depth(Vec3::Z * 1e-5) > depth(Vec3::ZERO),
+                "10 um must survive depth storage"
+            );
+        }
+    }
     #[test]
     fn hardware_bias_uses_actual_matrix_and_finite_light_volume() {
         let matrix = Mat4::orthographic_rh(-5., 5., -5., 5., 0.1, 10.1);
