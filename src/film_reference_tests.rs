@@ -1,13 +1,19 @@
-//! F0 only: 256 stratified primary samples, each with Exact's 256 shadow rays.
+//! Test-only F0/R1 film references: 256 primary samples, each with 256 shadow rays.
 //! Camera.view_mode.y is test scratch (sample + 1). The trace copies it into
 //! normal.w so the unchanged fresh ABI can salt each subpixel independently.
 use super::*;
 #[path = "../support/fresh_fixture.rs"]
 mod fixture;
 
+#[path = "receiver_policy_tests.rs"]
+mod receiver_policy_tests;
+
 fn film_sources(minimal: bool) -> [String; 2] {
     let mut sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
     for source in &mut sources {
+        // The current production entry is tiled; F0's cfg(test) accessor retains
+        // its original name. Adapt only the composed test module.
+        *source = edit(source, ("fn primary_shade_tiles(", "fn primary_shade("));
         *source = edit(
             source,
             (
@@ -83,7 +89,14 @@ fn read_buffer(r: &mut Renderer, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
 
 /// A normal centre frame must precede this call. Further samples reuse its owned
 /// scene/TLAS/material bindings; no resource tables or production files are edited.
-fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usize, minimal: bool) {
+fn integrate_with(
+    r: &mut Renderer,
+    camera: &Camera,
+    out: &std::path::Path,
+    pose: usize,
+    minimal: bool,
+    policy: Option<receiver_policy_tests::Policy>,
+) {
     fs::create_dir_all(out).unwrap();
     r.test_drain("film centre");
     let start = Instant::now();
@@ -129,9 +142,20 @@ fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usi
         48,
         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     );
+    let accumulator_source = receiver_policy_tests::accumulator_source(policy.is_some());
+    let sample_buffer = make(
+        "R1 saved visibility",
+        (world.len() / 4) as u64,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
+    let direct_sum = make(
+        "R1 direct sums",
+        bytes,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
     let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("F0 accumulator"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../support/film_accumulate.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(accumulator_source.into()),
     });
     let accumulator = r
         .device
@@ -180,18 +204,68 @@ fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usi
             resource: params.as_entire_binding(),
         },
     ]);
+    let tile_view = r
+        .primary
+        .as_ref()
+        .unwrap()
+        .targets
+        .as_ref()
+        .unwrap()
+        .tiles
+        .texture
+        .create_view(&Default::default());
+    if policy.is_some() {
+        entries.extend([
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: sample_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&tile_view),
+            },
+        ]);
+    }
     let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("film accumulator"),
         layout: &accumulator.get_bind_group_layout(0),
         entries: &entries,
     });
-    let sources = film_sources(minimal);
+    entries
+        .iter_mut()
+        .find(|e| e.binding == 5)
+        .unwrap()
+        .resource = direct_sum.as_entire_binding();
+    let direct_bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("R1 sun accumulator"),
+        layout: &accumulator.get_bind_group_layout(0),
+        entries: &entries,
+    });
+    let sources = policy.map_or_else(|| film_sources(minimal), receiver_policy_tests::sources);
     let pipelines = r
         .primary
         .as_ref()
         .unwrap()
         .test_film_pipelines(&r.device, &sources[1]);
+    let direct_pipelines = policy.map(|_| {
+        r.primary.as_ref().unwrap().test_film_pipelines(
+            &r.device,
+            &receiver_policy_tests::direct_source(&sources[1]),
+        )
+    });
     let [w, h] = [textures[0].width(), textures[0].height()];
+    if let Some(direct) = &direct_pipelines {
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+        r.encode_primary_shade(
+            &mut encoder,
+            &direct[2],
+            primary_ray_gpu::SHADE_TILE,
+            primary_ray_gpu::Shading::Soft,
+            None,
+        );
+        r.queue.submit([encoder.finish()]);
+        fs::write(prefix.with_extension("exact.sun.rgba16f"), capture(r)).unwrap();
+    }
     let inverse = camera.view().inverse();
     let eye = inverse.w_axis;
     let forward = -inverse.z_axis;
@@ -200,7 +274,15 @@ fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usi
         values.extend(v.to_le_bytes());
     }
     values.resize(48, 0);
-    for sample in 0..256u32 {
+    if policy.is_some() {
+        fs::create_dir_all(out.join("samples")).unwrap();
+    }
+    for ordinal in 0..256u32 {
+        let sample = if policy.is_some() {
+            (ordinal % 16) * 16 + (ordinal % 16 * 7 + ordinal / 16) % 16
+        } else {
+            ordinal
+        };
         r.queue
             .write_buffer(&r.uniform, 68, &(sample + 1).to_le_bytes());
         values[32..36].copy_from_slice(&sample.to_le_bytes());
@@ -228,11 +310,55 @@ fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usi
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(4), 1);
         }
         r.queue.submit([e.finish()]);
+        if policy.is_some() && ordinal < 16 {
+            fs::write(
+                out.join(format!("samples/{ordinal:02}.rgba16f")),
+                capture(r),
+            )
+            .unwrap();
+            let raw = read_buffer(r, &sample_buffer, (world.len() / 4) as u64);
+            let packed: Vec<u8> = raw
+                .chunks_exact(4)
+                .flat_map(|v| (u32::from_le_bytes(v.try_into().unwrap()) as u16).to_le_bytes())
+                .collect();
+            fs::write(
+                out.join(format!("samples/{ordinal:02}.visibility.u16")),
+                packed,
+            )
+            .unwrap();
+        }
+        if let Some(direct) = &direct_pipelines {
+            let mut e = r.device.create_command_encoder(&Default::default());
+            r.encode_primary_shade(
+                &mut e,
+                &direct[2],
+                primary_ray_gpu::SHADE_TILE,
+                primary_ray_gpu::Shading::Soft,
+                None,
+            );
+            {
+                let mut pass = e.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&accumulator);
+                pass.set_bind_group(0, &direct_bind, &[]);
+                pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(4), 1);
+            }
+            r.queue.submit([e.finish()]);
+            if ordinal < 16 {
+                fs::write(
+                    out.join(format!("samples/{ordinal:02}.sun.rgba16f")),
+                    capture(r),
+                )
+                .unwrap();
+            }
+        }
         // Bound queue residence and the OS watchdog. This is reference throughput,
         // never a production performance measurement.
-        if sample % 16 == 15 {
+        if ordinal % 16 == 15 {
             r.test_drain("film batch");
-            eprintln!("film pose={pose} minimal={minimal} samples={}", sample + 1);
+            eprintln!(
+                "film pose={pose} minimal={minimal} policy={policy:?} samples={}",
+                ordinal + 1
+            );
         }
     }
     fs::write(
@@ -240,8 +366,33 @@ fn integrate(r: &mut Renderer, camera: &Camera, out: &std::path::Path, pose: usi
         read_buffer(r, &sum, bytes),
     )
     .unwrap();
+    if policy.is_some() {
+        fs::write(
+            prefix.with_extension("direct.bin"),
+            read_buffer(r, &direct_sum, bytes),
+        )
+        .unwrap();
+    }
     r.queue.write_buffer(&r.uniform, 68, &0u32.to_le_bytes());
     fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"pose":pose,"minimal":minimal,"size":[w,h],"samples":256,"rays_per_sample":256,"seconds":start.elapsed().as_secs_f64(),"camera_inverse":camera.matrix(w,h).inverse().to_cols_array(),"eye":eye.to_array(),"forward":forward.to_array(),"normal_bias":if minimal {1e-5} else {0.001},"tmin":if minimal {"1e-5 m"} else {"unchanged projected-depth policy"}})).unwrap()).unwrap();
+    if let Some(policy) = policy {
+        let path = prefix.with_extension("json");
+        let mut info: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        info["receiver_policy"] = serde_json::json!(format!("{policy:?}"));
+        info["normal_bias"] = if matches!(policy, receiver_policy_tests::Policy::Minimal) {
+            serde_json::json!("1e-5 m (F0 replay)")
+        } else {
+            serde_json::json!("max(10um,16ulp(max abs world triangle vertex))")
+        };
+        info["tmin"] = serde_json::json!("epsilon (ray distance)");
+        info["saved_strata"] = serde_json::json!(
+            (0..16u32)
+                .map(|i| i * 16 + (i * 7) % 16)
+                .collect::<Vec<_>>()
+        );
+        fs::write(path, serde_json::to_vec_pretty(&info).unwrap()).unwrap();
+    }
 }
 
 #[test]
@@ -253,13 +404,24 @@ fn gpu_film_reference() {
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let out = PathBuf::from(m["output"].as_str().unwrap());
     let minimal = m["minimal"].as_bool().unwrap();
+    let receiver_policy = match m["receiver_policy"].as_str() {
+        Some("minimal") => Some(receiver_policy_tests::Policy::Minimal),
+        Some("magnitude") => Some(receiver_policy_tests::Policy::Magnitude),
+        Some("viewed") => Some(receiver_policy_tests::Policy::Viewed),
+        None => None,
+        _ => panic!("unknown receiver policy"),
+    };
+    if matches!(m["workload"].as_str(), Some("flat" | "convex" | "sawtooth")) {
+        receiver_policy_tests::analytic_fixture(&mut r, &m, receiver_policy.unwrap());
+        return;
+    }
     if m["workload"] == "quarry" {
         let (mut asset, cameras) = load_quarry(&m, &mut r);
         let color = target(&r, 1920, 1080);
         let pose = m["pose"].as_u64().unwrap() as usize;
         let camera = cameras.frames[usize::from(pose == 1)].camera().unwrap();
         traced_frame(&mut r, &color, &camera, &mut asset, true);
-        integrate(&mut r, &camera, &out, pose, minimal);
+        integrate_with(&mut r, &camera, &out, pose, minimal, receiver_policy);
     } else {
         let rects = fixture::rectangles(m["workload"] == "stress");
         let vertices =
@@ -321,7 +483,7 @@ fn gpu_film_reference() {
                 Draw::new(&mesh, &mut blockers),
             ],
         );
-        integrate(&mut r, &camera, &out, 0, minimal);
+        integrate_with(&mut r, &camera, &out, 0, minimal, receiver_policy);
         fs::write(
             out.join("rectangles.json"),
             serde_json::to_vec_pretty(&rects).unwrap(),

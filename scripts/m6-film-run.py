@@ -17,6 +17,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path("D:/Coding/renderlab-work/m6-exact-quality/f0")
+OWNER = "m6-film-reference-f0"
 LOCK = Path("D:/Coding/renderlab-work/gpu-slot.lock")
 FLAGS = subprocess.CREATE_NO_WINDOW
 GAMES = ("eldenring", "cyberpunk", "helldivers", "cs2.exe", "valorant", "fortniteclient", "overwatch",
@@ -95,7 +96,7 @@ def main():
                 save(runs / f"{a.label}-deferred.json", dict(utc=utc(), owner=(LOCK / "owner.json").read_text() if (LOCK / "owner.json").exists() else None))
                 return 3
             time.sleep(min(1,max(0,deadline-time.monotonic())))
-    owner = dict(owner="m6-film-reference-f0", utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label)
+    owner = dict(owner=OWNER, utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label)
     save(LOCK / "owner.json", owner)
     start = time.monotonic()
     try:
