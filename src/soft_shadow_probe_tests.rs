@@ -1,6 +1,8 @@
 //! Test-only Level-B cost screen, independent of the selected production mode.
 use super::*;
 
+#[path = "determinism_tests.rs"]
+mod determinism_tests;
 #[path = "interactive_climb_tests.rs"]
 mod interactive_climb_tests;
 #[path = "soft_shadow_acceptance_tests.rs"]
