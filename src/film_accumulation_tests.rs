@@ -264,7 +264,7 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
 }
 
 /// (placement + 1, depth along the camera forward) per pixel of an Exact centre frame.
-fn centre_surface(
+pub(super) fn centre_surface(
     r: &mut Renderer,
     asset: &mut prepared::Prepared,
     color: &wgpu::Texture,
@@ -294,7 +294,7 @@ fn centre_surface(
     (centre, forward)
 }
 
-fn t1_cameras(m: &serde_json::Value) -> Vec<Camera> {
+pub(super) fn t1_cameras(m: &serde_json::Value) -> Vec<Camera> {
     let cameras =
         cameras::Cameras::load(&PathBuf::from(m["t1_cameras"].as_str().unwrap())).unwrap();
     cameras.frames.iter().map(|f| f.camera().unwrap()).collect()
@@ -572,7 +572,7 @@ fn integrate_t1(
 }
 
 /// The footprint verifier's module: the temporal kernel with per-sample salted shadow rays.
-fn footprint_source() -> String {
+pub(super) fn footprint_source() -> String {
     let kernels = primary_ray_gpu::shader_sources(SOURCE).unwrap();
     format!(
         "{}\n{}",

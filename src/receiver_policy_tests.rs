@@ -5,6 +5,8 @@ use super::*;
 mod receiver_diagnostic_tests;
 #[path = "receiver_fold_tests.rs"]
 mod receiver_fold_tests;
+#[path = "receiver_backface_tests.rs"]
+mod receiver_backface_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Policy {

@@ -313,3 +313,8 @@ a counted quarry capture byte-for-byte, and beat adjacency in a paired sample.
 The second could simplify the concave inset, but must preserve contacts and the
 viewed/thin rules. Changing the adopted magnitude requires Islam. No optional
 screen was run before pushing the selected repair.
+
+Follow-up: the [bounded back-face retry screen](m6-backface-retry.md) is now
+measured and rejected. It fixes all three original witnesses and is cheaper in
+the short paired sample, but selects strictly farther front faces at six
+unambiguous quarry centre pixels. The adjacency repair remains selected.

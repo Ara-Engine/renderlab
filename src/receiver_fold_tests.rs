@@ -80,6 +80,13 @@ fn receiver_primary_spirv() {
 #[test]
 #[ignore = "offscreen primary traversal and neighbour acquisition on millimetre folds"]
 pub(super) fn gpu_receiver_fold_traced() {
+    traced_fold_with(
+        primary_ray_gpu::shader_sources(SOURCE).unwrap(),
+        &PathBuf::from(manifest()["output"].as_str().unwrap()),
+    );
+}
+
+pub(super) fn traced_fold_with(base_sources: [String; 2], out: &std::path::Path) -> Vec<u8> {
     let _validation = validation::begin(true);
     let mut r = renderer(true);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
@@ -147,7 +154,7 @@ pub(super) fn gpu_receiver_fold_traced() {
         .map(|(mesh, instances)| Draw::new(mesh, instances))
         .collect();
     render(&mut r, &color, &camera, &mut draws);
-    let mut sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let mut sources = base_sources.clone();
     let start = sources[0].find("fn primary_ray(").unwrap();
     let end = start
         + sources[0][start..]
@@ -208,8 +215,7 @@ pub(super) fn gpu_receiver_fold_traced() {
         }
         rows.push(serde_json::json!({"case":case,"old_false_shadows":counts[0],"new_false_shadows":counts[1],"real_occlusion_retained":counts[2],"failures":failures}));
     }
-    let out = PathBuf::from(manifest()["output"].as_str().unwrap());
-    fs::create_dir_all(&out).unwrap();
+    fs::create_dir_all(out).unwrap();
     fs::write(
         out.join("traced-fold.json"),
         serde_json::to_vec_pretty(
@@ -238,7 +244,7 @@ pub(super) fn gpu_receiver_fold_traced() {
     r.set_shadows(&shadows).unwrap();
     r.set_soft_shadows(crate::SoftShadows::Interactive);
     render(&mut r, &color, &camera, &mut draws);
-    let mut sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let mut sources = base_sources;
     let start = sources[1].find("fn primary_ray(").unwrap();
     let end = start
         + sources[1][start..]
@@ -341,6 +347,10 @@ pub(super) fn gpu_receiver_fold_traced() {
         .count();
     assert!(changed > 0);
     fs::write(out.join("deferred-fold.json"),serde_json::to_vec_pretty(&serde_json::json!({"repeats":repeats,"byte_identical":true,"hot_blocked_pixels":blocked,"changed_hit_records":changed,"corrected_blocked_pixels":0})).unwrap()).unwrap();
+    bytes
+        .into_iter()
+        .chain(corrected.into_iter().flatten())
+        .collect()
 }
 
 #[test]
