@@ -442,6 +442,8 @@ struct FramePaths {
     fresh: bool,
     /// Traced Interactive frames fuse camera rays and visibility into one dispatch.
     interactive: bool,
+    /// Traced temporal frames: the jittered Interactive trace and film accumulation.
+    temporal: bool,
     /// The program pipeline set the frame draws with; None for unlit frames.
     variant: Option<program_gpu::Variant>,
 }
@@ -1194,6 +1196,19 @@ impl Renderer {
             })
             .transpose()
             .map_err(rejected)?;
+        // A temporal kernel already in use recompiles in the transaction, so a rejected
+        // prelude keeps it; otherwise the first temporal frame compiles it.
+        let film_source = primary_sources
+            .as_ref()
+            .filter(|_| {
+                self.pipeline
+                    .primary
+                    .as_ref()
+                    .is_some_and(|p| p.film.is_some())
+            })
+            .map(|(kernels, _)| primary_ray_gpu::film_accumulation::kernel_source(&kernels[1]))
+            .transpose()
+            .map_err(rejected)?;
         let preludes = Preludes {
             raster: wgsl,
             hardware: hardware_source.as_deref(),
@@ -1217,12 +1232,18 @@ impl Renderer {
             .zip(primary_sources.as_ref().map(|(k, _)| k));
         let (format, samples) = (self.format, self.options.samples);
         let ((candidate, engine_error), programs) = std::thread::scope(|s| {
+            let film_source = film_source.as_deref();
             let engine = s.spawn(move || {
                 let scopes = OperationScopes::new(device);
-                let candidate = Self::compile(
+                let mut candidate = Self::compile(
                     device, ledger, layout, lighting, shadows, fresh, primary, format, samples,
                     wgsl,
                 );
+                if let (Some(source), Some((state, _)), Some(p)) =
+                    (film_source, primary, candidate.primary.as_mut())
+                {
+                    p.film = Some(state.film_kernel(device, ledger, source));
+                }
                 (candidate, scopes.finish())
             });
             let programs = self
@@ -1275,8 +1296,11 @@ impl Renderer {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
-        self.pipelines.created += candidate.count() + 2 * built.len() as u64;
-        self.program_cache.count(2 * built.len() as u64);
+        self.pipelines.created += candidate.count()
+            + program_gpu::pipeline_count(&built)
+            + 2 * u64::from(film_source.is_some());
+        self.program_cache
+            .count(program_gpu::pipeline_count(&built));
         self.pipeline = candidate;
         for (slot, c) in self.programs.iter_mut().zip(compiled) {
             slot.install_parameters(c.layout, &self.queue, &mut self.uploads);
@@ -2313,13 +2337,17 @@ impl Renderer {
         #[cfg(test)]
         let soft = soft && (traced || !self.fresh_fragment_reference);
         let fresh = soft && !traced;
+        let temporal = traced && soft && self.soft_mode == crate::SoftShadows::Temporal;
         FramePaths {
             lit,
             hardware_shadowed,
             soft,
             fresh,
             interactive: traced && soft && self.soft_mode == crate::SoftShadows::Interactive,
-            variant: if traced {
+            temporal,
+            variant: if temporal {
+                Some(Variant::Temporal)
+            } else if traced {
                 Some(Variant::Traced)
             } else if fresh {
                 Some(Variant::Fresh)
@@ -2372,6 +2400,7 @@ impl Renderer {
             soft,
             fresh,
             interactive,
+            temporal,
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
         if lit {
@@ -2478,6 +2507,11 @@ impl Renderer {
             result?;
             uploads.add(primary);
             self.uploads.add(primary);
+            if temporal {
+                self.ensure_film_kernel()?;
+                let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
+                self.prepare_film(key);
+            }
         }
         self.check_fault()?;
         let view = self
@@ -2517,21 +2551,25 @@ impl Renderer {
                     })
             };
             let p = self.pipeline.primary.as_ref().unwrap();
-            if interactive {
-                let tile = primary_ray_gpu::TRACE_TILE;
-                self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
+            if temporal {
+                self.encode_film(&mut encoder, stamps(6), stamps(0));
             } else {
-                self.encode_primary_visibility(&mut encoder, soft, stamps(6));
-                if soft {
-                    self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                if interactive {
+                    let tile = primary_ray_gpu::TRACE_TILE;
+                    self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
+                } else {
+                    self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                    if soft {
+                        self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                    }
                 }
+                let shading = if soft {
+                    primary_ray_gpu::Shading::Soft
+                } else {
+                    primary_ray_gpu::Shading::Hard
+                };
+                self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
-            let shading = if soft {
-                primary_ray_gpu::Shading::Soft
-            } else {
-                primary_ray_gpu::Shading::Hard
-            };
-            self.encode_primary_shading(&mut encoder, shading, stamps(0));
         }
         let timestamps =
             self.timing
@@ -2766,14 +2804,14 @@ impl Renderer {
                 mapped,
                 lit,
                 shadowed: shadow_frame.is_some() && !hardware_shadowed,
-                fresh: soft && !interactive,
+                fresh: soft && !interactive && !temporal,
                 submission: self.submissions,
                 frame: Some(frame),
                 revision: self.revision,
                 submitted_at,
             },
         );
-        self.slots[slot].traced_receivers = traced && (!soft || interactive);
+        self.slots[slot].traced_receivers = traced && (!soft || interactive || temporal);
         self.check_fault()?;
         if let Some(frame) = shadow_frame {
             self.stamp_shadows(frame, shadow_draws);

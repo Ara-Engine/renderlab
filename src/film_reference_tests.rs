@@ -8,13 +8,22 @@ mod fixture;
 #[path = "receiver_policy_tests.rs"]
 mod receiver_policy_tests;
 
+#[path = "film_accumulation_tests.rs"]
+mod film_accumulation_tests;
+
 /// Trace/visibility and program shading have separate production modules and ABIs.
 struct FilmSources {
     kernels: String,
     shading: String,
 }
 
-fn jittered(source: &str) -> String {
+/// Randomized point within each of the 16x16 footprint strata. Odd/even indices
+/// interleave across the footprint, rather than splitting it in two.
+const R1_JITTER: &str = "\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n";
+
+/// The camera ray through `film_jitter(sample)` (`jitter` defines it) instead of the
+/// pixel centre; the sample index is camera.view_mode.y - 1.
+fn jittered_with(source: &str, jitter: &str) -> String {
     let mut source = edit(
         source,
         (
@@ -22,13 +31,15 @@ fn jittered(source: &str) -> String {
             "(vec2<f32>(pixel)+film_jitter(camera.view_mode.y-1u))",
         ),
     );
-    // Randomized point within each of the 16x16 footprint strata. Odd/even
-    // indices interleave across the footprint, rather than splitting it in two.
-    source.push_str("\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n");
+    source.push_str(jitter);
     source
 }
 
 fn film_shading(program: &str) -> String {
+    film_shading_with(program, R1_JITTER)
+}
+
+fn film_shading_with(program: &str, jitter: &str) -> String {
     let soft = if let Some(frozen) = frozen_reference_modules() {
         let source = fs::read_to_string(frozen.join("traced-soft.wgsl")).unwrap();
         edit(&source, (STANDARD, program))
@@ -36,7 +47,7 @@ fn film_shading(program: &str) -> String {
         primary_ray_gpu::shading_sources(SOURCE, program).unwrap()[1].clone()
     };
     // The hit-plane gradients must use the same jittered ray as primary tracing.
-    jittered(&soft)
+    jittered_with(&soft, jitter)
 }
 
 fn frozen_reference_modules() -> Option<PathBuf> {
@@ -47,6 +58,10 @@ fn frozen_reference_modules() -> Option<PathBuf> {
 }
 
 fn film_sources() -> FilmSources {
+    film_sources_with(R1_JITTER)
+}
+
+fn film_sources_with(jitter: &str) -> FilmSources {
     let frozen = frozen_reference_modules();
     let soft = if let Some(frozen) = &frozen {
         fs::read_to_string(frozen.join("kernels-soft.wgsl")).unwrap()
@@ -54,7 +69,7 @@ fn film_sources() -> FilmSources {
         primary_ray_gpu::shader_sources(SOURCE).unwrap()[1].clone()
     };
     let mut kernels = edit(
-        &jittered(&soft),
+        &jittered_with(&soft, jitter),
         (
             if frozen.is_some() {
                 "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));"
@@ -75,7 +90,7 @@ fn film_sources() -> FilmSources {
     );
     let mut sources = FilmSources {
         kernels,
-        shading: film_shading(STANDARD),
+        shading: film_shading_with(STANDARD, jitter),
     };
     // A bounded arithmetic reducer for receiver-equivalence investigations.
     // Registered production references omit this field entirely.
@@ -490,56 +505,8 @@ fn gpu_film_reference() {
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         integrate_with(&mut r, &camera, &out, pose, minimal, receiver_policy);
     } else {
-        let rects = fixture::rectangles(m["workload"] == "stress");
-        let vertices =
-            [[-8., -8., 0.], [8., -8., 0.], [8., 8., 0.], [-8., 8., 0.]].map(|position| Vertex {
-                position,
-                normal: [0., 0., 1.],
-                uv: [0.; 2],
-                color: [1.; 4],
-            });
-        let mesh = r
-            .try_upload_mesh(&MeshData {
-                vertices: &vertices,
-                indices: &[0, 1, 2, 0, 2, 3],
-            })
-            .unwrap()
-            .unwrap();
-        r.test_drain("film fixture mesh");
-        let mut ground = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
-        r.test_drain("film ground");
-        let mut blockers = r
-            .try_upload_instances(&rects.iter().map(|v| v.transform()).collect::<Vec<_>>())
-            .unwrap()
-            .unwrap();
-        r.test_drain("film blockers");
-        r.set_lighting_and_shadows(
-            &Lighting {
-                lights: vec![Light::Directional {
-                    travel: Vec3::new(-1., 0., -1.),
-                    lux: [1000.; 3],
-                }],
-                exposure_stops: -8.,
-                ..Default::default()
-            },
-            &Shadows {
-                directional_disk_angle: 0.04,
-                requests: vec![ShadowRequest::Directional {
-                    split_ends: vec![10., 40.],
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let camera = Camera::look_at(
-            Vec3::new(0., 0., 4.),
-            Vec3::ZERO,
-            Vec3::Y,
-            55f32.to_radians(),
-            0.1,
-            100.,
-        )
-        .unwrap();
+        let (mesh, mut ground, mut blockers, camera, rects) =
+            rect_scene(&mut r, m["workload"] == "stress");
         let color = target(&r, 256, 192);
         render(
             &mut r,
@@ -557,4 +524,63 @@ fn gpu_film_reference() {
         )
         .unwrap();
     }
+}
+
+/// The F0/R1 rectangle fixture (thin, or stress when `stress`): a ground quad and blocker
+/// rectangles with their lighting set, and the frame they are integrated at.
+fn rect_scene(
+    r: &mut Renderer,
+    stress: bool,
+) -> (Mesh, Instances, Instances, Camera, Vec<fixture::Rectangle>) {
+    let rects = fixture::rectangles(stress);
+    let vertices =
+        [[-8., -8., 0.], [8., -8., 0.], [8., 8., 0.], [-8., 8., 0.]].map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let mesh = r
+        .try_upload_mesh(&MeshData {
+            vertices: &vertices,
+            indices: &[0, 1, 2, 0, 2, 3],
+        })
+        .unwrap()
+        .unwrap();
+    r.test_drain("film fixture mesh");
+    let ground = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
+    r.test_drain("film ground");
+    let blockers = r
+        .try_upload_instances(&rects.iter().map(|v| v.transform()).collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    r.test_drain("film blockers");
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(-1., 0., -1.),
+                lux: [1000.; 3],
+            }],
+            exposure_stops: -8.,
+            ..Default::default()
+        },
+        &Shadows {
+            directional_disk_angle: 0.04,
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![10., 40.],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )
+    .unwrap();
+    (mesh, ground, blockers, camera, rects)
 }

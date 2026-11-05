@@ -107,11 +107,16 @@ def main():
     p.add_argument("--no-build-contention", action="store_true", help="defer/abort performance runs if any compiler or linker is active")
     p.add_argument("--contended-screen", action="store_true", help="authorized screen only: 5 GiB preflight, 3 GiB runtime, marked contended")
     p.add_argument("--record-resources", action="store_true", help="attach 10 Hz memory/rustc context to each timing sample")
+    p.add_argument("--fast-check", action="store_true", help="correctness batch: 4 GiB preflight, 2 GiB runtime abort")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
     preflight_floor = 5120 if a.contended_screen else 6144
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
+        a.record_resources = True
+    if a.fast_check:
+        preflight_floor = 4096
+        a.runtime_memory_mbytes = 2048
         a.record_resources = True
     if not 0 < a.minutes <= 45:
         p.error("lease must be at most 45 minutes")
