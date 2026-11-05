@@ -1,32 +1,175 @@
-//! Shading programs on the GPU: one pipeline set per program, compiled against the
-//! active prelude compositions, with a reload transaction per program and per-material
-//! parameter blocks. Engine kernels stay in `Pipelines`; a program edit recompiles only
-//! its own shading pipelines.
+//! Shading programs on the GPU: per program, a module for every active path, composed
+//! against the active prelude compositions, and pipeline sets created from them on first
+//! use. A reload transaction per program (or over everything, for the prelude) creates
+//! every path's module, so naga validates the edit against each, then only the sets the
+//! last frame drew with; the rest compile when a frame first needs them. Pipelines of
+//! one transaction or frame are created concurrently, one thread each, since the driver
+//! compiles on the creating thread. Engine kernels stay in `Pipelines`. Per-material
+//! parameter blocks live here too.
 use super::*;
 use crate::program::{
     self, Composed, MaterialParameters, ParameterLayout, ProgramShared, STANDARD_PROGRAM, Stage,
 };
 use std::sync::{Mutex, Weak};
 
-/// One program's pipelines for every active path. Raster pairs are indexed by tangent
-/// stream, the traced pair by `Shading`.
+/// A program pipeline set a frame shades with. Raster sets are pairs indexed by tangent
+/// stream; the traced set is indexed by `Shading`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Variant {
+    /// Lit raster frames without shadows, or with light-space shadow maps.
+    Lit,
+    /// Raster frames with hardware hard shadows.
+    Hardware,
+    /// Raster frames with fresh soft visibility counts.
+    Fresh,
+    /// Traced primary visibility: Hard and Soft shading.
+    Traced,
+}
+
+/// One program's pipeline sets, each present once a frame needed it or a reload
+/// recompiled it because the last frame drew with it.
+#[derive(Default)]
 pub(crate) struct ProgramPipelines {
-    pub lit: [Owned<wgpu::RenderPipeline>; 2],
+    pub lit: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
-    /// Present exactly while traced primary visibility is selected.
     pub traced: Option<[Owned<wgpu::ComputePipeline>; 2]>,
 }
 impl ProgramPipelines {
-    pub fn count(&self) -> u64 {
-        2 + 2 * [
-            self.hardware.is_some(),
-            self.fresh.is_some(),
-            self.traced.is_some(),
-        ]
-        .into_iter()
-        .map(u64::from)
-        .sum::<u64>()
+    pub fn has(&self, variant: Variant) -> bool {
+        match variant {
+            Variant::Lit => self.lit.is_some(),
+            Variant::Hardware => self.hardware.is_some(),
+            Variant::Fresh => self.fresh.is_some(),
+            Variant::Traced => self.traced.is_some(),
+        }
+    }
+    pub(super) fn install(&mut self, variant: Variant, pair: [Built; 2]) {
+        let render = |pair: [Built; 2]| {
+            Some(pair.map(|b| match b {
+                Built::Render(p) => p,
+                Built::Compute(_) => unreachable!("raster sets hold render pipelines"),
+            }))
+        };
+        match variant {
+            Variant::Lit => self.lit = render(pair),
+            Variant::Hardware => self.hardware = render(pair),
+            Variant::Fresh => self.fresh = render(pair),
+            Variant::Traced => {
+                self.traced = Some(pair.map(|b| match b {
+                    Built::Compute(p) => p,
+                    Built::Render(_) => unreachable!("the traced set holds compute pipelines"),
+                }))
+            }
+        }
+    }
+}
+
+/// The driver cache program pipelines go through, present when the device enables
+/// `Features::PIPELINE_CACHE`: recompiling a source seen before in this process (a revert,
+/// an A/B toggle) is then a cache hit instead of a driver compile. Once `LIMIT` pipelines
+/// have gone through it, the next transaction replaces it, dropping that history, which
+/// bounds its memory over a long editing session.
+pub(super) struct ProgramCache {
+    cache: Option<wgpu::PipelineCache>,
+    pipelines: u64,
+}
+impl ProgramCache {
+    /// About 93 KB of driver data per lit pipeline was measured (fast-shader-reload.md).
+    const LIMIT: u64 = 512;
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            cache: device
+                .features()
+                .contains(wgpu::Features::PIPELINE_CACHE)
+                .then(|| Self::create(device)),
+            pipelines: 0,
+        }
+    }
+    fn create(device: &wgpu::Device) -> wgpu::PipelineCache {
+        // SAFETY: no initial data is supplied, so nothing unvalidated reaches the driver.
+        unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("program pipelines"),
+                data: None,
+                fallback: true,
+            })
+        }
+    }
+    /// Replaces a full cache before the next pipelines go through it.
+    pub fn refresh(&mut self, device: &wgpu::Device) {
+        if self.cache.is_some() && self.pipelines >= Self::LIMIT {
+            self.cache = Some(Self::create(device));
+            self.pipelines = 0;
+        }
+    }
+    pub fn count(&mut self, pipelines: u64) {
+        if self.cache.is_some() {
+            self.pipelines += pipelines;
+        }
+    }
+    pub fn get(&self) -> Option<&wgpu::PipelineCache> {
+        self.cache.as_ref()
+    }
+}
+
+/// One created pipeline of a set.
+pub(super) enum Built {
+    Render(Owned<wgpu::RenderPipeline>),
+    Compute(Owned<wgpu::ComputePipeline>),
+}
+
+/// One program's modules for every path the renderer has, created (and so validated by
+/// naga against each composition) inside its creation or reload transaction.
+pub(super) struct ProgramModules {
+    lit: Owned<wgpu::ShaderModule>,
+    hardware: Option<Owned<wgpu::ShaderModule>>,
+    fresh: Option<Owned<wgpu::ShaderModule>>,
+    /// Hard and Soft shading, present exactly while traced primary visibility is selected.
+    pub traced: Option<[Owned<wgpu::ShaderModule>; 2]>,
+}
+impl ProgramModules {
+    pub fn has(&self, variant: Variant) -> bool {
+        match variant {
+            Variant::Lit => true,
+            Variant::Hardware => self.hardware.is_some(),
+            Variant::Fresh => self.fresh.is_some(),
+            Variant::Traced => self.traced.is_some(),
+        }
+    }
+    /// Pipeline `index` of `variant`: the tangent stream, or `Shading` for traced.
+    fn pipeline(&self, abi: &ProgramAbi<'_>, variant: Variant, index: usize) -> Built {
+        let lit = |module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout| {
+            Built::Render(mesh_pipeline(
+                abi.device,
+                abi.ledger,
+                module,
+                layout,
+                wgpu::TextureFormat::Rgba16Float,
+                "fs_lit",
+                index == 1,
+                abi.samples,
+                abi.cache,
+            ))
+        };
+        match variant {
+            Variant::Lit => lit(&self.lit, abi.lit),
+            Variant::Hardware => lit(self.hardware.as_ref().unwrap(), abi.hardware.unwrap()),
+            Variant::Fresh => Built::Render(abi.fresh.unwrap().shade_pipeline(
+                abi.device,
+                abi.ledger,
+                self.fresh.as_ref().unwrap(),
+                index == 1,
+                abi.cache,
+            )),
+            Variant::Traced => Built::Compute(abi.primary.unwrap().shade_pipeline(
+                abi.device,
+                abi.ledger,
+                &self.traced.as_ref().unwrap()[index],
+                index,
+                abi.cache,
+            )),
+        }
     }
 }
 
@@ -38,6 +181,7 @@ pub(super) struct ProgramSlot {
     pub label: String,
     pub source: String,
     pub layout: Option<ParameterLayout>,
+    pub modules: ProgramModules,
     pub pipelines: ProgramPipelines,
     /// Live materials' parameter blocks, repacked when a reload changes the layout.
     pub materials: Vec<Weak<MaterialParameters>>,
@@ -61,10 +205,11 @@ pub(super) struct ProgramAbi<'a> {
     pub hardware: Option<&'a wgpu::PipelineLayout>,
     pub fresh: Option<&'a FreshState>,
     pub primary: Option<&'a PrimaryState>,
+    pub cache: Option<&'a wgpu::PipelineCache>,
 }
 
 pub(super) struct Compiled {
-    pub pipelines: ProgramPipelines,
+    pub modules: ProgramModules,
     pub layout: Option<ParameterLayout>,
 }
 
@@ -88,9 +233,10 @@ fn scope_error(label: &str, error: wgpu::Error, traced: &[Composed]) -> Error {
     }
 }
 
-/// Composes, checks and compiles one program for every path `abi` and `preludes` hold,
-/// in its own error scope. Rejections are `Error::Shader` naming the program and, where
-/// naga locates them, its lines; other device errors are `Error::Fault`.
+/// Composes, checks and creates one program's module for every path `abi` and `preludes`
+/// hold, in one error scope; pipelines come later (`create_sets`). Rejections are
+/// `Error::Shader` naming the program and, where naga locates them, its lines; other
+/// device errors are `Error::Fault`.
 pub(super) fn compile_program(
     abi: &ProgramAbi<'_>,
     preludes: &Preludes<'_>,
@@ -113,21 +259,6 @@ pub(super) fn compile_program(
         .map(|head| program::compose(head, source, Stage::Traced, parameters))
         .collect();
     let scopes = OperationScopes::new(abi.device);
-    let pair = |m: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout| {
-        [false, true].map(|tangent| {
-            mesh_pipeline(
-                abi.device,
-                abi.ledger,
-                m,
-                layout,
-                wgpu::TextureFormat::Rgba16Float,
-                "fs_lit",
-                tangent,
-                abi.samples,
-            )
-        })
-    };
-    let lit = pair(&module(abi, label, &raster), abi.lit);
     let raster_variant = |head: &str| {
         module(
             abi,
@@ -135,33 +266,66 @@ pub(super) fn compile_program(
             &program::compose(head, source, Stage::Raster, parameters),
         )
     };
-    let hardware = abi
-        .hardware
-        .zip(preludes.hardware)
-        .map(|(layout, head)| pair(&raster_variant(head), layout));
-    let fresh = abi
-        .fresh
-        .zip(preludes.fresh)
-        .map(|(state, head)| state.shade_pipelines(abi.device, abi.ledger, &raster_variant(head)));
-    let traced = abi
-        .primary
-        .filter(|_| !traced_sources.is_empty())
-        .map(|state| {
-            let [hard, soft] = [0, 1].map(|i| module(abi, label, &traced_sources[i]));
-            state.shade_pipelines(abi.device, abi.ledger, [&hard, &soft])
-        });
+    let modules = ProgramModules {
+        lit: module(abi, label, &raster),
+        hardware: abi.hardware.and(preludes.hardware).map(raster_variant),
+        fresh: abi.fresh.and(preludes.fresh).map(raster_variant),
+        traced: (!traced_sources.is_empty())
+            .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i]))),
+    };
     if let Some(error) = scopes.finish() {
         return Err(scope_error(label, error, &traced_sources));
     }
-    Ok(Compiled {
-        pipelines: ProgramPipelines {
-            lit,
-            hardware,
-            fresh,
-            traced,
-        },
-        layout,
+    Ok(Compiled { modules, layout })
+}
+
+/// Runs `jobs` concurrently, one scoped thread each, and returns their values in order,
+/// each with the first error its own scopes captured (wgpu error scopes are per thread).
+pub(super) fn in_parallel<T: Send, F: FnOnce() -> T + Send>(
+    device: &wgpu::Device,
+    jobs: impl IntoIterator<Item = F>,
+) -> Vec<(T, Option<wgpu::Error>)> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = jobs
+            .into_iter()
+            .map(|job| {
+                s.spawn(move || {
+                    let scopes = OperationScopes::new(device);
+                    let value = job();
+                    (value, scopes.finish())
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
+}
+
+/// Creates each requested `(modules, label, variant)` set, every pipeline concurrently.
+/// A failure names the first failing program in request order: `Error::Shader` for
+/// validation, `Error::Fault` otherwise.
+pub(super) fn create_sets(
+    abi: &ProgramAbi<'_>,
+    sets: &[(&ProgramModules, &str, Variant)],
+) -> Result<Vec<[Built; 2]>, Error> {
+    let jobs = sets.iter().flat_map(|&(modules, _, variant)| {
+        [0, 1].map(move |index| move || modules.pipeline(abi, variant, index))
+    });
+    let mut built = in_parallel(abi.device, jobs).into_iter();
+    let mut out = Vec::with_capacity(sets.len());
+    let mut failure = None;
+    for &(_, label, variant) in sets {
+        let [(a, ea), (b, eb)] = [built.next().unwrap(), built.next().unwrap()];
+        if let Some(error) = ea.or(eb).filter(|_| failure.is_none()) {
+            failure = Some(match error {
+                wgpu::Error::Validation { .. } => {
+                    Error::Shader(format!("program `{label}`, {variant:?} pipelines: {error}"))
+                }
+                _ => Error::Fault(Fault(error.to_string())),
+            });
+        }
+        out.push([a, b]);
+    }
+    failure.map_or(Ok(out), Err)
 }
 
 /// The standard program's handle and slot for a new renderer, whose ids start at 0.
@@ -180,7 +344,8 @@ pub(super) fn standard_slot(
         label: "standard".into(),
         source: STANDARD_PROGRAM.into(),
         layout: compiled.layout,
-        pipelines: compiled.pipelines,
+        modules: compiled.modules,
+        pipelines: ProgramPipelines::default(),
         materials: vec![],
     };
     (handle, slot)
@@ -193,10 +358,11 @@ impl Renderer {
         &self.standard
     }
 
-    /// Composes and compiles `d` for every active path now (raster lit, hardware and
-    /// fresh shading where this renderer has them, traced shading while traced is
-    /// selected). Rejections are `Error::Shader` naming program lines; nothing else
-    /// changes.
+    /// Composes `d` and creates its module for every active path now (raster lit,
+    /// hardware and fresh shading where this renderer has them, traced shading while
+    /// traced is selected), so naga checks it against each; its pipelines compile when a
+    /// frame first draws with it. Rejections are `Error::Shader` naming program lines;
+    /// nothing else changes.
     pub fn try_create_program(
         &mut self,
         d: &crate::ProgramDescriptor<'_>,
@@ -212,7 +378,6 @@ impl Renderer {
         self.check_fault()?;
         self.pipelines.successes += 1;
         self.pipelines.installations += 1;
-        self.pipelines.created += compiled.pipelines.count();
         let handle = crate::Program(Arc::new(ProgramShared {
             id: self.next_program,
             renderer: self.identity.clone(),
@@ -225,17 +390,20 @@ impl Renderer {
             label: d.label.into(),
             source: d.source.into(),
             layout: compiled.layout,
-            pipelines: compiled.pipelines,
+            modules: compiled.modules,
+            pipelines: ProgramPipelines::default(),
             materials: vec![],
         });
         self.update_hashes();
         Ok(handle)
     }
 
-    /// One transaction over `p`'s pipelines: on rejection its last working pipelines keep
-    /// rendering, and other programs are never recompiled. Existing materials are
-    /// repacked by member name; new or retyped members become zero and are listed in
-    /// the report.
+    /// One transaction over `p`: every path's module is created (naga checks the edit
+    /// against each), then the pipeline sets the last frame drew with `p` are created
+    /// concurrently; on rejection its last working pipelines keep rendering. Its other
+    /// sets compile when a frame first needs them, and other programs are never
+    /// recompiled. Existing materials are repacked by member name; new or retyped members
+    /// become zero and are listed in the report.
     pub fn reload_program(
         &mut self,
         p: &crate::Program,
@@ -255,26 +423,41 @@ impl Renderer {
             )));
         }
         self.pipelines.attempts += 1;
-        let compiled =
-            match compile_program(&self.program_abi(), &self.preludes(), &p.0.label, source) {
-                Ok(compiled) => compiled,
-                Err(Error::Fault(Fault(message))) => {
-                    let _ = self.fault.set(Fault(message));
-                    return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
-                }
-                Err(error) => return Err(rejected(error)),
-            };
+        self.program_cache.refresh(&self.device);
+        let abi = self.program_abi();
+        let built = compile_program(&abi, &self.preludes(), &p.0.label, source).and_then(|c| {
+            let sets: Vec<_> = self
+                .hot_sets(p.id(), &c.modules)
+                .map(|v| (&c.modules, p.0.label.as_str(), v))
+                .collect();
+            let built = create_sets(&abi, &sets)?;
+            let variants: Vec<_> = sets.iter().map(|s| s.2).collect();
+            Ok((c, variants, built))
+        });
+        let (compiled, variants, built) = match built {
+            Ok(built) => built,
+            Err(Error::Fault(Fault(message))) => {
+                let _ = self.fault.set(Fault(message));
+                return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
+            }
+            Err(error) => return Err(rejected(error)),
+        };
         let compile = start.elapsed();
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
         self.pipelines.successes += 1;
         self.pipelines.installations += 1;
-        self.pipelines.created += compiled.pipelines.count();
+        self.pipelines.created += 2 * built.len() as u64;
+        self.program_cache.count(2 * built.len() as u64);
         let slot = self.programs.iter_mut().find(|s| s.id == p.id()).unwrap();
         let zeroed = ParameterLayout::changed(slot.layout.as_ref(), compiled.layout.as_ref());
         let repack = slot.layout != compiled.layout;
-        slot.pipelines = compiled.pipelines;
+        slot.modules = compiled.modules;
+        slot.pipelines = ProgramPipelines::default();
+        for (variant, pair) in variants.into_iter().zip(built) {
+            slot.pipelines.install(variant, pair);
+        }
         slot.layout = compiled.layout;
         source.clone_into(&mut slot.source);
         slot.materials.retain(|m| m.strong_count() > 0);
@@ -297,6 +480,100 @@ impl Renderer {
             compile,
             zeroed_parameters: zeroed,
         })
+    }
+
+    /// The sets of program `id` the last frame drew with that `modules` can build: what a
+    /// reload recreates eagerly.
+    pub(super) fn hot_sets<'a>(
+        &'a self,
+        id: u64,
+        modules: &'a ProgramModules,
+    ) -> impl Iterator<Item = Variant> + 'a {
+        self.hot
+            .iter()
+            .filter(move |&&(program, variant)| program == id && modules.has(variant))
+            .map(|&(_, variant)| variant)
+    }
+
+    /// The sets a frame draws with: `variant` (None for unlit, diagnostic frames) of each
+    /// program its draws' materials use (none: the standard program). A traced frame
+    /// shades with its first draw's program (admission rejects mixed ones); raster frames
+    /// also bind the standard program first.
+    pub(super) fn frame_sets<'a>(
+        &self,
+        draws: impl IntoIterator<Item = Option<&'a Material>>,
+        variant: Option<Variant>,
+    ) -> Vec<(u64, Variant)> {
+        let Some(variant) = variant else {
+            return vec![];
+        };
+        let standard = self.standard.id();
+        let mut programs = draws
+            .into_iter()
+            .map(|m| m.map_or(standard, |m| m.program.id()));
+        let mut programs: Vec<u64> = if variant == Variant::Traced {
+            vec![programs.next().unwrap_or(standard)]
+        } else {
+            std::iter::once(standard).chain(programs).collect()
+        };
+        programs.sort_unstable();
+        programs.dedup();
+        programs.into_iter().map(|id| (id, variant)).collect()
+    }
+
+    /// Creates the sets in `sets` that their programs lack, every pipeline concurrently,
+    /// after the frame's admission checks and before its uploads, and records `sets` as
+    /// the hot sets reloads recreate. A failure rejects the frame with `Error::Shader`
+    /// (or faults).
+    pub(super) fn ensure_pipelines(&mut self, sets: Vec<(u64, Variant)>) -> Result<(), Error> {
+        let missing: Vec<_> = sets
+            .iter()
+            .copied()
+            .filter(|&(id, variant)| !self.program_slot(id).pipelines.has(variant))
+            .collect();
+        if !missing.is_empty() {
+            self.program_cache.refresh(&self.device);
+            let abi = self.program_abi();
+            let requests: Vec<_> = missing
+                .iter()
+                .map(|&(id, variant)| {
+                    let slot = self.program_slot(id);
+                    (&slot.modules, slot.label.as_str(), variant)
+                })
+                .collect();
+            let built = match create_sets(&abi, &requests) {
+                Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
+                other => other?,
+            };
+            self.pipelines.created += 2 * built.len() as u64;
+            self.program_cache.count(2 * built.len() as u64);
+            for (&(id, variant), pair) in missing.iter().zip(built) {
+                let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
+                slot.pipelines.install(variant, pair);
+            }
+            self.check_fault()?;
+        }
+        self.hot = sets;
+        Ok(())
+    }
+
+    /// Every set the standard program's modules can build, for tests that swap its
+    /// pipelines for probes and references.
+    #[cfg(test)]
+    pub(super) fn ensure_standard_pipelines(&mut self) {
+        let hot = std::mem::take(&mut self.hot);
+        let sets = [
+            Variant::Lit,
+            Variant::Hardware,
+            Variant::Fresh,
+            Variant::Traced,
+        ]
+        .into_iter()
+        .filter(|&v| self.programs[0].modules.has(v))
+        .map(|v| (self.standard.id(), v))
+        .collect();
+        self.ensure_pipelines(sets).unwrap();
+        self.hot = hot;
     }
 
     /// Sets named `Parameters` values of `m`, keeping its others: a buffer write, no
@@ -386,29 +663,28 @@ impl Renderer {
         self.programs.iter().find(|s| s.id == id).unwrap()
     }
 
-    /// Every program's traced shading pipelines on `heads`, in slot order.
-    pub(super) fn compile_traced_programs(
+    /// Every program's traced Hard and Soft shading modules on `heads`, in slot order;
+    /// their pipelines compile when a traced frame first draws with the program.
+    pub(super) fn compile_traced_modules(
         &self,
         heads: &[String; 2],
-    ) -> Result<Vec<[Owned<wgpu::ComputePipeline>; 2]>, Error> {
-        let state = self.primary.as_ref().unwrap();
+    ) -> Result<Vec<[Owned<wgpu::ShaderModule>; 2]>, Error> {
+        let abi = self.program_abi();
         let mut out = vec![];
         for slot in &self.programs {
             let parameters = program::declares_parameters(&slot.source);
             let sources = heads
                 .each_ref()
                 .map(|h| program::compose(h, &slot.source, Stage::Traced, parameters));
-            let abi = self.program_abi();
             let scopes = OperationScopes::new(&self.device);
-            let [hard, soft] = sources.each_ref().map(|c| module(&abi, &slot.label, c));
-            let pipelines = state.shade_pipelines(&self.device, &self.ledger, [&hard, &soft]);
+            let modules = sources.each_ref().map(|c| module(&abi, &slot.label, c));
             if let Some(error) = scopes.finish() {
                 return Err(match scope_error(&slot.label, error, &sources) {
                     Error::Fault(Fault(message)) => self.fail(message),
                     other => other,
                 });
             }
-            out.push(pipelines);
+            out.push(modules);
         }
         Ok(out)
     }
@@ -425,6 +701,7 @@ impl Renderer {
                 .primary
                 .as_ref()
                 .filter(|_| self.pipeline.primary.is_some()),
+            cache: self.program_cache.get(),
         }
     }
     pub(super) fn preludes(&self) -> Preludes<'_> {

@@ -1,6 +1,6 @@
 # Programmable shading
 
-**Status:** Phase 1 is implemented and recorded in [programmable-shading-phase-1.md](programmable-shading-phase-1.md), with its gate result and open constraints. Sections 1 and 4 describe the code before it.
+**Status:** Phase 1 is implemented and recorded in [programmable-shading-phase-1.md](programmable-shading-phase-1.md), with its gate result and open constraints. Reload latency and C17 are followed up in [fast-shader-reload.md](fast-shader-reload.md). Sections 1 and 4 describe the code before it.
 
 Design decision, 2026-11-05, based on `48eabf5`. This is CPU-only design: no renderer change, no GPU or window run and no repository build. The one piece of new evidence is a naga 30.0.1 composition probe outside the repository ([evidence](#evidence-and-time)). It uses the same naga that wgpu 30 validates with. Labels: **M** is measured, either in the cited records or by the probe; **I** is an inference.
 

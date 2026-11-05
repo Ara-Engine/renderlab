@@ -8,6 +8,9 @@ mod soft_shadow_probe_tests;
 #[path = "film_reference_tests.rs"]
 mod film_reference_tests;
 
+#[path = "reload_tests.rs"]
+mod reload_tests;
+
 const SEED_EDIT: (&str, &str) = (
     "    let seed=fresh_hash(pixel.x+pixel.y*width);",
     "    var seed=fresh_hash(pixel.x+pixel.y*width);\n    if FRESH_SEED!=0u {seed=fresh_hash(seed^(FRESH_SEED*0x9e3779b9u));}",

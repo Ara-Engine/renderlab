@@ -203,9 +203,11 @@ impl Renderer {
         self.soft_mode
     }
 
-    /// Selects how lit frames resolve camera visibility. Traced compiles its modules
-    /// from the installed source now, transactionally; failure keeps the current mode.
-    /// Raster releases traced pipelines and targets after in-flight frames.
+    /// Selects how lit frames resolve camera visibility. Traced compiles its kernels and
+    /// every program's traced modules from the installed source now, transactionally;
+    /// failure keeps the current mode. Program traced pipelines compile when a traced
+    /// frame first draws with the program. Raster releases traced pipelines and targets
+    /// after in-flight frames.
     pub fn set_primary_visibility(&mut self, mode: PrimaryVisibility) -> Result<(), Error> {
         self.check_fault()?;
         if mode == self.primary_mode {
@@ -215,6 +217,7 @@ impl Renderer {
             PrimaryVisibility::Raster => {
                 self.pipeline.primary = None;
                 for slot in &mut self.programs {
+                    slot.modules.traced = None;
                     slot.pipelines.traced = None;
                 }
                 self.primary_sources = None;
@@ -234,11 +237,12 @@ impl Renderer {
                         _ => self.fail(error.to_string()),
                     });
                 }
-                let traced = self.compile_traced_programs(&heads)?;
+                let traced = self.compile_traced_modules(&heads)?;
                 self.check_fault()?;
-                self.pipelines.created += 4 + 2 * traced.len() as u64;
-                for (slot, pipelines) in self.programs.iter_mut().zip(traced) {
-                    slot.pipelines.traced = Some(pipelines);
+                self.pipelines.created += 4;
+                for (slot, modules) in self.programs.iter_mut().zip(traced) {
+                    slot.modules.traced = Some(modules);
+                    slot.pipelines.traced = None;
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -685,25 +689,36 @@ impl PrimaryState {
     }
 
     /// One program's shading pipelines from its composed modules, indexed by `Shading`.
+    #[cfg(test)]
     pub fn shade_pipelines(
         &self,
         device: &wgpu::Device,
         ledger: &Ledger,
         modules: [&wgpu::ShaderModule; 2],
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
-        [0, 1].map(|i| {
-            ledger.own(
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("traced program shading"),
-                    layout: Some(&self.shade_layouts[i]),
-                    module: modules[i],
-                    entry_point: Some("primary_shade_tiles"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
-                ResourceKind::ComputePipeline,
-            )
-        })
+        [0, 1].map(|i| self.shade_pipeline(device, ledger, modules[i], i, None))
+    }
+    /// The pipeline of `Shading` index `shading` from its module, so the pair can compile
+    /// concurrently, through `cache` when given.
+    pub fn shade_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        shading: usize,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::ComputePipeline> {
+        ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("traced program shading"),
+                layout: Some(&self.shade_layouts[shading]),
+                module,
+                entry_point: Some("primary_shade_tiles"),
+                compilation_options: Default::default(),
+                cache,
+            }),
+            ResourceKind::ComputePipeline,
+        )
     }
 
     /// `fresh_compute` of a soft primary module on the traced fresh ABI. Tests seed or

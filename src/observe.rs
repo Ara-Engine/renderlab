@@ -372,8 +372,9 @@ pub struct PipelineStats {
     pub attempts: u64,
     pub successes: u64,
     pub installations: u64,
-    /// Render and compute pipelines created by renderer creation, reloads, program
-    /// creation and traced selection, cumulative.
+    /// Render and compute pipelines created, cumulative: engine pipelines at renderer
+    /// creation, reloads and traced selection, and program pipeline sets when a reload
+    /// recreates the last frame's or a frame first draws with one.
     pub created: u64,
 }
 #[derive(Clone, Debug)]

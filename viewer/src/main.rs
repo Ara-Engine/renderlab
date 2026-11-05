@@ -13,6 +13,7 @@ mod hdr_files;
 #[path = "../../support/lighting_controls.rs"]
 mod lighting_settings;
 mod prepared;
+mod shader_watch;
 mod surface_probe;
 use renderlab::virtual_geometry::{
     PreparationState, SelectorMode, StreamOptions, VirtualAsset, VirtualScene,
@@ -28,7 +29,7 @@ use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use winit::{
     application::ApplicationHandler,
@@ -59,6 +60,9 @@ impl PendingResize {
 struct Options {
     policy: policy::Policy,
     shader: PathBuf,
+    /// The standard shading program's file; defaults to programs/standard.wgsl beside the
+    /// prelude.
+    program: PathBuf,
     lighting: Option<PathBuf>,
     environment: Option<PathBuf>,
     environment_settings: Option<PathBuf>,
@@ -93,6 +97,7 @@ impl Options {
             environment_settings: None,
             capture_hdr: None,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
+            program: PathBuf::new(),
             frames: None,
             seconds: None,
             timestamps: true,
@@ -237,6 +242,7 @@ impl Options {
                         Some(args.next().ok_or("missing HDR output prefix")?.into())
                 }
                 "--shader" => options.shader = args.next().ok_or("missing shader path")?.into(),
+                "--program" => options.program = args.next().ok_or("missing program path")?.into(),
                 "--no-timestamps" => options.timestamps = false,
                 "--log-frames" => options.log_frames = true,
                 "--trace-surface" => options.trace_surface = true,
@@ -245,6 +251,9 @@ impl Options {
                 _ if !arg.starts_with('-') => options.shader = arg.into(),
                 _ => return Err(format!("unknown argument {arg}")),
             }
+        }
+        if options.program.as_os_str().is_empty() {
+            options.program = shader_watch::ShaderWatch::standard_beside(&options.shader);
         }
         if options.asset.is_some() && options.virtual_manifest.is_some() {
             return Err("choose --asset or --virtual-manifest".into());
@@ -277,10 +286,15 @@ impl Marker {
         } else {
             "shader_write"
         };
-        let elapsed = at.saturating_duration_since(self.origin) + self.file_age;
+        // Shader writes: save to detection (the file's age when read, which the poll
+        // interval bounds), then detection to `kind`.
+        let detected = at.saturating_duration_since(self.origin);
+        let elapsed = detected + self.file_age;
         eprintln!(
-            "{category}_to_{kind}_proxy_ms={:.3} frame={} revision={} definition=m1_async_not_scanout",
+            "{category}_to_{kind}_proxy_ms={:.3} save_to_detect_ms={:.3} detect_to_{kind}_ms={:.3} frame={} revision={} definition=m1_async_not_scanout",
             elapsed.as_secs_f64() * 1000.0,
+            self.file_age.as_secs_f64() * 1000.0,
+            detected.as_secs_f64() * 1000.0,
             frame.0,
             self.revision.0
         );
@@ -305,7 +319,7 @@ struct View {
     keys: HashSet<KeyCode>,
     input_stamp: Option<Instant>,
     applied_input_stamp: Option<Instant>,
-    source: String,
+    shaders: shader_watch::ShaderWatch,
     shader_rejected: bool,
     shader_check: Instant,
     lighting_file: lighting_settings::LightingFile,
@@ -418,11 +432,13 @@ impl View {
             },
             cfg!(debug_assertions)
         );
-        let required_features = if options.timestamps {
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
-        } else {
-            wgpu::Features::empty()
-        };
+        // A pipeline cache makes reverting a shader edit a cache hit, not a recompile.
+        let required_features = adapter.features()
+            & if options.timestamps {
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PIPELINE_CACHE
+            } else {
+                wgpu::Features::PIPELINE_CACHE
+            };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features,
@@ -534,7 +550,11 @@ impl View {
             keys: HashSet::new(),
             input_stamp: None,
             applied_input_stamp: None,
-            source,
+            shaders: shader_watch::ShaderWatch::new(
+                options.shader.clone(),
+                source,
+                options.program.clone(),
+            ),
             shader_rejected: false,
             shader_check: Instant::now(),
             lighting_file,
@@ -659,23 +679,17 @@ impl View {
             if let Some(path) = &options.lighting {
                 self.lighting_file.poll(path, &mut self.renderer);
             }
-            if let Ok(source) = std::fs::read_to_string(&options.shader)
-                && source != self.source
-            {
-                self.source = source;
-                let origin = Instant::now();
-                let file_age = std::fs::metadata(&options.shader)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|s| SystemTime::now().duration_since(s).ok())
-                    .unwrap_or_default();
-                match self.renderer.reload(&self.source) {
+            for reload in self.shaders.poll(&mut self.renderer) {
+                let file = reload.path.display();
+                match reload.result {
                     Ok(report) => {
-                        self.shader_rejected = false;
                         eprintln!(
-                            "reload_compile_ms={:.3} revision={}",
+                            "reload_compile_ms={:.3} revision={} file={file} kind={:?} retry={} save_to_detect_ms={:.3}",
                             report.compile.as_secs_f64() * 1000.0,
-                            report.revision.0
+                            report.revision.0,
+                            reload.kind,
+                            reload.retry,
+                            reload.file_age.as_secs_f64() * 1000.0,
                         );
                         if self.markers.len() == 16 {
                             self.markers.pop_front();
@@ -683,26 +697,35 @@ impl View {
                         }
                         self.markers.push_back(Marker {
                             revision: report.revision,
-                            origin,
-                            file_age,
+                            origin: reload.detected,
+                            file_age: reload.file_age,
                             startup: false,
                             presented: false,
                             completed: false,
                         });
-                        self.set_title(TITLE.into());
                     }
                     Err(renderlab::ReloadError::Rejected {
                         diagnostic,
                         compile,
                     }) => {
-                        self.shader_rejected = true;
                         eprintln!(
-                            "reload_rejected compile_ms={:.3} diagnostic={diagnostic}",
-                            compile.as_secs_f64() * 1000.0
+                            "reload_rejected compile_ms={:.3} file={file} kind={:?} retry={} diagnostic={diagnostic}",
+                            compile.as_secs_f64() * 1000.0,
+                            reload.kind,
+                            reload.retry,
                         );
-                        self.set_title("Renderlab | shader rejected; last valid pipeline active | see terminal".into());
                     }
                     Err(error) => return Err(error.into()),
+                }
+                let rejected = self.shaders.rejected();
+                if rejected != self.shader_rejected {
+                    self.shader_rejected = rejected;
+                    self.set_title(if rejected {
+                        "Renderlab | shader rejected; last valid pipeline active | see terminal"
+                            .into()
+                    } else {
+                        TITLE.into()
+                    });
                 }
             }
         }

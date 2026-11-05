@@ -208,20 +208,33 @@ impl FreshState {
             ResourceKind::ShaderModule,
         );
         FreshPipelines {
-            receiver: self.mesh(device, ledger, &shader, false, true),
+            receiver: self.mesh(device, ledger, &shader, false, true, None),
             compute: self.compute_pipeline(device, ledger, &shader, "fresh_compute", &[]),
             compute_tile: TILE,
         }
     }
     /// One program's fresh lighting pair (without, with tangents) from its composed
     /// raster module.
+    #[cfg(test)]
     pub fn shade_pipelines(
         &self,
         device: &wgpu::Device,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
     ) -> [Owned<wgpu::RenderPipeline>; 2] {
-        [false, true].map(|t| self.mesh(device, ledger, shader, t, false))
+        [false, true].map(|t| self.shade_pipeline(device, ledger, shader, t, None))
+    }
+    /// One pipeline of that pair, so the pair can compile concurrently, through `cache`
+    /// when given.
+    pub fn shade_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        shader: &wgpu::ShaderModule,
+        tangent: bool,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::RenderPipeline> {
+        self.mesh(device, ledger, shader, tangent, false, cache)
     }
     fn mesh(
         &self,
@@ -230,6 +243,7 @@ impl FreshState {
         shader: &wgpu::ShaderModule,
         tangent: bool,
         receiver: bool,
+        cache: Option<&wgpu::PipelineCache>,
     ) -> Owned<wgpu::RenderPipeline> {
         let receiver_formats = [
             Some(wgpu::TextureFormat::Rgba32Float.into()),
@@ -298,7 +312,7 @@ impl FreshState {
                     }),
                     multisample: Default::default(),
                     multiview_mask: None,
-                    cache: None,
+                    cache,
                 }),
                 ResourceKind::RenderPipeline,
             )

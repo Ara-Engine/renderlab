@@ -94,8 +94,10 @@ impl Renderer {
         let standard = self.standard.clone();
         self.reload_program(&standard, source)
     }
-    /// The standard program's pipelines, which tests swap for probes and references.
+    /// The standard program's pipelines, every set this renderer can build created
+    /// first, which tests swap for probes and references.
     pub(crate) fn test_standard(&mut self) -> &mut program_gpu::ProgramPipelines {
+        self.ensure_standard_pipelines();
         &mut self.programs[0].pipelines
     }
     /// A lit pair from a composed raster module, on the hardware-shadow ABI or the plain
@@ -127,6 +129,7 @@ impl Renderer {
                 "fs_lit",
                 tangent,
                 self.options.samples,
+                None,
             )
         });
         assert!(scopes.finish().is_none());
@@ -360,7 +363,7 @@ impl Pipelines {
     }
 }
 /// A lit or diagnostic mesh pipeline on the 48-byte vertex ABI, with the optional
-/// tangent stream, reversed-Z depth and `samples`.
+/// tangent stream, reversed-Z depth and `samples`, through `cache` when given.
 #[allow(clippy::too_many_arguments)]
 fn mesh_pipeline(
     device: &wgpu::Device,
@@ -371,6 +374,7 @@ fn mesh_pipeline(
     entry: &str,
     tangent: bool,
     samples: SampleCount,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> Owned<wgpu::RenderPipeline> {
     ledger.own(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -424,10 +428,22 @@ fn mesh_pipeline(
                 ..Default::default()
             },
             multiview_mask: None,
-            cache: None,
+            cache,
         }),
         ResourceKind::RenderPipeline,
     )
+}
+/// A frame's visibility and lit-shading choices (`Renderer::frame_paths`).
+struct FramePaths {
+    lit: bool,
+    hardware_shadowed: bool,
+    soft: bool,
+    /// Raster fresh frames: receiver raster, visibility compute, then raster shading.
+    fresh: bool,
+    /// Traced Interactive frames fuse camera rays and visibility into one dispatch.
+    interactive: bool,
+    /// The program pipeline set the frame draws with; None for unlit frames.
+    variant: Option<program_gpu::Variant>,
 }
 struct Slot {
     readback: Option<Owned<wgpu::Buffer>>,
@@ -491,6 +507,13 @@ pub struct Renderer {
     primary_sources: Option<([String; 2], [String; 2])>,
     /// Shading programs in creation order; the first is the standard program.
     programs: Vec<ProgramSlot>,
+    /// The program pipeline sets the last frame drew with, which reloads recreate
+    /// eagerly; other sets compile when a frame first needs them.
+    hot: Vec<(u64, program_gpu::Variant)>,
+    /// Program pipelines go through this driver cache when the device enables
+    /// `Features::PIPELINE_CACHE`, so recompiling a source seen before (a revert, an A/B
+    /// toggle) is a cache hit; see `program_gpu::ProgramCache`.
+    program_cache: program_gpu::ProgramCache,
     standard: crate::Program,
     next_program: u64,
     depth: Option<Depth>,
@@ -868,6 +891,7 @@ impl Renderer {
             });
         }
         let identity = Arc::new(());
+        let program_cache = program_gpu::ProgramCache::new(&device);
         let standard = program_gpu::compile_program(
             &ProgramAbi {
                 device: &device,
@@ -877,6 +901,7 @@ impl Renderer {
                 hardware: hardware_shadows.as_ref().map(|h| &*h.layout),
                 fresh: fresh.as_ref(),
                 primary: None,
+                cache: None,
             },
             &Preludes {
                 raster: wgsl,
@@ -890,7 +915,8 @@ impl Renderer {
         if let Some(error) = fault.get() {
             return Err(Error::Fault(error.clone()));
         }
-        let created = pipeline.count() + standard.pipelines.count();
+        // The standard program has modules only; its pipelines compile at first draw.
+        let created = pipeline.count();
         let (standard, slot) = program_gpu::standard_slot(&identity, standard);
         let mut renderer = Self {
             device,
@@ -928,6 +954,8 @@ impl Renderer {
             fresh_source,
             primary_sources: None,
             programs: vec![slot],
+            hot: vec![],
+            program_cache,
             standard,
             next_program: 1,
             depth: None,
@@ -1032,7 +1060,7 @@ impl Renderer {
         );
         let mesh = |tangent| {
             mesh_pipeline(
-                device, ledger, &shader, layout, format, "fs", tangent, samples,
+                device, ledger, &shader, layout, format, "fs", tangent, samples, None,
             )
         };
         let diagnostic = mesh(false);
@@ -1120,7 +1148,10 @@ impl Renderer {
     }
 
     /// Replaces the engine prelude (shaders/scene.wgsl): one transaction over the engine
-    /// pipelines and every program recomposed against it. Any rejection keeps them all.
+    /// pipelines and every program recomposed against it, each program's module created
+    /// for every path. Program pipeline sets the last frame drew with are recreated in
+    /// the transaction, concurrently with the engine pipelines; the others compile when a
+    /// frame first needs them. Any rejection keeps them all.
     pub fn reload(&mut self, wgsl: &str) -> Result<ReloadReport, ReloadError> {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
@@ -1128,6 +1159,7 @@ impl Renderer {
         let start = Instant::now();
         self.pipelines.attempts += 1;
         self.purge_programs();
+        self.program_cache.refresh(&self.device);
         let rejected = |error: Error| ReloadError::Rejected {
             diagnostic: error.to_string(),
             compile: start.elapsed(),
@@ -1157,22 +1189,63 @@ impl Renderer {
             })
             .transpose()
             .map_err(rejected)?;
-        let scopes = OperationScopes::new(&self.device);
-        let candidate = Self::compile(
+        let preludes = Preludes {
+            raster: wgsl,
+            hardware: hardware_source.as_deref(),
+            fresh: fresh_source.as_deref(),
+            traced: primary_sources.as_ref().map(|(_, heads)| heads),
+        };
+        let abi = self.program_abi();
+        // The engine pipelines compile on their own thread while every program's modules
+        // and hot sets (the sets the last frame drew with) compile concurrently here.
+        let (device, ledger, layout, lighting, shadows) = (
             &self.device,
             &self.ledger,
-            &self.layout,
+            &*self.layout,
             &self.lighting,
             &self.shadows,
-            self.fresh.as_ref().zip(fresh_source.as_deref()),
-            self.primary
-                .as_ref()
-                .zip(primary_sources.as_ref().map(|(k, _)| k)),
-            self.format,
-            self.options.samples,
-            wgsl,
         );
-        if let Some(error) = scopes.finish() {
+        let fresh = self.fresh.as_ref().zip(fresh_source.as_deref());
+        let primary = self
+            .primary
+            .as_ref()
+            .zip(primary_sources.as_ref().map(|(k, _)| k));
+        let (format, samples) = (self.format, self.options.samples);
+        let ((candidate, engine_error), programs) = std::thread::scope(|s| {
+            let engine = s.spawn(move || {
+                let scopes = OperationScopes::new(device);
+                let candidate = Self::compile(
+                    device, ledger, layout, lighting, shadows, fresh, primary, format, samples,
+                    wgsl,
+                );
+                (candidate, scopes.finish())
+            });
+            let programs = self
+                .programs
+                .iter()
+                .map(|slot| {
+                    program_gpu::compile_program(&abi, &preludes, &slot.label, &slot.source)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|compiled| {
+                    let sets: Vec<_> = self
+                        .programs
+                        .iter()
+                        .zip(&compiled)
+                        .enumerate()
+                        .flat_map(|(i, (slot, c))| {
+                            self.hot_sets(slot.id, &c.modules)
+                                .map(move |v| (i, (&c.modules, slot.label.as_str(), v)))
+                        })
+                        .collect();
+                    let requests: Vec<_> = sets.iter().map(|(_, request)| *request).collect();
+                    let built = program_gpu::create_sets(&abi, &requests)?;
+                    let keys: Vec<_> = sets.iter().map(|&(i, (_, _, v))| (i, v)).collect();
+                    Ok((keys, built, compiled))
+                });
+            (engine.join().unwrap(), programs)
+        });
+        if let Some(error) = engine_error {
             return match error {
                 wgpu::Error::Validation { .. } => Err(ReloadError::Rejected {
                     diagnostic: error.to_string(),
@@ -1184,38 +1257,28 @@ impl Renderer {
                 }
             };
         }
-        let preludes = Preludes {
-            raster: wgsl,
-            hardware: hardware_source.as_deref(),
-            fresh: fresh_source.as_deref(),
-            traced: primary_sources.as_ref().map(|(_, heads)| heads),
-        };
-        let mut programs = Vec::with_capacity(self.programs.len());
-        for slot in &self.programs {
-            match program_gpu::compile_program(
-                &self.program_abi(),
-                &preludes,
-                &slot.label,
-                &slot.source,
-            ) {
-                Ok(compiled) => programs.push(compiled.pipelines),
-                Err(Error::Fault(Fault(message))) => {
-                    let _ = self.fault.set(Fault(message));
-                    return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
-                }
-                Err(error) => return Err(rejected(error)),
+        let (keys, built, compiled) = match programs {
+            Ok(programs) => programs,
+            Err(Error::Fault(Fault(message))) => {
+                let _ = self.fault.set(Fault(message));
+                return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
             }
-        }
+            Err(error) => return Err(rejected(error)),
+        };
         let compile = start.elapsed();
         self.pipelines.successes += 1;
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
-        self.pipelines.created +=
-            candidate.count() + programs.iter().map(|p| p.count()).sum::<u64>();
+        self.pipelines.created += candidate.count() + 2 * built.len() as u64;
+        self.program_cache.count(2 * built.len() as u64);
         self.pipeline = candidate;
-        for (slot, pipelines) in self.programs.iter_mut().zip(programs) {
-            slot.pipelines = pipelines;
+        for (slot, c) in self.programs.iter_mut().zip(compiled) {
+            slot.modules = c.modules;
+            slot.pipelines = Default::default();
+        }
+        for ((i, variant), pair) in keys.into_iter().zip(built) {
+            self.programs[i].pipelines.install(variant, pair);
         }
         wgsl.clone_into(&mut self.source);
         self.hardware_source = hardware_source;
@@ -1996,6 +2059,12 @@ impl Renderer {
         if (shadow_frame.is_some() || traced) && self.hardware_shadows.is_some() {
             shadow_preparation += acceleration_start.elapsed();
         }
+        // The frame's program pipeline sets, created now if missing: after every admission
+        // check (so a rejected frame creates nothing) and before the frame's uploads.
+        let variant = self
+            .frame_paths(view_mode, shadow_frame.is_some(), traced)
+            .variant;
+        self.ensure_pipelines(self.frame_sets(draws.iter().map(|d| d.material), variant))?;
         let mut uploads = UploadBytes::default();
         let mut scene = SceneCounts::default();
         let mut visibility = Duration::ZERO;
@@ -2206,6 +2275,10 @@ impl Renderer {
         scene: SceneCounts,
         cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
+        let variant = self
+            .frame_paths(view_mode, shadow_frame.is_some(), false)
+            .variant;
+        self.ensure_pipelines(self.frame_sets(draws.iter().map(|d| d.material), variant))?;
         self.submit_frame(
             color,
             camera_bytes,
@@ -2223,6 +2296,35 @@ impl Renderer {
         )
     }
 
+    /// How a frame with these choices resolves visibility and lit shading: what
+    /// `submit_frame` encodes and which program pipeline set it draws with.
+    fn frame_paths(&self, view_mode: ViewMode, shadowed: bool, traced: bool) -> FramePaths {
+        use program_gpu::Variant;
+        let lit = view_mode == ViewMode::Lit;
+        let hardware_shadowed = shadowed && self.hardware_shadows.is_some();
+        let soft = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
+        #[cfg(test)]
+        let soft = soft && (traced || !self.fresh_fragment_reference);
+        let fresh = soft && !traced;
+        FramePaths {
+            lit,
+            hardware_shadowed,
+            soft,
+            fresh,
+            interactive: traced && soft && self.soft_mode == crate::SoftShadows::Interactive,
+            variant: if traced {
+                Some(Variant::Traced)
+            } else if fresh {
+                Some(Variant::Fresh)
+            } else if hardware_shadowed {
+                Some(Variant::Hardware)
+            } else if lit {
+                Some(Variant::Lit)
+            } else {
+                None
+            },
+        }
+    }
     // Persistent data is prepared once, then borrowed for the shared render pass.
     // `traced` frames replace both raster geometry passes with camera rays and
     // deferred compute shading; the TLAS for this draw sequence is current.
@@ -2257,15 +2359,14 @@ impl Renderer {
             uploads.view_settings = 16;
             uploads.write_calls += 1;
         }
-        let lit = view_mode == ViewMode::Lit;
-        let hardware_shadowed = shadow_frame.is_some() && self.hardware_shadows.is_some();
-        let soft = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
-        #[cfg(test)]
-        let soft = soft && (traced || !self.fresh_fragment_reference);
-        // Raster fresh frames: receiver raster, visibility compute, then raster shading.
-        let fresh = soft && !traced;
-        // Traced Interactive frames fuse camera rays and visibility into one dispatch.
-        let interactive = traced && soft && self.soft_mode == crate::SoftShadows::Interactive;
+        let FramePaths {
+            lit,
+            hardware_shadowed,
+            soft,
+            fresh,
+            interactive,
+            ..
+        } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
@@ -2485,7 +2586,7 @@ impl Renderer {
                 } else if hardware_shadowed {
                     &p.hardware.as_ref().unwrap()[t]
                 } else if lit {
-                    &p.lit[t]
+                    &p.lit.as_ref().unwrap()[t]
                 } else if tangent {
                     &*self.pipeline.diagnostic_tangent
                 } else {

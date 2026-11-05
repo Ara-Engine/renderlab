@@ -252,6 +252,9 @@ impl Renderer {
         instances: &mut Instances,
     ) {
         self.test_drain("lighting admission setup");
+        // Program pipelines are created at first draw; create them now, so the frames
+        // below must create none.
+        self.ensure_standard_pipelines();
         for slot in &mut self.slots {
             slot.flight = Some(Flight {
                 done: Arc::new(OnceLock::new()),

@@ -2,7 +2,7 @@
 
 2026-11-05 (00:43–02:10 UTC), based on `af6578c`, implementing phase 1 of [programmable shading](programmable-shading.md). RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, release test binaries, registered full-resident quarry (12 draws, 13,034,903 triangles) at 1920×1080 1x unless noted. No window, viewer, game capture or push.
 
-**Gate result: not passed outright.** Every output set is byte-identical, and the shading-pass and frame-time gates pass. One condition is unmet: the static-repeat check failed in 2 of 13 candidate runs. The baseline failed 8 of 12 in the same alternating sessions (details below), so this is the climb-2 driver hazard resurfacing on main, not a change introduced here. The gate says a byte difference stops the unit, so this is reported for a decision, not argued away. Edit-to-image also regressed on traced-selected renderers (+40%), and the viewer does not yet watch program files (C17).
+**Gate result: not passed outright.** Every output set is byte-identical, and the shading-pass and frame-time gates pass. One condition is unmet: the static-repeat check failed in 2 of 13 candidate runs. The baseline failed 8 of 12 in the same alternating sessions (details below), so this is the climb-2 driver hazard resurfacing on main, not a change introduced here. The gate says a byte difference stops the unit, so this is reported for a decision, not argued away. Edit-to-image also regressed on traced-selected renderers (+40%), and the viewer does not yet watch program files (C17); both are addressed in [fast shader reload](fast-shader-reload.md).
 
 | Gate | Result |
 |---|---|
@@ -120,7 +120,7 @@ The Interactive acceptance was run in alternating candidate and baseline process
 
 ## Constraints and differences from the design
 
-- **C17 open.** The viewer still polls only `scene.wgsl` (viewer code was outside this unit's ownership). Live editing of lit shading in the viewer now needs it to watch `shaders/programs/standard.wgsl` and call `reload_program`.
+- **C17 closed later.** The viewer now watches `shaders/programs/standard.wgsl` and calls `reload_program`, and reloads compile only the pipelines the last frame used: see [fast shader reload](fast-shader-reload.md). At this phase it polled only `scene.wgsl`.
 - **R2.** Raster mesh-uv helpers keep implicit derivatives, which keeps the standard program byte-identical. Programs must call them in uniform control flow or use the `_grad` forms. naga does not reject implicit sampling in divergent raster code.
 - **Grad helpers take the receiver:** `sample_*_grad(input, uv, dx, dy)`, because traced sampling needs the draw's material slot.
 - **Visibility.** Programs cannot move the shadow-ray origin or choose traced lights. Soft visibility remains `lights[0]` only (C15). Mixed-program traced frames are rejected until phase 3.

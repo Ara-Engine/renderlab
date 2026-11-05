@@ -768,12 +768,12 @@ fn gpu_lit_photometry_1x_4x() {
                 source.replace(find, replace)
             });
             let mut probe = r.test_lit_pair(&probe, false);
-            std::mem::swap(&mut r.test_standard().lit, &mut probe);
+            std::mem::swap(r.test_standard().lit.as_mut().unwrap(), &mut probe);
             lit_render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut instances)]);
             let image = hdr(&mut r);
             assert_eq!(image[(48 * 128 + 64) * 4], 4.);
             assert_eq!(r.test_capture_color(&t)[(48 * 128 + 64) * 4], 204);
-            std::mem::swap(&mut r.test_standard().lit, &mut probe);
+            std::mem::swap(r.test_standard().lit.as_mut().unwrap(), &mut probe);
         }
     }
 }
