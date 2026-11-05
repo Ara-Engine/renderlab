@@ -8,39 +8,41 @@ pub(super) enum Policy {
     Viewed,
 }
 
-pub(super) fn sources(policy: Policy) -> [String; 2] {
+pub(super) fn sources(policy: Policy) -> FilmSources {
     let mut sources = film_sources(true);
     if matches!(policy, Policy::Minimal) {
         return sources;
     }
-    for source in &mut sources {
-        source.push_str(include_str!("../support/receiver_policy.wgsl"));
-        *source = edit(
-            source,
-            (
-                "ray.near+direction*hit.t,getCommittedHitVertexPositions(&query)",
-                "world_position(getCommittedHitVertexPositions(&query)[0]*(1.0-hit.barycentrics.x-hit.barycentrics.y)+getCommittedHitVertexPositions(&query)[1]*hit.barycentrics.x+getCommittedHitVertexPositions(&query)[2]*hit.barycentrics.y,hit.instance_custom_data).xyz,getCommittedHitVertexPositions(&query)",
-            ),
-        );
-        *source = edit(
-            source,
-            (
-                "textureStore(primary_world_output,p,vec4<f32>(trace.point,clip.z/clip.w));",
-                "let a=world_position(trace.positions[0],trace.record.x-1u).xyz;\n    let b=world_position(trace.positions[1],trace.record.x-1u).xyz;\n    let c=world_position(trace.positions[2],trace.record.x-1u).xyz;\n    textureStore(primary_world_output,p,vec4<f32>(trace.point,receiver_epsilon(a,b,c)));",
-            ),
-        );
-    }
-    sources[1] = edit(
-        &sources[1],
+    // Receiver reconstruction belongs to tracing; the program consumes the
+    // unchanged Receiver interface and the visibility texture for every policy.
+    sources
+        .kernels
+        .push_str(include_str!("../support/receiver_policy.wgsl"));
+    sources.kernels = edit(
+        &sources.kernels,
+        (
+            "ray.near+direction*hit.t,getCommittedHitVertexPositions(&query)",
+            "world_position(getCommittedHitVertexPositions(&query)[0]*(1.0-hit.barycentrics.x-hit.barycentrics.y)+getCommittedHitVertexPositions(&query)[1]*hit.barycentrics.x+getCommittedHitVertexPositions(&query)[2]*hit.barycentrics.y,hit.instance_custom_data).xyz,getCommittedHitVertexPositions(&query)",
+        ),
+    );
+    sources.kernels = edit(
+        &sources.kernels,
+        (
+            "textureStore(primary_world_output,p,vec4<f32>(trace.point,clip.z/clip.w));",
+            "let a=world_position(trace.positions[0],trace.record.x-1u).xyz;\n    let b=world_position(trace.positions[1],trace.record.x-1u).xyz;\n    let c=world_position(trace.positions[2],trace.record.x-1u).xyz;\n    textureStore(primary_world_output,p,vec4<f32>(trace.point,receiver_epsilon(a,b,c)));",
+        ),
+    );
+    sources.kernels = edit(
+        &sources.kernels,
         (
             "let origin=world+normal*1e-5;",
             "let epsilon=textureLoad(fresh_world,vec2<i32>(pixel),0).w;\n    let origin=world+normal*epsilon;",
         ),
     );
-    sources[1] = edit(&sources[1], ("let tmin=1e-5;", "let tmin=epsilon;"));
+    sources.kernels = edit(&sources.kernels, ("let tmin=1e-5;", "let tmin=epsilon;"));
     if matches!(policy, Policy::Viewed) {
-        sources[1] = edit(
-            &sources[1],
+        sources.kernels = edit(
+            &sources.kernels,
             (
                 "let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);",
                 "let normal=select(-geometric,geometric,dot(geometric,lighting.eye-world)>=0.0);",
@@ -50,16 +52,17 @@ pub(super) fn sources(policy: Policy) -> [String; 2] {
     sources
 }
 
-pub(super) fn direct_source(source: &str) -> String {
-    // Reset after all environment terms, retaining the identical material/BRDF,
-    // exposure, geometry and visibility. The fixture/quarry has one directional sun.
-    let source = edit(
-        source,
+pub(super) fn direct_source() -> String {
+    // Preserve F0/R1's environment reset in the standard program itself. A separate
+    // sun-only shade body changes rounding on the quarry, even with the same BRDF.
+    let program = edit(
+        STANDARD,
         (
-            "    for(var i=0u;i<lighting.count;i+=1u) {",
-            "    exposed=vec3<f32>(0.0);\n    for(var i=0u;i<lighting.count;i+=1u) {",
+            "    for(var i=0u;i<light_count();i+=1u) {",
+            "    exposed=vec3<f32>(0.0);\n    for(var i=0u;i<light_count();i+=1u) {",
         ),
     );
+    let source = film_shading(&program);
     assert_eq!(source.matches("primary_frame.clear").count(), 3);
     source.replace("primary_frame.clear", "vec4<f32>(0.0,0.0,0.0,1.0)")
 }
@@ -67,7 +70,16 @@ pub(super) fn direct_source(source: &str) -> String {
 pub(super) fn accumulator_source(r1: bool) -> String {
     let source = include_str!("../support/film_accumulate.wgsl");
     if !r1 {
-        return source.to_owned();
+        // Uncovered trace tiles leave stale hit records. F0 predates that engine
+        // contract: reject those samples as R1 already does, preserving its estimand.
+        let source = edit(
+            source,
+            (
+                "    if h!=0u && h==bitcast<u32>(c.w) && abs(ds-dc)<=0.02*dc {",
+                "    if textureLoad(tiles,id.xy/vec2<u32>(8u,4u),0).x!=0u && h!=0u && h==bitcast<u32>(c.w) && abs(ds-dc)<=0.02*dc {",
+            ),
+        );
+        return format!("{source}\n@group(0) @binding(8) var tiles:texture_2d<u32>;\n");
     }
     let source = edit(
         source,
@@ -91,11 +103,12 @@ pub(super) fn accumulator_source(r1: bool) -> String {
 #[test]
 fn receiver_policy_sources_compile() {
     for policy in [Policy::Minimal, Policy::Magnitude, Policy::Viewed] {
-        for source in sources(policy) {
+        let sources = sources(policy);
+        for source in [sources.kernels, sources.shading] {
             validate_wgsl(&source);
         }
-        validate_wgsl(&direct_source(&sources(policy)[1]));
     }
+    validate_wgsl(&direct_source());
     validate_wgsl(&accumulator_source(true));
 }
 

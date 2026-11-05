@@ -456,22 +456,25 @@ impl PrimaryState {
     pub(super) fn test_film_pipelines(
         &self,
         device: &wgpu::Device,
-        source: &str,
+        kernels: &str,
+        shading: &str,
     ) -> [wgpu::ComputePipeline; 3] {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("test-only F0 film reference"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+        let [kernels, shading] = [kernels, shading].map(|source| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("test-only F0/R1 film reference"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
         });
         [
-            ("primary_trace_receivers", &self.trace_layouts[1]),
-            ("fresh_compute", &self.fresh_layout),
-            ("primary_shade", &self.shade_layouts[1]),
+            ("primary_trace_receivers", &self.trace_layouts[1], &kernels),
+            ("fresh_compute", &self.fresh_layout, &kernels),
+            ("primary_shade_tiles", &self.shade_layouts[1], &shading),
         ]
-        .map(|(entry, layout)| {
+        .map(|(entry, layout, module)| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(layout),
-                module: &module,
+                module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
                 cache: None,

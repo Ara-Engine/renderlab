@@ -8,63 +8,74 @@ mod fixture;
 #[path = "receiver_policy_tests.rs"]
 mod receiver_policy_tests;
 
-fn film_sources(minimal: bool) -> [String; 2] {
-    let mut sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
-    for source in &mut sources {
-        // The current production entry is tiled; F0's cfg(test) accessor retains
-        // its original name. Adapt only the composed test module.
-        *source = edit(source, ("fn primary_shade_tiles(", "fn primary_shade("));
-        *source = edit(
-            source,
-            (
-                "(vec2<f32>(pixel)+vec2<f32>(0.5))",
-                "(vec2<f32>(pixel)+film_jitter(camera.view_mode.y-1u))",
-            ),
-        );
-        *source = edit(
-            source,
-            (
-                "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));",
-                "textureStore(primary_normal_output,p,vec4<f32>(normal,f32(camera.view_mode.y)));",
-            ),
-        );
-        // Randomized point within each of the 16x16 footprint strata. Odd/even
-        // indices interleave across the footprint, rather than splitting it in two.
-        source.push_str("\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n");
-        // The hard module does not contain the fresh hash.
-        if !source.contains("fn fresh_hash(") {
-            source.push_str("fn fresh_hash(input:u32)->u32 {var x=input;x=(x^(x>>16u))*0x7feb352du;x=(x^(x>>15u))*0x846ca68bu;return x^(x>>16u);}\n");
-        }
-    }
-    sources[1] = edit(&sources[1], SEED_EDIT);
-    sources[1] = sources[1].replace(
+/// Trace/visibility and program shading have separate production modules and ABIs.
+struct FilmSources {
+    kernels: String,
+    shading: String,
+}
+
+fn jittered(source: &str) -> String {
+    let mut source = edit(
+        source,
+        (
+            "(vec2<f32>(pixel)+vec2<f32>(0.5))",
+            "(vec2<f32>(pixel)+film_jitter(camera.view_mode.y-1u))",
+        ),
+    );
+    // Randomized point within each of the 16x16 footprint strata. Odd/even
+    // indices interleave across the footprint, rather than splitting it in two.
+    source.push_str("\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x83d2e19bu);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n return (vec2<f32>(f32(i%16u),f32(i/16u))+q)/16.0;\n}\n");
+    source
+}
+
+fn film_shading(program: &str) -> String {
+    let [_, soft] = primary_ray_gpu::shading_sources(SOURCE, program).unwrap();
+    // The hit-plane gradients must use the same jittered ray as primary tracing.
+    jittered(&soft)
+}
+
+fn film_sources(minimal: bool) -> FilmSources {
+    let [_, soft] = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let mut kernels = edit(
+        &jittered(&soft),
+        (
+            "textureStore(primary_normal_output,p,vec4<f32>(normal,1.0));",
+            "textureStore(primary_normal_output,p,vec4<f32>(normal,f32(camera.view_mode.y)));",
+        ),
+    );
+    kernels = edit(&kernels, SEED_EDIT);
+    kernels = kernels.replace(
         "FRESH_SEED",
         "(u32(textureLoad(fresh_normal,vec2<i32>(pixel),0).w))",
     );
     if minimal {
-        sources[1] = edit(
-            &sources[1],
+        kernels = edit(
+            &kernels,
             (
                 "let origin=world+normal*view.coverage_bias.w;",
                 "let origin=world+normal*1e-5;",
             ),
         );
-        sources[1] = edit(
-            &sources[1],
+        kernels = edit(
+            &kernels,
             ("let tmin=view.coverage_bias.z/rate;", "let tmin=1e-5;"),
         );
     }
-    sources
+    FilmSources {
+        kernels,
+        shading: film_shading(STANDARD),
+    }
 }
 
 #[test]
 fn film_reference_sources_compile() {
     for minimal in [false, true] {
-        for source in film_sources(minimal) {
+        let sources = film_sources(minimal);
+        for source in [sources.kernels, sources.shading] {
             validate_wgsl(&source);
         }
     }
-    validate_wgsl(include_str!("../support/film_accumulate.wgsl"));
+    validate_wgsl(&receiver_policy_tests::accumulator_source(false));
 }
 
 fn read_buffer(r: &mut Renderer, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
@@ -225,6 +236,11 @@ fn integrate_with(
                 resource: wgpu::BindingResource::TextureView(&tile_view),
             },
         ]);
+    } else {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 8,
+            resource: wgpu::BindingResource::TextureView(&tile_view),
+        });
     }
     let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("film accumulator"),
@@ -242,15 +258,16 @@ fn integrate_with(
         entries: &entries,
     });
     let sources = policy.map_or_else(|| film_sources(minimal), receiver_policy_tests::sources);
-    let pipelines = r
-        .primary
-        .as_ref()
-        .unwrap()
-        .test_film_pipelines(&r.device, &sources[1]);
+    let pipelines = r.primary.as_ref().unwrap().test_film_pipelines(
+        &r.device,
+        &sources.kernels,
+        &sources.shading,
+    );
     let direct_pipelines = policy.map(|_| {
         r.primary.as_ref().unwrap().test_film_pipelines(
             &r.device,
-            &receiver_policy_tests::direct_source(&sources[1]),
+            &sources.kernels,
+            &receiver_policy_tests::direct_source(),
         )
     });
     let [w, h] = [textures[0].width(), textures[0].height()];
