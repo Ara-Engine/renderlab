@@ -2,11 +2,87 @@
 
 2026-11-05, base main `43d9184` (viewed-side receiver policy, programmable shading phase 1, the determinism FMA fix and fast reload), branch `t3/temporal-primary-rays`. This implements and measures the first unit of [T1](m6-temporal-primaries.md#9-gpu-implementation-plan-and-stop-rules). RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu/naga 30.0.1, release library test binaries built with two Cargo jobs, the registered full-resident quarry (12 draws, 13,034,903 triangles) at 1920×1080 1x, 16x anisotropy, a 0.04-rad disk. Every GPU run was offscreen under the shared lease; no window, viewer, desktop input, game capture or Unreal launch.
 
-**Result.** The film references were regenerated under the adopted receiver policy and agree with R1. T1a (static accumulation) is implemented as the opt-in `SoftShadows::Temporal`, with the Exact, Interactive and hard modules untouched. It passes T-0, the frozen F1-AA checks, the 8-frame limit, F1 on radiance and on partial-type visibility, F2, F4, F6, F8 across processes and Q-cut's cold identity.
+**Result (second round, build b12).** Root's decisions are applied: the corner-free lattice is the production sequence, and history is kept only in trace tiles a ray has hit, byte-identical to keeping it everywhere. T1a now passes every check except the F1 solid maximum at **three pixels**, one per pose. There a single sample of 128 lies within about 10⁻⁶ px of a concave triangle edge, where the **production receiver origin** is blocked by the adjacent triangle ([§0.3](#03-solids-verified-locally-and-the-remaining-cause)). The fixtures (thin, stress, all 12 acne cases) pass. Cost is +0.025 ms per frame over Interactive on a contended screen. Stage 2 (T1b) has not started, because the gate is not passed while those three pixels fail. Defaults are unchanged.
 
-**It has one recorded miss: the F1 solid bound on R_F (maximum ≤ 0.002).** On references verified with 17,408 samples, 27–64 pixels per pose out of 0.29–1.1 M exceed it, by one sample in 128. Most come from the lattice's exact pixel-corner sample ([§4](#solids-the-recorded-miss)). A corner-free candidate cuts them by 4–6x but does not clear the bound either. Fixtures were not run.
+The first round's text from §1 onwards is kept as measured; where §0 differs, §0 supersedes it.
 
-Cost on a contended screen is +0.124–0.128 ms per frame over Interactive, so T1a would land near 0.99 ms against the 0.87–0.89 ms HRT floor: a likely miss, unconfirmed on a quiet machine. T1b–T1d (motion, lights and movers, timing acceptance) were not started; the gate's miss needs a decision first, since each stage is kept only if its gate passes. Defaults are unchanged.
+## 0. Second round: decisions applied
+
+Root's decisions (2026-11-05):
+
+- **Solid bound.** The 0.002 solid maximum stays. A sample on the pixel corner is a sampling defect: the box filter gives the corner zero measure, but that lattice point carried 1/128 of the weight.
+- **Sequence.** The corner-free lattice is adopted as that defect's fix.
+- **Second-sample rule.** Frame 2 must be no worse than frame 1, so the N = 2 / N = 1 ratio must be ≤ 1.0. The **0.944 quoted in the design was the earlier ordering's measured value, not a limit**. T1a′'s worst ratio, 0.946, passes.
+- **Remaining solid failures.** Each is verified with a high-sample local footprint estimate, as G2 was.
+- **Cost.** History is restricted to tiles rays have hit, with byte-identical output.
+
+### 0.1 What changed
+
+- **Sequence (production).** k = 0 is the exact pixel centre. Every other index is the rank-1 lattice node moved by (8.5, 8.5)/256 px, so no sample lies on a pixel edge; the former corner sample sits 0.033 px inside. Every power-of-two prefix is the moved lattice with its centre point replaced by the exact centre. CPU tests check the order, the prefixes, the symmetries and that no coordinate is 0 or 1.
+- **History only where rays have hit.** A per-tile flag, set once a camera ray in the 8×4 trace tile hits after a reset and ping-ponged with the history, decides where history is stored. Every pixel of an unflagged tile has seen only background, so its history is implied: mean = the background sample, weight min(frames, 256), index frames − 1. Background samples therefore contribute the clear colour as the f16 image stores it (`film_background`), the value Interactive writes and the reference integrates. Unflagged tiles and the clear blocks outside the scene rectangle store the background directly, as the Interactive and hard paths do.
+- **Byte identity (M, in process, same pipelines).** With a test switch that keeps history in every tile, the 128-frame pose-0 sequence gives identical HDR images in all 128 frames, and identical history at all 355,520 pixels of the 11,110 flagged tiles (of 64,800).
+- **Reset frames** still run the production Interactive pipelines; `film_init` now writes history and flags for covered tiles only.
+
+### 0.2 Gate on the production sequence (build b12)
+
+| Check | Result |
+|---|---|
+| T-0 | Pass, 9/9 |
+| F8 | Pass: 31/31 static repeats including the history in each of two processes; 54/54 checkpoint captures, repeat and cut digests identical across them |
+| 8-frame limit, F1-AA, F2, F4, F6, Q-cut | Pass at all three poses. Worst population at frame 8: 0.38 / 0.39 / 0.42 × bar (radiance); at frame 128 every channel ≤ 0.12 × bar |
+| Second-sample rule (≤ 1.0) | Pass: worst N = 2 / N = 1 ratio 0.900 / 0.902 / 0.946 |
+| F1 solid maximum on replica-confirmed solids | 6 / 10 / 11 lit pixels over 0.002 (umbra 0 / 0 / 0), maximum 0.0078 / 0.0169 / 0.0078; resolved below |
+| Fixtures | Pass ([§0.4](#04-fixtures)) |
+
+The regenerated references reproduce the first round's: replica-confirmed solids are again 276,825 / 276,239 / 1,047,987 lit pixels.
+
+### 0.3 Solids, verified locally, and the remaining cause
+
+`gpu_film_t1_footprint` re-estimates each of the 27 pixels over a 1024 × 1024 stratified grid covering the whole footprint, corners included, with one jittered position per cell. Each position gets 32 independently salted production shadow rays: 33.5 M rays per pixel. Acceptance is the reference's (centre placement and depth within 2%).
+
+- **24 of 27 are partial footprints** and are reclassified. Each has 1–166 opposite samples, local visibility 0.99985–0.999999. The nearest opposite sample to a corner is 0.04–0.48 px away; only one lies within 0.05 px of a corner. Per-pixel counts are in `footprint/footprint.json`.
+- **3 are truly solid**: pose 0 (1347, 380), pose 1 (1119, 713) and pose 2 (1325, 276), with zero opposite samples among 1,048,576. T1 errs by 0.0078 at each.
+
+Cause (M). A temporal run that recorded these pixels every frame (`t1-watch`) shows one sample each, at frames 121, 115 and 45, with all 8 rays blocked; every other frame is fully lit. Each of those samples hit its triangle on an edge: barycentrics (4.2×10⁻⁶, 0.4989), (0.93793, 2.0×10⁻⁵) and (0.61097, 0.38903), where u + v = 1 − 10⁻⁵. Micro-grids of 1,048,576 samples around each exact position give:
+
+| Window around the sample | Opposite samples, poses 0 / 1 / 2 | Visibility |
+|---|---|---|
+| ±0.5 px (clipped to the pixel) | 0 / 2 / 0 | 1.0 / 0.999997 / 1.0 |
+| ±0.005 px | 73 / 474 / 76 | 0.99993 / 0.99955 / 0.99993 |
+| ±0.00005 px | 624,988 / 625,605 / 312,801 | 0.40 / 0.40 / 0.70 |
+
+So a band roughly 10⁻⁶ px wide (nanometres at the quarry) along each edge is fully shadowed, while the surface on both sides is lit. That matches the receiver policy at a concave edge. The origin is offset 10 µm along the hit triangle's own geometric normal; for hits within about that distance of a concave fold, the offset point lies behind the adjacent triangle, which blocks every ray.
+
+This is the production receiver policy, shared by Exact, Interactive and the references; each hits the band with probability proportional to its area. It is not T1's accumulation. T1 exposes it because each pixel samples 256 fixed positions and weights each at 1/256 indefinitely. The band's true area is far below 0.002, so these pixels' film value is solid lit. Fixing it means changing the receiver origin near edges, for example pulling the hit point into its triangle before offsetting, which changes Exact and Interactive. That needs its own unit and acceptance, and is not made here.
+
+### 0.4 Fixtures
+
+`gpu_film_t1_fixtures` runs 256 temporal frames on each R1 fixture. It writes T1's own samples' centre-surface visibility in R1's film layout, split into halves by frame parity. `scripts/m6-temporal-fixtures.py` evaluates R1's continuous analytic oracles at exactly T1's sample positions: the frame's lattice index and the pixel's symmetry.
+
+| Fixture | Result |
+|---|---|
+| Acne: flat and convex, 1 km and 10 km, 80°, 85° and 89° (12 cases) | Pass: 0 false-shadow pixels of 35,328 covered in every case |
+| Thin | Pass: all-pixel RMS 0.00108 against noise 0.00656; partial (933 px) 0.00781 against 0.0476; solid maximum error 0; 2 accepted-count mismatches |
+| Stress | Pass: all-pixel RMS 0.00094 against noise 0.00327; partial (2,297 px) 0.00433 against 0.0151; solid maximum error 0; 0 mismatches |
+
+### 0.5 Cost after the tile restriction (M, contended screen)
+
+Three processes of 48 paired frames, with the method of §5. Two had no foreign compiler and the third one; at least 8.1 GiB stayed available.
+
+| Process | Interactive span | Temporal span | Paired ratio | Paired delta | Trace, I / T | Shading, I / T |
+|---|---:|---:|---:|---:|---|---|
+| 1 | 0.9066 | 0.9330 | 1.0290 | +0.0262 | 0.4932 / 0.4804 | 0.3695 / 0.4071 |
+| 2 | 0.9074 | 0.9331 | 1.0271 | +0.0246 | 0.4925 / 0.4800 | 0.3697 / 0.4076 |
+| 3 (slow GPU state) | 1.2129 | 1.2546 | 1.0318 | +0.0388 | 0.6645 / 0.6520 | 0.4703 / 0.5275 |
+
+- The delta falls from +0.125 to +0.025 ms; history traffic now covers about 17% of tiles.
+- On the quiet 0.865 ms Interactive base, T1a would be near 0.89 ms, at the top of the 0.87–0.89 ms HRT floor.
+- Temporal maxima reached 1.9–2.2 ms in these processes. The quiet confirmation and the spike check are deferred, as root asked.
+
+### 0.6 Next
+
+- **Decision needed:** whether the concave-edge receiver band is fixed in the receiver policy first, or accepted as a recorded production defect so that T1b may start.
+- **Ready for T1b:** registered Q-walk and Q-zoom camera sequences (`sequences/`, hashes in `registered.json`) and a shader draft (`wip/film_motion.wgsl`).
 
 ## 1. Film references under the adopted policy
 

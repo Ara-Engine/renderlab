@@ -505,56 +505,8 @@ fn gpu_film_reference() {
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         integrate_with(&mut r, &camera, &out, pose, minimal, receiver_policy);
     } else {
-        let rects = fixture::rectangles(m["workload"] == "stress");
-        let vertices =
-            [[-8., -8., 0.], [8., -8., 0.], [8., 8., 0.], [-8., 8., 0.]].map(|position| Vertex {
-                position,
-                normal: [0., 0., 1.],
-                uv: [0.; 2],
-                color: [1.; 4],
-            });
-        let mesh = r
-            .try_upload_mesh(&MeshData {
-                vertices: &vertices,
-                indices: &[0, 1, 2, 0, 2, 3],
-            })
-            .unwrap()
-            .unwrap();
-        r.test_drain("film fixture mesh");
-        let mut ground = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
-        r.test_drain("film ground");
-        let mut blockers = r
-            .try_upload_instances(&rects.iter().map(|v| v.transform()).collect::<Vec<_>>())
-            .unwrap()
-            .unwrap();
-        r.test_drain("film blockers");
-        r.set_lighting_and_shadows(
-            &Lighting {
-                lights: vec![Light::Directional {
-                    travel: Vec3::new(-1., 0., -1.),
-                    lux: [1000.; 3],
-                }],
-                exposure_stops: -8.,
-                ..Default::default()
-            },
-            &Shadows {
-                directional_disk_angle: 0.04,
-                requests: vec![ShadowRequest::Directional {
-                    split_ends: vec![10., 40.],
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let camera = Camera::look_at(
-            Vec3::new(0., 0., 4.),
-            Vec3::ZERO,
-            Vec3::Y,
-            55f32.to_radians(),
-            0.1,
-            100.,
-        )
-        .unwrap();
+        let (mesh, mut ground, mut blockers, camera, rects) =
+            rect_scene(&mut r, m["workload"] == "stress");
         let color = target(&r, 256, 192);
         render(
             &mut r,
@@ -572,4 +524,63 @@ fn gpu_film_reference() {
         )
         .unwrap();
     }
+}
+
+/// The F0/R1 rectangle fixture (thin, or stress when `stress`): a ground quad and blocker
+/// rectangles with their lighting set, and the frame they are integrated at.
+fn rect_scene(
+    r: &mut Renderer,
+    stress: bool,
+) -> (Mesh, Instances, Instances, Camera, Vec<fixture::Rectangle>) {
+    let rects = fixture::rectangles(stress);
+    let vertices =
+        [[-8., -8., 0.], [8., -8., 0.], [8., 8., 0.], [-8., 8., 0.]].map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let mesh = r
+        .try_upload_mesh(&MeshData {
+            vertices: &vertices,
+            indices: &[0, 1, 2, 0, 2, 3],
+        })
+        .unwrap()
+        .unwrap();
+    r.test_drain("film fixture mesh");
+    let ground = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
+    r.test_drain("film ground");
+    let blockers = r
+        .try_upload_instances(&rects.iter().map(|v| v.transform()).collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    r.test_drain("film blockers");
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(-1., 0., -1.),
+                lux: [1000.; 3],
+            }],
+            exposure_stops: -8.,
+            ..Default::default()
+        },
+        &Shadows {
+            directional_disk_angle: 0.04,
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![10., 40.],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )
+    .unwrap();
+    (mesh, ground, blockers, camera, rects)
 }

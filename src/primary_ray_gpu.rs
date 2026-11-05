@@ -468,6 +468,9 @@ pub(super) enum Shading {
 pub(super) struct PrimaryState {
     #[cfg(test)]
     pub test_fresh_tile: Option<[u32; 2]>,
+    /// Temporal history kept in every tile instead of only where rays have hit (tests).
+    #[cfg(test)]
+    pub test_film_materialize: bool,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
@@ -658,6 +661,8 @@ impl PrimaryState {
         Self {
             #[cfg(test)]
             test_fresh_tile: None,
+            #[cfg(test)]
+            test_film_materialize: false,
             trace_layouts: [&trace[0], &trace[1]]
                 .map(|g| layout("primary trace ABI", &[Some(g), Some(&array_bindings)])),
             shade_layouts: shade_bindings.each_ref().map(|g| {

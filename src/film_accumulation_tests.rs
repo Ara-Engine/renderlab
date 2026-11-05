@@ -35,8 +35,12 @@ fn direct_program() -> String {
 }
 
 /// Misses shade black instead of the lit clear colour (sun-only and visibility images).
+/// Soft modules name the clear colour at three stores; temporal modules once, in
+/// `film_background`.
 fn black_clear(source: &str) -> String {
-    assert_eq!(source.matches("primary_frame.clear").count(), 3);
+    let sites = source.matches("primary_frame.clear").count();
+    let temporal = source.contains("fn film_background()");
+    assert_eq!(sites, if temporal { 1 } else { 3 });
     source.replace("primary_frame.clear", "vec4<f32>(0.0,0.0,0.0,1.0)")
 }
 
@@ -136,11 +140,13 @@ fn per_sample_shading(r: &Renderer, program: &str) -> Owned<wgpu::ComputePipelin
 /// Visibility of a temporal sequence's own samples on each pixel's centre surface
 /// (support/film_t1_visibility.wgsl): the reference's R_F estimand, accumulated with the
 /// cumulative weights static T1 uses.
+/// Two result halves (accumulated by frame parity) estimate its noise.
 struct ConditionedVisibility {
     shading: Owned<wgpu::ComputePipeline>,
     accumulator: wgpu::ComputePipeline,
-    bind: wgpu::BindGroup,
-    result: wgpu::Buffer,
+    bind: [wgpu::BindGroup; 2],
+    result: [wgpu::Buffer; 2],
+    size: [u32; 2],
 }
 impl ConditionedVisibility {
     /// `centre` is (placement + 1, depth along `forward`) per pixel of a centre frame.
@@ -167,13 +173,15 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         r.queue.write_buffer(&centre_buffer, 0, centre);
-        let result = buffer(
-            "T1 conditioned visibility",
-            centre.len() as u64,
-            wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        );
+        let result = [0, 1].map(|_| {
+            buffer(
+                "T1 conditioned visibility",
+                centre.len() as u64,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            )
+        });
         let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("T1 conditioned visibility"),
             source: wgpu::ShaderSource::Wgsl(
@@ -191,6 +199,7 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
                 cache: None,
             });
         let primary = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let size = [primary.hit.texture.width(), primary.hit.texture.height()];
         let views = [
             &primary.hit.texture,
             &r.lighting.hdr.as_ref().unwrap().resolved.texture,
@@ -209,25 +218,29 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
             binding: 3,
             resource: centre_buffer.as_entire_binding(),
         });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 4,
-            resource: result.as_entire_binding(),
-        });
-        let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("T1 conditioned visibility"),
-            layout: &accumulator.get_bind_group_layout(0),
-            entries: &entries,
+        let bind = result.each_ref().map(|result| {
+            let mut entries = entries.clone();
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: result.as_entire_binding(),
+            });
+            r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("T1 conditioned visibility"),
+                layout: &accumulator.get_bind_group_layout(0),
+                entries: &entries,
+            })
         });
         Self {
             shading: per_sample_shading(r, &program),
             accumulator,
             bind,
             result,
+            size,
         }
     }
-    /// Re-shades the last temporal frame's samples and accumulates their visibility. The
-    /// frame's HDR image is overwritten by the per-sample output.
-    fn accumulate(&self, r: &Renderer) {
+    /// Re-shades the last temporal frame's samples and accumulates their visibility into
+    /// `half`. The frame's HDR image is overwritten by the per-sample output.
+    fn accumulate(&self, r: &Renderer, half: usize) {
         let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
         let mut e = r.device.create_command_encoder(&Default::default());
         r.encode_shade_group(
@@ -240,8 +253,8 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
         {
             let mut pass = e.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.accumulator);
-            pass.set_bind_group(0, &self.bind, &[]);
-            pass.dispatch_workgroups(1920u32.div_ceil(8), 1080u32.div_ceil(4), 1);
+            pass.set_bind_group(0, &self.bind[half], &[]);
+            pass.dispatch_workgroups(self.size[0].div_ceil(8), self.size[1].div_ceil(4), 1);
         }
         r.queue.submit([e.finish()]);
     }
@@ -555,6 +568,22 @@ fn integrate_t1(
     fs::write(prefix.with_extension("json"),serde_json::to_vec_pretty(&serde_json::json!({"pose":pose,"size":[w,h],"samples":SAMPLES,"replicas":replicas,"rays_per_sample":RAYS,"halves":"index/512, each 32x16 strata randomized within stratum","seconds":start.elapsed().as_secs_f64(),"camera_inverse":camera.matrix(w,h).inverse().to_cols_array(),"eye":eye.to_array(),"forward":forward.to_array(),"receiver_policy":"Production (viewed side, max(10um,16ulp)), epsilon t_min","layout":"counts[vis0,vis1,acc0,acc1] u32, moments[vis0^2,vis1^2,-,-]/65536, radiance0 rgba, radiance1 rgba"})).unwrap()).unwrap();
 }
 
+/// The footprint verifier's module: the temporal kernel with per-sample salted shadow rays.
+fn footprint_source() -> String {
+    let kernels = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    format!(
+        "{}\n{}",
+        edit(
+            &film_accumulation::kernel_source(&kernels[1]).unwrap(),
+            (
+                SEED_EDIT.0,
+                "    var seed=fresh_hash(pixel.x+pixel.y*width);\n    seed=fresh_hash(seed^(film_footprint_seed*0x9e3779b9u));",
+            ),
+        ),
+        include_str!("../support/film_t1_footprint.wgsl")
+    )
+}
+
 #[test]
 fn t1_reference_sources_compile() {
     let sources = film_sources_with(T1_JITTER);
@@ -566,6 +595,7 @@ fn t1_reference_sources_compile() {
         validate_wgsl(&source);
     }
     validate_wgsl(include_str!("../support/film_reference_t1.wgsl"));
+    validate_wgsl(&footprint_source());
 }
 
 #[test]
@@ -627,8 +657,13 @@ fn digest(bytes: &[u8]) -> String {
 fn history(r: &Renderer) -> Vec<u8> {
     let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
     let written = film.parity;
-    let [colour, anchor] = film.history(written);
-    [read_texture(r, colour), read_texture(r, anchor)].concat()
+    let [colour, anchor, tiles] = film.history(written);
+    [
+        read_texture(r, colour),
+        read_texture(r, anchor),
+        read_texture(r, tiles),
+    ]
+    .concat()
 }
 
 /// Discards the film history: the next temporal frame resets every pixel.
@@ -681,6 +716,15 @@ fn gpu_film_t1_temporal() {
         fs::create_dir_all(&out).unwrap();
         let (surface, forward) = centre_surface(&mut r, &mut asset, &color, camera);
         let conditioned = ConditionedVisibility::new(&r, &surface, forward);
+        let watch: Vec<[u32; 2]> = m["watch"][pose.to_string()]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|p| [0, 1].map(|i| p[i].as_u64().unwrap() as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut watched = vec![];
         for (name, program, black) in programs() {
             let mut centre = centre_shading(&r, &program, black);
             let mut temporal = temporal_shading(&r, &program, black);
@@ -695,6 +739,20 @@ fn gpu_film_t1_temporal() {
             let mut digests = vec![];
             for n in 1..=frames {
                 traced_frame(&mut r, &color, camera, &mut asset, true);
+                if name == "full" && !watch.is_empty() {
+                    r.test_drain("T1 watch");
+                    let [hit, counts] = interactive_outputs(&r);
+                    for &[x, y] in &watch {
+                        let i = (x + y * 1920) as usize;
+                        let word = |b: &[u8], j: usize| {
+                            u32::from_le_bytes(b[j * 4..j * 4 + 4].try_into().unwrap())
+                        };
+                        watched.push(serde_json::json!({"pixel":[x,y],"frame":n,
+                            "record":[word(&hit, i * 4), word(&hit, i * 4 + 1), word(&hit, i * 4 + 2), word(&hit, i * 4 + 3)],
+                            "barycentrics":[f32::from_bits(word(&hit, i * 4 + 2)), f32::from_bits(word(&hit, i * 4 + 3))],
+                            "count":word(&counts, i)}));
+                    }
+                }
                 if n == 1 {
                     let first = [settled(&mut r), interactive_outputs(&r).concat()];
                     let same = [first[0] == interactive[0], first[1] == interactive[1]];
@@ -708,12 +766,12 @@ fn gpu_film_t1_temporal() {
                 }
                 if name == "visibility" {
                     // After the film capture: this pass overwrites the frame's HDR image.
-                    conditioned.accumulate(&r);
+                    conditioned.accumulate(&r, 0);
                     if checkpoints.contains(&n) {
-                        let size = conditioned.result.size();
+                        let size = conditioned.result[0].size();
                         fs::write(
                             out.join(format!("conditioned-n{n:03}.u32")),
-                            read_buffer(&mut r, &conditioned.result, size),
+                            read_buffer(&mut r, &conditioned.result[0], size),
                         )
                         .unwrap();
                     }
@@ -722,6 +780,13 @@ fn gpu_film_t1_temporal() {
             std::mem::swap(r.test_standard().temporal.as_mut().unwrap(), &mut temporal);
             std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut centre);
             results.insert(format!("p{pose}/{name}"), serde_json::json!(digests));
+            if !watched.is_empty() {
+                fs::write(
+                    out.join("watch.json"),
+                    serde_json::to_vec_pretty(&watched).unwrap(),
+                )
+                .unwrap();
+            }
             eprintln!("T1 temporal pose={pose} program={name} done");
         }
     }
@@ -771,7 +836,7 @@ fn gpu_film_t1_temporal() {
                 fn word(b: &[u8], i: usize) -> &[u8] {
                     &b[i * 4..i * 4 + 4]
                 }
-                let pixels = base.len() / 24;
+                let pixels = 1920 * 1080;
                 let mut channels = [0usize; 6];
                 for i in 0..pixels {
                     for (c, count) in channels.iter_mut().enumerate() {
@@ -792,18 +857,58 @@ fn gpu_film_t1_temporal() {
             }
         }
     }
+    // History kept only in tiles a ray has hit must give the images of history kept in every
+    // tile, frame by frame, and the same history wherever it is kept.
+    let mut runs = vec![];
+    for materialize in [false, true] {
+        r.primary.as_mut().unwrap().test_film_materialize = materialize;
+        reset_film(&mut r);
+        let mut images = vec![];
+        for _ in 1..=frames {
+            traced_frame(&mut r, &color, &cameras[pose], &mut asset, true);
+            images.push(digest(&settled(&mut r)));
+        }
+        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let [colour, anchor, tiles] = film.history(film.parity).map(|t| read_texture(&r, t));
+        runs.push((images, colour, anchor, tiles));
+    }
+    r.primary.as_mut().unwrap().test_film_materialize = false;
+    let (kept, all) = (&runs[0], &runs[1]);
+    let tile_width = 1920u32.div_ceil(8) as usize;
+    let flag = |tiles: &[u8], i: usize| tiles[i * 4..i * 4 + 4] != [0; 4];
+    let (mut kept_pixels, mut history_differs) = (0usize, 0usize);
+    for i in 0..1920 * 1080 {
+        let tile = (i % 1920) / 8 + (i / 1920) / 4 * tile_width;
+        if flag(&kept.3, tile) {
+            kept_pixels += 1;
+            history_differs += usize::from(
+                kept.1[i * 16..i * 16 + 16] != all.1[i * 16..i * 16 + 16]
+                    || kept.2[i * 8..i * 8 + 8] != all.2[i * 8..i * 8 + 8],
+            );
+        }
+    }
+    let tiles = kept.3.len() / 4;
+    let skip = serde_json::json!({"pose":pose,"frames":frames,
+        "frames_identical":kept.0.iter().zip(&all.0).filter(|(a, b)| a == b).count(),
+        "kept_tiles":(0..tiles).filter(|&t| flag(&kept.3, t)).count(),"tiles":tiles,
+        "materialized_tiles":(0..tiles).filter(|&t| flag(&all.3, t)).count(),
+        "kept_pixels":kept_pixels,"kept_history_differing_pixels":history_differs});
     fs::write(
         root.join("temporal.json"),
         serde_json::to_vec_pretty(
             &serde_json::json!({"frames":frames,"checkpoints":checkpoints,
             "identity":identity,"digests":results,"cuts":cuts,
             "repeats":{"pose":pose,"runs":repeats,"identical_to_first":identical,"differing":differing,
-                "digests":first.as_ref().map(|f| &f.0)}}),
+                "digests":first.as_ref().map(|f| &f.0)},"background_history":skip}),
         )
         .unwrap(),
     )
     .unwrap();
     assert!(differing.is_empty(), "static repeats differ: {differing:?}");
+    assert!(
+        kept.0 == all.0 && history_differs == 0,
+        "history kept only where rays hit differs from history everywhere: {skip}"
+    );
 }
 
 /// Paired complete-frame timing on one renderer: production Interactive and Temporal frames
@@ -871,4 +976,196 @@ fn gpu_film_t1_timing() {
         .unwrap(),
     )
     .unwrap();
+}
+
+/// G2-style local verification of reference-solid pixels where T1 deviates: manifest
+/// `footprint` maps a pose to `[x, y, expected]` triples (expected: 1 lit, 0 umbra) and
+/// `grid` sets the G x G stratified sub-pixel samples per pixel, 32 salted rays each.
+#[test]
+#[ignore = "owned GPU lease; T1 footprint verification of solid reference pixels, offscreen"]
+fn gpu_film_t1_footprint() {
+    let m = manifest();
+    let _validation = validation::begin(m["validate"].as_bool().unwrap_or(true));
+    let mut r = renderer(m["validate"].as_bool().unwrap_or(true));
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let (mut asset, _) = load_quarry(&m, &mut r);
+    let color = target(&r, 1920, 1080);
+    let cameras = t1_cameras(&m);
+    let grid = m["grid"].as_u64().unwrap_or(1024) as u32;
+    let source = footprint_source();
+    let mut results = serde_json::Map::new();
+    let start = Instant::now();
+    for (pose, pixels) in m["footprint"].as_object().unwrap() {
+        let camera = &cameras[pose.parse::<usize>().unwrap()];
+        let (surface, forward) = centre_surface(&mut r, &mut asset, &color, camera);
+        let eye = camera.view().inverse().w_axis;
+        // [x, y, expected] verifies the footprint; [x, y, expected, cx, cy, spacing] samples a
+        // micro grid of that spacing around (cx, cy) inside the pixel.
+        let micro: Vec<[f32; 3]> = pixels
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|i| p.get(3 + i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32)
+            })
+            .collect();
+        let pixels: Vec<[u32; 3]> = pixels
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| std::array::from_fn(|i| p[i].as_u64().unwrap() as u32))
+            .collect();
+        let mut targets = vec![];
+        for (&[x, y, expected], &[cx, cy, spacing]) in pixels.iter().zip(&micro) {
+            let i = (x + y * 1920) as usize * 8;
+            targets.extend([x, y, 1920, 1080].iter().flat_map(|v| v.to_le_bytes()));
+            targets.extend_from_slice(&surface[i..i + 8]);
+            targets.extend([expected, 0].iter().flat_map(|v| v.to_le_bytes()));
+            targets.extend(eye.to_array().iter().flat_map(|v| v.to_le_bytes()));
+            targets.extend(
+                forward
+                    .extend(0.0)
+                    .to_array()
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes()),
+            );
+            targets.extend([cx, cy, spacing, 0.0].iter().flat_map(|v| v.to_le_bytes()));
+        }
+        let sums = r.test_film_footprint(&source, &targets, grid);
+        let rows: Vec<_> = pixels
+            .iter()
+            .zip(sums.chunks_exact(32))
+            .enumerate()
+            .map(|(index, (&[x, y, expected], s))| {
+                let w: Vec<u32> = s
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                serde_json::json!({"pixel":[x,y],"expected":expected,"samples":grid*grid,"micro":micro[index],
+                    "accepted":w[0],"visible_rays":w[1],"rays":32*u64::from(w[0]),
+                    "visibility":f64::from(w[1])/(32.0*f64::from(w[0]).max(1.0)),
+                    "opposite_samples":w[2],"corner":w[3],"edge":w[4],"interior":w[5],
+                    "nearest_to_corner_px":if w[2]>0 {f64::from(w[6])*1e-6} else {-1.0},"rejected":w[7]})
+            })
+            .collect();
+        results.insert(pose.clone(), serde_json::json!(rows));
+    }
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    fs::write(
+        out.join("footprint.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"grid":grid,"rays_per_sample":32,
+            "seconds":start.elapsed().as_secs_f64(),"poses":results}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// T1 static accumulation on the R1 fixtures (manifest `cases`: name, workload and, for flat
+/// and convex, distance and incidence), `frames` frames each. Writes T1's own samples'
+/// centre-surface visibility in R1's film-sum layout (halves by frame parity) with the centre
+/// receivers and fixture geometry, for scripts/m6-temporal-fixtures.py's oracles.
+#[test]
+#[ignore = "owned GPU lease; T1 on the thin, stress and acne fixtures, offscreen"]
+fn gpu_film_t1_fixtures() {
+    let m = manifest();
+    let _validation = validation::begin(m["validate"].as_bool().unwrap_or(true));
+    let mut r = renderer(m["validate"].as_bool().unwrap_or(true));
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let frames = m["frames"].as_u64().unwrap_or(256) as u32;
+    let root = PathBuf::from(m["output"].as_str().unwrap());
+    let color = target(&r, 256, 192);
+    for case in m["cases"].as_array().unwrap() {
+        let out = root.join(case["name"].as_str().unwrap());
+        fs::create_dir_all(&out).unwrap();
+        let workload = case["workload"].as_str().unwrap();
+        let rect = matches!(workload, "thin" | "stress");
+        let (mesh, mut ground, mut blockers, camera, geometry) = if rect {
+            let (mesh, ground, blockers, camera, rects) = rect_scene(&mut r, workload == "stress");
+            fs::write(
+                out.join("rectangles.json"),
+                serde_json::to_vec_pretty(&rects).unwrap(),
+            )
+            .unwrap();
+            (mesh, ground, Some(blockers), camera, None)
+        } else {
+            let (mesh, instances, camera, geometry) =
+                receiver_policy_tests::analytic_scene(&mut r, case);
+            (mesh, instances, None, camera, Some(geometry))
+        };
+        if let Some(geometry) = geometry {
+            fs::write(
+                out.join("geometry.json"),
+                serde_json::to_vec_pretty(&geometry).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut frame = |r: &mut Renderer| match &mut blockers {
+            Some(blockers) => render(
+                r,
+                &color,
+                &camera,
+                &mut [Draw::new(&mesh, &mut ground), Draw::new(&mesh, blockers)],
+            ),
+            None => render(r, &color, &camera, &mut [Draw::new(&mesh, &mut ground)]),
+        };
+        // The centre frame defines the centre surface, as for the R1 references.
+        r.set_soft_shadows(crate::SoftShadows::Exact);
+        frame(&mut r);
+        r.test_drain("T1 fixture centre");
+        let [world, normal, counts] = receivers(&r);
+        let hit = hit_record(&r);
+        for (suffix, data) in [
+            ("world.f32", &world),
+            ("normal.f32", &normal),
+            ("exact.u32", &counts),
+            ("hit.u32", &hit),
+        ] {
+            fs::write(out.join(format!("pose-0.{suffix}")), data).unwrap();
+        }
+        let inverse = camera.view().inverse();
+        let (eye, forward) = (inverse.w_axis.truncate(), -inverse.z_axis.truncate());
+        let centre: Vec<u8> = world
+            .chunks_exact(16)
+            .zip(hit.chunks_exact(16))
+            .flat_map(|(w, h)| {
+                let p = Vec3::from_array(std::array::from_fn(|i| {
+                    f32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap())
+                }));
+                h[..4]
+                    .iter()
+                    .copied()
+                    .chain((p - eye).dot(forward).to_le_bytes())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let conditioned = ConditionedVisibility::new(&r, &centre, forward);
+        r.set_soft_shadows(crate::SoftShadows::Temporal);
+        for n in 1..=frames {
+            frame(&mut r);
+            conditioned.accumulate(&r, (n % 2) as usize);
+        }
+        r.test_drain("T1 fixture frames");
+        let halves = conditioned
+            .result
+            .each_ref()
+            .map(|b| read_buffer(&mut r, b, b.size()));
+        // R1's film layout: counts [visible 0, visible 1, accepted 0, accepted 1], then zero
+        // moments and radiance.
+        let mut film = Vec::with_capacity(halves[0].len() / 8 * 48);
+        for (a, b) in halves[0].chunks_exact(8).zip(halves[1].chunks_exact(8)) {
+            for word in [&a[..4], &b[..4], &a[4..], &b[4..]] {
+                film.extend_from_slice(word);
+            }
+            film.extend([0u8; 32]);
+        }
+        fs::write(out.join("pose-0.film.bin"), film).unwrap();
+        fs::write(out.join("pose-0.json"), serde_json::to_vec_pretty(&serde_json::json!({"pose":0,
+            "size":[256,192],"samples":frames,"frames":frames,"rays_per_sample":8,
+            "estimator":"T1 temporal film accumulation, its own samples on the centre surface; halves by frame parity",
+            "eye":eye.extend(1.0).to_array(),"forward":forward.extend(0.0).to_array(),
+            "receiver_policy":"Production"})).unwrap()).unwrap();
+        r.set_soft_shadows(crate::SoftShadows::Exact);
+        eprintln!("T1 fixture {} done", case["name"]);
+    }
 }

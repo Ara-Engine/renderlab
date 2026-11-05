@@ -481,7 +481,12 @@ fn gpu_receiver_policy_centres() {
     }
 }
 
-pub(super) fn analytic_fixture(r: &mut Renderer, m: &serde_json::Value, policy: Policy) {
+/// An R1 analytic fixture (flat, convex or sawtooth) uploaded with its lighting set, and
+/// the frame it is integrated at: mesh, instances, camera and geometry record.
+pub(super) fn analytic_scene(
+    r: &mut Renderer,
+    m: &serde_json::Value,
+) -> (Mesh, Instances, Camera, serde_json::Value) {
     let workload = m["workload"].as_str().unwrap();
     let distance = m["distance"].as_f64().unwrap_or(0.0) as f32;
     let translation = Vec3::splat(distance);
@@ -528,7 +533,7 @@ pub(super) fn analytic_fixture(r: &mut Renderer, m: &serde_json::Value, policy: 
         .unwrap()
         .unwrap();
     r.test_drain("R1 fixture mesh");
-    let mut instances = r
+    let instances = r
         .try_upload_instances(&[Mat4::from_translation(translation)])
         .unwrap()
         .unwrap();
@@ -563,9 +568,19 @@ pub(super) fn analytic_fixture(r: &mut Renderer, m: &serde_json::Value, policy: 
         100.,
     )
     .unwrap();
+    let geometry = serde_json::json!({"profile":profile,"translation":translation.to_array(),"incidence":incidence,"disk_angle":if workload=="sawtooth" {0.04} else {0.001},"workload":workload});
+    (mesh, instances, camera, geometry)
+}
+
+pub(super) fn analytic_fixture(r: &mut Renderer, m: &serde_json::Value, policy: Policy) {
+    let (mesh, mut instances, camera, geometry) = analytic_scene(r, m);
     let color = target(r, 256, 192);
     render(r, &color, &camera, &mut [Draw::new(&mesh, &mut instances)]);
     let out = PathBuf::from(m["output"].as_str().unwrap());
     integrate_with(r, &camera, &out, 0, true, Some(policy));
-    fs::write(out.join("geometry.json"),serde_json::to_vec_pretty(&serde_json::json!({"profile":profile,"translation":translation.to_array(),"incidence":incidence,"disk_angle":if workload=="sawtooth" {0.04} else {0.001},"workload":workload})).unwrap()).unwrap();
+    fs::write(
+        out.join("geometry.json"),
+        serde_json::to_vec_pretty(&geometry).unwrap(),
+    )
+    .unwrap();
 }
