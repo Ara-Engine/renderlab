@@ -238,3 +238,87 @@ future optimizers are bit-identical. All game/Unreal/foreign-process or RAM
 deferrals and an overlapping-renderer interruption are excluded from pass/fail
 counts. No viewer, desktop input or game capture was used. The GPU slot was released
 after every owned window. No commits were pushed.
+
+
+## Receiver investigation: same-ray traversal precision and residual arithmetic
+
+2026-11-05, receiver-origin work based on `539c233`; RTX 4070 SUPER,
+NVIDIA 617.14, Windows/Vulkan, wgpu/naga 30.0.1, optimized tests with two
+Cargo jobs. This finding is separate from the camera-ray contraction diagnosis
+below. Evidence: `E:/renderlab-work/receiver-origin/actual-ray/` and
+`fine-debug-summary.json`. Runs were offscreen under the shared GPU lease.
+
+The three T1 quarry witnesses are pose 0 **(1347,380)**, pose 1
+**(1119,713)** and pose 2 **(1325,276)**. A diagnostic writes the actual
+GPU f32 ray origin/direction bits, returned primitive/barycentrics, returned
+object-space vertices and the GPU's object-to-world matrix. All three returned
+hit records match the original T1 watch records exactly. Every one of their
+32 diagnostic shadow rays is blocked.
+
+The following intersections use **that same ray**, with its f32 bit patterns
+interpreted exactly. The affine transform and Möller–Trumbore determinants use
+Python rational arithmetic; there is no rounded world-vertex array or rebuilt
+f64 camera ray. Both triangles contain the ray intersection. The source RLA
+supplies the index-adjacent triangle; the returned triangle's source vertices
+match the GPU vertex readback. Reproduce with
+`scripts/m6-receiver-ray-proof.py --rays <rays.json> --asset <full.rla> --out <proof.json>`.
+
+| Pose | GPU primitive | Exact nearer primitive | Near t (m) | Far t (m) | Gap (µm) | Gap / f32 spacing at t |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 792224 | 96182 | 10.371475181292949 | 10.371478089780888 | 2.908488 | 3.049771 |
+| 1 | 683251 | 130985 | 7.456214173203602 | 7.456217666098777 | 3.492895 | 7.325132 |
+| 2 | 330253 | 73189 | 5.317873491192970 | 5.317873730252765 | 0.239060 | 0.501345 |
+
+Origin and direction words, in x/y/z order:
+
+| Pose | Origin u32 bits | Direction u32 bits |
+|---|---|---|
+| 0 | 1084643078, 1079609728, 1086733976 | 3199554938, 3191725192, 3211437939 |
+| 1 | 1084663096, 1079604188, 1086735981 | 3203026834, 3202835874, 3208906120 |
+| 2 | 1076249851, 1073737051, 1078020408 | 3200478687, 3185187307, 3211463342 |
+
+This demonstrates finite-precision traversal/instance-transform/triangle-hit
+ordering on this tested implementation. It does **not** isolate the hardware
+triangle unit from the instance inverse transform, establish a Vulkan violation,
+or establish the same behaviour on other GPUs. The exact scene's nearer facet
+has positive viewed-side N·L at all three witnesses; the returned farther facet
+has negative N·L. These witnesses therefore are not a real backlit sliver created
+solely by using a different f64 camera ray. An earlier independently reconstructed
+f64 camera ray was a different experiment and cannot establish this conclusion.
+
+Pose 2 is especially important: ordering two long f32 t values is insufficient
+when their exact separation is half a float spacing. A repair must also produce
+a stable receiver if traversal initially selects either edge neighbour. The
+receiver investigation uses a canonical shared edge and local facet depth slopes,
+with an error-bounded primitive-ID tie; it does not rank facets by illumination.
+
+### Rejected compensated-arithmetic experiment
+
+A two-float camera reconstruction/intersection experiment tried `p=a*b` followed
+by `fma(a,b,-p)`, compensated sums and explicit FMA evaluation orders. Direct GPU
+readback returned zero for **all six** low components of each diagnostic ray,
+although CPU expansion of the same read-back f32 matrix had nonzero residuals.
+The matrix matched bit for bit. The purported fine direction still differed
+from the CPU result by approximately 5e-6; the near point differed by approximately
+1e-7. Consequently its intersection ordering was ordinary f32 accuracy, and its
+apparently higher-precision results were rejected.
+
+The observation establishes loss of those residuals in the tested shader path;
+the optimizer stage responsible was not isolated. Explicit `fma` remains useful
+for the accepted contraction order, but it is not proof of an error-free
+two-product expansion. [WGSL's floating-point and FMA rules](https://www.w3.org/TR/WGSL/#floating-point-evaluation)
+must be considered alongside actual bit readback. No compensated arithmetic from
+this experiment is retained in the production receiver repair.
+
+### Separate pre-existing Vulkan layout warnings
+
+The original main baseline executable and the receiver candidate both emit
+`VUID-StandaloneSpirv-None-10684` during validation-off startup on this SDK.
+The diagnostic text identifies explicit `Offset` decorations on a function-local
+struct. This is a separate pre-existing item, not evidence of a new receiver
+race or of the compensated-arithmetic diagnosis. The original-main control is
+`receiver-origin/runs/baseline-layout-control.json` and its log. It runs zero
+measurement pairs after initialization. Validation-on receiver quality runs
+report active Core + Synchronization validation and zero errors. Timing reports
+must state their validation setting; the validation-off warnings must not be
+silently represented as a clean validation run.
