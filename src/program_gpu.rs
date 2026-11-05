@@ -13,6 +13,9 @@ use crate::program::{
 use std::sync::{Mutex, Weak};
 
 #[cfg(test)]
+#[path = "program_api_tests.rs"]
+mod api_tests;
+#[cfg(test)]
 #[path = "toon_tests.rs"]
 mod toon_tests;
 
@@ -189,6 +192,33 @@ pub(super) struct ProgramSlot {
     pub pipelines: ProgramPipelines,
     /// Live materials' parameter blocks, repacked when a reload changes the layout.
     pub materials: Vec<Weak<MaterialParameters>>,
+}
+impl ProgramSlot {
+    /// Install reflected layout/defaults only after the whole reload has succeeded.
+    /// Explicit compatible overrides survive; omitted or retyped fields use defaults.
+    pub(super) fn install_parameters(
+        &mut self,
+        next: Option<ParameterLayout>,
+        queue: &wgpu::Queue,
+        uploads: &mut UploadBytes,
+    ) {
+        if self.layout == next {
+            return;
+        }
+        self.layout = next;
+        self.materials.retain(|m| m.strong_count() > 0);
+        for parameters in self.materials.iter().filter_map(Weak::upgrade) {
+            let mut values = parameters.values.lock().unwrap();
+            values.retain(|(name, value)| {
+                ParameterLayout::check(self.layout.as_ref(), [(name.as_str(), value.clone())])
+                    .is_ok()
+            });
+            let block = ParameterLayout::pack(self.layout.as_ref(), &values);
+            queue.write_buffer(&parameters.buffer, 0, &block);
+            uploads.materials += block.len() as u64;
+            uploads.write_calls += 1;
+        }
+    }
 }
 
 /// The prelude compositions programs compile against: the raster prelude, its
@@ -407,7 +437,7 @@ impl Renderer {
     /// concurrently; on rejection its last working pipelines keep rendering. Its other
     /// sets compile when a frame first needs them, and other programs are never
     /// recompiled. Existing materials are repacked by member name; new or retyped members
-    /// become zero and are listed in the report.
+    /// use program defaults (zero when absent). Zeroed members are listed in the report.
     pub fn reload_program(
         &mut self,
         p: &crate::Program,
@@ -456,27 +486,13 @@ impl Renderer {
         self.program_cache.count(2 * built.len() as u64);
         let slot = self.programs.iter_mut().find(|s| s.id == p.id()).unwrap();
         let zeroed = ParameterLayout::changed(slot.layout.as_ref(), compiled.layout.as_ref());
-        let repack = slot.layout != compiled.layout;
         slot.modules = compiled.modules;
         slot.pipelines = ProgramPipelines::default();
         for (variant, pair) in variants.into_iter().zip(built) {
             slot.pipelines.install(variant, pair);
         }
-        slot.layout = compiled.layout;
+        slot.install_parameters(compiled.layout, &self.queue, &mut self.uploads);
         source.clone_into(&mut slot.source);
-        slot.materials.retain(|m| m.strong_count() > 0);
-        if repack {
-            for parameters in slot.materials.iter().filter_map(Weak::upgrade) {
-                let mut values = parameters.values.lock().unwrap();
-                values.retain(|(name, value)| {
-                    ParameterLayout::check(slot.layout.as_ref(), [(name.as_str(), *value)]).is_ok()
-                });
-                let block = ParameterLayout::pack(slot.layout.as_ref(), &values);
-                self.queue.write_buffer(&parameters.buffer, 0, &block);
-                self.uploads.materials += block.len() as u64;
-                self.uploads.write_calls += 1;
-            }
-        }
         self.update_hashes();
         self.revision.0 += 1;
         Ok(ReloadReport {
@@ -592,9 +608,9 @@ impl Renderer {
             return Err(Error::InvalidInput("material belongs to another renderer"));
         }
         let layout = self.program_slot(m.program.id()).layout.as_ref();
-        ParameterLayout::check(layout, values.iter().copied())?;
+        ParameterLayout::check(layout, values.iter().cloned())?;
         let mut stored = m.parameters.values.lock().unwrap();
-        for &(name, value) in values {
+        for (name, value) in values.iter().cloned() {
             match stored.iter_mut().find(|(n, _)| n == name) {
                 Some(entry) => entry.1 = value,
                 None => stored.push((name.into(), value)),
@@ -608,7 +624,7 @@ impl Renderer {
     }
 
     /// A new material's checked parameter block for `program`, registered for repacking.
-    /// Blocks start zeroed, so only nonempty values are written.
+    /// Includes the program's defaults even when no material overrides are supplied.
     pub(super) fn material_parameters(
         &mut self,
         program: &crate::Program,
@@ -630,14 +646,17 @@ impl Renderer {
             }),
             ResourceKind::Buffer,
         );
-        let values: Vec<_> = values.iter().map(|&(n, v)| (n.to_owned(), v)).collect();
+        let values: Vec<_> = values
+            .iter()
+            .map(|(n, v)| ((*n).to_owned(), v.clone()))
+            .collect();
         let slot = self
             .programs
             .iter_mut()
             .find(|s| s.id == program.id())
             .unwrap();
-        if !values.is_empty() {
-            let block = ParameterLayout::pack(slot.layout.as_ref(), &values);
+        let block = ParameterLayout::pack(slot.layout.as_ref(), &values);
+        if block.iter().any(|&b| b != 0) {
             self.queue.write_buffer(&buffer, 0, &block);
             self.uploads.materials += block.len() as u64;
             self.uploads.write_calls += 1;
@@ -659,7 +678,7 @@ impl Renderer {
         }
         ParameterLayout::check(
             self.program_slot(program.id()).layout.as_ref(),
-            data.parameters.iter().copied(),
+            data.parameters.iter().cloned(),
         )
     }
 

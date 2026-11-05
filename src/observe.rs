@@ -111,7 +111,8 @@ pub struct ReloadReport {
     pub revision: Revision,
     pub compile: Duration,
     /// Program reloads only: `Parameters` members that are new or retyped, which every
-    /// existing material of the program now reads as zero.
+    /// existing material of the program now reads as zero. Members with nonzero
+    /// DEFAULT_PARAMETERS values use those defaults and are excluded.
     pub zeroed_parameters: Vec<String>,
 }
 #[derive(Debug)]

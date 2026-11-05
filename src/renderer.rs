@@ -1279,6 +1279,7 @@ impl Renderer {
         self.program_cache.count(2 * built.len() as u64);
         self.pipeline = candidate;
         for (slot, c) in self.programs.iter_mut().zip(compiled) {
+            slot.install_parameters(c.layout, &self.queue, &mut self.uploads);
             slot.modules = c.modules;
             slot.pipelines = Default::default();
         }

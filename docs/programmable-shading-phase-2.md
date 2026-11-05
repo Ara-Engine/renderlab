@@ -150,6 +150,10 @@ The design's 100 ms target remains unmet for these uncached edits.
 
 ## API gaps encountered
 
+Gaps 1-3 below are the historical phase-2 observations, now addressed by the
+[API follow-through](programmable-shading-api-gaps.md). Visibility admission in
+item 4 remains unchanged.
+
 1. **Custom program watching is a caller concern.** The public reload transaction
    works, but the viewer's `ShaderWatch` names the standard program only. There is
    no turnkey toon watcher/selection UI. This gate calls the public reload API;

@@ -1,12 +1,16 @@
 // A deliberately non-PBR style, authored entirely through the shading-program API.
-// Suggested Parameters: bands=4, thresholds=(0.12,0.9), fill=0.25,
-// shadow_tint=(0.12,0.08,0.24), rim_color=(0.12,0.2,0.3), rim_power=4.
+// Defaults live beside the typed block; materials only supply overrides.
 // Rim colour is exposed HDR (intentionally independent of scene exposure).
 struct Parameters {
     shadow_tint:vec3<f32>, bands:f32,
     rim_color:vec3<f32>, rim_power:f32,
     thresholds:vec2<f32>, fill:f32, flat_shaded:u32,
 };
+const DEFAULT_PARAMETERS:Parameters = Parameters(
+    vec3<f32>(0.12,0.08,0.24),4.0,
+    vec3<f32>(0.12,0.2,0.3),4.0,
+    vec2<f32>(0.12,0.9),0.25,0u
+);
 struct Surface { albedo:vec3<f32>, n:vec3<f32> };
 
 fn surface(input:SurfaceInput) -> Surface {
