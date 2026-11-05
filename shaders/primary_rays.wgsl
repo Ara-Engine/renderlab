@@ -84,13 +84,44 @@ fn primary_gradients(ray:PrimaryRay,world:vec3<f32>,n:vec3<f32>,e1:vec3<f32>,e2:
     return mat2x2<f32>(uv1*dot(u,sx)+uv2*dot(v,sx),uv1*dot(u,sy)+uv2*dot(v,sy));
 }
 
-// Deferred material shading of every pixel with the unchanged lit body. Misses take
-// the lit clear colour. Visibility is the module's hard_shadow: inline ray or counts.
+// The trace's per-tile coverage flags (primary_trace.wgsl PRIMARY_TILE).
+@group(0) @binding(21) var primary_tiles:texture_2d<u32>;
+// primary_frame.scene widened to whole trace tiles, as [x0, y0, x1, y1): shading
+// dispatches only its tiles, and every pixel outside it is a miss. Written by the CPU
+// (primary_ray_gpu.rs PrimaryState::region) as storage, not derived from the uniform:
+// a uniform-derived dispatch layout made long-lived pipelines change arithmetic mid-run.
+@group(0) @binding(22) var<storage,read> primary_region:vec4<u32>;
+// Pixels per clear block; primary_ray_gpu.rs CLEAR_TILE must match.
+const PRIMARY_CLEAR_TILE=16u;
+// Deferred material shading of primary_region with the unchanged lit body. Misses take
+// the lit clear colour; uncovered tiles take it without reading their stale hit
+// records. Visibility is the module's hard_shadow: inline ray or counts.
 // Sixteen-pixel groups shade the gather-bound soft image about a fifth faster than
 // 32; primary_ray_gpu.rs SHADE_TILE must match.
-@compute @workgroup_size(4,4) fn primary_shade(@builtin(global_invocation_id) id:vec3<u32>) {
+// The dispatch holds the region's groups in its first rows, then one row per
+// PRIMARY_CLEAR_TILE image rows of clear blocks: every pixel outside the region takes the
+// clear colour from a few large blocks, because launching a shading group per
+// background tile cost more than its stores (primary_ray_gpu.rs encode_primary_shade).
+@compute @workgroup_size(4,4) fn primary_shade_tiles(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let region=primary_region;
+    let shaded=(region.zw-region.xy)/vec2<u32>(4u);
     let size=textureDimensions(primary_hit);
+    if group.y>=shaded.y {
+        // Each lane stores one column of a clear block, skipping the region.
+        let base=vec2<u32>(group.x,group.y-shaded.y)*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);
+        for(var k=0u;k<PRIMARY_CLEAR_TILE;k+=1u) {
+            let p=base+vec2<u32>(0u,k);
+            if all(p<size) && !(all(p>=region.xy) && all(p<region.zw)) {textureStore(primary_hdr,vec2<i32>(p),primary_frame.clear);}
+        }
+        return;
+    }
+    if group.x>=shaded.x {return;}
+    let id=grid+vec3<u32>(region.xy,0u);
     if any(id.xy>=size) {return;}
+    if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
+        textureStore(primary_hdr,vec2<i32>(id.xy),primary_frame.clear);
+        return;
+    }
     primary_shade_pixel(id.xy,size);
 }
 // One pixel inside the image: its hit record shaded, or the clear colour for a miss.

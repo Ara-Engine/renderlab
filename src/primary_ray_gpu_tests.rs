@@ -61,9 +61,33 @@ fn receivers(r: &Renderer) -> [Vec<u8>; 3] {
     }
     out
 }
-/// Placement + 1, primitive and f32 barycentrics per pixel.
+/// Per pixel, whether the last traced frame leaves it uncovered: outside the scene
+/// rectangle, where no ray is traced, or in a tile whose flag is clear.
+fn uncovered(r: &Renderer) -> Vec<bool> {
+    let primary = r.primary.as_ref().unwrap();
+    let t = primary.targets.as_ref().unwrap();
+    let tiles = read_texture(r, &t.tiles.texture);
+    let s = primary.scene.map(|v| v as usize);
+    let [tw, th] = primary_ray_gpu::TRACE_TILE.map(|v| v as usize);
+    let (width, height, columns) = (
+        t.hit.texture.width() as usize,
+        t.hit.texture.height() as usize,
+        t.tiles.texture.width() as usize,
+    );
+    (0..width * height)
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let tile = x / tw + y / th * columns;
+            !(s[0]..s[2]).contains(&x)
+                || !(s[1]..s[3]).contains(&y)
+                || tiles[tile * 4..tile * 4 + 4] == [0; 4]
+        })
+        .collect()
+}
+/// Placement + 1, primitive and f32 barycentrics per pixel, as a complete image.
+/// Uncovered tiles publish no records; every pixel there is a miss, a zero record.
 fn hit_record(r: &Renderer) -> Vec<u8> {
-    read_texture(
+    let mut hit = read_texture(
         r,
         &r.primary
             .as_ref()
@@ -73,12 +97,17 @@ fn hit_record(r: &Renderer) -> Vec<u8> {
             .unwrap()
             .hit
             .texture,
-    )
+    );
+    for (record, miss) in hit.chunks_exact_mut(16).zip(uncovered(r)) {
+        if miss {
+            record.fill(0);
+        }
+    }
+    hit
 }
 /// Hit records and counts of an Interactive frame as complete images. Uncovered tiles
 /// publish neither; every pixel there is a miss, a zero record with count 256.
 fn interactive_outputs(r: &Renderer) -> [Vec<u8>; 2] {
-    let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
     let visibility = &r
         .fresh
         .as_ref()
@@ -87,25 +116,13 @@ fn interactive_outputs(r: &Renderer) -> [Vec<u8>; 2] {
         .as_ref()
         .unwrap()
         .visibility;
-    let (mut hit, mut counts) = (hit_record(r), read_texture(r, &visibility.texture));
-    let tiles = read_texture(r, &t.tiles.texture);
-    let [tw, th] = primary_ray_gpu::TRACE_TILE.map(|v| v as usize);
-    let (width, columns) = (
-        t.hit.texture.width() as usize,
-        t.tiles.texture.width() as usize,
-    );
-    for (i, (record, count)) in hit
-        .chunks_exact_mut(16)
-        .zip(counts.chunks_exact_mut(4))
-        .enumerate()
-    {
-        let tile = (i % width) / tw + (i / width) / th * columns;
-        if tiles[tile * 4..tile * 4 + 4] == [0; 4] {
-            record.fill(0);
+    let mut counts = read_texture(r, &visibility.texture);
+    for (count, miss) in counts.chunks_exact_mut(4).zip(uncovered(r)) {
+        if miss {
             count.copy_from_slice(&256u32.to_le_bytes());
         }
     }
-    [hit, counts]
+    [hit_record(r), counts]
 }
 /// Swaps the traced fresh estimator, which traced soft frames dispatch.
 fn swap_compute(r: &mut Renderer, pipeline: &mut Owned<wgpu::ComputePipeline>) {
@@ -575,8 +592,7 @@ fn gpu_primary_kernel_screen() {
         let [a, b] = if trace {
             compiled.trace
         } else {
-            let [hard, soft, _] = compiled.shade;
-            [hard, soft]
+            compiled.shade
         };
         variants.push(Variant {
             name: spec["name"].as_str().unwrap().to_owned(),

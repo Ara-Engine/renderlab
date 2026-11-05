@@ -2282,9 +2282,7 @@ impl Renderer {
                     self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                 }
             }
-            let shading = if interactive {
-                primary_ray_gpu::Shading::Interactive
-            } else if soft {
+            let shading = if soft {
                 primary_ray_gpu::Shading::Soft
             } else {
                 primary_ray_gpu::Shading::Hard

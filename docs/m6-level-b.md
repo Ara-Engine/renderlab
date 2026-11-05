@@ -1,6 +1,6 @@
 # M6 Level-B soft shadows
 
-The gate and Interactive API were subsequently approved. The [implementation and verification](m6-level-b-implementation.md) passes the traced-receiver quality checks, exact mask replay and inspection. The retained 1-lane layout misses the 0.30 ms visibility and 1.10 ms frame targets; both 2x Unreal floors remain unmet. Exact remains the default. The later [cost hillclimb](m6-interactive-climb.md) fuses visibility into the camera-ray pass with byte-identical output: the frame is 0.861–0.862 ms, 2.50x HRT and 1.85x VSM, so the 2x VSM floor still misses.
+The gate and Interactive API were subsequently approved. The [implementation and verification](m6-level-b-implementation.md) passes the traced-receiver quality checks, exact mask replay and inspection. The retained 1-lane layout misses the 0.30 ms visibility and 1.10 ms frame targets; both 2x Unreal floors remain unmet. Exact remains the default. The later [cost hillclimb](m6-interactive-climb.md) fuses visibility into the camera-ray pass with byte-identical output: the frame is 0.861–0.862 ms, 2.50x HRT and 1.85x VSM, so the 2x VSM floor still misses. The [second climb](m6-interactive-climb-2.md) reaches 0.816 ms (2.63x HRT, 1.96x VSM) with byte-identical output; the 2x VSM floor misses by 0.016 ms.
 
 Design decision, 2026-11-04, based on `0fd49d7`. CPU evidence only: no renderer change, GPU, Unreal or viewer run, and no build.
 

@@ -15,8 +15,11 @@ const FRAME_BYTES: usize = 112;
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
 pub(super) const SHADE_TILE: [u32; 2] = [4, 4];
-/// Traced fresh visibility takes receiver coverage from the hit record, so misses
-/// never write receivers. The estimator itself is the unchanged production body.
+/// Pixels per clear block in the shading dispatch; WGSL PRIMARY_CLEAR_TILE must match.
+pub(super) const CLEAR_TILE: [u32; 2] = [16, 16];
+/// Traced fresh visibility takes receiver coverage from the tile flag and hit record,
+/// so misses never write receivers and uncovered tiles never write hit records. The
+/// estimator itself is the unchanged production body.
 const COVERAGE_SEAM: &str = "    if inside {\n        let normal=textureLoad(fresh_normal,p,0);";
 const TANGENT_SEAM: &str =
     "@vertex fn vs_tangent(input:VertexInput, @location(5) tangent:vec4<f32>) -> VertexOutput {";
@@ -114,7 +117,7 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
         COVERAGE_SEAM,
         &COVERAGE_SEAM.replacen(
             "if inside {",
-            "if inside && textureLoad(primary_hit,p,0).x!=0u {",
+            "if inside && textureLoad(primary_tiles,id/PRIMARY_TILE,0).x!=0u && textureLoad(primary_hit,p,0).x!=0u {",
             1,
         ),
         1,
@@ -140,8 +143,8 @@ pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
 
 /// Pixels whose camera ray can reach any placement, as `[x0, y0, x1, y1)`: the bounding
 /// rectangle of every conservative world bound projected through `matrix`, 2 px
-/// outward. A ray outside it misses every triangle; Interactive frames skip those
-/// rays. Bounds reaching behind the eye, or a nonfinite projection, give the image.
+/// outward. A ray outside it misses every triangle; traced frames skip those rays.
+/// Bounds reaching behind the eye, or a nonfinite projection, give the image.
 pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
     let matrix = matrix.as_dmat4();
     let (mut lower, mut upper) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
@@ -383,10 +386,11 @@ struct Geometry {
     materials: Owned<wgpu::BindGroup>,
 }
 pub(super) struct Targets {
-    /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Interactive frames
-    /// write them, and their counts, only in tiles whose `tiles` flag is set.
+    /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Traced frames write
+    /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
+    /// flag is set.
     pub hit: Depth,
-    /// One flag per `TRACE_TILE` pixels: nonzero when an Interactive camera ray hit.
+    /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
     pub tiles: Depth,
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
@@ -396,7 +400,7 @@ struct Bindings {
     fresh: Option<Owned<wgpu::BindGroup>>,
     /// Soft frames: the fused Interactive trace and visibility.
     interactive: Option<Owned<wgpu::BindGroup>>,
-    shade: [Option<Owned<wgpu::BindGroup>>; 3],
+    shade: [Option<Owned<wgpu::BindGroup>>; 2],
 }
 enum Retired {
     Targets(#[allow(dead_code)] Targets),
@@ -412,9 +416,8 @@ pub(super) struct PrimaryPipelines {
     pub fresh: Owned<wgpu::ComputePipeline>,
     /// Interactive soft frames: camera rays and their 8-direction counts in one dispatch.
     pub interactive: Owned<wgpu::ComputePipeline>,
-    /// Indexed by `Shading`: inline hard-shadow rays (or none), fresh counts, or fresh
-    /// counts behind Interactive tile flags.
-    pub shade: [Owned<wgpu::ComputePipeline>; 3],
+    /// Indexed by `Shading`; both read the trace's tile flags first.
+    pub shade: [Owned<wgpu::ComputePipeline>; 2],
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -422,15 +425,13 @@ pub(super) struct PrimaryPipelines {
 pub(super) enum Shading {
     /// Inline `hard_shadow` rays, or none.
     Hard,
-    /// Fresh visibility counts over complete hit records.
+    /// Fresh visibility counts, Exact or Interactive.
     Soft,
-    /// Fresh counts; tile flags skip the hit records of uncovered tiles.
-    Interactive,
 }
 
 pub(super) struct PrimaryState {
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
-    shade_bindings: [Owned<wgpu::BindGroupLayout>; 3],
+    shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
     fresh_layout: Owned<wgpu::PipelineLayout>,
     interactive_bindings: Owned<wgpu::BindGroupLayout>,
@@ -438,8 +439,17 @@ pub(super) struct PrimaryState {
     array_bindings: Owned<wgpu::BindGroupLayout>,
     material_bindings: Owned<wgpu::BindGroupLayout>,
     trace_layouts: [Owned<wgpu::PipelineLayout>; 2],
-    shade_layouts: [Owned<wgpu::PipelineLayout>; 3],
+    shade_layouts: [Owned<wgpu::PipelineLayout>; 2],
     frame: Option<(Buffer, [u8; FRAME_BYTES])>,
+    /// The last prepared frame's `scene_pixels` rectangle.
+    pub scene: [u32; 4],
+    /// That rectangle widened to whole `TRACE_TILE`s: shading dispatches only its groups
+    /// and clears the rest. Uploaded only when it changes.
+    region: [u32; 4],
+    /// `region` as storage for WGSL `primary_region`. A uniform-derived region made
+    /// long-lived shading pipelines change their arithmetic mid-run on NVIDIA 617.14
+    /// (docs/m6-interactive-climb-2.md), so it is not part of the frame uniform.
+    region_buffer: Option<Buffer>,
     /// Storage stand-in for absent tangent streams and unused draw slots.
     absent: Option<Buffer>,
     pub targets: Option<Targets>,
@@ -485,7 +495,6 @@ impl PrimaryState {
             self.bindings.as_ref().unwrap().fresh.as_ref().unwrap(),
         )
     }
-
     /// `lighting` is the group-3 layout shared with raster shading.
     pub fn new(device: &wgpu::Device, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
         use wgpu::TextureFormat as F;
@@ -505,7 +514,12 @@ impl PrimaryState {
             &[camera, image(16, F::Rgba32Float), image(17, F::Rgba32Float)],
         ]
         .map(|extra| {
-            let mut entries = vec![scene(TRACE_SCENE), frame, image(13, F::Rgba32Uint)];
+            let mut entries = vec![
+                scene(TRACE_SCENE),
+                frame,
+                image(13, F::Rgba32Uint),
+                image(20, F::R32Uint),
+            ];
             entries.extend_from_slice(extra);
             group("primary trace", &entries)
         });
@@ -521,14 +535,16 @@ impl PrimaryState {
             ],
         );
         let uint = wgpu::TextureSampleType::Uint;
-        let shade_bindings = [
-            &[scene(2)][..],
-            &[texture(6, uint)],
-            &[texture(6, uint), texture(21, uint)],
-        ]
-        .map(|visibility| {
-            let mut entries = vec![camera, texture(7, uint), frame, image(18, F::Rgba16Float)];
-            entries.extend_from_slice(visibility);
+        let shade_bindings = [scene(2), texture(6, uint)].map(|visibility| {
+            let entries = [
+                camera,
+                texture(7, uint),
+                frame,
+                image(18, F::Rgba16Float),
+                texture(21, uint),
+                read(22, 16),
+                visibility,
+            ];
             group("primary shading", &entries)
         });
         let fresh_bindings = group(
@@ -539,6 +555,7 @@ impl PrimaryState {
                 texture(4, wgpu::TextureSampleType::Float { filterable: false }),
                 image(5, F::R32Uint),
                 texture(7, uint),
+                texture(21, uint),
             ],
         );
         let array_bindings = group(
@@ -615,6 +632,9 @@ impl PrimaryState {
             array_bindings,
             material_bindings,
             frame: None,
+            scene: [0; 4],
+            region: [0; 4],
+            region_buffer: None,
             absent: None,
             targets: None,
             geometry: None,
@@ -665,9 +685,8 @@ impl PrimaryState {
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
             ],
             shade: [
-                pipeline(&hard, "primary_shade", &self.shade_layouts[0]),
-                pipeline(&soft, "primary_shade", &self.shade_layouts[1]),
-                pipeline(&soft, "primary_shade_tiles", &self.shade_layouts[2]),
+                pipeline(&hard, "primary_shade_tiles", &self.shade_layouts[0]),
+                pipeline(&soft, "primary_shade_tiles", &self.shade_layouts[1]),
             ],
         }
     }
@@ -735,10 +754,16 @@ impl PrimaryState {
             self.retired.push((last, Retired::Bindings(b)));
         }
         self.frame = None;
+        self.region_buffer = None;
         self.absent = None;
     }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
+    }
+    /// Workgroups of `tile` pixels covering `region`.
+    pub(super) fn region_groups(&self, tile: [u32; 2]) -> [u32; 2] {
+        let r = self.region;
+        std::array::from_fn(|i| (r[i + 2] - r[i]).div_ceil(tile[i]))
     }
 }
 
@@ -765,18 +790,47 @@ impl Renderer {
         if !inverse.is_finite() {
             return Err(Error::InvalidInput("traced camera inverse is nonfinite"));
         }
-        // Only the Interactive trace reads the rectangle; it costs O(placements) per frame.
-        let scene = if soft && self.soft_mode == crate::SoftShadows::Interactive {
-            let mut bounds = vec![];
-            for d in draws {
-                for &model in &d.instances.state.models {
-                    bounds.push(shadow_gpu::world_bounds(d.mesh.bounds, model)?);
-                }
+        // Every traced frame's camera rays read the rectangle: O(placements) per frame.
+        let mut bounds = vec![];
+        for d in draws {
+            for &model in &d.instances.state.models {
+                bounds.push(shadow_gpu::world_bounds(d.mesh.bounds, model)?);
             }
-            scene_pixels(&bounds, matrix, [size.width, size.height])
-        } else {
-            [0, 0, size.width, size.height]
+        }
+        let scene = scene_pixels(&bounds, matrix, [size.width, size.height]);
+        // Whole trace tiles, so shading reads only tile flags its trace wrote.
+        let region = {
+            let t = TRACE_TILE;
+            let lo = [scene[0] / t[0] * t[0], scene[1] / t[1] * t[1]];
+            [
+                lo[0],
+                lo[1],
+                lo[0] + (scene[2] - lo[0]).div_ceil(t[0]) * t[0],
+                lo[1] + (scene[3] - lo[1]).div_ceil(t[1]) * t[1],
+            ]
         };
+        if self.primary.as_ref().unwrap().region_buffer.is_none() {
+            let buffer = Buffer::new(
+                self,
+                "primary shading region",
+                16,
+                wgpu::BufferUsages::STORAGE,
+            );
+            let state = self.primary.as_mut().unwrap();
+            state.region_buffer = Some(buffer);
+            // No real region is all ones, so the new buffer is always written.
+            state.region = [u32::MAX; 4];
+        }
+        let state = self.primary.as_mut().unwrap();
+        state.scene = scene;
+        if state.region != region {
+            let words: Vec<u8> = region.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            self.queue
+                .write_buffer(&state.region_buffer.as_ref().unwrap().value, 0, &words);
+            state.region = region;
+            uploads.camera += 16;
+            uploads.write_calls += 1;
+        }
         let mut bytes = [0; FRAME_BYTES];
         bytes[..64].copy_from_slice(&matrix_bytes(inverse));
         for (dst, value) in bytes[64..80]
@@ -1026,6 +1080,7 @@ impl Renderer {
             use wgpu::BindingResource as R;
             let hardware = self.hardware_shadows.as_ref().unwrap();
             let frame = &state.frame.as_ref().unwrap().0.value;
+            let region = &state.region_buffer.as_ref().unwrap().value;
             let group = |layout: &wgpu::BindGroupLayout, entries: &[(u32, R<'_>)]| {
                 let entries: Vec<_> = entries
                     .iter()
@@ -1048,10 +1103,16 @@ impl Renderer {
             let trace_scene = (TRACE_SCENE, hardware.scene().as_binding());
             let uniform = (10, frame.as_entire_binding());
             let hit = R::TextureView(&t.hit.view);
+            let tiles = R::TextureView(&t.tiles.view);
             let trace = [
                 Some(group(
                     &state.trace_bindings[0],
-                    &[trace_scene.clone(), uniform.clone(), (13, hit.clone())],
+                    &[
+                        trace_scene.clone(),
+                        uniform.clone(),
+                        (13, hit.clone()),
+                        (20, tiles.clone()),
+                    ],
                 )),
                 fresh.map(|f| {
                     group(
@@ -1061,23 +1122,25 @@ impl Renderer {
                             trace_scene.clone(),
                             uniform.clone(),
                             (13, hit.clone()),
+                            (20, tiles.clone()),
                             (16, R::TextureView(&f.world.view)),
                             (17, R::TextureView(&f.normal.view)),
                         ],
                     )
                 }),
             ];
-            let shade = |shading: Shading, visibility: &[(u32, R<'_>)]| {
-                let mut entries = vec![
+            let shade = |shading: Shading, visibility: (u32, R<'_>)| {
+                let entries = [
                     camera.clone(),
                     (7, hit.clone()),
                     uniform.clone(),
                     (18, R::TextureView(&hdr.view)),
+                    (21, tiles.clone()),
+                    (22, region.as_entire_binding()),
+                    visibility,
                 ];
-                entries.extend_from_slice(visibility);
                 Some(group(&state.shade_bindings[shading as usize], &entries))
             };
-            let tiles = R::TextureView(&t.tiles.view);
             let next = Bindings {
                 trace,
                 fresh: fresh.map(|f| {
@@ -1089,6 +1152,7 @@ impl Renderer {
                             (4, R::TextureView(&f.normal.view)),
                             (5, R::TextureView(&f.visibility.view)),
                             (7, hit.clone()),
+                            (21, tiles.clone()),
                         ],
                     )
                 }),
@@ -1106,19 +1170,11 @@ impl Renderer {
                     )
                 }),
                 shade: match fresh {
-                    Some(f) => {
-                        let counts = (6, R::TextureView(&f.visibility.view));
-                        [
-                            None,
-                            shade(Shading::Soft, std::slice::from_ref(&counts)),
-                            shade(Shading::Interactive, &[counts, (21, tiles)]),
-                        ]
-                    }
-                    None => [
-                        shade(Shading::Hard, std::slice::from_ref(&scene)),
+                    Some(f) => [
                         None,
-                        None,
+                        shade(Shading::Soft, (6, R::TextureView(&f.visibility.view))),
                     ],
+                    None => [shade(Shading::Hard, scene), None],
                 },
                 key,
             };
@@ -1143,7 +1199,8 @@ impl Renderer {
         let pipeline = &p.trace[usize::from(soft)];
         self.encode_primary_trace(encoder, pipeline, TRACE_TILE, soft, timestamp_writes);
     }
-    /// The trace dispatch with `pipeline`; tests screen variant kernels on one ABI.
+    /// The trace dispatch with `pipeline` over the image; tests screen variant kernels on
+    /// one ABI.
     pub(super) fn encode_primary_trace(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1184,8 +1241,8 @@ impl Renderer {
     }
 
     /// Interactive soft frames: camera rays, hit records and 8-direction counts in one
-    /// dispatch, replacing the trace and fresh visibility passes. Production passes
-    /// `TRACE_TILE`; tests screen other workgroup shapes on the same ABI.
+    /// dispatch over the image, replacing the trace and fresh visibility passes.
+    /// Production passes `TRACE_TILE`; tests screen other workgroup shapes on the ABI.
     pub(super) fn encode_primary_interactive(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1237,7 +1294,8 @@ impl Renderer {
         );
     }
 
-    /// Deferred material shading of the whole image into the HDR target: one dispatch.
+    /// Deferred material shading of the scene region into the HDR target, and the clear
+    /// colour everywhere else, in one dispatch.
     pub(super) fn encode_primary_shading(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1248,7 +1306,8 @@ impl Renderer {
         let pipeline = &p.shade[shading as usize];
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
-    /// The shading dispatch with `pipeline`; tests screen variant kernels on one ABI.
+    /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks
+    /// for the rest of the image. Tests screen variant shading kernels on one ABI.
     pub(super) fn encode_primary_shade(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1274,10 +1333,10 @@ impl Renderer {
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &*g.materials, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        pass.dispatch_workgroups(
-            size.width.div_ceil(tile[0]),
-            size.height.div_ceil(tile[1]),
-            1,
-        );
+        // Rows of region shading groups, then rows of CLEAR_TILE clear blocks over the
+        // image, as WGSL primary_shade_tiles decodes them.
+        let [x, y] = state.region_groups(tile);
+        let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
+        pass.dispatch_workgroups(x.max(bx), y + by, 1);
     }
 }

@@ -50,15 +50,18 @@ fn primary_modules_compile_and_reject_lit_seam_drift() {
     let grids = [
         ("primary_trace", [x, y, 1]),
         ("primary_trace_receivers", [x, y, 1]),
-        ("primary_shade", [u, v, 1]),
-        ("primary_trace_interactive", [x, y, 1]),
         ("primary_shade_tiles", [u, v, 1]),
+        ("primary_trace_interactive", [x, y, 1]),
     ];
-    // Interactive tile flags cover exactly one trace workgroup each.
-    assert!(sources[1].contains(&format!("const PRIMARY_TILE=vec2<u32>({x}u,{y}u);")));
+    // Clear blocks are square; the shading kernel decodes them with one constant.
+    let [c, d] = primary_ray_gpu::CLEAR_TILE;
+    assert_eq!(c, d);
     for (index, source) in sources.iter().enumerate() {
+        // Tile flags cover exactly one trace workgroup each, in both modules.
+        assert!(source.contains(&format!("const PRIMARY_TILE=vec2<u32>({x}u,{y}u);")));
+        assert!(source.contains(&format!("const PRIMARY_CLEAR_TILE={c}u;")));
         let (module, info) = validate_wgsl(source);
-        for (name, grid) in &grids[if index == 0 { 0..3 } else { 2..5 }] {
+        for (name, grid) in &grids[if index == 0 { 0..3 } else { 2..4 }] {
             let entry = module
                 .entry_points
                 .iter()
@@ -107,7 +110,7 @@ fn primary_modules_compile_and_reject_lit_seam_drift() {
     }
 }
 
-/// Interactive frames trace only `scene_pixels`: every pixel-centre segment from near
+/// Traced frames trace only `scene_pixels`: every pixel-centre segment from near
 /// to far that enters the bounds lies inside it. Bounds behind the eye give the image;
 /// no bounds give no pixels.
 #[test]

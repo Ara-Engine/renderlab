@@ -13,8 +13,6 @@ struct Step {
     kind: Kind,
     /// Workgroup tile of the fused or shading pass.
     tile: [u32; 2],
-    /// Shading on complete hit records (`primary_shade`) instead of tile flags.
-    soft_shading: bool,
     pipelines: Vec<Owned<wgpu::ComputePipeline>>,
 }
 struct Variant {
@@ -52,11 +50,7 @@ fn encode(
                 r.encode_primary_interactive(encoder, &p[0], step.tile, writes(true, true))
             }
             Kind::Shade => {
-                let shading = if step.soft_shading {
-                    primary_ray_gpu::Shading::Soft
-                } else {
-                    primary_ray_gpu::Shading::Interactive
-                };
+                let shading = primary_ray_gpu::Shading::Soft;
                 r.encode_primary_shade(encoder, &p[0], step.tile, shading, writes(true, true))
             }
         }
@@ -76,9 +70,9 @@ fn outputs(r: &Renderer, kind: Kind) -> Vec<Vec<u8>> {
 }
 
 /// One pass from `{kind: split|fused|shade, edits?: [[module, find, replace]], tile?: [x, y],
-/// unchecked?: [ray_query|bounds|loops|int_div], soft?: bool}`; module 0 is hard and 1
-/// soft. `tile` resizes the fused or shading workgroup; `unchecked` drops those naga
-/// runtime checks from a fused module; `soft` shades with `primary_shade`.
+/// unchecked?: [ray_query|bounds|loops|int_div]}`; module 0 is hard and 1 soft. `tile`
+/// resizes the fused workgroup (shading decodes its region and clear rows from
+/// `SHADE_TILE` groups); `unchecked` drops those naga runtime checks from a fused module.
 fn step(r: &Renderer, base: &[String; 2], spec: &serde_json::Value) -> Step {
     let kind = match spec["kind"].as_str().unwrap() {
         "split" => Kind::Split,
@@ -94,15 +88,17 @@ fn step(r: &Renderer, base: &[String; 2], spec: &serde_json::Value) -> Step {
             (e[1].as_str().unwrap(), e[2].as_str().unwrap()),
         );
     }
-    let soft_shading = spec["soft"].as_bool().unwrap_or(false);
     let (default, entry) = match kind {
-        Kind::Shade if soft_shading => (primary_ray_gpu::SHADE_TILE, "fn primary_shade("),
         Kind::Shade => (primary_ray_gpu::SHADE_TILE, "fn primary_shade_tiles("),
         _ => (primary_ray_gpu::TRACE_TILE, "fn primary_trace_interactive("),
     };
     let tile = spec["tile"]
         .as_array()
         .map_or(default, |t| [0, 1].map(|i| t[i].as_u64().unwrap() as u32));
+    assert!(
+        kind != Kind::Shade || tile == default,
+        "shading groups are SHADE_TILE"
+    );
     if tile != default {
         let find = format!("@workgroup_size({},{}) {entry}", default[0], default[1]);
         let replace = format!("@workgroup_size({},{}) {entry}", tile[0], tile[1]);
@@ -145,14 +141,13 @@ fn step(r: &Renderer, base: &[String; 2], spec: &serde_json::Value) -> Step {
         }
         Kind::Fused => vec![primary.interactive_pipeline(&r.device, &r.ledger, &soft, &eight)],
         Kind::Shade => {
-            let [_, soft, tiles] = primary.compile(&r.device, &r.ledger, &sources).shade;
-            vec![if soft_shading { soft } else { tiles }]
+            let [_, soft] = primary.compile(&r.device, &r.ledger, &sources).shade;
+            vec![soft]
         }
     };
     Step {
         kind,
         tile,
-        soft_shading,
         pipelines,
     }
 }
