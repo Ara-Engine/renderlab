@@ -234,8 +234,16 @@ def main():
             raise RuntimeError("GPU lease ownership changed")
         if LOCK.resolve() != Path("D:/Coding/renderlab-work/gpu-slot.lock").resolve():
             raise RuntimeError("unexpected lock path")
-        # Only this fixed, token-checked directory is removed.
-        shutil.rmtree(LOCK)
+        # Only this fixed, token-checked directory is removed. Another process reading owner.json
+        # holds a Windows share lock on it briefly; retry rather than leave a stale lease.
+        for attempt in range(60):
+            try:
+                shutil.rmtree(LOCK)
+                break
+            except PermissionError:
+                if attempt == 59:
+                    raise
+                time.sleep(0.5)
         ledger = OUT / "gpu-windows.json"
         rows = json.loads(ledger.read_text()) if ledger.exists() else []
         rows.append(dict(label=a.label, acquired=owner["utc"], released=utc(), seconds=time.monotonic() - start))

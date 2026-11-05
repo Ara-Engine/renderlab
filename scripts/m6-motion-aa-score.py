@@ -322,12 +322,25 @@ def main():
     print(json.dumps(result["gates"], indent=1)[:8000])
 
 
+def replay_gate(run):
+    """F8 over the full program's runs: every run's scored images equal the first run's, and the
+    final records are identical within each setting. gpu_film_t2_motion turns test diagnostics on
+    in runs 0-1 only, and they store a band marker in the records, so records compare within
+    runs 0-1 and within runs 2 onward."""
+    runs = run["digests"]["full"]
+    images = all(r[:-1] == runs[0][:-1] for r in runs)
+    groups = [runs[:2], runs[2:]]
+    records = all(len({r[-1] for r in g}) <= 1 for g in groups)
+    return dict(passed=images and records, replays=len(runs) - 1, images_identical=images,
+                records_identical_within_setting=records, identical_to_first_including_records=run["replays_identical"])
+
+
 def gates(frames, f2, bar, run, solids):
     g = {}
     empty = run.get("empty_identity", [])
     g["T-0"] = dict(passed=all(i["hdr_identical"] for i in run["identity"]) and bool(run.get("t0_empty_passed")),
                     reset=run["identity"], empty_pixels=empty)
-    g["F8_replay"] = dict(passed=run["replays_identical"] == run["replays"], replays=run["replays"], identical=run["replays_identical"])
+    g["F8_replay"] = replay_gate(run)
     fails = []
     for f, row in frames.items():
         if "converged" not in row:

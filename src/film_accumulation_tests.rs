@@ -1383,6 +1383,8 @@ fn gpu_film_t2_static() {
         .as_array()
         .map(|a| a.iter().map(|v| v.as_str().unwrap().to_owned()).collect());
     let detail = m["detail"].as_bool().unwrap_or(false);
+    let baseline = m["baseline"].as_u64().unwrap_or(0) as usize;
+    assert!(baseline < modes.len());
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     // Compile the temporal and record pipelines once, then swap scored programs into them.
@@ -1448,13 +1450,18 @@ fn gpu_film_t2_static() {
                         fs::remove_file(out.join(format!("first-p{pose}-{name}-n{n:03}.rgba16f")));
                 }
             }
-            for (run, (images, _, history)) in runs.iter().enumerate().skip(1) {
-                let identical = runs[0].0.iter().zip(images).filter(|(a, b)| a == b).count();
+            // Every run against the `baseline` run (default the first): a later baseline compares
+            // records with T1a after both pipelines' first use. `mismatches` are against the first.
+            let base = &runs[baseline];
+            for (run, (images, _, history)) in
+                runs.iter().enumerate().filter(|(i, _)| *i != baseline)
+            {
+                let identical = base.0.iter().zip(images).filter(|(a, b)| a == b).count();
                 let row = serde_json::json!({"pose":pose,"program":name,"frames":frames,
-                    "compared":[modes[0].0, modes[run].0],"run":run,
-                    "frames_identical":identical,"history_identical":runs[0].2 == *history,
-                    "first_differing_frame":runs[0].0.iter().zip(images).position(|(a, b)| a != b).map(|i| i + 1),
-                    "mismatches":mismatches.iter().filter(|x| x["run"] == run).take(20).collect::<Vec<_>>()});
+                    "compared":[modes[baseline].0, modes[run].0],"baseline":baseline,"run":run,
+                    "frames_identical":identical,"history_identical":base.2 == *history,
+                    "first_differing_frame":base.0.iter().zip(images).position(|(a, b)| a != b).map(|i| i + 1),
+                    "mismatches_against_first_run":mismatches.iter().filter(|x| x["run"] == run).take(20).collect::<Vec<_>>()});
                 eprintln!("T2 static {row}");
                 results.push(row);
             }
@@ -1697,6 +1704,31 @@ fn gpu_film_t2_motion() {
         .skip(1)
         .filter(|run| *run == &replay[0])
         .count();
+    // The first run's freshly created pipelines can round differently from later runs
+    // (docs/m6-motion-aa-gpu.md section 3), so replays are also compared with the first replay,
+    // and each run lists the digest indices (scored frames, then records) where it differs.
+    let identical_to_replay = replay
+        .iter()
+        .skip(2)
+        .filter(|run| replay.get(1) == Some(run))
+        .count();
+    let differing: Vec<_> = replay
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(run, digests)| {
+            let at: Vec<usize> = digests
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(replay[0].as_array().unwrap())
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| i)
+                .collect();
+            serde_json::json!({"run":run,"differs_from_first_at":at})
+        })
+        .collect();
     let t0_passed = empty_identity
         .iter()
         .all(|c| c["hdr_differing"] == 0 && c["hit_differing"] == 0 && c["counts_differing"] == 0);
@@ -1706,7 +1738,8 @@ fn gpu_film_t2_motion() {
             &serde_json::json!({"sequence":m["sequence"],"records":count,
             "scored":scored,"frames":frames,"identity":identity,"empty_identity":empty_identity,
             "t0_empty_passed":t0_passed,"digests":digests,"replays":replays,
-            "replays_identical":identical,"seconds":start.elapsed().as_secs_f64()}),
+            "replays_identical":identical,"replays_identical_to_first_replay":identical_to_replay,
+            "replay_differences":differing,"seconds":start.elapsed().as_secs_f64()}),
         )
         .unwrap(),
     )
