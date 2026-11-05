@@ -197,6 +197,8 @@ Paired frames along Q-walk (8 warm-up and 56 measured pairs per process; moving 
 
 ### S2.5 Next (root decision)
 
+Superseded by [motion AA](m6-motion-aa.md): no per-pixel fix removes the shadow-edge leak; the next unit is T2a, world-anchored sample records.
+
 The frozen stop rules name the next candidates: a ±1 px reverse search, then two-layer silhouette history. On this evidence:
 
 - **Trails.** A ±1 px reverse search adds history for the current surface, but it does not stop background pixels accepting mixed edge history, which is the trails' source. Two-layer silhouette history addresses that directly. So would a cheaper restriction to test first: an anchor bit marking history that mixes surfaces, which only that history's own surface may accept. Edge pixels would then restart, like Interactive, instead of trailing.
