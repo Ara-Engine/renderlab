@@ -8,7 +8,7 @@ fn soft_shadow_default_is_exact() {
 
 #[test]
 #[ignore = "GPU lock, 8 GiB RAM, acknowledgment and RENDERLAB_PRIMARY_MANIFEST; offscreen"]
-fn gpu_soft_shadow_traced_acceptance() {
+pub(super) fn gpu_soft_shadow_traced_acceptance() {
     let manifest = manifest();
     let _validation = validation::begin(true);
     let out = PathBuf::from(manifest["output"].as_str().unwrap());
@@ -31,9 +31,9 @@ fn gpu_soft_shadow_traced_acceptance() {
         let [world, normal, counts] = receivers(&r);
         // Frozen primary acceptance is reused; this is not a new reference.
         let baseline = PathBuf::from(manifest["reference"].as_str().unwrap());
-        assert_eq!(
-            counts,
-            fs::read(baseline.join(format!("pose-{index}-seed-0-production.u32"))).unwrap(),
+        assert!(
+            counts
+                == fs::read(baseline.join(format!("pose-{index}-seed-0-production.u32"))).unwrap(),
             "Exact default count regression"
         );
         fs::write(name("world.f32"), world).unwrap();
@@ -55,19 +55,29 @@ fn gpu_soft_shadow_traced_acceptance() {
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);
             let image = capture(&mut r);
-            let [_, counts] = interactive_outputs(&r);
-            assert_eq!(
-                counts,
-                fs::read(replay.join(format!("pose-{index}-seed-{seed}-1x8.u32"))).unwrap(),
+            let [hits, counts] = interactive_outputs(&r);
+            assert!(
+                counts
+                    == fs::read(replay.join(format!("pose-{index}-seed-{seed}-1x8.u32"))).unwrap(),
                 "public Interactive frame differs from replay"
             );
-            traced_frame(&mut r, &color, &camera, &mut asset, true);
-            assert_eq!(capture(&mut r), image, "static HDR seed={seed}");
-            assert_eq!(
-                interactive_outputs(&r)[1],
-                counts,
-                "static counts seed={seed}"
-            );
+            for repeat in 0..manifest["static_repeats"].as_u64().unwrap_or(1) {
+                traced_frame(&mut r, &color, &camera, &mut asset, true);
+                let repeated = capture(&mut r);
+                if repeated != image {
+                    super::determinism_tests::investigate(
+                        &mut r, &image, &repeated, &hits, &counts, seed, &out,
+                    );
+                }
+                assert!(
+                    repeated == image,
+                    "static HDR seed={seed} repeat={repeat}; see determinism.json"
+                );
+                assert!(
+                    interactive_outputs(&r)[1] == counts,
+                    "static counts seed={seed} repeat={repeat}"
+                );
+            }
             std::mem::swap(
                 &mut r.pipeline.primary.as_mut().unwrap().interactive,
                 &mut p,
@@ -87,8 +97,11 @@ fn gpu_soft_shadow_traced_acceptance() {
         fs::write(name("hard.rgba16f"), capture(&mut r)).unwrap();
         r.set_shadows(&soft).unwrap();
     }
-    assert_eq!(records[0], records[2], "return frame differs");
-    assert_ne!(records[0], records[1], "motion did not change output");
+    assert!(
+        records[0] == records[2],
+        "return frame differs; compare pose files"
+    );
+    assert!(records[0] != records[1], "motion did not change output");
     let camera = cameras.frames[0].camera().unwrap();
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     let accepted = capture(&mut r);
@@ -111,9 +124,8 @@ fn gpu_soft_shadow_traced_acceptance() {
         let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
         assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);
         assert_eq!(capture(&mut r) == accepted, !tint, "reload output");
-        assert_eq!(
-            interactive_outputs(&r)[1],
-            accepted_counts,
+        assert!(
+            interactive_outputs(&r)[1] == accepted_counts,
             "reload changed counts"
         );
     }
