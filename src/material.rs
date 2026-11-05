@@ -1,6 +1,7 @@
 use crate::{
     Error,
     observe::{Allocation, Owned},
+    program::{MaterialParameters, Program, Value},
 };
 use renderlab_asset::{Filter, MipmapFilter, Sampler, TextureRole, Wrap};
 use std::sync::Arc;
@@ -64,6 +65,11 @@ pub struct MaterialDescriptor<'a> {
     pub normal_texture: Option<TextureBinding<'a>>,
     pub normal_scale: f32,
     pub double_sided: bool,
+    /// The material's shading program; None is the renderer's standard program.
+    pub program: Option<&'a Program>,
+    /// Named values for the program's `struct Parameters`, checked by name and type.
+    /// Omitted members are zero.
+    pub parameters: &'a [(&'a str, Value)],
 }
 impl Default for MaterialDescriptor<'_> {
     fn default() -> Self {
@@ -76,6 +82,8 @@ impl Default for MaterialDescriptor<'_> {
             normal_texture: None,
             normal_scale: 1.,
             double_sided: false,
+            program: None,
+            parameters: &[],
         }
     }
 }
@@ -88,6 +96,9 @@ pub struct Material {
     pub(crate) _uniform: Owned<wgpu::Buffer>,
     pub(crate) _samplers: [Owned<wgpu::Sampler>; 3],
     pub(crate) _textures: [Texture; 3],
+    /// The resolved program, retained while the material lives.
+    pub(crate) program: Program,
+    pub(crate) parameters: Arc<MaterialParameters>,
     pub(crate) _allocation: Allocation,
 }
 impl MaterialDescriptor<'_> {

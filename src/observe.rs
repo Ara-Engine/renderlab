@@ -110,6 +110,9 @@ pub struct SceneCounts {
 pub struct ReloadReport {
     pub revision: Revision,
     pub compile: Duration,
+    /// Program reloads only: `Parameters` members that are new or retyped, which every
+    /// existing material of the program now reads as zero.
+    pub zeroed_parameters: Vec<String>,
 }
 #[derive(Debug)]
 pub struct Completion {
@@ -369,6 +372,9 @@ pub struct PipelineStats {
     pub attempts: u64,
     pub successes: u64,
     pub installations: u64,
+    /// Render and compute pipelines created by renderer creation, reloads, program
+    /// creation and traced selection, cumulative.
+    pub created: u64,
 }
 #[derive(Clone, Debug)]
 pub struct Stats {

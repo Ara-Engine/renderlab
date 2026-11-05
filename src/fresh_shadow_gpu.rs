@@ -1,8 +1,5 @@
 use super::*;
 
-const PIXEL_SEAM: &str = "    let source_front=front==(input.winding>0.0);";
-pub(super) const GEOMETRIC_SEAM: &str = "    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));";
-
 /// Receiver pixels per `fresh_compute` workgroup; WGSL `FRESH_TILE` must match.
 pub(super) const TILE: [u32; 2] = [2, 2];
 
@@ -11,28 +8,20 @@ pub(super) fn shader_source(source: &str) -> Result<String, Error> {
     compose(source, include_str!("../shaders/fresh_shadows.wgsl"))
 }
 
-/// Splices a fresh visibility body into the checked scene source. Tests use this to
-/// compare frozen or experimental bodies against the production one.
+/// Splices a fresh visibility body into the checked prelude's visibility markers. Its
+/// `hard_shadow` reads the receiver pixel's count. Tests use this to compare frozen or
+/// experimental bodies against the production one.
 pub(super) fn compose(source: &str, fresh: &str) -> Result<String, Error> {
     crate::hardware_shadows::shader_source(source, SampleCount::One)?;
-    if source.matches(PIXEL_SEAM).count() != 1 || source.matches(GEOMETRIC_SEAM).count() != 1 {
-        return Err(Error::InvalidInput(
-            "fresh shadows require the unchanged fragment pixel/geometric receiver seams",
-        ));
-    }
     let (before, rest) = source
         .split_once(crate::hardware_shadows::VISIBILITY_BEGIN)
         .unwrap();
     let (_, after) = rest
         .split_once(crate::hardware_shadows::VISIBILITY_END)
         .unwrap();
-    Ok(
-        format!("enable wgpu_ray_query;\n{before}\n{fresh}\n{after}").replacen(
-            PIXEL_SEAM,
-            &format!("    fresh_pixel=vec2<i32>(input.position.xy);\n{PIXEL_SEAM}"),
-            1,
-        ),
-    )
+    Ok(format!(
+        "enable wgpu_ray_query;\n{before}\n{fresh}\n{after}"
+    ))
 }
 
 /// Two float32 receiver attachments and one uint visibility count per output pixel.
@@ -65,9 +54,10 @@ pub(super) fn admit_targets(settings: &Shadows, width: u32, height: u32) -> Resu
     Ok(())
 }
 
+/// The engine's fresh receiver raster and visibility compute; shading belongs to each
+/// program (`FreshState::shade_pipelines`).
 pub(super) struct FreshPipelines {
     pub receiver: Owned<wgpu::RenderPipeline>,
-    pub shade: [Owned<wgpu::RenderPipeline>; 2],
     pub compute: Owned<wgpu::ComputePipeline>,
     /// Receiver pixels per `compute` workgroup, which sets the dispatch grid.
     pub compute_tile: [u32; 2],
@@ -208,20 +198,45 @@ impl FreshState {
             retired_binds: vec![],
         }
     }
+    /// The engine pipelines from the fresh composition of the prelude.
     pub fn compile(&self, device: &wgpu::Device, ledger: &Ledger, source: &str) -> FreshPipelines {
         let shader = ledger.own(
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("fresh receiver compute shading candidate"),
+                label: Some("fresh receivers and visibility compute"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             }),
             ResourceKind::ShaderModule,
         );
+        FreshPipelines {
+            receiver: self.mesh(device, ledger, &shader, false, true),
+            compute: self.compute_pipeline(device, ledger, &shader, "fresh_compute", &[]),
+            compute_tile: TILE,
+        }
+    }
+    /// One program's fresh lighting pair (without, with tangents) from its composed
+    /// raster module.
+    pub fn shade_pipelines(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        shader: &wgpu::ShaderModule,
+    ) -> [Owned<wgpu::RenderPipeline>; 2] {
+        [false, true].map(|t| self.mesh(device, ledger, shader, t, false))
+    }
+    fn mesh(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        shader: &wgpu::ShaderModule,
+        tangent: bool,
+        receiver: bool,
+    ) -> Owned<wgpu::RenderPipeline> {
         let receiver_formats = [
             Some(wgpu::TextureFormat::Rgba32Float.into()),
             Some(wgpu::TextureFormat::Rgba32Float.into()),
         ];
         let shade_formats = [Some(wgpu::TextureFormat::Rgba16Float.into())];
-        let mesh = |tangent, receiver| {
+        {
             ledger.own(
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(if receiver {
@@ -235,7 +250,7 @@ impl FreshState {
                         &self.shade_layout
                     }),
                     vertex: wgpu::VertexState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
                         compilation_options: Default::default(),
                         buffers: &[
@@ -261,7 +276,7 @@ impl FreshState {
                         ],
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some(if receiver { "fs_receiver" } else { "fs_lit" }),
                         compilation_options: Default::default(),
                         targets: if receiver {
@@ -287,12 +302,6 @@ impl FreshState {
                 }),
                 ResourceKind::RenderPipeline,
             )
-        };
-        FreshPipelines {
-            receiver: mesh(false, true),
-            shade: [false, true].map(|t| mesh(t, false)),
-            compute: self.compute_pipeline(device, ledger, &shader, "fresh_compute", &[]),
-            compute_tile: TILE,
         }
     }
     /// `entry` from a composed module, on the persistent compute ABI, with optional

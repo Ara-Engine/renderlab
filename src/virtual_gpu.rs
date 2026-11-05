@@ -68,6 +68,7 @@ impl Renderer {
                         sampler: b.sampler,
                     }
                 }),
+                ..Default::default()
             };
             if let Some(material) = self.try_create_material(&descriptor)? {
                 asset.materials.push(material);

@@ -39,38 +39,68 @@ fn primary_probe_wgsl_compiles_to_spirv() {
     }
 }
 
-/// Both traced modules compile to SPIR-V on the CPU, every entry the renderer
-/// dispatches matches its Rust grid, and lit-body drift is rejected before compile.
+/// The traced kernel modules hold no program code; kernels and the standard program's
+/// shading modules compile to SPIR-V on the CPU with the renderer's dispatch grids; and
+/// traced shading rejects implicit-derivative sampling at the program line.
 #[test]
-fn primary_modules_compile_and_reject_lit_seam_drift() {
-    let sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
-    assert!(sources[0].contains("var hardware_scene") && !sources[0].contains("fresh_visibility:"));
-    assert!(sources[1].contains("fresh_visibility:") && !sources[1].contains("var hardware_scene"));
+fn primary_modules_compile_and_kernels_hold_no_program() {
+    let standard = crate::STANDARD_PROGRAM;
+    let kernels = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let shading = primary_ray_gpu::shading_sources(SOURCE, standard).unwrap();
+    for sources in [&kernels, &shading] {
+        assert!(
+            sources[0].contains("var hardware_scene") && !sources[0].contains("fresh_visibility:")
+        );
+        assert!(
+            sources[1].contains("fresh_visibility:") && !sources[1].contains("var hardware_scene")
+        );
+    }
+    for kernel in &kernels {
+        assert!(!kernel.contains("fn surface(") && !kernel.contains("fn primary_shade_tiles("));
+    }
     let [[x, y], [u, v]] = [primary_ray_gpu::TRACE_TILE, primary_ray_gpu::SHADE_TILE];
-    let grids = [
-        ("primary_trace", [x, y, 1]),
-        ("primary_trace_receivers", [x, y, 1]),
-        ("primary_shade_tiles", [u, v, 1]),
-        ("primary_trace_interactive", [x, y, 1]),
-    ];
     // Clear blocks are square; the shading kernel decodes them with one constant.
     let [c, d] = primary_ray_gpu::CLEAR_TILE;
     assert_eq!(c, d);
-    for (index, source) in sources.iter().enumerate() {
-        // Tile flags cover exactly one trace workgroup each, in both modules.
+    let modules = [
+        (
+            &kernels[0],
+            &[
+                ("primary_trace", [x, y, 1]),
+                ("primary_trace_receivers", [x, y, 1]),
+            ][..],
+            false,
+        ),
+        (
+            &kernels[1],
+            &[("primary_trace_interactive", [x, y, 1])][..],
+            true,
+        ),
+        (
+            &shading[0],
+            &[("primary_shade_tiles", [u, v, 1])][..],
+            false,
+        ),
+        (
+            &shading[1],
+            &[("primary_shade_tiles", [u, v, 1])][..],
+            false,
+        ),
+    ];
+    for (source, grids, interactive) in modules {
+        // Tile flags cover exactly one trace workgroup each, in every module.
         assert!(source.contains(&format!("const PRIMARY_TILE=vec2<u32>({x}u,{y}u);")));
-        assert!(source.contains(&format!("const PRIMARY_CLEAR_TILE={c}u;")));
         let (module, info) = validate_wgsl(source);
-        for (name, grid) in &grids[if index == 0 { 0..3 } else { 2..4 }] {
+        for (name, grid) in grids {
             let entry = module
                 .entry_points
                 .iter()
                 .find(|e| e.name == *name)
                 .unwrap();
             assert_eq!(entry.workgroup_size, *grid, "{name} dispatch grid drift");
-            // The renderer compiles the soft module's Interactive trace with eight directions.
+            // The renderer compiles the Interactive trace with eight directions.
             let mut constants = naga::back::PipelineConstants::default();
-            if index == 1 {
+            if interactive {
                 constants.insert("FRESH_DIRECTIONS".into(), 8.0);
             }
             let (module, info) = naga::back::pipeline_constants::process_overrides(
@@ -95,19 +125,39 @@ fn primary_modules_compile_and_reject_lit_seam_drift() {
             .unwrap();
         }
     }
-    for drift in [
-        SOURCE.replace(
-            "textureSample(base_color,base_sampler,input.uv)",
-            "vec4<f32>(1.0)",
-        ),
-        SOURCE.replace(
-            "let mr=textureSample(metallic_roughness,mr_sampler,input.uv);",
-            "let mr=textureSample(metallic_roughness,mr_sampler,input.uv)+textureSample(base_color,base_sampler,input.uv*2.0);",
-        ),
-        SOURCE.replace("{ discard; }", "{ return vec4<f32>(0.0); }"),
-    ] {
-        assert!(primary_ray_gpu::shader_sources(&drift).is_err());
+    for source in &shading {
+        assert!(source.contains(&format!("const PRIMARY_CLEAR_TILE={c}u;")));
     }
+    // Valid raster WGSL, but compute stages have no implicit derivatives.
+    let implicit = standard.replace(
+        "let mr=sample_metallic_roughness(input);",
+        "let mr=textureSample(metallic_roughness,mr_sampler,input.uv);",
+    );
+    let line = standard
+        .lines()
+        .position(|l| l.contains("let mr="))
+        .unwrap()
+        + 1;
+    let [_, soft] = primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let composed = crate::program::compose(&soft, &implicit, crate::program::Stage::Traced, false);
+    let module = naga::front::wgsl::parse_str(&composed.source).unwrap();
+    assert!(
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all()
+        )
+        .validate(&module)
+        .is_err()
+    );
+    let message = crate::program::traced_stage_error("standard", &composed)
+        .unwrap()
+        .to_string();
+    assert!(
+        message.starts_with(&format!("program `standard` line {line}:")),
+        "{message}"
+    );
+    let valid = crate::program::compose(&soft, standard, crate::program::Stage::Traced, false);
+    assert!(crate::program::traced_stage_error("standard", &valid).is_none());
 }
 
 /// Traced frames trace only `scene_pixels`: every pixel-centre segment from near
@@ -749,16 +799,30 @@ fn dump_composed_modules() {
     };
     let dir = PathBuf::from(dir);
     fs::create_dir_all(&dir).unwrap();
-    let [hard, soft] = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    // The standard program's modules on every path, then the traced kernels.
+    let program = |head: &str, stage| {
+        crate::program::compose(head, crate::STANDARD_PROGRAM, stage, false).source
+    };
+    let raster = crate::program::Stage::Raster;
+    let [hard, soft] = primary_ray_gpu::shading_sources(SOURCE, crate::STANDARD_PROGRAM).unwrap();
+    let [hard_kernels, soft_kernels] = primary_ray_gpu::shader_sources(SOURCE).unwrap();
     for (name, source) in [
-        ("raster", SOURCE.to_owned()),
+        ("raster", program(SOURCE, raster)),
         (
             "hardware-1x",
-            crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap(),
+            program(
+                &crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap(),
+                raster,
+            ),
         ),
-        ("fresh", fresh_shadow_gpu::shader_source(SOURCE).unwrap()),
+        (
+            "fresh",
+            program(&fresh_shadow_gpu::shader_source(SOURCE).unwrap(), raster),
+        ),
         ("traced-hard", hard),
         ("traced-soft", soft),
+        ("kernels-hard", hard_kernels),
+        ("kernels-soft", soft_kernels),
     ] {
         fs::write(dir.join(format!("{name}.wgsl")), source).unwrap();
     }

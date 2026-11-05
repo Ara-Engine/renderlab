@@ -12,13 +12,31 @@ const SEED_EDIT: (&str, &str) = (
     "    let seed=fresh_hash(pixel.x+pixel.y*width);",
     "    var seed=fresh_hash(pixel.x+pixel.y*width);\n    if FRESH_SEED!=0u {seed=fresh_hash(seed^(FRESH_SEED*0x9e3779b9u));}",
 );
-const COUNT_DECODE: &str = "return f32(textureLoad(fresh_visibility,fresh_pixel,0).x)/256.0;";
-/// Base-colour probe for the supersampled-reference metric: the lit body returns the
-/// raster `fs` base-colour product right after sampling, through either path.
-const BASE_COLOR_EDIT: (&str, &str) = (
-    "    let sampled=textureSample(base_color,base_sampler,input.uv);",
-    "    let sampled=textureSample(base_color,base_sampler,input.uv);\n    return vec4<f32>(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,1.0);",
-);
+const COUNT_DECODE: &str = "return f32(textureLoad(fresh_visibility,receiver.pixel,0).x)/256.0;";
+const STANDARD: &str = crate::STANDARD_PROGRAM;
+/// Base-colour probe program for the supersampled-reference metric: the raster `fs`
+/// base-colour product of the standard program's sample, through either path.
+const BASE_COLOR_PROGRAM: &str = "struct Surface { color:vec3<f32> };\nfn surface(input:SurfaceInput)->Surface {\n    let sampled=sample_base_color(input);\n    return Surface(input.material.base_color.rgb*input.color.rgb*sampled.rgb*TINT);\n}\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> { return s.color; }\n";
+/// One program's traced shading pipelines from composed module sources.
+fn shading_pipelines(r: &Renderer, sources: &[String; 2]) -> [Owned<wgpu::ComputePipeline>; 2] {
+    let scopes = OperationScopes::new(&r.device);
+    let [hard, soft] = sources.each_ref().map(|source| {
+        r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("test traced shading"),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        })
+    });
+    let pipelines =
+        r.primary
+            .as_ref()
+            .unwrap()
+            .shade_pipelines(&r.device, &r.ledger, [&hard, &soft]);
+    assert!(
+        scopes.finish().is_none(),
+        "traced shading failed to compile"
+    );
+    pipelines
+}
 
 fn manifest() -> serde_json::Value {
     serde_json::from_slice(&fs::read(std::env::var("RENDERLAB_PRIMARY_MANIFEST").unwrap()).unwrap())
@@ -193,17 +211,12 @@ fn gpu_primary_traced_quarry_acceptance() {
         })
         .collect();
     let mut noop = primary.fresh_pipeline(&r.device, &r.ledger, &module, "fresh_noop", &[]);
-    let mut sources = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let mut sources = primary_ray_gpu::shading_sources(SOURCE, STANDARD).unwrap();
     sources[1] = edit(
         &sources[1],
         (COUNT_DECODE, &COUNT_DECODE.replace("/256.0", "/16777216.0")),
     );
-    let mut fixed = r
-        .primary
-        .as_ref()
-        .unwrap()
-        .compile(&r.device, &r.ledger, &sources)
-        .shade;
+    let mut fixed = shading_pipelines(&r, &sources);
     let soft = r.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.0;
@@ -251,7 +264,7 @@ fn gpu_primary_traced_quarry_acceptance() {
             .flat_map(|s| (s * 1024).to_le_bytes())
             .collect();
         swap_compute(&mut r, &mut noop);
-        std::mem::swap(&mut r.pipeline.primary.as_mut().unwrap().shade, &mut fixed);
+        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
         let t = &r
             .fresh
             .as_ref()
@@ -273,7 +286,7 @@ fn gpu_primary_traced_quarry_acceptance() {
         );
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         swap_compute(&mut r, &mut noop);
-        std::mem::swap(&mut r.pipeline.primary.as_mut().unwrap().shade, &mut fixed);
+        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
         fs::write(name("reference.rgba16f"), capture(&mut r)).unwrap();
         traced_frame(&mut r, &color, &camera, &mut asset, false);
         let raster = capture(&mut r);
@@ -315,17 +328,10 @@ fn gpu_primary_traced_quarry_acceptance() {
         records[0][0] != records[1][0],
         "the translated pose did not change the image"
     );
-    // Transactional reload on the traced path.
+    // Transactional prelude and program reloads on the traced path.
     let camera = cameras.frames[1].camera().unwrap();
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     let accepted = capture(&mut r);
-    let drift = edit(
-        SOURCE,
-        (
-            "let sampled=textureSample(base_color,base_sampler,input.uv);",
-            "let sampled=vec4<f32>(1.0);",
-        ),
-    );
     let tinted = edit(
         SOURCE,
         (
@@ -333,21 +339,47 @@ fn gpu_primary_traced_quarry_acceptance() {
             "const TINT: vec3<f32> = vec3<f32>(0.5, 0.5, 0.5);",
         ),
     );
+    // Implicit-derivative sampling is valid raster WGSL but has no traced meaning.
+    let implicit = edit(
+        STANDARD,
+        (
+            "let sampled=sample_base_color(input);",
+            "let sampled=textureSample(base_color,base_sampler,input.uv);",
+        ),
+    );
+    let syntax = edit(
+        STANDARD,
+        ("let mr=sample_metallic_roughness(input);", "let mr=;"),
+    );
+    let program_tint = edit(STANDARD, ("*sampled.rgb*TINT", "*sampled.rgb*TINT*0.5"));
     let mut reload = vec![];
-    for (label, source, ok) in [
-        ("invalid", "invalid WGSL", false),
-        ("lit seam drift", drift.as_str(), false),
-        ("tint", tinted.as_str(), true),
-        ("restore", SOURCE, true),
+    for (label, program, source, ok, changes) in [
+        ("invalid", false, "invalid WGSL", false, false),
+        ("tint", false, tinted.as_str(), true, true),
+        ("restore", false, SOURCE, true, false),
+        ("program syntax", true, syntax.as_str(), false, false),
+        (
+            "program implicit sampling",
+            true,
+            implicit.as_str(),
+            false,
+            false,
+        ),
+        ("program tint", true, program_tint.as_str(), true, true),
+        ("program restore", true, STANDARD, true, false),
     ] {
-        let result = r.reload(source);
+        let result = if program {
+            r.test_reload_standard(source)
+        } else {
+            r.reload(source)
+        };
         assert_eq!(result.is_ok(), ok, "{label}: {result:?}");
+        let diagnostic = result.err().map(|e| e.to_string());
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         let image = capture(&mut r);
-        assert_eq!(image == accepted, label != "tint", "{label} reload image");
-        reload.push(
-            serde_json::json!({"label":label,"accepted":ok,"image_unchanged":image==accepted}),
-        );
+        assert_eq!(image == accepted, !changes, "{label} reload image");
+        reload.push(serde_json::json!({"label":label,"accepted":ok,
+            "image_unchanged":image==accepted,"diagnostic":diagnostic}));
     }
     let after = r.stats().ownership;
     fs::write(
@@ -394,7 +426,7 @@ fn gpu_primary_quality_reference_images() {
     )
     .unwrap();
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-    r.reload(&edit(SOURCE, BASE_COLOR_EDIT)).unwrap();
+    r.test_reload_standard(BASE_COLOR_PROGRAM).unwrap();
     let color = target(&r, 1920, 1080);
     let ppm = |path: PathBuf, rgb: &[u8]| {
         let mut bytes = b"P6\n1920 1080\n255\n".to_vec();
@@ -547,7 +579,10 @@ fn gpu_primary_kernel_screen() {
     let camera = cameras.frames[1].camera().unwrap();
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     r.test_drain("primary kernel screen inputs");
-    let base = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    // Trace variants edit the kernels; shading variants edit the standard program's
+    // shading modules, or a `frozen` module file (an earlier build's composition).
+    let kernels = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let shading = primary_ray_gpu::shading_sources(SOURCE, STANDARD).unwrap();
     struct Variant {
         name: String,
         trace: bool,
@@ -564,8 +599,15 @@ fn gpu_primary_kernel_screen() {
         .chain(manifest["variants"].as_array().unwrap())
     {
         let trace = spec["stage"] == "trace";
-        let mut sources = base.clone();
+        let mut sources = if trace {
+            kernels.clone()
+        } else {
+            shading.clone()
+        };
         let module = if trace { 0 } else { usize::from(soft) };
+        if let Some(path) = spec["frozen"].as_str() {
+            sources[module] = fs::read_to_string(path).unwrap();
+        }
         for e in spec["edits"].as_array().into_iter().flatten() {
             let pair = (e[0].as_str().unwrap(), e[1].as_str().unwrap());
             sources[module] = edit(&sources[module], pair);
@@ -578,21 +620,21 @@ fn gpu_primary_kernel_screen() {
         let tile = spec["tile"]
             .as_array()
             .map_or(default, |t| [0, 1].map(|i| t[i].as_u64().unwrap() as u32));
-        let scopes = OperationScopes::new(&r.device);
-        let compiled = r
-            .primary
-            .as_ref()
-            .unwrap()
-            .compile(&r.device, &r.ledger, &sources);
-        assert!(
-            scopes.finish().is_none(),
-            "{} failed to compile",
-            spec["name"]
-        );
         let [a, b] = if trace {
+            let scopes = OperationScopes::new(&r.device);
+            let compiled = r
+                .primary
+                .as_ref()
+                .unwrap()
+                .compile(&r.device, &r.ledger, &sources);
+            assert!(
+                scopes.finish().is_none(),
+                "{} failed to compile",
+                spec["name"]
+            );
             compiled.trace
         } else {
-            compiled.shade
+            shading_pipelines(&r, &sources)
         };
         variants.push(Variant {
             name: spec["name"].as_str().unwrap().to_owned(),
@@ -897,4 +939,383 @@ fn gpu_primary_single_sided_and_mirrored_fixture() {
         off_edge, 0,
         "traced and raster disagree away from coverage edges"
     );
+}
+
+/// Shader edit-to-image proxy on the registered quarry, raster then traced: a tint edit
+/// and its revert, reloaded from memory, then one frame rendered and completed. Each
+/// sample runs from the reload call to that frame's GPU completion; file polling and
+/// presentation are excluded. Kinds: `program` reloads the standard program alone,
+/// `prelude` the engine prelude with every program. Reverts must be byte-identical.
+#[test]
+#[ignore = "shared GPU slot, 8 GiB RAM, experimental acknowledgment, RENDERLAB_PRIMARY_MANIFEST"]
+fn gpu_program_edit_to_image() {
+    let manifest = manifest();
+    let validate = manifest["validate"].as_bool().unwrap_or(false);
+    let _validation = validation::begin(validate);
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let reps = manifest["reps"].as_u64().unwrap_or(5) as usize;
+    let mut r = renderer(validate);
+    let (mut asset, cameras) = load_quarry(&manifest, &mut r);
+    let color = target(&r, 1920, 1080);
+    let camera = cameras.frames[0].camera().unwrap();
+    let tinted = edit(
+        SOURCE,
+        (
+            "const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);",
+            "const TINT: vec3<f32> = vec3<f32>(0.5, 0.5, 0.5);",
+        ),
+    );
+    let program_tint = edit(STANDARD, ("*sampled.rgb*TINT", "*sampled.rgb*TINT*0.5"));
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mut rows = vec![];
+    for traced in [false, true] {
+        let mode = if traced {
+            PrimaryVisibility::Traced
+        } else {
+            PrimaryVisibility::Raster
+        };
+        r.set_primary_visibility(mode).unwrap();
+        traced_frame(&mut r, &color, &camera, &mut asset, traced);
+        let accepted = capture(&mut r);
+        for (kind, edited, original) in [
+            ("program", program_tint.as_str(), STANDARD),
+            ("prelude", tinted.as_str(), SOURCE),
+        ] {
+            for rep in 0..reps {
+                for (step, source) in [("edit", edited), ("revert", original)] {
+                    r.test_drain("edit admission");
+                    let created = r.stats().pipelines.created;
+                    let start = Instant::now();
+                    let report = if kind == "program" {
+                        r.test_reload_standard(source)
+                    } else {
+                        r.reload(source)
+                    }
+                    .unwrap();
+                    let reloaded = start.elapsed();
+                    traced_frame(&mut r, &color, &camera, &mut asset, traced);
+                    r.test_drain("edit image");
+                    let image = start.elapsed();
+                    assert_eq!(
+                        capture(&mut r) == accepted,
+                        step == "revert",
+                        "{kind} {step}"
+                    );
+                    rows.push(
+                        serde_json::json!({"path": if traced {"traced"} else {"raster"},
+                        "kind": kind, "step": step, "rep": rep, "compile_ms": ms(report.compile),
+                        "reload_ms": ms(reloaded), "edit_to_image_ms": ms(image),
+                        "pipelines": r.stats().pipelines.created - created}),
+                    );
+                    eprintln!("edit_to_image {}", rows.last().unwrap());
+                }
+            }
+        }
+    }
+    r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+    fs::write(
+        out.join("edit-to-image.json"),
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"validation": validate, "reps": reps, "samples": rows}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// Driver compile cost per lit and traced shading variant: each frozen module (an
+/// earlier build's composition, `frozen` directory) against the standard program's
+/// composition, on the production ABIs, alternating, `reps` times. Each sample is the
+/// module and its pipelines' creation, which the device compiles synchronously.
+#[test]
+#[ignore = "shared GPU slot, experimental acknowledgment, RENDERLAB_PRIMARY_MANIFEST"]
+fn gpu_program_compile_cost() {
+    let manifest = manifest();
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let frozen = PathBuf::from(manifest["frozen"].as_str().unwrap());
+    let reps = manifest["reps"].as_u64().unwrap_or(3) as usize;
+    let mut r = renderer(false);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let read = |name: &str| fs::read_to_string(frozen.join(name)).unwrap();
+    let program = |head: &str| {
+        crate::program::compose(head, STANDARD, crate::program::Stage::Raster, false).source
+    };
+    let hardware = crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap();
+    let fresh = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
+    let shading = primary_ray_gpu::shading_sources(SOURCE, STANDARD).unwrap();
+    // (variant, frozen source, current source)
+    let cases = [
+        ("raster lit pair", read("raster.wgsl"), program(SOURCE)),
+        (
+            "hardware lit pair",
+            read("hardware-1x.wgsl"),
+            program(&hardware),
+        ),
+        ("fresh lit pair", read("fresh.wgsl"), program(&fresh)),
+        // Both traced shading modules: (hard, soft) joined by a NUL separator.
+        (
+            "traced shading pair",
+            format!("{}\0{}", read("traced-hard.wgsl"), read("traced-soft.wgsl")),
+            format!("{}\0{}", shading[0], shading[1]),
+        ),
+    ];
+    let compile = |r: &Renderer, case: usize, source: &str| -> f64 {
+        let scopes = OperationScopes::new(&r.device);
+        let start = Instant::now();
+        match case {
+            0 | 1 => drop(r.test_lit_pair(source, case == 1)),
+            2 => {
+                let m = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("compile cost"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+                drop(
+                    r.fresh
+                        .as_ref()
+                        .unwrap()
+                        .shade_pipelines(&r.device, &r.ledger, &m),
+                );
+            }
+            _ => {
+                let (hard, soft) = source.split_once('\0').unwrap();
+                drop(shading_pipelines(r, &[hard.to_owned(), soft.to_owned()]));
+            }
+        }
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        assert!(scopes.finish().is_none());
+        ms
+    };
+    // Every compile gets its own TINT, as a real edit does, so no driver cache can serve
+    // it; frozen and program sources take the identical edit.
+    let tint = "const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);";
+    let mut unique = 0;
+    let mut rows = vec![];
+    for rep in 0..reps {
+        for (i, (name, old, new)) in cases.iter().enumerate() {
+            let order = if rep % 2 == 0 {
+                [("frozen", old), ("program", new)]
+            } else {
+                [("program", new), ("frozen", old)]
+            };
+            for (kind, source) in order {
+                unique += 1;
+                let edited = format!(
+                    "const TINT: vec3<f32> = vec3<f32>(1.0, 1.0, {:.7});",
+                    1.0 + f64::from(unique) * 1e-6
+                );
+                assert!(source.contains(tint));
+                let ms = compile(&r, i, &source.replace(tint, &edited));
+                rows.push(serde_json::json!({"variant": name, "kind": kind, "rep": rep, "ms": ms}));
+                eprintln!("compile_cost {}", rows.last().unwrap());
+            }
+        }
+    }
+    fs::write(
+        out.join("compile-cost.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
+/// The program API end to end on a traced-capable hardware renderer: a user program
+/// with `Parameters` on raster and traced frames, parameter edits as buffer writes with
+/// no compile, a rejected reload keeping the image, a layout-changing reload repacking
+/// the material by name, typed parameter checks, and mixed-program frames rendering on
+/// raster but rejected on traced (mixed-program dispatch is a later phase).
+#[test]
+#[ignore = "shared GPU slot, experimental acknowledgment; offscreen"]
+fn gpu_program_api_raster_and_traced() {
+    let _validation = validation::begin(true);
+    let mut r = renderer(true);
+    // Flat output: the program returns its parameter colour, so both paths agree exactly.
+    let flat = "struct Parameters { tint: vec3<f32>, gain: f32 };\nstruct Surface { color: vec3<f32> };\nfn surface(input: SurfaceInput) -> Surface { return Surface(params.tint*params.gain); }\nfn shade(s: Surface, input: SurfaceInput) -> vec3<f32> { return s.color; }\n";
+    let program = r
+        .try_create_program(&crate::ProgramDescriptor {
+            label: "flat",
+            source: flat,
+        })
+        .unwrap();
+    let quad = |z: f32| {
+        [[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]].map(|[x, y]| Vertex {
+            position: [x, y, z],
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        })
+    };
+    let upload = |r: &mut Renderer, z: f32| loop {
+        let vertices = quad(z);
+        if let Some(mesh) = r
+            .try_upload_mesh(&MeshData {
+                vertices: &vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+            })
+            .unwrap()
+        {
+            break mesh;
+        }
+        r.test_drain("program api upload");
+    };
+    let front = upload(&mut r, 0.0);
+    let back = upload(&mut r, -0.5);
+    let mut instances = [0, 1].map(|_| {
+        loop {
+            if let Some(i) = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap() {
+                break i;
+            }
+            r.test_drain("program api instances");
+        }
+    });
+    let material =
+        |r: &mut Renderer, program: Option<&crate::Program>, values: &[(&str, Value)]| loop {
+            if let Some(m) = r
+                .try_create_material(&MaterialDescriptor {
+                    double_sided: true,
+                    program,
+                    parameters: values,
+                    ..Default::default()
+                })
+                .unwrap()
+            {
+                break m;
+            }
+            r.test_drain("program api material");
+        };
+    let m = material(
+        &mut r,
+        Some(&program),
+        &[
+            ("tint", Value::Vec3([0.25, 0.5, 1.0])),
+            ("gain", Value::F32(1.0)),
+        ],
+    );
+    let standard = material(&mut r, None, &[]);
+    assert!(
+        r.try_create_material(&MaterialDescriptor {
+            program: Some(&program),
+            parameters: &[("gain", Value::U32(1))],
+            ..Default::default()
+        })
+        .is_err(),
+        "wrong parameter type"
+    );
+    let color = target(&r, 64, 64);
+    let camera =
+        Camera::look_at(Vec3::new(0., 0., 3.), Vec3::ZERO, Vec3::Y, 0.8, 0.1, 10.).unwrap();
+    let centre = |r: &mut Renderer| {
+        let image = capture(r);
+        let p = (32 * 64 + 32) * 8;
+        [0, 1, 2].map(|c| decode_f16(u16::from_le_bytes([image[p + 2 * c], image[p + 2 * c + 1]])))
+    };
+    let mut frame = |r: &mut Renderer, traced: bool, m: &Material| {
+        r.primary_mode = if traced {
+            PrimaryVisibility::Traced
+        } else {
+            PrimaryVisibility::Raster
+        };
+        let [a, _] = &mut instances;
+        render(
+            r,
+            &color,
+            &camera,
+            &mut [Draw::new(&front, a).with_material(m)],
+        );
+        centre(r)
+    };
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    for traced in [false, true] {
+        assert_eq!(
+            frame(&mut r, traced, &m),
+            [0.25, 0.5, 1.0],
+            "traced={traced}"
+        );
+    }
+    // Parameter edits are buffer writes on both paths: no pipeline is created.
+    let created = r.stats().pipelines.created;
+    r.try_update_parameters(&m, &[("tint", Value::Vec3([1.0, 0.0, 0.0]))])
+        .unwrap();
+    for traced in [false, true] {
+        assert_eq!(
+            frame(&mut r, traced, &m),
+            [1.0, 0.0, 0.0],
+            "traced={traced}"
+        );
+    }
+    assert_eq!(r.stats().pipelines.created, created);
+    assert!(
+        r.try_update_parameters(&m, &[("missing", Value::F32(1.0))])
+            .is_err()
+    );
+    assert!(
+        r.try_update_parameters(&m, &[("tint", Value::F32(1.0))])
+            .is_err()
+    );
+    // A rejected program reload keeps the last working pipelines and image.
+    let broken = flat.replace("return s.color;", "return s.colour;");
+    match r.reload_program(&program, &broken) {
+        Err(ReloadError::Rejected { diagnostic, .. }) => {
+            assert!(
+                diagnostic.contains("program `flat` line 4:"),
+                "{diagnostic}"
+            )
+        }
+        other => panic!("expected rejection, got {other:?}"),
+    }
+    for traced in [false, true] {
+        assert_eq!(
+            frame(&mut r, traced, &m),
+            [1.0, 0.0, 0.0],
+            "traced={traced}"
+        );
+    }
+    // Renaming a member: the material keeps `tint` and reads the new member as zero.
+    let boosted = flat.replace("gain", "boost");
+    let report = r.reload_program(&program, &boosted).unwrap();
+    assert_eq!(report.zeroed_parameters, ["boost"]);
+    assert_eq!(frame(&mut r, true, &m), [0.0; 3]);
+    r.try_update_parameters(&m, &[("boost", Value::F32(0.5))])
+        .unwrap();
+    for traced in [false, true] {
+        assert_eq!(
+            frame(&mut r, traced, &m),
+            [0.5, 0.0, 0.0],
+            "traced={traced}"
+        );
+    }
+    // Mixed programs: raster switches pipelines per draw; traced rejects the frame.
+    let [a, b] = &mut instances;
+    r.primary_mode = PrimaryVisibility::Raster;
+    render(
+        &mut r,
+        &color,
+        &camera,
+        &mut [
+            Draw::new(&back, b).with_material(&standard),
+            Draw::new(&front, a).with_material(&m),
+        ],
+    );
+    assert_eq!(centre(&mut r), [0.5, 0.0, 0.0], "nearer flat draw wins");
+    r.primary_mode = PrimaryVisibility::Traced;
+    assert!(matches!(
+        r.try_render_view(
+            &color,
+            &camera,
+            &mut [
+                Draw::new(&back, b).with_material(&standard),
+                Draw::new(&front, a).with_material(&m),
+            ],
+            ViewMode::Lit,
+        ),
+        Err(Error::InvalidInput(_))
+    ));
+    // The program's pipelines retire once its last handle (the material's) drops.
+    drop(program);
+    assert_eq!(r.programs.len(), 2);
+    drop(m);
+    r.collect().unwrap();
+    assert_eq!(r.programs.len(), 1);
+    r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+    r.test_drain("program api complete");
 }

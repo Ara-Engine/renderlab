@@ -16,6 +16,9 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
+#[path = "program_gpu.rs"]
+mod program_gpu;
+use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -83,6 +86,52 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
 
 #[cfg(test)]
 impl Renderer {
+    /// Reloads the standard program, as edits of its file do.
+    pub(crate) fn test_reload_standard(
+        &mut self,
+        source: &str,
+    ) -> Result<ReloadReport, ReloadError> {
+        let standard = self.standard.clone();
+        self.reload_program(&standard, source)
+    }
+    /// The standard program's pipelines, which tests swap for probes and references.
+    pub(crate) fn test_standard(&mut self) -> &mut program_gpu::ProgramPipelines {
+        &mut self.programs[0].pipelines
+    }
+    /// A lit pair from a composed raster module, on the hardware-shadow ABI or the plain
+    /// lit ABI.
+    pub(crate) fn test_lit_pair(
+        &self,
+        composed: &str,
+        hardware: bool,
+    ) -> [Owned<wgpu::RenderPipeline>; 2] {
+        let scopes = OperationScopes::new(&self.device);
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("test hardware lit pair"),
+                source: wgpu::ShaderSource::Wgsl(composed.into()),
+            });
+        let layout = if hardware {
+            &self.hardware_shadows.as_ref().unwrap().layout
+        } else {
+            &self.lighting.layout
+        };
+        let pair = [false, true].map(|tangent| {
+            mesh_pipeline(
+                &self.device,
+                &self.ledger,
+                &module,
+                layout,
+                wgpu::TextureFormat::Rgba16Float,
+                "fs_lit",
+                tangent,
+                self.options.samples,
+            )
+        });
+        assert!(scopes.finish().is_none());
+        pair
+    }
     pub(crate) fn test_drain(&mut self, label: &str) {
         eprintln!("finite_gpu_drain label={label} timeout_seconds=20");
         self.device
@@ -294,17 +343,91 @@ impl Renderer {
         assert_eq!(instances.state.dirty_count, 0);
     }
 }
+/// The engine's own pipelines from the prelude. Lit shading belongs to each program
+/// (`ProgramSlot`).
 struct Pipelines {
     fresh: Option<FreshPipelines>,
     /// Present exactly while traced primary visibility is selected.
     primary: Option<PrimaryPipelines>,
-    hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     shadow: Owned<wgpu::RenderPipeline>,
     diagnostic_tangent: Owned<wgpu::RenderPipeline>,
-    lit_tangent: Owned<wgpu::RenderPipeline>,
     diagnostic: Owned<wgpu::RenderPipeline>,
-    lit: Owned<wgpu::RenderPipeline>,
     present: Owned<wgpu::RenderPipeline>,
+}
+impl Pipelines {
+    fn count(&self) -> u64 {
+        4 + 2 * u64::from(self.fresh.is_some()) + 4 * u64::from(self.primary.is_some())
+    }
+}
+/// A lit or diagnostic mesh pipeline on the 48-byte vertex ABI, with the optional
+/// tangent stream, reversed-Z depth and `samples`.
+#[allow(clippy::too_many_arguments)]
+fn mesh_pipeline(
+    device: &wgpu::Device,
+    ledger: &Ledger,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    entry: &str,
+    tangent: bool,
+    samples: SampleCount,
+) -> Owned<wgpu::RenderPipeline> {
+    ledger.own(
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 48,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &VERTEX_ATTRIBUTES,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 4,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &MODEL_ATTRIBUTES,
+                    }),
+                    if tangent {
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &TANGENT_ATTRIBUTES,
+                        })
+                    } else {
+                        None
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                targets: &[Some(format.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: samples as u32,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        }),
+        ResourceKind::RenderPipeline,
+    )
 }
 struct Slot {
     readback: Option<Owned<wgpu::Buffer>>,
@@ -359,8 +482,17 @@ pub struct Renderer {
     soft_mode: crate::SoftShadows,
     /// Identity of the traced modules, which also produce the HDR of traced frames.
     primary_hash: [u8; 32],
-    /// Last installed scene WGSL, composed again when traced visibility is selected.
+    /// Last installed prelude WGSL, composed again when traced visibility is selected.
     source: String,
+    /// Its hardware-shadow and fresh compositions, where this renderer has those paths.
+    hardware_source: Option<String>,
+    fresh_source: Option<String>,
+    /// While traced is selected: the kernel modules and the program shading heads.
+    primary_sources: Option<([String; 2], [String; 2])>,
+    /// Shading programs in creation order; the first is the standard program.
+    programs: Vec<ProgramSlot>,
+    standard: crate::Program,
+    next_program: u64,
     depth: Option<Depth>,
     msaa: Option<Depth>,
     view_mode: ViewMode,
@@ -613,6 +745,17 @@ impl Renderer {
                 count: None,
             });
         }
+        // The material's program parameter block, read only by programs declaring one.
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: material_stages,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(crate::program::PARAMETER_BYTES as u64),
+            },
+            count: None,
+        });
         let material_bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fixed material ABI"),
@@ -712,7 +855,6 @@ impl Renderer {
             &layout,
             &lighting,
             &shadows,
-            hardware_shadows.as_ref().zip(hardware_source.as_deref()),
             fresh.as_ref().zip(fresh_source.as_deref()),
             None,
             color_format,
@@ -725,9 +867,31 @@ impl Renderer {
                 _ => Error::Fault(Fault(error.to_string())),
             });
         }
+        let identity = Arc::new(());
+        let standard = program_gpu::compile_program(
+            &ProgramAbi {
+                device: &device,
+                ledger: &ledger,
+                samples: options.samples,
+                lit: &lighting.layout,
+                hardware: hardware_shadows.as_ref().map(|h| &*h.layout),
+                fresh: fresh.as_ref(),
+                primary: None,
+            },
+            &Preludes {
+                raster: wgsl,
+                hardware: hardware_source.as_deref(),
+                fresh: fresh_source.as_deref(),
+                traced: None,
+            },
+            "standard",
+            crate::STANDARD_PROGRAM,
+        )?;
         if let Some(error) = fault.get() {
             return Err(Error::Fault(error.clone()));
         }
+        let created = pipeline.count() + standard.pipelines.count();
+        let (standard, slot) = program_gpu::standard_slot(&identity, standard);
         let mut renderer = Self {
             device,
             queue,
@@ -743,17 +907,13 @@ impl Renderer {
             instance_bindings,
             material_bindings,
             default_material: None,
-            identity: Arc::new(()),
+            identity,
             #[cfg(test)]
             reference_draws: false,
             #[cfg(test)]
             fresh_fragment_reference: false,
             pipeline,
-            shader_hash: Sha256::new()
-                .chain_update(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
-                .chain_update(fresh_source.as_deref().unwrap_or("").as_bytes())
-                .finalize()
-                .into(),
+            shader_hash: [0; 32],
             lighting,
             environment: Default::default(),
             shadows,
@@ -764,6 +924,12 @@ impl Renderer {
             soft_mode: crate::SoftShadows::Exact,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
+            hardware_source,
+            fresh_source,
+            primary_sources: None,
+            programs: vec![slot],
+            standard,
+            next_program: 1,
             depth: None,
             msaa: None,
             view_mode: ViewMode::BaseColor,
@@ -785,6 +951,7 @@ impl Renderer {
                 attempts: 1,
                 successes: 1,
                 installations: 1,
+                created,
             },
             uploads: UploadBytes {
                 lut: crate::lighting::DFG.len() as u64,
@@ -800,6 +967,7 @@ impl Renderer {
             busy_frames: 0,
             upload_cpu: CpuFrame::default(),
         };
+        renderer.update_hashes();
         // The initial defaults share one immediately submitted flight.
         let scopes = OperationScopes::new(&renderer.device);
         let defaults: [Texture; 3] = [
@@ -840,6 +1008,8 @@ impl Renderer {
         Ok(renderer)
     }
 
+    /// The engine's pipelines from the prelude `source` and its fresh composition and
+    /// traced kernel modules; programs compile separately (`program_gpu`).
     #[allow(clippy::too_many_arguments)]
     fn compile(
         device: &wgpu::Device,
@@ -847,7 +1017,6 @@ impl Renderer {
         layout: &wgpu::PipelineLayout,
         lighting: &LightingGpu,
         shadows: &ShadowState,
-        hardware: Option<(&HardwareState, &str)>,
         fresh: Option<(&FreshState, &str)>,
         primary: Option<(&PrimaryState, &[String; 2])>,
         format: wgpu::TextureFormat,
@@ -861,102 +1030,13 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let mesh = |shader: &wgpu::ShaderModule,
-                    layout: &wgpu::PipelineLayout,
-                    format: wgpu::TextureFormat,
-                    entry,
-                    tangent: bool| {
-            ledger.own(
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
-                        compilation_options: Default::default(),
-                        buffers: &[
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 48,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &VERTEX_ATTRIBUTES,
-                            }),
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 4,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &MODEL_ATTRIBUTES,
-                            }),
-                            if tangent {
-                                Some(wgpu::VertexBufferLayout {
-                                    array_stride: 16,
-                                    step_mode: wgpu::VertexStepMode::Vertex,
-                                    attributes: &TANGENT_ATTRIBUTES,
-                                })
-                            } else {
-                                None
-                            },
-                        ],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(format.into())],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Greater),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: samples as u32,
-                        ..Default::default()
-                    },
-                    multiview_mask: None,
-                    cache: None,
-                }),
-                ResourceKind::RenderPipeline,
+        let mesh = |tangent| {
+            mesh_pipeline(
+                device, ledger, &shader, layout, format, "fs", tangent, samples,
             )
         };
-        let diagnostic = mesh(&shader, layout, format, "fs", false);
-        let diagnostic_tangent = mesh(&shader, layout, format, "fs", true);
-        let lit = mesh(
-            &shader,
-            &lighting.layout,
-            wgpu::TextureFormat::Rgba16Float,
-            "fs_lit",
-            false,
-        );
-        let lit_tangent = mesh(
-            &shader,
-            &lighting.layout,
-            wgpu::TextureFormat::Rgba16Float,
-            "fs_lit",
-            true,
-        );
-        let hardware = hardware.map(|(hardware, source)| {
-            let shader = ledger.own(
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("optional live hardware shadow shader"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                }),
-                ResourceKind::ShaderModule,
-            );
-            [false, true].map(|tangent| {
-                mesh(
-                    &shader,
-                    &hardware.layout,
-                    wgpu::TextureFormat::Rgba16Float,
-                    "fs_lit",
-                    tangent,
-                )
-            })
-        });
+        let diagnostic = mesh(false);
+        let diagnostic_tangent = mesh(true);
         let shadow = ledger.own(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("source-sided shadow depth"),
@@ -1021,12 +1101,9 @@ impl Renderer {
         Pipelines {
             fresh: fresh.map(|(f, source)| f.compile(device, ledger, source)),
             primary: primary.map(|(p, sources)| p.compile(device, ledger, sources)),
-            hardware,
             shadow,
             diagnostic_tangent,
-            lit_tangent,
             diagnostic,
-            lit,
             present,
         }
     }
@@ -1042,41 +1119,44 @@ impl Renderer {
         Error::Fault(self.fault.get().unwrap().clone())
     }
 
+    /// Replaces the engine prelude (shaders/scene.wgsl): one transaction over the engine
+    /// pipelines and every program recomposed against it. Any rejection keeps them all.
     pub fn reload(&mut self, wgsl: &str) -> Result<ReloadReport, ReloadError> {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
         let start = Instant::now();
         self.pipelines.attempts += 1;
+        self.purge_programs();
+        let rejected = |error: Error| ReloadError::Rejected {
+            diagnostic: error.to_string(),
+            compile: start.elapsed(),
+        };
         let hardware_source = self
             .hardware_shadows
             .as_ref()
             .map(|_| crate::hardware_shadows::shader_source(wgsl, self.options.samples))
             .transpose()
-            .map_err(|error| ReloadError::Rejected {
-                diagnostic: error.to_string(),
-                compile: start.elapsed(),
-            })?;
+            .map_err(rejected)?;
         let fresh_source = self
             .fresh
             .as_ref()
             .map(|_| fresh_shadow_gpu::shader_source(wgsl))
             .transpose()
-            .map_err(|error| ReloadError::Rejected {
-                diagnostic: error.to_string(),
-                compile: start.elapsed(),
-            })?;
+            .map_err(rejected)?;
         // Traced modules are part of the same transaction while they are selected.
         let primary_sources = self
             .pipeline
             .primary
             .as_ref()
-            .map(|_| primary_ray_gpu::shader_sources(wgsl))
+            .map(|_| {
+                Ok::<_, Error>((
+                    primary_ray_gpu::shader_sources(wgsl)?,
+                    primary_ray_gpu::shading_heads(wgsl)?,
+                ))
+            })
             .transpose()
-            .map_err(|error| ReloadError::Rejected {
-                diagnostic: error.to_string(),
-                compile: start.elapsed(),
-            })?;
+            .map_err(rejected)?;
         let scopes = OperationScopes::new(&self.device);
         let candidate = Self::compile(
             &self.device,
@@ -1084,22 +1164,19 @@ impl Renderer {
             &self.layout,
             &self.lighting,
             &self.shadows,
-            self.hardware_shadows
-                .as_ref()
-                .zip(hardware_source.as_deref()),
             self.fresh.as_ref().zip(fresh_source.as_deref()),
-            self.primary.as_ref().zip(primary_sources.as_ref()),
+            self.primary
+                .as_ref()
+                .zip(primary_sources.as_ref().map(|(k, _)| k)),
             self.format,
             self.options.samples,
             wgsl,
         );
-        let error = scopes.finish();
-        let compile = start.elapsed();
-        if let Some(error) = error {
+        if let Some(error) = scopes.finish() {
             return match error {
                 wgpu::Error::Validation { .. } => Err(ReloadError::Rejected {
                     diagnostic: error.to_string(),
-                    compile,
+                    compile: start.elapsed(),
                 }),
                 _ => {
                     let _ = self.fault.set(Fault(error.to_string()));
@@ -1107,25 +1184,50 @@ impl Renderer {
                 }
             };
         }
+        let preludes = Preludes {
+            raster: wgsl,
+            hardware: hardware_source.as_deref(),
+            fresh: fresh_source.as_deref(),
+            traced: primary_sources.as_ref().map(|(_, heads)| heads),
+        };
+        let mut programs = Vec::with_capacity(self.programs.len());
+        for slot in &self.programs {
+            match program_gpu::compile_program(
+                &self.program_abi(),
+                &preludes,
+                &slot.label,
+                &slot.source,
+            ) {
+                Ok(compiled) => programs.push(compiled.pipelines),
+                Err(Error::Fault(Fault(message))) => {
+                    let _ = self.fault.set(Fault(message));
+                    return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
+                }
+                Err(error) => return Err(rejected(error)),
+            }
+        }
+        let compile = start.elapsed();
         self.pipelines.successes += 1;
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
+        self.pipelines.created +=
+            candidate.count() + programs.iter().map(|p| p.count()).sum::<u64>();
         self.pipeline = candidate;
-        self.shader_hash = Sha256::new()
-            .chain_update(hardware_source.as_deref().unwrap_or(wgsl).as_bytes())
-            .chain_update(fresh_source.as_deref().unwrap_or("").as_bytes())
-            .finalize()
-            .into();
-        if let Some(sources) = &primary_sources {
-            self.primary_hash = primary_ray_gpu::sources_hash(sources);
+        for (slot, pipelines) in self.programs.iter_mut().zip(programs) {
+            slot.pipelines = pipelines;
         }
         wgsl.clone_into(&mut self.source);
+        self.hardware_source = hardware_source;
+        self.fresh_source = fresh_source;
+        self.primary_sources = primary_sources;
+        self.update_hashes();
         self.revision.0 += 1;
         self.pipelines.installations += 1;
         Ok(ReloadReport {
             revision: self.revision,
             compile,
+            zeroed_parameters: vec![],
         })
     }
 
@@ -1603,6 +1705,7 @@ impl Renderer {
         self.check_fault()?;
         let start = Instant::now();
         data.validate(&self.identity)?;
+        self.validate_program(data)?;
         let preparation = start.elapsed();
         let poll = self.collect()?;
         if self.occupied() >= FLIGHTS - 1 {
@@ -1677,6 +1780,8 @@ impl Renderer {
             }),
             ResourceKind::Buffer,
         );
+        let program = data.program.unwrap_or(&self.standard).clone();
+        let parameters = self.material_parameters(&program, data.parameters);
         let bind = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material"),
@@ -1710,6 +1815,10 @@ impl Renderer {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&samplers[2]),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: parameters.buffer.as_entire_binding(),
+                    },
                 ],
             }),
             ResourceKind::BindGroup,
@@ -1725,7 +1834,12 @@ impl Renderer {
             _uniform: uniform,
             _samplers: samplers,
             _textures: textures,
-            _allocation: self.ledger.allocate(AllocationKind::Material, 48),
+            program,
+            parameters,
+            _allocation: self.ledger.allocate(
+                AllocationKind::Material,
+                48 + crate::program::PARAMETER_BYTES as u64,
+            ),
         }
     }
 
@@ -1806,7 +1920,12 @@ impl Renderer {
         }
         let traced = self.primary_mode == PrimaryVisibility::Traced && view_mode == ViewMode::Lit;
         if traced {
-            primary_ray_gpu::admit_draws(draws, matrix, self.shadows.enabled(view_mode))?;
+            primary_ray_gpu::admit_draws(
+                draws,
+                matrix,
+                self.shadows.enabled(view_mode),
+                self.standard.id(),
+            )?;
             #[cfg(test)]
             assert!(
                 !self.reference_draws,
@@ -2355,15 +2474,25 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
-            pass.set_pipeline(if fresh {
-                &self.pipeline.fresh.as_ref().unwrap().shade[0]
-            } else if hardware_shadowed {
-                &self.pipeline.hardware.as_ref().unwrap()[0]
-            } else if lit {
-                &self.pipeline.lit
-            } else {
-                &self.pipeline.diagnostic
-            });
+            // Each lit draw uses its material's program; pipelines switch in submission
+            // order, which defines equal-depth winners.
+            let default = self.default_material.as_ref().unwrap();
+            let pipeline_for = |program: u64, tangent: bool| {
+                let t = usize::from(tangent);
+                let p = &self.program_slot(program).pipelines;
+                if fresh {
+                    &p.fresh.as_ref().unwrap()[t]
+                } else if hardware_shadowed {
+                    &p.hardware.as_ref().unwrap()[t]
+                } else if lit {
+                    &p.lit[t]
+                } else if tangent {
+                    &*self.pipeline.diagnostic_tangent
+                } else {
+                    &*self.pipeline.diagnostic
+                }
+            };
+            pass.set_pipeline(pipeline_for(self.standard.id(), false));
             if lit {
                 pass.set_bind_group(3, self.lighting.bind(), &[]);
             }
@@ -2385,20 +2514,10 @@ impl Renderer {
                 if draw.slots.is_empty() {
                     continue;
                 }
-                let candidate = if fresh {
-                    &self.pipeline.fresh.as_ref().unwrap().shade
-                        [usize::from(draw.mesh.tangent.is_some())]
-                } else if hardware_shadowed {
-                    &self.pipeline.hardware.as_ref().unwrap()
-                        [usize::from(draw.mesh.tangent.is_some())]
-                } else {
-                    match (lit, draw.mesh.tangent.is_some()) {
-                        (true, true) => &self.pipeline.lit_tangent,
-                        (false, true) => &self.pipeline.diagnostic_tangent,
-                        (true, false) => &self.pipeline.lit,
-                        (false, false) => &self.pipeline.diagnostic,
-                    }
-                };
+                let candidate = pipeline_for(
+                    draw.material.unwrap_or(default).program.id(),
+                    draw.mesh.tangent.is_some(),
+                );
                 if changed(&mut pipeline, candidate) {
                     pass.set_pipeline(candidate);
                 }
@@ -2406,10 +2525,7 @@ impl Renderer {
                 if changed(&mut instances, bind) {
                     pass.set_bind_group(1, bind, &[]);
                 }
-                let bind: &wgpu::BindGroup = &draw
-                    .material
-                    .unwrap_or(self.default_material.as_ref().unwrap())
-                    .bind;
+                let bind: &wgpu::BindGroup = &draw.material.unwrap_or(default).bind;
                 if changed(&mut material, bind) {
                     pass.set_bind_group(2, bind, &[]);
                 }
@@ -2593,6 +2709,7 @@ impl Renderer {
     pub(crate) fn collect(&mut self) -> Result<Duration, Error> {
         self.check_fault()?;
         let start = Instant::now();
+        self.purge_programs();
         self.device
             .poll(wgpu::PollType::Poll)
             .map_err(Error::Poll)?;

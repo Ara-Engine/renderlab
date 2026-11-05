@@ -7,10 +7,10 @@
 @group(0) @binding(13) var primary_hit_output:texture_storage_2d<rgba32uint,write>;
 @group(0) @binding(16) var primary_world_output:texture_storage_2d<rgba32float,write>;
 @group(0) @binding(17) var primary_normal_output:texture_storage_2d<rgba32float,write>;
-// Every trace tile writes its coverage flag; only tiles with a camera hit write hit
-// records (and receivers or counts), so shading and fresh visibility read the flag first.
-// Pixels outside primary_frame.scene are misses without a ray.
-const PRIMARY_TILE=vec2<u32>(8u,4u);
+// Every trace tile (PRIMARY_TILE, primary_rays.wgsl) writes its coverage flag; only
+// tiles with a camera hit write hit records (and receivers or counts), so shading and
+// fresh visibility read the flag first. Pixels outside primary_frame.scene are misses
+// without a ray.
 @group(0) @binding(20) var primary_tile_output:texture_storage_2d<r32uint,write>;
 var<workgroup> primary_tile_hit:atomic<u32>;
 

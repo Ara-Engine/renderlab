@@ -4,10 +4,10 @@
 @group(0) @binding(4) var fresh_normal:texture_2d<f32>;
 @group(0) @binding(5) var fresh_output:texture_storage_2d<r32uint,write>;
 @group(0) @binding(6) var fresh_visibility:texture_2d<u32>;
-var<private> fresh_pixel:vec2<i32>;
-fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
+// The receiver pixel's fresh count, for every shadowed light (lights[0]'s estimate).
+fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     if light.kind.z==0u { return 1.0; }
-    return f32(textureLoad(fresh_visibility,fresh_pixel,0).x)/256.0;
+    return f32(textureLoad(fresh_visibility,receiver.pixel,0).x)/256.0;
 }
 struct FreshReceiver {
     @location(0) world:vec4<f32>,

@@ -224,25 +224,42 @@ fn gpu_lit_edits_and_bundle_recovery() {
     );
     lit_render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut inst)]);
     assert_eq!(expected, r.test_capture_color(&t));
+    // Prelude edits, then a standard-program type error.
+    let reload = |r: &mut Renderer, (program, source): &(bool, String)| {
+        if *program {
+            r.test_reload_standard(source)
+        } else {
+            r.reload(source)
+        }
+    };
     for bad in [
-        "invalid WGSL".to_owned(),
-        SOURCE.replace(
-            "@group(0) @binding(1) var exposed_hdr",
-            "@group(0) @binding(7) var exposed_hdr",
+        (false, "invalid WGSL".to_owned()),
+        (
+            false,
+            SOURCE.replace(
+                "@group(0) @binding(1) var exposed_hdr",
+                "@group(0) @binding(7) var exposed_hdr",
+            ),
         ),
-        SOURCE.replace(
-            "var exposed=exposed_product",
-            "var exposed:u32=exposed_product",
+        (
+            true,
+            crate::STANDARD_PROGRAM.replace(
+                "var exposed=exposed_product",
+                "var exposed:u32=exposed_product",
+            ),
         ),
     ] {
-        assert!(matches!(r.reload(&bad), Err(ReloadError::Rejected { .. })));
+        assert!(matches!(
+            reload(&mut r, &bad),
+            Err(ReloadError::Rejected { .. })
+        ));
         assert_eq!(r.stats().revision, before.revision);
         lit_render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut inst)]);
         assert_eq!(expected, r.test_capture_color(&t));
         assert_eq!(expected_hdr, hdr(&mut r));
         render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut inst)]);
         let diag = r.test_capture_color(&t);
-        assert!(r.reload(&bad).is_err());
+        assert!(reload(&mut r, &bad).is_err());
         render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut inst)]);
         assert_eq!(diag, r.test_capture_color(&t));
     }
@@ -725,15 +742,38 @@ fn gpu_lit_photometry_1x_4x() {
             }
         }
         instances.set(0, Mat4::IDENTITY).unwrap();
-        // Explicit per-sample resolve oracle; no raster coverage assumptions.
-        let probe=SOURCE.replace("@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool)","@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool, @builtin(sample_index) sample:u32)").replace("return vec4<f32>(exposed,1.0);","return vec4<f32>(vec3<f32>(select(0.0,16.0,sample==3u)),1.0);");
+        // Explicit per-sample resolve oracle; no raster coverage assumptions. Programs
+        // cannot read the sample index, so this edits the generated entry itself.
         if samples == SampleCount::Four {
-            r.reload(&probe).unwrap();
+            let composed = crate::program::compose(
+                SOURCE,
+                crate::STANDARD_PROGRAM,
+                crate::program::Stage::Raster,
+                false,
+            )
+            .source;
+            let probe = [
+                (
+                    "@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool)",
+                    "@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool, @builtin(sample_index) sample:u32)",
+                ),
+                (
+                    "return vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0);",
+                    "return vec4<f32>(vec3<f32>(select(0.0,16.0,sample==3u)),1.0);",
+                ),
+            ]
+            .iter()
+            .fold(composed, |source, (find, replace)| {
+                assert_eq!(source.matches(find).count(), 1);
+                source.replace(find, replace)
+            });
+            let mut probe = r.test_lit_pair(&probe, false);
+            std::mem::swap(&mut r.test_standard().lit, &mut probe);
             lit_render(&mut r, &t, &c, &mut [Draw::new(&mesh, &mut instances)]);
             let image = hdr(&mut r);
             assert_eq!(image[(48 * 128 + 64) * 4], 4.);
             assert_eq!(r.test_capture_color(&t)[(48 * 128 + 64) * 4], 204);
-            r.reload(SOURCE).unwrap();
+            std::mem::swap(&mut r.test_standard().lit, &mut probe);
         }
     }
 }

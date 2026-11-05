@@ -100,13 +100,38 @@ fn gpu_soft_shadow_traced_acceptance() {
             "const TINT: vec3<f32> = vec3<f32>(0.5, 0.5, 0.5);",
         ),
     );
-    for (source, ok, tint) in [
-        ("invalid WGSL", false, false),
-        (&SOURCE.replace(PIXEL_SEAM, ""), false, false),
-        (tinted.as_str(), true, true),
-        (SOURCE, true, false),
+    let standard = crate::STANDARD_PROGRAM;
+    let unmarked = SOURCE.replace(crate::hardware_shadows::VISIBILITY_END, "");
+    let syntax = edit(
+        standard,
+        ("let mr=sample_metallic_roughness(input);", "let mr=;"),
+    );
+    let implicit = edit(
+        standard,
+        (
+            "let sampled=sample_base_color(input);",
+            "let sampled=textureSample(base_color,base_sampler,input.uv);",
+        ),
+    );
+    let program_tint = edit(standard, ("*sampled.rgb*TINT", "*sampled.rgb*TINT*0.5"));
+    // Prelude reloads, then program reloads: rejections keep the image, edits change only
+    // shading (counts are engine visibility), and restores are byte-identical.
+    for (program, source, ok, tint) in [
+        (false, "invalid WGSL", false, false),
+        (false, unmarked.as_str(), false, false),
+        (false, tinted.as_str(), true, true),
+        (false, SOURCE, true, false),
+        (true, syntax.as_str(), false, false),
+        (true, implicit.as_str(), false, false),
+        (true, program_tint.as_str(), true, true),
+        (true, standard, true, false),
     ] {
-        assert_eq!(r.reload(source).is_ok(), ok);
+        let result = if program {
+            r.test_reload_standard(source)
+        } else {
+            r.reload(source)
+        };
+        assert_eq!(result.is_ok(), ok, "{result:?}");
         assert_eq!(r.soft_shadows(), crate::SoftShadows::Interactive);
         let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
         assert_eq!(report.soft_shadows, crate::SoftShadows::Interactive);

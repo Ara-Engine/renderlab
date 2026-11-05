@@ -1,7 +1,6 @@
 // Test-only cold fragment reference, extracted from the frozen M6 reference.
 // No history reads, packing, reconstruction, or temporal sample-index advance.
 @group(0) @binding(2) var hardware_scene:acceleration_structure;
-var<private> reference_pixel:vec2<u32>;
 fn hash_u32(input:u32) -> u32 {
     var x=input; x=(x^(x>>16u))*0x7feb352du; x=(x^(x>>15u))*0x846ca68bu; return x^(x>>16u);
 }
@@ -27,7 +26,10 @@ fn nearest_shadow_hit(view:ShadowView, origin:vec3<f32>, projected:vec3<f32>, di
     let hit=rayQueryGetCommittedIntersection(&query);
     return select(hit.t,0.0,hit.kind==0u);
 }
-fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
+fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
+    let world=receiver.world;
+    let geometric=receiver.geometric;
+    let reference_pixel=vec2<u32>(receiver.pixel);
     if light.kind.z==0u { return 1.0; }
     var layer=light.kind.y; var found=false;
     let depth=dot(shadow_views[layer].camera_depth,vec4<f32>(world,1.0));

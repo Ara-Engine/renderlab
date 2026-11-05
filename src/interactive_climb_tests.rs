@@ -70,17 +70,28 @@ fn outputs(r: &Renderer, kind: Kind) -> Vec<Vec<u8>> {
 }
 
 /// One pass from `{kind: split|fused|shade, edits?: [[module, find, replace]], tile?: [x, y],
-/// unchecked?: [ray_query|bounds|loops|int_div]}`; module 0 is hard and 1 soft. `tile`
-/// resizes the fused workgroup (shading decodes its region and clear rows from
-/// `SHADE_TILE` groups); `unchecked` drops those naga runtime checks from a fused module.
-fn step(r: &Renderer, base: &[String; 2], spec: &serde_json::Value) -> Step {
+/// unchecked?: [ray_query|bounds|loops|int_div], frozen?: path}`; module 0 is hard and 1
+/// soft: the kernel modules for split and fused passes, the standard program's shading
+/// modules for shade passes. `frozen` replaces the soft shading module with a file (an
+/// earlier build's composition). `tile` resizes the fused workgroup (shading decodes its
+/// region and clear rows from `SHADE_TILE` groups); `unchecked` drops those naga runtime
+/// checks from a fused module.
+fn step(r: &Renderer, base: &[String; 2], shading: &[String; 2], spec: &serde_json::Value) -> Step {
     let kind = match spec["kind"].as_str().unwrap() {
         "split" => Kind::Split,
         "fused" => Kind::Fused,
         "shade" => Kind::Shade,
         other => panic!("unknown kind {other}"),
     };
-    let mut sources = base.clone();
+    let mut sources = if kind == Kind::Shade {
+        shading.clone()
+    } else {
+        base.clone()
+    };
+    if let Some(path) = spec["frozen"].as_str() {
+        assert!(kind == Kind::Shade, "frozen modules replace shading only");
+        sources[1] = fs::read_to_string(path).unwrap();
+    }
     for e in spec["edits"].as_array().into_iter().flatten() {
         let m = e[0].as_u64().unwrap() as usize;
         sources[m] = edit(
@@ -141,7 +152,14 @@ fn step(r: &Renderer, base: &[String; 2], spec: &serde_json::Value) -> Step {
         }
         Kind::Fused => vec![primary.interactive_pipeline(&r.device, &r.ledger, &soft, &eight)],
         Kind::Shade => {
-            let [_, soft] = primary.compile(&r.device, &r.ledger, &sources).shade;
+            let module = |source: &String| {
+                r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("climb shading module"),
+                    source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+                })
+            };
+            let [hard, soft] = sources.each_ref().map(module);
+            let [_, soft] = primary.shade_pipelines(&r.device, &r.ledger, [&hard, &soft]);
             vec![soft]
         }
     };
@@ -177,6 +195,7 @@ fn gpu_interactive_climb_screen() {
     let public = interactive_outputs(&r);
     let public_hdr = read_texture(&r, &r.lighting.hdr.as_ref().unwrap().resolved.texture);
     let base = primary_ray_gpu::shader_sources(SOURCE).unwrap();
+    let shading = primary_ray_gpu::shading_sources(SOURCE, crate::STANDARD_PROGRAM).unwrap();
     let production = [
         serde_json::json!({"name": "production-split", "kind": "split"}),
         serde_json::json!({"name": "production-fused", "kind": "fused"}),
@@ -189,8 +208,8 @@ fn gpu_interactive_climb_screen() {
     {
         let scopes = OperationScopes::new(&r.device);
         let steps = match spec["steps"].as_array() {
-            Some(steps) => steps.iter().map(|s| step(&r, &base, s)).collect(),
-            None => vec![step(&r, &base, spec)],
+            Some(steps) => steps.iter().map(|s| step(&r, &base, &shading, s)).collect(),
+            None => vec![step(&r, &base, &shading, spec)],
         };
         assert!(
             scopes.finish().is_none(),

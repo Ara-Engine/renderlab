@@ -1,0 +1,22 @@
+// ---- renderlab shading-program API, raster fragment stage ----
+// Mesh-uv samples use the hardware's implicit derivatives, as the fixed lit shader
+// sampled. Call them in uniform control flow (the generated entry calls `surface` before
+// any per-pixel branch); custom mappings pass their own footprint to the `_grad` forms.
+fn sample_base_color(input:SurfaceInput) -> vec4<f32> { return textureSample(base_color,base_sampler,input.uv); }
+fn sample_metallic_roughness(input:SurfaceInput) -> vec4<f32> { return textureSample(metallic_roughness,mr_sampler,input.uv); }
+fn sample_normal_map(input:SurfaceInput) -> vec4<f32> { return textureSample(normal_map,normal_sampler,input.uv); }
+fn sample_base_color_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+    return textureSampleGrad(base_color,base_sampler,uv,dx,dy);
+}
+fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+    return textureSampleGrad(metallic_roughness,mr_sampler,uv,dx,dy);
+}
+fn sample_normal_map_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+    return textureSampleGrad(normal_map,normal_sampler,uv,dx,dy);
+}
+// Split-sum (A, B) at (n.v, roughness). The table has one level, so every stage agrees.
+fn environment_dfg(n_dot_v:f32, roughness:f32) -> vec2<f32> {
+    let uv=(vec2<f32>(clamp(n_dot_v,0.0,1.0),roughness)*127.0+vec2<f32>(0.5))/128.0;
+    return textureSample(dfg,dfg_sampler,uv).rg;
+}
+// ---- end of the raster program API ----

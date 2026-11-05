@@ -220,6 +220,7 @@ impl Prepared {
                         metallic_roughness_texture: data
                             .metallic_roughness_texture
                             .map(|t| binding(t.texture, t.sampler)),
+                        ..Default::default()
                     };
                     if let Some(m) = r.try_create_material(&descriptor)? {
                         self.materials.push(m);

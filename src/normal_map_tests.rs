@@ -32,13 +32,9 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
         .unwrap();
         let target = target(r.device(), 65, 65);
         let vertices = triangle([1.; 3]);
-        let normal_source = SOURCE.replace(
-            "return vec4<f32>(exposed,1.0);",
-            "return vec4<f32>(n*0.5+vec3<f32>(0.5),1.0);",
-        );
-        let white_source =
-            SOURCE.replace("return vec4<f32>(exposed,1.0);", "return vec4<f32>(1.0);");
-        assert_ne!(normal_source, SOURCE);
+        let normal_source = crate::program::standard_returning("n*0.5+vec3<f32>(0.5)");
+        let white_source = crate::program::standard_returning("vec3<f32>(1.0)");
+        assert_ne!(normal_source, crate::STANDARD_PROGRAM);
         let transforms = [
             Mat4::IDENTITY,
             Mat4::from_rotation_y(0.35) * Mat4::from_scale(Vec3::new(-1.5, 0.75, 0.5)),
@@ -108,7 +104,7 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
                 100.,
             )
             .unwrap();
-            r.reload(&white_source).unwrap();
+            r.test_reload_standard(&white_source).unwrap();
             lit(
                 &mut r,
                 &target,
@@ -116,7 +112,7 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
                 &mut [Draw::new(&mesh, &mut instances).with_material(&material)],
             );
             let coverage = lighting_tests::hdr(&mut r);
-            r.reload(&normal_source).unwrap();
+            r.test_reload_standard(&normal_source).unwrap();
             lit(
                 &mut r,
                 &target,
@@ -175,11 +171,12 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
             )
             .unwrap();
             let before = r.stats();
-            let bad = normal_source.replace(
+            // A rejected prelude edit keeps the normal-probe program rendering.
+            let bad = SOURCE.replace(
                 "@location(5) tangent:vec4<f32>",
                 "@location(7) tangent:vec4<f32>",
             );
-            assert_ne!(bad, normal_source);
+            assert_ne!(bad, SOURCE);
             assert!(r.reload(&bad).is_err());
             assert_eq!(r.stats().revision, before.revision);
             lit(
@@ -189,7 +186,7 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
                 &mut [Draw::new(&mesh, &mut instances).with_material(&material)],
             );
             assert_eq!(image, lighting_tests::hdr(&mut r));
-            r.reload(SOURCE).unwrap();
+            r.test_reload_standard(crate::STANDARD_PROGRAM).unwrap();
             let before = r.stats();
             lit(
                 &mut r,
@@ -207,7 +204,7 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
             cancelling[2].normal = [0., 0., -1.];
             let mesh = upload(&mut r, &cancelling, &INDICES);
             let mut slots = instances(&mut r, &[Mat4::IDENTITY]);
-            r.reload(&normal_source).unwrap();
+            r.test_reload_standard(&normal_source).unwrap();
             for eye_z in [4., -4.] {
                 let c = Camera::look_at(
                     Vec3::new(0., 0., eye_z),
@@ -587,8 +584,9 @@ pub(super) fn geometric_shadow_case(samples: SampleCount, hardware: bool) {
     } else {
         device(false)
     };
-    let source=SOURCE.replace("return vec4<f32>(exposed,1.0);",
-        "return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);");
+    let visibility = crate::program::standard_returning(
+        "vec3<f32>(hard_shadow(lights[0],input.receiver,-lights[0].travel_outer.xyz))",
+    );
     let options = RendererOptions {
         samples,
         ..Default::default()
@@ -601,12 +599,13 @@ pub(super) fn geometric_shadow_case(samples: SampleCount, hardware: bool) {
             Limits::default(),
             options,
             HardwareShadowOptions::default(),
-            &source,
+            SOURCE,
         )
     } else {
-        suite_renderer(device, queue, FORMAT, options, &source)
+        suite_renderer(device, queue, FORMAT, options, SOURCE)
     }
     .unwrap();
+    r.test_reload_standard(&visibility).unwrap();
     let vertices = [
         ([-1., -1., 0.], [0., 1.]),
         ([1., -1., 0.], [1., 1.]),

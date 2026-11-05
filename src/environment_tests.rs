@@ -307,18 +307,15 @@ fn probe_source(probes: &[Probe]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    let start = SOURCE.find("@fragment fn fs_lit(").unwrap();
-    let end = SOURCE.find("@vertex fn vs_present(").unwrap();
+    // A program: each pixel column evaluates one probe through the engine environment.
     format!(
-        "{}\n@fragment fn fs_lit(input:VertexOutput)->@location(0) vec4<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(u32(input.position.x),{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=vec3<f32>(0.0);\n if lighting.map.w<0.0 {{ rgb=environment_radiance(d,max(probe.w,0.0)); }} else {{ rgb=environment_legacy_lod(d,max(probe.w,0.0)); }}\n if probe.w<0.0 {{ rgb=environment_bilinear(environment_diffuse,d,0,0); }}\n return vec4<f32>(environment_product(rgb,vec3<f32>(1.0)),1.0);\n}}\n{}",
-        &SOURCE[..start],
+        "struct Surface {{ column:u32 }};\nfn surface(input:SurfaceInput)->Surface {{ return Surface(input.pixel.x); }}\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(s.column,{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=vec3<f32>(0.0);\n if lighting.map.w<0.0 {{ rgb=environment_radiance(d,max(probe.w,0.0)); }} else {{ rgb=environment_legacy_lod(d,max(probe.w,0.0)); }}\n if probe.w<0.0 {{ rgb=environment_bilinear(environment_diffuse,d,0,0); }}\n return environment_product(rgb,vec3<f32>(1.0));\n}}\n",
         probes.len(),
         probes.len() - 1,
-        &SOURCE[end..]
     )
 }
 fn run_probes(r: &mut Renderer, probes: &[Probe]) -> Vec<[f32; 3]> {
-    r.reload(&probe_source(probes)).unwrap();
+    r.test_reload_standard(&probe_source(probes)).unwrap();
     let color = target(r.device(), probes.len() as u32, 1);
     // The camera's horizontal frustum grows with this deliberately one-row target's aspect ratio.
     let span = (probes.len() as f32 * 4.0).max(1000.0);
@@ -395,7 +392,7 @@ fn gpu_environment_independent_banks_without_float_filter_feature() {
         );
         assert_eq!(value[1], 2.0);
     }
-    r.reload(SOURCE).unwrap();
+    r.test_reload_standard(crate::STANDARD_PROGRAM).unwrap();
     r.set_environment(None, Default::default()).unwrap();
     drop(map);
     r.test_drain("RLE2 retirement");

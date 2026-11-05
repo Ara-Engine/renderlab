@@ -1,13 +1,13 @@
 //! Traced primary visibility on hardware-shadow 1x renderers: one closest-hit camera
 //! ray per pixel against the shadow TLAS, exact fresh receivers from the hit triangle,
-//! and deferred compute shading with the unchanged lit body. Draw geometry and
+//! and deferred compute shading with each material's shading program. Draw geometry and
 //! materials are descriptor-indexed, so each stage is one dispatch over the image.
+//! Trace and visibility kernels hold no program code and compile once per prelude; each
+//! program compiles only its own shading modules (`shading_heads`).
 use super::*;
 use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
 use crate::shadow_plan::Bounds;
 
-const LIT_SIGNATURE: &str = "@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {";
-const PRESENT_SEAM: &str = "@vertex fn vs_present(";
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
 const FRAME_BYTES: usize = 112;
@@ -19,95 +19,32 @@ pub(super) const SHADE_TILE: [u32; 2] = [4, 4];
 pub(super) const CLEAR_TILE: [u32; 2] = [16, 16];
 /// Traced fresh visibility takes receiver coverage from the tile flag and hit record,
 /// so misses never write receivers and uncovered tiles never write hit records. The
-/// estimator itself is the unchanged production body.
+/// estimator itself is the unchanged production body; this engine kernel seam is in
+/// shaders/fresh_shadows.wgsl, not in any program.
 const COVERAGE_SEAM: &str = "    if inside {\n        let normal=textureLoad(fresh_normal,p,0);";
+/// Traced shading reconstructs tangent frames with the prelude's own vertex function,
+/// which the hardware composition pins (the affine vertex block must be unchanged).
 const TANGENT_SEAM: &str =
     "@vertex fn vs_tangent(input:VertexInput, @location(5) tangent:vec4<f32>) -> VertexOutput {";
+/// Enable directives precede every declaration, including the composition's own.
+const ENABLES: &str = "enable wgpu_binding_array;\nenable wgpu_ray_query_vertex_return;\n";
 
-/// Rewrites a composed lit module for compute. fs_lit's body becomes `primary_lit`,
-/// taking the receiver plane, explicit UV gradients and the draw's material slot in
-/// place of quad derivatives and bound material globals. Every seam must occur once.
-fn compute_lit(composed: &str) -> Result<String, Error> {
-    let seams = Error::InvalidInput(
-        "traced primary shading requires the unchanged lit, tangent and material seams",
-    );
-    if composed.matches(LIT_SIGNATURE).count() != 1 || composed.matches(TANGENT_SEAM).count() != 1 {
-        return Err(seams);
-    }
-    let (before, rest) = composed.split_once(LIT_SIGNATURE).unwrap();
-    let (body, after) = rest.split_once(PRESENT_SEAM).ok_or(Error::InvalidInput(
-        "traced primary shading requires the presentation seam after fs_lit",
-    ))?;
-    let mut body = body.to_owned();
-    for (find, replace) in [
-        (fresh_shadow_gpu::GEOMETRIC_SEAM, ""),
-        (
-            "textureSample(base_color,base_sampler,input.uv)",
-            "textureSampleGrad(primary_base_color[primary_index],primary_base_sampler[primary_index],input.uv,dx,dy)",
-        ),
-        (
-            "textureSample(metallic_roughness,mr_sampler,input.uv)",
-            "textureSampleGrad(primary_metallic_roughness[primary_index],primary_mr_sampler[primary_index],input.uv,dx,dy)",
-        ),
-        (
-            "textureSample(normal_map,normal_sampler,input.uv)",
-            "textureSampleGrad(primary_normal_map[primary_index],primary_normal_sampler[primary_index],input.uv,dx,dy)",
-        ),
-        // The DFG table has one level, so this equals the raster sample.
-        (
-            "textureSample(dfg,dfg_sampler,uv)",
-            "textureSampleLevel(dfg,dfg_sampler,uv,0.0)",
-        ),
-        // Unreachable: traced frames admit only double-sided materials.
-        (
-            "if material.double_sided==0u && !source_front { discard; }",
-            "if material.double_sided==0u && !source_front { return vec4<f32>(0.0); }",
-        ),
-    ] {
-        if body.matches(find).count() != 1 {
-            return Err(seams);
-        }
-        body = body.replacen(find, replace, 1);
-    }
-    if [
-        "textureSample(",
-        "dpdx",
-        "dpdy",
-        "(base_color,",
-        "(metallic_roughness,",
-        "(normal_map,",
-    ]
-    .iter()
-    .any(|bound| body.contains(bound))
-    {
-        return Err(Error::InvalidInput(
-            "traced primary shading cannot use implicit derivatives or bound material textures",
-        ));
-    }
-    // The local shadows the bound material uniform for the whole body. Enable
-    // directives precede every declaration, including the composition's own.
-    Ok(format!(
-        "enable wgpu_binding_array;\nenable wgpu_ray_query_vertex_return;\n{before}fn primary_lit(input:VertexOutput,front:bool,geometric:vec3<f32>,dx:vec2<f32>,dy:vec2<f32>,primary_index:u32)->vec4<f32> {{\n    let material=primary_materials[primary_index].value;{body}{PRESENT_SEAM}{after}"
-    )
-    .replacen(
-        TANGENT_SEAM,
-        "fn primary_tangent(input:VertexInput,tangent:vec4<f32>)->VertexOutput {",
-        1,
-    ))
-}
-
-/// The hard/unshadowed module (inline `hard_shadow` rays and the trace) and the soft
-/// module (fresh visibility counts and their traced dispatch), from one scene source.
-pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+/// The hardware (inline `hard_shadow` rays) and fresh (counts) compositions of one
+/// prelude, each followed by the shared ray helpers.
+fn heads(wgsl: &str) -> Result<[String; 2], Error> {
     let rays = format!(
         "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
         include_str!("../shaders/primary_rays.wgsl")
     );
-    let hard = compute_lit(&crate::hardware_shadows::shader_source(
-        wgsl,
-        SampleCount::One,
-    )?)?;
-    let soft = compute_lit(&fresh_shadow_gpu::shader_source(wgsl)?)?;
+    let hard = crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
+    let soft = fresh_shadow_gpu::shader_source(wgsl)?;
+    Ok([hard, soft].map(|c| format!("{ENABLES}{c}\n{rays}")))
+}
+
+/// The engine's trace and visibility kernel modules: hard (camera rays and exact
+/// receivers) and soft (traced fresh visibility and the fused Interactive pass).
+pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+    let [hard, soft] = heads(wgsl)?;
     if soft.matches(COVERAGE_SEAM).count() != 1 {
         return Err(Error::InvalidInput(
             "traced fresh visibility requires the unchanged receiver coverage seam",
@@ -124,15 +61,44 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
     );
     let trace = include_str!("../shaders/primary_trace.wgsl");
     Ok([
-        format!("{hard}\n{rays}\n{trace}"),
+        format!("{hard}\n{trace}"),
         format!(
-            "{soft}\n{rays}\n{trace}\n{}",
+            "{soft}\n{trace}\n{}",
             include_str!("../shaders/primary_interactive.wgsl")
         ),
     ])
 }
 
-/// Identity of the traced modules, recorded on the HDR images they write.
+/// Heads of every program's traced shading modules, indexed by `Shading`: Hard (inline
+/// `hard_shadow` rays) and Soft (fresh counts). `program::compose` appends the API, the
+/// program and the shading entry.
+pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
+    let heads = heads(wgsl)?;
+    if heads.iter().any(|h| h.matches(TANGENT_SEAM).count() != 1) {
+        return Err(Error::InvalidInput(
+            "traced primary shading requires the unchanged tangent vertex function",
+        ));
+    }
+    Ok(heads.map(|h| {
+        h.replacen(
+            TANGENT_SEAM,
+            "fn primary_tangent(input:VertexInput,tangent:vec4<f32>)->VertexOutput {",
+            1,
+        )
+    }))
+}
+
+/// One program's traced shading modules, indexed by `Shading`.
+#[cfg(test)]
+pub(super) fn shading_sources(wgsl: &str, program: &str) -> Result<[String; 2], Error> {
+    let parameters = crate::program::declares_parameters(program);
+    Ok(shading_heads(wgsl)?.map(|head| {
+        crate::program::compose(&head, program, crate::program::Stage::Traced, parameters).source
+    }))
+}
+
+/// Identity of the traced kernel modules, combined with the programs' on the HDR images
+/// they write.
 pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
     Sha256::new()
         .chain_update(sources[0].as_bytes())
@@ -189,9 +155,21 @@ pub(super) fn supported(device: &wgpu::Device) -> bool {
 }
 
 /// Rejects a traced frame before any frame write: hardware-shadowed frames need opaque
-/// double-sided casters, meshes must have BLASes, the draw count must fit and the
-/// camera inverse must exist.
-pub(super) fn admit_draws(draws: &[Draw<'_>], matrix: Mat4, shadowed: bool) -> Result<(), Error> {
+/// double-sided casters, meshes must have BLASes, the draw count must fit, the camera
+/// inverse must exist, and every draw must use one shading program (`standard` for draws
+/// without a material): mixed-program frames need per-program tile dispatch.
+pub(super) fn admit_draws(
+    draws: &[Draw<'_>],
+    matrix: Mat4,
+    shadowed: bool,
+    standard: u64,
+) -> Result<(), Error> {
+    let program = |d: &Draw<'_>| d.material.map_or(standard, |m| m.program.id());
+    if draws.windows(2).any(|w| program(&w[0]) != program(&w[1])) {
+        return Err(Error::InvalidInput(
+            "traced primary visibility supports one shading program per frame; mixed-program frames are not implemented yet",
+        ));
+    }
     if shadowed
         && draws
             .iter()
@@ -236,6 +214,10 @@ impl Renderer {
         match mode {
             PrimaryVisibility::Raster => {
                 self.pipeline.primary = None;
+                for slot in &mut self.programs {
+                    slot.pipelines.traced = None;
+                }
+                self.primary_sources = None;
                 self.primary.as_mut().unwrap().release(self.submissions);
             }
             PrimaryVisibility::Traced => {
@@ -243,6 +225,7 @@ impl Renderer {
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
                 let sources = shader_sources(&self.source)?;
+                let heads = shading_heads(&self.source)?;
                 let scopes = OperationScopes::new(&self.device);
                 let pipelines = state.compile(&self.device, &self.ledger, &sources);
                 if let Some(error) = scopes.finish() {
@@ -251,9 +234,15 @@ impl Renderer {
                         _ => self.fail(error.to_string()),
                     });
                 }
+                let traced = self.compile_traced_programs(&heads)?;
                 self.check_fault()?;
+                self.pipelines.created += 4 + 2 * traced.len() as u64;
+                for (slot, pipelines) in self.programs.iter_mut().zip(traced) {
+                    slot.pipelines.traced = Some(pipelines);
+                }
                 self.pipeline.primary = Some(pipelines);
-                self.primary_hash = sources_hash(&sources);
+                self.primary_sources = Some((sources, heads));
+                self.update_hashes();
             }
         }
         self.primary_mode = mode;
@@ -408,7 +397,9 @@ enum Retired {
     Bindings(#[allow(dead_code)] Bindings),
 }
 
-/// Compiled lazily while traced visibility is selected, and with every reload then.
+/// The engine's traced kernels, compiled while traced visibility is selected and with
+/// every prelude reload then. Shading pipelines belong to each program (indexed by
+/// `Shading`; both read the trace's tile flags first).
 pub(super) struct PrimaryPipelines {
     /// Hit record only; hit record plus exact fresh receivers.
     pub trace: [Owned<wgpu::ComputePipeline>; 2],
@@ -416,8 +407,6 @@ pub(super) struct PrimaryPipelines {
     pub fresh: Owned<wgpu::ComputePipeline>,
     /// Interactive soft frames: camera rays and their 8-direction counts in one dispatch.
     pub interactive: Owned<wgpu::ComputePipeline>,
-    /// Indexed by `Shading`; both read the trace's tile flags first.
-    pub shade: [Owned<wgpu::ComputePipeline>; 2],
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -452,6 +441,8 @@ pub(super) struct PrimaryState {
     region_buffer: Option<Buffer>,
     /// Storage stand-in for absent tangent streams and unused draw slots.
     absent: Option<Buffer>,
+    /// The program every draw of the last prepared frame uses (`admit_draws`).
+    pub program: u64,
     pub targets: Option<Targets>,
     geometry: Option<Geometry>,
     bindings: Option<Bindings>,
@@ -586,6 +577,8 @@ impl PrimaryState {
                 sampler(14),
                 per_draw(texture(15, filtered)),
                 sampler(16),
+                // Each draw's program parameter block; read only by programs declaring one.
+                per_draw(read(17, crate::program::PARAMETER_BYTES as u64)),
             ],
         );
         let layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
@@ -636,6 +629,7 @@ impl PrimaryState {
             region: [0; 4],
             region_buffer: None,
             absent: None,
+            program: 0,
             targets: None,
             geometry: None,
             bindings: None,
@@ -643,7 +637,7 @@ impl PrimaryState {
         }
     }
 
-    /// `sources` are `shader_sources` output: hard module first, soft module second.
+    /// `sources` are `shader_sources` output: hard kernels first, soft kernels second.
     pub fn compile(
         &self,
         device: &wgpu::Device,
@@ -684,11 +678,29 @@ impl PrimaryState {
                 pipeline(&hard, "primary_trace", &self.trace_layouts[0]),
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
             ],
-            shade: [
-                pipeline(&hard, "primary_shade_tiles", &self.shade_layouts[0]),
-                pipeline(&soft, "primary_shade_tiles", &self.shade_layouts[1]),
-            ],
         }
+    }
+
+    /// One program's shading pipelines from its composed modules, indexed by `Shading`.
+    pub fn shade_pipelines(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        modules: [&wgpu::ShaderModule; 2],
+    ) -> [Owned<wgpu::ComputePipeline>; 2] {
+        [0, 1].map(|i| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("traced program shading"),
+                    layout: Some(&self.shade_layouts[i]),
+                    module: modules[i],
+                    entry_point: Some("primary_shade_tiles"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        })
     }
 
     /// `fresh_compute` of a soft primary module on the traced fresh ABI. Tests seed or
@@ -784,6 +796,11 @@ impl Renderer {
             let single_sided = !d.material.unwrap_or(default).double_sided;
             (d.instances.len(), d.mesh.tangent.is_some(), single_sided)
         }))?;
+        // Admission guarantees one program; an empty frame shades nothing.
+        let program = draws.first().map_or(self.standard.id(), |d| {
+            d.material.unwrap_or(default).program.id()
+        });
+        self.primary.as_mut().unwrap().program = program;
         let sided = placements.iter().any(|p| p & 1 << 30 != 0);
         let matrix = camera.matrix(size.width, size.height);
         let inverse = matrix.inverse();
@@ -956,6 +973,10 @@ impl Renderer {
                 std::array::from_fn(|i| used.iter().map(|m| &*m._textures[i].0.view).collect());
             let samplers: [Vec<&wgpu::Sampler>; 3] =
                 std::array::from_fn(|i| used.iter().map(|m| &*m._samplers[i]).collect());
+            let parameters: Vec<_> = used
+                .iter()
+                .map(|m| m.parameters.buffer.as_entire_buffer_binding())
+                .collect();
             let materials = bind(
                 "primary draw materials",
                 &state.material_bindings,
@@ -967,6 +988,7 @@ impl Renderer {
                     (14, R::SamplerArray(&samplers[1])),
                     (15, R::TextureViewArray(&views[2])),
                     (16, R::SamplerArray(&samplers[2])),
+                    (17, R::BufferArray(&parameters)),
                 ],
             );
             let next = Geometry {
@@ -1294,16 +1316,16 @@ impl Renderer {
         );
     }
 
-    /// Deferred material shading of the scene region into the HDR target, and the clear
-    /// colour everywhere else, in one dispatch.
+    /// Deferred shading of the scene region into the HDR target with the frame's program,
+    /// and the clear colour everywhere else, in one dispatch.
     pub(super) fn encode_primary_shading(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let p = self.pipeline.primary.as_ref().unwrap();
-        let pipeline = &p.shade[shading as usize];
+        let program = self.program_slot(self.primary.as_ref().unwrap().program);
+        let pipeline = &program.pipelines.traced.as_ref().unwrap()[shading as usize];
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
     /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks

@@ -12,6 +12,7 @@ mod mesh;
 mod normal;
 mod observe;
 mod primary_ray;
+mod program;
 mod renderer;
 mod shadow_plan;
 mod shadows;
@@ -29,6 +30,7 @@ pub use material::{
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
 pub use primary_ray::{PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, traced_limits};
+pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderlab_asset::{self as asset, Vertex};

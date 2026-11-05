@@ -409,14 +409,10 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
     let _validation = validation::begin(true);
     let camera = camera(0.);
     let pixel_world = 8. * (55_f32.to_radians() * 0.5).tan() / 97.;
-    let visibility = SOURCE.replace(
-        "return vec4<f32>(exposed,1.0);",
-        "return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);",
+    let visibility = crate::program::standard_returning(
+        "vec3<f32>(hard_shadow(lights[0],input.receiver,-lights[0].travel_outer.xyz))",
     );
-    let reference = SOURCE.replace(
-        "return vec4<f32>(exposed,1.0);",
-        "return vec4<f32>(input.color.rgb,1.0);",
-    );
+    let reference = crate::program::standard_returning("input.color.rgb");
     for samples in [SampleCount::One, SampleCount::Four] {
         let (device, queue) = hardware_device();
         let mut r = Renderer::new_with_hardware_shadows(
@@ -429,9 +425,10 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
                 ..Default::default()
             },
             HardwareShadowOptions::default(),
-            &visibility,
+            SOURCE,
         )
         .unwrap();
+        r.test_reload_standard(&visibility).unwrap();
         let color = target(r.device(), 129, 97);
         let receiver = upload(&mut r, &quad(1.5), &[0, 1, 2, 0, 2, 3]);
         let blocker = upload(&mut r, &quad(1.), &[0, 1, 2, 0, 2, 3]);
@@ -486,7 +483,7 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
                 exposure_stops: -5.,
                 ..Default::default()
             };
-            r.reload(&visibility).unwrap();
+            r.test_reload_standard(&visibility).unwrap();
             r.set_lighting_and_shadows(&lights, &settings).unwrap();
             lit(
                 &mut r,
@@ -519,7 +516,7 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
             )
             .unwrap();
 
-            r.reload(&reference).unwrap();
+            r.test_reload_standard(&reference).unwrap();
             r.set_shadows(&Shadows::default()).unwrap();
             // Equal-depth first-winner coverage is independent of interpolated receiver values.
             lit(
@@ -558,10 +555,10 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
                         "visibility resolves in HDR before tone mapping"
                     );
                     let impostor = visibility.replace(
-                        "hard_shadow(lights[0],input.world,geometric,",
-                        &format!("hard_shadow(lights[0],vec3<f32>((floor(input.position.x)+0.5-64.5)*{pixel_world},(48.5-floor(input.position.y)-0.5)*{pixel_world},0.0),geometric,"),
+                        "hard_shadow(lights[0],input.receiver,",
+                        &format!("hard_shadow(lights[0],Receiver(vec3<f32>((floor(f32(input.pixel.x))+0.5-64.5)*{pixel_world},(48.5-floor(f32(input.pixel.y))-0.5)*{pixel_world},0.0),input.receiver.geometric,input.receiver.pixel,0u),"),
                     );
-                    r.reload(&impostor).unwrap();
+                    r.test_reload_standard(&impostor).unwrap();
                     r.set_shadows(&settings).unwrap();
                     lit(
                         &mut r,

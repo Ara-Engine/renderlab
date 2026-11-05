@@ -31,6 +31,10 @@ struct VertexOutput {
     @location(5) tangent:vec3<f32>,
     @location(6) @interpolate(flat) handedness:f32,
 };
+// Engine-private receiver of one shaded pixel; every visibility variant reads it.
+// geometric: the receiver plane's unit normal as raster derivatives give it, pointing
+// away from the camera. pixel: the shaded pixel. slot: the traced draw's material slot.
+struct Receiver { world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, slot:u32 };
 fn unit_normal(n:vec3<f32>) -> vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
     let scaled=n/max(scale,1e-30);
@@ -82,7 +86,7 @@ fn vertex_output(input: VertexInput) -> VertexOutput {
     return vec4<f32>(result,1.0);
 }
 
-// Only fs_lit uses group 3.
+// Only lit shading programs and the engine's visibility kernels use group 3.
 struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32, map:vec4<f32> };
 struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
@@ -117,7 +121,10 @@ struct ShadowVertex {
     if material.double_sided==0u && front!=(input.winding>0.0) { discard; }
 }
 // renderlab: direct visibility begin
-fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
+// Visibility of `light` from the receiver along l, toward the light. 1 is unshadowed.
+fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
+    let world=receiver.world;
+    let geometric=receiver.geometric;
     if light.kind.z==0u { return 1.0; }
     var layer=light.kind.y;
     let normal=select(-geometric,geometric,dot(geometric,l)>=0.0);
@@ -297,83 +304,6 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
     let fresnel=f0+(vec3<f32>(1.0)-f0)*pow(1.0-vh,5.0);
     // Declared initial diffuse model: plain nonmetallic Lambert.
     return (base*((1.0-metal)/PI)+d*visibility*fresnel)*nl;
-}
-@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
-    let source_front=front==(input.winding>0.0);
-    // Derivatives evaluated uniformly before any source-winding discard.
-    // Shadow comparison keeps this geometric plane independent of the sampled shading normal.
-    // Viewport Y increases downwards. Negate the derivative cross for the camera-facing normal,
-    // then restore source orientation before the declared source-back frame reversal.
-    let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));
-    let face=-geometric;
-    let source_geometric=select(-face,face,source_front);
-    let sampled=textureSample(base_color,base_sampler,input.uv);
-    let mr=textureSample(metallic_roughness,mr_sampler,input.uv);
-    let normal_sample=textureSample(normal_map,normal_sampler,input.uv).xyz*2.0-vec3<f32>(1.0);
-    if material.double_sided==0u && !source_front { discard; }
-    var n=unit_normal(input.normal);
-    if dot(input.normal,input.normal)<=1e-12 || dot(n,n)<0.5 { n=source_geometric; }
-    if dot(n,n)<0.5 { n=vec3<f32>(0.0,0.0,1.0); }
-    if material.normal_mapped!=0u {
-        let projected_t=input.tangent-n*dot(n,input.tangent);
-        var t=unit_normal(projected_t);
-        if dot(projected_t,projected_t)<=1e-12 || dot(t,t)<0.5 {
-            let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(n.x)>0.9);
-            t=unit_normal(axis-n*dot(n,axis));
-        }
-        let b=input.handedness*cross(n,t);
-        // Divide before multiplying to support every finite scale without overflow.
-        let scale=max(abs(material.normal_scale),1.0);
-        let decoded=vec3<f32>(normal_sample.xy*(material.normal_scale/scale),normal_sample.z/scale);
-        var mapped=unit_normal(decoded);
-        if length(decoded)<=1e-6/scale || dot(mapped,mapped)<0.5 { mapped=vec3<f32>(0.0,0.0,1.0); }
-        n=unit_normal(t*mapped.x+b*mapped.y+n*mapped.z);
-    }
-    // A source-back surface reverses the entire perturbed frame.
-    if material.double_sided!=0u && !source_front { n=-n; }
-    var v=unit_normal(lighting.eye-input.world);
-    if dot(v,v)<0.5 { v=n; }
-    let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
-    let metal=clamp(material.metallic*mr.b,0.0,1.0);
-    let rough=clamp(material.roughness*mr.g,0.0,1.0);
-    let uv=(vec2<f32>(clamp(dot(n,v),0.0,1.0),rough)*127.0+vec2<f32>(0.5))/128.0;
-    let ab=textureSample(dfg,dfg_sampler,uv).rg;
-    let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
-    var exposed=exposed_product(lighting.environment,base*(1.0-metal)+f0*ab.x+vec3<f32>(ab.y));
-    if lighting.map.w!=0.0 {
-        let irradiance=environment_bilinear(environment_diffuse,environment_direction(n),0,0);
-        let reflected=reflect(-v,n);
-        let radiance=environment_radiance(environment_direction(reflected),rough);
-        exposed=min(environment_product(irradiance,base*((1.0-metal)/PI))+
-            environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
-    }
-    for(var i=0u;i<lighting.count;i+=1u) {
-        let light=lights[i];
-        var l=-light.travel_outer.xyz;
-        var attenuation=1.0;
-        if light.kind.x!=0u {
-            // Scale coordinates before subtraction, avoiding overflow for opposite finite inputs.
-            let half_delta=light.position_range.xyz*0.5-input.world*0.5;
-            let scale=max(max(abs(half_delta.x),abs(half_delta.y)),abs(half_delta.z));
-            l=unit_normal(half_delta);
-            let scaled=half_delta/max(scale,1e-30);
-            let distance=scale*min(2.0*sqrt(dot(scaled,scaled)),1e37/max(scale,1.0));
-            let inverse=1.0/max(distance,0.01);
-            attenuation=inverse*inverse;
-            if light.position_range.w>0.0 {
-                let ratio=min(distance/light.position_range.w,1.0);
-                let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
-                attenuation*=window*window;
-            }
-            if light.kind.x==2u {
-                let cone=clamp((dot(-l,light.travel_outer.xyz)-light.travel_outer.w)/max(light.rgb_inner.w-light.travel_outer.w,1e-4),0.0,1.0);
-                attenuation*=cone*cone;
-            }
-        }
-        attenuation*=hard_shadow(light,input.world,geometric,l);
-        exposed=min(exposed+exposed_product(light.rgb_inner.xyz,brdf(n,v,l,base,metal,rough)*attenuation),vec3<f32>(65504.0));
-    }
-    return vec4<f32>(exposed,1.0);
 }
 @vertex fn vs_present(@builtin(vertex_index) id:u32) -> @builtin(position) vec4<f32> {
     let xy=vec2<f32>(f32((id<<1u)&2u),f32(id&2u));

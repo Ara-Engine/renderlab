@@ -4,8 +4,19 @@ use super::*;
 use std::{fs, path::PathBuf};
 
 const SOURCE: &str = include_str!("../shaders/scene.wgsl");
-const PIXEL_SEAM: &str = "    let source_front=front==(input.winding>0.0);";
+const STANDARD: &str = crate::STANDARD_PROGRAM;
+/// The receiver visibility of lights[0], which visibility probes return.
+const VISIBILITY: &str =
+    "vec3<f32>(hard_shadow(lights[0],input.receiver,-lights[0].travel_outer.xyz))";
 
+/// The standard program returning `value` (a vec3 expression) in place of its lit sum.
+fn standard_returning(value: &str) -> String {
+    assert_eq!(STANDARD.matches("    return exposed;\n").count(), 1);
+    STANDARD.replace("    return exposed;\n", &format!("    return {value};\n"))
+}
+
+/// The standard program, or its lights[0] visibility alone, on the frozen cold fragment
+/// reference visibility, composed for the raster hardware ABI.
 fn reference_source(width: u32, visibility_only: bool) -> String {
     let (before, rest) = SOURCE
         .split_once(crate::hardware_shadows::VISIBILITY_BEGIN)
@@ -13,20 +24,16 @@ fn reference_source(width: u32, visibility_only: bool) -> String {
     let (_, after) = rest
         .split_once(crate::hardware_shadows::VISIBILITY_END)
         .unwrap();
-    let source = format!(
+    let prelude = format!(
         "enable wgpu_ray_query;\nconst REFERENCE_WIDTH:u32={width}u;\n{before}\n{}\n{after}",
         include_str!("../support/fresh_fragment_reference.wgsl")
-    )
-    .replacen(
-        PIXEL_SEAM,
-        &format!("    reference_pixel=vec2<u32>(input.position.xy);\n{PIXEL_SEAM}"),
-        1,
     );
-    if visibility_only {
-        source.replace("    return vec4<f32>(exposed,1.0);", "    return vec4<f32>(vec3<f32>(hard_shadow(lights[0],input.world,geometric,-lights[0].travel_outer.xyz)),1.0);")
+    let program = if visibility_only {
+        standard_returning(VISIBILITY)
     } else {
-        source
-    }
+        STANDARD.to_owned()
+    };
+    crate::program::compose(&prelude, &program, crate::program::Stage::Raster, false).source
 }
 
 fn validate_wgsl(source: &str) -> (naga::Module, naga::valid::ModuleInfo) {
@@ -44,9 +51,13 @@ fn validate_wgsl(source: &str) -> (naga::Module, naga::valid::ModuleInfo) {
 #[test]
 fn fresh_shader_reload_seams_and_cpu_spirv() {
     let source = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
-    assert!(fresh_shadow_gpu::shader_source(&SOURCE.replace(PIXEL_SEAM, "")).is_err());
-    assert!(fresh_shadow_gpu::shader_source(&format!("{SOURCE}\n{PIXEL_SEAM}")).is_err());
-    assert!(fresh_shadow_gpu::shader_source(&SOURCE.replace("let geometric=unit_normal(cross(unit_normal(dpdx(input.world)),unit_normal(dpdy(input.world))));", "let geometric=unit_normal(input.normal);")).is_err());
+    let markers = [
+        crate::hardware_shadows::VISIBILITY_BEGIN,
+        crate::hardware_shadows::VISIBILITY_END,
+    ];
+    for marker in markers {
+        assert!(fresh_shadow_gpu::shader_source(&SOURCE.replace(marker, "")).is_err());
+    }
     assert!(
         fresh_shadow_gpu::shader_source(
             &SOURCE.replace("vec4<f32>(position, 1.0)", "vec4<f32>(position*2.0, 1.0)")
@@ -260,27 +271,7 @@ fn reference_pipelines(
     width: u32,
     visibility_only: bool,
 ) -> [Owned<wgpu::RenderPipeline>; 2] {
-    let scopes = OperationScopes::new(&r.device);
-    let reference = Renderer::compile(
-        &r.device,
-        &r.ledger,
-        &r.layout,
-        &r.lighting,
-        &r.shadows,
-        Some((
-            r.hardware_shadows.as_ref().unwrap(),
-            &reference_source(width, visibility_only),
-        )),
-        None,
-        None,
-        r.format,
-        SampleCount::One,
-        SOURCE,
-    )
-    .hardware
-    .unwrap();
-    assert!(scopes.finish().is_none());
-    reference
+    r.test_lit_pair(&reference_source(width, visibility_only), true)
 }
 
 fn read_texture(r: &Renderer, texture: &wgpu::Texture) -> Vec<u8> {
@@ -362,10 +353,16 @@ fn compare(
         differences, 0,
         "fresh fragment HDR equivalence failed at {name}"
     );
-    std::mem::swap(r.pipeline.hardware.as_mut().unwrap(), reference_counts);
+    std::mem::swap(
+        r.test_standard().hardware.as_mut().unwrap(),
+        reference_counts,
+    );
     render(r, color, camera, draws);
     let reference_visibility = capture(r);
-    std::mem::swap(r.pipeline.hardware.as_mut().unwrap(), reference_counts);
+    std::mem::swap(
+        r.test_standard().hardware.as_mut().unwrap(),
+        reference_counts,
+    );
     fs::write(out.join(format!("{name}-visibility.u32")), &counts).unwrap();
     fs::write(
         out.join(format!("{name}-visibility-reference.rgba16f")),
@@ -468,7 +465,7 @@ fn gpu_fresh_thin_contact_moving_view_equivalence() {
     };
     r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
     let reference = reference_pipelines(&r, color.width(), false);
-    let _hard = std::mem::replace(r.pipeline.hardware.as_mut().unwrap(), reference);
+    let _hard = std::mem::replace(r.test_standard().hardware.as_mut().unwrap(), reference);
     let mut reference_counts = reference_pipelines(&r, color.width(), true);
     let mut observed_partial = 0;
     for (index, x) in [0., 0.01, 0.02, 0., -0.01].into_iter().enumerate() {
@@ -574,7 +571,10 @@ fn gpu_fresh_thin_contact_moving_view_equivalence() {
         r.stats().ownership.target_bytes.live
     );
     assert!(r.reload("invalid WGSL").is_err());
-    assert!(r.reload(&SOURCE.replace(PIXEL_SEAM, "")).is_err());
+    assert!(
+        r.reload(&SOURCE.replace(crate::hardware_shadows::VISIBILITY_END, ""))
+            .is_err()
+    );
     r.set_shadows(&Shadows::default()).unwrap();
     r.collect().unwrap();
     assert!(r.fresh.as_ref().unwrap().targets.is_none());
@@ -847,8 +847,6 @@ fn gpu_fresh_geometry_cost_screen() {
     let color = target(&r, 1920, 1080);
     let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
     let source = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
-    let start = source.find("@fragment fn fs_lit(").unwrap();
-    let end = source[start..].find("@vertex fn vs_present(").unwrap() + start;
     // Consume every varying so dead-code elimination cannot turn this into a
     // position-only vertex shader. The optional constant is a separate lower bound.
     let body = if manifest["constant"].as_bool().unwrap_or(false) {
@@ -856,19 +854,21 @@ fn gpu_fresh_geometry_cost_screen() {
     } else {
         "let value=dot(input.color,vec4<f32>(0.1))+dot(input.uv,vec2<f32>(0.1))+dot(input.normal,vec3<f32>(0.1))+input.winding+dot(input.world,vec3<f32>(0.1))+dot(input.tangent,vec3<f32>(0.1))+input.handedness+f32(front); return vec4<f32>(value,value,value,1.0);"
     };
+    // A raw entry point, not a program: it reads interpolants a program never sees.
     let trivial = format!(
-        "{}@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {{ {body} }}\n{}",
-        &source[..start],
-        &source[end..]
+        "{source}\n@fragment fn fs_lit(input:VertexOutput, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {{ {body} }}\n"
     );
     validate_wgsl(&trivial);
     let scopes = OperationScopes::new(&r.device);
+    let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("trivial fresh lighting"),
+        source: wgpu::ShaderSource::Wgsl(trivial.as_str().into()),
+    });
     let mut probe = r
         .fresh
         .as_ref()
         .unwrap()
-        .compile(&r.device, &r.ledger, &trivial)
-        .shade;
+        .shade_pipelines(&r.device, &r.ledger, &module);
     assert!(scopes.finish().is_none());
     let warmup = manifest["warmup_frames"].as_u64().unwrap_or(12) as usize;
     let frames = manifest["frames"].as_u64().unwrap_or(48) as usize;
@@ -890,7 +890,7 @@ fn gpu_fresh_geometry_cost_screen() {
         let trivial = k % 2 == 1;
         let pose = (k / 2) % 2;
         if trivial {
-            std::mem::swap(&mut r.pipeline.fresh.as_mut().unwrap().shade, &mut probe);
+            std::mem::swap(r.test_standard().fresh.as_mut().unwrap(), &mut probe);
         }
         let report = render(
             &mut r,
@@ -899,7 +899,7 @@ fn gpu_fresh_geometry_cost_screen() {
             &mut asset.draws(Visibility::Frustum),
         );
         if trivial {
-            std::mem::swap(&mut r.pipeline.fresh.as_mut().unwrap().shade, &mut probe);
+            std::mem::swap(r.test_standard().fresh.as_mut().unwrap(), &mut probe);
         }
         if frame >= warmup {
             pending.insert(report.frame.0, (trivial, pose));
@@ -1211,7 +1211,7 @@ fn gpu_fresh_quarry_equivalence_and_complete_frame() {
         .unwrap();
     } else {
         let reference = reference_pipelines(&r, color.width(), false);
-        let _hard = std::mem::replace(r.pipeline.hardware.as_mut().unwrap(), reference);
+        let _hard = std::mem::replace(r.test_standard().hardware.as_mut().unwrap(), reference);
         let mut reference_counts = reference_pipelines(&r, color.width(), true);
         // Stop at the first quality failure. Forward/return views expose stale visibility.
         for (index, pose) in [0, 1, 0].into_iter().enumerate() {

@@ -1,6 +1,8 @@
 // Composed only for an explicitly opted-in device. Camera binding 0 is unchanged.
 @group(0) @binding(2) var hardware_scene:acceleration_structure;
-fn hard_shadow(light:Light, world:vec3<f32>, geometric:vec3<f32>, l:vec3<f32>) -> f32 {
+fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
+    let world=receiver.world;
+    let geometric=receiver.geometric;
     if light.kind.z==0u { return 1.0; }
     var layer=light.kind.y;
     let depth=dot(shadow_views[layer].camera_depth,vec4<f32>(world,1.0));

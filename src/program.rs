@@ -1,0 +1,558 @@
+//! Shading programs: user WGSL `surface` and `shade` functions composed with the engine
+//! prelude, the program API and a generated entry point into one module per stage and
+//! visibility variant. naga checks each program before the device compiles it, so
+//! diagnostics name program lines, and `struct Parameters` is reflected from naga IR.
+//! See docs/programmable-shading.md.
+use crate::{Error, observe::Owned};
+use std::{
+    ops::Range,
+    sync::{Arc, Mutex},
+};
+
+/// The built-in photoreal program every material uses unless it names another.
+pub const STANDARD_PROGRAM: &str = include_str!("../shaders/programs/standard.wgsl");
+const COMMON_API: &str = include_str!("../shaders/program_api.wgsl");
+const RASTER_API: &str = include_str!("../shaders/program_raster.wgsl");
+const RASTER_ENTRY: &str = include_str!("../shaders/program_raster_entry.wgsl");
+const TRACED_API: &str = include_str!("../shaders/program_traced.wgsl");
+const TRACED_ENTRY: &str = include_str!("../shaders/program_traced_entry.wgsl");
+/// Raster materials bind their block as a uniform beside the fixed material ABI.
+const RASTER_PARAMETERS: &str = "@group(2) @binding(7) var<uniform> params:Parameters;\n";
+/// Traced shading reads each draw's block from a binding array and copies the hit's.
+const TRACED_PARAMETERS: &str = "struct RlParameters { value:Parameters };\n@group(2) @binding(17) var<storage,read> rl_parameters:binding_array<RlParameters,PRIMARY_BATCHES>;\nvar<private> params:Parameters;\nfn rl_load_parameters(slot:u32) { params=rl_parameters[slot].value; }\n";
+const TRACED_NO_PARAMETERS: &str = "fn rl_load_parameters(slot:u32) {}\n";
+
+/// Source of a shading program: WGSL without bindings that defines
+/// `fn surface(input: SurfaceInput) -> Surface` and
+/// `fn shade(s: Surface, input: SurfaceInput) -> vec3<f32>` (exposed linear HDR), and may
+/// declare `struct Parameters` of f32, vec2/3/4<f32>, u32 and i32 members, read as
+/// `params`. The API is shaders/program_api.wgsl plus its raster and traced stages.
+#[derive(Clone, Copy, Debug)]
+pub struct ProgramDescriptor<'a> {
+    pub label: &'a str,
+    pub source: &'a str,
+}
+
+/// Owned handle to one renderer's shading program. Materials retain their program; the
+/// renderer owns its pipelines and releases them once every handle has dropped.
+#[derive(Clone)]
+pub struct Program(pub(crate) Arc<ProgramShared>);
+pub(crate) struct ProgramShared {
+    pub id: u64,
+    pub renderer: Arc<()>,
+    pub label: String,
+}
+impl Program {
+    pub fn label(&self) -> &str {
+        &self.0.label
+    }
+    pub(crate) fn id(&self) -> u64 {
+        self.0.id
+    }
+}
+impl PartialEq for Program {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for Program {}
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Program({:?})", self.0.label)
+    }
+}
+
+/// One `Parameters` member's value, checked against the member's name and type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Value {
+    F32(f32),
+    Vec2([f32; 2]),
+    Vec3([f32; 3]),
+    Vec4([f32; 4]),
+    U32(u32),
+    I32(i32),
+}
+impl Value {
+    fn kind(self) -> Kind {
+        match self {
+            Self::F32(_) => Kind::F32,
+            Self::Vec2(_) => Kind::Vec2,
+            Self::Vec3(_) => Kind::Vec3,
+            Self::Vec4(_) => Kind::Vec4,
+            Self::U32(_) => Kind::U32,
+            Self::I32(_) => Kind::I32,
+        }
+    }
+    fn write(self, out: &mut [u8]) {
+        let words: Vec<[u8; 4]> = match self {
+            Self::F32(v) => vec![v.to_ne_bytes()],
+            Self::Vec2(v) => v.map(f32::to_ne_bytes).to_vec(),
+            Self::Vec3(v) => v.map(f32::to_ne_bytes).to_vec(),
+            Self::Vec4(v) => v.map(f32::to_ne_bytes).to_vec(),
+            Self::U32(v) => vec![v.to_ne_bytes()],
+            Self::I32(v) => vec![v.to_ne_bytes()],
+        };
+        for (dst, word) in out.chunks_exact_mut(4).zip(words) {
+            dst.copy_from_slice(&word);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    F32,
+    Vec2,
+    Vec3,
+    Vec4,
+    U32,
+    I32,
+}
+
+/// Bytes of every material's parameter block; `Parameters` may use at most this many.
+pub(crate) const PARAMETER_BYTES: usize = 256;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Field {
+    pub name: String,
+    pub kind: Kind,
+    pub offset: u32,
+}
+
+/// A program's reflected `struct Parameters`, in member order.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ParameterLayout {
+    pub fields: Vec<Field>,
+}
+impl ParameterLayout {
+    /// Every named value must name a member of the same type.
+    pub fn check<'a>(
+        layout: Option<&Self>,
+        values: impl IntoIterator<Item = (&'a str, Value)>,
+    ) -> Result<(), Error> {
+        for (name, value) in values {
+            let field = layout
+                .and_then(|l| l.fields.iter().find(|f| f.name == name))
+                .ok_or(Error::InvalidInput(
+                    "material parameter is not a member of its program's Parameters",
+                ))?;
+            if field.kind != value.kind() {
+                return Err(Error::InvalidInput(
+                    "material parameter type differs from its Parameters member",
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// The parameter block: each value at its member's offset and omitted members zero.
+    /// Values naming no member of the same type are skipped.
+    pub fn pack(layout: Option<&Self>, values: &[(String, Value)]) -> [u8; PARAMETER_BYTES] {
+        let mut block = [0; PARAMETER_BYTES];
+        for (name, value) in values {
+            if let Some(f) = layout
+                .and_then(|l| l.fields.iter().find(|f| f.name == *name))
+                .filter(|f| f.kind == value.kind())
+            {
+                value.write(&mut block[f.offset as usize..]);
+            }
+        }
+        block
+    }
+    /// Members of `next` that are new or retyped relative to `previous`.
+    pub fn changed(previous: Option<&Self>, next: Option<&Self>) -> Vec<String> {
+        next.map_or(&[][..], |l| &l.fields)
+            .iter()
+            .filter(|f| {
+                !previous.is_some_and(|p| {
+                    p.fields
+                        .iter()
+                        .any(|o| o.name == f.name && o.kind == f.kind)
+                })
+            })
+            .map(|f| f.name.clone())
+            .collect()
+    }
+}
+
+/// One material's parameter values and GPU block, repacked by name when its program
+/// reloads with a different layout.
+pub(crate) struct MaterialParameters {
+    pub buffer: Owned<wgpu::Buffer>,
+    pub values: Mutex<Vec<(String, Value)>>,
+}
+
+/// The stage a composition targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stage {
+    Raster,
+    Traced,
+}
+
+/// A composed module and the bytes its program occupies.
+pub(crate) struct Composed {
+    pub source: String,
+    pub program: Range<usize>,
+}
+
+/// One module: `head` (the prelude with its visibility variant and, for traced stages,
+/// the ray helpers), the shared API, the stage API, the parameter binding when
+/// `parameters`, the program, then the generated entry point.
+pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    let (api, binding, entry) = match stage {
+        Stage::Raster => (
+            RASTER_API,
+            if parameters { RASTER_PARAMETERS } else { "" },
+            RASTER_ENTRY,
+        ),
+        Stage::Traced => (
+            TRACED_API,
+            if parameters {
+                TRACED_PARAMETERS
+            } else {
+                TRACED_NO_PARAMETERS
+            },
+            TRACED_ENTRY,
+        ),
+    };
+    let mut source = format!("{head}\n{COMMON_API}{api}{binding}// ---- program ----\n");
+    let start = source.len();
+    source.push_str(program);
+    let program = start..source.len();
+    source.push_str("\n// ---- end of program ----\n");
+    source.push_str(entry);
+    Composed { source, program }
+}
+
+/// The program's identifiers in order, without comments (WGSL block comments nest).
+fn tokens<'a>(source: &'a str) -> Vec<&'a str> {
+    let bytes = source.as_bytes();
+    let (mut out, mut i, mut depth, mut start) = (vec![], 0, 0usize, None);
+    let flush = |out: &mut Vec<&'a str>, start: &mut Option<usize>, end: usize| {
+        if let Some(s) = start.take() {
+            out.push(&source[s..end]);
+        }
+    };
+    while i < bytes.len() {
+        let pair = &bytes[i..bytes.len().min(i + 2)];
+        if pair == b"/*" {
+            flush(&mut out, &mut start, i);
+            depth += 1;
+            i += 2;
+        } else if depth > 0 && pair == b"*/" {
+            depth -= 1;
+            i += 2;
+        } else if depth > 0 {
+            i += 1;
+        } else if pair == b"//" {
+            flush(&mut out, &mut start, i);
+            i += source[i..].find('\n').unwrap_or(source.len() - i);
+        } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            start.get_or_insert(i);
+            i += 1;
+        } else {
+            flush(&mut out, &mut start, i);
+            i += 1;
+        }
+    }
+    flush(&mut out, &mut start, bytes.len());
+    out
+}
+fn declares(source: &str, keyword: &str, name: &str) -> bool {
+    tokens(source).windows(2).any(|w| w == [keyword, name])
+}
+/// Whether `program` declares `struct Parameters`, which composition binds as `params`.
+pub(crate) fn declares_parameters(program: &str) -> bool {
+    declares(program, "struct", "Parameters")
+}
+
+/// A diagnostic naming the program line when `offset` lies inside it.
+fn diagnostic(
+    label: &str,
+    composed: &Composed,
+    location: Option<naga::SourceLocation>,
+    message: &str,
+) -> Error {
+    let first = composed.source[..composed.program.start]
+        .matches('\n')
+        .count() as u32
+        + 1;
+    Error::Shader(match location {
+        Some(l) if composed.program.contains(&(l.offset as usize)) => format!(
+            "program `{label}` line {}:{}: {message}",
+            l.line_number - first + 1,
+            l.line_position
+        ),
+        Some(l) => format!(
+            "program `{label}`, engine composition line {}: {message}",
+            l.line_number
+        ),
+        None => format!("program `{label}`: {message}"),
+    })
+}
+fn in_program(composed: &Composed, span: naga::Span) -> bool {
+    span.to_range()
+        .is_some_and(|r| composed.program.contains(&r.start))
+}
+
+/// What the engine reads from a valid program: its `Parameters` layout, if declared.
+#[derive(Debug)]
+pub(crate) struct Analysis {
+    pub parameters: Option<ParameterLayout>,
+}
+
+/// Checks a program's raster composition with naga before any device compile: both
+/// functions, syntax, types and validation with program-line diagnostics, no program
+/// bindings, and the reflected `Parameters` block.
+pub(crate) fn analyse(label: &str, program: &str, composed: &Composed) -> Result<Analysis, Error> {
+    for name in ["surface", "shade"] {
+        if !declares(program, "fn", name) {
+            return Err(Error::Shader(format!(
+                "program `{label}` must define fn {name}; see shaders/programs/standard.wgsl"
+            )));
+        }
+    }
+    let source = &composed.source;
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|e| diagnostic(label, composed, e.location(source), e.message()))?;
+    for (handle, global) in module.global_variables.iter() {
+        let span = module.global_variables.get_span(handle);
+        if global.binding.is_some() && in_program(composed, span) {
+            return Err(diagnostic(
+                label,
+                composed,
+                Some(span.location(source)),
+                "programs cannot declare bindings; declare struct Parameters and use the engine services",
+            ));
+        }
+    }
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|e| {
+        let mut message = e.as_inner().to_string();
+        let mut cause = std::error::Error::source(e.as_inner());
+        while let Some(next) = cause {
+            message = format!("{message}: {next}");
+            cause = next.source();
+        }
+        diagnostic(label, composed, e.location(source), &message)
+    })?;
+    let parameters = module
+        .types
+        .iter()
+        .find(|(h, ty)| {
+            ty.name.as_deref() == Some("Parameters")
+                && in_program(composed, module.types.get_span(*h))
+        })
+        .map(|(_, ty)| reflect(&module, ty))
+        .transpose()
+        .map_err(|message| diagnostic(label, composed, None, message))?;
+    Ok(Analysis { parameters })
+}
+
+fn reflect(module: &naga::Module, ty: &naga::Type) -> Result<ParameterLayout, &'static str> {
+    let naga::TypeInner::Struct { members, span } = &ty.inner else {
+        return Err("Parameters must be a struct");
+    };
+    if *span as usize > PARAMETER_BYTES {
+        return Err("Parameters may use at most 256 bytes");
+    }
+    let fields = members
+        .iter()
+        .map(|m| {
+            let kind = match module.types[m.ty].inner {
+                naga::TypeInner::Scalar(s) if s == naga::Scalar::F32 => Kind::F32,
+                naga::TypeInner::Scalar(s) if s == naga::Scalar::U32 => Kind::U32,
+                naga::TypeInner::Scalar(s) if s == naga::Scalar::I32 => Kind::I32,
+                naga::TypeInner::Vector { size, scalar } if scalar == naga::Scalar::F32 => {
+                    match size {
+                        naga::VectorSize::Bi => Kind::Vec2,
+                        naga::VectorSize::Tri => Kind::Vec3,
+                        naga::VectorSize::Quad => Kind::Vec4,
+                    }
+                }
+                _ => return Err("Parameters members must be f32, vec2/3/4<f32>, u32 or i32"),
+            };
+            Ok(Field {
+                name: m.name.clone().unwrap_or_default(),
+                kind,
+                offset: m.offset,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(ParameterLayout { fields })
+}
+
+/// Names the program location of a traced-stage rejection: implicit-derivative sampling
+/// and dpdx/dpdy, which compute stages lack. None when the program has neither.
+pub(crate) fn traced_stage_error(label: &str, composed: &Composed) -> Option<Error> {
+    let module = naga::front::wgsl::parse_str(&composed.source).ok()?;
+    module.functions.iter().find_map(|(_, f)| {
+        f.expressions.iter().find_map(|(h, e)| {
+            let implicit = matches!(
+                e,
+                naga::Expression::ImageSample {
+                    level: naga::SampleLevel::Auto | naga::SampleLevel::Bias(_),
+                    ..
+                } | naga::Expression::Derivative { .. }
+            );
+            let span = f.expressions.get_span(h);
+            (implicit && in_program(composed, span)).then(|| {
+                diagnostic(
+                    label,
+                    composed,
+                    Some(span.location(&composed.source)),
+                    "traced shading has no implicit derivatives: use the sample_* helpers or sample_*_grad with input.uv_dx/uv_dy, not textureSample or dpdx/dpdy",
+                )
+            })
+        })
+    })
+}
+
+/// The standard program returning `value`, a vec3 expression, in place of its lit sum:
+/// how tests probe one term (visibility, base colour) through the full program path.
+#[cfg(test)]
+pub(crate) fn standard_returning(value: &str) -> String {
+    assert_eq!(
+        STANDARD_PROGRAM
+            .matches(
+                "    return exposed;
+"
+            )
+            .count(),
+        1
+    );
+    STANDARD_PROGRAM.replace(
+        "    return exposed;
+",
+        &format!(
+            "    return {value};
+"
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const PRELUDE: &str = include_str!("../shaders/scene.wgsl");
+    const TOON: &str = "struct Parameters { shadow_tint: vec3<f32>, bands: f32, rim_color: vec3<f32>, rim_power: f32, fill: f32, flat_shaded: u32 };\nstruct Surface { albedo: vec3<f32>, n: vec3<f32> };\nfn surface(input: SurfaceInput) -> Surface {\n    var n=input.geometric;\n    if params.flat_shaded==0u { n=normalize(input.normal); }\n    return Surface(input.material.base_color.rgb*sample_base_color(input).rgb,n);\n}\nfn shade(s: Surface, input: SurfaceInput) -> vec3<f32> {\n    var lit=ambient(s.n)*params.fill;\n    for(var i=0u;i<light_count();i+=1u) {\n        let light=light_sample(i,input);\n        let incident=max(dot(s.n,light.direction),0.0)*light_visibility(input,light);\n        let band=floor(incident*params.bands)/params.bands;\n        lit+=light.intensity*light.attenuation*band;\n    }\n    return expose(s.albedo*lit/PI);\n}\n";
+
+    fn raster(program: &str) -> Composed {
+        compose(
+            PRELUDE,
+            program,
+            Stage::Raster,
+            declares_parameters(program),
+        )
+    }
+    fn rejection(label: &str, program: &str) -> String {
+        match analyse(label, program, &raster(program)) {
+            Err(Error::Shader(message)) => message,
+            other => panic!("expected a shader rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standard_program_composes_without_parameters() {
+        let composed = raster(STANDARD_PROGRAM);
+        assert!(!declares_parameters(STANDARD_PROGRAM));
+        assert_eq!(&composed.source[composed.program.clone()], STANDARD_PROGRAM);
+        assert!(
+            analyse("standard", STANDARD_PROGRAM, &composed)
+                .unwrap()
+                .parameters
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parameters_are_reflected_checked_and_packed() {
+        let layout = analyse("toon", TOON, &raster(TOON))
+            .unwrap()
+            .parameters
+            .unwrap();
+        let offsets: Vec<_> = layout
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.offset))
+            .collect();
+        assert_eq!(
+            offsets,
+            [
+                ("shadow_tint", 0),
+                ("bands", 12),
+                ("rim_color", 16),
+                ("rim_power", 28),
+                ("fill", 32),
+                ("flat_shaded", 36)
+            ]
+        );
+        let l = Some(&layout);
+        assert!(ParameterLayout::check(l, [("bands", Value::F32(3.0))]).is_ok());
+        assert!(ParameterLayout::check(l, [("bands", Value::U32(3))]).is_err());
+        assert!(ParameterLayout::check(l, [("missing", Value::F32(1.0))]).is_err());
+        assert!(ParameterLayout::check(None, [("bands", Value::F32(1.0))]).is_err());
+        let block = ParameterLayout::pack(
+            l,
+            &[
+                ("bands".into(), Value::F32(3.0)),
+                ("flat_shaded".into(), Value::U32(1)),
+            ],
+        );
+        assert_eq!(block[12..16], 3f32.to_ne_bytes());
+        assert_eq!(block[36..40], 1u32.to_ne_bytes());
+        assert!(
+            block[..12]
+                .iter()
+                .chain(&block[16..36])
+                .chain(&block[40..])
+                .all(|&b| b == 0)
+        );
+        let retyped = TOON.replace("rim_power: f32", "rim_power: u32");
+        let next = analyse("toon", &retyped, &raster(&retyped))
+            .unwrap()
+            .parameters;
+        assert_eq!(ParameterLayout::changed(l, next.as_ref()), ["rim_power"]);
+        assert!(ParameterLayout::changed(l, l).is_empty());
+    }
+
+    #[test]
+    fn rejections_name_program_lines() {
+        let line = |text: &str| {
+            STANDARD_PROGRAM
+                .lines()
+                .position(|l| l.contains(text))
+                .unwrap()
+                + 1
+        };
+        let syntax = STANDARD_PROGRAM.replace(
+            "let mr=sample_metallic_roughness(input);",
+            "let mr=sample_metallic_roughness(input;",
+        );
+        let message = rejection("standard", &syntax);
+        assert!(
+            message.starts_with(&format!("program `standard` line {}:", line("let mr="))),
+            "{message}"
+        );
+        let binding =
+            format!("@group(2) @binding(9) var<uniform> mine:vec4<f32>;\n{STANDARD_PROGRAM}");
+        let message = rejection("standard", &binding);
+        assert!(
+            message.starts_with("program `standard` line 1:") && message.contains("bindings"),
+            "{message}"
+        );
+        let redefinition = format!("{STANDARD_PROGRAM}fn light_count() -> u32 {{ return 0u; }}\n");
+        let message = rejection("standard", &redefinition);
+        assert!(message.contains("light_count"), "{message}");
+        let missing = STANDARD_PROGRAM.replace("fn shade(", "fn shaded(");
+        assert!(rejection("standard", &missing).contains("must define fn shade"));
+        // A commented-out definition does not count.
+        let commented = STANDARD_PROGRAM.replace("fn surface(", "// fn surface(\nfn surfaced(");
+        assert!(rejection("standard", &commented).contains("must define fn surface"));
+        let oversized =
+            format!("struct Parameters {{ a: array<vec4<f32>, 17> }};\n{STANDARD_PROGRAM}");
+        assert!(rejection("standard", &oversized).contains("Parameters"));
+    }
+}
