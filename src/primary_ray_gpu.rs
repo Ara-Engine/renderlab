@@ -73,7 +73,21 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
 /// `hard_shadow` rays) and Soft (fresh counts). `program::compose` appends the API, the
 /// program and the shading entry.
 pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
-    let heads = heads(wgsl)?;
+    let mut heads = heads(wgsl)?;
+    // Hard shading reuses the exact epsilon published by its camera-hit pass.
+    // Keep this engine helper separate from every user's shading program.
+    let epsilon = "primary_epsilon(v,placement)";
+    if heads[0].matches(epsilon).count() != 1 {
+        return Err(Error::InvalidInput(
+            "traced hard shading requires the engine receiver precision helper",
+        ));
+    }
+    heads[0] = heads[0].replacen(
+        epsilon,
+        "textureLoad(primary_receiver_epsilon,pixel,0).x",
+        1,
+    );
+    heads[0].push_str("\n@group(0) @binding(23) var primary_receiver_epsilon:texture_2d<f32>;\n");
     if heads.iter().any(|h| h.matches(TANGENT_SEAM).count() != 1) {
         return Err(Error::InvalidInput(
             "traced primary shading requires the unchanged tangent vertex function",
@@ -387,6 +401,8 @@ pub(super) struct Targets {
     /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
     /// flag is set.
     pub hit: Depth,
+    /// Exact hard-receiver epsilon, computed from the returned hit vertices.
+    pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
     pub tiles: Depth,
 }
@@ -400,7 +416,7 @@ struct Bindings {
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
 }
 enum Retired {
-    Targets(#[allow(dead_code)] Targets),
+    Targets(#[allow(dead_code)] Box<Targets>),
     Geometry(#[allow(dead_code)] Geometry),
     Bindings(#[allow(dead_code)] Bindings),
 }
@@ -427,6 +443,8 @@ pub(super) enum Shading {
 }
 
 pub(super) struct PrimaryState {
+    #[cfg(test)]
+    pub test_fresh_tile: Option<[u32; 2]>,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
@@ -512,7 +530,7 @@ impl PrimaryState {
         let frame = uniform(10, FRAME_BYTES as u64);
         let camera = uniform(0, 80);
         let trace = [
-            &[][..],
+            &[image(23, F::R32Float)][..],
             &[camera, image(16, F::Rgba32Float), image(17, F::Rgba32Float)],
         ]
         .map(|extra| {
@@ -538,7 +556,7 @@ impl PrimaryState {
         );
         let uint = wgpu::TextureSampleType::Uint;
         let shade_bindings = [scene(2), texture(6, uint)].map(|visibility| {
-            let entries = [
+            let mut entries = vec![
                 camera,
                 texture(7, uint),
                 frame,
@@ -547,6 +565,12 @@ impl PrimaryState {
                 read(22, 16),
                 visibility,
             ];
+            if visibility.binding == 2 {
+                entries.push(texture(
+                    23,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                ));
+            }
             group("primary shading", &entries)
         });
         let fresh_bindings = group(
@@ -603,6 +627,8 @@ impl PrimaryState {
             )
         };
         Self {
+            #[cfg(test)]
+            test_fresh_tile: None,
             trace_layouts: [&trace[0], &trace[1]]
                 .map(|g| layout("primary trace ABI", &[Some(g), Some(&array_bindings)])),
             shade_layouts: shade_bindings.each_ref().map(|g| {
@@ -779,7 +805,7 @@ impl PrimaryState {
     /// Retires every frame resource after `last`; the next traced frame recreates them.
     pub fn release(&mut self, last: u64) {
         if let Some(t) = self.targets.take() {
-            self.retired.push((last, Retired::Targets(t)));
+            self.retired.push((last, Retired::Targets(Box::new(t))));
         }
         if let Some(g) = self.geometry.take() {
             self.retired.push((last, Retired::Geometry(g)));
@@ -1106,13 +1132,18 @@ impl Renderer {
             };
             let next = Targets {
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
+                epsilon: target(
+                    "primary hard receiver epsilon",
+                    size,
+                    wgpu::TextureFormat::R32Float,
+                ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
             };
             let state = self.primary.as_mut().unwrap();
             if let Some(old) = state.targets.replace(next) {
                 state
                     .retired
-                    .push((self.submissions, Retired::Targets(old)));
+                    .push((self.submissions, Retired::Targets(Box::new(old))));
             }
         }
         let state = self.primary.as_ref().unwrap();
@@ -1161,6 +1192,7 @@ impl Renderer {
                         uniform.clone(),
                         (13, hit.clone()),
                         (20, tiles.clone()),
+                        (23, R::TextureView(&t.epsilon.view)),
                     ],
                 )),
                 fresh.map(|f| {
@@ -1179,7 +1211,7 @@ impl Renderer {
                 }),
             ];
             let shade = |shading: Shading, visibility: (u32, R<'_>)| {
-                let entries = [
+                let mut entries = vec![
                     camera.clone(),
                     (7, hit.clone()),
                     uniform.clone(),
@@ -1188,6 +1220,9 @@ impl Renderer {
                     (22, region.as_entire_binding()),
                     visibility,
                 ];
+                if matches!(shading, Shading::Hard) {
+                    entries.push((23, R::TextureView(&t.epsilon.view)));
+                }
                 Some(group(&state.shade_bindings[shading as usize], &entries))
             };
             let next = Bindings {
@@ -1286,7 +1321,15 @@ impl Renderer {
         pipeline: &wgpu::ComputePipeline,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        self.encode_primary_fresh_tile(encoder, pipeline, fresh_shadow_gpu::TILE, timestamp_writes);
+        let tile = fresh_shadow_gpu::TILE;
+        #[cfg(test)]
+        let tile = self
+            .primary
+            .as_ref()
+            .unwrap()
+            .test_fresh_tile
+            .unwrap_or(tile);
+        self.encode_primary_fresh_tile(encoder, pipeline, tile, timestamp_writes);
     }
 
     /// Interactive soft frames: camera rays, hit records and 8-direction counts in one

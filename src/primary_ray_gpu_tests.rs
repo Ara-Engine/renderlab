@@ -741,6 +741,7 @@ fn gpu_primary_kernel_screen() {
     let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
     let period = f64::from(r.queue.get_timestamp_period()) * 1e-6;
     let mut samples = vec![vec![]; n];
+    let mut sample_context = vec![];
     for rep in 0..warmup + reps {
         let mut encoder = r.device.create_command_encoder(&Default::default());
         for k in 0..n {
@@ -764,6 +765,7 @@ fn gpu_primary_kernel_screen() {
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
             .collect();
         if rep >= warmup {
+            sample_context.push(serde_json::json!({"host_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()}));
             for (i, v) in samples.iter_mut().enumerate() {
                 v.push((s[2 * i + 1] - s[2 * i]) as f64 * period);
             }
@@ -785,7 +787,7 @@ fn gpu_primary_kernel_screen() {
                 "tile": v.tile, "differing": d, "median_ms": median(s),
                 "min_ms": s.iter().copied().fold(f64::MAX, f64::min),
                 "max_ms": s.iter().copied().fold(0.0, f64::max),
-                "paired_ratio_vs_production": median(&ratios), "samples_ms": s});
+                "paired_ratio_vs_production": median(&ratios), "samples_ms": s,"sample_context":sample_context});
             eprintln!("primary_kernel {line}");
             line
         })

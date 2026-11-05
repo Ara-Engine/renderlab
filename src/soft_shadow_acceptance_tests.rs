@@ -20,7 +20,6 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
     let module = seeded_module(&r);
-    let mut records = vec![];
     for (index, pose) in [0, 1, 0].into_iter().enumerate() {
         let camera = cameras.frames[pose].camera().unwrap();
         let name = |kind: &str| out.join(format!("pose-{index}-{kind}"));
@@ -39,7 +38,8 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
         fs::write(name("world.f32"), world).unwrap();
         fs::write(name("normal.f32"), normal).unwrap();
         fs::write(name("exact.rgba16f"), &exact).unwrap();
-        let mut row = vec![];
+        drop(exact);
+        drop(counts);
         for seed in 0..4 {
             let mut p = r.primary.as_ref().unwrap().interactive_pipeline(
                 &r.device,
@@ -84,10 +84,7 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
             );
             fs::write(name(&format!("seed-{seed}-interactive.rgba16f")), &image).unwrap();
             fs::write(name(&format!("seed-{seed}-interactive.u32")), &counts).unwrap();
-            row.push(image);
-            row.push(counts);
         }
-        records.push(row);
         let soft = r.shadows.settings.clone();
         let mut hard = soft.clone();
         hard.directional_disk_angle = 0.;
@@ -97,11 +94,21 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
         fs::write(name("hard.rgba16f"), capture(&mut r)).unwrap();
         r.set_shadows(&soft).unwrap();
     }
-    assert!(
-        records[0] == records[2],
-        "return frame differs; compare pose files"
-    );
-    assert!(records[0] != records[1], "motion did not change output");
+    // The captures already live on disk. Compare their bytes one pair at a time
+    // rather than retaining all three poses (~300 MiB) during the repeat gate.
+    let mut motion_changed = false;
+    for seed in 0..4 {
+        for kind in ["rgba16f", "u32"] {
+            let path = |pose| out.join(format!("pose-{pose}-seed-{seed}-interactive.{kind}"));
+            let first = fs::read(path(0)).unwrap();
+            assert!(
+                first == fs::read(path(2)).unwrap(),
+                "return frame differs seed={seed} kind={kind}"
+            );
+            motion_changed |= first != fs::read(path(1)).unwrap();
+        }
+    }
+    assert!(motion_changed, "motion did not change output");
     let camera = cameras.frames[0].camera().unwrap();
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     let accepted = capture(&mut r);

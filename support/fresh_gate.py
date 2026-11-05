@@ -118,7 +118,7 @@ def threshold(draws):
     spread=2*a.std(ddof=1)/mean if mean else 0.
     return dict(median=float(np.median(a)),spread_2sd_relative=float(spread),limit=float(np.median(a)*(1+spread)),maximum=float(a.max()))
 
-def prepare(out, workload):
+def prepare(out, workload, solid_verification=None):
     out=Path(out);shape=(1080,1920) if workload=="quarry" else (192,256)
     pose_count=3 if workload=="quarry" else 5;seed_count=4 if workload=="quarry" else 16
     diagnostics=json.loads((out/"diagnostics.json").read_text())
@@ -135,6 +135,17 @@ def prepare(out, workload):
                 total+=v;square+=v*v
             ref=total/64;sigma=np.sqrt(np.maximum(0,(square-total*total/64)/63))
         else: ref,sigma=analytic_reference(world,json.loads((out/"rectangles.json").read_text()))
+        if solid_verification is not None:
+            # Same estimator, 4096 independent 256-ray replicas at solid receivers
+            # near terminators. Preserve the frozen bound; repair finite-reference
+            # population membership only where verification reveals a partial.
+            verified=np.load(Path(solid_verification)/f"pose-{pose}-verified.npz")
+            pixels=verified["pixels"]
+            assert np.all((ref.ravel()[pixels]==0)|(ref.ravel()[pixels]==1))
+            assert np.array_equal(ref.ravel()[pixels],verified["original"])
+            partial=(verified["ref"]>0)&(verified["ref"]<1)
+            ref.ravel()[pixels[partial]]=verified["ref"][partial]
+            sigma.ravel()[pixels[partial]]=verified["sigma"][partial]
         np.savez_compressed(out/f"pose-{pose}-reference.npz",ref=ref,sigma=sigma,depth=depth,cover=cover)
         np.rint(ref*16777216).astype("<u4").tofile(out/f"pose-{pose}-reference.u32")
         draws=[load_counts(out,pose,s,"production",shape)/256 for s in range(65,81)]
@@ -204,6 +215,10 @@ def prepare(out, workload):
         temporal.append(dict(poses=[pose,pose+1],rms=rms,p99=p99,candidates=candidates,production_same_seed=same,passes=passes,production_passes=production_passes))
         failures.extend(f"{workload}/motion-{pose}/seed-{s}/G5" for s,ok in enumerate(passes) if not ok)
     result=dict(workload=workload,poses=results,G5=temporal,failures=failures,numeric_pass=not failures,G7="pending inspection")
+    if solid_verification is not None:
+        result["solid_verification"]=dict(directory=str(solid_verification),
+            selection_sha256=sha(Path(solid_verification)/"selection.json"),
+            classification_sha256=sha(Path(solid_verification)/"classification.json"))
     save(out/"gate.json",result)
     if failures: raise RuntimeError("Candidate stopped: "+", ".join(failures[:15]))
     return result

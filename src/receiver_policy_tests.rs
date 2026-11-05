@@ -1,6 +1,9 @@
 //! Production receiver-policy references and independent analytic fixtures.
 use super::*;
 
+#[path = "receiver_diagnostic_tests.rs"]
+mod receiver_diagnostic_tests;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Policy {
     Production,
@@ -262,6 +265,20 @@ fn gpu_receiver_policy_paired_timing() {
         *r.test_standard().traced.as_mut().unwrap() =
             shading_pipelines(&r, &read(["traced-hard", "traced-soft"]));
     }
+    let mut separate = m["separate_interactive"].as_str().map(|path| {
+        let source = fs::read_to_string(path).unwrap();
+        let shader = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("separate eight-ray screen"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        r.primary.as_ref().unwrap().fresh_pipeline(
+            &r.device,
+            &r.ledger,
+            &shader,
+            "fresh_compute",
+            &[],
+        )
+    });
     let warmup = m["warmup_pairs"].as_u64().unwrap_or(24) as usize;
     let pairs = m["pairs"].as_u64().unwrap_or(48) as usize;
     let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
@@ -276,6 +293,7 @@ fn gpu_receiver_policy_paired_timing() {
             for g in r.poll().unwrap().gpu {
                 if let Some((pair, mode, baseline)) = pending.remove(&g.frame.0) {
                     samples.push(serde_json::json!({"pair":pair,"mode":(["hard","exact","interactive"][mode]),"baseline":baseline,
+                    "host_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                     "receiver_ms":g.receiver_pass.map(ms),"compute_ms":g.visibility_compute.map(ms),"shading_ms":ms(g.mesh_pass),
                     "tone_ms":g.present_pass.map(ms),"span_ms":ms(g.render_span)}));
                 }
@@ -285,6 +303,7 @@ fn gpu_receiver_policy_paired_timing() {
         // Each mode gets an old/new pair, with mode and order rotating together.
         for k in 0..3 {
             let mode = (pair + k) % 3;
+            let mut identity = None;
             for j in 0..2 {
                 let baseline = (pair + j) % 2 == 0;
                 r.set_shadows(if mode == 0 { &hard } else { &soft })
@@ -294,11 +313,48 @@ fn gpu_receiver_policy_paired_timing() {
                 } else {
                     crate::SoftShadows::Exact
                 });
+                let split = mode == 2 && !baseline && separate.is_some();
+                r.primary.as_mut().unwrap().test_fresh_tile = if split {
+                    m["separate_tile"]
+                        .as_array()
+                        .map(|t| [0, 1].map(|i| t[i].as_u64().unwrap() as u32))
+                } else {
+                    None
+                };
+                if split {
+                    r.set_soft_shadows(crate::SoftShadows::Exact);
+                    std::mem::swap(
+                        &mut r.pipeline.primary.as_mut().unwrap().fresh,
+                        separate.as_mut().unwrap(),
+                    );
+                }
                 if baseline {
                     std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
                     std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
                 }
                 let report = traced_frame(&mut r, &color, &poses[pair % 2], &mut asset, true);
+                if split {
+                    std::mem::swap(
+                        &mut r.pipeline.primary.as_mut().unwrap().fresh,
+                        separate.as_mut().unwrap(),
+                    );
+                }
+                // Two complete poses before timing; retained candidates must keep
+                // hit records, receiver exports, counts and HDR exactly unchanged.
+                if m["require_identity"].as_bool().unwrap_or(false) && pair < 2 {
+                    let mut actual = vec![hit_record(&r), capture(&mut r)];
+                    if mode != 0 {
+                        actual.extend(receivers(&r));
+                    }
+                    if let Some(expected) = identity.take() {
+                        assert!(
+                            actual == expected,
+                            "candidate byte identity pose={pair} mode={mode}"
+                        );
+                    } else {
+                        identity = Some(actual);
+                    }
+                }
                 if baseline {
                     std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
                     std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
@@ -318,7 +374,8 @@ fn gpu_receiver_policy_paired_timing() {
     fs::write(
         out.join("paired-timing.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"warmup_pairs":warmup,"pairs":pairs,"samples":samples}),
+            &serde_json::json!({"warmup_pairs":warmup,"pairs":pairs,"samples":samples,
+                "identity_poses":if m["require_identity"].as_bool().unwrap_or(false) {2} else {0}}),
         )
         .unwrap(),
     )

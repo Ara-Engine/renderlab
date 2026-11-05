@@ -10,11 +10,14 @@ struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, sce
 // Per placement: batch index; bit 31 tangent, bit 30 single-sided, bit 29 thin.
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
 
-fn primary_receiver(trace_world:vec3<f32>,v:array<vec3<f32>,3>,placement:u32,pixel:vec2<i32>)->Receiver {
+fn primary_epsilon(v:array<vec3<f32>,3>,placement:u32)->f32 {
     let a=world_position(v[0],placement).xyz;let b=world_position(v[1],placement).xyz;
     let c=world_position(v[2],placement).xyz;
+    return receiver_epsilon(a,b,c);
+}
+fn primary_receiver(trace_world:vec3<f32>,v:array<vec3<f32>,3>,placement:u32,pixel:vec2<i32>)->Receiver {
     return Receiver(trace_world,primary_geometric(v[0],v[1],v[2],placement),pixel,
-        primary_placements[placement]&0x1fffffffu,receiver_epsilon(a,b,c),(primary_placements[placement]&0x20000000u)!=0u);
+        primary_placements[placement]&0x1fffffffu,primary_epsilon(v,placement),(primary_placements[placement]&0x20000000u)!=0u);
 }
 
 // Near and far points of the pixel-centre ray and their per-pixel derivatives,

@@ -12,6 +12,7 @@
 // fresh visibility read the flag first. Pixels outside primary_frame.scene are misses
 // without a ray.
 @group(0) @binding(20) var primary_tile_output:texture_storage_2d<r32uint,write>;
+@group(0) @binding(23) var primary_epsilon_output:texture_storage_2d<r32float,write>;
 var<workgroup> primary_tile_hit:atomic<u32>;
 
 // Object-space positions are the hit triangle's own, in index order.
@@ -59,12 +60,14 @@ fn primary_tile_covered(hit:bool,id:vec2<u32>,group:vec2<u32>)->bool {
     if all(id==group*PRIMARY_TILE) {textureStore(primary_tile_output,group,vec4<u32>(covered));}
     return covered!=0u;
 }
-// Hard and unshadowed frames: the hit record only.
+// Hard and unshadowed frames: hit record and exact triangle precision. Computing
+// epsilon here keeps its vertex transforms out of programmable hard shading.
 @compute @workgroup_size(8,4) fn primary_trace(@builtin(global_invocation_id) id:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>) {
     let size=textureDimensions(primary_hit_output);
-    let record=primary_scene_trace(id.xy,size).record;
+    let trace=primary_scene_trace(id.xy,size);let record=trace.record;
     if !primary_tile_covered(record.x!=0u,id.xy,group.xy) || any(id.xy>=size) {return;}
     textureStore(primary_hit_output,vec2<i32>(id.xy),record);
+    if record.x!=0u {textureStore(primary_epsilon_output,vec2<i32>(id.xy),vec4<f32>(primary_epsilon(trace.positions,record.x-1u)));}
 }
 // Exact soft frames also publish exact fresh receivers at hits: the triangle point, epsilon
 // and the hit triangle's plane normal from its returned positions (no vertex gather).
