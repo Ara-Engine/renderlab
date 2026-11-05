@@ -12,6 +12,10 @@ use crate::program::{
 };
 use std::sync::{Mutex, Weak};
 
+#[cfg(test)]
+#[path = "toon_tests.rs"]
+mod toon_tests;
+
 /// A program pipeline set a frame shades with. Raster sets are pairs indexed by tangent
 /// stream; the traced set is indexed by `Shading`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
