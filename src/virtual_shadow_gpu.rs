@@ -335,12 +335,22 @@ fn written(binding: u32) -> wgpu::BindGroupLayoutEntry {
     )
 }
 
-/// The module source: the shared draw-slot count, then shaders/virtual_shadow.wgsl.
+/// The module source: the shared draw-slot count, then shaders/virtual_shadow.wgsl. Tests
+/// may substitute a shader variant file through `RENDERLAB_VSM_SHADER` (N8d cost bisection
+/// without a rebuild per variant).
 pub(super) fn shader_source() -> String {
+    #[cfg(test)]
+    let variant = std::env::var("RENDERLAB_VSM_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    #[cfg(not(test))]
+    let variant: Option<String> = None;
     format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
-        include_str!("../shaders/virtual_shadow.wgsl")
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl"))
     )
 }
 

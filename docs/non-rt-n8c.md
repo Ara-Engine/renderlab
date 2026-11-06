@@ -2,6 +2,8 @@
 
 Follow-up unit to [N8b](non-rt-n8b.md) and [N1c](non-rt-n1c.md), 2026-11-06 UTC, base `f3c6025`, branch `t3/n8c-shadow-cost`. Bar (Islam, 2026-11-06): Unreal's cost with quality at or above Unreal's on every measure. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8d](non-rt-n8d.md)** measured conservative skips (a whole-cone lit test, wave-level ring sharing, per-azimuth ring horizons) and latency restructures. All were byte-identical to this unit's output, and none cut the cost. The trace there places the cost in exact walks of shadowed receivers, about 4x wave divergence.
+
 ## Result
 
 **Quality: above Unreal VSM on every measured quantity of S2, S3 and the quarry (traced and no-RT at 0.35 px), at the default and at a faster setting. S1 keeps N8b's single miss: 2 umbra leaks on pose 1 (fast setting: 1) against VSM's 0. Cost: every target is missed. The quarry shadow pass falls from 5.7-6.0 ms to 3.1-3.4 ms static and from 24 ms to 4.6-4.8 ms with the sun turning. The no-RT frame falls from 6.44 ms to 3.86-4.15 ms, against VSM's 1.61 ms. No setting beats Unreal on both cost and quality.**

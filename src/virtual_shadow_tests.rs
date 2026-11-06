@@ -106,6 +106,14 @@ fn sun(r: &mut Renderer, to_light: Vec3) {
     )
     .unwrap();
 }
+/// SHA-256 of an output (N8d identity checks between builds and variants).
+pub(super) fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 pub(super) fn counts(bytes: &[u8]) -> Vec<u32> {
     bytes
         .chunks_exact(4)
@@ -294,6 +302,7 @@ fn gpu_virtual_quarry_screen() {
         }
         let [_, n8] = interactive_outputs(&r);
         let mut row = agreement(&counts(&n8), &counts(&rt), &hit);
+        row["hash"] = serde_json::json!(sha256(&n8));
         let _ = ms(&mut r);
         for _ in 0..24 {
             traced_frame(&mut r, &color, &camera, &mut asset, true);
@@ -310,6 +319,8 @@ fn gpu_virtual_quarry_screen() {
             traced_frame(&mut r, &color, &camera, &mut asset, true);
         }
         let turning = ms(&mut r);
+        let [_, turned] = interactive_outputs(&r);
+        row["turned_hash"] = serde_json::json!(sha256(&turned));
         row["variant"] = serde_json::json!(name);
         row["static_shadow_ms_p50"] = serde_json::json!(median(fixed));
         row["turning_shadow_ms_p50"] = serde_json::json!(median(turning));

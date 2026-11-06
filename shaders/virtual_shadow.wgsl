@@ -765,7 +765,8 @@ fn vsm_kappa(n:vec3<f32>)->f32 {
     vsm_horizon_out[vsm_horizon_pass.offset+primitive]=pack2x16float(packed);
 }
 // Whether all eight directions rise above the receiver triangle's ring horizon on the ray
-// origin's side, so the ring walk cannot block any of them.
+// origin's side, so the ring walk cannot block any of them. A mirroring placement puts the
+// object's winding side on the world winding's far side, so its sides swap (N8d).
 fn vsm_beyond_horizon(r:VsmReceiver,l:vec3<f32>)->bool {
     if !VSM_HORIZON {return false;}
     let m=models[r.slot];
@@ -779,7 +780,7 @@ fn vsm_beyond_horizon(r:VsmReceiver,l:vec3<f32>)->bool {
     let toward=select(lighting.eye-r.world,l,r.thin);
     let up=dot(winding,toward)>=0.0;
     let n=select(-normalize(winding),normalize(winding),up);
-    let bound=select(h.y,h.x,up);
+    let bound=select(h.y,h.x,up!=(dot(cross(x,y),z)<0.0));
     for(var j=0u;j<8u;j+=1u) {
         let e=dot(vsm_dirs[j],n);
         if e<=0.0 || e*e<=bound*bound*(1.0-e*e) {return false;}

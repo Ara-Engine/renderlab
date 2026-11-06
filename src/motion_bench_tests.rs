@@ -716,6 +716,7 @@ fn gpu_motion_virtual_screen() {
         }
         let [_, n8] = interactive_outputs(&r);
         let mut row = vs::agreement(&vs::counts(&n8), &vs::counts(&rt), &hit);
+        row["hash"] = serde_json::json!(vs::sha256(&n8));
         let _ = ms(&mut r);
         for _ in 0..24 {
             frame(&mut r, &color, &camera, &mut scene);
@@ -740,6 +741,8 @@ fn gpu_motion_virtual_screen() {
             frame(&mut r, &color, &camera, &mut scene);
         }
         let turning = ms(&mut r);
+        let [_, turned] = interactive_outputs(&r);
+        row["turned_hash"] = serde_json::json!(vs::sha256(&turned));
         row["variant"] = serde_json::json!(name);
         row["static_shadow_ms_p50"] = serde_json::json!(median(fixed));
         row["turning_shadow_ms_p50"] = serde_json::json!(median(turning));
