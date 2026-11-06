@@ -122,6 +122,16 @@ fn hdr_rect(r: &Renderer, rect: [u32; 4]) -> Vec<u8> {
     read_rect(r, &r.lighting.hdr.as_ref().unwrap().resolved.texture, rect)
 }
 
+fn frame_inputs(r: &Renderer, p: &Pose) -> serde_json::Value {
+    serde_json::json!({
+        "camera": r.camera_shadow.unwrap().to_vec(),
+        "light": r.lighting.pending.records,
+        "lighting": r.lighting.pending.uniform(Vec3::from_array(p.eye)),
+        "shadow_views_sha256": r.shadows.published_hash,
+        "sun": p.to_light,
+    })
+}
+
 fn crop_hit(r: &Renderer, rect: [u32; 4]) -> Vec<u8> {
     let state = r.primary.as_ref().unwrap();
     let t = state.targets.as_ref().unwrap();
@@ -433,16 +443,7 @@ impl FilmCrop {
     }
 }
 
-#[test]
-#[ignore = "S2/S3 owned GPU lease; 4 GiB preflight/2 GiB abort; one native-size process per bench"]
-fn gpu_motion_bench_batch() {
-    let m = manifest();
-    let b: Bench =
-        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
-    let out = PathBuf::from(m["output"].as_str().unwrap());
-    fs::create_dir_all(&out).unwrap();
-    let mut r = renderer(false);
-    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+fn upload_scene(r: &mut Renderer, b: &Bench) -> Scene {
     let mut scene = vec![];
     for g in &b.meshes {
         let vertices: Vec<_> = g
@@ -480,6 +481,149 @@ fn gpu_motion_bench_batch() {
         r.test_drain("motion material");
         scene.push((g.name.clone(), mesh, instances, material));
     }
+    scene
+}
+
+/// Compare complete, independently seeded replays. Switching modes per frame
+/// would discard the history that precedes light-change resets.
+#[test]
+#[ignore = "owned GPU lease; S3 manifest; 4 GiB preflight / 2 GiB abort"]
+fn gpu_motion_reset_identity() {
+    let m = manifest();
+    let b: Bench =
+        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = renderer(false);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let mut scene = upload_scene(&mut r, &b);
+    let color = target(&r, b.size[0], b.size[1]);
+    let track = &b.tracks[0];
+    let frames = m["frames"].as_u64().unwrap_or(track.frames.len() as u64) as usize;
+    let radius = *b.radii.iter().find(|&&v| v > 0.).unwrap();
+    let full_hdr = m["full_hdr"].as_bool().unwrap_or(false);
+    let seed_replays = m["seed_replays"].as_bool().unwrap_or(true);
+    let mut rows = vec![];
+    for (name, mode) in [
+        ("Interactive", SoftShadows::Interactive),
+        ("Temporal", SoftShadows::Temporal),
+    ] {
+        r.set_soft_shadows(mode);
+        for _ in 0..8 {
+            if seed_replays {
+                r.shadows.test_reset_bases();
+            }
+            for p in &track.frames {
+                let camera = configure(&mut r, &b, p, radius, &mut scene);
+                frame(&mut r, &color, &camera, &mut scene);
+            }
+        }
+        // Replay setup belongs before the first frame, never inside the track:
+        // transported shadow bases are part of its light sampling inputs.
+        if seed_replays {
+            r.shadows.test_reset_bases();
+        }
+        r.set_soft_shadows(SoftShadows::Interactive);
+        let camera = configure(&mut r, &b, &track.frames[0], radius, &mut scene);
+        frame(&mut r, &color, &camera, &mut scene);
+        r.set_soft_shadows(mode);
+        for p in track.frames.iter().take(frames) {
+            let camera = configure(&mut r, &b, p, radius, &mut scene);
+            frame(&mut r, &color, &camera, &mut scene);
+            let reset = mode == SoftShadows::Interactive
+                || r.primary.as_ref().unwrap().film.as_ref().unwrap().reset;
+            if !reset {
+                continue;
+            }
+            let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+            let f = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+            let outputs = [
+                hdr_rect(&r, b.crop),
+                crop_hit(&r, b.crop),
+                read_rect(&r, &f.visibility.texture, b.crop),
+                read_rect(
+                    &r,
+                    &t.tiles.texture,
+                    [b.crop[0] / 8, b.crop[1] / 4, b.crop[2] / 8, b.crop[3] / 4],
+                ),
+            ];
+            let inputs = frame_inputs(&r, p);
+            let full_hash = full_hdr.then(|| digest(&hdr_rect(&r, [0, 0, b.size[0], b.size[1]])));
+            if mode == SoftShadows::Interactive {
+                for (kind, bytes) in ["hdr", "hit", "counts", "tiles"].into_iter().zip(&outputs) {
+                    fs::write(out.join(format!("{name}-{}-{kind}.bin", p.frame)), bytes).unwrap();
+                }
+                fs::write(
+                    out.join(format!("{name}-{}-inputs.json", p.frame)),
+                    serde_json::to_vec(
+                        &serde_json::json!({"inputs":inputs,"full_hdr_sha256":full_hash}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            } else {
+                let mut same = vec![];
+                let mut differences = vec![];
+                for ((kind, bytes), stride) in ["hdr", "hit", "counts", "tiles"]
+                    .into_iter()
+                    .zip(&outputs)
+                    .zip([8, 16, 4, 4])
+                {
+                    let expected =
+                        fs::read(out.join(format!("Interactive-{}-{kind}.bin", p.frame))).unwrap();
+                    same.push(expected == *bytes);
+                    for (i, (a, z)) in expected
+                        .chunks_exact(stride)
+                        .zip(bytes.chunks_exact(stride))
+                        .enumerate()
+                        .filter(|(_, (a, z))| a != z)
+                        .take(32)
+                    {
+                        differences.push(serde_json::json!({"kind":kind,"pixel":[b.crop[0]+i as u32%(b.crop[2]-b.crop[0]),b.crop[1]+i as u32/(b.crop[2]-b.crop[0])],"expected":a,"actual":z}));
+                    }
+                    if expected != *bytes {
+                        fs::write(out.join(format!("Temporal-{}-{kind}.bin", p.frame)), bytes)
+                            .unwrap();
+                    }
+                }
+                let expected: serde_json::Value = serde_json::from_slice(
+                    &fs::read(out.join(format!("Interactive-{}-inputs.json", p.frame))).unwrap(),
+                )
+                .unwrap();
+                rows.push(serde_json::json!({"frame":p.frame,"identical":same,"inputs_equal":inputs==expected["inputs"],"interactive_inputs":expected["inputs"],"temporal_inputs":inputs,"full_hdr_equal":serde_json::json!(full_hash)==expected["full_hdr_sha256"],"full_hdr_sha256":full_hash,"crop_sha256":outputs.each_ref().map(|b|digest(b)),"differences":differences}));
+            }
+        }
+    }
+    fs::write(
+        out.join("reset-identity.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+    if let Some(expected) = m["expected_resets"].as_u64() {
+        assert_eq!(rows.len() as u64, expected);
+    }
+    assert!(
+        rows.iter().all(|v| v["inputs_equal"] == true),
+        "replays use different frame inputs; see reset-identity.json"
+    );
+    assert!(
+        rows.iter().all(|v| v["full_hdr_equal"] == true
+            && v["identical"].as_array().unwrap().iter().all(|x| x == true)),
+        "reset differs; see reset-identity.json"
+    );
+}
+
+#[test]
+#[ignore = "S2/S3 owned GPU lease; 4 GiB preflight/2 GiB abort; one native-size process per bench"]
+fn gpu_motion_bench_batch() {
+    let m = manifest();
+    let b: Bench =
+        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = renderer(false);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let mut scene = upload_scene(&mut r, &b);
     let color = target(&r, b.size[0], b.size[1]);
     let mut timings: Vec<serde_json::Value> = fs::read(out.join("timings.json"))
         .ok()
@@ -497,6 +641,7 @@ fn gpu_motion_bench_batch() {
             }
             fs::create_dir_all(&directory).unwrap();
             let p = &track.frames[0];
+            r.shadows.test_reset_bases();
             let camera = configure(&mut r, &b, p, radius, &mut scene);
             r.set_soft_shadows(SoftShadows::Exact);
             frame(&mut r, &color, &camera, &mut scene);
@@ -520,6 +665,7 @@ fn gpu_motion_bench_batch() {
                 // Separate uninterrupted production replays from diagnostic readbacks.
                 let mut records = vec![];
                 for repeat in 0..8 {
+                    r.shadows.test_reset_bases();
                     let warm = configure(
                         &mut r,
                         &b,
@@ -565,6 +711,7 @@ fn gpu_motion_bench_batch() {
                         }
                     }
                 }
+                r.shadows.test_reset_bases();
                 let _ = configure(
                     &mut r,
                     &b,
@@ -587,6 +734,27 @@ fn gpu_motion_bench_batch() {
                     frame(&mut r, &color, &camera, &mut scene);
                     let rgb = hdr_rect(&r, b.crop);
                     fs::write(path.join(format!("{:04}.rgba16f", p.frame)), &rgb).unwrap();
+                    let reset = mode == SoftShadows::Temporal
+                        && (radius == 0.
+                            || r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+                    let inputs = frame_inputs(&r, p);
+                    if reset && radius > 0. {
+                        let expected: serde_json::Value = serde_json::from_slice(
+                            &fs::read(directory.join(format!("Interactive/{:04}.json", p.frame)))
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            inputs, expected["inputs"],
+                            "reset audit needs identical frame inputs"
+                        );
+                    }
+                    fs::write(
+                        path.join(format!("{:04}.json", p.frame)),
+                        serde_json::to_vec(&serde_json::json!({"reset":reset,"inputs":inputs}))
+                            .unwrap(),
+                    )
+                    .unwrap();
                     if [
                         0, 15, 16, 17, 19, 23, 31, 32, 63, 64, 95, 96, 127, 159, 191, 319, 351,
                         352, 353, 355, 359, 367, 384,
@@ -601,7 +769,6 @@ fn gpu_motion_bench_batch() {
                     }
                     if mode == SoftShadows::Temporal && radius > 0. {
                         let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
-                        let reset = film.reset;
                         let mut e = r.device.create_command_encoder(&Default::default());
                         r.encode_shade_group(
                             &mut e,
@@ -619,11 +786,6 @@ fn gpu_motion_bench_batch() {
                         fs::write(
                             path.join(format!("{:04}-hit.u32", p.frame)),
                             crop_hit(&r, b.crop),
-                        )
-                        .unwrap();
-                        fs::write(
-                            path.join(format!("{:04}.json", p.frame)),
-                            serde_json::to_vec(&serde_json::json!({"reset":reset})).unwrap(),
                         )
                         .unwrap();
                     } else {
@@ -645,9 +807,6 @@ fn gpu_motion_bench_batch() {
                             hdr_rect(&r, b.crop),
                         )
                         .unwrap();
-                        if mode == SoftShadows::Temporal {
-                            fs::write(path.join(format!("{:04}.json",p.frame)),b"{\"reset\":true,\"fallback\":\"zero-radius uses production hard path\"}").unwrap();
-                        }
                     }
                 }
                 let pending = out.join("timings.tmp");
@@ -657,6 +816,7 @@ fn gpu_motion_bench_batch() {
             }
             r.set_soft_shadows(SoftShadows::Exact);
             let reference_radius = if radius == 0. { 0.04 } else { radius };
+            r.shadows.test_reset_bases();
             let camera = configure(&mut r, &b, p, reference_radius, &mut scene);
             frame(&mut r, &color, &camera, &mut scene);
             let reference = FilmCrop::new(&r, &b, radius);
