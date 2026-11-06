@@ -175,6 +175,8 @@ struct Pipelines {
     hardware: [Owned<wgpu::RenderPipeline>; 2],
     lookup: Owned<wgpu::ComputePipeline>,
     horizon: Owned<wgpu::ComputePipeline>,
+    /// N8g walk records (shaders/virtual_shadow_records.wgsl).
+    record: Owned<wgpu::ComputePipeline>,
     /// The lookup with `VSM_DEBUG`, built on first use (tests only).
     debug: Option<Owned<wgpu::ComputePipeline>>,
 }
@@ -188,10 +190,17 @@ struct Layouts {
     pass: Owned<wgpu::BindGroupLayout>,
     lookup: Owned<wgpu::BindGroupLayout>,
     horizon: Owned<wgpu::BindGroupLayout>,
+    /// The lookup's group 2: every batch's walk records.
+    records: Owned<wgpu::BindGroupLayout>,
 }
 /// Ring horizons (N8b lever 1): 4 bytes per triangle of every traced draw, computed once
 /// per draw list by `vsm_horizon`. Elevations do not change under the similarity transforms
 /// the lookup accepts, so camera, sun and instance motion keep them.
+///
+/// N8g walk records, built with them: per addressed triangle, its object-space positions
+/// and edge neighbours in 48 contiguous bytes (`RECORD_BYTES`), so the lookup's ring fans
+/// and walks read one record per triangle instead of index -> vertex -> adjacency chains.
+/// Camera, sun and instance independent; copied bits, so the lookup's output is unchanged.
 struct Horizons {
     /// Each draw's index buffer and addressed triangle count, in batch order.
     key: Vec<(usize, u32)>,
@@ -200,10 +209,27 @@ struct Horizons {
     buffer: Owned<wgpu::Buffer>,
     params: Owned<wgpu::Buffer>,
     group: Owned<wgpu::BindGroup>,
+    /// Per batch the first record segment (`NO_RECORDS`: the lookup reads its chains).
+    slots: Vec<u32>,
+    /// Per segment its triangle count, records and build group (pass uniforms in
+    /// `record_params`: batch, count, first triangle).
+    records: Vec<(u32, Owned<wgpu::Buffer>, Owned<wgpu::BindGroup>)>,
+    record_params: Owned<wgpu::Buffer>,
+    /// The lookup's group 2 over `records`, placeholders after them.
+    record_array: Owned<wgpu::BindGroup>,
+    _absent: Owned<wgpu::Buffer>,
     _allocation: Allocation,
     /// Whether this frame computes them (the first frame of a draw list).
     dispatch: bool,
 }
+/// One walk record: three corners of (position bits, adjacency word).
+const RECORD_BYTES: u64 = 48;
+/// Triangles per record segment (WGSL `1 << VSM_SEGMENT_BITS`): 96 MiB, within the default
+/// 128 MiB storage binding.
+const SEGMENT: u32 = 1 << 21;
+const SEGMENT_BYTES: u64 = SEGMENT as u64 * RECORD_BYTES;
+/// A batch's record slot when it has none (WGSL: any slot >= PRIMARY_BATCHES).
+const NO_RECORDS: u32 = 127;
 /// The draw list's caster clusters (N8c): every draw's clusters per placement, their raster
 /// lists and the cluster data bindings. Rebuilt when the draw list changes.
 struct Casters {
@@ -397,6 +423,16 @@ pub(super) fn shader_source() -> String {
         variant
             .as_deref()
             .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl"))
+    )
+}
+
+/// The walk-record build module (N8g): the shared draw-slot count, then
+/// shaders/virtual_shadow_records.wgsl.
+fn records_source() -> String {
+    format!(
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        crate::TRACED_DRAWS,
+        include_str!("../shaders/virtual_shadow_records.wgsl")
     )
 }
 
@@ -595,6 +631,13 @@ impl VirtualState {
                     storage(23, false, S::COMPUTE),
                 ],
             ),
+            records: group(
+                "N8g walk records",
+                &[wgpu::BindGroupLayoutEntry {
+                    count: std::num::NonZeroU32::new(crate::TRACED_DRAWS),
+                    ..storage(9, true, S::COMPUTE)
+                }],
+            ),
         };
         let pipeline_layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
             ledger.own(
@@ -630,7 +673,30 @@ impl VirtualState {
         );
         let lookup_layout = pipeline_layout(
             "N8 visibility ABI",
-            &[Some(&layouts.lookup), Some(arrays), None, Some(lighting)],
+            &[
+                Some(&layouts.lookup),
+                Some(arrays),
+                Some(&layouts.records),
+                Some(lighting),
+            ],
+        );
+        let record_module = ledger.own(
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N8g walk records"),
+                source: wgpu::ShaderSource::Wgsl(records_source().into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let record = ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("vsm_record"),
+                layout: Some(&horizon_layout),
+                module: &record_module,
+                entry_point: Some("vsm_record"),
+                compilation_options: Default::default(),
+                cache: None,
+            }),
+            ResourceKind::ComputePipeline,
         );
         let module = ledger.own(
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -710,6 +776,7 @@ impl VirtualState {
             ],
             lookup: compute("vsm_lookup", &lookup_layout, &[]),
             horizon: compute("vsm_horizon", &horizon_layout, &[]),
+            record,
             debug: None,
         };
         Self {
@@ -1295,24 +1362,138 @@ impl Renderer {
                 }),
                 ResourceKind::BindGroup,
             );
+            // N8g walk records in segments of `SEGMENT` triangles, each one binding of the
+            // lookup's array, in batch order. A batch whose segments do not fit the array (or a
+            // device whose binding limit is below a segment) reads the chains instead.
+            if words > 1 << 25 {
+                return Err(Error::InvalidInput(
+                    "SoftShadows::Virtual addresses at most 2^25 triangles per draw list",
+                ));
+            }
+            let limits = self.device.limits();
+            let usable = SEGMENT_BYTES
+                <= limits
+                    .max_storage_buffer_binding_size
+                    .min(limits.max_buffer_size);
+            let mut slots = vec![];
+            let mut segments = vec![];
+            for (d, &(_, triangles)) in horizon_key.iter().enumerate() {
+                let n = triangles.div_ceil(SEGMENT) as usize;
+                if usable && segments.len() + n <= crate::TRACED_DRAWS as usize {
+                    slots.push(segments.len() as u32);
+                    for k in 0..n as u32 {
+                        let first = k * SEGMENT;
+                        segments.push([d as u32, (triangles - first).min(SEGMENT), first, 0]);
+                    }
+                } else {
+                    slots.push(NO_RECORDS);
+                }
+            }
+            let record_params = self.ledger.own(
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("N8g walk record passes"),
+                    size: crate::TRACED_DRAWS as u64 * HORIZON_STRIDE,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            );
+            let mut bytes = vec![0u8; crate::TRACED_DRAWS as usize * HORIZON_STRIDE as usize];
+            for (i, segment) in segments.iter().enumerate() {
+                let at = i * HORIZON_STRIDE as usize;
+                for (k, value) in segment.iter().enumerate() {
+                    bytes[at + k * 4..at + k * 4 + 4].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+            self.queue.write_buffer(&record_params, 0, &bytes);
+            let records: Vec<_> = segments
+                .iter()
+                .map(|&[_, count, _, _]| {
+                    let records = self.ledger.own(
+                        self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("N8g walk records"),
+                            size: u64::from(count.max(1)) * RECORD_BYTES,
+                            usage: wgpu::BufferUsages::STORAGE,
+                            mapped_at_creation: false,
+                        }),
+                        ResourceKind::Buffer,
+                    );
+                    let build = self.ledger.own(
+                        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("N8g walk record pass"),
+                            layout: &state.layouts.horizon,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 22,
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &record_params,
+                                        offset: 0,
+                                        size: wgpu::BufferSize::new(16),
+                                    }),
+                                },
+                                buffer(23, &records),
+                            ],
+                        }),
+                        ResourceKind::BindGroup,
+                    );
+                    (count, records, build)
+                })
+                .collect();
+            let absent = self.ledger.own(
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("N8g absent walk records"),
+                    size: RECORD_BYTES,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            );
+            let bindings: Vec<_> = records
+                .iter()
+                .map(|(_, b, _)| b.as_entire_buffer_binding())
+                .chain(std::iter::repeat(absent.as_entire_buffer_binding()))
+                .take(crate::TRACED_DRAWS as usize)
+                .collect();
+            let record_array = self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("N8g walk records"),
+                    layout: &state.layouts.records,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::BufferArray(&bindings),
+                    }],
+                }),
+                ResourceKind::BindGroup,
+            );
+            let record_bytes: u64 = segments
+                .iter()
+                .map(|s| u64::from(s[1]) * RECORD_BYTES)
+                .sum();
             state.horizons = Some(Horizons {
                 key: horizon_key,
                 offsets,
                 _allocation: self
                     .ledger
-                    .allocate(AllocationKind::Shadow, u64::from(words) * 4),
+                    .allocate(AllocationKind::Shadow, u64::from(words) * 4 + record_bytes),
                 buffer: store,
                 params,
                 group,
+                slots,
+                records,
+                record_params,
+                record_array,
+                _absent: absent,
                 dispatch: true,
             });
         } else if let Some(h) = &mut state.horizons {
             h.dispatch = false;
         }
-        let offsets = &state.horizons.as_ref().unwrap().offsets;
+        // Bits 0-24 the batch's first horizon word, 25-31 its first record segment (N8g).
+        let h = state.horizons.as_ref().unwrap();
         for b in 0..64 {
-            let offset = offsets.get(b).copied().unwrap_or(0);
-            frame.extend_from_slice(&offset.to_ne_bytes());
+            let offset = h.offsets.get(b).copied().unwrap_or(0);
+            let slot = h.slots.get(b).copied().unwrap_or(NO_RECORDS);
+            frame.extend_from_slice(&(offset | slot << 25).to_ne_bytes());
         }
         state.levels = levels;
         state.stats = VirtualShadowStats {
@@ -1331,11 +1512,12 @@ impl Renderer {
             [size.width, size.height],
             self.submissions,
         )?;
-        let rebuild = state.constants != state.built;
+        let constants = state.constants.clone();
+        let rebuild = constants != state.built;
         if state.debug && state.pipelines.debug.is_none() || rebuild {
             let layout = &state.lookup_layout;
             let lookup = |label, debug: bool| {
-                let mut constants = state.constants.clone();
+                let mut constants = constants.clone();
                 constants.push(("VSM_DEBUG", f64::from(u8::from(debug))));
                 self.ledger.own(
                     self.device
@@ -1356,7 +1538,7 @@ impl Renderer {
             let debug = state.debug.then(|| lookup("vsm_lookup debug", true));
             if rebuild {
                 state.pipelines.lookup = lookup("vsm_lookup", false);
-                state.built = state.constants.clone();
+                state.built = constants.clone();
             }
             state.pipelines.debug = debug;
         }
@@ -1597,7 +1779,13 @@ impl Renderer {
                 pass.set_bind_group(0, &*h.group, &[d as u32 * HORIZON_STRIDE as u32]);
                 pass.dispatch_workgroups(triangles.div_ceil(64), 1, 1);
             }
-            let _ = &h.params;
+            // N8g walk records, one pass per segment.
+            pass.set_pipeline(&p.record);
+            for (i, (count, _, group)) in h.records.iter().enumerate() {
+                pass.set_bind_group(0, &**group, &[i as u32 * HORIZON_STRIDE as u32]);
+                pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+            }
+            let _ = (&h.params, &h.record_params);
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8 ring and map visibility"),
@@ -1617,6 +1805,7 @@ impl Renderer {
         }
         pass.set_bind_group(0, &*g.lookup, &[]);
         pass.set_bind_group(1, arrays, &[]);
+        pass.set_bind_group(2, &*state.horizons.as_ref().unwrap().record_array, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         // One workgroup per trace tile; a rolling frame only one tile of every block, unless
         // it moved casters (N8f), which visits every tile for the pixels they reach.
@@ -1737,16 +1926,17 @@ mod tests {
     use super::*;
     #[test]
     fn virtual_shadow_module_validates_without_ray_queries() {
-        let source = shader_source();
-        assert!(!source.contains("ray_query") && !source.contains("acceleration_structure"));
-        let module = naga::front::wgsl::parse_str(&source)
+        for source in [shader_source(), records_source()] {
+            assert!(!source.contains("ray_query") && !source.contains("acceleration_structure"));
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        }
         assert_eq!(FRAME_BYTES, 1168);
     }
     #[test]

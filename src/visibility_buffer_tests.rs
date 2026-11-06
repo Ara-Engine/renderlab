@@ -891,8 +891,17 @@ fn gpu_visibility_quarry() {
                     "N8f camera motion {label} from {:.1} s",
                     begun.elapsed().as_secs_f64()
                 );
+                // N8g: `move_wrap` > 0 walks the camera back and forth over that many steps, so
+                // long traced runs stay near the pose (every frame still moves).
+                let wrap = m["move_wrap"].as_u64().unwrap_or(0) as u32;
                 for i in 1..=move_frames {
-                    let step = Vec3::X * (0.001 * i as f32);
+                    let at = if wrap > 0 {
+                        let k = i % (2 * wrap);
+                        k.min(2 * wrap - k)
+                    } else {
+                        i
+                    };
+                    let step = Vec3::X * (0.001 * at as f32);
                     let moved = Camera::look_at(
                         Vec3::from_array(pose.eye) + step,
                         Vec3::from_array(pose.target) + step,

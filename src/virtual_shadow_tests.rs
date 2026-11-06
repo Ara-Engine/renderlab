@@ -203,8 +203,9 @@ pub(super) fn diagnose(
     fs::write(out.join(format!("{label}-trace.u32x4")), trace).unwrap();
 }
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl).
-const SCREEN_CONSTANTS: [&str; 17] = [
+const SCREEN_CONSTANTS: [&str; 18] = [
     "VSM_SKIP",
+    "VSM_RECORDS",
     "VSM_CAP_RULE",
     "VSM_WALK_SHIFT",
     "VSM_LEAN",

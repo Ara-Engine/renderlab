@@ -2,6 +2,8 @@
 
 Follow-up unit to [N8e](non-rt-n8e.md), 2026-11-06 UTC, base `8a45027`, branch `t3/n8f-shadow-motion`. Brief (Islam, 2026-11-06): cut the virtual-shadow pass on frames where the camera or a caster moves (quarry 2.92-3.16 ms in N8e, against Unreal VSM's estimated 0.5 ms and a 1.61 ms no-RT frame target), with every quality measure at or above VSM's. Profile first, with Nsight's GPU Trace, and find out why Unreal pays so little. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8g](non-rt-n8g.md)** found that this unit's multi-pass trace (p4-mp: the resident-warp series and its 45% tail) started after the 4,000 camera frames had ended, so it profiled the caster-motion phase. The hotspot trace (p4-rt) was inside camera motion. Re-traced inside camera motion, the dense lookup holds about 9 warps per SM with a short tail and is bound by per-visit test work. N8g's per-triangle walk records (byte-identical) cut camera-moving frames 12% (2.47-2.51 → 2.17-2.21 ms) and static and turning frames 18%.
+
 ## Result
 
 **Two levers were kept, and both leave the output byte-identical to N8e's.**
