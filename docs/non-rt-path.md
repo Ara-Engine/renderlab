@@ -69,7 +69,7 @@ Against Unreal on this GPU (M, [end-to-end comparison](quarry-end-to-end-compari
 
 ## Units and stop rules
 
-**N0: software traversal probe (first unit).** Test-only, no production change. Sol implements; Opus accepts.
+**N0: software traversal probe (first unit).** Test-only, no production change. Sol implements; Opus accepts. **Result ([non-rt-n0.md](non-rt-n0.md)):** parity passes. Software 8-ray shadows cost 9.43 ms, 21.9x hardware, so the shadow stop rule triggered and N1 is not started.
 
 - **Files owned:**
   - `src/software_bvh.rs`: CPU builder, GPU layout and a CPU reference traversal;

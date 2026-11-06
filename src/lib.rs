@@ -17,6 +17,9 @@ pub mod program_watch;
 mod renderer;
 mod shadow_plan;
 mod shadows;
+// Test-only software ray backend probe (docs/non-rt-path.md, N0).
+#[cfg(test)]
+mod software_bvh;
 pub mod virtual_geometry;
 mod visibility;
 
