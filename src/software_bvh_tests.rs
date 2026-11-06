@@ -13,6 +13,10 @@ use glam::{DMat4, DVec2, DVec3, DVec4};
 use std::collections::BTreeMap;
 use wgpu::util::DeviceExt;
 
+// Unit N4 (docs/non-rt-path-2.md) reuses this harness for the light-space caster grid.
+#[path = "light_grid_tests.rs"]
+mod light_grid_tests;
+
 /// splitmix64.
 struct Rng(u64);
 impl Rng {
@@ -1330,6 +1334,7 @@ impl Software {
         quarry: &mut prepared::Prepared,
         bvhs: &[Bvh],
         packed: &bvh::Packed,
+        extra: &[(wgpu::BindGroupLayoutEntry, wgpu::BindingResource<'_>)],
     ) -> (Self, Vec<(usize, Mat4, bool)>) {
         use wgpu::{BindingResource as R, TextureFormat as F};
         let draws = quarry.draws(Visibility::Frustum);
@@ -1469,7 +1474,10 @@ impl Software {
                         layout_entry(42, storage(true), None),
                         layout_entry(45, storage(false), None),
                         layout_entry(46, storage(false), None),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(extra.iter().map(|e| e.0))
+                    .collect::<Vec<_>>(),
                 ),
             ),
         ];
@@ -1514,7 +1522,10 @@ impl Software {
                     (44, R::BufferArray(&indices)),
                     (45, masks.as_entire_binding()),
                     (46, dump.as_entire_binding()),
-                ],
+                ]
+                .into_iter()
+                .chain(extra.iter().map(|e| (e.0.binding, e.1.clone())))
+                .collect::<Vec<_>>(),
             ),
         ];
         let layout = r
@@ -2426,7 +2437,7 @@ fn gpu_software_bvh_probe() {
     r.test_drain("software probe first frame");
     let refs: Vec<&Bvh> = bvhs.iter().collect();
     let packed = bvh::pack(&refs);
-    let (sw, placements) = Software::new(&r, &mut asset, &bvhs, &packed);
+    let (sw, placements) = Software::new(&r, &mut asset, &bvhs, &packed, &[]);
     {
         let draws = asset.draws(Visibility::Frustum);
         assert_eq!(draws.len(), quarry.meshes.len());
@@ -2575,7 +2586,7 @@ fn gpu_software_bvh_probe() {
                 let (b, build) = build_all(&quarry.meshes, max_leaf, pad_v);
                 summary.insert(format!("build_pad_{pad_v}"), build);
                 let packed_v = bvh::pack(&b.iter().collect::<Vec<_>>());
-                let (sw_v, _) = Software::new(&r, &mut asset, &b, &packed_v);
+                let (sw_v, _) = Software::new(&r, &mut asset, &b, &packed_v, &[]);
                 r.queue.write_buffer(
                     &sw_v.frame,
                     0,

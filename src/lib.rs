@@ -6,6 +6,9 @@ extern crate self as renderlab;
 mod environment;
 mod hardware_shadows;
 mod instances;
+// Test-only light-space caster grid probe (docs/non-rt-path-2.md, N4).
+#[cfg(test)]
+mod light_grid;
 mod lighting;
 mod material;
 mod mesh;
