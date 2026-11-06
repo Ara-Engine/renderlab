@@ -219,6 +219,13 @@ S3 Temporal resets on **258** frames. Its strict RGB equality audit **fails on
 **0.034058**, maximum whole-crop RGB RMS difference **0.00022420**. These are
 retained renderer failures. No renderer algorithm was changed to hide them.
 
+The [reset-identity follow-up](temporal-reset-identity.md) traces this failure to
+the benchmark carrying transported light bases between independent mode replays.
+Equal sun vectors did not imply equal shadow-view matrices or disk samples.
+Seeding each replay identically restores all 258 reset identities, including
+complete-image HDR hashes. The historical tables above retain their original
+captures and have not been rescored with the corrected replay initialization.
+
 **VSM rotation cost:** steady-phase native means, first/last two boundary frames
 excluded, eight replays. Page counters are the engine's separate asynchronous
 buckets, not interchangeable measures of the same physical pages.
