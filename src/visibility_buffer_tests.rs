@@ -140,48 +140,54 @@ fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
 }
 
 /// Median per-stage GPU milliseconds of the prepared visibility buffer, encoded alone:
-/// per pass cull, software raster, hardware raster and HZB, then resolve.
+/// per pass cull, software raster, hardware raster and HZB, then resolve. All repeats
+/// go in one submission, so the GPU does not idle (and downclock) between them.
 fn stage_profile(r: &mut Renderer, repeats: usize) -> Vec<f64> {
     let n = visibility_buffer::STAGE_QUERIES;
-    let queries = r.device.create_query_set(&wgpu::QuerySetDescriptor {
-        label: Some("N1c stages"),
-        ty: wgpu::QueryType::Timestamp,
-        count: n,
-    });
+    // Resolve offsets need QUERY_RESOLVE_BUFFER_ALIGNMENT.
+    let stride = (u64::from(n) * 8).next_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
+    let bytes = stride * repeats as u64;
     let resolved = r.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("N1c stage timestamps"),
-        size: u64::from(n) * 8,
+        size: bytes,
         usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let read = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("N1c stage readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
     let period = f64::from(r.queue.get_timestamp_period());
-    let mut samples = vec![vec![]; n as usize / 2];
-    for _ in 0..repeats {
-        let read = r.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("N1c stage readback"),
-            size: u64::from(n) * 8,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+    let mut e = r.device.create_command_encoder(&Default::default());
+    for k in 0..repeats as u64 {
+        let queries = r.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("N1c stages"),
+            ty: wgpu::QueryType::Timestamp,
+            count: n,
         });
-        let mut e = r.device.create_command_encoder(&Default::default());
         r.encode_visibility_stages(&mut e, true, None, Some(&queries));
-        e.resolve_query_set(&queries, 0..n, &resolved, 0);
-        e.copy_buffer_to_buffer(&resolved, 0, &read, 0, u64::from(n) * 8);
-        e.map_buffer_on_submit(&read, wgpu::MapMode::Read, .., |result| result.unwrap());
-        r.queue.submit([e.finish()]);
-        r.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(Duration::from_secs(20)),
-            })
-            .unwrap();
-        let bytes = read.get_mapped_range(..).unwrap();
-        let t: Vec<u64> = bytes
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-            .collect();
+        e.resolve_query_set(&queries, 0..n, &resolved, k * stride);
+    }
+    e.copy_buffer_to_buffer(&resolved, 0, &read, 0, bytes);
+    e.map_buffer_on_submit(&read, wgpu::MapMode::Read, .., |result| result.unwrap());
+    r.queue.submit([e.finish()]);
+    r.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(20)),
+        })
+        .unwrap();
+    let mapped = read.get_mapped_range(..).unwrap();
+    let t: Vec<u64> = mapped
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let mut samples = vec![vec![]; n as usize / 2];
+    for repeat in t.chunks_exact(stride as usize / 8) {
         for (i, s) in samples.iter_mut().enumerate() {
-            s.push(t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period * 1e-6);
+            s.push(repeat[2 * i + 1].saturating_sub(repeat[2 * i]) as f64 * period * 1e-6);
         }
     }
     samples
@@ -684,7 +690,7 @@ fn gpu_visibility_quarry() {
         "software_extent",
         visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
     );
-    let lifts = list("lod_lift", 0.);
+    let lifts = list("lod_lift", visibility_buffer::DEFAULT_LOD_LIFT);
     let poses: Vec<usize> = m["poses"].as_array().map_or(vec![0, 1, 0], |v| {
         v.iter().map(|x| x.as_u64().unwrap() as usize).collect()
     });

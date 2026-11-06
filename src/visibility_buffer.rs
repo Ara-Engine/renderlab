@@ -17,11 +17,14 @@ pub(crate) const NONE: u32 = u32::MAX;
 const TABLE: u32 = 1 << 16;
 const CLUSTER_BYTES: u64 = 64;
 const GROUP_BYTES: u64 = 32;
-/// visibility_buffer_cull.wgsl's Args and Rejects header.
-const ARGS_BYTES: u64 = 64;
+/// visibility_buffer_cull.wgsl's Args (16 working words, then the last frame's copy
+/// kept by visibility_buffer_reset.wgsl) and Rejects header.
+const ARGS_BYTES: u64 = 128;
 const REJECT_HEADER: u64 = 400;
-/// Default projected-error bound for the cut, in pixels.
-pub(crate) const DEFAULT_LOD_PIXELS: f32 = 0.5;
+/// Default projected-error bound for the cut, in pixels (docs/non-rt-n1c.md).
+pub(crate) const DEFAULT_LOD_PIXELS: f32 = 0.35;
+/// Default lift of LOD receivers, in units of their simplification error.
+pub(crate) const DEFAULT_LOD_LIFT: f32 = 1.;
 /// Clusters whose projected box exceeds this many pixels use the hardware raster.
 pub(crate) const DEFAULT_SOFTWARE_EXTENT: f32 = 32.;
 
@@ -301,6 +304,7 @@ pub(super) struct VisibilityBuffer {
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
     finish: wgpu::ComputePipeline,
+    reset: wgpu::ComputePipeline,
     software: wgpu::ComputePipeline,
     hardware: wgpu::RenderPipeline,
     base: wgpu::ComputePipeline,
@@ -685,6 +689,12 @@ impl VisibilityBuffer {
         let groups_cull = [Some(&cull_layout), Some(state.array_layout())];
         let cull = compute(&cull_source, "cull", &groups_cull, &[]);
         let finish = compute(&cull_source, "finish", &groups_cull, &[]);
+        let reset = compute(
+            &stage_source(include_str!("../shaders/visibility_buffer_reset.wgsl")),
+            "reset",
+            &groups_cull,
+            &[],
+        );
         let software_pipeline = compute(
             &stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
             "raster",
@@ -881,6 +891,7 @@ impl VisibilityBuffer {
             _hzb_absent: hzb_absent,
             cull,
             finish,
+            reset,
             software: software_pipeline,
             hardware: hardware_pipeline,
             base,
@@ -914,19 +925,15 @@ impl VisibilityBuffer {
     pub(super) fn test_counts(&self, r: &Renderer) -> [PassCounts; 2] {
         let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("N1c culling counters"),
-            size: 2 * ARGS_BYTES,
+            size: ARGS_BYTES,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut e = r.device.create_command_encoder(&Default::default());
         for i in 0..2 {
-            e.copy_buffer_to_buffer(
-                &self.args[i].value,
-                0,
-                &buffer,
-                i as u64 * ARGS_BYTES,
-                ARGS_BYTES,
-            );
+            // The copy the last frame's reset kept.
+            let half = ARGS_BYTES / 2;
+            e.copy_buffer_to_buffer(&self.args[i].value, half, &buffer, i as u64 * half, half);
         }
         let done = Arc::new(OnceLock::new());
         let signal = done.clone();
@@ -1042,6 +1049,7 @@ mod tests {
     fn visibility_shaders_have_no_ray_queries_and_validate() {
         let mut sources = vec![
             stage_source(include_str!("../shaders/visibility_buffer_cull.wgsl")),
+            stage_source(include_str!("../shaders/visibility_buffer_reset.wgsl")),
             stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
             stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
@@ -1196,26 +1204,23 @@ impl Renderer {
         let v = self.visibility_buffer.as_ref().unwrap();
         let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
         let stage = |i: u32| Stamp(stages.map(|q| (q, i * 2)));
-        // A tiny first pass records the start; final resolve records the end. The
-        // existing primary timestamp span includes both passes and pyramids.
-        {
-            let _pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("N1c begin"),
-                timestamp_writes: stamps.as_ref().map(|s| wgpu::ComputePassTimestampWrites {
-                    query_set: s.query_set,
-                    beginning_of_pass_write_index: s.beginning_of_pass_write_index,
-                    end_of_pass_write_index: None,
-                }),
-            });
-        }
-        // The previous frame's resolve zeroed every hit; new buffers start zeroed.
-        encoder.clear_buffer(&v.rejects.value, 0, Some(REJECT_HEADER));
+        // The first cull records the primary span's start and the resolve pass its end.
+        // No clears: the previous frame's resolve zeroed its hits and its reset zeroed
+        // the counters; new buffers start zeroed.
+        let begin = stamps.as_ref().map(|s| wgpu::ComputePassTimestampWrites {
+            query_set: s.query_set,
+            beginning_of_pass_write_index: s.beginning_of_pass_write_index,
+            end_of_pass_write_index: None,
+        });
         for i in 0..2 {
-            encoder.clear_buffer(&v.args[i].value, 0, None);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N1c LOD cut and cluster cull"),
-                    timestamp_writes: stage(i as u32 * 4).compute(),
+                    timestamp_writes: if i == 0 && begin.is_some() {
+                        begin.clone()
+                    } else {
+                        stage(i as u32 * 4).compute()
+                    },
                 });
                 pass.set_pipeline(&v.cull);
                 pass.set_bind_group(0, &v.cull_groups[i], &[]);
@@ -1285,5 +1290,10 @@ impl Renderer {
         pass.set_bind_group(1, arrays, &[]);
         pass.set_bind_group(2, &v.data_group, &[]);
         pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(4), 1);
+        pass.set_pipeline(&v.reset);
+        for group in &v.cull_groups {
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
     }
 }

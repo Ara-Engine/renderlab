@@ -977,7 +977,7 @@ impl Renderer {
             visibility_buffer: None,
             lod_pixels: visibility_buffer::DEFAULT_LOD_PIXELS,
             software_extent: visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
-            lod_lift: 0.,
+            lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
