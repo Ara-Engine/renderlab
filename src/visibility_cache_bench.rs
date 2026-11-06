@@ -358,7 +358,7 @@ fn gpu_visibility_cache_bench() {
     let scene_box = bvh::Aabb { lo: scene_box.lo - Vec3::new(sweep, 0., 0.), hi: scene_box.hi + Vec3::new(sweep, 0., 0.) };
     let sided = !b.material.double_sided;
     let budget = m["budget"].as_u64().unwrap_or(65_536) as u32;
-    let prefetch = m["prefetch"].as_bool().unwrap_or(true);
+    let flags = m["flags"].as_u64().map_or(vc::flags::ALL, |f| f as u32);
     let pixel_angle = 2.0 * (b.fov_y_degrees.to_radians() * 0.5).tan() / b.size[1] as f32;
     let mut stamp = 0u32;
     let cases: Vec<(String, f32)> = m["cases"]
@@ -443,7 +443,7 @@ fn gpu_visibility_cache_bench() {
                 stamp,
                 slots: sizes.slots,
                 budget: if k == 0 { sizes.queue } else { budget },
-                prefetch,
+                flags,
                 queue: sizes.queue,
                 pending: sizes.pending,
                 probes: 64,
@@ -475,7 +475,7 @@ fn gpu_visibility_cache_bench() {
             stamp: stamp % 0xffff + 1,
             slots: sizes.slots,
             budget,
-            prefetch,
+            flags,
             queue: sizes.queue,
             pending: sizes.pending,
             probes: 64,

@@ -5,15 +5,25 @@
 // Cells. A receiver triangle at level k is split into the 4^k sub-triangles of its n = 2^k
 // barycentric subdivision; a cell is one sub-triangle, keyed by (placement, primitive,
 // level, i, j, upper, side) and sampled at its centroid, so cell values are independent of
-// the camera. A pixel picks k old its footprint (cell area about one pixel at normal
-// incidence) and reads the cell under its hit barycentrics.
+// the camera. A pixel picks k from its footprint (cell area about one pixel at normal
+// incidence) and reads the cell under its hit barycentrics. Triangles smaller than the
+// footprint are one cell each.
+//
+// Footprint fills. Pixel centres sample only some of the cells under a footprint, so a pixel
+// whose cell is not usable also claims the cell's neighbours at secondary priority: the
+// sub-triangles sharing its edges inside its triangle, and for whole-triangle cells the
+// triangles across its edges (the runtime adjacency in the index buffer). Usability is fixed
+// during the lookup pass, so the claimed set does not depend on invocation order. A pixel
+// whose own cell the budgeted fill leaves unusable shows a usable whole-triangle neighbour's
+// value (substitution), else N0's Interactive estimate.
 //
 // Directions. Each cell owns a jittered, rotated square lattice in a gnomonic chart fixed in
-// the world around the anchor sun direction. The lattice points inside the current sun disk
+// the world around the anchor sun direction. The lattice points inside the current sun cone
 // are the cell's rays (8 on average). A cell stores a 4x4 window of lattice points that
-// covers the disk: 16 blocked bits, 16 valid bits and the window's origin. When the sun
+// covers the cone: 16 blocked bits, 16 valid bits and the window's origin. When the sun
 // moves, the window slides; points that stay keep their bits, and only points entering the
-// disk are traced.
+// cone are traced. A cell missing at most one ray in the cone stays usable (partial) while
+// that ray waits at secondary priority.
 //
 // Static visibility only. Fills trace against static placements (instance info.w == 0).
 // Each frame, lookups test a cell's unblocked rays against the movers' own BVHs. Receivers
@@ -33,23 +43,30 @@ struct CacheParams {
     scene_lo:vec4<f32>,scene_hi:vec4<f32>,
     // x: radians per pixel; y: cell scale (footprints per cell edge).
     view:vec4<f32>,
-    // x: frame stamp (1..65535); y: slot mask; z: fill budget (cells); w: flags (bit 0 prefetch).
+    // x: frame stamp (1..65535); y: slot mask; z: fill budget (cells); w: CACHE_FLAG_* bits.
     frame:vec4<u32>,
     // x: queue capacity per region; y: pending capacity; z: probe limit; w: movers present.
     limits:vec4<u32>,
 };
+const CACHE_FLAG_SUBDIVISION:u32=1u;  // prefetch sub-triangle neighbours
+const CACHE_FLAG_RING:u32=2u;         // prefetch whole-triangle neighbours across edges
+const CACHE_FLAG_SUBSTITUTE:u32=4u;   // show a filled whole-triangle neighbour meanwhile
+const CACHE_FLAG_PARTIAL:u32=8u;      // cells missing one ray in the cone stay usable
+fn cache_flag(flag:u32)->bool {return (cache_params[0].frame.w&flag)!=0u;}
+
 struct CacheWords {data:array<atomic<u32>>};
 // One-element binding arrays: N0's layout already uses the stage's eight storage buffers.
 @group(2) @binding(47) var<storage,read> cache_params:binding_array<CacheParams,1>;
 @group(2) @binding(48) var<storage,read_write> cache_table:binding_array<CacheWords,1>;
 @group(2) @binding(49) var<storage,read_write> cache_work:binding_array<CacheWords,1>;
 
-// cache_work words: counters, indirect arguments, then the primary queue, the prefetch queue
-// and the pending pixel list (pixel, slot pairs). visibility_cache.rs Work must match.
+// cache_work words: counters, indirect arguments, mismatch dump, then the primary queue,
+// the prefetch queue and the pending pixel list (pixel, slot pairs). visibility_cache.rs
+// `work` must match.
 const CACHE_PENDING:u32=0u;
 const CACHE_QUEUED:u32=1u;      // primary (visible) requests, then prefetch at 2
 const CACHE_FULL_COUNT:u32=3u;  // probe limit reached
-const CACHE_BUSY_COUNT:u32=4u;  // claims in flight
+const CACHE_BUSY_COUNT:u32=4u;  // claims in flight at lookup
 const CACHE_FILLED:u32=5u;
 const CACHE_RAYS:u32=6u;
 const CACHE_FALLBACK:u32=7u;
@@ -57,14 +74,18 @@ const CACHE_MOVER_RAYS:u32=8u;
 const CACHE_WARM:u32=9u;
 const CACHE_INCOMPLETE:u32=10u;
 const CACHE_INSERTED:u32=11u;
-const CACHE_FILL_PRIMARY:u32=12u;  // cells the plan takes old each region
+const CACHE_FILL_PRIMARY:u32=12u;  // cells the plan takes from each region
 const CACHE_FILL_PREFETCH:u32=13u;
 const CACHE_MISMATCH:u32=14u;      // validation replay
 const CACHE_CHECKED:u32=15u;
-const CACHE_FILL_ARGS:u32=16u;
-const CACHE_RESOLVE_ARGS:u32=20u;
-const CACHE_DUMP:u32=24u;          // first mismatches: slot, bit pairs at 24..31
-const CACHE_QUEUES:u32=32u;
+const CACHE_SUBSTITUTED:u32=16u;
+const CACHE_RING:u32=17u;          // whole-triangle neighbours claimed
+const CACHE_PARTIAL_USED:u32=18u;
+const CACHE_RESOLVE_FOUND:u32=19u; // deferred pixels resolved from a cell
+const CACHE_FILL_ARGS:u32=24u;
+const CACHE_RESOLVE_ARGS:u32=28u;
+const CACHE_DUMP:u32=32u;          // first mismatches: slot, bit pairs
+const CACHE_QUEUES:u32=40u;
 
 const CACHE_LOCK:u32=1u;           // key a of a claim in flight (placement field 0)
 const CACHE_NONE:u32=0xffffffffu;
@@ -138,7 +159,7 @@ fn cache_find(a:u32,b:u32,insert:bool)->vec2<u32> {
     return vec2<u32>(CACHE_NONE,CACHE_OVER);
 }
 
-// A cell's direction lattice: offset in [0, 1)^2 and rotation, old its key.
+// A cell's direction lattice: offset in [0, 1)^2 and rotation, from its key.
 struct CacheLattice {offset:vec2<f32>,c:f32,s:f32};
 fn cache_lattice(a:u32,b:u32)->CacheLattice {
     let h1=fresh_hash(a^fresh_hash(b));let h2=fresh_hash(h1^0xa511e9b3u);let h3=fresh_hash(h2^0x63d83595u);
@@ -153,8 +174,8 @@ fn cache_centre(t:CacheLattice)->vec2<f32> {
     let c=vec2<f32>(dot(l,p.chart_u.xyz),dot(l,p.chart_v.xyz))/(dot(l,p.chart_l.xyz)*p.chart_u.w);
     return vec2<f32>(t.c*c.x+t.s*c.y,-t.s*c.x+t.c*c.y)-t.offset;
 }
-// Origin of the 4x4 window covering the disk: the first lattice indices at or above
-// centre - radius. The disk is at most 3.6 spacings wide (visibility_cache.rs keeps the
+// Origin of the 4x4 window covering the cone: the first lattice indices at or above
+// centre - radius. The cone is at most 3.6 spacings wide (visibility_cache.rs keeps the
 // sun near enough to the anchor), so four columns and rows cover it.
 fn cache_window(centre:vec2<f32>)->vec2<i32> {
     let r=cache_params[0].chart_v.w/cache_params[0].chart_u.w;
@@ -176,7 +197,7 @@ fn cache_disk(t:CacheLattice,window:vec2<i32>)->u32 {
     }
     return bits;
 }
-// Window bits (low 16) moved old window `old` to window `to`; points leaving are dropped.
+// Window bits (low 16) moved from window `old` to window `to`; points leaving are dropped.
 fn cache_shift(bits:u32,old:vec2<i32>,to:vec2<i32>)->u32 {
     let d=to-old;
     if all(d==vec2<i32>(0)) {return bits;}
@@ -195,7 +216,7 @@ fn cache_meta(stamp:u32,window:vec2<i32>)->u32 {
     return (stamp&0xffffu)|((u32(window.x)&0xffu)<<16u)|((u32(window.y)&0xffu)<<24u);
 }
 
-// The receiver at a cell's centroid: the placement's triangle, the side of the key, ÃŽÂµ.
+// The receiver at a cell's centroid: the placement's triangle, the side of the key, Îµ.
 struct CacheReceiver {world:vec3<f32>,geometric:vec3<f32>,epsilon:f32,thin:bool,side:u32};
 fn cache_receiver(a:u32,b:u32)->CacheReceiver {
     let placement=((a>>22u)&63u)-1u;let primitive=a&0x3fffffu;let level=a>>28u;
@@ -244,24 +265,27 @@ fn cache_static(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32)->bool {
     return cache_any(origin,direction,tmin,tmax,false);
 }
 
-// A cell's current state: rays in the disk, visible rays among them (static), and whether
-// every ray in the disk is valid. `bits` and `info` are the stored words.
-struct CacheState {inside:u32,visible:u32,complete:bool,window:vec2<i32>,disk:u32,blocked:u32};
+// A cell's current state: rays in the cone, the valid ones among them, visible (static)
+// valid rays, whether every ray in the cone is valid, and whether the cell is usable now.
+struct CacheState {inside:u32,valid:u32,visible:u32,complete:bool,usable:bool,window:vec2<i32>,disk:u32,blocked:u32,valid_bits:u32};
 fn cache_state(t:CacheLattice,bits:u32,info:u32)->CacheState {
     let window=cache_window(cache_centre(t));
     let disk=cache_disk(t,window);
     let old=cache_meta_window(info);
     let valid=cache_shift(bits>>16u,old,window);
     let blocked=cache_shift(bits&0xffffu,old,window);
-    return CacheState(countOneBits(disk),countOneBits(disk&~blocked),(disk&~valid)==0u,window,disk,blocked);
+    let inside=countOneBits(disk);let have=countOneBits(disk&valid);
+    let complete=have==inside;
+    let usable=complete || (cache_flag(CACHE_FLAG_PARTIAL) && have+1u>=inside && have>=4u);
+    return CacheState(inside,have,countOneBits(disk&valid&~blocked),complete,usable,window,disk,blocked,valid);
 }
-// Visible rays after the movers: static-visible rays tested against each mover's BVH.
+// Visible rays after the movers: static-visible valid rays tested against each mover's BVH.
 fn cache_composite(a:u32,b:u32,t:CacheLattice,s:CacheState)->u32 {
     if cache_params[0].limits.w==0u {return s.visible;}
     let r=cache_receiver(a,b);
     var visible=0u;var tested=0u;
     for(var bit=0u;bit<16u;bit+=1u) {
-        if (s.disk&~s.blocked&(1u<<bit))==0u {continue;}
+        if (s.disk&s.valid_bits&~s.blocked&(1u<<bit))==0u {continue;}
         let d=cache_direction(t,s.window+vec2<i32>(i32(bit&3u),i32(bit>>2u)));
         let o=cache_origin(r,d);
         tested+=1u;
@@ -270,66 +294,43 @@ fn cache_composite(a:u32,b:u32,t:CacheLattice,s:CacheState)->u32 {
     atomicAdd(&cache_work[0].data[CACHE_MOVER_RAYS],tested);
     return visible;
 }
-fn cache_value(visible:u32,inside:u32)->u32 {
-    if inside==0u {return 256u;}
-    return (256u*visible+inside/2u)/inside;
+fn cache_value(visible:u32,valid:u32)->u32 {
+    if valid==0u {return 256u;}
+    return (256u*visible+valid/2u)/valid;
 }
-// Queue a slot once per frame: its stamp moves to the current frame.
-fn cache_enqueue(slot:u32,region:u32,fresh:bool) {
+// The count of a usable cell at `slot`, its state, and partial use recorded.
+fn cache_read(slot:u32)->vec2<u32> {
+    let w=4u*slot;
+    let ka=atomicLoad(&cache_table[0].data[w]);let kb=atomicLoad(&cache_table[0].data[w+1u]);
+    let t=cache_lattice(ka,kb);
+    let s=cache_state(t,atomicLoad(&cache_table[0].data[w+2u]),atomicLoad(&cache_table[0].data[w+3u]));
+    if !s.usable {return vec2<u32>(0u,0u);}
+    if !s.complete {atomicAdd(&cache_work[0].data[CACHE_PARTIAL_USED],1u);}
+    return vec2<u32>(cache_value(cache_composite(ka,kb,t,s),s.valid),select(1u,2u,s.complete));
+}
+// Claim a slot's enqueue for this frame: its stamp moves to the current frame once.
+fn cache_claim(slot:u32)->bool {
     let stamp=cache_params[0].frame.x;
-    if !fresh {
-        var info=atomicLoad(&cache_table[0].data[4u*slot+3u]);
-        var won=false;
-        for(var attempt=0u;attempt<4u;attempt+=1u) {
-            if (info&0xffffu)==stamp {return;}
-            let r=atomicCompareExchangeWeak(&cache_table[0].data[4u*slot+3u],info,(info&0xffff0000u)|stamp);
-            if r.exchanged {won=true;break;}
-            info=r.old_value;
-        }
-        if !won {return;}
+    var info=atomicLoad(&cache_table[0].data[4u*slot+3u]);
+    for(var attempt=0u;attempt<4u;attempt+=1u) {
+        if (info&0xffffu)==stamp {return false;}
+        let r=atomicCompareExchangeWeak(&cache_table[0].data[4u*slot+3u],info,(info&0xffff0000u)|stamp);
+        if r.exchanged {return true;}
+        info=r.old_value;
     }
+    return false;
+}
+// Append to a queue region one entry at a time (prefetch and resolve paths).
+fn cache_push(slot:u32,region:u32) {
     let q=atomicAdd(&cache_work[0].data[CACHE_QUEUED+region],1u);
     if q<cache_params[0].limits.x {atomicStore(&cache_work[0].data[cache_queue(region)+q],slot);}
 }
-fn cache_defer(pixel:u32,slot:u32) {
-    let q=atomicAdd(&cache_work[0].data[CACHE_PENDING],1u);
-    if q<cache_params[0].limits.y {
-        atomicStore(&cache_work[0].data[cache_pending_base()+2u*q],pixel);
-        atomicStore(&cache_work[0].data[cache_pending_base()+2u*q+1u],slot);
-    }
-}
 fn cache_movers(placement:u32)->bool {return software_instances[placement].info.w!=0u;}
 
-// Prefetch: the sub-triangles sharing an edge with cell (i, j, upper) inside its triangle.
-fn cache_prefetch(a:u32,cell:vec3<u32>,side:u32,level:u32) {
-    let last=(1u<<level)-1u;
-    for(var e=0u;e<3u;e+=1u) {
-        var i=i32(cell.x);var j=i32(cell.y);var up=1u-cell.z;
-        if cell.z==0u {
-            if e==1u {i-=1;} if e==2u {j-=1;}
-        } else {
-            if e==1u {i+=1;} if e==2u {j+=1;}
-        }
-        if i<0 || j<0 {continue;}
-        let n=u32(i)+u32(j);
-        if n>last || (up!=0u && n==last) {continue;}
-        let f=cache_find(a,cache_key_b(u32(i),u32(j),up,side),true);
-        if f.y==CACHE_NEW {cache_enqueue(f.x,1u,true);}
-        else if f.y==CACHE_FOUND {cache_enqueue(f.x,1u,false);}
-    }
-}
-
-// Lookup and update: one invocation per pixel. Complete cells write the pixel's count; cold
-// or incomplete cells are queued once and the pixel is deferred to cache_resolve.
-@compute @workgroup_size(8,4) fn cache_lookup(@builtin(global_invocation_id) id:vec3<u32>) {
-    let size=textureDimensions(primary_hit);
-    if any(id.xy>=size) {return;}
-    let p=vec2<i32>(id.xy);
-    let hit=textureLoad(primary_hit,p,0);
-    if hit.x==0u {textureStore(fresh_output,p,vec4<u32>(256u));return;}
+// A covered pixel's cell key and the inputs its neighbours' keys reuse.
+struct CachePixel {ka:u32,kb:u32,level:u32,cell:vec3<u32>,side:u32,placement:u32,primitive:u32,footprint:f32};
+fn cache_pixel(hit:vec4<u32>)->CachePixel {
     let placement=hit.x-1u;
-    let pixel=id.x+id.y*size.x;
-    if cache_movers(placement) {cache_defer(pixel,CACHE_NONE);return;}
     let v=software_positions(software_instances[placement].info.y,hit.y);
     let bary=bitcast<vec2<f32>>(hit.zw);
     let a=world_position(v[0],placement).xyz;let b=world_position(v[1],placement).xyz;let c=world_position(v[2],placement).xyz;
@@ -337,32 +338,129 @@ fn cache_prefetch(a:u32,cell:vec3<u32>,side:u32,level:u32) {
     let point=world_position(receiver_point(v[0],v[1],v[2],w),placement).xyz;
     let footprint=length(lighting.eye-point)*cache_params[0].view.x*cache_params[0].view.y;
     let level=cache_level(0.5*length(cross(b-a,c-a)),footprint);
-    let geometric=primary_geometric(v[0],v[1],v[2],placement);
-    let side=u32(dot(geometric,lighting.eye-point)<0.0);
+    let side=u32(dot(primary_geometric(v[0],v[1],v[2],placement),lighting.eye-point)<0.0);
     let cell=cache_cell(bary,level);
-    let ka=cache_key_a(placement,hit.y,level);let kb=cache_key_b(cell.x,cell.y,cell.z,side);
-    let f=cache_find(ka,kb,true);
+    return CachePixel(cache_key_a(placement,hit.y,level),cache_key_b(cell.x,cell.y,cell.z,side),level,cell,side,placement,hit.y,footprint);
+}
+// Key of the whole-triangle cell across edge e of a pixel's triangle, at the pixel's
+// footprint, or (0, 0) when there is no neighbour or it is subdivided there.
+fn cache_ring_key(p:CachePixel,e:u32)->vec2<u32> {
+    let mesh=software_instances[p.placement].info.y;
+    let n=software_edge_neighbour(mesh,p.primitive,e);
+    if n==0xffffffffu {return vec2<u32>(0u);}
+    let v=software_positions(mesh,n);
+    let a=world_position(v[0],p.placement).xyz;let b=world_position(v[1],p.placement).xyz;let c=world_position(v[2],p.placement).xyz;
+    if cache_level(0.5*length(cross(b-a,c-a)),p.footprint)!=0u {return vec2<u32>(0u);}
+    let centre=(a+b+c)*(1.0/3.0);
+    let side=u32(dot(primary_geometric(v[0],v[1],v[2],p.placement),lighting.eye-centre)<0.0);
+    return vec2<u32>(cache_key_a(p.placement,n,0u),cache_key_b(0u,0u,0u,side));
+}
+// Prefetch: the sub-triangles sharing an edge with the pixel's cell inside its triangle,
+// or, for a whole-triangle cell, the triangles across its edges.
+fn cache_prefetch(p:CachePixel) {
+    if p.level>0u {
+        if !cache_flag(CACHE_FLAG_SUBDIVISION) {return;}
+        let last=(1u<<p.level)-1u;
+        for(var e=0u;e<3u;e+=1u) {
+            var i=i32(p.cell.x);var j=i32(p.cell.y);let up=1u-p.cell.z;
+            if p.cell.z==0u {
+                if e==1u {i-=1;} if e==2u {j-=1;}
+            } else {
+                if e==1u {i+=1;} if e==2u {j+=1;}
+            }
+            if i<0 || j<0 {continue;}
+            let n=u32(i)+u32(j);
+            if n>last || (up!=0u && n==last) {continue;}
+            let f=cache_find(p.ka,cache_key_b(u32(i),u32(j),up,p.side),true);
+            if f.y==CACHE_NEW || (f.y==CACHE_FOUND && cache_claim(f.x)) {cache_push(f.x,1u);}
+        }
+        return;
+    }
+    if !cache_flag(CACHE_FLAG_RING) {return;}
+    for(var e=0u;e<3u;e+=1u) {
+        let k=cache_ring_key(p,e);
+        if k.x==0u {continue;}
+        let f=cache_find(k.x,k.y,true);
+        if f.y==CACHE_NEW {atomicAdd(&cache_work[0].data[CACHE_RING],1u);}
+        if f.y==CACHE_NEW || (f.y==CACHE_FOUND && cache_claim(f.x)) {cache_push(f.x,1u);}
+    }
+}
+// A usable whole-triangle neighbour's count for a pixel whose own cell is not usable.
+fn cache_substitute(p:CachePixel)->u32 {
+    if p.level!=0u || !cache_flag(CACHE_FLAG_SUBSTITUTE) {return CACHE_NONE;}
+    for(var e=0u;e<3u;e+=1u) {
+        let k=cache_ring_key(p,e);
+        if k.x==0u {continue;}
+        let f=cache_find(k.x,k.y,false);
+        if f.y!=CACHE_FOUND {continue;}
+        let r=cache_read(f.x);
+        if r.y!=0u {atomicAdd(&cache_work[0].data[CACHE_SUBSTITUTED],1u);return r.x;}
+    }
+    return CACHE_NONE;
+}
+
+// Lookup and update: one invocation per pixel. Usable cells write the pixel's count; cold
+// or incomplete cells are queued once, their neighbours prefetched, and the pixel is
+// deferred to cache_resolve. Queue and pending appends are aggregated per workgroup, so
+// the fill and resolve read them in tile order.
+var<workgroup> cache_group_counts:array<atomic<u32>,2>;
+var<workgroup> cache_group_bases:array<u32,2>;
+struct CacheLookup {queue:u32,pending:bool,slot:u32};
+fn cache_lookup_pixel(id:vec2<u32>,size:vec2<u32>)->CacheLookup {
+    var out=CacheLookup(CACHE_NONE,false,CACHE_NONE);
+    if any(id>=size) {return out;}
+    let p=vec2<i32>(id);
+    let hit=textureLoad(primary_hit,p,0);
+    if hit.x==0u {textureStore(fresh_output,p,vec4<u32>(256u));return out;}
+    out.pending=true;
+    if cache_movers(hit.x-1u) {return out;}
+    let px=cache_pixel(hit);
+    let f=cache_find(px.ka,px.kb,true);
     if f.y==CACHE_FOUND {
-        let t=cache_lattice(ka,kb);
-        let s=cache_state(t,atomicLoad(&cache_table[0].data[4u*f.x+2u]),atomicLoad(&cache_table[0].data[4u*f.x+3u]));
-        if s.complete {
-            textureStore(fresh_output,p,vec4<u32>(cache_value(cache_composite(ka,kb,t,s),s.inside)));
+        let r=cache_read(f.x);
+        if r.y!=0u {
+            textureStore(fresh_output,p,vec4<u32>(r.x));
             atomicAdd(&cache_work[0].data[CACHE_WARM],1u);
-            return;
+            // A partial cell's missing ray waits at secondary priority.
+            if r.y==1u && cache_claim(f.x) {cache_push(f.x,1u);}
+            out.pending=false;
+            return out;
         }
         atomicAdd(&cache_work[0].data[CACHE_INCOMPLETE],1u);
-        cache_enqueue(f.x,0u,false);
-        cache_defer(pixel,f.x);
-        return;
+        if cache_claim(f.x) {out.queue=f.x;}
+        out.slot=f.x;
+    } else if f.y==CACHE_NEW {
+        out.queue=f.x;
+        out.slot=f.x;
+    } else {
+        atomicAdd(&cache_work[0].data[select(CACHE_BUSY_COUNT,CACHE_FULL_COUNT,f.y==CACHE_OVER)],1u);
     }
-    if f.y==CACHE_NEW {
-        cache_enqueue(f.x,0u,true);
-        if (cache_params[0].frame.w&1u)!=0u && level>0u {cache_prefetch(ka,cell,side,level);}
-        cache_defer(pixel,f.x);
-        return;
+    cache_prefetch(px);
+    return out;
+}
+@compute @workgroup_size(8,4) fn cache_lookup(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let size=textureDimensions(primary_hit);
+    let r=cache_lookup_pixel(id.xy,size);
+    var qi=0u;var pi=0u;
+    if r.queue!=CACHE_NONE {qi=atomicAdd(&cache_group_counts[0],1u);}
+    if r.pending {pi=atomicAdd(&cache_group_counts[1],1u);}
+    workgroupBarrier();
+    if lane==0u {
+        cache_group_bases[0]=atomicAdd(&cache_work[0].data[CACHE_QUEUED],atomicLoad(&cache_group_counts[0]));
+        cache_group_bases[1]=atomicAdd(&cache_work[0].data[CACHE_PENDING],atomicLoad(&cache_group_counts[1]));
     }
-    atomicAdd(&cache_work[0].data[select(CACHE_BUSY_COUNT,CACHE_FULL_COUNT,f.y==CACHE_OVER)],1u);
-    cache_defer(pixel,CACHE_NONE);
+    workgroupBarrier();
+    if r.queue!=CACHE_NONE {
+        let q=cache_group_bases[0]+qi;
+        if q<cache_params[0].limits.x {atomicStore(&cache_work[0].data[cache_queue(0u)+q],r.queue);}
+    }
+    if r.pending {
+        let q=cache_group_bases[1]+pi;
+        if q<cache_params[0].limits.y {
+            atomicStore(&cache_work[0].data[cache_pending_base()+2u*q],id.x+id.y*size.x);
+            atomicStore(&cache_work[0].data[cache_pending_base()+2u*q+1u],r.slot);
+        }
+    }
 }
 
 fn cache_groups(n:u32)->vec3<u32> {
@@ -385,7 +483,7 @@ fn cache_groups(n:u32)->vec3<u32> {
 }
 
 // Fill: one invocation per planned cell. The window slides to the current sun; rays in the
-// disk that are not valid are traced against static geometry.
+// cone that are not valid are traced against static geometry.
 @compute @workgroup_size(64) fn cache_fill(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let index=id.x+id.y*groups.x*64u;
     let primary=atomicLoad(&cache_work[0].data[CACHE_FILL_PRIMARY]);
@@ -397,8 +495,7 @@ fn cache_groups(n:u32)->vec3<u32> {
     let bits=atomicLoad(&cache_table[0].data[w+2u]);let info=atomicLoad(&cache_table[0].data[w+3u]);
     let t=cache_lattice(ka,kb);
     let s=cache_state(t,bits,info);
-    let old=cache_meta_window(info);
-    var valid=cache_shift(bits>>16u,old,s.window);
+    var valid=s.valid_bits;
     var blocked=s.blocked;
     let r=cache_receiver(ka,kb);
     var rays=0u;
@@ -408,33 +505,44 @@ fn cache_groups(n:u32)->vec3<u32> {
         let d=cache_direction(t,s.window+vec2<i32>(i32(bit&3u),i32(bit>>2u)));
         let o=cache_origin(r,d);
         let tmax=cache_tmax(o,d);
-        if tmax>r.epsilon && cache_static(o,d,r.epsilon,tmax) {blocked|=m;}
+        if tmax>r.epsilon && cache_static(o,d,r.epsilon,tmax) {blocked|=m;} else {blocked&=~m;}
         valid|=m;rays+=1u;
     }
-    atomicStore(&cache_table[0].data[w+2u],blocked|(valid<<16u));
+    atomicStore(&cache_table[0].data[w+2u],(blocked&valid)|(valid<<16u));
     atomicStore(&cache_table[0].data[w+3u],cache_meta(info,s.window));
     atomicAdd(&cache_work[0].data[CACHE_FILLED],1u);
     atomicAdd(&cache_work[0].data[CACHE_RAYS],rays);
 }
 
-// Resolve: deferred pixels read their cell if the fill completed it, else take N0's
-// Interactive estimate at the pixel's own receiver (the fallback).
+// Resolve: deferred pixels read their cell if the fill made it usable (pixels whose claim
+// was in flight at lookup find it again, and claim it if it is still absent), else a usable
+// whole-triangle neighbour's value, else N0's Interactive estimate at the pixel's own
+// receiver (the fallback).
 @compute @workgroup_size(64) fn cache_resolve(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let index=id.x+id.y*groups.x*64u;
     if index>=min(atomicLoad(&cache_work[0].data[CACHE_PENDING]),cache_params[0].limits.y) {return;}
     let base=cache_pending_base()+2u*index;
-    let pixel=atomicLoad(&cache_work[0].data[base]);let slot=atomicLoad(&cache_work[0].data[base+1u]);
+    let pixel=atomicLoad(&cache_work[0].data[base]);var slot=atomicLoad(&cache_work[0].data[base+1u]);
     let size=textureDimensions(primary_hit);
     let p=vec2<i32>(vec2<u32>(pixel%size.x,pixel/size.x));
-    if slot!=CACHE_NONE {
-        let w=4u*slot;
-        let ka=atomicLoad(&cache_table[0].data[w]);let kb=atomicLoad(&cache_table[0].data[w+1u]);
-        let t=cache_lattice(ka,kb);
-        let s=cache_state(t,atomicLoad(&cache_table[0].data[w+2u]),atomicLoad(&cache_table[0].data[w+3u]));
-        if s.complete {
-            textureStore(fresh_output,p,vec4<u32>(cache_value(cache_composite(ka,kb,t,s),s.inside)));
-            return;
+    let hit=textureLoad(primary_hit,p,0);
+    if !cache_movers(hit.x-1u) {
+        let px=cache_pixel(hit);
+        if slot==CACHE_NONE {
+            // The claim was in flight at lookup: find the cell again, or claim it for later frames.
+            let f=cache_find(px.ka,px.kb,true);
+            if f.y==CACHE_FOUND {slot=f.x;}
         }
+        if slot!=CACHE_NONE {
+            let r=cache_read(slot);
+            if r.y!=0u {
+                atomicAdd(&cache_work[0].data[CACHE_RESOLVE_FOUND],1u);
+                textureStore(fresh_output,p,vec4<u32>(r.x));
+                return;
+            }
+        }
+        let s=cache_substitute(px);
+        if s!=CACHE_NONE {textureStore(fresh_output,p,vec4<u32>(s));return;}
     }
     atomicAdd(&cache_work[0].data[CACHE_FALLBACK],1u);
     let normal=textureLoad(fresh_normal,p,0);

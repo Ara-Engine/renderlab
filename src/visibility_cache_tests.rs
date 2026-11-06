@@ -265,7 +265,7 @@ impl Cache {
         FrameStats { lookup_ms: ms(0, 1), plan_ms: ms(2, 3), fill_ms: ms(4, 5), resolve_ms: ms(6, 7), total_ms: ms(0, 7), counters }
     }
     fn counters(&self, r: &Renderer) -> BTreeMap<String, u32> {
-        let words = read_words(r, &self.work, 0, 16);
+        let words = read_words(r, &self.work, 0, vc::work::NAMES.len() as u64);
         vc::work::NAMES.iter().zip(words).map(|(n, w)| ((*n).to_owned(), w)).collect()
     }
     /// Validation replay of every stored ray: (rays checked, mismatches, first dumps).
@@ -278,7 +278,7 @@ impl Cache {
             e.clear_buffer(&self.work, 0, Some(4 * vc::work::QUEUES as u64));
             self.pass(r, sw, e, &self.validate, Ok([x, groups.div_ceil(x)]), None);
         });
-        let w = read_words(r, &self.work, 0, 32);
+        let w = read_words(r, &self.work, 0, vc::work::QUEUES as u64);
         serde_json::json!({"checked": w[vc::work::CHECKED], "mismatches": w[vc::work::MISMATCH],
             "dump": &w[vc::work::DUMP..vc::work::DUMP + 8], "wall_s": started.elapsed().as_secs_f64()})
     }
@@ -336,22 +336,35 @@ fn summarize(frames: &[FrameStats]) -> serde_json::Value {
         "filled": spread_of(frames, c("filled")), "rays": spread_of(frames, c("rays")),
         "fallback": spread_of(frames, c("fallback")), "inserted": spread_of(frames, c("inserted")),
         "incomplete": spread_of(frames, c("incomplete")), "busy": spread_of(frames, c("busy")),
-        "probe_limit": spread_of(frames, c("probe_limit"))})
+        "probe_limit": spread_of(frames, c("probe_limit")), "substituted": spread_of(frames, c("substituted")),
+        "ring_claimed": spread_of(frames, c("ring_claimed")), "partial_used": spread_of(frames, c("partial_used")),
+        "resolve_found": spread_of(frames, c("resolve_found")), "warm": spread_of(frames, c("warm"))})
 }
 
-/// The CPU mirror of cache_lookup's key for one covered pixel: placements as (mesh,
-/// model, normal rows), and the camera eye.
+/// The CPU mirror of cache_lookup's keys: placements as (mesh, model, normal rows), each
+/// mesh's runtime adjacency (opposite-vertex edge order, as the GPU index buffers carry it),
+/// and the frame's pixel angle.
 struct Mirror<'a> {
     meshes: &'a [MeshData32],
     placements: Vec<(usize, Mat4, [[f32; 4]; 4])>,
+    adjacency: Vec<Vec<u32>>,
     pixel_angle: f32,
     cell_scale: f32,
+    flags: u32,
 }
-/// A pixel's key and how close its level and side decisions were to their boundaries.
+/// A pixel's key, its footprint, and how close its level and side decisions were to their
+/// boundaries (GPU and CPU f32 may decide those differently).
 struct Mirrored {
     key: Key,
+    footprint: f32,
     level_margin: f32,
     side_margin: f32,
+}
+/// unit_normal in scene.wgsl.
+fn unit(x: Vec3) -> Vec3 {
+    let s = x.abs().max_element().max(1e-30);
+    let x = x / s;
+    x * x.dot(x).max(1e-30).sqrt().recip()
 }
 impl Mirror<'_> {
     fn vertices(&self, placement: usize, primitive: u32) -> [Vec3; 3] {
@@ -359,55 +372,115 @@ impl Mirror<'_> {
         let (positions, indices) = &self.meshes[mesh];
         std::array::from_fn(|k| Vec3::from_array(positions[indices[3 * primitive as usize + k] as usize]))
     }
+    fn world(&self, placement: usize, p: Vec3) -> Vec3 {
+        (self.placements[placement].1 * p.extend(1.0)).truncate()
+    }
+    /// primary_geometric: the normal transform applied to the object winding normal.
+    fn geometric(&self, placement: usize, v: [Vec3; 3]) -> Vec3 {
+        let n = self.placements[placement].2;
+        let source = unit(unit(v[1] - v[0]).cross(unit(v[2] - v[0])));
+        unit(Vec3::from_slice(&n[0][..3]) * source.x + Vec3::from_slice(&n[1][..3]) * source.y + Vec3::from_slice(&n[2][..3]) * source.z)
+    }
     fn key(&self, record: [u32; 4], eye: Vec3) -> Mirrored {
         let placement = record[0] as usize - 1;
-        let (_, model, n) = self.placements[placement];
         let v = self.vertices(placement, record[1]);
         let bary = Vec2::new(f32::from_bits(record[2]), f32::from_bits(record[3]));
-        let world = |p: Vec3| (model * p.extend(1.0)).truncate();
-        let [a, b, c] = v.map(world);
+        let [a, b, c] = v.map(|p| self.world(placement, p));
         let w = Vec3::new(1.0 - bary.x - bary.y, bary.x, bary.y);
-        let object = v[2].mul_add(Vec3::splat(w.z), v[1].mul_add(Vec3::splat(w.y), v[0] * w.x));
-        let point = world(object);
+        let point = self.world(placement, v[2].mul_add(Vec3::splat(w.z), v[1].mul_add(Vec3::splat(w.y), v[0] * w.x)));
         let footprint = (eye - point).length() * self.pixel_angle * self.cell_scale;
         let area = 0.5 * (b - a).cross(c - a).length();
         let level = vc::level(area, footprint);
-        let unit = |x: Vec3| {
-            let s = x.abs().max_element().max(1e-30);
-            let x = x / s;
-            x * x.dot(x).max(1e-30).sqrt().recip()
-        };
-        let source = unit(unit(v[1] - v[0]).cross(unit(v[2] - v[0])));
-        let geometric = unit(Vec3::from_slice(&n[0][..3]) * source.x + Vec3::from_slice(&n[1][..3]) * source.y + Vec3::from_slice(&n[2][..3]) * source.z);
         let toward = eye - point;
-        let side_dot = geometric.dot(toward);
+        let side_dot = self.geometric(placement, v).dot(toward);
         let [i, j, upper] = vc::cell(bary, level);
         Mirrored {
             key: Key { placement: placement as u32, primitive: record[1], level, i, j, upper, side: u32::from(side_dot < 0.0) },
+            footprint,
             level_margin: vc::level_margin(area, footprint),
             side_margin: side_dot.abs() / toward.length(),
         }
     }
+    /// The keys with the other side or level of a near-boundary decision (for classifying
+    /// CPU/GPU key differences).
+    fn alternatives(&self, record: [u32; 4], m: &Mirrored) -> Vec<Key> {
+        let mut out = vec![];
+        if m.side_margin < 1e-5 {
+            out.push(Key { side: 1 - m.key.side, ..m.key });
+        }
+        if m.level_margin < 1e-4 {
+            let bary = Vec2::new(f32::from_bits(record[2]), f32::from_bits(record[3]));
+            for level in [m.key.level.saturating_sub(1), (m.key.level + 1).min(vc::MAX_LEVEL)] {
+                if level != m.key.level {
+                    let [i, j, upper] = vc::cell(bary, level);
+                    out.push(Key { level, i, j, upper, ..m.key });
+                }
+            }
+        }
+        out
+    }
+    /// cache_prefetch's claims for key `k` at `footprint`, and whether any of their own
+    /// decisions was near a boundary.
+    fn neighbours(&self, k: &Key, footprint: f32, eye: Vec3) -> (Vec<Key>, bool) {
+        if k.level > 0 {
+            if self.flags & vc::flags::SUBDIVISION == 0 {
+                return (vec![], false);
+            }
+            let last = (1u32 << k.level) - 1;
+            let keys = (0..3)
+                .filter_map(|e| {
+                    let (mut i, mut j) = (k.i as i32, k.j as i32);
+                    match (k.upper, e) {
+                        (0, 1) => i -= 1,
+                        (0, 2) => j -= 1,
+                        (1, 1) => i += 1,
+                        (1, 2) => j += 1,
+                        _ => {}
+                    }
+                    let up = 1 - k.upper;
+                    if i < 0 || j < 0 {
+                        return None;
+                    }
+                    let n = (i + j) as u32;
+                    (n <= last && !(up != 0 && n == last)).then_some(Key { i: i as u32, j: j as u32, upper: up, ..*k })
+                })
+                .collect();
+            return (keys, false);
+        }
+        if self.flags & vc::flags::RING == 0 {
+            return (vec![], false);
+        }
+        let placement = k.placement as usize;
+        let mesh = self.placements[placement].0;
+        let (mut keys, mut near) = (vec![], false);
+        for e in 0..3 {
+            let n = self.adjacency[mesh][3 * k.primitive as usize + e];
+            if n == crate::receiver_adjacency::MISSING {
+                continue;
+            }
+            let v = self.vertices(placement, n);
+            let [a, b, c] = v.map(|p| self.world(placement, p));
+            let area = 0.5 * (b - a).cross(c - a).length();
+            near |= vc::level_margin(area, footprint) < 1e-4 && vc::level(area, footprint) <= 1;
+            if vc::level(area, footprint) != 0 {
+                continue;
+            }
+            let centre = (a + b + c) * (1.0 / 3.0);
+            let toward = eye - centre;
+            let side_dot = self.geometric(placement, v).dot(toward);
+            near |= side_dot.abs() / toward.length() < 1e-5;
+            keys.push(Key { placement: k.placement, primitive: n, level: 0, i: 0, j: 0, upper: 0, side: u32::from(side_dot < 0.0) });
+        }
+        (keys, near)
+    }
 }
-/// The neighbours cache_prefetch claims for a new cell.
-fn prefetch_keys(k: &Key) -> Vec<Key> {
-    let last = (1u32 << k.level) - 1;
-    (0..3)
-        .filter_map(|e| {
-            let (mut i, mut j) = (k.i as i32, k.j as i32);
-            match (k.upper, e) {
-                (0, 1) => i -= 1,
-                (0, 2) => j -= 1,
-                (1, 1) => i += 1,
-                (1, 2) => j += 1,
-                _ => {}
-            }
-            let up = 1 - k.upper;
-            if i < 0 || j < 0 {
-                return None;
-            }
-            let n = (i + j) as u32;
-            (n <= last && !(up != 0 && n == last)).then_some(Key { i: i as u32, j: j as u32, upper: up, ..*k })
+/// Each mesh's runtime adjacency, built on the CPU as the upload builds it.
+fn adjacency(meshes: &[MeshData32]) -> Vec<Vec<u32>> {
+    meshes
+        .iter()
+        .map(|(positions, indices)| {
+            let vertices: Vec<Vertex> = positions.iter().map(|&position| Vertex { position, normal: [0.; 3], uv: [0.; 2], color: [1.; 4] }).collect();
+            crate::receiver_adjacency::build(&MeshData { vertices: &vertices, indices }).neighbours
         })
         .collect()
 }
@@ -516,7 +589,10 @@ fn gpu_visibility_cache_probe() {
                 list.push((slot, *m, n.0));
             }
         }
-        Mirror { meshes: &quarry.meshes, placements: list, pixel_angle: 0.0, cell_scale: 1.0 }
+        let built = Instant::now();
+        let adjacency = adjacency(&quarry.meshes);
+        eprintln!("cache_adjacency ms={:.0}", built.elapsed().as_secs_f64() * 1e3);
+        Mirror { meshes: &quarry.meshes, placements: list, adjacency, pixel_angle: 0.0, cell_scale: 1.0, flags: 0 }
     };
     summary.insert("memory".into(), serde_json::json!({"table_bytes": sizes.table_bytes(), "work_bytes": sizes.work_bytes(),
         "params_bytes": 144, "total_bytes": sizes.table_bytes() + sizes.work_bytes() + 144, "sizes": sizes,
@@ -524,7 +600,7 @@ fn gpu_visibility_cache_probe() {
     let chart = Chart::new(l, 0.04);
     let cell_scale = manifest["cell_scale"].as_f64().unwrap_or(1.0) as f32;
     let budget = manifest["budget"].as_u64().unwrap_or(65_536) as u32;
-    let prefetch = manifest["prefetch"].as_bool().unwrap_or(true);
+    let flags = manifest["flags"].as_u64().map_or(vc::flags::ALL, |f| f as u32);
     let base = |camera: &Camera, sun: Vec3, stamp: u32, budget: u32| Params {
         chart,
         sun,
@@ -534,7 +610,7 @@ fn gpu_visibility_cache_probe() {
         stamp,
         slots: sizes.slots,
         budget,
-        prefetch,
+        flags,
         queue: sizes.queue,
         pending: sizes.pending,
         probes: 64,
@@ -615,19 +691,113 @@ fn gpu_visibility_cache_probe() {
     summary.insert("validation_poses".into(), check);
     write(&summary);
 
-    // 2. The Q-walk: frame 0 is a cold view (unbounded fill), then the budgeted walk. The
-    // first 16 frames are replayed on the CPU from their hit records.
+    // 2. CPU replay of the Q-walk's first frames with unbounded fills: every frame's claimed
+    // key set is then a function of its hit records (centre keys, and the neighbours of
+    // centres not complete at the frame's start), so the GPU table must hold exactly the
+    // CPU's keys, each complete, in the CPU's window, with N0's any-hit for a sample of rays.
     let walk = cameras::Cameras::load(&manifest_path(&manifest, "walk")).unwrap();
     let hit = r.primary.as_ref().unwrap().targets.as_ref().unwrap().hit.texture.clone();
     let replay_frames = manifest["replay_frames"].as_u64().unwrap_or(16) as usize;
+    let mut mirror = mirror;
+    mirror.flags = flags;
+    let replay = {
+        let t = Instant::now();
+        cache.clear(&r);
+        let mut present: HashSet<Key> = HashSet::new();
+        let mut ambiguous: HashSet<Key> = HashSet::new();
+        let mut frames = vec![];
+        let mut cpu_ms = 0.0;
+        for pose in walk.frames.iter().take(replay_frames) {
+            let camera = pose.camera().unwrap();
+            receivers_at(&mut r, &mut asset, &camera);
+            let params = base(&camera, l, next(), unbounded);
+            frames.push(cache.frame(&r, &sw, &params));
+            let started = Instant::now();
+            mirror.pixel_angle = params.pixel_angle;
+            let eye = Vec3::from_array(pose.eye);
+            let records = u32s(&read_tex(&r, &hit));
+            let mut added: HashSet<Key> = HashSet::new();
+            for record in records.chunks_exact(4) {
+                if record[0] == 0 {
+                    continue;
+                }
+                let record: [u32; 4] = record.try_into().unwrap();
+                let m = mirror.key(record, eye);
+                for alt in mirror.alternatives(record, &m) {
+                    ambiguous.insert(alt);
+                    ambiguous.extend(mirror.neighbours(&alt, m.footprint, eye).0);
+                }
+                if present.contains(&m.key) {
+                    continue;
+                }
+                added.insert(m.key);
+                let (keys, near) = mirror.neighbours(&m.key, m.footprint, eye);
+                if near {
+                    ambiguous.extend(keys.iter().copied());
+                }
+                added.extend(keys);
+            }
+            present.extend(added);
+            cpu_ms += started.elapsed().as_secs_f64() * 1e3;
+        }
+        let gpu: HashMap<Key, [u32; 2]> = cache.slots(&r).iter().map(|s| (Key::unpack(s[0], s[1]), [s[2], s[3]])).collect();
+        let only_gpu: Vec<&Key> = gpu.keys().filter(|k| !present.contains(k)).collect();
+        let only_cpu: Vec<&Key> = present.iter().filter(|k| !gpu.contains_key(k)).collect();
+        let mut window_differences = 0;
+        let mut disk_differences = 0;
+        let mut incomplete = 0;
+        let mut rng = Rng(0x16f);
+        let mut sample = vec![];
+        let mut levels = BTreeMap::<u32, usize>::new();
+        for (k, [bits, meta]) in &gpu {
+            *levels.entry(k.level).or_default() += 1;
+            let lattice = vc::lattice(k.a(), k.b());
+            let window = chart.window(&lattice, l);
+            let disk = chart.disk(&lattice, window, l);
+            window_differences += usize::from(vc::meta_window(*meta) != window);
+            incomplete += usize::from((bits >> 16) & disk != disk);
+            disk_differences += usize::from((bits >> 16) != disk);
+            if rng.below(64) == 0 && sample.len() < 20_000 {
+                sample.push((*k, *bits, vc::meta_window(*meta)));
+            }
+        }
+        let world = CpuRays::new(&quarry.meshes, &bvhs, &mirror.placements);
+        let (mut rays, mut differ, mut differ_near) = (0, 0, 0);
+        for (k, bits, window) in &sample {
+            let lattice = vc::lattice(k.a(), k.b());
+            let receiver = world.receiver(&mirror, k);
+            for bit in 0..16 {
+                if (bits >> 16) & (1 << bit) == 0 {
+                    continue;
+                }
+                let d = chart.direction(&lattice, *window + IVec2::new(bit & 3, bit >> 2));
+                let blocked = world.blocked(&receiver, d, &scene, false).0;
+                rays += 1;
+                if blocked != (bits & (1 << bit) != 0) {
+                    differ += 1;
+                    differ_near += usize::from(world.blocked(&receiver, d, &scene, true).1 < 1e-6);
+                }
+            }
+        }
+        serde_json::json!({"frames": replay_frames, "frame_stats": summarize(&frames), "cpu_keys": present.len(), "gpu_keys": gpu.len(),
+            "gpu_keys_by_level": levels,
+            "only_gpu": only_gpu.len(), "only_cpu": only_cpu.len(),
+            "only_gpu_near_boundary": only_gpu.iter().filter(|k| ambiguous.contains(k)).count(),
+            "only_cpu_near_boundary": only_cpu.iter().filter(|k| ambiguous.contains(k)).count(),
+            "only_gpu_examples": only_gpu.iter().filter(|k| !ambiguous.contains(k)).take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
+            "only_cpu_examples": only_cpu.iter().filter(|k| !ambiguous.contains(k)).take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
+            "window_differences": window_differences, "cone_mask_differences": disk_differences, "incomplete_cells": incomplete,
+            "sampled_cells": sample.len(), "sampled_rays": rays, "ray_differences": differ, "ray_differences_within_1um_of_an_edge": differ_near,
+            "cpu_key_ms": cpu_ms, "replay_s": t.elapsed().as_secs_f64()})
+    };
+    eprintln!("cache_replay {replay}");
+    summary.insert("cpu_replay".into(), replay);
+    write(&summary);
+
+    // 3. The Q-walk: frame 0 is a cold view (unbounded fill), then the budgeted walk.
     let keep: Vec<u64> = manifest["walk_keep"].as_array().map_or(vec![0, 1, 16, 48, 64, 96, 128, 160], |a| a.iter().map(|v| v.as_u64().unwrap()).collect());
     cache.clear(&r);
     let mut frames = vec![];
-    let mut cpu_keys: HashSet<Key> = HashSet::new();
-    let mut margins: HashMap<Key, (f32, f32)> = HashMap::new();
-    let mut cpu_ms = 0.0;
-    let mut mirror = mirror;
-    let mut gpu_keys_at_replay = vec![];
     for (index, pose) in walk.frames.iter().enumerate() {
         let camera = pose.camera().unwrap();
         receivers_at(&mut r, &mut asset, &camera);
@@ -635,29 +805,6 @@ fn gpu_visibility_cache_probe() {
         let stats = cache.frame(&r, &sw, &params);
         if keep.contains(&(index as u64)) {
             save(&format!("walk-{index:03}.u32"), &read_counts(&r, &sw.counts));
-        }
-        if index < replay_frames {
-            let t = Instant::now();
-            mirror.pixel_angle = params.pixel_angle;
-            let eye = Vec3::from_array(pose.eye);
-            let records = u32s(&read_tex(&r, &hit));
-            for record in records.chunks_exact(4) {
-                if record[0] == 0 {
-                    continue;
-                }
-                let m = mirror.key(record.try_into().unwrap(), eye);
-                if cpu_keys.insert(m.key) && prefetch && m.key.level > 0 {
-                    for n in prefetch_keys(&m.key) {
-                        cpu_keys.insert(n);
-                    }
-                }
-                let entry = margins.entry(m.key).or_insert((f32::INFINITY, f32::INFINITY));
-                *entry = (entry.0.min(m.level_margin), entry.1.min(m.side_margin));
-            }
-            cpu_ms += t.elapsed().as_secs_f64() * 1e3;
-            if index + 1 == replay_frames {
-                gpu_keys_at_replay = cache.slots(&r);
-            }
         }
         if index % 16 == 0 {
             eprintln!("cache_walk {index} {}", serde_json::to_string(&stats).unwrap());
@@ -669,71 +816,11 @@ fn gpu_visibility_cache_probe() {
     summary.insert("walk".into(), serde_json::json!({"frames": frames, "cold_frame_0": frames[0], "after_frame_0": summarize(&frames[1..]),
         "moving": summarize(&moving), "end_equals_pose0_warm": walk_end == pose0_warm,
         "phases": walk.frames.iter().map(|p| p.phase.clone()).collect::<Vec<_>>()}));
-    eprintln!("cache_walk_summary {}", summary["walk"]["after_frame_0"]);
+    eprintln!("cache_walk_summary {}", summary["walk"]["moving"]);
     write(&summary);
     let check = cache.validate(&r, &sw, &base(&pose(0), l, next(), budget));
     eprintln!("cache_validate walk {check}");
     summary.insert("validation_walk".into(), check);
-
-    // 3. CPU replay of the first frames: the claimed key set, and every cell's window and
-    // in-cone mask, with N0's any-hit for a sample of its stored rays.
-    let replay = {
-        let t = Instant::now();
-        let gpu: HashMap<Key, [u32; 2]> = gpu_keys_at_replay.iter().map(|s| (Key::unpack(s[0], s[1]), [s[2], s[3]])).collect();
-        let only_gpu: Vec<&Key> = gpu.keys().filter(|k| !cpu_keys.contains(k)).collect();
-        let only_cpu: Vec<&Key> = cpu_keys.iter().filter(|k| !gpu.contains_key(k)).collect();
-        let near = |k: &Key| margins.get(k).is_some_and(|m| m.0 < 1e-4 || m.1 < 1e-5);
-        let mut window_differences = 0;
-        let mut disk_differences = 0;
-        let mut incomplete = 0;
-        let mut rng = Rng(0x16f);
-        let mut sample = vec![];
-        for (k, [bits, meta]) in &gpu {
-            let (a, b) = (k.a(), k.b());
-            let t = vc::lattice(a, b);
-            let window = chart.window(&t, l);
-            let disk = chart.disk(&t, window, l);
-            window_differences += usize::from(vc::meta_window(*meta) != window);
-            disk_differences += usize::from((bits >> 16) & disk != disk || (bits >> 16) != disk);
-            incomplete += usize::from((bits >> 16) & disk != disk);
-            if rng.below(64) == 0 && sample.len() < 20_000 {
-                sample.push((*k, *bits, vc::meta_window(*meta)));
-            }
-        }
-        // Stored rays against N0's CPU any-hit on the same f32 lattice point and direction.
-        let world = CpuRays::new(&quarry.meshes, &bvhs, &mirror.placements);
-        let (mut rays, mut differ, mut differ_near) = (0, 0, 0);
-        for (k, bits, window) in &sample {
-            let t = vc::lattice(k.a(), k.b());
-            let receiver = world.receiver(&mirror, k);
-            for bit in 0..16 {
-                if (bits >> 16) & (1 << bit) == 0 {
-                    continue;
-                }
-                let d = chart.direction(&t, *window + IVec2::new(bit & 3, bit >> 2));
-                let blocked = world.blocked(&receiver, d, &scene, false).0;
-                rays += 1;
-                if blocked != (bits & (1 << bit) != 0) {
-                    differ += 1;
-                    differ_near += usize::from(world.blocked(&receiver, d, &scene, true).1 < 1e-6);
-                }
-            }
-        }
-        serde_json::json!({"frames": replay_frames, "cpu_keys": cpu_keys.len(), "gpu_keys": gpu.len(),
-            "only_gpu": only_gpu.len(), "only_cpu": only_cpu.len(),
-            "only_gpu_near_boundary": only_gpu.iter().filter(|k| near(k)).count(),
-            "only_cpu_near_boundary": only_cpu.iter().filter(|k| near(k)).count(),
-            "only_gpu_examples": only_gpu.iter().take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
-            "only_cpu_examples": only_cpu.iter().take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
-            "window_differences": window_differences, "disk_mask_differences": disk_differences, "incomplete_cells": incomplete,
-            "sampled_cells": sample.len(), "sampled_rays": rays, "ray_differences": differ, "ray_differences_within_1um_of_an_edge": differ_near,
-            "cpu_key_ms": cpu_ms, "replay_s": t.elapsed().as_secs_f64()})
-    };
-    eprintln!("cache_replay {replay}");
-    summary.insert("cpu_replay".into(), replay);
-    write(&summary);
-    drop(margins);
-    drop(cpu_keys);
 
     // 4. Sun motion at pose 0 on a warm cache: 1 and 10 degrees per second at 60 Hz, then a
     // 5 degree jump. Production lighting follows the sun so the fallback traces it too.

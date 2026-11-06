@@ -26,27 +26,41 @@ pub const LOCK: u32 = 1;
 /// Mean lattice points inside the sun disk: Interactive's ray count.
 pub const RAYS: f32 = 8.0;
 
-/// Word offsets of the work buffer (`cache_work`): counters, indirect arguments, then the
-/// primary queue, the prefetch queue and the pending (pixel, slot) list.
+/// Word offsets of the work buffer (`cache_work`): counters, indirect arguments, the
+/// mismatch dump, then the primary queue, the prefetch queue and the pending (pixel, slot)
+/// list.
 pub mod work {
     pub const MISMATCH: usize = 14;
     pub const CHECKED: usize = 15;
-    pub const FILL_ARGS: usize = 16;
+    pub const FILL_ARGS: usize = 24;
     /// Resolve arguments follow the fill arguments: the probe copies both in one 32-byte copy.
-    pub const RESOLVE_ARGS: usize = 20;
+    pub const RESOLVE_ARGS: usize = 28;
     const _: () = assert!(RESOLVE_ARGS == FILL_ARGS + 4);
-    pub const DUMP: usize = 24;
-    pub const QUEUES: usize = 32;
+    pub const DUMP: usize = 32;
+    pub const QUEUES: usize = 40;
     /// Counter names in word order, for summaries.
-    pub const NAMES: [&str; 16] = [
+    pub const NAMES: [&str; 20] = [
         "pending", "queued", "queued_prefetch", "probe_limit", "busy", "filled", "rays",
         "fallback", "mover_rays", "warm", "incomplete", "inserted", "fill_primary",
-        "fill_prefetch", "mismatch", "checked",
+        "fill_prefetch", "mismatch", "checked", "substituted", "ring_claimed", "partial_used",
+        "resolve_found",
     ];
     /// Words for `queue` entries per region and `pending` pixels.
     pub fn words(queue: u32, pending: u32) -> usize {
         QUEUES + 2 * queue as usize + 2 * pending as usize
     }
+}
+/// `CacheParams.frame.w` bits (CACHE_FLAG_* in the WGSL).
+pub mod flags {
+    /// Prefetch the sub-triangles sharing an edge with an unusable cell.
+    pub const SUBDIVISION: u32 = 1;
+    /// Prefetch the whole-triangle cells across an unusable whole-triangle cell's edges.
+    pub const RING: u32 = 2;
+    /// A pixel whose own cell stays unusable shows a usable whole-triangle neighbour's value.
+    pub const SUBSTITUTE: u32 = 4;
+    /// Cells missing at most one ray in the cone stay usable.
+    pub const PARTIAL: u32 = 8;
+    pub const ALL: u32 = SUBDIVISION | RING | SUBSTITUTE | PARTIAL;
 }
 
 pub fn fresh_hash(input: u32) -> u32 {
@@ -229,7 +243,8 @@ pub struct Params {
     pub stamp: u32,
     pub slots: u32,
     pub budget: u32,
-    pub prefetch: bool,
+    /// `flags` bits.
+    pub flags: u32,
     pub queue: u32,
     pub pending: u32,
     pub probes: u32,
@@ -249,7 +264,7 @@ impl Params {
             glam::Vec4::new(self.pixel_angle, self.cell_scale, 0.0, 0.0),
         ];
         let mut words: Vec<u32> = floats.iter().flat_map(|v| v.to_array().map(f32::to_bits)).collect();
-        words.extend([self.stamp, self.slots - 1, self.budget, u32::from(self.prefetch)]);
+        words.extend([self.stamp, self.slots - 1, self.budget, self.flags]);
         words.extend([self.queue, self.pending, self.probes, u32::from(self.movers)]);
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
