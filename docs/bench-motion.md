@@ -346,6 +346,10 @@ no native comparison track or timing matrix.
 
 ## Reproduction
 
+Use a fresh output root when reproducing captures: completed evidence roots
+retain summaries and PNGs after raw-array cleanup, and their resume markers
+deliberately skip already completed engine configurations.
+
 ```powershell
 py -3 -B scripts/bench-motion-scene.py S2 --output E:/renderlab-work/motion-benches/S2/fixture
 py -3 -B scripts/bench-motion-scene.py S3 --output E:/renderlab-work/motion-benches/S3/fixture
@@ -360,6 +364,7 @@ py -3 -B scripts/bench-motion-score.py --root <root>
 py -3 -B scripts/bench-motion-score.py --root <root> --comparison-only
 py -3 -B scripts/bench-motion-audit.py --root <root>
 py -3 -B scripts/bench-motion-oracle.py --root E:/renderlab-work/motion-benches/S2
+py -3 -B scripts/bench-motion-inspect.py --root <root>
 py -3 -B scripts/bench-motion-html.py --root E:/renderlab-work/motion-benches
 ```
 
