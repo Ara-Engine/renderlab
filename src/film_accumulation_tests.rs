@@ -19,6 +19,9 @@ use primary_ray_gpu::film_accumulation;
 #[path = "t1a_integration_tests.rs"]
 mod integration_tests;
 
+#[path = "contact_fold_tests.rs"]
+mod contact_fold_tests;
+
 /// Two independent stratified halves of 512 samples (32 x 16 strata each), randomized in
 /// each stratum, so each half is an unbiased footprint estimate on its own.
 const T1_JITTER: &str = "\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x6a09e667u);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n let j=i%512u;\n return (vec2<f32>(f32(j%32u),f32(j/32u))+q)/vec2<f32>(32.0,16.0);\n}\n";
