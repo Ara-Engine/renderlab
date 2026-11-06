@@ -42,7 +42,7 @@ def save(path, value):
         claimed = True
         end = datetime.datetime.fromisoformat(value["utc"]) + datetime.timedelta(minutes=value["expected_minutes"])
         with SCHEDULE.open("a",encoding="utf-8") as f:
-            f.write(f"\n[contact-fold-bench reservation] owner=contact-fold-bench end={end.isoformat()} label={value['label']}\n")
+            f.write(f"\n[{runner.OWNER} reservation] owner={runner.OWNER} end={end.isoformat()} label={value['label']}\n")
     if path.name.endswith("-preflight.json"):
         foreground_before=foreground();value["foreground_read_only"]=foreground_before
     if isinstance(value,dict) and "command" in value:
