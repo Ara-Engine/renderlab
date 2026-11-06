@@ -1189,10 +1189,11 @@ fn gpu_light_grid_probe() {
     drop(refs);
     drop(packed);
     let soft = primary_ray_gpu::shader_sources(SOURCE).unwrap()[1].clone();
+    let query_source = lsg::traced_source(&soft, &bvh::constants(meshes, instances, stack), &heap.constants);
     let q = {
         let scopes = OperationScopes::new(&r.device);
-        let source = lsg::traced_source(&soft, &bvh::constants(meshes, instances, stack), &heap.constants);
-        let m = module(&r, &source);
+        let source = &query_source;
+        let m = module(&r, source);
         assert_eq!(source.matches(RECORD).count(), 1);
         assert_eq!(source.matches(DUMP).count(), 1);
         assert_eq!(source.matches(STEP).count(), 1);
@@ -1290,6 +1291,60 @@ fn gpu_light_grid_probe() {
     drop((quarry, bvhs));
     if manifest["first_look_only"].as_bool().unwrap_or(false) {
         return;
+    }
+    // Hillclimb screen on the base grid at pose 0: override variants of the query module,
+    // each byte-identical to N0's counts before it is timed against hardware with the base.
+    if let Some(variants) = manifest["screen"].as_array() {
+        let spec = &specs[0];
+        heap.build(&r, &scene, spec, start);
+        receivers_at(&mut r, &mut asset, 0);
+        submit(&r, |e| encode(&r, &sw, &p, Pass::SwShadows, e, None));
+        let n0_8 = read_counts(&r, &sw.counts);
+        submit(&r, |e| encode(&r, &sw, &p, Pass::SwExact, e, None));
+        let n0_256 = read_counts(&r, &sw.counts);
+        let m = module(&r, &query_source);
+        let mut compiled = vec![];
+        let mut identity = serde_json::Map::new();
+        for v in variants {
+            let name = v["name"].as_str().unwrap().to_owned();
+            let constants: Vec<(String, f64)> = v["constants"].as_object().into_iter().flatten()
+                .map(|(k, x)| (k.clone(), x.as_f64().unwrap())).collect();
+            let refs: Vec<(&str, f64)> = constants.iter().map(|(k, x)| (k.as_str(), *x)).collect();
+            let eight: Vec<_> = refs.iter().copied().chain(EIGHT).collect();
+            let scopes = OperationScopes::new(&r.device);
+            let pipes = [compute(&r, &sw.layout, &m, "fresh_compute", &eight), compute(&r, &sw.layout, &m, "fresh_compute", &refs)];
+            if let Some(e) = scopes.finish() {
+                panic!("screen variant {name} failed to compile: {e}");
+            }
+            // Every variant only adds exact BVH fallbacks, so one dispatch costs at most N0's.
+            let first_ms = time_once(&r, |e, s| sw.pass(&r, e, &pipes[0], g8x4, Some(s)));
+            submit(&r, |e| sw.pass(&r, e, &pipes[0], g8x4, None));
+            let d8 = differing(&read_counts(&r, &sw.counts), &n0_8);
+            submit(&r, |e| sw.pass(&r, e, &pipes[1], g2x2, None));
+            let d256 = differing(&read_counts(&r, &sw.counts), &n0_256);
+            let line = serde_json::json!({"constants": v["constants"], "vs_n0": {"shadows8": d8, "exact256": d256}, "first_ms": first_ms});
+            eprintln!("light_grid_screen {name} {line}");
+            identity.insert(name.clone(), line);
+            assert!(d8 == 0 && d256 == 0, "screen variant {name} changes the counts");
+            compiled.push((name, pipes));
+        }
+        let mut entries = vec![
+            Timed { name: "base/shadows8".into(), hw: Pass::HwShadows, sw: &sw, pipeline: &q.shadows, groups: g8x4 },
+            Timed { name: "base/exact256".into(), hw: Pass::HwExact, sw: &sw, pipeline: &q.exact, groups: g2x2 },
+        ];
+        for (name, pipes) in &compiled {
+            entries.push(Timed { name: format!("{name}/shadows8"), hw: Pass::HwShadows, sw: &sw, pipeline: &pipes[0], groups: g8x4 });
+            entries.push(Timed { name: format!("{name}/exact256"), hw: Pass::HwExact, sw: &sw, pipeline: &pipes[1], groups: g2x2 });
+        }
+        let reps = manifest["screen_reps"].as_u64().unwrap_or(12) as usize;
+        let timing = time_pairs(&r, &sw, &p, &entries, 4, reps);
+        eprintln!("light_grid_screen_timing {}", serde_json::json!(entries.iter().map(|e| (e.name.clone(),
+            timing[e.name.as_str()]["software"]["median_ms"].clone(), timing[e.name.as_str()]["hardware"]["median_ms"].clone())).collect::<Vec<_>>()));
+        summary.insert("screen".into(), serde_json::json!({"identity": identity, "timing": timing}));
+        write(&summary, "summary.json");
+        if manifest["screen_only"].as_bool().unwrap_or(false) {
+            return;
+        }
     }
     // Count identity against N0 at poses 0, 1 and return; 8 repeats at pose 0.
     let run = |r: &Renderer, safe: [bool; 2]| {
