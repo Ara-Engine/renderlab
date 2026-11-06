@@ -29,7 +29,7 @@ mod motion_bench_tests;
 mod virtual_shadow_tests;
 
 /// Optional `virtual` manifest object overriding `VirtualShadowSettings` fields.
-fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSettings> {
+pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSettings> {
     let v = m.get("virtual")?;
     let mut s = crate::VirtualShadowSettings::default();
     let f = |key: &str, value: &mut f32| {
@@ -50,6 +50,10 @@ fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSetting
     u("march_samples", &mut s.march_samples);
     u("bias_ulps", &mut s.bias_ulps);
     u("first_block", &mut s.first_block);
+    u("directions", &mut s.directions);
+    u("walk_cap", &mut s.walk_cap);
+    u("refresh", &mut s.refresh);
+    f("sun_hysteresis", &mut s.sun_hysteresis);
     if let Some(ring) = v["ring"].as_bool() {
         s.ring = ring;
     }

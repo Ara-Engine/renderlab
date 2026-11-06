@@ -693,15 +693,23 @@ fn gpu_visibility_quarry() {
     let lifts = list("lod_lift", visibility_buffer::DEFAULT_LOD_LIFT);
     // N8c: shadow caster cut errors (texels; negative = original geometry) and sun-turning
     // frames timed after each configuration's static frames.
-    let mut base = crate::VirtualShadowSettings::default();
-    if let Some(v) = m.get("virtual") {
-        if let Some(x) = v["first_block"].as_u64() {
-            base.first_block = x as u32;
-        }
-        if let Some(x) = v["march_samples"].as_u64() {
-            base.march_samples = x as u32;
-        }
-    }
+    // The manifest's `virtual` settings (N8c first_block and march_samples, N8e levers).
+    let parse = super::film_reference_tests::film_accumulation_tests::virtual_settings;
+    let base = parse(&m).unwrap_or_default();
+    // N8e: `virtual_variants` {name: settings} runs every configuration once per variant,
+    // labelled `-v{name}`, in this one process.
+    let variants: Vec<(String, crate::VirtualShadowSettings)> =
+        m["virtual_variants"].as_object().map_or_else(
+            || vec![(String::new(), base)],
+            |o| {
+                o.iter()
+                    .map(|(name, v)| {
+                        let settings = parse(&serde_json::json!({ "virtual": v }));
+                        (format!("-v{name}"), settings.unwrap_or_default())
+                    })
+                    .collect()
+            },
+        );
     let caster_errors = m["caster_error"]
         .as_array()
         .map(|v| v.iter().map(|x| Some(x.as_f64().unwrap() as f32)).collect())
@@ -769,22 +777,25 @@ fn gpu_visibility_quarry() {
                 }
             }
         }
-        for (mode, lod, extent, lift, caster) in configs {
+        let configs = configs
+            .into_iter()
+            .flat_map(|c| variants.iter().map(move |v| (c, v)));
+        for ((mode, lod, extent, lift, caster), (variant, settings)) in configs {
             r.primary_mode = mode;
             r.set_lod_error_pixels(lod);
             r.set_software_raster_extent(extent);
             r.set_lod_receiver_lift(lift);
             r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
-                caster_error_texels: caster.unwrap_or(base.caster_error_texels),
-                ..base
+                caster_error_texels: caster.unwrap_or(settings.caster_error_texels),
+                ..*settings
             })
             .unwrap();
             let suffix = match caster {
-                Some(c) if mode != PrimaryVisibility::Traced => format!("-ce{c}"),
-                _ => String::new(),
+                Some(c) if mode != PrimaryVisibility::Traced => format!("-ce{c}{variant}"),
+                _ => variant.clone(),
             };
             let label = if mode == PrimaryVisibility::Traced {
-                format!("p{pose}-Traced")
+                format!("p{pose}-Traced{suffix}")
             } else if lift != 0. {
                 format!("p{pose}-lod{lod}-sw{extent}-lift{lift}{suffix}")
             } else {

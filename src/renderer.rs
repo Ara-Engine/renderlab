@@ -2631,6 +2631,19 @@ impl Renderer {
             temporal,
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
+        // N8e: another pass writing the soft visibility target ends Virtual's rolling refresh,
+        // whose untouched tiles keep the counts it wrote last.
+        let virtual_frame = traced
+            && soft
+            && !temporal
+            && !interactive
+            && self.soft_mode == crate::SoftShadows::Virtual;
+        if soft
+            && !virtual_frame
+            && let Some(state) = self.virtual_shadows.as_mut()
+        {
+            state.rolling = false;
+        }
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
