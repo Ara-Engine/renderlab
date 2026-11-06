@@ -35,8 +35,10 @@ fn light_front_word(a:u32)->u32 {return light_front[a>>24u].data[a&0xffffffu];}
 fn light_entry_word(a:u32)->u32 {return light_entries[a>>24u].data[a&0xffffffu];}
 // Steps after which a ray falls back to the BVH; light_grid.rs MAX_STEPS must match.
 const LIGHT_GRID_MAX_STEPS:u32=4096u;
-// Stats-run bounds only (they keep a single dispatch short): fewer steps, and a cap on
-// entries read, past which a ray also falls back. Defaults leave the walk unchanged.
+// Walk bounds; past either one a ray falls back to N0's BVH, so answers are unchanged.
+// The stats run bounds both to keep one dispatch short. LIGHT_GRID_ENTRY_LIMIT=32 is the
+// retained hillclimb step (docs/non-rt-n4.md): 1.67x on 8-ray and Exact. Defaults leave
+// the walk unbounded.
 override LIGHT_GRID_STEP_LIMIT:u32=4096u;
 override LIGHT_GRID_ENTRY_LIMIT:u32=0xffffffffu;
 

@@ -84,6 +84,14 @@ N0's 25 cm cap saved nothing (10.9 against 10.1 ms, M): almost all software shad
 
 ## 5. First unit: N4, light-space caster grid
 
+**Result ([non-rt-n4.md](non-rt-n4.md)):** exact but too slow, so the stop rule triggered.
+
+- The GPU counts are byte-identical to N0's at poses 0, 1 and return.
+- Interactive costs 8.08 ms after one retained hillclimb step (13.58 ms before), against hardware's 0.42 ms.
+- Exact costs 198 ms, against 9.2 ms; a rebuild costs 305 ms; memory is 669 MB.
+- The bytes-scaled step-1 model projected 1.32 ms, so it was triggered too. The probe ran anyway as the brief directed; that is a recorded deviation.
+- The CPU replay was done in Rust, not Python, so it reuses N0's watertight test exactly.
+
 Owned files: `scripts/n4-lsg-replay.py`, `src/light_grid.rs`, `shaders/light_grid.wgsl`, `src/light_grid_tests.rs`. Branch from `origin/t3/software-bvh-traversal-probe` and reuse its harness, receivers and watertight test read-only. N1b, if run in parallel, owns `src/visibility_buffer*.rs` and `shaders/visibility_buffer*.wgsl`. Sol implements; Opus accepts.
 
 1. **CPU replay first, no GPU.** Build the grid for the registered sun in Python:
