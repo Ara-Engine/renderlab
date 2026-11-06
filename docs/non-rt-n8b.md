@@ -1,6 +1,6 @@
 # N8b: N8's quality misses root-caused and fixed; cost levers (non-RT Interactive)
 
-Follow-up unit to [N8](non-rt-n8.md), 2026-11-06 UTC, base `aee5007`, branch `t3/1ab178d6`. Bar (Islam, 2026-11-06): Unreal's quality on every measure at about Unreal's cost. Labels: **M** measured here, **I** inference.
+Follow-up unit to [N8](non-rt-n8.md), 2026-11-06 UTC, base `aee5007`, branch `t3/n8b-virtual-shadow-quality`. Bar (Islam, 2026-11-06): Unreal's quality on every measure at about Unreal's cost. Labels: **M** measured here, **I** inference.
 
 ## Result
 
