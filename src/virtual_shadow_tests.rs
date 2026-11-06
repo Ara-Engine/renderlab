@@ -106,7 +106,7 @@ fn sun(r: &mut Renderer, to_light: Vec3) {
     )
     .unwrap();
 }
-fn counts(bytes: &[u8]) -> Vec<u32> {
+pub(super) fn counts(bytes: &[u8]) -> Vec<u32> {
     bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
@@ -114,7 +114,7 @@ fn counts(bytes: &[u8]) -> Vec<u32> {
 }
 /// Per-ray agreement of N8 against hardware counts on the same directions, as a JSON row.
 /// Counts are 32 per visible ray; only covered receivers are compared.
-fn agreement(n8: &[u32], rt: &[u32], hit: &[u8]) -> serde_json::Value {
+pub(super) fn agreement(n8: &[u32], rt: &[u32], hit: &[u8]) -> serde_json::Value {
     let (mut pixels, mut equal, mut sum, mut flips, mut lost, mut invented) =
         (0u64, 0, 0u64, 0, 0, 0);
     for ((&a, &b), h) in n8.iter().zip(rt).zip(hit.chunks_exact(16)) {
@@ -132,6 +132,233 @@ fn agreement(n8: &[u32], rt: &[u32], hit: &[u8]) -> serde_json::Value {
     serde_json::json!({"covered":pixels,"equal":equal,"mean_abs_visibility":sum as f64/256./pixels.max(1) as f64,
         "flips_ge_half":flips,"umbra_with_light":lost,"lit_with_shadow":invented})
 }
+/// Rows of `rect` from a full image with `stride` bytes per pixel.
+fn crop_rows(bytes: &[u8], width: u32, rect: [u32; 4], stride: usize) -> Vec<u8> {
+    let mut out = vec![];
+    for y in rect[1]..rect[3] {
+        let row = (y * width) as usize * stride;
+        out.extend_from_slice(
+            &bytes[row + rect[0] as usize * stride..row + rect[2] as usize * stride],
+        );
+    }
+    out
+}
+/// N8b diagnosis of the frame `draw` renders: Interactive counts, then N8 counts and the
+/// `VSM_DEBUG` decision trace on the same receivers. Writes `{label}-interactive.u32`,
+/// `{label}-n8.u32`, `{label}-trace.u32x4` and `{label}-hit.u32`, cropped to `rect`.
+/// Leaves the renderer in `SoftShadows::Virtual` with the trace enabled, so a sequence
+/// keeps N8's page cache history (an Interactive frame does not touch it).
+pub(super) fn diagnose(
+    r: &mut Renderer,
+    out: &std::path::Path,
+    label: &str,
+    rect: Option<[u32; 4]>,
+    draw: &mut dyn FnMut(&mut Renderer),
+) {
+    if r.virtual_shadows.as_ref().is_none_or(|s| !s.debug) {
+        r.set_soft_shadows(SoftShadows::Virtual);
+        draw(r);
+        r.virtual_shadows.as_mut().unwrap().debug = true;
+        // The manifest's screen constants, if any (variant traces).
+        set_screen_constants(r, screen_constants(&manifest()));
+    }
+    r.set_soft_shadows(SoftShadows::Interactive);
+    draw(r);
+    let [hit, rt] = interactive_outputs(r);
+    r.set_soft_shadows(SoftShadows::Virtual);
+    draw(r);
+    let [hit_n8, n8] = interactive_outputs(r);
+    assert!(hit_n8 == hit, "N8 diagnosis traces the same camera hits");
+    let state = r.virtual_shadows.as_ref().unwrap();
+    let buffer = state.debug_buffer().unwrap().clone();
+    let mut trace = read_buffer(r, &buffer, buffer.size());
+    let width = r
+        .fresh
+        .as_ref()
+        .unwrap()
+        .targets
+        .as_ref()
+        .unwrap()
+        .visibility
+        .texture
+        .width();
+    let mut outputs = [hit, rt, n8];
+    if let Some(rect) = rect {
+        for (bytes, stride) in outputs.iter_mut().zip([16, 4, 4]) {
+            *bytes = crop_rows(bytes, width, rect, stride);
+        }
+        trace = crop_rows(&trace, width, rect, 32);
+    }
+    for (name, bytes) in ["hit", "interactive", "n8"].iter().zip(&outputs) {
+        fs::write(out.join(format!("{label}-{name}.u32")), bytes).unwrap();
+    }
+    fs::write(out.join(format!("{label}-trace.u32x4")), trace).unwrap();
+}
+/// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl).
+const SCREEN_CONSTANTS: [&str; 11] = [
+    "VSM_HORIZON",
+    "VSM_FIRST_BLOCK",
+    "VSM_FAR",
+    "VSM_ORIGIN_STEP",
+    "VSM_SPAN",
+    "VSM_CONTINUE",
+    "VSM_PEEL",
+    "VSM_ASCEND",
+    "VSM_REFINE",
+    "VSM_WALK_STEPS",
+    "VSM_EXTRA_SAMPLES",
+];
+/// `{"constants": {name: number}}` as the state's override list.
+pub(super) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)> {
+    v["constants"].as_object().map_or_else(Vec::new, |object| {
+        object
+            .iter()
+            .map(|(name, value)| {
+                let name = SCREEN_CONSTANTS
+                    .into_iter()
+                    .find(|c| c == name)
+                    .unwrap_or_else(|| panic!("unknown screen constant {name}"));
+                (name, value.as_f64().unwrap())
+            })
+            .collect()
+    })
+}
+/// Sets the lookup constants; the state must exist (after one Virtual frame).
+pub(super) fn set_screen_constants(r: &mut Renderer, constants: Vec<(&'static str, f64)>) {
+    r.virtual_shadows.as_mut().unwrap().constants = constants;
+}
+/// A traced renderer with the manifest's `virtual` settings, for the diagnosis tests.
+pub(super) fn diagnosis_renderer(m: &serde_json::Value) -> Renderer {
+    let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    if let Some(settings) = virtual_settings(m) {
+        r.set_virtual_shadow_settings(settings).unwrap();
+    }
+    r
+}
+
+/// N8b variant screen on quarry pose 0 (see motion_bench_tests::gpu_motion_virtual_screen):
+/// counts against Interactive and shadow GPU times, static and with the sun turning.
+#[test]
+#[ignore = "N8b GPU lease, quarry upload; 4 GiB start/2 GiB abort; offscreen variant screen"]
+fn gpu_virtual_quarry_screen() {
+    let m = manifest();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = diagnosis_renderer(&m);
+    let (mut asset, cameras) = load_quarry(&m, &mut r);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let color = target(&r, 1920, 1080);
+    let camera = cameras.frames[0].camera().unwrap();
+    let lighting =
+        lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let shadows = r.shadows.settings.clone();
+    let Light::Directional { travel, lux } = lighting.lights[0] else {
+        panic!("quarry sun");
+    };
+    let turn = m["turn_degrees"].as_f64().unwrap_or(0.03) as f32;
+    r.set_soft_shadows(SoftShadows::Interactive);
+    traced_frame(&mut r, &color, &camera, &mut asset, true);
+    let [hit, rt] = interactive_outputs(&r);
+    // Bring the GPU to its working clocks before the first variant's timing.
+    for _ in 0..30 {
+        traced_frame(&mut r, &color, &camera, &mut asset, true);
+    }
+    let ms = |r: &mut Renderer| -> Vec<f64> {
+        r.test_drain("N8b quarry screen");
+        r.poll()
+            .unwrap()
+            .gpu
+            .iter()
+            .filter_map(|s| s.visibility_compute.map(|d| d.as_secs_f64() * 1e3))
+            .collect()
+    };
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let mut rows = vec![];
+    for (name, v) in m["variants"].as_object().unwrap() {
+        let settings =
+            virtual_settings(&serde_json::json!({ "virtual": v["virtual"] })).unwrap_or_default();
+        r.set_virtual_shadow_settings(settings).unwrap();
+        r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+        r.set_soft_shadows(SoftShadows::Virtual);
+        traced_frame(&mut r, &color, &camera, &mut asset, true);
+        set_screen_constants(&mut r, screen_constants(v));
+        for _ in 0..4 {
+            traced_frame(&mut r, &color, &camera, &mut asset, true);
+        }
+        let [_, n8] = interactive_outputs(&r);
+        let mut row = agreement(&counts(&n8), &counts(&rt), &hit);
+        let _ = ms(&mut r);
+        for _ in 0..24 {
+            traced_frame(&mut r, &color, &camera, &mut asset, true);
+        }
+        let fixed = ms(&mut r);
+        for i in 1..=16 {
+            let mut lit = lighting.clone();
+            lit.lights[0] = Light::Directional {
+                travel: Mat4::from_rotation_y((turn * i as f32).to_radians())
+                    .transform_vector3(travel),
+                lux,
+            };
+            r.set_lighting_and_shadows(&lit, &shadows).unwrap();
+            traced_frame(&mut r, &color, &camera, &mut asset, true);
+        }
+        let turning = ms(&mut r);
+        row["variant"] = serde_json::json!(name);
+        row["static_shadow_ms_p50"] = serde_json::json!(median(fixed));
+        row["turning_shadow_ms_p50"] = serde_json::json!(median(turning));
+        row["stats"] = serde_json::json!(format!("{:?}", r.virtual_shadow_stats()));
+        eprintln!("N8b quarry screen {row}");
+        rows.push(row);
+    }
+    fs::write(
+        out.join("screen-quarry.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "N8b GPU lease, quarry upload; 4 GiB start/2 GiB abort; offscreen decision trace"]
+fn gpu_virtual_quarry_diagnose() {
+    let m = manifest();
+    let out = PathBuf::from(m["output"].as_str().unwrap()).join("quarry");
+    fs::create_dir_all(&out).unwrap();
+    let mut r = diagnosis_renderer(&m);
+    let (mut asset, cameras) = load_quarry(&m, &mut r);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let color = target(&r, 1920, 1080);
+    // Optional `variants`: {name: {settings}} screens on the one loaded asset; each writes
+    // quarry-<name>/ beside the base quarry/ trace.
+    let base = virtual_settings(&m).unwrap_or_default();
+    let mut variants = vec![(out.clone(), base)];
+    if let Some(list) = m["variants"].as_object() {
+        for (name, v) in list {
+            let s = virtual_settings(&serde_json::json!({ "virtual": v })).unwrap();
+            let dir = out.with_file_name(format!("quarry-{name}"));
+            fs::create_dir_all(&dir).unwrap();
+            variants.push((dir, s));
+        }
+    }
+    for (dir, settings) in variants {
+        r.set_virtual_shadow_settings(settings).unwrap();
+        for pose in [0usize, 1] {
+            let camera = cameras.frames[pose].camera().unwrap();
+            diagnose(&mut r, &dir, &format!("pose-{pose}"), None, &mut |r| {
+                traced_frame(r, &color, &camera, &mut asset, true);
+            });
+            eprintln!(
+                "N8b quarry {dir:?} pose {pose}: {:?}",
+                r.virtual_shadow_stats()
+            );
+        }
+    }
+}
+
 fn gpu_ms(r: &mut Renderer, frames: &mut Vec<serde_json::Value>, label: &str) {
     for s in r.poll().unwrap().gpu {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -308,8 +535,10 @@ fn gpu_virtual_quarry() {
         })
         .collect();
     r.set_soft_shadows(SoftShadows::Exact);
-    // A timing-only rerun can skip it (manifest "reference": false).
-    let poses_with_reference = if m["reference"].as_bool() == Some(false) {
+    // A timing-only rerun can skip it (manifest "reference": false), and a rerun into the
+    // same output reuses the one already built there (N8b).
+    let built = (0..2).all(|i| out.join(format!("pose-{i}-traced-reference.bin")).is_file());
+    let poses_with_reference = if m["reference"].as_bool() == Some(false) || built {
         0
     } else {
         2
@@ -351,11 +580,19 @@ fn gpu_virtual_quarry() {
     }
     // Interactive (hardware rays) is the same-direction control; N8 runs with its full
     // vertex 1-ring and with the receiver triangle alone.
+    let selected = |name: &str| {
+        m["modes"]
+            .as_array()
+            .is_none_or(|names| names.iter().any(|n| n.as_str() == Some(name)))
+    };
     for (name, mode, ring) in [
         ("interactive", SoftShadows::Interactive, true),
         ("n8", SoftShadows::Virtual, true),
         ("n8-ring0", SoftShadows::Virtual, false),
     ] {
+        if !selected(name) {
+            continue;
+        }
         r.set_virtual_shadow_settings(crate::VirtualShadowSettings { ring, ..base })
             .unwrap();
         r.set_soft_shadows(mode);
