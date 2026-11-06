@@ -369,6 +369,13 @@ impl Renderer {
                         "traced primary visibility requires hardware ray queries and TRACED_FEATURES",
                     ));
                 }
+                if mode == PrimaryVisibility::VisibilityBuffer
+                    && !visibility_buffer::supported(&self.device)
+                {
+                    return Err(Error::InvalidInput(
+                        "visibility-buffer primaries require VISIBILITY_FEATURES, VISIBILITY_RASTER_FEATURES and visibility_limits",
+                    ));
+                }
                 let state = self.primary.as_ref().ok_or(Error::InvalidInput(
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;

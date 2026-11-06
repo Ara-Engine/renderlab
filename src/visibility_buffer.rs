@@ -1,20 +1,145 @@
-//! N1b: full-detail cluster IDs/depth, two-phase conservative HZB rejection, and
-//! exact pixel-centre receiver reconstruction into the primary hit ABI. No LOD,
-//! lighting-model decisions, acceleration structures or ray-query instructions.
+//! N1c: primary visibility from a clusterLOD cut. Each frame selects one cut of every
+//! mesh's cluster hierarchy at a pixel error bound, culls it against the frustum and a
+//! two-phase HZB, rasterizes small clusters in software and the rest in hardware into one
+//! 64-bit (depth, cluster, triangle) buffer, then reconstructs exact pixel-centre
+//! receivers into the primary hit ABI. Meshes without an attached hierarchy are one
+//! level of original-geometry clusters. No lighting-model decisions, acceleration
+//! structures or ray-query instructions.
 use super::*;
 use primary_ray_gpu::Buffer;
+use rayon::prelude::*;
 
-const TRIANGLES: u32 = 128;
+/// Largest cluster: the software raster's workgroup and 7-bit triangle IDs.
+pub(crate) const MAX_CLUSTER: usize = 128;
+/// No refined group: the cluster is original geometry.
+pub(crate) const NONE: u32 = u32::MAX;
+/// `Cluster::counts` flag: per-triangle primitive IDs follow in the cluster data.
+const TABLE: u32 = 1 << 16;
+const CLUSTER_BYTES: u64 = 64;
+const GROUP_BYTES: u64 = 32;
+/// visibility_buffer_cull.wgsl's Args and Rejects header.
+const ARGS_BYTES: u64 = 64;
+const REJECT_HEADER: u64 = 400;
+/// Default projected-error bound for the cut, in pixels.
+pub(crate) const DEFAULT_LOD_PIXELS: f32 = 0.5;
+/// Clusters whose projected box exceeds this many pixels use the hardware raster.
+pub(crate) const DEFAULT_SOFTWARE_EXTENT: f32 = 32.;
+
+/// One cluster of at most 128 triangles over at most 128 of its mesh's vertices.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Cluster {
-    bounds: Aabb,
-    first: u32,
-    count: u32,
+    pub bounds: Aabb,
+    pub owner: u32,
+    pub refined: u32,
+    /// Word offsets into the mesh's cluster data: three position words per vertex.
+    pub vertices: u32,
+    pub triangles: u32,
+    /// First primitive ID, or with `TABLE` the word offset of per-triangle IDs.
+    pub primitives: u32,
+    /// Triangles | vertices << 8 | TABLE.
+    pub counts: u32,
 }
 
-pub(crate) fn clusters(data: &MeshData<'_>) -> (Vec<Cluster>, Vec<u32>) {
-    // Morton order gives small spatial clusters even for arbitrary source index order.
-    // Source primitive IDs stay unchanged: the raster follows this indirection table.
+/// A mesh's cluster records and LOD groups (sphere centre, radius, accumulated error;
+/// `f32::MAX` error never coarsens), plus the GPU words the records index: local vertex
+/// positions (exact object-space f32 copies), packed u8 local triangles and source
+/// primitive tables.
+pub(crate) struct Clusters {
+    pub clusters: Vec<Cluster>,
+    pub groups: Vec<[f32; 5]>,
+    pub data: Arc<Owned<wgpu::Buffer>>,
+}
+
+/// Accumulates clusters and their data words. `add` fills the open cluster; `finish`
+/// closes it with its LOD links.
+pub(crate) struct ClusterBuilder {
+    pub clusters: Vec<Cluster>,
+    pub words: Vec<u32>,
+    mark: Vec<u32>,
+    local: Vec<u8>,
+    vertices: Vec<u32>,
+    triangles: Vec<u32>,
+    primitives: Vec<u32>,
+}
+impl ClusterBuilder {
+    pub fn new(vertex_count: usize) -> Self {
+        Self {
+            clusters: vec![],
+            words: vec![],
+            mark: vec![0; vertex_count],
+            local: vec![0; vertex_count],
+            vertices: Vec::with_capacity(MAX_CLUSTER),
+            triangles: Vec::with_capacity(MAX_CLUSTER),
+            primitives: Vec::with_capacity(MAX_CLUSTER),
+        }
+    }
+    /// Adds a triangle unless the open cluster would exceed 128 triangles or vertices.
+    pub fn add(&mut self, triangle: [u32; 3], primitive: u32) -> bool {
+        let serial = self.clusters.len() as u32 + 1;
+        let new = (0..3)
+            .filter(|&k| {
+                let v = triangle[k];
+                self.mark[v as usize] != serial && !triangle[..k].contains(&v)
+            })
+            .count();
+        if self.triangles.len() == MAX_CLUSTER || self.vertices.len() + new > MAX_CLUSTER {
+            return false;
+        }
+        let mut packed = 0;
+        for (k, &v) in triangle.iter().enumerate() {
+            let v = v as usize;
+            if self.mark[v] != serial {
+                self.mark[v] = serial;
+                self.local[v] = self.vertices.len() as u8;
+                self.vertices.push(v as u32);
+            }
+            packed |= u32::from(self.local[v]) << (8 * k);
+        }
+        self.triangles.push(packed);
+        self.primitives.push(primitive);
+        true
+    }
+    /// Closes the open cluster. Contiguous primitive IDs store only the first.
+    pub fn finish(&mut self, vertices: &[Vertex], owner: u32, refined: u32) {
+        if self.triangles.is_empty() {
+            return;
+        }
+        let contiguous = self.primitives.windows(2).all(|w| w[1] == w[0] + 1);
+        let vertex_offset = self.words.len() as u32;
+        for &v in &self.vertices {
+            self.words
+                .extend(vertices[v as usize].position.map(f32::to_bits));
+        }
+        let triangle_offset = self.words.len() as u32;
+        self.words.extend_from_slice(&self.triangles);
+        let (primitives, table) = if contiguous {
+            (self.primitives[0], 0)
+        } else {
+            let offset = self.words.len() as u32;
+            self.words.extend_from_slice(&self.primitives);
+            (offset, TABLE)
+        };
+        self.clusters.push(Cluster {
+            bounds: Aabb::from_positions(
+                self.vertices.iter().map(|&v| vertices[v as usize].position),
+            )
+            .unwrap(),
+            owner,
+            refined,
+            vertices: vertex_offset,
+            triangles: triangle_offset,
+            primitives,
+            counts: self.triangles.len() as u32 | (self.vertices.len() as u32) << 8 | table,
+        });
+        self.vertices.clear();
+        self.triangles.clear();
+        self.primitives.clear();
+    }
+}
+
+/// Original-geometry clusters from Morton-sorted triangle centroids: one terminal
+/// group, so every cluster is always in the cut.
+pub(crate) fn source_clusters(data: &MeshData<'_>) -> ClusterBuilder {
     let bounds = Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap();
     let lo = Vec3::from_array(bounds.min);
     let scale = Vec3::splat(1023.) / (Vec3::from_array(bounds.max) - lo).max(Vec3::splat(1e-20));
@@ -42,27 +167,59 @@ pub(crate) fn clusters(data: &MeshData<'_>) -> (Vec<Cluster>, Vec<u32>) {
             (u64::from(morton) << 32) | id as u64
         })
         .collect();
-    order.sort_unstable();
-    let triangles: Vec<_> = order.into_iter().map(|v| v as u32).collect();
-    let clusters = triangles
-        .chunks(TRIANGLES as usize)
-        .enumerate()
-        .map(|(i, ids)| Cluster {
-            bounds: Aabb::from_positions(ids.iter().flat_map(|&p| {
-                data.indices[p as usize * 3..p as usize * 3 + 3]
-                    .iter()
-                    .map(|&i| data.vertices[i as usize].position)
-            }))
-            .unwrap(),
-            first: i as u32 * TRIANGLES,
-            count: ids.len() as u32,
-        })
-        .collect();
-    (clusters, triangles)
+    order.par_sort_unstable();
+    let mut builder = ClusterBuilder::new(data.vertices.len());
+    for primitive in order.into_iter().map(|v| v as u32) {
+        let p = primitive as usize * 3;
+        let triangle = [data.indices[p], data.indices[p + 1], data.indices[p + 2]];
+        if !builder.add(triangle, primitive) {
+            builder.finish(data.vertices, 0, NONE);
+            assert!(builder.add(triangle, primitive));
+        }
+    }
+    builder.finish(data.vertices, 0, NONE);
+    builder
 }
+
+impl Renderer {
+    /// Uploads cluster data words and wraps the records for a mesh.
+    pub(crate) fn upload_clusters(
+        &self,
+        clusters: Vec<Cluster>,
+        words: &[u32],
+        groups: Vec<[f32; 5]>,
+    ) -> Clusters {
+        let bytes = (words.len().max(1) * 4) as u64;
+        let data = Arc::new(self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("N1c cluster vertices, triangles and primitive tables"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        ));
+        if !words.is_empty() {
+            let mut staging = self
+                .queue
+                .write_buffer_with(&data, 0, std::num::NonZeroU64::new(bytes).unwrap())
+                .unwrap();
+            let (chunks, _) = staging.slice(..).into_chunks::<4>();
+            chunks.write_iter(words.iter().map(|w| w.to_ne_bytes()));
+        }
+        Clusters {
+            clusters,
+            groups,
+            data,
+        }
+    }
+}
+
 pub(super) fn supported(device: &wgpu::Device) -> bool {
     let limits = device.limits();
-    device.features().contains(crate::VISIBILITY_FEATURES)
+    device
+        .features()
+        .contains(crate::VISIBILITY_FEATURES | crate::VISIBILITY_RASTER_FEATURES)
         && crate::visibility_limits(limits.clone()) == limits
 }
 
@@ -103,41 +260,65 @@ pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/visibility_buffer_resolve.wgsl")
     ))
 }
+fn stage_source(stage: &str) -> String {
+    format!(
+        "{}\n{stage}",
+        include_str!("../shaders/visibility_buffer.wgsl")
+    )
+}
+
+/// Counters a pass leaves in its arguments buffer.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PassCounts {
+    pub software_clusters: u32,
+    pub hardware_clusters: u32,
+    pub cut_clusters: u32,
+    pub cut_triangles: u32,
+    pub software_triangles: u32,
+    pub hardware_triangles: u32,
+}
 
 pub(super) struct VisibilityBuffer {
     size: wgpu::Extent3d,
+    lift: f32,
     key: Vec<(wgpu::Buffer, usize)>,
-    transforms: Vec<Mat4>,
     matrix: Mat4,
+    frames: u64,
     count: u32,
     _clusters: Buffer,
-    _triangles: Buffer,
+    _groups: Buffer,
     configs: [Buffer; 2],
     _lists: [Buffer; 2],
     args: [Buffer; 2],
-    _rejected: Buffer,
+    rejects: Buffer,
     _repair_scan: Buffer,
-    ids: Depth,
+    _image: Buffer,
+    _absent: Buffer,
+    _visibility: Buffer,
     depth: Depth,
     _hzb: Depth,
     _hzb_absent: Depth,
-    hzb_sizes: Vec<[u32; 2]>,
     cull: wgpu::ComputePipeline,
-    raster: wgpu::RenderPipeline,
+    finish: wgpu::ComputePipeline,
+    software: wgpu::ComputePipeline,
+    hardware: wgpu::RenderPipeline,
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
     cull_groups: [wgpu::BindGroup; 2],
-    raster_groups: [wgpu::BindGroup; 2],
+    software_groups: [wgpu::BindGroup; 2],
+    hardware_groups: [wgpu::BindGroup; 2],
     hzb_groups: Vec<wgpu::BindGroup>,
     resolve_group: wgpu::BindGroup,
+    data_group: wgpu::BindGroup,
     // Binding resources are retained by wgpu command buffers across replacements.
     hit: wgpu::Texture,
     world: wgpu::Texture,
 }
 fn layout(device: &wgpu::Device, entries: &[wgpu::BindGroupLayoutEntry]) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("N1b ABI"),
+        label: Some("N1c ABI"),
         entries,
     })
 }
@@ -160,6 +341,13 @@ fn buffer_entry(
             has_dynamic_offset: false,
             min_binding_size: None,
         },
+    }
+}
+/// One read-only storage buffer per draw slot: the meshes' cluster data.
+fn data_entry(binding: u32, stages: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        count: std::num::NonZeroU32::new(crate::TRACED_DRAWS),
+        ..buffer_entry(binding, false, false, stages)
     }
 }
 fn tex_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
@@ -231,7 +419,7 @@ fn bind(
     entries: &[(u32, wgpu::BindingResource<'_>)],
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("N1b resources"),
+        label: Some("N1c resources"),
         layout,
         entries: &entries
             .iter()
@@ -242,6 +430,9 @@ fn bind(
             .collect::<Vec<_>>(),
     })
 }
+fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
+    values.into_iter().flat_map(u32::to_ne_bytes).collect()
+}
 impl VisibilityBuffer {
     fn new(r: &Renderer, draws: &[PreparedDraw<'_>], size: wgpu::Extent3d) -> Result<Self, Error> {
         use wgpu::{
@@ -250,137 +441,142 @@ impl VisibilityBuffer {
         let state = r.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
         let fresh = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
-        let count: usize = draws
-            .iter()
-            .map(|d| d.mesh.clusters.len() * d.instances.len())
-            .sum();
-        let bytes = (count.max(1) as u64)
-            .checked_mul(48)
-            .ok_or(Error::InvalidInput("visibility cluster table overflow"))?;
-        if bytes > r.device.limits().max_storage_buffer_binding_size {
+        let mut records = vec![];
+        let mut groups = vec![];
+        let mut placement = 0u32;
+        for d in draws {
+            let mesh = d.mesh.clusters.as_ref().ok_or(Error::InvalidInput(
+                "visibility buffer mesh uploaded without cluster data",
+            ))?;
+            let base = (groups.len() / 8) as u32;
+            for g in &mesh.groups {
+                groups.extend(g.map(f32::to_bits));
+                groups.extend([0; 3]);
+            }
+            for _ in 0..d.instances.len() {
+                for c in &mesh.clusters {
+                    let refined = if c.refined == NONE {
+                        NONE
+                    } else {
+                        c.refined + base
+                    };
+                    records.extend(c.bounds.min.map(f32::to_bits));
+                    records.push(c.vertices);
+                    records.extend(c.bounds.max.map(f32::to_bits));
+                    records.push(c.triangles);
+                    records.extend([
+                        c.owner + base,
+                        refined,
+                        c.primitives,
+                        c.counts,
+                        placement,
+                        0,
+                        0,
+                        0,
+                    ]);
+                }
+                placement += 1;
+            }
+        }
+        let count = records.len() / 16;
+        if count >= 1 << 25 {
+            return Err(Error::InvalidInput(
+                "visibility buffer supports at most 2^25 cluster instances",
+            ));
+        }
+        let limit = r.device.limits().max_storage_buffer_binding_size;
+        let bytes = count.max(1) as u64 * CLUSTER_BYTES;
+        if bytes > limit {
             return Err(Error::InvalidInput(
                 "visibility clusters exceed storage binding limit",
             ));
         }
         let storage = wgpu::BufferUsages::STORAGE;
-        let clusters = Buffer::new(r, "N1b source clusters", bytes, storage);
+        let clusters = Buffer::new(r, "N1c cluster instances", bytes, storage);
+        if !records.is_empty() {
+            r.queue
+                .write_buffer(&clusters.value, 0, &words(records.iter().copied()));
+        }
+        let group_buffer = Buffer::new(
+            r,
+            "N1c LOD groups",
+            (groups.len().max(8) / 8) as u64 * GROUP_BYTES,
+            storage,
+        );
+        if !groups.is_empty() {
+            r.queue
+                .write_buffer(&group_buffer.value, 0, &words(groups.iter().copied()));
+        }
         let configs = std::array::from_fn(|_| {
-            Buffer::new(r, "N1b view and pass", 80, wgpu::BufferUsages::UNIFORM)
+            Buffer::new(r, "N1c view and pass", 176, wgpu::BufferUsages::UNIFORM)
         });
-        let lists = std::array::from_fn(|_| {
-            Buffer::new(
-                r,
-                "N1b compact visible clusters",
-                count.max(1) as u64 * 4,
-                storage,
-            )
-        });
+        let list = |label, n: u64| Buffer::new(r, label, count.max(1) as u64 * 4 * n, storage);
+        let lists = std::array::from_fn(|_| list("N1c software then hardware clusters", 2));
         let args = std::array::from_fn(|_| {
             Buffer::new(
                 r,
-                "N1b indirect cluster raster",
-                16,
+                "N1c indirect software dispatch, hardware draw and counts",
+                ARGS_BYTES,
                 storage | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
             )
         });
-        let rejected = Buffer::new(
+        let rejects = Buffer::new(
             r,
-            "N1b previous depth rejects",
-            count.max(1) as u64 * 4,
-            storage,
+            "N1c pass-1 HZB rejects and pyramid dispatches",
+            REJECT_HEADER + count.max(1) as u64 * 4,
+            storage | wgpu::BufferUsages::INDIRECT,
         );
         let repair_scan = Buffer::new(
             r,
-            "N1b ambiguous-edge fallback policy",
+            "N1c ambiguous-edge fallback policy",
             crate::TRACED_DRAWS as u64 * 4,
             storage,
         );
-        let flags: Vec<_> = draws
-            .iter()
-            .map(|d| u32::from(d.mesh.repair_scan))
-            .chain(std::iter::repeat(0))
-            .take(crate::TRACED_DRAWS as usize)
-            .flat_map(u32::to_ne_bytes)
-            .collect();
+        let flags = words(
+            draws
+                .iter()
+                .map(|d| u32::from(d.mesh.repair_scan))
+                .chain(std::iter::repeat(0))
+                .take(crate::TRACED_DRAWS as usize),
+        );
         r.queue.write_buffer(&repair_scan.value, 0, &flags);
-        let mut references = vec![];
-        let mut bases = vec![];
-        let mut meshes: Vec<(wgpu::Buffer, u32)> = vec![];
-        for d in draws {
-            let buffer = (**d.mesh.index).clone();
-            let base = if let Some((_, base)) = meshes.iter().find(|(index, _)| *index == buffer) {
-                *base
-            } else {
-                let base = references.len() as u32;
-                references.extend_from_slice(&d.mesh.cluster_triangles);
-                meshes.push((buffer, base));
-                base
-            };
-            bases.push(base);
-        }
-        if references.len() as u64 * 4 > r.device.limits().max_storage_buffer_binding_size {
+        let image_size = Buffer::new(r, "N1c image size", 16, wgpu::BufferUsages::UNIFORM);
+        r.queue.write_buffer(
+            &image_size.value,
+            0,
+            &words([size.width, size.height, 0, 0]),
+        );
+        let pixels = u64::from(size.width) * u64::from(size.height) * 8;
+        if pixels > limit {
             return Err(Error::InvalidInput(
-                "visibility triangle indirection exceeds storage binding limit",
+                "visibility buffer exceeds storage binding limit",
             ));
         }
-        let triangles = Buffer::new(
-            r,
-            "N1b spatial-to-source triangle IDs",
-            (references.len().max(1) as u64) * 4,
-            storage,
-        );
-        if !references.is_empty() {
-            let bytes: Vec<_> = references.into_iter().flat_map(u32::to_ne_bytes).collect();
-            r.queue.write_buffer(&triangles.value, 0, &bytes);
-        }
-        let mut packed = Vec::with_capacity(bytes as usize);
-        let mut placement = 0u32;
-        for (d, base) in draws.iter().zip(bases) {
-            for _ in 0..d.instances.len() {
-                for c in &d.mesh.clusters {
-                    for x in c.bounds.min {
-                        packed.extend_from_slice(&x.to_ne_bytes());
-                    }
-                    packed.extend_from_slice(&(c.first + base).to_ne_bytes());
-                    for x in c.bounds.max {
-                        packed.extend_from_slice(&x.to_ne_bytes());
-                    }
-                    packed.extend_from_slice(&c.count.to_ne_bytes());
-                    for x in [placement, 0, 0, 0] {
-                        packed.extend_from_slice(&x.to_ne_bytes());
-                    }
-                }
-                placement += 1;
-            }
-        }
-        if !packed.is_empty() {
-            r.queue.write_buffer(&clusters.value, 0, &packed);
-        }
-        let ids = target(
-            r,
-            "N1b instance and source primitive",
-            size,
-            F::Rg32Uint,
-            1,
-            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
-        );
+        let visibility = Buffer::new(r, "N1c 64-bit depth and cluster IDs", pixels, storage);
         let depth = target(
             r,
-            "N1b full-detail depth",
+            "N1c hardware-cluster depth",
             size,
             F::Depth32Float,
             1,
-            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+            U::RENDER_ATTACHMENT,
         );
+        // Level 0 texels cover 2x2 pixels. Power-of-two sizes halve exactly; texels
+        // beyond the image stay 0.
         let extent = wgpu::Extent3d {
-            width: size.width.next_power_of_two(),
-            height: size.height.next_power_of_two(),
+            width: size.width.div_ceil(2).next_power_of_two(),
+            height: size.height.div_ceil(2).next_power_of_two(),
             depth_or_array_layers: 1,
         };
         let levels = 32 - extent.width.max(extent.height).leading_zeros();
+        if levels > 16 {
+            return Err(Error::InvalidInput(
+                "visibility buffer HZB exceeds 16 levels",
+            ));
+        }
         let hzb = target(
             r,
-            "N1b conservative min depth",
+            "N1c conservative min depth",
             extent,
             F::R32Float,
             levels,
@@ -388,7 +584,7 @@ impl VisibilityBuffer {
         );
         let hzb_absent = target(
             r,
-            "N1b unused HZB base input",
+            "N1c unused HZB base input",
             wgpu::Extent3d {
                 width: 1,
                 height: 1,
@@ -398,27 +594,46 @@ impl VisibilityBuffer {
             1,
             U::TEXTURE_BINDING,
         );
+        let raster_stages = S::VERTEX | S::FRAGMENT;
         let cull_layout = layout(
             &r.device,
             &[
                 buffer_entry(0, true, false, S::COMPUTE),
                 buffer_entry(1, false, false, S::COMPUTE),
-                buffer_entry(2, false, true, S::COMPUTE),
+                buffer_entry(2, false, false, S::COMPUTE),
                 buffer_entry(3, false, true, S::COMPUTE),
-                buffer_entry(4, false, true, S::COMPUTE),
-                sampled(5, wgpu::TextureSampleType::Float { filterable: false }),
+                buffer_entry(5, false, true, S::COMPUTE),
+                buffer_entry(6, false, true, S::COMPUTE),
+                sampled(7, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         );
-        let raster_layout = layout(
+        let software_layout = layout(
             &r.device,
-            &[0, 1, 2, 6].map(|b| buffer_entry(b, b == 0, false, S::VERTEX)),
+            &[
+                buffer_entry(0, true, false, S::COMPUTE),
+                buffer_entry(1, false, false, S::COMPUTE),
+                buffer_entry(3, false, false, S::COMPUTE),
+                buffer_entry(5, false, false, S::COMPUTE),
+                buffer_entry(8, false, true, S::COMPUTE),
+            ],
         );
+        let hardware_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, raster_stages),
+                buffer_entry(1, false, false, S::VERTEX),
+                buffer_entry(3, false, false, S::VERTEX),
+                buffer_entry(8, false, true, S::FRAGMENT),
+            ],
+        );
+        let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
         let hzb_layout = layout(
             &r.device,
             &[
-                sampled(0, wgpu::TextureSampleType::Depth),
+                buffer_entry(0, false, false, S::COMPUTE),
                 image(1, F::R32Float),
                 sampled(2, wgpu::TextureSampleType::Float { filterable: false }),
+                buffer_entry(3, true, false, S::COMPUTE),
             ],
         );
         let resolve_layout = layout(
@@ -427,7 +642,9 @@ impl VisibilityBuffer {
                 buffer_entry(0, true, false, S::COMPUTE),
                 buffer_entry(10, true, false, S::COMPUTE),
                 buffer_entry(30, false, false, S::COMPUTE),
-                sampled(29, wgpu::TextureSampleType::Uint),
+                buffer_entry(29, false, true, S::COMPUTE),
+                buffer_entry(31, false, false, S::COMPUTE),
+                buffer_entry(33, false, false, S::COMPUTE),
                 image(13, F::Rgba32Uint),
                 image(16, F::Rgba32Float),
                 image(17, F::Rgba32Float),
@@ -438,7 +655,7 @@ impl VisibilityBuffer {
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("N1b pipeline"),
+                    label: Some("N1c pipeline"),
                     bind_group_layouts: groups,
                     immediate_size: 0,
                 })
@@ -464,33 +681,34 @@ impl VisibilityBuffer {
                     cache: None,
                 })
         };
-        let source = include_str!("../shaders/visibility_buffer.wgsl");
-        let cull = compute(
-            &format!(
-                "{source}\n{}",
-                include_str!("../shaders/visibility_buffer_cull.wgsl")
-            ),
-            "cull",
-            &[Some(&cull_layout), Some(state.array_layout())],
+        let cull_source = stage_source(include_str!("../shaders/visibility_buffer_cull.wgsl"));
+        let groups_cull = [Some(&cull_layout), Some(state.array_layout())];
+        let cull = compute(&cull_source, "cull", &groups_cull, &[]);
+        let finish = compute(&cull_source, "finish", &groups_cull, &[]);
+        let software_pipeline = compute(
+            &stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
+            "raster",
+            &[
+                Some(&software_layout),
+                Some(state.array_layout()),
+                Some(&data_layout),
+            ],
             &[],
         );
         let shader = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("N1b ID raster"),
+            label: Some("N1c hardware ID raster"),
             source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{source}\n{}",
-                    include_str!("../shaders/visibility_buffer_raster.wgsl")
-                )
-                .into(),
+                stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
             ),
         });
-        let raster = r
+        let hardware_pipeline = r
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("N1b ID raster"),
+                label: Some("N1c hardware ID raster"),
                 layout: Some(&pipeline_layout(&[
-                    Some(&raster_layout),
+                    Some(&hardware_layout),
                     Some(state.array_layout()),
+                    Some(&data_layout),
                 ])),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -502,17 +720,15 @@ impl VisibilityBuffer {
                     module: &shader,
                     entry_point: Some("fs"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: F::Rg32Uint,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &[],
                 }),
                 primitive: Default::default(),
+                // GreaterEqual: equal-depth fragments still reach the 64-bit max, so
+                // ties never depend on the culler's nondeterministic draw order.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: F::Depth32Float,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Greater),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -528,10 +744,29 @@ impl VisibilityBuffer {
             compute(
                 &resolve_source,
                 "resolve",
-                &[Some(&resolve_layout), Some(state.array_layout())],
-                &[("WRITE_RECEIVERS", v)],
+                &[
+                    Some(&resolve_layout),
+                    Some(state.array_layout()),
+                    Some(&data_layout),
+                ],
+                &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
             )
         });
+        let state = r.primary.as_ref().unwrap();
+        let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
+        let data: Vec<_> = draws
+            .iter()
+            .map(|d| {
+                d.mesh
+                    .clusters
+                    .as_ref()
+                    .unwrap()
+                    .data
+                    .as_entire_buffer_binding()
+            })
+            .chain(std::iter::repeat(absent.value.as_entire_buffer_binding()))
+            .take(crate::TRACED_DRAWS as usize)
+            .collect();
         let cull_groups = std::array::from_fn(|i| {
             bind(
                 &r.device,
@@ -539,25 +774,40 @@ impl VisibilityBuffer {
                 &[
                     (0, configs[i].value.as_entire_binding()),
                     (1, clusters.value.as_entire_binding()),
-                    (2, lists[i].value.as_entire_binding()),
-                    (3, args[i].value.as_entire_binding()),
-                    (4, rejected.value.as_entire_binding()),
-                    (5, R::TextureView(&hzb.view)),
+                    (2, group_buffer.value.as_entire_binding()),
+                    (3, lists[i].value.as_entire_binding()),
+                    (5, args[i].value.as_entire_binding()),
+                    (6, rejects.value.as_entire_binding()),
+                    (7, R::TextureView(&hzb.view)),
                 ],
             )
         });
-        let raster_groups = std::array::from_fn(|i| {
+        let software_groups = std::array::from_fn(|i| {
             bind(
                 &r.device,
-                &raster_layout,
+                &software_layout,
                 &[
                     (0, configs[i].value.as_entire_binding()),
                     (1, clusters.value.as_entire_binding()),
-                    (2, lists[i].value.as_entire_binding()),
-                    (6, triangles.value.as_entire_binding()),
+                    (3, lists[i].value.as_entire_binding()),
+                    (5, args[i].value.as_entire_binding()),
+                    (8, visibility.value.as_entire_binding()),
                 ],
             )
         });
+        let hardware_groups = std::array::from_fn(|i| {
+            bind(
+                &r.device,
+                &hardware_layout,
+                &[
+                    (0, configs[i].value.as_entire_binding()),
+                    (1, clusters.value.as_entire_binding()),
+                    (3, lists[i].value.as_entire_binding()),
+                    (8, visibility.value.as_entire_binding()),
+                ],
+            )
+        });
+        let data_group = bind(&r.device, &data_layout, &[(8, R::BufferArray(&data))]);
         let views: Vec<_> = (0..levels)
             .map(|i| {
                 hzb.texture.create_view(&wgpu::TextureViewDescriptor {
@@ -574,7 +824,7 @@ impl VisibilityBuffer {
                     &r.device,
                     &hzb_layout,
                     &[
-                        (0, R::TextureView(&depth.view)),
+                        (0, visibility.value.as_entire_binding()),
                         (1, R::TextureView(&views[i as usize])),
                         (
                             2,
@@ -584,6 +834,7 @@ impl VisibilityBuffer {
                                 &views[i as usize - 1]
                             }),
                         ),
+                        (3, image_size.value.as_entire_binding()),
                     ],
                 )
             })
@@ -595,7 +846,9 @@ impl VisibilityBuffer {
                 (0, r.uniform.as_entire_binding()),
                 (10, state.frame_buffer().as_entire_binding()),
                 (30, repair_scan.value.as_entire_binding()),
-                (29, R::TextureView(&ids.view)),
+                (29, visibility.value.as_entire_binding()),
+                (31, clusters.value.as_entire_binding()),
+                (33, group_buffer.value.as_entire_binding()),
                 (13, R::TextureView(&t.hit.view)),
                 (16, R::TextureView(&fresh.world.view)),
                 (17, R::TextureView(&fresh.normal.view)),
@@ -605,62 +858,75 @@ impl VisibilityBuffer {
         );
         Ok(Self {
             size,
+            lift: r.lod_lift,
             key: draws
                 .iter()
                 .map(|d| ((**d.mesh.index).clone(), d.instances.len()))
                 .collect(),
-            transforms: vec![],
             matrix: Mat4::ZERO,
+            frames: 0,
             count: count as u32,
             _clusters: clusters,
-            _triangles: triangles,
+            _groups: group_buffer,
             configs,
             _lists: lists,
             args,
-            _rejected: rejected,
+            rejects,
             _repair_scan: repair_scan,
-            ids,
+            _image: image_size,
+            _absent: absent,
+            _visibility: visibility,
             depth,
             _hzb: hzb,
             _hzb_absent: hzb_absent,
-            hzb_sizes: (0..levels)
-                .map(|i| [(extent.width >> i).max(1), (extent.height >> i).max(1)])
-                .collect(),
             cull,
-            raster,
+            finish,
+            software: software_pipeline,
+            hardware: hardware_pipeline,
             base,
             reduce,
             resolve,
             cull_groups,
-            raster_groups,
+            software_groups,
+            hardware_groups,
             hzb_groups,
             resolve_group,
+            data_group,
             hit: (*t.hit.texture).clone(),
             world: (*fresh.world.texture).clone(),
         })
     }
-    fn pyramid(&self, encoder: &mut wgpu::CommandEncoder) {
-        for (i, (group, size)) in self.hzb_groups.iter().zip(&self.hzb_sizes).enumerate() {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("N1b HZB"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(if i == 0 { &self.base } else { &self.reduce });
+    /// Pass `i`'s pyramid; its dispatches are zero when nothing reads it.
+    fn pyramid(&self, encoder: &mut wgpu::CommandEncoder, i: usize, stamp: Stamp<'_>) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("N1c HZB"),
+            timestamp_writes: stamp.compute(),
+        });
+        for (level, group) in self.hzb_groups.iter().enumerate() {
+            pass.set_pipeline(if level == 0 { &self.base } else { &self.reduce });
             pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            let word = 4 + i * 48 + level * 3;
+            pass.dispatch_workgroups_indirect(&self.rejects.value, word as u64 * 4);
         }
     }
+    /// Both passes' counters. Test and diagnostic use only: waits for the GPU.
     #[cfg(test)]
-    pub(super) fn test_counts(&self, r: &Renderer) -> [u32; 3] {
+    pub(super) fn test_counts(&self, r: &Renderer) -> [PassCounts; 2] {
         let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("N1b 32-byte culling counters"),
-            size: 32,
+            label: Some("N1c culling counters"),
+            size: 2 * ARGS_BYTES,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut e = r.device.create_command_encoder(&Default::default());
         for i in 0..2 {
-            e.copy_buffer_to_buffer(&self.args[i].value, 0, &buffer, i as u64 * 16, 16);
+            e.copy_buffer_to_buffer(
+                &self.args[i].value,
+                0,
+                &buffer,
+                i as u64 * ARGS_BYTES,
+                ARGS_BYTES,
+            );
         }
         let done = Arc::new(OnceLock::new());
         let signal = done.clone();
@@ -676,61 +942,108 @@ impl VisibilityBuffer {
             .unwrap();
         done.get().unwrap().as_ref().unwrap();
         let bytes = buffer.get_mapped_range(..).unwrap();
-        [
-            self.count,
-            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-            u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
-        ]
+        let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        std::array::from_fn(|pass| {
+            let w = |i| word(pass * 16 + i);
+            PassCounts {
+                software_clusters: w(3),
+                hardware_clusters: w(5),
+                cut_clusters: w(8),
+                cut_triangles: w(9),
+                software_triangles: w(10),
+                hardware_triangles: w(11),
+            }
+        })
+    }
+    #[cfg(test)]
+    pub(super) fn cluster_instances(&self) -> u32 {
+        self.count
     }
 }
+
+/// Optional timestamp pair indices for one encoded stage.
+#[derive(Clone, Copy)]
+pub(crate) struct Stamp<'a>(Option<(&'a wgpu::QuerySet, u32)>);
+impl<'a> Stamp<'a> {
+    fn compute(self) -> Option<wgpu::ComputePassTimestampWrites<'a>> {
+        self.0
+            .map(|(query_set, i)| wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(i),
+                end_of_pass_write_index: Some(i + 1),
+            })
+    }
+    fn render(self) -> Option<wgpu::RenderPassTimestampWrites<'a>> {
+        self.0
+            .map(|(query_set, i)| wgpu::RenderPassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(i),
+                end_of_pass_write_index: Some(i + 1),
+            })
+    }
+}
+/// Diagnostic stage stamps: per pass cull, software, hardware, HZB; then resolve.
+#[cfg(test)]
+pub(crate) const STAGE_QUERIES: u32 = 18;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn spatial_clusters_preserve_each_source_triangle_and_its_bounds() {
-        let vertices: Vec<_> = (0..200u32)
-            .flat_map(|i| [[i as f32, 0., 0.], [i as f32, 1., 0.], [i as f32, 0., 1.]])
-            .map(|position| Vertex {
-                position,
-                normal: [0., 1., 0.],
-                uv: [0.; 2],
-                color: [1.; 4],
-            })
-            .collect();
-        let indices: Vec<_> = (0..vertices.len() as u32).collect();
-        let (clusters, ids) = clusters(&MeshData {
-            vertices: &vertices,
-            indices: &indices,
-        });
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, (0..200).collect::<Vec<_>>());
-        for c in clusters {
-            for &id in &ids[c.first as usize..(c.first + c.count) as usize] {
-                for &v in &indices[id as usize * 3..id as usize * 3 + 3] {
-                    let p = vertices[v as usize].position;
-                    assert!(
-                        (0..3)
-                            .all(|axis| p[axis] >= c.bounds.min[axis]
-                                && p[axis] <= c.bounds.max[axis])
-                    );
-                }
-            }
+    fn vertex(position: [f32; 3]) -> Vertex {
+        Vertex {
+            position,
+            normal: [0., 1., 0.],
+            uv: [0.; 2],
+            color: [1.; 4],
         }
     }
     #[test]
+    fn source_clusters_preserve_each_triangle_within_vertex_and_triangle_caps() {
+        // A strip with shared vertices and a fan that forces the vertex cap.
+        let mut vertices: Vec<_> = (0..300u32)
+            .map(|i| vertex([i as f32 * 0.01, (i % 2) as f32, 0.]))
+            .collect();
+        let mut indices: Vec<u32> = (0..298).flat_map(|i| [i, i + 1, i + 2]).collect();
+        let hub = vertices.len() as u32;
+        vertices.push(vertex([0., 0., 1.]));
+        for i in 0..299 {
+            indices.extend([hub, i, i + 1]);
+        }
+        let data = MeshData {
+            vertices: &vertices,
+            indices: &indices,
+        };
+        let b = source_clusters(&data);
+        let mut seen = vec![false; indices.len() / 3];
+        for c in &b.clusters {
+            let triangles = (c.counts & 255) as usize;
+            let count = ((c.counts >> 8) & 255) as usize;
+            assert!(triangles <= MAX_CLUSTER && count <= MAX_CLUSTER && triangles > 0);
+            let local = &b.words[c.vertices as usize..c.vertices as usize + 3 * count];
+            for k in 0..triangles {
+                let packed = b.words[c.triangles as usize + k];
+                let primitive = if c.counts & TABLE != 0 {
+                    b.words[c.primitives as usize + k]
+                } else {
+                    c.primitives + k as u32
+                } as usize;
+                assert!(!std::mem::replace(&mut seen[primitive], true));
+                for corner in 0..3 {
+                    let l = (packed >> (8 * corner) & 255) as usize;
+                    let p = vertices[indices[primitive * 3 + corner] as usize].position;
+                    assert_eq!(&local[3 * l..3 * l + 3], &p.map(f32::to_bits));
+                    assert!((0..3).all(|a| p[a] >= c.bounds.min[a] && p[a] <= c.bounds.max[a]));
+                }
+            }
+        }
+        assert!(seen.into_iter().all(|s| s));
+    }
+    #[test]
     fn visibility_shaders_have_no_ray_queries_and_validate() {
-        let base = include_str!("../shaders/visibility_buffer.wgsl");
         let mut sources = vec![
-            format!(
-                "{base}\n{}",
-                include_str!("../shaders/visibility_buffer_cull.wgsl")
-            ),
-            format!(
-                "{base}\n{}",
-                include_str!("../shaders/visibility_buffer_raster.wgsl")
-            ),
+            stage_source(include_str!("../shaders/visibility_buffer_cull.wgsl")),
+            stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
+            stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
             resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
         ];
@@ -775,6 +1088,24 @@ mod tests {
     }
 }
 impl Renderer {
+    /// Projected-error bound of the visibility buffer's cluster cut, in pixels.
+    /// Negative selects original geometry only. Meshes without an attached hierarchy
+    /// always draw their original geometry.
+    pub fn set_lod_error_pixels(&mut self, pixels: f32) {
+        self.lod_pixels = pixels;
+    }
+    pub fn lod_error_pixels(&self) -> f32 {
+        self.lod_pixels
+    }
+    #[cfg(test)]
+    pub(super) fn set_software_raster_extent(&mut self, pixels: f32) {
+        self.software_extent = pixels;
+    }
+    /// Scale of a coarse triangle's simplification error by which its shadow receiver
+    /// moves to the viewed side; 0 keeps receivers on the drawn LOD triangle.
+    pub fn set_lod_receiver_lift(&mut self, scale: f32) {
+        self.lod_lift = scale;
+    }
     pub(super) fn prepare_visibility_buffer(
         &mut self,
         draws: &[PreparedDraw<'_>],
@@ -807,7 +1138,11 @@ impl Renderer {
             .map(|d| ((**d.mesh.index).clone(), d.instances.len()))
             .collect();
         if self.visibility_buffer.as_ref().is_none_or(|v| {
-            v.size != size || v.key != key || v.hit != *primary.hit.texture || v.world != **world
+            v.size != size
+                || v.key != key
+                || v.lift != self.lod_lift
+                || v.hit != *primary.hit.texture
+                || v.world != **world
         }) {
             let scopes = OperationScopes::new(&self.device);
             let next = VisibilityBuffer::new(self, draws, size)?;
@@ -816,30 +1151,30 @@ impl Renderer {
             }
             self.visibility_buffer = Some(next);
         }
+        let (lod, extent) = (self.lod_pixels, self.software_extent);
         let v = self.visibility_buffer.as_mut().unwrap();
         let matrix = camera.matrix(size.width, size.height);
-        let transforms: Vec<_> = draws
-            .iter()
-            .flat_map(|d| d.instances.state.models.iter().copied())
-            .collect();
-        let valid = v.matrix == matrix && v.transforms == transforms;
+        let eye = camera.view().inverse().w_axis.truncate();
+        let scale = size.height as f32 * 0.5 / (camera.fov_y() * 0.5).tan();
+        let previous = if v.frames == 0 { matrix } else { v.matrix };
         for i in 0..2 {
             let mut bytes = matrix_bytes(matrix).to_vec();
+            bytes.extend_from_slice(&matrix_bytes(previous));
+            for value in [eye.x, eye.y, eye.z, scale, lod, camera.near(), extent, 0.] {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
             for word in [
                 v.count,
-                u32::from(i == 1 || valid),
+                u32::from(v.frames != 0),
                 i as u32,
                 size.width | (size.height << 16),
             ] {
                 bytes.extend_from_slice(&word.to_ne_bytes());
             }
             self.queue.write_buffer(&v.configs[i].value, 0, &bytes);
-            let args: [u32; 4] = [TRIANGLES * 3, 0, 0, 0];
-            let bytes: Vec<_> = args.into_iter().flat_map(u32::to_ne_bytes).collect();
-            self.queue.write_buffer(&v.args[i].value, 0, &bytes);
         }
         v.matrix = matrix;
-        v.transforms = transforms;
+        v.frames += 1;
         Ok(())
     }
     pub(super) fn encode_visibility_buffer(
@@ -848,13 +1183,24 @@ impl Renderer {
         soft: bool,
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        self.encode_visibility_stages(encoder, soft, stamps, None);
+    }
+    /// `stages` optionally receives STAGE_QUERIES diagnostic timestamps.
+    pub(super) fn encode_visibility_stages(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        soft: bool,
+        stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        stages: Option<&wgpu::QuerySet>,
+    ) {
         let v = self.visibility_buffer.as_ref().unwrap();
         let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
+        let stage = |i: u32| Stamp(stages.map(|q| (q, i * 2)));
         // A tiny first pass records the start; final resolve records the end. The
-        // existing primary timestamp span includes both culls, rasters and pyramids.
+        // existing primary timestamp span includes both passes and pyramids.
         {
             let _pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("N1b begin"),
+                label: Some("N1c begin"),
                 timestamp_writes: stamps.as_ref().map(|s| wgpu::ComputePassTimestampWrites {
                     query_set: s.query_set,
                     beginning_of_pass_write_index: s.beginning_of_pass_write_index,
@@ -862,34 +1208,43 @@ impl Renderer {
                 }),
             });
         }
+        // The previous frame's resolve zeroed every hit; new buffers start zeroed.
+        encoder.clear_buffer(&v.rejects.value, 0, Some(REJECT_HEADER));
         for i in 0..2 {
+            encoder.clear_buffer(&v.args[i].value, 0, None);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("N1b cluster cull"),
-                    timestamp_writes: None,
+                    label: Some("N1c LOD cut and cluster cull"),
+                    timestamp_writes: stage(i as u32 * 4).compute(),
                 });
                 pass.set_pipeline(&v.cull);
                 pass.set_bind_group(0, &v.cull_groups[i], &[]);
                 pass.set_bind_group(1, arrays, &[]);
-                let groups = v.count.div_ceil(128);
-                pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535).max(1), 1);
+                if i == 0 {
+                    let groups = v.count.div_ceil(64);
+                    pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535).max(1), 1);
+                } else {
+                    // Only pass 1's rejects, dispatched by pass 1's finish.
+                    pass.dispatch_workgroups_indirect(&v.args[0].value, 48);
+                }
+                pass.set_pipeline(&v.finish);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("N1c software raster"),
+                    timestamp_writes: stage(i as u32 * 4 + 1).compute(),
+                });
+                pass.set_pipeline(&v.software);
+                pass.set_bind_group(0, &v.software_groups[i], &[]);
+                pass.set_bind_group(1, arrays, &[]);
+                pass.set_bind_group(2, &v.data_group, &[]);
+                pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("N1b cluster IDs"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &v.ids.view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: if i == 0 {
-                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                            } else {
-                                wgpu::LoadOp::Load
-                            },
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    label: Some("N1c hardware raster"),
+                    color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &v.depth.view,
                         depth_ops: Some(wgpu::Operations {
@@ -902,28 +1257,33 @@ impl Renderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: stage(i as u32 * 4 + 2).render(),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&v.raster);
-                pass.set_bind_group(0, &v.raster_groups[i], &[]);
+                pass.set_pipeline(&v.hardware);
+                pass.set_bind_group(0, &v.hardware_groups[i], &[]);
                 pass.set_bind_group(1, arrays, &[]);
-                pass.draw_indirect(&v.args[i].value, 0);
+                pass.set_bind_group(2, &v.data_group, &[]);
+                pass.draw_indirect(&v.args[i].value, 16);
             }
-            v.pyramid(encoder);
+            v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("N1b exact hit resolve"),
-            timestamp_writes: stamps.as_ref().map(|s| wgpu::ComputePassTimestampWrites {
+        let resolve_stamps = stamps
+            .map(|s| wgpu::ComputePassTimestampWrites {
                 query_set: s.query_set,
                 beginning_of_pass_write_index: None,
                 end_of_pass_write_index: s.end_of_pass_write_index,
-            }),
+            })
+            .or(stage(8).compute());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("N1c exact hit resolve"),
+            timestamp_writes: resolve_stamps,
         });
         pass.set_pipeline(&v.resolve[usize::from(soft)]);
         pass.set_bind_group(0, &v.resolve_group, &[]);
         pass.set_bind_group(1, arrays, &[]);
+        pass.set_bind_group(2, &v.data_group, &[]);
         pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(4), 1);
     }
 }

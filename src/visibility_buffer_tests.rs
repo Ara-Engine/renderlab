@@ -1,5 +1,6 @@
-//! N1b batched agreement/quality/timing on a real device with RT disabled.
+//! N1b/N1c batched agreement/quality/timing, including a real device with RT disabled.
 use super::*;
+use rayon::prelude::*;
 
 fn no_rt_renderer() -> Renderer {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -16,6 +17,7 @@ fn no_rt_renderer() -> Renderer {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: crate::RECEIVER_FEATURES
             | crate::VISIBILITY_FEATURES
+            | crate::VISIBILITY_RASTER_FEATURES
             | crate::VIRTUAL_FEATURES
             | wgpu::Features::TIMESTAMP_QUERY,
         required_limits: crate::visibility_limits(wgpu::Limits::default()),
@@ -118,12 +120,183 @@ fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
     )
     .unwrap();
     if let Some(v) = &r.visibility_buffer {
+        let passes: Vec<_> = v
+            .test_counts(r)
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "software_clusters": c.software_clusters, "hardware_clusters": c.hardware_clusters,
+                    "cut_clusters": c.cut_clusters, "cut_triangles": c.cut_triangles,
+                    "software_triangles": c.software_triangles, "hardware_triangles": c.hardware_triangles})
+            })
+            .collect();
+        let row = serde_json::json!({"cluster_instances": v.cluster_instances(), "passes": passes});
         fs::write(
             out.join(format!("{label}.cull.json")),
-            serde_json::to_vec(&v.test_counts(r)).unwrap(),
+            serde_json::to_vec_pretty(&row).unwrap(),
         )
         .unwrap();
     }
+}
+
+/// Median per-stage GPU milliseconds of the prepared visibility buffer, encoded alone:
+/// per pass cull, software raster, hardware raster and HZB, then resolve.
+fn stage_profile(r: &mut Renderer, repeats: usize) -> Vec<f64> {
+    let n = visibility_buffer::STAGE_QUERIES;
+    let queries = r.device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("N1c stages"),
+        ty: wgpu::QueryType::Timestamp,
+        count: n,
+    });
+    let resolved = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("N1c stage timestamps"),
+        size: u64::from(n) * 8,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let period = f64::from(r.queue.get_timestamp_period());
+    let mut samples = vec![vec![]; n as usize / 2];
+    for _ in 0..repeats {
+        let read = r.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("N1c stage readback"),
+            size: u64::from(n) * 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut e = r.device.create_command_encoder(&Default::default());
+        r.encode_visibility_stages(&mut e, true, None, Some(&queries));
+        e.resolve_query_set(&queries, 0..n, &resolved, 0);
+        e.copy_buffer_to_buffer(&resolved, 0, &read, 0, u64::from(n) * 8);
+        e.map_buffer_on_submit(&read, wgpu::MapMode::Read, .., |result| result.unwrap());
+        r.queue.submit([e.finish()]);
+        r.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(20)),
+            })
+            .unwrap();
+        let bytes = read.get_mapped_range(..).unwrap();
+        let t: Vec<u64> = bytes
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        for (i, s) in samples.iter_mut().enumerate() {
+            s.push(t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period * 1e-6);
+        }
+    }
+    samples
+        .into_iter()
+        .map(|mut s| {
+            s.sort_by(f64::total_cmp);
+            s[s.len() / 2]
+        })
+        .collect()
+}
+
+/// `load_quarry` with each primitive's cooked clusterLOD hierarchy attached when the
+/// manifest names `virtual_manifest` and `virtual_cache`. Returns load/attach statistics.
+fn load_quarry_lod(
+    m: &serde_json::Value,
+    r: &mut Renderer,
+) -> (prepared::Prepared, cameras::Cameras, serde_json::Value) {
+    let path = |key: &str| PathBuf::from(m[key].as_str().unwrap());
+    let (policy, _) = policy::Policy::args(vec![
+        "--limits".into(),
+        path("limits").to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+    let lighting =
+        lighting_settings::parse(&fs::read_to_string(path("lighting")).unwrap()).unwrap();
+    let shadows = Shadows {
+        directional_disk_angle: 0.04,
+        requests: vec![ShadowRequest::Directional {
+            split_ends: vec![4., 12., 40.],
+        }],
+        ..Default::default()
+    };
+    r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+    let env = environment_controls::load_environment(
+        &path("environment"),
+        asset::environment::Limits {
+            max_dimension: 4096,
+            max_texels: 64 * 1024 * 1024,
+            max_payload_bytes: 128 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    let env = r.try_upload_environment(&env).unwrap().unwrap();
+    r.set_environment(Some(&env), EnvironmentParameters::default())
+        .unwrap();
+    r.test_drain("N1c quarry environment");
+    let started = Instant::now();
+    let bytes = fs::read(path("asset")).unwrap();
+    let source = asset::decode(&bytes, policy.prepared()).unwrap();
+    drop(bytes);
+    let decode_ms = started.elapsed().as_secs_f64() * 1e3;
+    let started = Instant::now();
+    let lods: Vec<MeshLod> = match m["virtual_manifest"].as_str() {
+        Some(manifest) => {
+            let package =
+                LodPackage::open(&path("virtual_cache"), std::path::Path::new(manifest)).unwrap();
+            let primitives: Vec<_> = source
+                .meshes
+                .iter()
+                .enumerate()
+                .flat_map(|(i, mesh)| mesh.primitives.iter().map(move |p| (i, p)))
+                .collect();
+            // Four meshes at a time bound the page and table working set.
+            primitives
+                .chunks(4)
+                .flat_map(|chunk| {
+                    chunk
+                        .par_iter()
+                        .map(|&(i, p)| {
+                            let data = MeshData {
+                                vertices: &p.vertices,
+                                indices: &p.indices,
+                            };
+                            package.mesh_lod(i, p.material, &data).unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+        None => vec![],
+    };
+    let lod_build_ms = started.elapsed().as_secs_f64() * 1e3;
+    let mut asset =
+        prepared::Prepared::new_with_limits(source, policy.prepared(), 1_000_000).unwrap();
+    let started = Instant::now();
+    while !asset.ready() {
+        asset.advance(r).unwrap();
+        r.collect().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(120));
+    }
+    r.test_drain("N1c quarry upload");
+    let upload_ms = started.elapsed().as_secs_f64() * 1e3;
+    let started = Instant::now();
+    for (mesh, lod) in asset.meshes_mut().iter_mut().zip(&lods) {
+        while r.try_attach_lod(mesh, lod).unwrap().is_none() {
+            r.collect().unwrap();
+        }
+    }
+    r.test_drain("N1c LOD attach");
+    let attach_ms = started.elapsed().as_secs_f64() * 1e3;
+    let meshes: Vec<_> = lods
+        .iter()
+        .map(|l| {
+            let s = l.stats;
+            serde_json::json!({"groups": s.groups, "clusters": s.clusters, "source_clusters": s.source_clusters,
+                "lod_triangles": s.lod_triangles, "unmatched_triangles": s.unmatched_triangles,
+                "pages": s.pages, "read_ms": s.read_ms, "build_ms": s.build_ms})
+        })
+        .collect();
+    let stats = serde_json::json!({"decode_ms": decode_ms, "lod_build_ms": lod_build_ms,
+        "upload_ms": upload_ms, "attach_ms": attach_ms, "meshes": meshes});
+    eprintln!("N1c load {stats}");
+    let cameras = cameras::Cameras::load(&path("cameras")).unwrap();
+    assert!(cameras.frames.len() >= 2);
+    (asset, cameras, stats)
 }
 
 fn reference(
@@ -230,7 +403,7 @@ fn gpu_visibility_bench() {
     } else {
         renderer_with_features(
             m["validate"].as_bool() != Some(false),
-            crate::VIRTUAL_FEATURES,
+            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
         )
     };
     if !no_rt {
@@ -475,7 +648,7 @@ fn gpu_visibility_fixture() {
 }
 
 #[test]
-#[ignore = "N1b owned GPU lease: quarry agreement and paired cost, asset loaded once"]
+#[ignore = "N1c owned GPU lease: quarry LOD cuts, agreement and paired cost, asset loaded once"]
 fn gpu_visibility_quarry() {
     let m = manifest();
     let out = PathBuf::from(m["output"].as_str().unwrap());
@@ -486,16 +659,40 @@ fn gpu_visibility_quarry() {
     } else {
         renderer_with_features(
             m["validate"].as_bool() != Some(false),
-            crate::VIRTUAL_FEATURES,
+            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
         )
     };
-    let (mut asset, cameras) = load_quarry(&m, &mut r);
+    let (mut asset, cameras, load) = load_quarry_lod(&m, &mut r);
+    fs::write(
+        out.join("load.json"),
+        serde_json::to_vec_pretty(&load).unwrap(),
+    )
+    .unwrap();
     if !no_rt {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     }
     r.set_soft_shadows(SoftShadows::Virtual);
     let color = target(&r, 1920, 1080);
+    // Cut error bounds (px; negative = original geometry) and software extents (px).
+    let list = |key: &str, default: f32| -> Vec<f32> {
+        m[key].as_array().map_or(vec![default], |v| {
+            v.iter().map(|x| x.as_f64().unwrap() as f32).collect()
+        })
+    };
+    let lods = list("lod_pixels", visibility_buffer::DEFAULT_LOD_PIXELS);
+    let extents = list(
+        "software_extent",
+        visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
+    );
+    let lifts = list("lod_lift", 0.);
+    let poses: Vec<usize> = m["poses"].as_array().map_or(vec![0, 1, 0], |v| {
+        v.iter().map(|x| x.as_u64().unwrap() as usize).collect()
+    });
+    let stage_repeats = m["stage_repeats"].as_u64().unwrap_or(8) as usize;
+    let mut stages = vec![];
+    let mut changed = vec![];
     let mut rows = vec![];
+    // The 64-seed Exact reference needs traced fresh visibility (an RT device).
     let seeded = if !no_rt && m["reference"].as_bool() != Some(false) {
         let module = seeded_module(&r);
         (1..=64u32)
@@ -512,7 +709,7 @@ fn gpu_visibility_quarry() {
     } else {
         vec![]
     };
-    for (pose, index) in [0usize, 1, 0].into_iter().enumerate() {
+    for (pose, index) in poses.into_iter().enumerate() {
         let camera = cameras.frames[index].camera().unwrap();
         if !seeded.is_empty() && pose < 2 {
             r.primary_mode = PrimaryVisibility::Traced;
@@ -526,22 +723,35 @@ fn gpu_visibility_quarry() {
             reference(&mut r, &seeded, &out, &format!("p{pose}"));
             r.set_soft_shadows(SoftShadows::Virtual);
         }
-        let modes = if no_rt {
-            vec![PrimaryVisibility::VisibilityBuffer]
-        } else {
-            vec![
-                PrimaryVisibility::Traced,
-                PrimaryVisibility::VisibilityBuffer,
-            ]
-        };
-        for mode in modes {
+        let mut configs = vec![];
+        if !no_rt {
+            configs.push((PrimaryVisibility::Traced, 0., 0., 0.));
+        }
+        for &lod in &lods {
+            for &extent in &extents {
+                for &lift in &lifts {
+                    configs.push((PrimaryVisibility::VisibilityBuffer, lod, extent, lift));
+                }
+            }
+        }
+        for (mode, lod, extent, lift) in configs {
             r.primary_mode = mode;
-            let label = format!("p{pose}-{mode:?}");
+            r.set_lod_error_pixels(lod);
+            r.set_software_raster_extent(extent);
+            r.set_lod_receiver_lift(lift);
+            let label = if mode == PrimaryVisibility::Traced {
+                format!("p{pose}-Traced")
+            } else if lift != 0. {
+                format!("p{pose}-lod{lod}-sw{extent}-lift{lift}")
+            } else {
+                format!("p{pose}-lod{lod}-sw{extent}")
+            };
             let warm = if m["timing"].as_bool() == Some(true) {
                 32
             } else {
                 4
             };
+            let mut first = None;
             for i in 0..warm + 8 {
                 render(
                     &mut r,
@@ -549,8 +759,14 @@ fn gpu_visibility_quarry() {
                     &camera,
                     &mut asset.draws(Visibility::Frustum),
                 );
+                // The first frame after a camera or cut change culls pass 1 with the
+                // previous frame's HZB; its final hits must equal the settled frame's.
+                if i == 0 && mode == PrimaryVisibility::VisibilityBuffer {
+                    r.test_drain("N1c first changed frame");
+                    first = Some(hit_record(&r));
+                }
                 if warm == 4 || i + 1 == warm {
-                    r.test_drain("N1b quarry frame");
+                    r.test_drain("N1c quarry frame");
                 }
                 if i + 1 == warm {
                     let _ = r.poll().unwrap();
@@ -558,11 +774,35 @@ fn gpu_visibility_quarry() {
                     timing(&mut r, if i < warm { "warm" } else { &label }, &mut rows);
                 }
             }
-            r.test_drain("N1b quarry timing tail");
+            r.test_drain("N1c quarry timing tail");
             timing(&mut r, &label, &mut rows);
+            if let Some(first) = first {
+                let settled = first == hit_record(&r);
+                changed.push(
+                    serde_json::json!({"label": label, "first_frame_hits_equal_settled": settled}),
+                );
+                assert!(
+                    settled,
+                    "{label}: first changed frame differs from the settled frame"
+                );
+            }
+            if mode == PrimaryVisibility::VisibilityBuffer && stage_repeats > 0 {
+                let ms = stage_profile(&mut r, stage_repeats);
+                stages.push(serde_json::json!({"label": label, "lod_pixels": lod, "software_extent": extent, "lod_lift": lift, "stage_ms": ms}));
+            }
             snapshot(&mut r, &out, &label);
         }
     }
+    fs::write(
+        out.join("stages.json"),
+        serde_json::to_vec_pretty(&stages).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        out.join("changed-frames.json"),
+        serde_json::to_vec_pretty(&changed).unwrap(),
+    )
+    .unwrap();
     fs::write(
         out.join("timing.json"),
         serde_json::to_vec_pretty(&rows).unwrap(),

@@ -16,10 +16,13 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
+#[path = "mesh_lod.rs"]
+mod mesh_lod;
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
 #[path = "visibility_buffer.rs"]
 pub(crate) mod visibility_buffer;
+pub use mesh_lod::{LodPackage, LodStats, MeshLod};
 pub use virtual_shadow_gpu::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
 #[path = "program_gpu.rs"]
 mod program_gpu;
@@ -503,6 +506,10 @@ pub struct Renderer {
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
     visibility_buffer: Option<visibility_buffer::VisibilityBuffer>,
+    /// N1c cut error bound and software-raster cluster extent, in pixels.
+    lod_pixels: f32,
+    software_extent: f32,
+    lod_lift: f32,
     soft_mode: crate::SoftShadows,
     /// `SoftShadows::Virtual` state, created by its first frame (N8).
     virtual_shadows: Option<virtual_shadow_gpu::VirtualState>,
@@ -968,6 +975,9 @@ impl Renderer {
             primary,
             primary_mode: PrimaryVisibility::Raster,
             visibility_buffer: None,
+            lod_pixels: visibility_buffer::DEFAULT_LOD_PIXELS,
+            software_extent: visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
+            lod_lift: 0.,
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
@@ -1539,7 +1549,12 @@ impl Renderer {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh indices"),
                 size: index_bytes,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas | traced,
+                // COPY_SRC: attaching a cluster LOD hierarchy copies the source indices.
+                usage: wgpu::BufferUsages::INDEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
+                    | blas
+                    | traced,
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
@@ -1676,14 +1691,13 @@ impl Renderer {
             ..CpuFrame::default()
         };
         self.check_fault()?;
-        let (clusters, cluster_triangles) = if self.primary.is_some() {
-            visibility_buffer::clusters(data)
-        } else {
-            Default::default()
-        };
+        let clusters =
+            (self.primary.is_some() && visibility_buffer::supported(&self.device)).then(|| {
+                let b = visibility_buffer::source_clusters(data);
+                self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
+            });
         Ok(Some(Mesh {
             clusters,
-            cluster_triangles,
             repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),
             acceleration,
             tangent,

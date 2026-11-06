@@ -32,13 +32,14 @@ pub use material::{
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
 pub use primary_ray::{
-    PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES, traced_limits,
-    visibility_limits,
+    PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES,
+    VISIBILITY_RASTER_FEATURES, traced_limits, visibility_limits,
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
+pub use renderer::{LodPackage, LodStats, MeshLod};
 pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;

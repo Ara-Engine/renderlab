@@ -1,26 +1,40 @@
-// Full-detail cluster culling and hardware ID raster. Original implementation of
-// two-phase HZB culling (see docs/research/reuse-non-rt.md). Hardware clips against
-// the near plane and applies its top-left fill rule; IDs retain source triangles.
+// N1c: clusterLOD cut, two-phase HZB culling and a software/hardware ID raster into one
+// 64-bit (depth, cluster, triangle) visibility buffer. Original implementation of the
+// Nanite/Bevy design surveyed in docs/research/reuse-non-rt.md; no third-party source.
+// Hardware clusters clip against the near plane; software clusters are small and in front.
 enable wgpu_binding_array;
-struct Config {matrix:mat4x4<f32>,info:vec4<u32>};
-struct Cluster {lo:vec3<f32>,first:u32,hi:vec3<f32>,count:u32,placement:u32,pad0:u32,pad1:u32,pad2:u32};
+struct Config {
+    // Current and previous-frame view-projection; pass 1 tests last frame's HZB.
+    matrix:mat4x4<f32>,
+    previous:mat4x4<f32>,
+    // Camera position; w = pixels per unit error at unit distance (height/2 * cot(fov/2)).
+    eye:vec4<f32>,
+    // x error threshold in pixels (negative: original geometry only), y near distance,
+    // z largest software-raster cluster extent in pixels.
+    lod:vec4<f32>,
+    // x cluster count, y previous HZB valid, z pass, w width | height << 16.
+    info:vec4<u32>,
+};
+// Object-space box; vertices/triangles are word offsets into the mesh's cluster data
+// (three f32 position words per local vertex, then packed u8 local triangles in the
+// index buffer's corner order). primitives is the first primitive ID, or with TABLE set
+// the offset of per-triangle source primitive IDs. counts holds
+// triangles | vertices << 8 | TABLE.
+struct Cluster {lo:vec3<f32>,vertices:u32,hi:vec3<f32>,triangles:u32,owner:u32,refined:u32,primitives:u32,counts:u32,placement:u32,pad0:u32,pad1:u32,pad2:u32};
 @group(0) @binding(0) var<uniform> config:Config;
 @group(0) @binding(1) var<storage,read> clusters:array<Cluster>;
-struct Vec4s {data:array<vec4<f32>>};
 struct U32s {data:array<u32>};
 @group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;
 struct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};
 @group(1) @binding(1) var<storage,read> normals:array<NormalTransform>;
-@group(1) @binding(2) var<storage,read> vertices:binding_array<Vec4s,64>;
-@group(1) @binding(3) var<storage,read> indices:binding_array<U32s,64>;
 @group(1) @binding(5) var<storage,read> placements:array<u32>;
-// The composer selects the writable cull list or read-only raster list.
-// renderlab: list bindings
 
-// Conservative AABB projection: boxes crossing near/eye planes are never occluded.
-// Two passes retest previous-frame rejects against depth produced THIS frame.
-fn cluster_box(c:Cluster)->mat2x4<f32> {
-    let model=models[c.placement];let vp=config.matrix;let m=vp*model;
+fn image_size()->vec2<u32> {return vec2<u32>(config.info.w&65535u,config.info.w>>16u);}
+
+// Conservative AABB projection: boxes crossing near/eye planes return the whole screen
+// with hi.z = 1 and are never occluded or software rasterized.
+fn cluster_box(c:Cluster,vp:mat4x4<f32>)->mat2x4<f32> {
+    let model=models[c.placement];let m=vp*model;
     // Bound both matrix association orders: raster uses VP*(model*p), while the
     // box uses (VP*model)*corner. Absolute products bound cancellation as well as
     // transformed source points between the corners. 64 eps exceeds the sum of
