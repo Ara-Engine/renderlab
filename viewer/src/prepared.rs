@@ -306,6 +306,20 @@ impl Prepared {
             .max()
             .unwrap_or(1)
     }
+    /// One placement's model matrix, and setting it alone (N8f's caster-motion timing).
+    #[allow(dead_code)]
+    pub fn model(&self, batch: usize, slot: usize) -> Mat4 {
+        self.batches[batch].models[slot]
+    }
+    #[allow(dead_code)]
+    pub fn set_model(
+        &mut self,
+        batch: usize,
+        slot: usize,
+        model: Mat4,
+    ) -> Result<(), renderlab::Error> {
+        self.instances[batch].set(slot, model)
+    }
     pub fn animate(&mut self, phase: f32) -> Result<(), renderlab::Error> {
         if self.phase.to_bits() == phase.to_bits() {
             return Ok(());

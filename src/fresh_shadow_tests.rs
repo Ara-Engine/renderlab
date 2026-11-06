@@ -157,11 +157,13 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     );
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        // WGPU_DEBUG=1 adds shader source line info for profilers (N8f's Nsight traces).
         flags: if validate {
             wgpu::InstanceFlags::debugging()
         } else {
             wgpu::InstanceFlags::empty()
-        },
+        }
+        .with_env(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();

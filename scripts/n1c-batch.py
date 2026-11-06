@@ -32,6 +32,8 @@ def main():
     p.add_argument("--no-reference", action="store_true")
     p.add_argument("--caster-error", type=float, nargs="+", help="N8c caster cut errors (texels; negative: original geometry)")
     p.add_argument("--turn", type=int, default=0, help="N8c sun-turning frames timed after each configuration")
+    p.add_argument("--move-frames", type=int, default=0, help="N8f camera-moving, then caster-moving frames timed after each configuration")
+    p.add_argument("--move-batch", type=int, default=0, help="N8f placement (draw batch) the caster-moving frames move")
     a = p.parse_args()
     a.root.mkdir(parents=True, exist_ok=True)
     record = []
@@ -45,7 +47,8 @@ def main():
             test = "gpu_visibility_quarry"
             m.update(json.loads(QUARRY.read_text()), output=str(a.root / step),
                      reference=not (a.timing or a.no_reference), lod_pixels=a.lod, software_extent=a.extent, lod_lift=a.lift,
-                     poses=a.poses, stage_repeats=a.stage_repeats, turn_frames=a.turn)
+                     poses=a.poses, stage_repeats=a.stage_repeats, turn_frames=a.turn,
+                     move_frames=a.move_frames, move_batch=a.move_batch)
             if a.caster_error:
                 m["caster_error"] = a.caster_error
             if os.environ.get("N8_VIRTUAL"):
