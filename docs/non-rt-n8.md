@@ -2,6 +2,8 @@
 
 Implementation unit, 2026-11-06 UTC, base `437cbd5`, branch `t3/non-rt-virtual-shadow-path`. Bar (Islam, 2026-11-06): at least Unreal's quality on every measure at Unreal-like cost, better where cheaply possible; film quality is the long-term target, not this unit's gate. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8b](non-rt-n8b.md)** root-causes the misses below (the texel-column thickness test, the march's reach cap, sub-texel candidates, hidden occluders, other-mesh contacts inside `near`), replaces the back-face layer and thickness test with a peel layer and exact walks, and records the new quality and cost tables. The algorithm description below is N8's; the shader now differs as N8b describes.
+
 ## Result
 
 **Quality: N8 beats Unreal VSM on almost every measured quantity on all four benches, but misses on two counts. Cost: about VSM's on S2, 1.4-1.7x VSM on S3, and 1.6-8x on the 13 M-triangle quarry; a moving sun over the quarry costs 16-17 ms. Not film quality and not the 2x-faster floor.**

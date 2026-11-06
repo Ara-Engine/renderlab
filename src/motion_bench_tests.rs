@@ -613,6 +613,146 @@ fn gpu_motion_reset_identity() {
     );
 }
 
+/// N8b decision trace (virtual_shadow_tests::diagnose) through one case's track, in
+/// order so the page cache sees the production sequence; `frames` selects the traced ones.
+#[test]
+#[ignore = "N8b GPU lease, 4 GiB start/2 GiB abort; offscreen decision trace"]
+fn gpu_motion_virtual_diagnose() {
+    let m = manifest();
+    let b: Bench =
+        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
+    let case = m["case"].as_str().unwrap();
+    let out = PathBuf::from(m["output"].as_str().unwrap()).join(case);
+    fs::create_dir_all(&out).unwrap();
+    let frames: Vec<u64> = m["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_u64().unwrap())
+        .collect();
+    let mut r = super::virtual_shadow_tests::diagnosis_renderer(&m);
+    let mut scene = upload_scene(&mut r, &b);
+    let color = target(&r, b.size[0], b.size[1]);
+    let track = b
+        .tracks
+        .iter()
+        .find(|t| case.starts_with(&format!("{}-r", t.name)))
+        .unwrap();
+    let radius: f32 = case.rsplit("-r").next().unwrap().parse().unwrap();
+    r.shadows.test_reset_bases();
+    let last = *frames.iter().max().unwrap();
+    for p in track.frames.iter().take_while(|p| p.frame as u64 <= last) {
+        let camera = configure(&mut r, &b, p, radius, &mut scene);
+        if frames.contains(&(p.frame as u64)) {
+            let label = format!("{:04}", p.frame);
+            super::virtual_shadow_tests::diagnose(&mut r, &out, &label, Some(b.crop), &mut |r| {
+                frame(r, &color, &camera, &mut scene);
+            });
+        } else {
+            r.set_soft_shadows(SoftShadows::Virtual);
+            frame(&mut r, &color, &camera, &mut scene);
+        }
+    }
+}
+
+/// N8b variant screen on one pose of a case: per `variants` entry ({name: {"constants":
+/// {...}, "virtual": {...}}}), N8 counts against Interactive's on the same directions, and
+/// N8's shadow GPU time static and with the sun turning by `turn_degrees` per frame.
+#[test]
+#[ignore = "N8b GPU lease, 4 GiB start/2 GiB abort; offscreen variant screen"]
+fn gpu_motion_virtual_screen() {
+    use super::virtual_shadow_tests as vs;
+    let m = manifest();
+    let b: Bench =
+        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
+    let case = m["case"].as_str().unwrap();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = vs::diagnosis_renderer(&m);
+    let mut scene = upload_scene(&mut r, &b);
+    let color = target(&r, b.size[0], b.size[1]);
+    let track = b
+        .tracks
+        .iter()
+        .find(|t| case.starts_with(&format!("{}-r", t.name)))
+        .unwrap();
+    let radius: f32 = case.rsplit("-r").next().unwrap().parse().unwrap();
+    let p = &track.frames[m["frame"].as_u64().unwrap_or(0) as usize];
+    let turn = m["turn_degrees"].as_f64().unwrap_or(0.05) as f32;
+    r.shadows.test_reset_bases();
+    let camera = configure(&mut r, &b, p, radius, &mut scene);
+    r.set_soft_shadows(SoftShadows::Interactive);
+    frame(&mut r, &color, &camera, &mut scene);
+    let [hit, rt] = interactive_outputs(&r);
+    // Bring the GPU to its working clocks before the first variant's timing.
+    for _ in 0..60 {
+        frame(&mut r, &color, &camera, &mut scene);
+    }
+    let ms = |r: &mut Renderer| -> Vec<f64> {
+        r.test_drain("N8b screen");
+        r.poll()
+            .unwrap()
+            .gpu
+            .iter()
+            .filter_map(|s| s.visibility_compute.map(|d| d.as_secs_f64() * 1e3))
+            .collect()
+    };
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let mut rows = vec![];
+    for (name, v) in m["variants"].as_object().unwrap() {
+        let settings =
+            virtual_settings(&serde_json::json!({ "virtual": v["virtual"] })).unwrap_or_default();
+        r.set_virtual_shadow_settings(settings).unwrap();
+        r.set_soft_shadows(SoftShadows::Virtual);
+        frame(&mut r, &color, &camera, &mut scene);
+        vs::set_screen_constants(&mut r, vs::screen_constants(v));
+        r.shadows.test_reset_bases();
+        let camera = configure(&mut r, &b, p, radius, &mut scene);
+        for _ in 0..4 {
+            frame(&mut r, &color, &camera, &mut scene);
+        }
+        let [_, n8] = interactive_outputs(&r);
+        let mut row = vs::agreement(&vs::counts(&n8), &vs::counts(&rt), &hit);
+        let _ = ms(&mut r);
+        for _ in 0..24 {
+            frame(&mut r, &color, &camera, &mut scene);
+        }
+        let fixed = ms(&mut r);
+        let to_light = Vec3::from_array(p.to_light);
+        for i in 1..=16 {
+            let turned =
+                Mat4::from_rotation_y((turn * i as f32).to_radians()).transform_vector3(to_light);
+            let (lighting, shadows) = (
+                Lighting {
+                    lights: vec![Light::Directional {
+                        travel: -turned,
+                        lux: b.sun_lux,
+                    }],
+                    environment: [0.; 3],
+                    exposure_stops: b.exposure_stops,
+                },
+                r.shadows.settings.clone(),
+            );
+            r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+            frame(&mut r, &color, &camera, &mut scene);
+        }
+        let turning = ms(&mut r);
+        row["variant"] = serde_json::json!(name);
+        row["static_shadow_ms_p50"] = serde_json::json!(median(fixed));
+        row["turning_shadow_ms_p50"] = serde_json::json!(median(turning));
+        eprintln!("N8b screen {case} {row}");
+        rows.push(row);
+    }
+    fs::write(
+        out.join(format!("screen-{case}.json")),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 #[ignore = "S2/S3 owned GPU lease; 4 GiB preflight/2 GiB abort; one native-size process per bench"]
 fn gpu_motion_bench_batch() {
@@ -830,6 +970,10 @@ fn gpu_motion_bench_batch() {
                 fs::write(&pending, serde_json::to_vec(&timings).unwrap()).unwrap();
                 fs::rename(pending, out.join("timings.json")).unwrap();
                 eprintln!("MOTION {case} {name} complete");
+            }
+            // Candidate-only reruns score against an already generated reference (N8b).
+            if m["skip_reference"].as_bool() == Some(true) {
+                continue;
             }
             r.set_soft_shadows(SoftShadows::Exact);
             let reference_radius = if radius == 0. { 0.04 } else { radius };

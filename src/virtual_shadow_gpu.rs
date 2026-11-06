@@ -1,16 +1,17 @@
-//! N8 (docs/non-rt-n8.md): `SoftShadows::Virtual`, Interactive's eight sun directions with
-//! no ray queries or acceleration structure in the visibility pass.
+//! N8/N8b (docs/non-rt-n8.md, docs/non-rt-n8b.md): `SoftShadows::Virtual`, Interactive's
+//! eight sun directions with no ray queries or acceleration structure in the visibility pass.
 //!
 //! Near field: the receiver triangle and its vertex 1-ring (the exact-position edge
 //! adjacency stored after each mesh's indices), tested with the watertight test over the
-//! whole ray. Far field: a sun clipmap whose levels hold about one texel per receiver
-//! pixel: the highest surface toward the sun with its triangle id, and the highest surface
-//! facing away. Like a virtual shadow map, work is page-driven: receivers request 128-texel
-//! pages, only stale requested pages are rasterized (stencil-masked), and rasterized pages
-//! stay cached until the sun turns, the level's window moves, or a moved caster's
-//! light-space bounds touch them. Memory is dense per level (no physical page pool).
-//! The march uses the map as an index: a texel whose top surface is above the ray is
-//! confirmed by an exact test of its triangle, or by the ray lying inside a thick occluder.
+//! whole ray, unless a per-triangle ring horizon shows no ring triangle can block. Far
+//! field: a sun clipmap whose levels hold about one texel per receiver pixel, each with two
+//! layers of heights and triangle ids: the highest surface toward the sun and the next one
+//! below it (a depth peel). Like a virtual shadow map, work is page-driven: receivers request
+//! 128-texel pages at their level and every coarser one the march continues into, only stale
+//! requested pages are rasterized (stencil-masked), and rasterized pages stay cached until
+//! the sun turns, the level's window moves, or a moved caster's light-space bounds touch
+//! them. Memory is dense per level (no physical page pool). The march uses the map as an
+//! index only: a candidate texel is decided by an exact walk to the triangle under the ray.
 //!
 //! This unit consumes traced hit records and receivers; the shadow pass itself only
 //! rasterizes and reads textures. A raster visibility buffer producing the same
@@ -21,16 +22,18 @@ use super::*;
 pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
-/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels and sixteen rectangles.
-const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16;
+/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen rectangles and the 64
+/// per-batch horizon offsets.
+const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16 + 256;
+/// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
+const HORIZON_STRIDE: u64 = 256;
 const TEMPLATE_BYTES: u64 = 32;
 const MAX_TEMPLATES: u64 = MAX_LEVELS as u64 * crate::TRACED_DRAWS as u64;
 /// Per-level `VsmPass` uniforms at the minimum dynamic-offset alignment.
 const PASS_STRIDE: u64 = 256;
 /// Device features the page raster needs: triangle ids and placement-based first instances.
-pub const VIRTUAL_FEATURES: wgpu::Features = wgpu::Features::PRIMITIVE_INDEX
-    .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
-    .union(wgpu::Features::SHADER_PER_VERTEX);
+pub const VIRTUAL_FEATURES: wgpu::Features =
+    wgpu::Features::PRIMITIVE_INDEX.union(wgpu::Features::INDIRECT_FIRST_INSTANCE);
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 
 /// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md.
@@ -52,6 +55,11 @@ pub struct VirtualShadowSettings {
     /// Walk the receiver's vertex 1-ring for the exact near test; false tests only the
     /// receiver's own triangle (cheaper; nearby own-surface blockers then come from the map).
     pub ring: bool,
+    /// Also test the peel layer where it belongs to the same placement as the top layer
+    /// (N8b): surfaces hidden under their own mesh, such as scan overhangs. Off, those are
+    /// treated as folds the top layer decides: fewer exact walks (the quarry's static shadow
+    /// cost falls from about 4.9 to 2.8 ms) for more leaks (docs/non-rt-n8b.md).
+    pub peel_own: bool,
 }
 impl Default for VirtualShadowSettings {
     fn default() -> Self {
@@ -63,6 +71,7 @@ impl Default for VirtualShadowSettings {
             finest_texel: 1.0 / 16384.0,
             bias_ulps: 4,
             ring: true,
+            peel_own: false,
         }
     }
 }
@@ -104,9 +113,11 @@ struct Pipelines {
     finalize: Owned<wgpu::ComputePipeline>,
     clear: Owned<wgpu::RenderPipeline>,
     caster: Owned<wgpu::RenderPipeline>,
-    clear_back: Owned<wgpu::RenderPipeline>,
-    caster_back: Owned<wgpu::RenderPipeline>,
+    caster_peel: Owned<wgpu::RenderPipeline>,
     lookup: Owned<wgpu::ComputePipeline>,
+    horizon: Owned<wgpu::ComputePipeline>,
+    /// The lookup with `VSM_DEBUG`, built on first use (tests only).
+    debug: Option<Owned<wgpu::ComputePipeline>>,
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -114,6 +125,22 @@ struct Layouts {
     raster: Owned<wgpu::BindGroupLayout>,
     pass: Owned<wgpu::BindGroupLayout>,
     lookup: Owned<wgpu::BindGroupLayout>,
+    horizon: Owned<wgpu::BindGroupLayout>,
+}
+/// Ring horizons (N8b lever 1): 4 bytes per triangle of every traced draw, computed once
+/// per draw list by `vsm_horizon`. Elevations do not change under the similarity transforms
+/// the lookup accepts, so camera, sun and instance motion keep them.
+struct Horizons {
+    /// Each draw's vertex buffer and triangle count, in batch order.
+    key: Vec<(usize, u32)>,
+    /// First word of each batch's triangles.
+    offsets: Vec<u32>,
+    buffer: Owned<wgpu::Buffer>,
+    params: Owned<wgpu::Buffer>,
+    group: Owned<wgpu::BindGroup>,
+    _allocation: Allocation,
+    /// Whether this frame computes them (the first frame of a draw list).
+    dispatch: bool,
 }
 /// Map storage sized by (levels, pages) and the per-pixel level target by image size.
 struct Resources {
@@ -123,14 +150,21 @@ struct Resources {
     _depth: Owned<wgpu::Texture>,
     depth_layers: Vec<Owned<wgpu::TextureView>>,
     depth_sampled: Owned<wgpu::TextureView>,
-    _back: Owned<wgpu::Texture>,
-    back_layers: Vec<Owned<wgpu::TextureView>>,
-    back_sampled: Owned<wgpu::TextureView>,
+    _peel: Owned<wgpu::Texture>,
+    peel_layers: Vec<Owned<wgpu::TextureView>>,
+    peel_sampled: Owned<wgpu::TextureView>,
+    _peel_ids: Owned<wgpu::Texture>,
+    peel_id_layers: Vec<Owned<wgpu::TextureView>>,
+    peel_ids_sampled: Owned<wgpu::TextureView>,
     _ids: Owned<wgpu::Texture>,
     id_layers: Vec<Owned<wgpu::TextureView>>,
     ids_sampled: Owned<wgpu::TextureView>,
     _level: Owned<wgpu::Texture>,
     level_view: Owned<wgpu::TextureView>,
+    /// Per-pixel decision trace (`VSM_DEBUG`), two uvec4s per pixel; 16 bytes unless
+    /// `VirtualState::debug`.
+    debug: Owned<wgpu::Buffer>,
+    debug_sized: bool,
     frame: Owned<wgpu::Buffer>,
     requests: Owned<wgpu::Buffer>,
     state: Owned<wgpu::Buffer>,
@@ -146,9 +180,13 @@ struct Resources {
 struct Groups {
     key: [wgpu::Texture; 4],
     models: wgpu::Buffer,
+    horizons: wgpu::Buffer,
     mark: Owned<wgpu::BindGroup>,
     compact: Owned<wgpu::BindGroup>,
+    /// The top pass samples the peel ids (unused there), the peel pass the top ids: a
+    /// pass never samples its own colour target.
     raster: Owned<wgpu::BindGroup>,
+    raster_peel: Owned<wgpu::BindGroup>,
     pass: Owned<wgpu::BindGroup>,
     lookup: Owned<wgpu::BindGroup>,
 }
@@ -191,6 +229,13 @@ pub(super) struct VirtualState {
     /// request, compaction and raster passes and only runs the lookup.
     key: Vec<u64>,
     page_work: bool,
+    horizons: Option<Horizons>,
+    /// Tests: run the `VSM_DEBUG` lookup and keep its per-pixel trace in `debug_buffer`.
+    pub debug: bool,
+    /// Tests: lookup override constants for variant screens (`built`: those compiled).
+    pub constants: Vec<(&'static str, f64)>,
+    built: Vec<(&'static str, f64)>,
+    module: Owned<wgpu::ShaderModule>,
 }
 
 fn layout_entry(
@@ -261,7 +306,7 @@ fn written(binding: u32) -> wgpu::BindGroupLayoutEntry {
 /// The module source: the shared draw-slot count, then shaders/virtual_shadow.wgsl.
 pub(super) fn shader_source() -> String {
     format!(
-        "enable wgpu_binding_array;\nenable primitive_index;\nenable wgpu_per_vertex;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        "enable wgpu_binding_array;\nenable primitive_index;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
         include_str!("../shaders/virtual_shadow.wgsl")
     )
@@ -354,13 +399,22 @@ impl VirtualState {
                     frame_uniform(S::VERTEX_FRAGMENT),
                     storage(11, true, S::VERTEX),
                     storage(12, true, S::VERTEX),
+                    layout_entry(
+                        13,
+                        S::FRAGMENT,
+                        wgpu::BindingType::Texture {
+                            sample_type: uint,
+                            view_dimension: D::D2Array,
+                            multisampled: false,
+                        },
+                    ),
                 ],
             ),
             pass: group(
                 "N8 page raster level",
                 &[layout_entry(
                     30,
-                    S::VERTEX,
+                    S::VERTEX_FRAGMENT,
                     wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -381,6 +435,24 @@ impl VirtualState {
                     sampled(17, uint, D::D2Array),
                     sampled(18, uint, D::D2),
                     sampled(19, T::Depth, D::D2Array),
+                    storage(20, false, S::COMPUTE),
+                    sampled(21, uint, D::D2Array),
+                    storage(24, true, S::COMPUTE),
+                ],
+            ),
+            horizon: group(
+                "N8 ring horizon pass",
+                &[
+                    layout_entry(
+                        22,
+                        S::COMPUTE,
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(16),
+                        },
+                    ),
+                    storage(23, false, S::COMPUTE),
                 ],
             ),
         };
@@ -399,6 +471,10 @@ impl VirtualState {
         let raster_layout = pipeline_layout(
             "N8 page raster ABI",
             &[Some(&layouts.raster), Some(&layouts.pass)],
+        );
+        let horizon_layout = pipeline_layout(
+            "N8 ring horizon ABI",
+            &[Some(&layouts.horizon), Some(arrays)],
         );
         let lookup_layout = pipeline_layout(
             "N8 visibility ABI",
@@ -483,31 +559,13 @@ impl VirtualState {
             ),
             bias: Default::default(),
         };
-        let clear_back = raster(
-            "N8 stale back page clear",
-            "vs_vsm_clear",
-            None,
-            &[],
-            &[],
-            clear_state.clone(),
-        );
         let clear = raster(
             "N8 stale page clear",
             "vs_vsm_clear",
             Some("fs_vsm_clear"),
             &ids,
             &[],
-            wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: stencil(
-                    wgpu::CompareFunction::Always,
-                    wgpu::StencilOperation::Replace,
-                    0xff,
-                ),
-                bias: Default::default(),
-            },
+            clear_state,
         );
         // Casters keep the highest surface toward the light, only inside opened pages.
         let attributes = [wgpu::VertexAttribute {
@@ -539,12 +597,12 @@ impl VirtualState {
             &vertices,
             caster_state.clone(),
         );
-        // The back layer: the highest surface facing away from the sun.
-        let caster_back = raster(
-            "N8 page back faces",
+        // The peel layer: the highest surface other than the top triangle.
+        let caster_peel = raster(
+            "N8 page peel",
             "vs_vsm_caster",
-            Some("fs_vsm_back"),
-            &[],
+            Some("fs_vsm_peel"),
+            &ids,
             &vertices,
             caster_state,
         );
@@ -554,9 +612,10 @@ impl VirtualState {
             finalize: compute("vsm_finalize", &compact_layout),
             clear,
             caster,
-            clear_back,
-            caster_back,
+            caster_peel,
             lookup: compute("vsm_lookup", &lookup_layout),
+            horizon: compute("vsm_horizon", &horizon_layout),
+            debug: None,
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -572,7 +631,20 @@ impl VirtualState {
             tag: 0,
             key: vec![],
             page_work: true,
+            horizons: None,
+            debug: false,
+            constants: vec![],
+            built: vec![],
+            module,
         }
+    }
+
+    /// The last debug frame's trace buffer (`debug` must have been set for it).
+    pub fn debug_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.resources
+            .as_ref()
+            .filter(|r| r.debug_sized)
+            .map(|r| &*r.debug)
     }
 
     pub fn set_settings(
@@ -605,11 +677,9 @@ impl VirtualState {
         last: u64,
     ) -> bool {
         let pages = self.settings.pages;
-        if self
-            .resources
-            .as_ref()
-            .is_some_and(|r| r.levels >= levels && r.pages == pages && r.size == size)
-        {
+        if self.resources.as_ref().is_some_and(|r| {
+            r.levels >= levels && r.pages == pages && r.size == size && r.debug_sized == self.debug
+        }) {
             return false;
         }
         // Grow-only in levels, so the ladder can shift without reallocating.
@@ -667,10 +737,15 @@ impl VirtualState {
             DEPTH_FORMAT,
             wgpu::TextureAspect::DepthOnly,
         );
-        let (back, back_layers, back_sampled) = layers(
-            "N8 clipmap back-face heights and page stencil",
+        let (peel, peel_layers, peel_sampled) = layers(
+            "N8 clipmap peel heights and page stencil",
             DEPTH_FORMAT,
             wgpu::TextureAspect::DepthOnly,
+        );
+        let (peel_ids, peel_id_layers, peel_ids_sampled) = layers(
+            "N8 clipmap peel triangles",
+            wgpu::TextureFormat::R32Uint,
+            wgpu::TextureAspect::All,
         );
         let (ids, id_layers, ids_sampled) = layers(
             "N8 clipmap top triangles",
@@ -699,6 +774,11 @@ impl VirtualState {
             ResourceKind::TextureView,
         );
         let slots = levels as u64 * u64::from(pages * pages);
+        let debug_bytes = if self.debug {
+            u64::from(size[0]) * u64::from(size[1]) * 32
+        } else {
+            16
+        };
         let buffer = |label, size: u64, usage| {
             ledger.own(
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -711,7 +791,7 @@ impl VirtualState {
             )
         };
         use wgpu::BufferUsages as B;
-        let bytes = u64::from(side) * u64::from(side) * levels as u64 * 12
+        let bytes = u64::from(side) * u64::from(side) * levels as u64 * 16
             + u64::from(size[0]) * u64::from(size[1]) * 4
             + slots * 12
             + MAX_TEMPLATES * (TEMPLATE_BYTES + 20);
@@ -722,14 +802,19 @@ impl VirtualState {
             _depth: depth,
             depth_layers,
             depth_sampled,
-            _back: back,
-            back_layers,
-            back_sampled,
+            _peel: peel,
+            peel_layers,
+            peel_sampled,
+            _peel_ids: peel_ids,
+            peel_id_layers,
+            peel_ids_sampled,
             _ids: ids,
             id_layers,
             ids_sampled,
             _level: level,
             level_view,
+            debug: buffer("N8 decision trace", debug_bytes, B::STORAGE | B::COPY_SRC),
+            debug_sized: self.debug,
             frame: buffer("N8 frame", FRAME_BYTES as u64, B::UNIFORM),
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
             state: buffer("N8 page epochs", slots * 4, B::STORAGE),
@@ -1007,7 +1092,7 @@ impl Renderer {
             primitive_bits,
             s.march_samples,
             s.bias_ulps,
-            u32::from(s.ring),
+            u32::from(s.ring) | u32::from(s.peel_own) << 1,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
@@ -1017,6 +1102,81 @@ impl Renderer {
             for value in [lo.x, lo.y, hi.x, hi.y] {
                 frame.extend_from_slice(&(value as f32).to_ne_bytes());
             }
+        }
+        // Ring horizons: (re)built when the draw list's geometry changes.
+        let horizon_key: Vec<(usize, u32)> = draws
+            .iter()
+            .map(|d| (Arc::as_ptr(&d.mesh.vertex) as usize, d.mesh.index_count / 3))
+            .collect();
+        if state.horizons.as_ref().is_none_or(|h| h.key != horizon_key) {
+            let mut offsets = vec![];
+            let mut words = 0u32;
+            for &(_, triangles) in &horizon_key {
+                offsets.push(words);
+                words += triangles;
+            }
+            let store = self.ledger.own(
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("N8 ring horizons"),
+                    size: u64::from(words.max(1)) * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            );
+            let params = self.ledger.own(
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("N8 ring horizon passes"),
+                    size: crate::TRACED_DRAWS as u64 * HORIZON_STRIDE,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            );
+            let mut bytes = vec![0u8; crate::TRACED_DRAWS as usize * HORIZON_STRIDE as usize];
+            for (d, (&(_, triangles), &offset)) in horizon_key.iter().zip(&offsets).enumerate() {
+                let at = d * HORIZON_STRIDE as usize;
+                for (k, value) in [d as u32, triangles, offset, 0].iter().enumerate() {
+                    bytes[at + k * 4..at + k * 4 + 4].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+            self.queue.write_buffer(&params, 0, &bytes);
+            let group = self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("N8 ring horizon pass"),
+                    layout: &state.layouts.horizon,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 22,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &params,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(16),
+                            }),
+                        },
+                        buffer(23, &store),
+                    ],
+                }),
+                ResourceKind::BindGroup,
+            );
+            state.horizons = Some(Horizons {
+                key: horizon_key,
+                offsets,
+                _allocation: self
+                    .ledger
+                    .allocate(AllocationKind::Shadow, u64::from(words) * 4),
+                buffer: store,
+                params,
+                group,
+                dispatch: true,
+            });
+        } else if let Some(h) = &mut state.horizons {
+            h.dispatch = false;
+        }
+        let offsets = &state.horizons.as_ref().unwrap().offsets;
+        for b in 0..64 {
+            let offset = offsets.get(b).copied().unwrap_or(0);
+            frame.extend_from_slice(&offset.to_ne_bytes());
         }
         debug_assert_eq!(frame.len(), FRAME_BYTES);
         state.levels = levels;
@@ -1037,6 +1197,34 @@ impl Renderer {
             [size.width, size.height],
             self.submissions,
         );
+        if state.debug && state.pipelines.debug.is_none() || state.constants != state.built {
+            let layout = &state.lookup_layout;
+            let lookup = |label, debug: bool| {
+                let mut constants = state.constants.clone();
+                constants.push(("VSM_DEBUG", f64::from(u8::from(debug))));
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(label),
+                            layout: Some(layout),
+                            module: &state.module,
+                            entry_point: Some("vsm_lookup"),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
+            let debug = state.debug.then(|| lookup("vsm_lookup debug", true));
+            if state.constants != state.built {
+                state.pipelines.lookup = lookup("vsm_lookup", false);
+                state.built = state.constants.clone();
+            }
+            state.pipelines.debug = debug;
+        }
         let mut key: Vec<u64> = camera
             .view()
             .to_cols_array()
@@ -1091,9 +1279,10 @@ impl Renderer {
             (*fresh.world.texture).clone(),
             (*fresh.visibility.texture).clone(),
         ];
+        let horizons = (*state.horizons.as_ref().unwrap().buffer).clone();
         if r.groups
             .as_ref()
-            .is_none_or(|g| g.key != key || &g.models != arrays_models)
+            .is_none_or(|g| g.key != key || &g.models != arrays_models || g.horizons != horizons)
         {
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
             let hit = view(&targets.hit.texture);
@@ -1113,6 +1302,7 @@ impl Renderer {
             let groups = Groups {
                 key,
                 models: arrays_models.clone(),
+                horizons: horizons.clone(),
                 mark: group(
                     "N8 page requests",
                     &l.mark,
@@ -1145,6 +1335,17 @@ impl Renderer {
                         buffer(0, &r.frame),
                         buffer(11, &r.dirty),
                         buffer(12, arrays_models),
+                        texture(13, &r.peel_ids_sampled),
+                    ],
+                ),
+                raster_peel: group(
+                    "N8 page peel raster",
+                    &l.raster,
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(11, &r.dirty),
+                        buffer(12, arrays_models),
+                        texture(13, &r.ids_sampled),
                     ],
                 ),
                 pass: group(
@@ -1172,7 +1373,10 @@ impl Renderer {
                         texture(16, &r.depth_sampled),
                         texture(17, &r.ids_sampled),
                         texture(18, &r.level_view),
-                        texture(19, &r.back_sampled),
+                        texture(19, &r.peel_sampled),
+                        buffer(20, &r.debug),
+                        texture(21, &r.peel_ids_sampled),
+                        buffer(24, &horizons),
                     ],
                 ),
             };
@@ -1195,6 +1399,9 @@ impl Renderer {
         let p = &state.pipelines;
         let slots = state.levels as u64 * u64::from(r.pages * r.pages);
         let [width, height] = r.size;
+        if state.debug {
+            encoder.clear_buffer(&r.debug, 0, None);
+        }
         if state.page_work {
             encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
             encoder.clear_buffer(&r.dirty, 0, Some(MAX_LEVELS as u64 * 4));
@@ -1202,6 +1409,19 @@ impl Renderer {
         }
         let primary = self.primary.as_ref().unwrap();
         let (_, arrays) = primary.virtual_geometry().unwrap();
+        if let Some(h) = state.horizons.as_ref().filter(|h| h.dispatch) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("N8 ring horizons"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.horizon);
+            pass.set_bind_group(1, arrays, &[]);
+            for (d, &(_, triangles)) in h.key.iter().enumerate() {
+                pass.set_bind_group(0, &*h.group, &[d as u32 * HORIZON_STRIDE as u32]);
+                pass.dispatch_workgroups(triangles.div_ceil(64), 1, 1);
+            }
+            let _ = &h.params;
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8 ring and map visibility"),
             timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {
@@ -1214,7 +1434,10 @@ impl Renderer {
                 end_of_pass_write_index: t.end_of_pass_write_index,
             }),
         });
-        pass.set_pipeline(&p.lookup);
+        match (&p.debug, state.debug) {
+            (Some(debug), true) => pass.set_pipeline(debug),
+            _ => pass.set_pipeline(&p.lookup),
+        }
         pass.set_bind_group(0, &*g.lookup, &[]);
         pass.set_bind_group(1, arrays, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
@@ -1282,13 +1505,21 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            self.encode_virtual_layer(&mut pass, draws, level, &p.clear, &p.caster);
+            self.encode_virtual_layer(&mut pass, draws, level, [&p.clear, &p.caster], &g.raster);
             drop(pass);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("N8 stale page back faces"),
-                color_attachments: &[],
+                label: Some("N8 stale page peel"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &r.peel_id_layers[level],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &r.back_layers[level],
+                    view: &r.peel_layers[level],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -1300,7 +1531,13 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            self.encode_virtual_layer(&mut pass, draws, level, &p.clear_back, &p.caster_back);
+            self.encode_virtual_layer(
+                &mut pass,
+                draws,
+                level,
+                [&p.clear, &p.caster_peel],
+                &g.raster_peel,
+            );
         }
     }
 
@@ -1311,14 +1548,14 @@ impl Renderer {
         pass: &mut wgpu::RenderPass<'_>,
         draws: &[PreparedDraw<'_>],
         level: usize,
-        clear: &wgpu::RenderPipeline,
-        caster: &wgpu::RenderPipeline,
+        [clear, caster]: [&wgpu::RenderPipeline; 2],
+        raster: &wgpu::BindGroup,
     ) {
         let state = self.virtual_shadows.as_ref().unwrap();
         let r = state.resources.as_ref().unwrap();
         let g = r.groups.as_ref().unwrap();
         pass.set_stencil_reference(state.tag);
-        pass.set_bind_group(0, &*g.raster, &[]);
+        pass.set_bind_group(0, raster, &[]);
         pass.set_bind_group(1, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
         pass.set_pipeline(clear);
         pass.draw_indirect(&r.quad_args, level as u64 * 16);
@@ -1350,7 +1587,7 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        assert_eq!(FRAME_BYTES, 640);
+        assert_eq!(FRAME_BYTES, 896);
     }
     #[test]
     fn sun_basis_is_orthonormal_and_settings_validate() {

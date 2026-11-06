@@ -6,14 +6,16 @@ Processes the leased command starts (n8-batch.py's test binaries) are owned, not
         py -3 -B scripts/n8-batch.py <test binary> <root>
 """
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("s1_runner", Path(__file__).with_name("bench-contact-fold-run.py"))
 s1 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s1)
-OWNER = "n8-virtual-shadow"
-s1.runner.OUT = Path("E:/renderlab-work/n8")
+# N8_OWNER / N8_OUT let a follow-up unit (N8b) lease under its own name and evidence root.
+OWNER = os.environ.get("N8_OWNER", "n8-virtual-shadow")
+s1.runner.OUT = Path(os.environ.get("N8_OUT", "E:/renderlab-work/n8"))
 s1.runner.OWNER = OWNER
 original_state = s1.runner.state
 

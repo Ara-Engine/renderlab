@@ -43,6 +43,79 @@ fn lighting(b: &Bench, environment: f32, radius: f32) -> (Lighting, Shadows) {
     )
 }
 
+/// N8b decision trace (virtual_shadow_tests::diagnose) on both poses, black environment
+/// (N8 is identical across environments).
+#[test]
+#[ignore = "N8b GPU lease, 4 GiB start/2 GiB abort; offscreen decision trace"]
+fn gpu_contact_fold_virtual_diagnose() {
+    let m = manifest();
+    let b: Bench =
+        serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
+    let out = PathBuf::from(m["output"].as_str().unwrap()).join("S1");
+    fs::create_dir_all(&out).unwrap();
+    let mut r = super::virtual_shadow_tests::diagnosis_renderer(&m);
+    let mut scene = vec![];
+    for g in &b.meshes {
+        let vertices: Vec<_> = g
+            .positions
+            .iter()
+            .zip(&g.normals)
+            .map(|(&position, &normal)| Vertex {
+                position,
+                normal,
+                uv: [0.; 2],
+                color: [1.; 4],
+            })
+            .collect();
+        let mesh = r
+            .try_upload_mesh(&MeshData {
+                vertices: &vertices,
+                indices: &g.indices,
+            })
+            .unwrap()
+            .unwrap();
+        r.test_drain("S1 mesh upload");
+        let instances = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
+        let material = r
+            .try_create_material(&MaterialDescriptor {
+                base_color: [0.5, 0.5, 0.5, 1.],
+                metallic: 0.,
+                roughness: 0.6,
+                double_sided: true,
+                thin: g.thin,
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        r.test_drain("S1 upload");
+        scene.push((mesh, instances, material));
+    }
+    let color = target(&r, b.size[0], b.size[1]);
+    let (lit, shadows) = lighting(&b, 0., 0.04);
+    r.set_lighting_and_shadows(&lit, &shadows).unwrap();
+    for (pose, p) in b.poses.iter().enumerate() {
+        let camera = Camera::look_at(
+            Vec3::from_array(p.eye),
+            Vec3::from_array(p.target),
+            Vec3::Y,
+            45f32.to_radians(),
+            0.01,
+            100.,
+        )
+        .unwrap();
+        let label = format!("p{pose}");
+        super::virtual_shadow_tests::diagnose(&mut r, &out, &label, None, &mut |r| {
+            let mut draws: Vec<_> = scene
+                .iter_mut()
+                .map(|(mesh, instances, material)| {
+                    Draw::new(mesh, instances).with_material(material)
+                })
+                .collect();
+            render(r, &color, &camera, &mut draws);
+        });
+    }
+}
+
 #[test]
 #[ignore = "S1 owned GPU lease, 4 GiB start/2 GiB abort; one batched offscreen process"]
 fn gpu_contact_fold_batch() {

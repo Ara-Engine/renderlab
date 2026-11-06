@@ -51,6 +51,9 @@ fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSetting
     if let Some(ring) = v["ring"].as_bool() {
         s.ring = ring;
     }
+    if let Some(peel_own) = v["peel_own"].as_bool() {
+        s.peel_own = peel_own;
+    }
     Some(s)
 }
 

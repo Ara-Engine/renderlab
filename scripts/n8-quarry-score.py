@@ -54,25 +54,28 @@ def main():
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--reference", type=Path, default=REFERENCE)
     parser.add_argument("--traced", action="store_true", help="score against the run's traced-receiver reference, with native VSM")
+    parser.add_argument("--candidates", type=Path, help="N8b: candidate counts from another run, scored on --run's reference")
     args = parser.parse_args()
     if args.traced:
         rows = []
+        source = args.candidates or args.run
+        names = [n for n in ("interactive", "n8", "n8-ring0") if (source / f"pose-0-{n}.u32").exists()]
         for pose in (0, 1):
             ref, sigma, depth, cover = traced_reference(args.run, pose)
-            for name in ("interactive", "n8", "n8-ring0"):
-                cand = np.fromfile(args.run / f"pose-{pose}-{name}.u32", dtype="<u4").reshape(SHAPE) / 256.0
+            for name in names:
+                cand = np.fromfile(source / f"pose-{pose}-{name}.u32", dtype="<u4").reshape(SHAPE) / 256.0
                 rows.append(score_row(pose, name, cand, ref, sigma, depth, cover))
             with np.load(NATIVE / VSM[pose] / "decoded-v2/native.npz") as a:
                 vsm, valid = a["visibility"], a["valid"]
             common = cover & valid
             rows.append(score_row(pose, "UE VSM native", vsm, ref, sigma, depth, common))
             # The Renderlab modes on the same common domain, for a like-for-like comparison.
-            for name in ("interactive", "n8"):
-                cand = np.fromfile(args.run / f"pose-{pose}-{name}.u32", dtype="<u4").reshape(SHAPE) / 256.0
+            for name in names:
+                cand = np.fromfile(source / f"pose-{pose}-{name}.u32", dtype="<u4").reshape(SHAPE) / 256.0
                 rows.append(score_row(pose, name + " (VSM domain)", cand, ref, sigma, depth, common))
         for r in rows:
             print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items() if k not in ("populations", "counts")}))
-        (args.run / "scores-traced.json").write_text(json.dumps(rows, indent=2))
+        (source / "scores-traced.json").write_text(json.dumps(rows, indent=2))
         return
     rows = []
     names = sorted({p.name.split("-", 2)[2].removesuffix(".u32") for p in args.run.glob("pose-*-*.u32")})
