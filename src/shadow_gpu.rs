@@ -107,6 +107,14 @@ pub(super) struct ShadowState {
     ranges_published: bool,
 }
 impl ShadowState {
+    /// Independent benchmark replays must start with the same transported light
+    /// basis: disk samples use the shadow-view axes, not only the sun direction.
+    /// Keep transport intact throughout each replay, including Temporal resets.
+    #[cfg(test)]
+    pub(super) fn test_reset_bases(&mut self) {
+        self.bases.clear();
+    }
+
     pub fn new(
         device: &wgpu::Device,
         ledger: &Ledger,
