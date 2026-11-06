@@ -29,9 +29,9 @@ use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
-/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen rectangles, the 64
-/// per-batch horizon offsets and N8e's uvec4.
-const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16 + 256 + 16;
+/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
+/// screen rectangles, the 64 per-batch horizon offsets and N8e's uvec4.
+const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 256 + 16;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
@@ -245,6 +245,8 @@ struct Resources {
     state: Owned<wgpu::Buffer>,
     /// Per page slot: 1 when it is cleared and rasterized this frame.
     render: Owned<wgpu::Buffer>,
+    /// N8f: the caster cull's indirect dispatch, set by `vsm_compact` once a page is stale.
+    cull_args: Owned<wgpu::Buffer>,
     pass: Owned<wgpu::Buffer>,
     _allocation: Allocation,
     groups: Option<Groups>,
@@ -302,6 +304,9 @@ pub(super) struct VirtualState {
     history_frames: u32,
     pub rolling: bool,
     schedule: u32,
+    /// N8f: this rolling frame moved casters only, so the lookup visits every tile and also
+    /// looks up the pixels they can reach (`VsmFrame::n8e.w` bit 0).
+    casters_only: bool,
     horizons: Option<Horizons>,
     /// Tests: run the `VSM_DEBUG` lookup and keep its per-pixel trace in `debug_buffer`.
     pub debug: bool,
@@ -509,6 +514,7 @@ impl VirtualState {
                     storage(1, false, S::COMPUTE),
                     storage(2, false, S::COMPUTE),
                     storage(29, false, S::COMPUTE),
+                    storage(37, false, S::COMPUTE),
                 ],
             ),
             cull: group(
@@ -537,6 +543,7 @@ impl VirtualState {
                 &[
                     frame_uniform(S::COMPUTE),
                     storage(16, true, S::COMPUTE),
+                    storage(29, false, S::COMPUTE),
                     storage(36, false, S::COMPUTE),
                 ],
             ),
@@ -722,6 +729,7 @@ impl VirtualState {
             history_frames: 0,
             rolling: false,
             schedule: 0,
+            casters_only: false,
             horizons: None,
             debug: false,
             constants: vec![],
@@ -859,7 +867,8 @@ impl VirtualState {
             + mip_bytes
             + u64::from(side) * u64::from(side) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
-            + slots * 12;
+            + slots * 12
+            + 16;
         self.resources = Some(Resources {
             levels,
             pages,
@@ -877,6 +886,7 @@ impl VirtualState {
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
             state: buffer("N8 page epochs", slots * 4, B::STORAGE),
             render: buffer("N8c pages rasterized this frame", slots * 4, B::STORAGE),
+            cull_args: buffer("N8f caster cull dispatch", 16, B::STORAGE | B::INDIRECT),
             pass: buffer(
                 "N8 level and mip uniforms",
                 PASS_ENTRIES as u64 * PASS_STRIDE,
@@ -1098,6 +1108,25 @@ impl Renderer {
         }
         // Moved casters invalidate the pages under their old and new light-space bounds.
         let mut rects = vec![];
+        // N8f: their old and new bounds' pixel rectangles too (whole image when a corner is
+        // not in front of the camera): a static camera's pixels outside them keep their receivers.
+        let mut screens = vec![];
+        let clip = camera.matrix(size.width, size.height).as_dmat4();
+        let screen = |b: &crate::shadow_plan::Bounds| {
+            let (w, h) = (f64::from(size.width), f64::from(size.height));
+            let mut lo = glam::DVec2::INFINITY;
+            let mut hi = glam::DVec2::NEG_INFINITY;
+            for c in corners(b) {
+                let p = clip * c.extend(1.0);
+                if p.w <= 1e-6 {
+                    return [glam::DVec2::ZERO, glam::DVec2::new(w, h)];
+                }
+                let q = glam::DVec2::new((p.x / p.w * 0.5 + 0.5) * w, (0.5 - p.y / p.w * 0.5) * h);
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            [lo - 2.0, hi + 2.0]
+        };
         if cache.models.len() != placements {
             invalidated = [true; MAX_LEVELS];
         } else {
@@ -1106,6 +1135,9 @@ impl Renderer {
                     let [a0, a1] = rect(&cache.bounds[p]);
                     let [b0, b1] = rect(&bounds[p]);
                     rects.push([a0.min(b0), a1.max(b1)]);
+                    let [c0, c1] = screen(&cache.bounds[p]);
+                    let [d0, d1] = screen(&bounds[p]);
+                    screens.push([c0.min(d0), c1.max(d1)]);
                 }
             }
             if rects.len() > MAX_RECTS {
@@ -1193,10 +1225,12 @@ impl Renderer {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
         frame.extend_from_slice(&level_bytes);
-        for i in 0..MAX_RECTS {
-            let [lo, hi] = rects.get(i).copied().unwrap_or([glam::DVec2::ZERO; 2]);
-            for value in [lo.x, lo.y, hi.x, hi.y] {
-                frame.extend_from_slice(&(value as f32).to_ne_bytes());
+        for list in [&rects, &screens] {
+            for i in 0..MAX_RECTS {
+                let [lo, hi] = list.get(i).copied().unwrap_or([glam::DVec2::ZERO; 2]);
+                for value in [lo.x, lo.y, hi.x, hi.y] {
+                    frame.extend_from_slice(&(value as f32).to_ne_bytes());
+                }
             }
         }
         // Ring horizons: (re)built when the draw list's geometry changes.
@@ -1356,13 +1390,17 @@ impl Renderer {
             let o = state.cache.origins[i].unwrap_or_default();
             key.extend([o[0] as u64, o[1] as u64, u64::from(state.cache.epochs[i])]);
         }
+        // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
+        let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
         state.stats.page_work = state.page_work;
         state.key = key;
         // N8e rolling refresh: a frame that changes nothing but the sun (inside the map's
         // hysteresis) keeps the counts of the tiles it does not look up. The renderer clears
         // `rolling` whenever another pass writes the visibility target.
-        let rolling = state.rolling && !state.page_work && !rebuild && s.refresh > 1;
+        let rolling =
+            state.rolling && (!state.page_work || casters_only) && !rebuild && s.refresh > 1;
+        state.casters_only = rolling && casters_only;
         state.history_frames = if rolling {
             state.history_frames.wrapping_add(1)
         } else {
@@ -1377,7 +1415,12 @@ impl Renderer {
             0
         };
         state.schedule = schedule;
-        for value in [s.directions, schedule, s.walk_cap, 0] {
+        for value in [
+            s.directions,
+            schedule,
+            s.walk_cap,
+            u32::from(state.casters_only),
+        ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(frame.len(), FRAME_BYTES);
@@ -1451,6 +1494,7 @@ impl Renderer {
                         buffer(1, &r.requests),
                         buffer(2, &r.state),
                         buffer(29, &r.render),
+                        buffer(37, &r.cull_args),
                     ],
                 ),
                 cull: group(
@@ -1479,7 +1523,12 @@ impl Renderer {
                 mip: group(
                     "N8c max-mips",
                     &l.mip,
-                    &[buffer(0, &r.frame), buffer(16, &r.top), buffer(36, &r.mips)],
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(16, &r.top),
+                        buffer(29, &r.render),
+                        buffer(36, &r.mips),
+                    ],
                 ),
                 pass: group(
                     "N8 page raster level",
@@ -1569,8 +1618,9 @@ impl Renderer {
         pass.set_bind_group(0, &*g.lookup, &[]);
         pass.set_bind_group(1, arrays, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        // One workgroup per trace tile; a rolling frame only one tile of every block.
-        let [a, b] = if state.schedule != 0 {
+        // One workgroup per trace tile; a rolling frame only one tile of every block, unless
+        // it moved casters (N8f), which visits every tile for the pixels they reach.
+        let [a, b] = if state.schedule != 0 && !state.casters_only {
             refresh_block(state.settings.refresh)
         } else {
             [1, 1]
@@ -1584,7 +1634,9 @@ impl Renderer {
     }
 
     /// Requests and compaction, then for the stale pages: clear, the per-level caster cut
-    /// and cull, and the software and hardware rasters of the top layer, then the peel layer.
+    /// and cull, and the software and hardware rasters of the top layer, then the peel layer,
+    /// then the rasterized pages' max-mips. Without a stale page (camera motion inside the
+    /// level windows) the cull dispatches no group and the in-page mips return early.
     fn encode_virtual_pages(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1601,6 +1653,7 @@ impl Renderer {
         encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
+        encoder.clear_buffer(&r.cull_args, 0, None);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8 page requests, cache and caster cull"),
@@ -1622,8 +1675,8 @@ impl Renderer {
             pass.set_pipeline(&p.cull);
             pass.set_bind_group(0, &*g.cull, &[]);
             pass.set_bind_group(1, arrays, &[]);
-            let groups = casters.instances.count.div_ceil(64).max(1);
-            pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+            // N8f: no stale page (camera motion inside the windows) dispatches no group.
+            pass.dispatch_workgroups_indirect(&r.cull_args, 0);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
         }
@@ -1694,7 +1747,7 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        assert_eq!(FRAME_BYTES, 912);
+        assert_eq!(FRAME_BYTES, 1168);
     }
     #[test]
     fn sun_basis_is_orthonormal_and_settings_validate() {

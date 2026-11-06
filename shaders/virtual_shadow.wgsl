@@ -52,13 +52,16 @@ struct VsmFrame {
     // the first-step block mode (N8c `first_block`).
     misc:vec4<u32>,
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
-    // Eye-relative light-space xy rectangles (min.xy, max.xy) of moved casters.
+    // Eye-relative light-space xy rectangles (min.xy, max.xy) of moved casters, and (N8f)
+    // the pixel rectangles of their old and new bounds.
     rects:array<vec4<f32>,VSM_MAX_RECTS>,
+    srects:array<vec4<f32>,VSM_MAX_RECTS>,
     // Per traced batch, the first word of its triangles in vsm_horizons (N8b).
     horizon:array<vec4<u32>,16>,
     // N8e: x directions evaluated (1-8, the first of the eight); y the rolling refresh (block
     // a in bits 0-3, b in 4-7, this frame's tile in the block in 8-11 and 12-15, bit 16 set on
-    // a rolling frame); z the walk cap (0: none); w reserved.
+    // a rolling frame); z the walk cap (0: none); w bit 0 on a rolling frame that moved casters
+    // (N8f: every tile is visited, see vsm_reached).
     n8e:vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
@@ -153,6 +156,9 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     }
     return false;
 }
+// N8f: the caster cull's indirect dispatch (x, y, z), zeroed by the encoder and set once a
+// page is flagged, so page-work frames that render no page (camera motion) skip the cull.
+@group(0) @binding(37) var<storage,read_write> vsm_cull_args:array<atomic<u32>,4>;
 @compute @workgroup_size(64) fn vsm_compact(@builtin(global_invocation_id) id:vec3<u32>) {
     let pages=vsm.counts.y;let per=pages*pages;
     let level=id.x/per;
@@ -165,6 +171,11 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
         if vsm_state[id.x]!=epoch || moved {
             vsm_render[id.x]=1u;
             vsm_state[id.x]=epoch;
+            // vsm_cull's grid: 64 clusters a group, 65535 groups a row.
+            let groups=max((vsm.counts.z+63u)/64u,1u);
+            atomicMax(&vsm_cull_args[0],min(groups,65535u));
+            atomicMax(&vsm_cull_args[1],(groups+65534u)/65535u);
+            atomicMax(&vsm_cull_args[2],1u);
         }
     } else if moved {
         // Not needed now, but its cached depths no longer describe the scene.
@@ -962,12 +973,19 @@ fn vsm_mip_base(level:u32,mip:u32)->u32 {
     return level*((side*side-1u)/3u)+(side*side-s*s)/3u;
 }
 // One mip (vsm_pass.level) of every clip level (z): the largest normalized top height of
-// the 2x2 cells below. Rebuilt on every page-work frame.
+// the 2x2 cells below. Dispatched on every page-work frame; a mip cell inside one page is
+// rewritten only where that page was rasterized this frame (N8f), since the others' top
+// words are unchanged.
 @compute @workgroup_size(8,8) fn vsm_mip(@builtin(global_invocation_id) id:vec3<u32>) {
     let mip=vsm_pass.level;let level=id.z;
     if level>=vsm.counts.x {return;}
     let side=vsm.counts.y*VSM_PAGE;let s=side>>mip;
     if any(id.xy>=vec2<u32>(s)) {return;}
+    if (1u<<mip)<=VSM_PAGE {
+        let pages=vsm.counts.y;
+        let page=(id.xy<<vec2<u32>(mip))/VSM_PAGE;
+        if vsm_render[(level*pages+page.y)*pages+page.x]==0u {return;}
+    }
     var h=0.0;
     for(var k=0u;k<4u;k+=1u) {
         let c=id.xy*2u+vec2<u32>(k&1u,k>>1u);
@@ -1259,19 +1277,47 @@ fn vsm_visible(id:vec2<u32>,visible:u32) {
     let k=vsm.n8e.x;
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>((256u*visible+k/2u)/k));
 }
+// N8f: whether this frame's moved casters can change pixel id's count under a kept camera:
+// it lies in one's old or new pixel bounds (its receiver may differ), or its receiver's march
+// neighbourhood at a level it marches (vsm_mark's page requests) overlaps one's light-space
+// bounds. Nothing else the count depends on changed.
+fn vsm_reached(id:vec2<u32>)->bool {
+    let c=vec2<f32>(id)+vec2<f32>(0.5);
+    for(var i=0u;i<vsm.counts.w;i+=1u) {
+        let s=vsm.srects[i];
+        if all(c>=s.xy) && all(c<=s.zw) {return true;}
+    }
+    if textureLoad(vsm_hit,vec2<i32>(id),0).x==0u {return false;}
+    let level=textureLoad(vsm_level_in,vec2<i32>(id),0).x;
+    if level==VSM_NONE {return false;}
+    let p=vsm_light(textureLoad(vsm_world,vec2<i32>(id),0).xyz);
+    for(var l=level;l<vsm.counts.x;l+=1u) {
+        let r=vec2<f32>(vsm_radius(l,p.z));
+        for(var i=0u;i<vsm.counts.w;i+=1u) {
+            let m=vsm.rects[i];
+            if all(p.xy+r>=m.xy) && all(p.xy-r<=m.zw) {return true;}
+        }
+        if vsm_cap(l)>=vsm.depth.w-p.z {break;}
+    }
+    return false;
+}
 // N8e rolling refresh: on a frame that keeps the last frame's camera, casters and settings,
 // one trace tile of every a x b block (n8e.y: a, b, then the tile's offset in the block) is
 // looked up again and the others keep their last counts in the output. Otherwise every tile.
+// A rolling frame that moved casters (N8f) visits every tile: the block's tile and the pixels
+// the casters reach are looked up, the others keep their counts.
 @compute @workgroup_size(8,4) fn vsm_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
     let rolling=vsm.n8e.y;
+    let block=vec2<u32>(rolling&15u,(rolling>>4u)&15u);
+    let offset=vec2<u32>((rolling>>8u)&15u,(rolling>>12u)&15u);
+    let casters=(vsm.n8e.w&1u)!=0u;
     var tile=group.xy;
-    if (rolling>>16u)!=0u {
-        tile=tile*vec2<u32>(rolling&15u,(rolling>>4u)&15u)+vec2<u32>((rolling>>8u)&15u,(rolling>>12u)&15u);
-    }
+    if (rolling>>16u)!=0u && !casters {tile=tile*block+offset;}
     let id=tile*VSM_TRACE_TILE+local.xy;
     if any(id>=size) {return;}
     if textureLoad(vsm_tiles,tile,0).x==0u {return;}
+    if casters && any(tile%block!=offset) && !vsm_reached(id) {return;}
     if VSM_SKIP==1u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
     let px=vsm_prepare(id);
     if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}

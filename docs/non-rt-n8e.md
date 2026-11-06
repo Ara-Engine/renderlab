@@ -2,6 +2,8 @@
 
 Follow-up unit to [N8d](non-rt-n8d.md) and [N8c](non-rt-n8c.md), 2026-11-06 UTC, base `bb1e8df`, branch `t3/n8e-shadow-surplus`. Brief (Islam, 2026-11-06): bring the non-RT shadow pass to Unreal's cost by spending some of N8c's quality surplus over Unreal, staying at or above Unreal on every measure of S1, S2, S3 and the quarry, traced and no-RT. Targets: quarry static ≤ about 0.6 ms, sun turning ≤ about 1.2 ms, no-RT frame ≤ 1.61 ms. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8f](non-rt-n8f.md)** profiles the pass under motion with Nsight GPU Trace: the lookup is latency-bound on the exact walks' dependent geometry fetches (SM throughput 10-14%, about 8 resident warps per SM, 30% lane coherence). Casters-only frames now keep the counts moved casters cannot reach (quarry caster motion 3.3 → 2.3 ms, S2 0.68 → 0.44 ms), byte-identical; camera motion stays at 2.5 ms.
+
 ## Result
 
 **New non-RT default: `walk_cap: 16, refresh: 16, sun_hysteresis: 0.01` (directions 8). It stays above Unreal VSM on every measured quantity of S2, S3 and the quarry, traced and no-RT. S1 keeps N8c's single miss: 2 umbra leaks on pose 1 against VSM's 0. Cost falls about 4x on frames whose camera and casters hold still, and the sun-turning target is met. The static target is missed by 0.1-0.35 ms, and the no-RT frame lands at the 1.61 ms target within noise. Frames whose camera or casters move gain only the walk cap's sixth: they cost 2.9 ms on the quarry against VSM's 0.5 and miss.**

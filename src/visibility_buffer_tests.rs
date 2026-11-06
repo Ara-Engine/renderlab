@@ -5,11 +5,13 @@ use rayon::prelude::*;
 fn no_rt_renderer() -> Renderer {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        // WGPU_DEBUG=1 adds shader source line info for profilers (N8f's Nsight traces).
         flags: if manifest()["validate"].as_bool() == Some(false) {
             wgpu::InstanceFlags::empty()
         } else {
             wgpu::InstanceFlags::debugging()
-        },
+        }
+        .with_env(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -656,6 +658,7 @@ fn gpu_visibility_fixture() {
 #[test]
 #[ignore = "N1c owned GPU lease: quarry LOD cuts, agreement and paired cost, asset loaded once"]
 fn gpu_visibility_quarry() {
+    let begun = Instant::now();
     let m = manifest();
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
@@ -879,6 +882,87 @@ fn gpu_visibility_quarry() {
                 stages.push(serde_json::json!({"label": label, "lod_pixels": lod, "software_extent": extent, "lod_lift": lift, "stage_ms": ms}));
             }
             snapshot(&mut r, &out, &label);
+            // N8f: `move_frames` with the camera stepping 1 mm a frame, then as many with one
+            // placement (`move_batch`, slot 0) stepping 1 mm a frame at the pose's camera.
+            let move_frames = m["move_frames"].as_u64().unwrap_or(0) as u32;
+            if move_frames > 0 {
+                let pose = &cameras.frames[index];
+                eprintln!(
+                    "N8f camera motion {label} from {:.1} s",
+                    begun.elapsed().as_secs_f64()
+                );
+                for i in 1..=move_frames {
+                    let step = Vec3::X * (0.001 * i as f32);
+                    let moved = Camera::look_at(
+                        Vec3::from_array(pose.eye) + step,
+                        Vec3::from_array(pose.target) + step,
+                        Vec3::from_array(pose.up),
+                        pose.fov_y_radians,
+                        pose.near,
+                        pose.far,
+                    )
+                    .unwrap();
+                    render(
+                        &mut r,
+                        &color,
+                        &moved,
+                        &mut asset.draws(Visibility::Frustum),
+                    );
+                    timing(&mut r, &format!("{label}-move"), &mut rows);
+                }
+                r.test_drain("N8f camera motion tail");
+                timing(&mut r, &format!("{label}-move"), &mut rows);
+                let batch = m["move_batch"].as_u64().unwrap_or(0) as usize;
+                let base = asset.model(batch, 0);
+                for i in 1..=move_frames {
+                    let step = Mat4::from_translation(Vec3::X * (0.001 * i as f32));
+                    asset.set_model(batch, 0, step * base).unwrap();
+                    render(
+                        &mut r,
+                        &color,
+                        &camera,
+                        &mut asset.draws(Visibility::Frustum),
+                    );
+                    timing(&mut r, &format!("{label}-caster"), &mut rows);
+                }
+                r.test_drain("N8f caster motion tail");
+                timing(&mut r, &format!("{label}-caster"), &mut rows);
+                eprintln!("N8f caster motion {label}: {:?}", r.virtual_shadow_stats());
+                // Kept counts must equal a full lookup of the final placement (N8f identity).
+                let [_, rolled] = interactive_outputs(&r);
+                let settings = r.virtual_settings;
+                r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
+                    refresh: 1,
+                    ..settings
+                })
+                .unwrap();
+                render(
+                    &mut r,
+                    &color,
+                    &camera,
+                    &mut asset.draws(Visibility::Frustum),
+                );
+                r.test_drain("N8f caster identity");
+                let _ = r.poll().unwrap();
+                let [_, dense] = interactive_outputs(&r);
+                r.set_virtual_shadow_settings(settings).unwrap();
+                let differ = rolled
+                    .chunks_exact(4)
+                    .zip(dense.chunks_exact(4))
+                    .filter(|(a, b)| a != b)
+                    .count();
+                changed.push(serde_json::json!({"label": label, "caster_rolled_differs": differ}));
+                eprintln!("N8f caster identity {label}: {differ} pixels differ");
+                asset.set_model(batch, 0, base).unwrap();
+                render(
+                    &mut r,
+                    &color,
+                    &camera,
+                    &mut asset.draws(Visibility::Frustum),
+                );
+                r.test_drain("N8f motion restored");
+                let _ = r.poll().unwrap();
+            }
         }
     }
     fs::write(
