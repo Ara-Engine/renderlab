@@ -1,39 +1,39 @@
 # N7a: world-space visibility cache on the GPU (non-RT)
 
-2026-11-06 UTC. Unit N7a of [non-rt-n7.md](non-rt-n7.md) Â§6, on N0's software tracer ([non-rt-n0.md](non-rt-n0.md)). Branch `t3/n7a-visibility-cache`: `origin/t3/n4-light-space-grid` (a0cb9cb) with `origin/main` (7979345) merged. Test-only; no production file changed. Labels: **M** measured here, **I** inference.
+2026-11-06 UTC. Unit N7a of [non-rt-n7.md](non-rt-n7.md) §6, on N0's software tracer ([non-rt-n0.md](non-rt-n0.md)). Branch `t3/n7a-visibility-cache`: `origin/t3/n4-light-space-grid` (a0cb9cb) with `origin/main` (7979345) merged. Test-only; no production file changed. Labels: **M** measured here, **I** inference.
 
 ## Result
 
 **Stop on the frozen rules (M).** Values are measured, and the cache is exact against its own fresh traces.
 
-- **Cost.** The warm lookup costs 0.40â€“0.42 ms, against the 0.30 ms line. Warm Q-walk shadow work costs 4.1 ms p50 and 13.4 ms p99, against 0.5 and 1.2 ms.
-- **Quality.** Below Unreal VSM's error on the main populations everywhere: partial, contact, occluded, missed shadows and flips. Above VSM on lit, faint and isolated pixels on the quarry, so the frozen quality rule stops it there. Exact and Interactive also exceed VSM on faint and isolated there. On S2, the rule breaks in 11â€“22 of 160 frames per track, against Interactive's 1â€“11.
+- **Cost.** The warm lookup costs 0.40–0.42 ms, against the 0.30 ms line. Warm Q-walk shadow work costs 4.1 ms p50 and 13.4 ms p99, against 0.5 and 1.2 ms.
+- **Quality.** Below Unreal VSM's error on the main populations everywhere: partial, contact, occluded, missed shadows and flips. Above VSM on lit, faint and isolated pixels on the quarry, so the frozen quality rule stops it there. Exact and Interactive also exceed VSM on faint and isolated there. On S2, the rule breaks in 11–22 of 160 frames per track, against Interactive's 1–11.
 
-| Frozen rule ([non-rt-n7.md Â§6](non-rt-n7.md#6-gpu-first-unit-n7a)) | Measured | Verdict |
+| Frozen rule ([non-rt-n7.md §6](non-rt-n7.md#6-gpu-first-unit-n7a)) | Measured | Verdict |
 |---|---|---|
 | Quality: any R_F population RMS above VSM's, missed above VSM's, or false above max(VSM's, 2x Interactive's), on any Q-walk or S2 frame | Quarry poses 0 and 1: lit 0.023 against 0.0027, faint 0.155 against 0.046, isolated 0.187 against 0.049. Every other population and the missed count are below VSM. False shadows: 595, under 2x this run's Interactive (2 x 393) but above 2x the film doc's (2 x 9). S2: 15 / 22 / 17 / 11 frames break it, mostly faint, then lit and one false; Interactive breaks it in 5 / 11 / 4 / 1 | **Stop** |
 | Correctness: a stored outcome differs from a fresh trace in validation replay | 0 of 111 M stored rays replayed, over the quarry, Q-walk, sun, S2 and S3 | Pass |
-| Lookup and update pass above 0.30 ms, warm 1080p frame | Quarry 0.404â€“0.424 ms (Q-walk 0.56 ms p50); S2 0.27â€“0.28 ms; S3 0.15 ms | **Stop** (quarry) |
+| Lookup and update pass above 0.30 ms, warm 1080p frame | Quarry 0.404–0.424 ms (Q-walk 0.56 ms p50); S2 0.27–0.28 ms; S3 0.15 ms | **Stop** (quarry) |
 | Warm Q-walk shadow cost p50 above 0.5 ms or p99 above 1.2 ms | 4.12 ms p50, 13.4 ms p99 over 128 moving frames. The return path alone, all on surface seen before, is 0.99 / 3.5 ms | **Stop** |
-| Queued fill rays above 6.8 ns each | Cold views 5.4â€“6.6 ns. Sparse fills 64 ns (Q-walk, 52 k rays in 3.3 ms) to 136 ns (1Â°/s sun, 6.6 k rays in 0.89 ms) | **Triggered** for sparse fills; Â§2 re-priced below |
-| Sun at 1Â°/s adds more than 0.25 ms | Quarry +0.90 ms (1.31 against 0.41 ms p50); S3 +0.31 ms (0.46 against 0.15) | **Miss** recorded; 10Â°/s: quarry +2.40 ms |
+| Queued fill rays above 6.8 ns each | Cold views 5.4–6.6 ns. Sparse fills 64 ns (Q-walk, 52 k rays in 3.3 ms) to 136 ns (1°/s sun, 6.6 k rays in 0.89 ms) | **Triggered** for sparse fills; §2 re-priced below |
+| Sun at 1°/s adds more than 0.25 ms | Quarry +0.90 ms (1.31 against 0.41 ms p50); S3 +0.31 ms (0.46 against 0.15) | **Miss** recorded; 10°/s: quarry +2.40 ms |
 | Memory above 128 MB | 100.5 MB allocated. The Q-walk's 3.72 M cells overfill the 4 M-slot table: 156 k probe-limit lookups fall back. Holding them at load 0.5 needs 2^23 slots, a 134 MB table, 168 MB in all | Pass as allocated; **above the cap** at the size the walk needs |
-| Cut frames: recorded, no gate | Cold quarry view 47â€“63 ms (1.05 M cells, 8.4 M rays) | Amortization measured below; decision for Islam |
+| Cut frames: recorded, no gate | Cold quarry view 47–63 ms (1.05 M cells, 8.4 M rays) | Amortization measured below; decision for Islam |
 
 **Why the N7 estimates missed (M).** Three causes:
 
 - **Triangle density.** The quarry has about 8 triangles under each pixel footprint, while pixel centres hit about one. The N7 probe counted 589 k cells, the triangles that pixel centres hit, plus subdivision. The full set under the view is about 2.8 M cells: 2.77 M keys after 16 Q-walk frames. After any camera step, most pixel centres land on triangles never filled.
   - A 1-ring of adjacent triangles per new cell, the doc's "each newly seen footprint traces all of its cells", reduced the misses but did not remove them. The outward walk still claims 14 k new cells per frame p50, and moving frames fill 15.6 k cells (52 k rays) p50, against the 240 cells the doc estimated.
-- **Sparse fills are latency-bound.** A dispatch of a few thousand cells costs about 0.8 ms however few rays it holds: one deep software traversal sets the floor. Full-frame fills reach 5.4â€“6.6 ns per ray.
-- **The lookup costs 0.40 ms, against the 0.05â€“0.2 ms model.** Per pixel it fetches the triangle, computes the footprint level, probes the hash and tests 16 lattice directions against the cone. This is the same model-versus-GPU gap as N4 and N5.
+- **Sparse fills are latency-bound.** A dispatch of a few thousand cells costs about 0.8 ms however few rays it holds: one deep software traversal sets the floor. Full-frame fills reach 5.4–6.6 ns per ray.
+- **The lookup costs 0.40 ms, against the 0.05–0.2 ms model.** Per pixel it fetches the triangle, computes the footprint level, probes the hash and tests 16 lattice directions against the cone. This is the same model-versus-GPU gap as N4 and N5.
 
-**Quality defect found (M).** A cell's centroid can lie inside other geometry. On S3, slab triangles partly under a pillar and pillar triangles below the ridged slab return "fully shadowed" for lit pixels: 114 flips per frame, in arcs at the pillar feet ([image](#evidence-and-time)). On the quarry the 12 scans interpenetrate. Within 2 px of another placement (4.5% of pixels), lit RMS is 0.106 for the cache against 0.014 for Interactive. Elsewhere it is 0.0128 against 0.0109. Interactive samples the pixel's visible point, which is never buried. A burial guard at fill time is the proposed fix (Â§6). It is not built here, because the cost stops already decide the unit.
+**Quality defect found (M).** A cell's centroid can lie inside other geometry. On S3, slab triangles partly under a pillar and pillar triangles below the ridged slab return "fully shadowed" for lit pixels: 114 flips per frame, in arcs at the pillar feet ([image](#evidence-and-time)). On the quarry the 12 scans interpenetrate. Within 2 px of another placement (4.5% of pixels), lit RMS is 0.106 for the cache against 0.014 for Interactive. Elsewhere it is 0.0128 against 0.0109. Interactive samples the pixel's visible point, which is never buried. A burial guard at fill time is the proposed fix (§6). It is not built here, because the cost stops already decide the unit.
 
 ## 1. What was built
 
 Files (all new, test-only unless noted):
 
-- `shaders/visibility_cache.wgsl`: table, lookup, plan, fill, resolve and validation kernels, appended to N0's traced module. Rays use N0's `software_occluded`, with the same receivers' Îµ and side policy.
+- `shaders/visibility_cache.wgsl`: table, lookup, plan, fill, resolve and validation kernels, appended to N0's traced module. Rays use N0's `software_occluded`, with the same receivers' ε and side policy.
 - `src/visibility_cache.rs`: the CPU mirror of keys, cells, lattice, window and shift; the parameter block; the composition. `#[cfg(test)]` module in `lib.rs`.
 - `src/visibility_cache_tests.rs`: CPU tests and the quarry probe `gpu_visibility_cache_probe`.
 - `src/visibility_cache_bench.rs`: S2/S3 `gpu_visibility_cache_bench`. It copies motion_bench_tests.rs's crop film generator, whose file N8 owns.
@@ -50,7 +50,7 @@ Files (all new, test-only unless noted):
 
 **Directions.** Each cell owns a jittered, rotated square lattice in a gnomonic chart fixed in the world at the anchor sun.
 
-- The spacing puts 8 points on average in the sun cone (0.04 rad). The window test measured 7.6â€“8.4 near the anchor and up to 9.6 at 20Â°.
+- The spacing puts 8 points on average in the sun cone (0.04 rad). The window test measured 7.6–8.4 near the anchor and up to 9.6 at 20°.
 - A cell stores a 4x4 window: 16 blocked bits, 16 valid bits and the window origin.
 - Disk membership is the exact cone around the current sun, which is Interactive's estimand. When the sun moves, the window slides and only points entering the cone are traced.
 
@@ -85,8 +85,8 @@ Files (all new, test-only unless noted):
 | Check | CPU | GPU | Difference and class |
 |---|---:|---:|---|
 | Keys | 2,775,096 | 2,774,676 | 911 CPU-only: 894 prefetch-only, 13 centres, 4 same triangle with another key. 491 GPU-only: 489 prefetch-only, 2 same triangle. The prefetch-only keys match the claims the GPU dropped while a slot was in flight (counter: 138 per frame p50, 44 k in the cold frame): a claim race, not a value error |
-| Windows | â€” | â€” | 323 of 2.77 M differ; 2 lie within 1e-4 of a lattice line, the rest are not classified further. Separately, 1,196 cells were claimed in the last frame's resolve and are not filled yet |
-| Stored rays, 20,000 sampled cells | 159,856 | â€” | 2 differ, at 3.5 and 6.5 Âµm from a triangle boundary or the Îµ segment end (Îµ = 10 Âµm): f32 receiver rounding |
+| Windows | — | — | 323 of 2.77 M differ; 2 lie within 1e-4 of a lattice line, the rest are not classified further. Separately, 1,196 cells were claimed in the last frame's resolve and are not filled yet |
+| Stored rays, 20,000 sampled cells | 159,856 | — | 2 differ, at 3.5 and 6.5 µm from a triangle boundary or the ε segment end (ε = 10 µm): f32 receiver rounding |
 
 The replay is not bit-equal, so the doc's order item 1 is met only up to these classes. Stored values are exact by the validation replay.
 
@@ -100,18 +100,18 @@ RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan; release test binaries `n7a-b3.exe
 
 | Case | Lookup | Fill | Resolve | Shadow total | Rays | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Warm, static camera | 0.404â€“0.424 | â€” | â€” | **0.41â€“0.43** p50 | 0 | Rule line 0.30 |
-| Cold view, unbounded fill (2 runs x 2 reps) | 1.3â€“1.7 | 45â€“62 | 0.53â€“0.61 | **47â€“63** | 8.4 M | 1.05 M cells: 0.33 M centre, 0.71 M ring; 5.4â€“6.6 ns/ray |
+| Warm, static camera | 0.404–0.424 | — | — | **0.41–0.43** p50 | 0 | Rule line 0.30 |
+| Cold view, unbounded fill (2 runs x 2 reps) | 1.3–1.7 | 45–62 | 0.53–0.61 | **47–63** | 8.4 M | 1.05 M cells: 0.33 M centre, 0.71 M ring; 5.4–6.6 ns/ray |
 | Pose 1 after pose 0 (1 cm) | 0.99 | 23.3 | 0.33 | 24.6 | 3.6 M | 454 k new cells |
-| Q-walk moving frames (128), p50 / p99 | 0.56 / 1.12 | 3.28 / â€” | â€” | **4.12 / 13.4** | 52 k p50 | 15.6 k cells filled p50 |
-| â€” walk out (64) | 0.60 | 4.56 | 0.32 | 5.37 / 13.4 | 280 k | |
-| â€” hold (32) | 0.53 | 0.01 | 0.44 | 0.98 / 1.78 | 0 | 99 px/frame fall back: the table is overfull |
-| â€” return (64) | 0.48 | 0.21 | 0.19 | 0.99 / 3.5 | 17 | Surface seen on the way out |
-| Sun 1Â°/s (64 frames) | 0.41 | 0.89 | 0.01 | 1.31 p50 | 6.6 k | +0.90 ms; 136 ns/ray |
-| Sun 10Â°/s (64 frames) | 0.46 | 2.33 | 0.02 | 2.81 p50 | 101 k | Budget-capped at 65,536 cells |
-| Sun jump 5Â° | 1.24 | 2.60 | 11.8 | 15.6, then 14.7 | 378 k | 279 k pixels fall back to Interactive |
+| Q-walk moving frames (128), p50 / p99 | 0.56 / 1.12 | 3.28 / — | — | **4.12 / 13.4** | 52 k p50 | 15.6 k cells filled p50 |
+| — walk out (64) | 0.60 | 4.56 | 0.32 | 5.37 / 13.4 | 280 k | |
+| — hold (32) | 0.53 | 0.01 | 0.44 | 0.98 / 1.78 | 0 | 99 px/frame fall back: the table is overfull |
+| — return (64) | 0.48 | 0.21 | 0.19 | 0.99 / 3.5 | 17 | Surface seen on the way out |
+| Sun 1°/s (64 frames) | 0.41 | 0.89 | 0.01 | 1.31 p50 | 6.6 k | +0.90 ms; 136 ns/ray |
+| Sun 10°/s (64 frames) | 0.46 | 2.33 | 0.02 | 2.81 p50 | 101 k | Budget-capped at 65,536 cells |
+| Sun jump 5° | 1.24 | 2.60 | 11.8 | 15.6, then 14.7 | 378 k | 279 k pixels fall back to Interactive |
 
-Same processes: N0 software Interactive 9.5â€“11.4 ms; hardware Interactive 0.39â€“0.41 ms; display (the production soft shading pass, whose cost does not depend on the visibility values) 0.37â€“0.39 ms. Unreal VSM: 1.61 ms per frame, 0.50 ms of it shadows ([bench-motion](bench-motion.md), [non-rt-n7.md](non-rt-n7.md)).
+Same processes: N0 software Interactive 9.5–11.4 ms; hardware Interactive 0.39–0.41 ms; display (the production soft shading pass, whose cost does not depend on the visibility values) 0.37–0.39 ms. Unreal VSM: 1.61 ms per frame, 0.50 ms of it shadows ([bench-motion](bench-motion.md), [non-rt-n7.md](non-rt-n7.md)).
 
 **S2 (32 triangles) and S3 (525 k triangles), per frame:**
 
@@ -122,17 +122,17 @@ Same processes: N0 software Interactive 9.5â€“11.4 ms; hardware Interactive
 | S2 camera 1 px | 0.324 / 0.413 | 0.281 | 0.231 | 0.123 | 1.26 ms |
 | S2 shadow-step | 0.317 / 0.353 | 0.280 | 0.229 | 0.123 | 1.26 ms |
 | S3 static and holds | 0.15 | 0.147 | 1.62 | 0.172 | 5.0 ms, 383 k cells |
-| S3 0.25Â°/s | 0.434 / 0.829 | â€” | 1.61 | â€” | |
-| S3 1Â°/s | 0.462 / 0.827 | â€” | 1.61 | â€” | |
-| S3 jump recovery | 0.149 / 1.869 | â€” | 1.64 | â€” | |
+| S3 0.25°/s | 0.434 / 0.829 | — | 1.61 | — | |
+| S3 1°/s | 0.462 / 0.827 | — | 1.61 | — | |
+| S3 jump recovery | 0.149 / 1.869 | — | 1.64 | — | |
 
-On S2, rays are so cheap that the cache costs more than N0's Interactive: 0.31 against 0.23 ms. The lookup there includes the mover composite: about 2 M lattice rays a frame tested against the two movers. On S3 it is 10x cheaper than N0's Interactive when the sun holds, and adds 0.28â€“0.31 ms while it rotates. Unreal VSM's rotation increment on S3 is +0.23 ms of shadow depth.
+On S2, rays are so cheap that the cache costs more than N0's Interactive: 0.31 against 0.23 ms. The lookup there includes the mover composite: about 2 M lattice rays a frame tested against the two movers. On S3 it is 10x cheaper than N0's Interactive when the sun holds, and adds 0.28–0.31 ms while it rotates. Unreal VSM's rotation increment on S3 is +0.23 ms of shadow depth.
 
-**Â§2 re-priced (the 6.8 ns rule).**
+**§2 re-priced (the 6.8 ns rule).**
 
-- Cold views run at 5.4â€“6.6 ns per ray.
+- Cold views run at 5.4–6.6 ns per ray.
 - Sparse fills cost about 0.8 ms a dispatch plus about 11 ns per ray: 6.6 k rays take 0.89 ms, and 101 k rays take 2.33 ms.
-- N7's per-frame estimates (0.007â€“0.11 ms) assumed 3.4 ns per ray. A dispatch of a few thousand rays cannot go below the floor.
+- N7's per-frame estimates (0.007–0.11 ms) assumed 3.4 ns per ray. A dispatch of a few thousand rays cannot go below the floor.
 
 ## 4. Quality against film references (M)
 
@@ -170,26 +170,26 @@ On S2, rays are so cheap that the cache costs more than N0's Interactive: 0.31 a
 | | Interactive | 0.0742 | 0 | 0 | 0 | 24,054 | 3,732 | 0.0032 | |
 | | Unreal VSM | 0.1691 | 5,186 | 67 | 120 | 221,148 | 7,313 | 0.0525 | |
 
-- **Motion stability.** The cache's frame-to-frame error change is 1.3â€“1.4x Interactive's under camera motion, and equal for the moving blocker. That is 3â€“4x lower than VSM's.
-- **Static error.** The cache also loses contacts on hold frames (32â€“96 per phase), so part of its error is static. Cells span up to about 1.4 px on S2's large triangles.
+- **Motion stability.** The cache's frame-to-frame error change is 1.3–1.4x Interactive's under camera motion, and equal for the moving blocker. That is 2.8–15x lower than VSM's.
+- **Static error.** The cache also loses contacts on hold frames (32–96 per phase), so part of its error is static. Cells span up to about 1.4 px on S2's large triangles.
 - **Movers.** Mover receivers take Interactive. Contacts under the moving blocker are lost in 192 pixel-frames per moving phase.
 
-**S3, 1Â°/s sun, per phase.** The references were regenerated with reset shadow bases (the [reset-identity fix](temporal-reset-identity.md)), so their sample realizations differ from the archive: partial counts match in 133 of 385 frames. N0's Interactive (0.0779) matches the archived hardware value (0.07790), so the Unreal rows compare at reference-noise level.
+**S3, 1°/s sun, per phase.** The references were regenerated with reset shadow bases (the [reset-identity fix](temporal-reset-identity.md)), so their sample realizations differ from the archive: partial counts match in 133 of 385 frames. N0's Interactive (0.0779) matches the archived hardware value (0.07790), so the Unreal rows compare at reference-noise level.
 
 | Phase | Method | Partial RMS | Lost contact / contact | Max leaks | Max flips | Error change RMS | Shadow ms p50 / p99 |
 |---|---|---:|---:|---:|---:|---:|---:|
 | static (32) | N7a cache | 0.1155 | 448 / 48,512 | 3 | 114 | 0.0000 | 0.154 / 0.161 |
 | | N0 Interactive | 0.0775 | 0 | 0 | 0 | 0.0000 | 1.62 |
-| | Unreal VSM | 0.1878 | 2,929 | 111 | 187 | â€” | |
-| rotate 0.25Â°/s (128) | N7a cache | 0.1156 | 2,036 / 194,291 | 4 | 114 | 0.0023 | 0.434 / 0.829 |
+| | Unreal VSM | 0.1878 | 2,929 | 111 | 187 | — | |
+| rotate 0.25°/s (128) | N7a cache | 0.1156 | 2,036 / 194,291 | 4 | 114 | 0.0023 | 0.434 / 0.829 |
 | | N0 Interactive | 0.0780 | 0 | 0 | 0 | 0.0025 | 1.61 |
-| | Unreal VSM | 0.1875 | 11,630 | 111 | 190 | â€” | |
-| rotate 1Â°/s (128) | N7a cache | 0.1134 | 1,723 / 196,290 | 6 | 116 | 0.0047 | 0.462 / 0.827 |
+| | Unreal VSM | 0.1875 | 11,630 | 111 | 190 | — | |
+| rotate 1°/s (128) | N7a cache | 0.1134 | 1,723 / 196,290 | 6 | 116 | 0.0047 | 0.462 / 0.827 |
 | | N0 Interactive | 0.0779 | 0 | 0 | 0 | 0.0050 | 1.61 |
-| | Unreal VSM | 0.1863 | 12,289 | 106 | 192 | â€” | 2.44 (whole GPU) |
-| 5Â° jump recovery (33) | N7a cache | 0.1114 | 416 / 51,777 | 0 | 109 | 0.0036 | 0.149 / 1.869 |
+| | Unreal VSM | 0.1863 | 12,289 | 106 | 192 | — | 2.44 (whole GPU) |
+| 5° jump recovery (33) | N7a cache | 0.1114 | 416 / 51,777 | 0 | 109 | 0.0036 | 0.149 / 1.869 |
 | | N0 Interactive | 0.0761 | 0 | 0 | 0 | 0.0011 | 1.64 |
-| | Unreal VSM | 0.1811 | 3,153 | 114 | 226 | â€” | |
+| | Unreal VSM | 0.1811 | 3,153 | 114 | 226 | — | |
 
 - On S3 the cache stays below VSM on partial RMS, contact, leaks and flips.
 - It is clearly worse than Interactive: 1.46x partial RMS and 114 flips per frame. Its frozen rule breaks on all 385 frames (faint, lit, false, solid), against 318 for Interactive (faint, isolated).
@@ -198,7 +198,7 @@ On S2, rays are so cheap that the cache costs more than N0's Interactive: 0.31 a
 
 ## 5. Cold views and their amortization (M, proposal I)
 
-- **A cold quarry view costs 47â€“63 ms**: 1.05 M cells, 8.4 M rays. That is 5â€“6x N0's full-frame Interactive (9.5â€“11.4 ms), because it fills about 3 cells per pixel.
+- **A cold quarry view costs 47–63 ms**: 1.05 M cells, 8.4 M rays. That is 5–6x N0's full-frame Interactive (9.5–11.4 ms), because it fills about 3 cells per pixel.
 - **Measured progressive fill** at pose 0, with each unfilled pixel taking Interactive at its own receiver:
   - 131,072 cells per frame: 5 frames, 16.4, 14.6, 8.5, 1.5 and 0.4 ms.
   - 32,768 cells per frame: 12 frames, 16.4 ms falling to 0.4 ms.
@@ -206,9 +206,9 @@ On S2, rays are so cheap that the cache costs more than N0's Interactive: 0.31 a
 
 **Proposal for Islam (I).** On a cut or a jump over half the disk:
 
-- show N0's Interactive full-frame for one frame (9.5â€“11.4 ms), as the bar requires;
+- show N0's Interactive full-frame for one frame (9.5–11.4 ms), as the bar requires;
 - fill the cache at 131 k cells per frame behind it, warm in about 4 frames;
-- accept 2â€“3 frames of 9â€“16 ms on the software path.
+- accept 2–3 frames of 9–16 ms on the software path.
 
 No cheaper fallback meets the bar. A hard 1-ray shadow (about 1.2 ms) would be a below-bar mode on those frames and cannot be a default. Both options are open; the frozen rules gave no gate here.
 
@@ -217,9 +217,9 @@ No cheaper fallback meets the bar. A hard 1-ray shadow (about 1.2 ms) would be a
 - **Burial guard.** At fill time, mark a cell unusable when a short probe from its centroid along the keyed side is blocked within a few triangle sizes. Its pixels take Interactive, or a finer level. Expected to remove the S3 foot flips and most of the quarry's 7.7x lit excess near scan overlaps, at some fallback cost. It does not change the cost stops.
 - **Cells over triangle clusters, not triangles.** The 8-triangles-per-footprint factor sets both the cell count (2.8 M) and the Q-walk misses.
   - This needs a 2D chart per cluster, such as the meshlets N1b would cull, and must not mix surfaces.
-  - N7's world-voxel rows showed what mixing costs: 276â€“1,549 flips.
+  - N7's world-voxel rows showed what mixing costs: 276–1,549 flips.
 - **Lookup.** The per-pixel key from N1b's visibility buffer, plus a sun epoch per cell that skips the 16-direction cone test when the sun holds. Unmeasured. Every structure on this GPU has run above its model.
-- **Sparse fills.** Batch partial-window fills every K frames: about 0.11 ms average at 1Â°/s with K = 8 (I), with p99 frames near 0.9 ms; or overlap them with other work.
+- **Sparse fills.** Batch partial-window fills every K frames: about 0.11 ms average at 1°/s with K = 8 (I), with p99 frames near 0.9 ms; or overlap them with other work.
 - **Not proposed.** Loosening any frozen rule.
 
 ## Evidence and time
@@ -246,8 +246,8 @@ Evidence is in `E:/renderlab-work/n7a/`:
 | s2-1 | 224 s | Includes 213 s of references |
 | s3-1 | 178 s | Includes 168 s of references |
 
-- Release test builds took 1â€“1.5 min each, four in all.
-- CPU scoring took 11â€“150 s per run.
+- Release test builds took 1–1.5 min each, four in all.
+- CPU scoring took 11–150 s per run.
 - `cargo test -p renderlab --lib` passed by exit status: 106 passed, 0 failed, 101 ignored.
 
 **Implementation.** About 07:35 to 08:45 UTC, interleaved with the checks above; editing time was not isolated. There was no window, viewer, game capture or Unreal launch.

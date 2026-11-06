@@ -217,7 +217,7 @@ fn cache_meta(stamp:u32,window:vec2<i32>)->u32 {
     return (stamp&0xffffu)|((u32(window.x)&0xffu)<<16u)|((u32(window.y)&0xffu)<<24u);
 }
 
-// The receiver at a cell's centroid: the placement's triangle, the side of the key, ÃŽÂµ.
+// The receiver at a cell's centroid: the placement's triangle, the side of the key, ε.
 struct CacheReceiver {world:vec3<f32>,geometric:vec3<f32>,epsilon:f32,thin:bool,side:u32};
 fn cache_receiver(a:u32,b:u32)->CacheReceiver {
     let placement=((a>>22u)&63u)-1u;let primitive=a&0x3fffffu;let level=a>>28u;
