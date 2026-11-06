@@ -323,7 +323,8 @@ impl Grid {
     /// Whether some listed triangle that `test` accepts can block the ray, walking the
     /// pyramid from level `start` (clamped to the coarsest). None when the ray cannot be
     /// walked (not rising toward the grid's light, or MAX_STEPS): the caller falls back to
-    /// the BVH. The arithmetic is the WGSL's, in f32.
+    /// the BVH. The arithmetic is the WGSL's, in f32. `log` collects (level, cell x, cell y,
+    /// top, ray height, t) per step for diagnosis.
     pub fn trace(
         &self,
         origin: Vec3,
@@ -332,6 +333,7 @@ impl Grid {
         tmax: f32,
         start: usize,
         stats: &mut TraceStats,
+        mut log: Option<&mut Vec<[f32; 6]>>,
         mut test: impl FnMut(u32) -> bool,
     ) -> Option<bool> {
         let f = &self.frame;
@@ -368,6 +370,9 @@ impl Grid {
             stats.lookups += 1;
             let h = self.tops[level][(cell[0] + cell[1] * i64::from(w)) as usize];
             let rise = t.mul_add(dz, z0);
+            if let Some(log) = log.as_deref_mut() {
+                log.push([level as f32, at[0] as f32, at[1] as f32, h, rise, t]);
+            }
             if h >= rise && level > 0 {
                 for a in 0..2 {
                     let first = cell[a] << level;
@@ -449,25 +454,32 @@ pub fn constants(front_chunks: usize, entry_chunks: usize, meshes: usize) -> Str
 /// Words per heap chunk: 64 MiB bindings, under the 128 MiB storage-binding limit.
 pub const CHUNK_WORDS: usize = 1 << 24;
 
-/// Word offsets of the front heap's sections (list ends, pyramid, scan scratch) and the
-/// entry capacity. Entries are ENTRY_WORDS words each in their own heap.
+/// Word offsets of the front heap's sections (list ends, pyramid, scan scratch, and each
+/// triangle's cell range) and the entry capacity. Entries are ENTRY_WORDS words each in
+/// their own heap.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Layout {
     pub ends: u32,
     pub tops: u32,
     pub sums: u32,
+    /// Two words per triangle: x0 | y0 << 16, x1 | y1 << 16. The count pass stores them
+    /// and the scatter reuses them: two entry points can round the same f32 expression
+    /// differently, which made lists overlap.
+    pub ranges: u32,
     pub front_words: u32,
     pub capacity: u32,
 }
 impl Layout {
-    pub fn new(frame: &Frame, capacity: u32) -> Self {
+    pub fn new(frame: &Frame, capacity: u32, triangles: u32) -> Self {
+        assert!(frame.dims.iter().all(|&n| n < 1 << 16), "cell ranges are 16-bit");
         let cells = frame.dims[0] * frame.dims[1];
         let pyramid: u32 = frame.levels().iter().map(|[x, y]| x * y).sum();
         let (ends, tops) = (0, cells);
         let sums = tops + pyramid;
         // Block totals, the grand total, then the overflow flag.
-        let front_words = sums + cells.div_ceil(1024) + 2;
-        Self { ends, tops, sums, front_words, capacity }
+        let ranges = sums + cells.div_ceil(1024) + 2;
+        let front_words = ranges + 2 * triangles;
+        Self { ends, tops, sums, ranges, front_words, capacity }
     }
     pub fn front_chunks(&self) -> usize {
         (self.front_words as usize).div_ceil(CHUNK_WORDS)
@@ -500,7 +512,7 @@ pub fn params(frame: &Frame, layout: &Layout, start: u32, placements: &[GpuPlace
     }
     words.extend([frame.origin.x, frame.origin.y, 0.0, 0.0].map(f32::to_bits));
     words.extend([frame.dims[0], frame.dims[1], levels.len() as u32 - 1, start]);
-    words.extend([layout.ends, layout.tops, layout.sums, 0]);
+    words.extend([layout.ends, layout.tops, layout.sums, layout.ranges]);
     let triangles = placements.last().map_or(0, |p| p.first + p.count);
     words.extend([layout.capacity, 0, placements.len() as u32, triangles]);
     let mut offset = 0;

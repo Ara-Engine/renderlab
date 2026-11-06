@@ -96,10 +96,12 @@ impl<'a> CpuWorld<'a> {
             .collect()
     }
     fn grid(&self, models: &[(usize, Mat4)], l: Vec3, cell: f32) -> Grid {
-        let gpu = self.placements(models);
-        let margin = gpu.iter().map(|p| p.margin).fold(0.0, f32::max);
+        let margin = self.placements(models).iter().map(|p| p.margin).fold(0.0, f32::max);
         let boxes: Vec<_> = self.placed.iter().map(|p| bvh::Aabb { lo: p.lo, hi: p.hi }).collect();
-        let frame = Frame::new(l, cell, &boxes, margin);
+        self.grid_in(models, Frame::new(l, cell, &boxes, margin))
+    }
+    fn grid_in(&self, models: &[(usize, Mat4)], frame: Frame) -> Grid {
+        let gpu = self.placements(models);
         let placements: Vec<_> = models
             .iter()
             .zip(&gpu)
@@ -161,7 +163,7 @@ fn n0_blocked(world: &CpuWorld<'_>, ray: &Ray, count: &mut N0Count) -> bool {
 fn grid_blocked(world: &CpuWorld<'_>, grid: &Grid, ray: &Ray, start: usize, stats: &mut TraceStats) -> Option<bool> {
     let inv = inverse3(ray.direction);
     let mut cache: [Option<Option<Ray>>; 16] = [None; 16];
-    grid.trace(ray.origin, ray.direction, ray.tmin, ray.tmax, start, stats, |id| {
+    grid.trace(ray.origin, ray.direction, ray.tmin, ray.tmax, start, stats, None, |id| {
         let k = (id >> lsg::PLACEMENT_SHIFT) as usize;
         let object = *cache[k].get_or_insert_with(|| world.boxed(k, ray, inv).then(|| world.object(k, ray)));
         object.is_some_and(|o| {
@@ -316,8 +318,8 @@ fn light_grid_wgsl_validates() {
         cell: 0.01,
         dims: [3000, 2000],
     };
-    let layout = lsg::Layout::new(&frame, 20_000_000);
-    assert_eq!((layout.front_chunks(), layout.entry_chunks()), (1, 4));
+    let layout = lsg::Layout::new(&frame, 20_000_000, 13_000_000);
+    assert_eq!((layout.front_chunks(), layout.entry_chunks()), (3, 4));
     let constants = lsg::constants(layout.front_chunks(), layout.entry_chunks(), 12);
     let query = lsg::traced_source(soft, &bvh::constants(12, 12, 32), &constants);
     assert!(query.contains("blocked=light_grid_occluded(") && !query.contains("blocked=software_occluded("));
@@ -720,10 +722,13 @@ impl GpuHeap {
     /// Encodes build stages `0..stages` (BUILD_STAGES) of the loaded grid, each its own
     /// pass with optional timestamps at 2i and 2i + 1.
     fn encode(&self, e: &mut wgpu::CommandEncoder, frame: &Frame, stages: usize, stamps: Option<&wgpu::QuerySet>) {
+        self.encode_stages(e, frame, 0..stages, stamps);
+    }
+    fn encode_stages(&self, e: &mut wgpu::CommandEncoder, frame: &Frame, stages: std::ops::Range<usize>, stamps: Option<&wgpu::QuerySet>) {
         let cells = frame.dims[0] * frame.dims[1];
         let blocks = cells.div_ceil(1024);
         let levels = frame.levels();
-        for stage in 0..stages {
+        for stage in stages {
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(BUILD_STAGES[stage]),
                 timestamp_writes: stamps.map(|q| wgpu::ComputePassTimestampWrites {
@@ -796,17 +801,182 @@ impl GpuHeap {
     }
 }
 
+/// The first `words` words of a chunked heap.
+fn heap_words(r: &Renderer, buffers: &[wgpu::Buffer], words: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(words);
+    for b in buffers {
+        if out.len() >= words {
+            break;
+        }
+        out.extend(u32s(&read_buffer(r, b)));
+    }
+    out.truncate(words);
+    out
+}
+/// Stage-by-stage consistency of the GPU build of `spec`: the scatter must end every list
+/// at the next list's begin, lists must be sorted with their top at pyramid level 0, every
+/// pyramid cell must be the max of its children, and two builds must give the same heap.
+fn heap_check(r: &Renderer, heap: &GpuHeap, scene: &GpuScene, spec: &Spec, start: u32) -> serde_json::Value {
+    let f = &spec.frame;
+    let cells = (f.dims[0] * f.dims[1]) as usize;
+    heap.load(r, scene, spec, start);
+    submit(r, |e| heap.encode_stages(e, f, 0..3, None));
+    let begins = heap_words(r, &heap.front, cells);
+    submit(r, |e| heap.encode_stages(e, f, 3..4, None));
+    let ends = heap_words(r, &heap.front, cells);
+    let total = spec.layout.capacity;
+    let next = |c: usize| if c + 1 < cells { begins[c + 1] } else { total };
+    let bad_ends: Vec<usize> = (0..cells).filter(|&c| ends[c] != next(c)).collect();
+    submit(r, |e| heap.encode_stages(e, f, 4..6, None));
+    let front = heap_words(r, &heap.front, spec.layout.front_words as usize);
+    let entries = heap_words(r, &heap.entries, lsg::ENTRY_WORDS * total as usize);
+    let (mut unsorted, mut bad_top0) = (0usize, 0usize);
+    for c in 0..cells {
+        let (b, e) = (begins[c] as usize, (ends[c] as usize).min(total as usize));
+        let key = |i: usize| (f32::from_bits(entries[3 * i + 1]), entries[3 * i]);
+        for i in b + 1..e.max(b + 1) {
+            let (t0, i0) = key(i - 1);
+            let (t1, i1) = key(i);
+            if !(t0 > t1 || (t0 == t1 && i0 < i1)) {
+                unsorted += 1;
+                break;
+            }
+        }
+        let want = if e > b { key(b).0 } else { lsg::EMPTY };
+        if f32::from_bits(front[spec.layout.tops as usize + c]) != want {
+            bad_top0 += 1;
+        }
+    }
+    let levels = f.levels();
+    let mut offset = 0usize;
+    let mut bad_pyramid = 0usize;
+    for k in 1..levels.len() {
+        let ([w, h], [cw, ch]) = (levels[k], levels[k - 1]);
+        let below = offset;
+        offset += (cw * ch) as usize;
+        for y in 0..h {
+            for x in 0..w {
+                let mut m = lsg::EMPTY;
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let (cx, cy) = (2 * x + dx, 2 * y + dy);
+                    if cx < cw && cy < ch {
+                        m = m.max(f32::from_bits(front[spec.layout.tops as usize + below + (cx + cy * cw) as usize]));
+                    }
+                }
+                if f32::from_bits(front[spec.layout.tops as usize + offset + (x + y * w) as usize]) != m {
+                    bad_pyramid += 1;
+                }
+            }
+        }
+    }
+    heap.build(r, scene, spec, start);
+    let again_front = heap_words(r, &heap.front, spec.layout.front_words as usize);
+    let again_entries = heap_words(r, &heap.entries, lsg::ENTRY_WORDS * total as usize);
+    let differing_words = |a: &[u32], b: &[u32], range: std::ops::Range<usize>| range.filter(|&i| a[i] != b[i]).count();
+    let tops = spec.layout.tops as usize;
+    let out = serde_json::json!({"cells": cells, "entries": total,
+        "ends_not_next_begin": bad_ends.len(), "first_bad_ends": bad_ends.iter().take(8).map(|&c| [c as u32, begins[c], ends[c], next(c)]).collect::<Vec<_>>(),
+        "unsorted_lists": unsorted, "level0_top_mismatch": bad_top0, "pyramid_mismatch": bad_pyramid,
+        "rebuild_differing_words": {"ends": differing_words(&front, &again_front, 0..tops),
+            "tops": differing_words(&front, &again_front, tops..spec.layout.sums as usize),
+            "entries": differing_words(&entries, &again_entries, 0..entries.len())}});
+    eprintln!("light_grid_check {} {out}", spec.name);
+    out
+}
+/// The CPU walk (Grid::trace on a CPU build of the same frame) of the first `count` rays
+/// the GPU stats walk dumped at its step limit, with N0's any-hit answer for each.
+#[allow(clippy::too_many_arguments)]
+fn cpu_walk(r: &Renderer, sw: &Software, heap: &GpuHeap, meshes: &[MeshData32], bvhs: &[Bvh], models: &[(usize, Mat4)], spec: &Spec, start: usize, count: u32) -> serde_json::Value {
+    let world = CpuWorld::new(meshes, bvhs, models);
+    let grid = world.grid_in(models, spec.frame);
+    // The GPU build as a CPU grid, and its differences from the CPU build.
+    let front = heap_words(r, &heap.front, spec.layout.front_words as usize);
+    let words = heap_words(r, &heap.entries, lsg::ENTRY_WORDS * spec.layout.capacity as usize);
+    let mut tops = vec![];
+    let mut offset = spec.layout.tops as usize;
+    for [w, h] in &grid.levels {
+        let n = (w * h) as usize;
+        tops.push(front[offset..offset + n].iter().map(|b| f32::from_bits(*b)).collect::<Vec<_>>());
+        offset += n;
+    }
+    let cells = grid.ends.len();
+    let gpu = Grid {
+        frame: spec.frame,
+        levels: grid.levels.clone(),
+        tops,
+        ends: front[..cells].to_vec(),
+        entries: words.chunks_exact(3).map(|e| lsg::Entry { id: e[0], top: f32::from_bits(e[1]), bbox: e[2] }).collect(),
+        stats: grid.stats,
+    };
+    let length = |g: &Grid, c: usize| g.ends[c] - if c == 0 { 0 } else { g.ends[c - 1] };
+    let top_far = (0..cells).filter(|&c| (gpu.tops[0][c] - grid.tops[0][c]).abs() > 1e-3).count();
+    let length_diff = (0..cells).filter(|&c| length(&gpu, c) != length(&grid, c)).count();
+    let pyramid_far: usize = (1..grid.levels.len()).map(|k| (0..grid.tops[k].len()).filter(|&c| (gpu.tops[k][c] - grid.tops[k][c]).abs() > 1e-3).count()).sum();
+    let words = read_words(r, &sw.dump, 0, 8 * u64::from(count));
+    let (mut steps, mut long, mut fallbacks, mut agree) = (vec![], 0, 0, 0);
+    let (mut gpu_steps, mut gpu_fallbacks) = (vec![], 0);
+    let mut examples = vec![];
+    for w in words.chunks_exact(8) {
+        let v: Vec<f32> = w.iter().map(|b| f32::from_bits(*b)).collect();
+        let ray = Ray { origin: Vec3::new(v[0], v[1], v[2]), direction: Vec3::new(v[4], v[5], v[6]), tmin: v[3], tmax: v[7] };
+        let mut st = TraceStats::default();
+        let walked = grid_blocked(&world, &grid, &ray, start, &mut st);
+        let mut on_gpu = TraceStats::default();
+        let walked_gpu = grid_blocked(&world, &gpu, &ray, start, &mut on_gpu);
+        gpu_steps.push(u64::from(on_gpu.lookups));
+        gpu_fallbacks += u32::from(walked_gpu.is_none());
+        let truth = n0_blocked(&world, &ray, &mut N0Count::default());
+        fallbacks += u32::from(walked.is_none());
+        agree += u32::from(walked.unwrap_or(truth) == truth);
+        long += u32::from(st.lookups > 64);
+        steps.push(u64::from(st.lookups));
+        if examples.len() < 8 {
+            let f = &spec.frame;
+            let d = Vec3::new(ray.direction.dot(f.u), ray.direction.dot(f.v), ray.direction.dot(f.l));
+            examples.push(serde_json::json!({"ray": v, "cpu_steps": st.lookups, "cpu_lists": st.lists, "light_direction": d.to_array(),
+                "light_origin": [ray.origin.dot(f.u) - f.origin.x, ray.origin.dot(f.v) - f.origin.y, ray.origin.dot(f.l)]}));
+        }
+    }
+    let out = serde_json::json!({"rays": count, "cpu_steps": spread(&mut steps), "cpu_over_64": long, "cpu_fallbacks": fallbacks,
+        "cpu_agrees_with_n0": agree, "cpu_walk_on_gpu_grid_steps": spread(&mut gpu_steps), "cpu_walk_on_gpu_grid_fallbacks": gpu_fallbacks,
+        "gpu_vs_cpu_grid": {"level0_tops_beyond_1mm": top_far, "list_lengths_differ": length_diff, "upper_tops_beyond_1mm": pyramid_far},
+        "examples": examples});
+    eprintln!("light_grid_cpu_walk {out}");
+    out
+}
 /// Stats-run walk bounds: steps and entries per ray.
 const STATS_BOUNDS: [(&str, f64); 2] = [("LIGHT_GRID_STEP_LIMIT", 64.0), ("LIGHT_GRID_ENTRY_LIMIT", 512.0)];
 /// A single dispatch must stay well under Windows' 2 s GPU timeout.
 const DISPATCH_BUDGET_MS: f64 = 1000.0;
 const RECORD: &str = "fn light_grid_record(steps:u32,entries:u32,tests:u32,fallback:u32) {}";
+const DUMP: &str = "fn light_grid_dump(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32) {}";
 /// The stats module's walk counters, in N0's mask buffer (binding 45): rays, steps,
-/// entries, tests, fallbacks, then the most steps of one ray.
+/// entries, tests, fallbacks, the most steps of one ray, then the dump count. Rays that
+/// exhaust the step limit go to N0's dump buffer (binding 46): origin and tmin, then
+/// direction and tmax, at most DUMPED.
 const STATS: &str = "@group(2) @binding(45) var<storage,read_write> software_masks:array<atomic<u32>>;
+@group(2) @binding(46) var<storage,read_write> software_dump_rays:array<vec4<f32>>;
 fn light_grid_record(steps:u32,entries:u32,tests:u32,fallback:u32) {
     atomicAdd(&software_masks[0],1u);atomicAdd(&software_masks[1],steps);atomicAdd(&software_masks[2],entries);
     atomicAdd(&software_masks[3],tests);atomicAdd(&software_masks[4],fallback);atomicMax(&software_masks[5],steps);
+}";
+const STATS_DUMP: &str = "fn light_grid_dump(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32) {
+    let i=atomicAdd(&software_masks[6],1u);
+    if i<4096u {software_dump_rays[2u*i]=vec4<f32>(origin,tmin);software_dump_rays[2u*i+1u]=vec4<f32>(direction,tmax);}
+}";
+const DUMPED: u32 = 4096;
+const STEP: &str = "fn light_grid_step(step:u32,level:u32,at:vec2<i32>,h:f32,rise:f32,t:f32) {}";
+/// One-ray step trace: the first dumped ray walked by one invocation, its steps from
+/// dump vec4 16 (word 64) on (level, cell x, cell y, top; ray height, t).
+const STATS_STEP: &str = "var<private> light_tracing:bool;
+fn light_grid_step(step:u32,level:u32,at:vec2<i32>,h:f32,rise:f32,t:f32) {
+    if light_tracing && step<256u {software_dump_rays[16u+2u*step]=vec4<f32>(f32(level),f32(at.x),f32(at.y),h);software_dump_rays[17u+2u*step]=vec4<f32>(rise,t,0.0,0.0);}
+}
+@compute @workgroup_size(1) fn light_grid_trace_one() {
+    let a=software_dump_rays[0];let b=software_dump_rays[1];
+    light_tracing=true;
+    let blocked=light_grid_occluded(a.xyz,b.xyz,a.w,b.w);
+    software_dump_rays[2]=vec4<f32>(select(0.0,1.0,blocked),0.0,0.0,0.0);
 }";
 /// A count texture through a buffer copy, waiting up to N0's 20 s map limit.
 fn read_counts(r: &Renderer, texture: &wgpu::Texture) -> Vec<u8> {
@@ -898,6 +1068,7 @@ struct Queries {
     shadows: wgpu::ComputePipeline,
     exact: wgpu::ComputePipeline,
     stats: [wgpu::ComputePipeline; 2],
+    trace_one: wgpu::ComputePipeline,
 }
 
 #[test]
@@ -955,7 +1126,7 @@ fn gpu_light_grid_probe() {
         (models, scene)
     };
     let (meshes, instances) = (quarry.meshes.len(), models.len());
-    drop(quarry);
+    let triangles: u32 = scene.placements.iter().map(|p| p.count).sum();
     summary.insert("placements".into(), serde_json::to_value(&scene.placements).unwrap());
     let start = manifest["start"].as_u64().unwrap_or(0) as u32;
     let margin = scene.placements.iter().map(|p| p.margin).fold(0.0, f32::max);
@@ -968,7 +1139,7 @@ fn gpu_light_grid_probe() {
         .into_iter()
         .map(|(name, cell, alpha)| {
             let frame = Frame::new(tilted(l, alpha), cell, &scene.boxes, margin);
-            Spec { name, cell, alpha, frame, layout: lsg::Layout::new(&frame, 0) }
+            Spec { name, cell, alpha, frame, layout: lsg::Layout::new(&frame, 0, triangles) }
         })
         .collect();
     // Count every grid in a heap without entries, then size the shared heap for the largest.
@@ -980,7 +1151,7 @@ fn gpu_light_grid_probe() {
             probe.load(&r, &scene, spec, start);
             submit(&r, |e| probe.encode(e, &spec.frame, 3, None));
             let total = probe.word(&r, spec.layout.total(&spec.frame));
-            spec.layout = lsg::Layout::new(&spec.frame, total);
+            spec.layout = lsg::Layout::new(&spec.frame, total, triangles);
         }
     }
     let capacity = specs.iter().map(|s| s.layout.capacity).max().unwrap();
@@ -999,6 +1170,14 @@ fn gpu_light_grid_probe() {
     }
     summary.insert("grids".into(), grids.into());
     summary.insert("heap_bytes".into(), heap.bytes().into());
+    if manifest["check_heap"].as_bool().unwrap_or(true) {
+        let checks: Vec<_> = specs.iter().take(1).map(|s| heap_check(&r, &heap, &scene, s, start)).collect();
+        summary.insert("heap_check".into(), checks.into());
+        write(&summary, "summary.json");
+        if manifest["check_only"].as_bool().unwrap_or(false) {
+            return;
+        }
+    }
     let refs: Vec<&Bvh> = bvhs.iter().collect();
     let packed = bvh::pack(&refs);
     let stack = packed.stack;
@@ -1009,14 +1188,15 @@ fn gpu_light_grid_probe() {
     };
     drop(refs);
     drop(packed);
-    drop(bvhs);
     let soft = primary_ray_gpu::shader_sources(SOURCE).unwrap()[1].clone();
     let q = {
         let scopes = OperationScopes::new(&r.device);
         let source = lsg::traced_source(&soft, &bvh::constants(meshes, instances, stack), &heap.constants);
         let m = module(&r, &source);
         assert_eq!(source.matches(RECORD).count(), 1);
-        let counted = module(&r, &source.replacen(RECORD, STATS, 1));
+        assert_eq!(source.matches(DUMP).count(), 1);
+        assert_eq!(source.matches(STEP).count(), 1);
+        let counted = module(&r, &source.replacen(RECORD, STATS, 1).replacen(DUMP, STATS_DUMP, 1).replacen(STEP, STATS_STEP, 1));
         let bounded8: Vec<_> = STATS_BOUNDS.iter().copied().chain(EIGHT).collect();
         let q = Queries {
             shadows: compute(&r, &sw.layout, &m, "fresh_compute", &EIGHT),
@@ -1025,6 +1205,7 @@ fn gpu_light_grid_probe() {
                 compute(&r, &sw.layout, &counted, "fresh_compute", &bounded8),
                 compute(&r, &sw.layout, &counted, "fresh_compute", &STATS_BOUNDS),
             ],
+            trace_one: compute(&r, &sw.layout, &counted, "light_grid_trace_one", &[]),
         };
         if let Some(e) = scopes.finish() {
             panic!("light grid query pipelines failed: {e}");
@@ -1067,9 +1248,27 @@ fn gpu_light_grid_probe() {
                 e.clear_buffer(&sw.masks, 0, Some(64));
                 sw.pass(&r, e, &q.stats[k], groups, Some(s));
             });
-            let c = read_words(&r, &sw.masks, 0, 6);
+            let c = read_words(&r, &sw.masks, 0, 7);
             let mut line = serde_json::json!({"bounded_ms": bounded_ms, "rays": c[0], "steps": c[1], "entries": c[2],
-                "tests": c[3], "fallbacks": c[4], "max_steps": c[5], "bounds": STATS_BOUNDS});
+                "tests": c[3], "fallbacks": c[4], "max_steps": c[5], "step_limited": c[6], "bounds": STATS_BOUNDS});
+            if k == 0 && c[6] > 0 && manifest["check_walk"].as_bool().unwrap_or(true) {
+                line["cpu_walk"] = cpu_walk(&r, &sw, &heap, &quarry.meshes, &bvhs, &models, spec, start as usize, c[6].min(DUMPED));
+                // The first dumped ray, step by step on the GPU and on the CPU.
+                submit(&r, |e| {
+                    e.clear_buffer(&sw.dump, 256, Some(8192));
+                    sw.pass(&r, e, &q.trace_one, [1, 1], None);
+                });
+                let w: Vec<f32> = read_words(&r, &sw.dump, 0, 64 + 8 * 256).iter().map(|b| f32::from_bits(*b)).collect();
+                let gpu_steps: Vec<_> = w[64..].chunks_exact(8).take_while(|s| s[0] != 0.0 || s[1] != 0.0 || s[3] != 0.0).take(80).map(|s| [s[0], s[1], s[2], s[3], s[4], s[5]]).collect();
+                let world = CpuWorld::new(&quarry.meshes, &bvhs, &models);
+                let grid = world.grid_in(&models, spec.frame);
+                let ray = Ray { origin: Vec3::new(w[0], w[1], w[2]), direction: Vec3::new(w[4], w[5], w[6]), tmin: w[3], tmax: w[7] };
+                let mut cpu_steps = vec![];
+                grid.trace(ray.origin, ray.direction, ray.tmin, ray.tmax, start as usize, &mut TraceStats::default(), Some(&mut cpu_steps), |_| false);
+                eprintln!("light_grid_trace_one ray={:?} gpu_blocked={} gpu={gpu_steps:?} cpu={cpu_steps:?}", &w[..8], w[8]);
+                line["trace_one"] = serde_json::json!({"ray": &w[..8], "gpu": gpu_steps, "cpu": cpu_steps});
+                drop(grid);
+            }
             let sane = u64::from(c[4]) * 100 < u64::from(c[0]).max(1) && bounded_ms < DISPATCH_BUDGET_MS;
             if sane {
                 let pipeline = if k == 0 { &q.shadows } else { &q.exact };
@@ -1088,6 +1287,10 @@ fn gpu_light_grid_probe() {
     first.insert("n0/exact256_ms".into(), time_once(&r, |e, s| sw.pass(&r, e, &p.sw_exact, g2x2, Some(s))).into());
     summary.insert("first_look".into(), serde_json::Value::Object(first));
     write(&summary, "summary.json");
+    drop((quarry, bvhs));
+    if manifest["first_look_only"].as_bool().unwrap_or(false) {
+        return;
+    }
     // Count identity against N0 at poses 0, 1 and return; 8 repeats at pose 0.
     let run = |r: &Renderer, safe: [bool; 2]| {
         let mut out = (vec![], vec![]);

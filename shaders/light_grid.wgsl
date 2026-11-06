@@ -11,7 +11,8 @@
 // are rounded outward to 8-bit steps of the cell enlarged by 1/16 on each side (quantize).
 
 // u.w: cell size; v.w: 1 / cell; l.w: box quantum. dims: fine cells x, y, top level, query
-// start level. sections: front words of the ends, tops and scan scratch. extra: entry
+// start level. sections: front words of the ends, tops, scan scratch and triangle cell
+// ranges (two words each, written by the count pass and reused by the scatter). extra: entry
 // capacity, unused, placements, triangles. levels[k/4][k%4]: level k's first word in the
 // tops section. placements: first triangle, count, margin bits, mesh slot.
 struct LightGrid {
@@ -62,9 +63,12 @@ fn light_fine(p:vec2<f32>,d:vec2<f32>,t:f32,n:vec2<i32>)->vec2<i32> {
     let x=floor(fma(d,vec2<f32>(t),p)*light_grids[0].v.w);
     return vec2<i32>(clamp(x,vec2<f32>(0.0),vec2<f32>(n-vec2<i32>(1))));
 }
-// Walk statistics of one ray. light_grid_tests.rs swaps this body for atomic counters in
-// its stats module; the probe's kernels keep the empty body.
+// Walk statistics of one ray, and rays that exhaust the step limit. light_grid_tests.rs
+// swaps these bodies for atomic counters and a ray dump in its stats module; the probe's
+// kernels keep the empty bodies.
 fn light_grid_record(steps:u32,entries:u32,tests:u32,fallback:u32) {}
+fn light_grid_dump(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32) {}
+fn light_grid_step(step:u32,level:u32,at:vec2<i32>,h:f32,rise:f32,t:f32) {}
 // Never step back along the ray: positions only move with the ray's signs.
 fn light_ahead(x:vec2<i32>,at:vec2<i32>,s:vec2<i32>)->vec2<i32> {return select(min(x,at),max(x,at),s>vec2<i32>(0));}
 // Opaque any-hit with first-hit termination through the grid: Grid::trace in light_grid.rs.
@@ -98,6 +102,7 @@ fn light_grid_occluded(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32)->
         let cell=at>>shift;
         let h=bitcast<f32>(light_front_word(light_grids[0].sections.y+light_level(level)+u32(cell.x)+u32(cell.y)*width));
         let rise=fma(t,dz,z0);
+        light_grid_step(step,level,at,h,rise,t);
         if h>=rise && level>0u {
             let first=cell<<shift;
             let last=min(((cell+vec2<i32>(1))<<shift)-vec2<i32>(1),n-vec2<i32>(1));
@@ -136,19 +141,19 @@ fn light_grid_occluded(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32)->
         let leave=min(ex.x,ex.y);
         if leave>=end {light_grid_record(step+1u,entries,tests,0u);return false;}
         t=max(t,leave);
-        let axis=select(0u,1u,ex.y<ex.x);
+        // Step across the exit face; the other axis refines within the cell. Whole-vector
+        // selects only: runtime-indexed component stores (at[axis]=...) left `at` unchanged
+        // on NVIDIA 617.14 through naga's SPIR-V, so walks cycled to the step limit.
+        let exit=vec2<bool>(ex.x<=ex.y,ex.y<ex.x);
         let counts=vec2<i32>(vec2<u32>(width,(light_grids[0].dims.y+(1u<<level)-1u)>>level));
-        var next=cell;next[axis]+=s[axis];
-        if next[axis]<0 || next[axis]>=counts[axis] {light_grid_record(step+1u,entries,tests,0u);return false;}
-        let fine_first=next[axis]<<level;
-        let fine_last=min(((next[axis]+1)<<level)-1,n[axis]-1);
-        at[axis]=select(fine_last,fine_first,s[axis]>0);
-        let o=1u-axis;
-        let first=cell[o]<<level;
-        let last=min(((cell[o]+1)<<level)-1,n[o]-1);
-        at[o]=clamp(light_ahead(light_fine(p,d,t,n),at,s)[o],first,last);
+        let next=cell+select(vec2<i32>(0),s,exit);
+        if any(next<vec2<i32>(0)) || any(next>=counts) {light_grid_record(step+1u,entries,tests,0u);return false;}
+        let first=next<<shift;
+        let last=min(((next+vec2<i32>(1))<<shift)-vec2<i32>(1),n-vec2<i32>(1));
+        at=select(clamp(light_ahead(light_fine(p,d,t,n),at,s),first,last),select(last,first,s>vec2<i32>(0)),exit);
         level=min(level+1u,top_level);
     }
+    light_grid_dump(origin,direction,tmin,tmax);
     light_grid_record(LIGHT_GRID_MAX_STEPS,entries,tests,1u);
     return software_occluded(origin,direction,tmin,tmax);
 }
@@ -156,9 +161,10 @@ fn light_grid_occluded(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32)->
 struct LightAtomics {data:array<atomic<u32>>};
 struct LightVec4s {data:array<vec4<f32>>};
 struct LightU32s {data:array<u32>};
+// Entries are never updated atomically: each slot has one writer.
 @group(0) @binding(0) var<storage,read> light_grids:binding_array<LightGrid,1>;
 @group(0) @binding(1) var<storage,read_write> light_front:binding_array<LightAtomics,LIGHT_GRID_FRONT_CHUNKS>;
-@group(0) @binding(2) var<storage,read_write> light_entries:binding_array<LightAtomics,LIGHT_GRID_ENTRY_CHUNKS>;
+@group(0) @binding(2) var<storage,read_write> light_entries:binding_array<LightU32s,LIGHT_GRID_ENTRY_CHUNKS>;
 // Placement models (object to world, as the renderer uploads them), and the meshes' own
 // vertex (three vec4 per vertex, position first) and index buffers.
 @group(0) @binding(3) var<storage,read> light_models:array<mat4x4<f32>>;
@@ -170,8 +176,8 @@ var<workgroup> light_scan:array<u32,256>;
 fn light_load(a:u32)->u32 {return atomicLoad(&light_front[a>>24u].data[a&0xffffffu]);}
 fn light_store(a:u32,x:u32) {atomicStore(&light_front[a>>24u].data[a&0xffffffu],x);}
 fn light_add(a:u32,x:u32)->u32 {return atomicAdd(&light_front[a>>24u].data[a&0xffffffu],x);}
-fn light_entry_load(a:u32)->u32 {return atomicLoad(&light_entries[a>>24u].data[a&0xffffffu]);}
-fn light_entry_store(a:u32,x:u32) {atomicStore(&light_entries[a>>24u].data[a&0xffffffu],x);}
+fn light_entry_load(a:u32)->u32 {return light_entries[a>>24u].data[a&0xffffffu];}
+fn light_entry_store(a:u32,x:u32) {light_entries[a>>24u].data[a&0xffffffu]=x;}
 fn light_index(id:vec3<u32>,groups:vec3<u32>)->u32 {return id.x+id.y*groups.x*256u;}
 fn light_cells()->u32 {return light_grids[0].dims.x*light_grids[0].dims.y;}
 fn light_flag()->u32 {return light_grids[0].sections.z+(light_cells()+1023u)/1024u+1u;}
@@ -223,11 +229,13 @@ fn light_triangles()->u32 {
     if c<light_cells() {light_store(light_grids[0].sections.x+c,0u);}
     if c==0u {light_store(light_flag(),0u);}
 }
-// One triangle per invocation: count its cells.
+// One triangle per invocation: store its cell range and count its cells.
 @compute @workgroup_size(256) fn light_grid_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let index=light_index(id,groups);
     if index>=light_triangles() {return;}
     let r=light_range(light_triangle(index));
+    light_store(light_grids[0].sections.w+2u*index,r.x|(r.y<<16u));
+    light_store(light_grids[0].sections.w+2u*index+1u,r.z|(r.w<<16u));
     for(var y=r.y;y<=r.w;y+=1u) {for(var x=r.x;x<=r.z;x+=1u) {light_add(light_grids[0].sections.x+x+y*light_grids[0].dims.x,1u);}}
 }
 // Exclusive scan of 1024 counts per workgroup, in place; block totals to the scratch.
@@ -289,7 +297,8 @@ fn light_triangles()->u32 {
     let index=light_index(id,groups);
     if index>=light_triangles() {return;}
     let b=light_triangle(index);
-    let r=light_range(b);
+    let lo=light_load(light_grids[0].sections.w+2u*index);let hi=light_load(light_grids[0].sections.w+2u*index+1u);
+    let r=vec4<u32>(lo&0xffffu,lo>>16u,hi&0xffffu,hi>>16u);
     for(var y=r.y;y<=r.w;y+=1u) {
         for(var x=r.x;x<=r.z;x+=1u) {
             let slot=light_add(light_grids[0].sections.x+x+y*light_grids[0].dims.x,1u);
