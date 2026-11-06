@@ -150,6 +150,9 @@ struct Cache {
     params: wgpu::Buffer,
     table: wgpu::Buffer,
     work: wgpu::Buffer,
+    /// The plan's fill and resolve dispatch arguments, copied out of `work`: a buffer bound
+    /// read-write may not also be a dispatch's indirect buffer.
+    args: wgpu::Buffer,
     sizes: Sizes,
     lookup: wgpu::ComputePipeline,
     plan: wgpu::ComputePipeline,
@@ -176,7 +179,7 @@ impl Cache {
         [
             make("cache params", 144, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
             make("cache table", sizes.table_bytes(), usage),
-            make("cache work", sizes.work_bytes(), usage | wgpu::BufferUsages::INDIRECT),
+            make("cache work", sizes.work_bytes(), usage),
         ]
     }
     fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
@@ -186,10 +189,17 @@ impl Cache {
         let scopes = OperationScopes::new(&r.device);
         let m = module(r, source);
         let c = |entry| compute(r, &sw.layout, &m, entry, &EIGHT);
+        let args = r.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cache dispatch arguments"),
+            size: 32,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let cache = Self {
             params,
             table,
             work,
+            args,
             sizes,
             lookup: c("cache_lookup"),
             plan: c("cache_plan"),
@@ -224,7 +234,7 @@ impl Cache {
         pass.set_bind_group(3, r.lighting.bind(), &[]);
         match dispatch {
             Ok([x, y]) => pass.dispatch_workgroups(x, y, 1),
-            Err(offset) => pass.dispatch_workgroups_indirect(&self.work, offset),
+            Err(offset) => pass.dispatch_workgroups_indirect(&self.args, offset),
         }
     }
     /// One cache frame: lookup, plan, fill and resolve, each timed.
@@ -242,8 +252,9 @@ impl Cache {
             e.clear_buffer(&self.work, 0, Some(4 * vc::work::QUEUES as u64));
             self.pass(r, sw, e, &self.lookup, Ok([size.width.div_ceil(8), size.height.div_ceil(4)]), Some((&queries, 0)));
             self.pass(r, sw, e, &self.plan, Ok([1, 1]), Some((&queries, 2)));
-            self.pass(r, sw, e, &self.fill, Err(4 * vc::work::FILL_ARGS as u64), Some((&queries, 4)));
-            self.pass(r, sw, e, &self.resolve, Err(4 * vc::work::RESOLVE_ARGS as u64), Some((&queries, 6)));
+            e.copy_buffer_to_buffer(&self.work, 4 * vc::work::FILL_ARGS as u64, &self.args, 0, 32);
+            self.pass(r, sw, e, &self.fill, Err(0), Some((&queries, 4)));
+            self.pass(r, sw, e, &self.resolve, Err(16), Some((&queries, 6)));
             e.resolve_query_set(&queries, 0..STAMPS, &resolve, 0);
         });
         let w = u32s(&read_buffer(r, &resolve));

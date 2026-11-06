@@ -32,7 +32,9 @@ pub mod work {
     pub const MISMATCH: usize = 14;
     pub const CHECKED: usize = 15;
     pub const FILL_ARGS: usize = 16;
+    /// Resolve arguments follow the fill arguments: the probe copies both in one 32-byte copy.
     pub const RESOLVE_ARGS: usize = 20;
+    const _: () = assert!(RESOLVE_ARGS == FILL_ARGS + 4);
     pub const DUMP: usize = 24;
     pub const QUEUES: usize = 32;
     /// Counter names in word order, for summaries.
