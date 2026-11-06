@@ -198,9 +198,9 @@ fn software_occluded(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32)->bo
 }
 
 // ---- composed traced modules only ----
-// Software counterpart of primary_trace.wgsl primary_closest: the same pixel-centre
+// Software counterpart of primary_trace.wgsl primary_raw_closest: the same pixel-centre
 // segment, culling and outputs.
-fn primary_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
+fn primary_raw_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
     let ray=primary_ray(pixel,size);let delta=ray.far-ray.near;let distance=length(delta);
     let direction=delta/distance;
     let mode=select(SOFTWARE_CLOSEST,SOFTWARE_CULL,primary_frame.sided.x!=0u);
@@ -211,4 +211,155 @@ fn primary_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
     // Reconstruct on the hit triangle rather than the rounded primary-ray segment.
     let point=world_position(receiver_point(v[0],v[1],v[2],w),hit.placement).xyz;
     return PrimaryTrace(vec4<u32>(hit.placement+1u,hit.primitive,bitcast<vec2<u32>>(hit.bary)),point,v);
+}
+fn primary_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
+    let trace=primary_raw_closest(pixel,size);
+    if trace.record.x==0u {return trace;}
+    let ray=primary_ray(pixel,size);let delta=ray.far-ray.near;
+    return primary_repair(trace,ray.near,delta/length(delta));
+}
+// Probe candidates of primary_repair: every triangle of placement `slot` the object-space
+// segment [0, reach] crosses (hardware: the unconfirmed non-opaque candidates of that
+// instance), in BVH order, at most SOFTWARE_REPAIR_CANDIDATES.
+const SOFTWARE_REPAIR_CANDIDATES:u32=16u;
+fn software_candidates(slot:u32,origin:vec3<f32>,direction:vec3<f32>,reach:f32,list:ptr<function,array<u32,SOFTWARE_REPAIR_CANDIDATES>>)->u32 {
+    let instance=software_instances[slot];
+    let m=instance.rows;let p=vec4<f32>(origin,1.0);
+    let o=vec3<f32>(dot(m[0],p),dot(m[1],p),dot(m[2],p));
+    let d=vec3<f32>(dot(m[0].xyz,direction),dot(m[1].xyz,direction),dot(m[2].xyz,direction));
+    let ray=software_ray(o,d);let mesh=instance.info.y;
+    var stack:array<u32,SOFTWARE_STACK>;
+    var sp=0u;var node=instance.info.x;var count=0u;
+    loop {
+        for(var c=0u;c<8u;c+=1u) {
+            let child=software_nodes[mesh].data[node*8u+c];
+            let kind=bitcast<u32>(child.hi.w);
+            if kind==0u {break;}
+            if software_box(ray,child.lo.xyz,child.hi.xyz,0.0,reach)>reach {continue;}
+            let index=bitcast<u32>(child.lo.w);
+            if kind==SOFTWARE_INNER {stack[sp]=index;sp+=1u;continue;}
+            for(var i=0u;i<kind;i+=1u) {
+                let primitive=software_prims[mesh].data[index+i];
+                let v=software_positions(mesh,primitive);
+                if count<SOFTWARE_REPAIR_CANDIDATES && software_triangle(ray,v[0],v[1],v[2],0.0,reach).x>=0.0 {(*list)[count]=primitive;count+=1u;}
+            }
+        }
+        if sp==0u {return count;}
+        sp-=1u;node=stack[sp];
+    }
+    return count;
+}
+// primary_trace.wgsl primary_edge_neighbour on the software index binding (the same buffer).
+fn software_edge_neighbour(mesh:u32,primitive:u32,edge:u32)->u32 {
+    let words=arrayLength(&software_indices[mesh].data);
+    if words%3u!=1u {return 0xffffffffu;}
+    return software_indices[mesh].data[(words-1u)/2u+primitive*3u+edge];
+}
+// Software copy of primary_trace.wgsl primary_repair (edge repair, d72b02c): the same
+// arithmetic, with the probe's ray query replaced by software_candidates and the vertices
+// read through the software bindings. Keep it in step with the production function.
+fn primary_repair(trace:PrimaryTrace,origin:vec3<f32>,direction:vec3<f32>)->PrimaryTrace {
+    var software_list:array<u32,SOFTWARE_REPAIR_CANDIDATES>;
+    var software_count=0u;var software_next=0u;
+    let slot=trace.record.x-1u;let vertices=trace.positions;
+    let batch=software_instances[slot].info.y;
+    let a=world_position(vertices[0],slot).xyz;let b=world_position(vertices[1],slot).xyz;let c=world_position(vertices[2],slot).xyz;
+    let epsilon=receiver_epsilon(a,b,c);
+    let m=models[slot];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
+    let ab=linear*(vertices[1]-vertices[0]);let ac=linear*(vertices[2]-vertices[0]);
+    let margin=min(vec3<f32>(0.25),4.0*epsilon*vec3<f32>(length(ac-ab),length(ac),length(ab))/max(length(cross(ab,ac)),1e-30));
+    let bary=bitcast<vec2<f32>>(trace.record.zw);let weights=vec3<f32>(1.0-bary.x-bary.y,bary);
+    if all(weights>=margin) {return trace;}
+    let normal=primary_geometric(vertices[0],vertices[1],vertices[2],slot);
+    let score=abs(primary_edge_dot(normal,direction));
+    let radius=epsilon/max(score,0.0001);
+    var result=trace;var best=-1.0;
+    for(var edge=0u;edge<3u;edge+=1u) {
+        if weights[edge]>=margin[edge] {continue;}
+        var e0=vertices[(edge+1u)%3u];var e1=vertices[(edge+2u)%3u];
+        if !primary_edge_order(e0,e1) {let swap=e0;e0=e1;e1=swap;}
+        let p0=world_position(e0,slot).xyz;let p1=world_position(e1,slot).xyz;
+        let axis=linear*(e1-e0);let centre=(p0+p1)*0.5;
+        let local=fma(direction,vec3<f32>(primary_edge_dot(centre-origin,direction)),origin);
+        let perpendicular=fma(-direction,vec3<f32>(primary_edge_dot(axis,direction)),axis);
+        let denominator=primary_edge_dot(perpendicular,perpendicular);
+        if denominator<1e-30 {continue;}
+        let t=clamp(-primary_edge_dot(p0-local,perpendicular)/denominator,0.0,1.0);
+        let point=fma(axis,vec3<f32>(t),p0);
+        let edge_distance=length(point-trace.point);
+        if edge_distance>4.0*epsilon {continue;}
+        let side=unit_normal(cross(direction,axis));
+        let neighbour=software_edge_neighbour(batch,trace.record.y,edge);
+        for(var probe=0u;probe<2u;probe+=1u) {
+            if probe==0u && weights[edge]>=margin[edge]*0.25 {continue;}
+            if probe==1u {
+                if best>=0.0 {continue;}
+                let own_side=primary_edge_dot(linear*(vertices[edge]-e0),side);
+                let viewed=select(normal,-normal,primary_edge_dot(normal,direction)>0.0);
+                let projected=fma(epsilon,primary_edge_dot(viewed,side)*sign(own_side),weights[edge]*abs(own_side));
+                if projected>=0.0 {continue;}
+            }
+            let own_side_direction=select(-epsilon,epsilon,primary_edge_dot(linear*(vertices[edge]-e0),side)>=0.0)*select(1.0,-1.0,probe!=0u);
+            let start=fma(-direction,vec3<f32>(4.0*radius),fma(side,vec3<f32>(own_side_direction),point));
+            let probe_direction=direction;let reach=8.0*radius;
+
+            if neighbour==0xffffffffu {
+                software_count=software_candidates(slot,start,probe_direction,reach,&software_list);software_next=0u;
+            }
+            var direct_pending=true;
+            loop {
+                var v:array<vec3<f32>,3>;var candidate_primitive=neighbour;
+                var visible=(primary_placements[slot]&0x40000000u)==0u;
+                if neighbour!=0xffffffffu {
+                    if !direct_pending {break;}direct_pending=false;
+                    v=software_positions(batch,neighbour);
+                    if !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}
+                    if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}
+                } else {
+                    if software_next>=software_count {break;}
+                    candidate_primitive=software_list[software_next];software_next+=1u;
+                    if candidate_primitive==trace.record.y {continue;}
+                    v=software_positions(batch,candidate_primitive);
+                    let r=software_instances[slot].rows;
+                    if !visible {visible=dot(cross(v[1]-v[0],v[2]-v[0]),vec3<f32>(dot(r[0].xyz,direction),dot(r[1].xyz,direction),dot(r[2].xyz,direction)))<0.0;}
+                }
+                var common_vertices=0u;
+                for(var i=0u;i<3u;i+=1u) {common_vertices+=u32(all(v[i]==e0) || all(v[i]==e1));}
+                if common_vertices!=2u {continue;}
+                if !visible {continue;}
+                let n=primary_geometric(v[0],v[1],v[2],slot);
+                let candidate_score=abs(primary_edge_dot(n,direction));
+                let slack=8.0*1.1920928955078125e-7;
+                var other=vec3<f32>(0.0);
+                for(var j=0u;j<3u;j+=1u) {if !all(v[j]==e0) && !all(v[j]==e1) {other=linear*(v[j]-e0);}}
+                let own=linear*(vertices[edge]-e0);
+                let own_side=primary_edge_dot(own,side);let other_side=primary_edge_dot(other,side);
+                let depth_axis=unit_normal(cross(axis,side));
+                let own_depth=primary_edge_dot(own,depth_axis);let other_depth=primary_edge_dot(other,depth_axis);
+                let order=fma(other_depth,abs(own_side),-own_depth*abs(other_side));
+                let uncertainty=32.0*1.1920928955078125e-7*(abs(other_depth*own_side)+abs(own_depth*other_side));
+                let overlap=own_side*other_side>0.0;
+                if probe==1u {
+                    let relative_other=other+linear*(e0-vertices[0]);
+                    let inset=receiver_fold_weights(ab,ac,weights,edge,relative_other,-direction,epsilon);
+                    if any(inset!=weights) && best<0.0 {
+                        result=PrimaryTrace(vec4<u32>(trace.record.xy,bitcast<vec2<u32>>(inset.yz)),world_position(receiver_point(vertices[0],vertices[1],vertices[2],inset),slot).xyz,vertices);
+                    }
+                    continue;
+                }
+                if !overlap {continue;}
+                if edge_distance>2.0*epsilon {continue;}
+                let prefer=(overlap && order < -uncertainty) || ((!overlap || abs(order)<=uncertainty) && candidate_primitive<trace.record.y);
+                let chosen=select(score,candidate_score,prefer);
+                let primitive=select(trace.record.y,candidate_primitive,prefer);
+                if prefer && (chosen>best+slack || (abs(chosen-best)<=slack && primitive<result.record.y)) {
+                    var positions=vertices;if prefer {positions=v;}
+                    let w=primary_edge_weights(positions,e0,e1,t);
+                    result=PrimaryTrace(vec4<u32>(slot+1u,primitive,bitcast<vec2<u32>>(w.yz)),point,positions);
+                    best=chosen;
+                }
+            }
+        }
+    }
+    return result;
 }

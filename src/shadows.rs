@@ -10,6 +10,16 @@ pub enum SoftShadows {
     /// The first eight directions, without filtering or history. Grain is visible
     /// inside penumbrae; solid regions and static frames remain deterministic.
     Interactive,
+    /// Opt-in temporal film accumulation (docs/m6-temporal-primaries.md): each frame
+    /// traces one jittered primary per pixel with eight rotated directions and the frame's
+    /// program output is averaged per pixel, integrating the pixel footprint and the disk.
+    /// Still frames converge beyond Exact by frame 2–4 on the registered T1 film references.
+    /// A reset pixel's first frame is byte-identical to Interactive. This unit holds a static view:
+    /// any camera, scene, lighting, shadow, program or parameter change resets every
+    /// pixel. In motion it resets every frame, so the output equals Interactive 1x,
+    /// which is below the film-quality bar. The known receiver concave-edge defect
+    /// is being fixed separately. History costs 48 bytes per pixel plus tile flags.
+    Temporal,
 }
 
 /// Entries correspond exactly to the current `Lighting::lights` vector.

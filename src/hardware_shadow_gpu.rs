@@ -10,6 +10,7 @@ pub(crate) struct MeshAcceleration {
     size: wgpu::BlasTriangleGeometrySizeDescriptor,
     vertex: Arc<Owned<wgpu::Buffer>>,
     index: Arc<Owned<wgpu::Buffer>>,
+    _receiver_adjacency: Option<Allocation>,
     _estimated: Allocation,
     _observed: Option<Allocation>,
 }
@@ -223,12 +224,14 @@ impl HardwareState {
         ledger: &Ledger,
         vertex: &Arc<Owned<wgpu::Buffer>>,
         index: &Arc<Owned<wgpu::Buffer>>,
+        index_count: u32,
+        adjacency_bytes: u64,
     ) -> Arc<MeshAcceleration> {
         let size = wgpu::BlasTriangleGeometrySizeDescriptor {
             vertex_format: wgpu::VertexFormat::Float32x3,
             vertex_count: (vertex.size() / 48) as u32,
             index_format: Some(wgpu::IndexFormat::Uint32),
-            index_count: Some((index.size() / 4) as u32),
+            index_count: Some(index_count),
             flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
         };
         let label = self.label("BLAS");
@@ -251,9 +254,11 @@ impl HardwareState {
             size,
             vertex: vertex.clone(),
             index: index.clone(),
+            _receiver_adjacency: (adjacency_bytes != 0)
+                .then(|| ledger.allocate(AllocationKind::Shadow, adjacency_bytes)),
             _estimated: ledger.allocate(
                 AllocationKind::HardwareAsEstimate,
-                mesh_estimate(index.size() / 12).unwrap().0,
+                mesh_estimate(u64::from(index_count) / 3).unwrap().0,
             ),
             _observed: observed,
         })

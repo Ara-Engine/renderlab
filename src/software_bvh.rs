@@ -802,9 +802,10 @@ const SOFT_EDITS: [(&str, &str); 6] = [
         "                blocked=software_occluded(ray_origin,direction,tmin,tmax);\n",
     ),
 ];
-/// Start and end of the hardware camera-ray function the WGSL replaces.
+/// Start and end of the hardware camera-ray functions the WGSL replaces: the raw closest
+/// hit, its edge-repair wrapper and the repair's probe queries (edge repair, d72b02c).
 const CLOSEST: (&str, &str) = (
-    "// The full near-to-far segment with forced opaque geometry and no first-hit flag.\nfn primary_closest(",
+    "// The full near-to-far segment with forced opaque geometry and no first-hit flag.\nfn primary_raw_closest(",
     "// The pixel's camera ray, or a miss",
 );
 

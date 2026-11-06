@@ -8,6 +8,10 @@ use super::*;
 use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
 use crate::shadow_plan::Bounds;
 
+#[path = "film_accumulation.rs"]
+pub(super) mod film_accumulation;
+use film_accumulation::{FilmLayouts, FilmState};
+
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
 const FRAME_BYTES: usize = 112;
@@ -60,13 +64,93 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
         1,
     );
     let trace = include_str!("../shaders/primary_trace.wgsl");
+    let interactive = include_str!("../shaders/primary_interactive.wgsl");
+    let queue = if interactive.contains("fn primary_retry_interactive(") {
+        include_str!("../shaders/primary_edge_queue.wgsl")
+    } else {
+        ""
+    };
     Ok([
         format!("{hard}\n{trace}"),
-        format!(
-            "{soft}\n{trace}\n{}",
-            include_str!("../shaders/primary_interactive.wgsl")
-        ),
+        format!("{soft}\n{trace}\n{queue}\n{interactive}"),
     ])
+}
+
+/// The check pipeline shares the actual geometry arithmetic, including test rays,
+/// but has no traversal types, builtins or lighting estimator in its module.
+pub(super) fn edge_check_source(kernels: &str) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+    let kernels = kernels.replace("\r\n", "\n");
+    let mut functions = BTreeMap::new();
+    for (at, _) in kernels.match_indices("\nfn ") {
+        let start = at + 1;
+        let name = &kernels[start + 3..kernels[start..].find('(').unwrap() + start];
+        let brace = kernels[start..].find('{').unwrap() + start;
+        let mut depth = 1;
+        let mut end = brace + 1;
+        while depth != 0 {
+            depth += i32::from(kernels.as_bytes()[end] == b'{')
+                - i32::from(kernels.as_bytes()[end] == b'}');
+            end += 1;
+        }
+        functions.insert(name.to_owned(), kernels[start..end].to_owned());
+    }
+    let repair = functions.get_mut("primary_repair").unwrap();
+    *repair = repair.replace("var query:ray_query<vertex_return>;", "");
+    let start = repair
+        .find("            if neighbour==0xffffffffu {")
+        .unwrap();
+    let end = repair[start..]
+        .find("            var direct_pending=true;")
+        .unwrap()
+        + start;
+    repair.replace_range(
+        start..end,
+        "            if neighbour==0xffffffffu {primary_check_fallback=true;continue;}\n",
+    );
+    let start = repair
+        .find("                if neighbour!=0xffffffffu {")
+        .unwrap();
+    let end = repair[start..]
+        .find("                var common_vertices=0u;")
+        .unwrap()
+        + start;
+    repair.replace_range(start..end,"                if !direct_pending {break;}direct_pending=false;\n                v=primary_triangle_vertices(batch,neighbour);\n                if !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}\n                if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}\n");
+    let mut selected = BTreeSet::new();
+    let mut pending = vec![
+        "primary_repair".to_owned(),
+        "primary_ray".to_owned(),
+        "primary_receiver".to_owned(),
+    ];
+    while let Some(name) = pending.pop() {
+        if !selected.insert(name.clone()) {
+            continue;
+        }
+        let body = &functions[&name];
+        for dependency in functions.keys() {
+            if dependency != &name && body.contains(&format!("{dependency}(")) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    let mut source = format!(
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}\n",
+        include_str!("../shaders/primary_edge_queue.wgsl")
+    );
+    source.push_str("struct Receiver {world:vec3<f32>,geometric:vec3<f32>,pixel:vec2<i32>,slot:u32,epsilon:f32,thin:bool};\nstruct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};\n@group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;\n@group(1) @binding(1) var<storage,read> normals:array<NormalTransform>;\nstruct PrimaryFrame {inverse:mat4x4<f32>,clear:vec4<f32>,sided:vec4<u32>,scene:vec4<u32>};\n@group(0) @binding(7) var primary_hit:texture_2d<u32>;\n@group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;\n@group(1) @binding(5) var<storage,read> primary_placements:array<u32>;\nstruct PrimaryRay {near:vec3<f32>,far:vec3<f32>,dx_near:vec3<f32>,dy_near:vec3<f32>,dx_far:vec3<f32>,dy_far:vec3<f32>};\n");
+    let start = kernels.find("struct PrimaryTrace {").unwrap();
+    let end = kernels[start..]
+        .find("fn primary_triangle_vertices(")
+        .unwrap()
+        + start;
+    source.push_str(&kernels[start..end]);
+    for name in selected {
+        source.push_str(&functions[&name]);
+        source.push('\n');
+    }
+    source.push_str(include_str!("../shaders/primary_edge_check.wgsl"));
+    assert!(!source.contains("rayQuery") && !source.contains("ray_query"));
+    source
 }
 
 /// Heads of every program's traced shading modules, indexed by `Shading`: Hard (inline
@@ -213,7 +297,16 @@ impl Renderer {
     /// Chooses disk-shadow sampling for traced lit 1x frames. Exact is the default.
     /// The preference survives primary-path changes and reload; raster, hard and
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
+    /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
+        if mode != crate::SoftShadows::Temporal
+            && let Some(state) = &mut self.primary
+            && let Some(film) = state.film.take()
+        {
+            state
+                .retired
+                .push((self.submissions, Retired::Film(Box::new(film))));
+        }
         self.soft_mode = mode;
     }
 
@@ -236,7 +329,9 @@ impl Renderer {
                 self.pipeline.primary = None;
                 for slot in &mut self.programs {
                     slot.modules.traced = None;
+                    slot.modules.temporal = None;
                     slot.pipelines.traced = None;
+                    slot.pipelines.temporal = None;
                 }
                 self.primary_sources = None;
                 self.primary.as_mut().unwrap().release(self.submissions);
@@ -257,10 +352,12 @@ impl Renderer {
                 }
                 let traced = self.compile_traced_modules(&heads)?;
                 self.check_fault()?;
-                self.pipelines.created += 4;
-                for (slot, modules) in self.programs.iter_mut().zip(traced) {
+                self.pipelines.created += pipelines.count();
+                for (slot, (modules, temporal)) in self.programs.iter_mut().zip(traced) {
                     slot.modules.traced = Some(modules);
+                    slot.modules.temporal = Some(temporal);
                     slot.pipelines.traced = None;
+                    slot.pipelines.temporal = None;
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -405,6 +502,10 @@ pub(super) struct Targets {
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
     pub tiles: Depth,
+    pub repairs: Buffer,
+    pub repair_args: Buffer,
+    pub retries: Buffer,
+    defer_edges: bool,
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
@@ -413,12 +514,16 @@ struct Bindings {
     fresh: Option<Owned<wgpu::BindGroup>>,
     /// Soft frames: the fused Interactive trace and visibility.
     interactive: Option<Owned<wgpu::BindGroup>>,
+    repair: Option<Owned<wgpu::BindGroup>>,
+    check: Option<Owned<wgpu::BindGroup>>,
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
 }
 enum Retired {
     Targets(#[allow(dead_code)] Box<Targets>),
     Geometry(#[allow(dead_code)] Geometry),
     Bindings(#[allow(dead_code)] Bindings),
+    Film(#[allow(dead_code)] Box<FilmState>),
+    FilmGroups(#[allow(dead_code)] Box<[[Owned<wgpu::BindGroup>; 3]; 2]>),
 }
 
 /// The engine's traced kernels, compiled while traced visibility is selected and with
@@ -431,6 +536,20 @@ pub(super) struct PrimaryPipelines {
     pub fresh: Owned<wgpu::ComputePipeline>,
     /// Interactive soft frames: camera rays and their 8-direction counts in one dispatch.
     pub interactive: Owned<wgpu::ComputePipeline>,
+    /// Temporal soft frames: the jittered, direction-rotated Interactive trace and the
+    /// reset frames' history start (`film_init`), compiled on the first such frame
+    /// (`ensure_film_kernel`).
+    pub film: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    pub interactive_repair: Option<Owned<wgpu::ComputePipeline>>,
+    pub interactive_retry: Option<Owned<wgpu::ComputePipeline>>,
+    pub interactive_full: Option<Owned<wgpu::ComputePipeline>>,
+}
+impl PrimaryPipelines {
+    pub(super) fn count(&self) -> u64 {
+        4 + u64::from(self.interactive_repair.is_some())
+            + u64::from(self.interactive_retry.is_some())
+            + u64::from(self.interactive_full.is_some())
+    }
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -444,13 +563,22 @@ pub(super) enum Shading {
 
 pub(super) struct PrimaryState {
     #[cfg(test)]
+    pub test_split_interactive_timestamps: bool,
+    #[cfg(test)]
     pub test_fresh_tile: Option<[u32; 2]>,
+    /// Temporal history kept in every tile instead of only where rays have hit (tests).
+    #[cfg(test)]
+    pub test_film_materialize: bool,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
     fresh_layout: Owned<wgpu::PipelineLayout>,
     interactive_bindings: Owned<wgpu::BindGroupLayout>,
     interactive_layout: Owned<wgpu::PipelineLayout>,
+    repair_bindings: Owned<wgpu::BindGroupLayout>,
+    repair_layout: Owned<wgpu::PipelineLayout>,
+    check_bindings: Owned<wgpu::BindGroupLayout>,
+    check_layout: Owned<wgpu::PipelineLayout>,
     array_bindings: Owned<wgpu::BindGroupLayout>,
     material_bindings: Owned<wgpu::BindGroupLayout>,
     trace_layouts: [Owned<wgpu::PipelineLayout>; 2],
@@ -472,6 +600,12 @@ pub(super) struct PrimaryState {
     pub targets: Option<Targets>,
     geometry: Option<Geometry>,
     bindings: Option<Bindings>,
+    /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
+    geometry_generation: u64,
+    bindings_generation: u64,
+    film_layouts: FilmLayouts,
+    /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
+    pub film: Option<FilmState>,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -552,9 +686,48 @@ impl PrimaryState {
                 image(13, F::Rgba32Uint),
                 image(5, F::R32Uint),
                 image(20, F::R32Uint),
+                buffer(
+                    24,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    52,
+                ),
+                buffer(
+                    27,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    16,
+                ),
+            ],
+        );
+        let repair_bindings = group(
+            "primary deferred edge repair",
+            &[
+                scene(TRACE_SCENE),
+                scene(2),
+                frame,
+                image(13, F::Rgba32Uint),
+                image(5, F::R32Uint),
+                image(20, F::R32Uint),
+                buffer(26, wgpu::BufferBindingType::Storage { read_only: true }, 52),
+                buffer(28, wgpu::BufferBindingType::Storage { read_only: true }, 20),
             ],
         );
         let uint = wgpu::TextureSampleType::Uint;
+        let check_bindings = group(
+            "primary arithmetic edge checks",
+            &[
+                frame,
+                buffer(
+                    24,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    52,
+                ),
+                buffer(
+                    28,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    20,
+                ),
+            ],
+        );
         let shade_bindings = [scene(2), texture(6, uint)].map(|visibility| {
             let mut entries = vec![
                 camera,
@@ -628,7 +801,11 @@ impl PrimaryState {
         };
         Self {
             #[cfg(test)]
+            test_split_interactive_timestamps: false,
+            #[cfg(test)]
             test_fresh_tile: None,
+            #[cfg(test)]
+            test_film_materialize: false,
             trace_layouts: [&trace[0], &trace[1]]
                 .map(|g| layout("primary trace ABI", &[Some(g), Some(&array_bindings)])),
             shade_layouts: shade_bindings.each_ref().map(|g| {
@@ -655,6 +832,28 @@ impl PrimaryState {
                     Some(lighting),
                 ],
             ),
+            film_layouts: FilmLayouts::new(
+                device,
+                ledger,
+                &array_bindings,
+                &material_bindings,
+                lighting,
+            ),
+            repair_layout: layout(
+                "primary edge repair ABI",
+                &[
+                    Some(&repair_bindings),
+                    Some(&array_bindings),
+                    None,
+                    Some(lighting),
+                ],
+            ),
+            repair_bindings,
+            check_layout: layout(
+                "primary arithmetic edge check ABI",
+                &[Some(&check_bindings), Some(&array_bindings)],
+            ),
+            check_bindings,
             interactive_bindings,
             fresh_bindings,
             trace_bindings: trace,
@@ -670,6 +869,9 @@ impl PrimaryState {
             targets: None,
             geometry: None,
             bindings: None,
+            geometry_generation: 0,
+            bindings_generation: 0,
+            film: None,
             retired: vec![],
         }
     }
@@ -703,19 +905,125 @@ impl PrimaryState {
                 ResourceKind::ComputePipeline,
             )
         };
+        let modern = sources[1].contains("fn primary_retry_interactive(");
+        let deferred = modern || sources[1].contains("fn primary_trace_interactive_deferred(");
+        let check = modern.then(|| {
+            ledger.own(
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("primary arithmetic edge checks; no traversal"),
+                    source: wgpu::ShaderSource::Wgsl(edge_check_source(&sources[1]).into()),
+                }),
+                ResourceKind::ShaderModule,
+            )
+        });
         PrimaryPipelines {
+            interactive_repair: deferred.then(|| {
+                self.interactive_entry(
+                    device,
+                    ledger,
+                    if modern {
+                        check.as_ref().unwrap()
+                    } else {
+                        &soft
+                    },
+                    if modern {
+                        "primary_check_interactive"
+                    } else {
+                        "primary_repair_interactive"
+                    },
+                    if modern {
+                        &[]
+                    } else {
+                        &[("FRESH_DIRECTIONS", 8.0)]
+                    },
+                )
+            }),
+            interactive_retry: modern.then(|| {
+                self.interactive_entry(
+                    device,
+                    ledger,
+                    &soft,
+                    "primary_retry_interactive",
+                    &[("FRESH_DIRECTIONS", 8.0)],
+                )
+            }),
+            interactive_full: deferred.then(|| {
+                self.interactive_pipeline(device, ledger, &soft, &[("FRESH_DIRECTIONS", 8.0)])
+            }),
             fresh: self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
-            interactive: self.interactive_pipeline(
+            interactive: self.interactive_entry(
                 device,
                 ledger,
                 &soft,
+                if deferred {
+                    "primary_trace_interactive_deferred"
+                } else {
+                    "primary_trace_interactive"
+                },
                 &[("FRESH_DIRECTIONS", 8.0)],
             ),
             trace: [
                 pipeline(&hard, "primary_trace", &self.trace_layouts[0]),
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
             ],
+            film: None,
         }
+    }
+
+    /// The temporal trace and reset (`film_init`) pipelines from one
+    /// `film_accumulation::kernel_source` module.
+    pub fn film_kernel(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        source: &str,
+    ) -> [Owned<wgpu::ComputePipeline>; 2] {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("temporal film trace"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        [
+            ("primary_trace_interactive", &self.film_layouts.trace),
+            ("film_init", &self.film_layouts.init),
+        ]
+        .map(|(entry, layout)| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("FRESH_DIRECTIONS", 8.0)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        })
+    }
+
+    /// A program's temporal shading pipeline from its `film_accumulation::compose_shading`
+    /// module, through `cache` when given.
+    pub fn film_shade_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::ComputePipeline> {
+        ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("temporal program shading"),
+                layout: Some(&self.film_layouts.shade),
+                module,
+                entry_point: Some("primary_shade_tiles"),
+                compilation_options: Default::default(),
+                cache,
+            }),
+            ResourceKind::ComputePipeline,
+        )
     }
 
     /// One program's shading pipelines from its composed modules, indexed by `Shading`.
@@ -786,12 +1094,34 @@ impl PrimaryState {
         module: &wgpu::ShaderModule,
         constants: &[(&str, f64)],
     ) -> Owned<wgpu::ComputePipeline> {
+        self.interactive_entry(
+            device,
+            ledger,
+            module,
+            "primary_trace_interactive",
+            constants,
+        )
+    }
+    fn interactive_entry(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        entry: &str,
+        constants: &[(&str, f64)],
+    ) -> Owned<wgpu::ComputePipeline> {
         ledger.own(
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("traced Interactive camera rays and visibility"),
-                layout: Some(&self.interactive_layout),
+                label: Some(entry),
+                layout: Some(match entry {
+                    "primary_check_interactive" => &self.check_layout,
+                    "primary_retry_interactive" | "primary_repair_interactive" => {
+                        &self.repair_layout
+                    }
+                    _ => &self.interactive_layout,
+                }),
                 module,
-                entry_point: Some("primary_trace_interactive"),
+                entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants,
                     ..Default::default()
@@ -812,6 +1142,9 @@ impl PrimaryState {
         }
         if let Some(b) = self.bindings.take() {
             self.retired.push((last, Retired::Bindings(b)));
+        }
+        if let Some(f) = self.film.take() {
+            self.retired.push((last, Retired::Film(Box::new(f))));
         }
         self.frame = None;
         self.region_buffer = None;
@@ -1054,6 +1387,7 @@ impl Renderer {
                 materials,
             };
             let state = self.primary.as_mut().unwrap();
+            state.geometry_generation += 1;
             if let Some(old) = state.geometry.replace(next) {
                 state
                     .retired
@@ -1130,7 +1464,37 @@ impl Renderer {
                 height: size.height.div_ceil(TRACE_TILE[1]),
                 depth_or_array_layers: 1,
             };
+            let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
+            let retry_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 4;
+            let defer_edges = repair_bytes <= self.device.limits().max_storage_buffer_binding_size
+                && repair_bytes <= self.device.limits().max_buffer_size;
+            let repairs = Buffer::new(
+                self,
+                "primary edge worklist",
+                if defer_edges { repair_bytes } else { 52 },
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_SRC,
+            );
+            let repair_args = Buffer::new(
+                self,
+                "primary edge dispatch arguments",
+                16,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            );
+            let retries = Buffer::new(
+                self,
+                "primary sparse fallback and changed receivers",
+                if defer_edges { retry_bytes } else { 20 },
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_SRC,
+            );
             let next = Targets {
+                repairs,
+                repair_args,
+                retries,
+                defer_edges,
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -1250,6 +1614,33 @@ impl Renderer {
                             (13, hit.clone()),
                             (5, R::TextureView(&f.visibility.view)),
                             (20, tiles.clone()),
+                            (24, t.repairs.value.as_entire_binding()),
+                            (27, t.repair_args.value.as_entire_binding()),
+                        ],
+                    )
+                }),
+                repair: fresh.map(|f| {
+                    group(
+                        &state.repair_bindings,
+                        &[
+                            trace_scene.clone(),
+                            scene.clone(),
+                            uniform.clone(),
+                            (13, hit.clone()),
+                            (5, R::TextureView(&f.visibility.view)),
+                            (20, tiles.clone()),
+                            (26, t.repairs.value.as_entire_binding()),
+                            (28, t.retries.value.as_entire_binding()),
+                        ],
+                    )
+                }),
+                check: fresh.map(|_| {
+                    group(
+                        &state.check_bindings,
+                        &[
+                            uniform.clone(),
+                            (24, t.repairs.value.as_entire_binding()),
+                            (28, t.retries.value.as_entire_binding()),
                         ],
                     )
                 }),
@@ -1263,6 +1654,7 @@ impl Renderer {
                 key,
             };
             let state = self.primary.as_mut().unwrap();
+            state.bindings_generation += 1;
             if let Some(old) = state.bindings.replace(next) {
                 state
                     .retired
@@ -1345,9 +1737,41 @@ impl Renderer {
         let state = self.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let bindings = state.bindings.as_ref().unwrap();
+        let pipelines = self.pipeline.primary.as_ref().unwrap();
+        let targets = state.targets.as_ref().unwrap();
+        let deferred = targets.defer_edges && pipelines.interactive_repair.is_some();
+        #[cfg(not(test))]
+        let split_timestamps = false;
+        #[cfg(test)]
+        let split_timestamps = self
+            .primary
+            .as_ref()
+            .unwrap()
+            .test_split_interactive_timestamps;
+        let pipeline = if deferred {
+            pipeline
+        } else {
+            pipelines.interactive_full.as_deref().unwrap_or(pipeline)
+        };
+        if deferred {
+            encoder.clear_buffer(&targets.repairs.value, 0, Some(16));
+            encoder.clear_buffer(&targets.repair_args.value, 0, Some(16));
+            encoder.clear_buffer(&targets.retries.value, 0, Some(16));
+        }
+        let begin = timestamp_writes
+            .as_ref()
+            .map(|t| wgpu::ComputePassTimestampWrites {
+                query_set: t.query_set,
+                beginning_of_pass_write_index: t.beginning_of_pass_write_index,
+                end_of_pass_write_index: if deferred && !split_timestamps {
+                    None
+                } else {
+                    t.end_of_pass_write_index
+                },
+            });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("traced Interactive visibility"),
-            timestamp_writes,
+            timestamp_writes: begin,
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &**bindings.interactive.as_ref().unwrap(), &[]);
@@ -1358,6 +1782,78 @@ impl Renderer {
             size.height.div_ceil(tile[1]),
             1,
         );
+        drop(pass);
+        if deferred && pipelines.interactive_retry.is_none() {
+            let stamps = timestamp_writes.map(|t| wgpu::ComputePassTimestampWrites {
+                query_set: t.query_set,
+                beginning_of_pass_write_index: if split_timestamps {
+                    t.beginning_of_pass_write_index.map(|i| i + 2)
+                } else {
+                    None
+                },
+                end_of_pass_write_index: t
+                    .end_of_pass_write_index
+                    .map(|i| i + if split_timestamps { 2 } else { 0 }),
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("retained two-pass receiver correction"),
+                timestamp_writes: stamps,
+            });
+            pass.set_pipeline(pipelines.interactive_repair.as_ref().unwrap());
+            pass.set_bind_group(0, &**bindings.repair.as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
+            pass.set_bind_group(3, self.lighting.bind(), &[]);
+            pass.dispatch_workgroups_indirect(&targets.repairs.value, 0);
+            return;
+        }
+
+        if deferred {
+            let end = timestamp_writes
+                .as_ref()
+                .filter(|_| split_timestamps)
+                .map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set,
+                    beginning_of_pass_write_index: if split_timestamps {
+                        t.beginning_of_pass_write_index.map(|i| i + 2)
+                    } else {
+                        None
+                    },
+                    end_of_pass_write_index: if split_timestamps {
+                        t.end_of_pass_write_index.map(|i| i + 2)
+                    } else {
+                        None
+                    },
+                });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("near-edge arithmetic check"),
+                timestamp_writes: end,
+            });
+            pass.set_pipeline(pipelines.interactive_repair.as_ref().unwrap());
+            pass.set_bind_group(0, &**bindings.check.as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
+            pass.dispatch_workgroups_indirect(&targets.repair_args.value, 0);
+            drop(pass);
+            let stamps = timestamp_writes.map(|t| wgpu::ComputePassTimestampWrites {
+                query_set: t.query_set,
+                beginning_of_pass_write_index: if split_timestamps {
+                    t.beginning_of_pass_write_index.map(|i| i + 4)
+                } else {
+                    None
+                },
+                end_of_pass_write_index: t
+                    .end_of_pass_write_index
+                    .map(|i| i + if split_timestamps { 4 } else { 0 }),
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sparse fallback and replacement visibility"),
+                timestamp_writes: stamps,
+            });
+            pass.set_pipeline(pipelines.interactive_retry.as_ref().unwrap());
+            pass.set_bind_group(0, &**bindings.repair.as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
+            pass.set_bind_group(3, self.lighting.bind(), &[]);
+            pass.dispatch_workgroups_indirect(&targets.retries.value, 0);
+        }
     }
 
     /// Fresh visibility over the traced receivers with `tile` receivers per group; tests
@@ -1408,20 +1904,28 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        let bindings = self.primary.as_ref().unwrap().bindings.as_ref().unwrap();
+        let group = bindings.shade[shading as usize].as_ref().unwrap();
+        self.encode_shade_group(encoder, pipeline, group, tile, timestamp_writes);
+    }
+    /// `encode_primary_shade` with an explicit group 0, which temporal shading extends.
+    pub(super) fn encode_shade_group(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        group: &wgpu::BindGroup,
+        tile: [u32; 2],
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         let state = self.primary.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
-        let bindings = state.bindings.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("traced deferred shading"),
             timestamp_writes,
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(
-            0,
-            &**bindings.shade[shading as usize].as_ref().unwrap(),
-            &[],
-        );
+        pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &*g.materials, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);

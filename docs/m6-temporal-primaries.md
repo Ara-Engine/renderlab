@@ -1,5 +1,7 @@
 # M6 T1: temporally jittered primaries with hit-record history
 
+**Status:** the GPU references and T1a (static accumulation, corner-free lattice) are implemented and measured in [m6-temporal-gpu.md](m6-temporal-gpu.md). T1a fails only at three pixels where the production receiver origin is blocked at concave triangle edges, a known production defect being fixed separately. The T1b candidate (commit `b8fa1f3`) failed its Q-walk gate on silhouette ghost trails, shadow-edge blur and the frozen R_D F4 stop, and was reverted. T1c and T1d have not started. The second-sample criterion is N = 2 / N = 1 ≤ 1.0; the 0.944 in §2 was the earlier ordering's measured value, not a limit.
+
 Design decision, 2026-11-05, base `fe196fd`. This is the CPU phase of the temporal unit that [film gap §7](m6-film-gap.md#7-next-unit-and-stop-rules) froze as F1-AA. It replays R1's 16 saved per-sample frames and film references, plus the accept-b7 Interactive captures. There was no production change, GPU run, build, window or push. Labels: **M** is measured here from saved evidence; **I** is a model or inference.
 
 Binding inputs:
