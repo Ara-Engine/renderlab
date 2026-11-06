@@ -17,6 +17,9 @@ use wgpu::util::DeviceExt;
 #[path = "light_grid_tests.rs"]
 mod light_grid_tests;
 
+#[path = "visibility_cache_tests.rs"]
+mod visibility_cache_tests;
+
 /// splitmix64.
 struct Rng(u64);
 impl Rng {
@@ -1318,6 +1321,11 @@ struct Software {
     layout: wgpu::PipelineLayout,
     groups: [wgpu::BindGroup; 3],
     frame: wgpu::Buffer,
+    /// Per placement: models and normal transforms (group 1), and instance records
+    /// (binding 42). Rewritten in place when placements move.
+    models: wgpu::Buffer,
+    normals: wgpu::Buffer,
+    instances: wgpu::Buffer,
     hit: wgpu::Texture,
     counts: wgpu::Texture,
     tiles: wgpu::Texture,
@@ -1331,13 +1339,12 @@ const DUMP_RAYS: u64 = 1 << 21;
 impl Software {
     fn new(
         r: &Renderer,
-        quarry: &mut prepared::Prepared,
+        draws: &[Draw<'_>],
         bvhs: &[Bvh],
         packed: &bvh::Packed,
         extra: &[(wgpu::BindGroupLayoutEntry, wgpu::BindingResource<'_>)],
     ) -> (Self, Vec<(usize, Mat4, bool)>) {
         use wgpu::{BindingResource as R, TextureFormat as F};
-        let draws = quarry.draws(Visibility::Frustum);
         let mut models = vec![];
         let mut normals = vec![];
         let mut placements = vec![];
@@ -1378,8 +1385,8 @@ impl Software {
         let meshes = draws.len();
         let read = wgpu::BufferUsages::STORAGE;
         let words: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let [models, normals, table, instances] =
-            [&models, &normals, &words, &instances].map(|b| init(r, b, read));
+        let [models, normals, table, instances] = [&models, &normals, &words, &instances]
+            .map(|b| init(r, b, read | wgpu::BufferUsages::COPY_DST));
         let nodes: Vec<_> = packed.nodes.iter().map(|b| init(r, b, read)).collect();
         let prims: Vec<_> = packed.prims.iter().map(|b| init(r, b, read)).collect();
         let nodes: Vec<_> = nodes
@@ -1545,6 +1552,9 @@ impl Software {
                 layout,
                 groups,
                 frame,
+                models,
+                normals,
+                instances,
                 hit,
                 counts,
                 tiles,
@@ -2437,7 +2447,7 @@ fn gpu_software_bvh_probe() {
     r.test_drain("software probe first frame");
     let refs: Vec<&Bvh> = bvhs.iter().collect();
     let packed = bvh::pack(&refs);
-    let (sw, placements) = Software::new(&r, &mut asset, &bvhs, &packed, &[]);
+    let (sw, placements) = Software::new(&r, &asset.draws(Visibility::Frustum), &bvhs, &packed, &[]);
     {
         let draws = asset.draws(Visibility::Frustum);
         assert_eq!(draws.len(), quarry.meshes.len());
@@ -2586,7 +2596,7 @@ fn gpu_software_bvh_probe() {
                 let (b, build) = build_all(&quarry.meshes, max_leaf, pad_v);
                 summary.insert(format!("build_pad_{pad_v}"), build);
                 let packed_v = bvh::pack(&b.iter().collect::<Vec<_>>());
-                let (sw_v, _) = Software::new(&r, &mut asset, &b, &packed_v, &[]);
+                let (sw_v, _) = Software::new(&r, &asset.draws(Visibility::Frustum), &b, &packed_v, &[]);
                 r.queue.write_buffer(
                     &sw_v.frame,
                     0,

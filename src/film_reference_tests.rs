@@ -12,9 +12,10 @@ mod receiver_policy_tests;
 mod film_accumulation_tests;
 
 /// Trace/visibility and program shading have separate production modules and ABIs.
-struct FilmSources {
-    kernels: String,
-    shading: String,
+/// Visible to primary_ray_gpu_tests for the N7a bench references (visibility_cache_bench.rs).
+pub(super) struct FilmSources {
+    pub(super) kernels: String,
+    pub(super) shading: String,
 }
 
 /// Randomized point within each of the 16x16 footprint strata. Odd/even indices
@@ -65,7 +66,7 @@ fn frozen_reference_modules() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn film_sources() -> FilmSources {
+pub(super) fn film_sources() -> FilmSources {
     film_sources_with(R1_JITTER)
 }
 

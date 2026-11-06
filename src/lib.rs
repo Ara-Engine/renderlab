@@ -24,6 +24,9 @@ mod shadows;
 // Test-only software ray backend probe (docs/non-rt-path.md, N0).
 #[cfg(test)]
 mod software_bvh;
+// Test-only world-space visibility cache probe (docs/non-rt-n7.md, N7a).
+#[cfg(test)]
+mod visibility_cache;
 pub mod virtual_geometry;
 mod visibility;
 

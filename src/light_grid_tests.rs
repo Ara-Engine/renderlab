@@ -192,7 +192,7 @@ fn fresh_hash(input: u32) -> u32 {
     x = (x ^ (x >> 15)).wrapping_mul(0x846c_a68b);
     x ^ (x >> 16)
 }
-/// fresh_estimate's rays on CPU for one receiver: the same R2 directions, ε, thin origins
+/// fresh_estimate's rays on CPU for one receiver: the same R2 directions, Îµ, thin origins
 /// and per-pixel shift, around `l` in a basis of its own (the CPU has no shadow view), with
 /// tmax at the scene box. Directions are not bit-identical to the GPU's; both CPU sides
 /// trace the same rays.
@@ -264,7 +264,7 @@ fn light_grid_matches_brute_force_on_fixtures() {
     };
     let l = Vec3::new(0.4, 0.8, 0.3).normalize();
     // Rays from points on random triangles (a fifth on a vertex or an edge), on either side
-    // at 10 µm-1 mm, around the sun within 0.15 rad; one in ten random, some sinking.
+    // at 10 Âµm-1 mm, around the sun within 0.15 rad; one in ten random, some sinking.
     let mut rays = vec![];
     for i in 0..3000 {
         let k = rng.below(models.len());
@@ -1184,7 +1184,7 @@ fn gpu_light_grid_probe() {
     let (sw, _) = {
         let extra = heap.extra();
         let entries: Vec<_> = extra.iter().map(|(e, b)| (*e, wgpu::BindingResource::BufferArray(b))).collect();
-        Software::new(&r, &mut asset, &bvhs, &packed, &entries)
+        Software::new(&r, &asset.draws(Visibility::Frustum), &bvhs, &packed, &entries)
     };
     drop(refs);
     drop(packed);
