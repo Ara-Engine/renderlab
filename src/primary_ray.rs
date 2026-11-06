@@ -16,9 +16,11 @@ pub enum PrimaryVisibility {
     /// regular opaque double-sided draws. Diagnostic views and virtual geometry
     /// still rasterize.
     Traced,
-    /// Full-detail cluster rasterization into IDs and depth, followed by the same
-    /// exact receiver repair and programmable deferred shading as traced primaries.
-    /// At 1x, requires [`VISIBILITY_FEATURES`] and [`visibility_limits`], but no RT.
+    /// A per-frame cluster cut (original geometry, or an attached clusterLOD hierarchy at
+    /// `Renderer::set_lod_error_pixels`) rasterized into a 64-bit depth/ID buffer,
+    /// followed by the same exact receiver repair and programmable deferred shading as
+    /// traced primaries. At 1x, requires [`VISIBILITY_FEATURES`],
+    /// [`VISIBILITY_RASTER_FEATURES`] and [`visibility_limits`], but no RT.
     VisibilityBuffer,
 }
 
@@ -27,6 +29,10 @@ pub const VISIBILITY_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_
     .union(wgpu::Features::BUFFER_BINDING_ARRAY)
     .union(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY)
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
+/// 64-bit storage max atomics for the visibility buffer's (depth, cluster, triangle)
+/// words, written by its software and hardware rasters.
+pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
+    wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
 /// Deferred material arrays and five resolve storage targets (hits, world, normal,
 /// coverage and receiver epsilon). No acceleration-structure limits are raised.

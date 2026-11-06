@@ -294,6 +294,11 @@ impl Prepared {
     pub fn ready(&self) -> bool {
         self.progress == UploadProgress::Ready
     }
+    /// Uploaded meshes in source mesh/primitive order, e.g. to attach LOD hierarchies.
+    #[allow(dead_code)]
+    pub fn meshes_mut(&mut self) -> &mut [Mesh] {
+        &mut self.meshes
+    }
     pub fn max_instances(&self) -> u32 {
         self.batches
             .iter()

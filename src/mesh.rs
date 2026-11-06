@@ -51,8 +51,8 @@ impl Limits {
 
 /// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
-    pub(crate) clusters: Vec<crate::renderer::visibility_buffer::Cluster>,
-    pub(crate) cluster_triangles: Vec<u32>,
+    /// Visibility-buffer clusters: original geometry, or an attached clusterLOD hierarchy.
+    pub(crate) clusters: Option<crate::renderer::visibility_buffer::Clusters>,
     pub(crate) repair_scan: bool,
     pub(crate) renderer: std::sync::Arc<()>,
     pub(crate) acceleration:
