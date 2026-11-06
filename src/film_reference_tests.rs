@@ -9,7 +9,7 @@ mod fixture;
 mod receiver_policy_tests;
 
 #[path = "film_accumulation_tests.rs"]
-mod film_accumulation_tests;
+pub(super) mod film_accumulation_tests;
 
 /// Trace/visibility and program shading have separate production modules and ABIs.
 struct FilmSources {

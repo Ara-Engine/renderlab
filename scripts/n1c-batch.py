@@ -50,6 +50,9 @@ def main():
                 m["caster_error"] = a.caster_error
             if os.environ.get("N8_VIRTUAL"):
                 m["virtual"] = json.loads(os.environ["N8_VIRTUAL"])
+            # N8e: {name: settings}, every configuration once per variant (labels -v{name}).
+            if os.environ.get("N8E_VARIANTS"):
+                m["virtual_variants"] = json.loads(os.environ["N8E_VARIANTS"])
             if not a.no_lod:
                 m.update(virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
         else:

@@ -1,5 +1,5 @@
-// N8/N8b/N8c: non-RT Interactive sun visibility (docs/non-rt-n8.md, non-rt-n8b.md,
-// non-rt-n8c.md). No ray
+// N8/N8b/N8c/N8e: non-RT Interactive sun visibility (docs/non-rt-n8.md, non-rt-n8b.md,
+// non-rt-n8c.md, non-rt-n8e.md). No ray
 // queries and no acceleration structure: each receiver's 8 Interactive directions get
 //   - an exact watertight test against the receiver triangle and its vertex 1-ring, over
 //     the whole ray (the existing edge adjacency, walked as vertex fans; skipped where the
@@ -18,6 +18,9 @@
 // pages, only requested pages that are stale are rasterized, from the meshes' clusters
 // (N8c; optionally a per-level LOD cut), and rasterized pages stay valid until the sun turns, the
 // level window moves, or a moved object's light-space bounds touch them.
+// N8e (docs/non-rt-n8e.md): a walk cap (proven blocks close a receiver's undecided
+// directions), fewer directions per frame, and a rolling refresh that looks up one trace tile
+// per block while the frame otherwise holds still (vsm_lookup).
 // virtual_shadow_gpu.rs prepends PRIMARY_BATCHES and owns every layout below.
 
 const VSM_PAGE:u32=128u;
@@ -53,6 +56,10 @@ struct VsmFrame {
     rects:array<vec4<f32>,VSM_MAX_RECTS>,
     // Per traced batch, the first word of its triangles in vsm_horizons (N8b).
     horizon:array<vec4<u32>,16>,
+    // N8e: x directions evaluated (1-8, the first of the eight); y the rolling refresh (block
+    // a in bits 0-3, b in 4-7, this frame's tile in the block in 8-11 and 12-15, bit 16 set on
+    // a rolling frame); z the walk cap (0: none); w reserved.
+    n8e:vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 
@@ -488,6 +495,10 @@ var<private> vsm_shear:array<vec3<f32>,8>;
 // holding all eight directions.
 var<private> vsm_centre:vec3<f32>;
 var<private> vsm_cone:f32;
+// N8e: the directions this frame evaluates (bit j: vsm_dirs[j]); the others start blocked
+// and are not counted. Walk triangles tested so far (the walk cap).
+var<private> vsm_active:u32;
+var<private> vsm_visits:u32;
 // Diagnostics (VSM_DEBUG only): the trace scripts/n8-diagnose.py classifies, two uvec4s per
 // pixel. Whole-vector read-modify-writes of named components only.
 //   x: ring-blocked directions (0-7) | map-blocked (8-15) | level (24-31)
@@ -528,7 +539,7 @@ fn vsm_prepare_rays(l:vec3<f32>) {
     for(var j=0u;j<8u;j+=1u) {
         let d=vsm_permute(vsm_dirs[j]);
         let shear=vec3<f32>(d.x/d.z,d.y/d.z,1.0/d.z);
-        cone=max(cone,length(shear.xy-vsm_centre.xy));
+        if (vsm_active&(1u<<j))!=0u {cone=max(cone,length(shear.xy-vsm_centre.xy));}
         // Constant-index stores only: unrolled by hand below.
         if j==0u {vsm_shear[0]=shear;} else if j==1u {vsm_shear[1]=shear;} else if j==2u {vsm_shear[2]=shear;}
         else if j==3u {vsm_shear[3]=shear;} else if j==4u {vsm_shear[4]=shear;} else if j==5u {vsm_shear[5]=shear;}
@@ -612,7 +623,7 @@ fn vsm_corner(w:array<vec3<f32>,3>,p:vec3<f32>)->u32 {
 // vertices as the adjacency does and as vsm_in_ring assumes. A triangle across edge
 // (c, c+1) is tested only in the fan of c+1.
 fn vsm_ring(r:VsmReceiver,walk:bool)->VsmRing {
-    var ring=vsm_ring_triangle(r,vsm_own,VsmRing(0u,0.0));
+    var ring=vsm_ring_triangle(r,vsm_own,VsmRing(0xffu&~vsm_active,0.0));
     var visited=1u;
     for(var c=0u;c<3u*u32(walk);c+=1u) {
         if ring.blocked==0xffu {break;}
@@ -783,7 +794,7 @@ fn vsm_beyond_horizon(r:VsmReceiver,l:vec3<f32>)->bool {
     let bound=select(h.y,h.x,up!=(dot(cross(x,y),z)<0.0));
     for(var j=0u;j<8u;j+=1u) {
         let e=dot(vsm_dirs[j],n);
-        if e<=0.0 || e*e<=bound*bound*(1.0-e*e) {return false;}
+        if (vsm_active&(1u<<j))!=0u && (e<=0.0 || e*e<=bound*bound*(1.0-e*e)) {return false;}
     }
     return true;
 }
@@ -802,6 +813,11 @@ fn vsm_in_ring(r:VsmReceiver,id:u32)->bool {
 // Point-location walk steps per aim from the texel's triangle toward the ray (N8b), at
 // the receiver's level; coarser levels' texels span more triangles.
 override VSM_WALK_STEPS:u32=8u;
+// The coarser levels' walk lengthening: VSM_WALK_STEPS << min(level - receiver's, this).
+override VSM_WALK_SHIFT:u32=2u;
+// N8e lean walks (0: off) and their step bound.
+override VSM_LEAN:u32=0u;
+override VSM_LEAN_STEPS:u32=2u;
 // Crossing refinements: walk aims after the sample's own xy.
 override VSM_REFINE:u32=3u;
 // The continuity rule's reach: the predicted crossing must lie this many spans of the last
@@ -862,15 +878,21 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f
     var below=false;
     var span=0.0;
     var hits=0u;
-    for(var phase=0u;phase<=VSM_REFINE;phase+=1u) {
+    // N8e lean walks: past VSM_LEAN times the walk cap in visits, a receiver's walks test
+    // the sample's located surface without refinements (its later candidates stay exact
+    // where they are tested, but are no longer chased to their crossings).
+    let lean=VSM_LEAN!=0u && vsm.n8e.z!=0u && vsm_visits>=VSM_LEAN*vsm.n8e.z;
+    let reach=select(steps,min(steps,VSM_LEAN_STEPS),lean);
+    for(var phase=0u;phase<=select(VSM_REFINE,0u,lean);phase+=1u) {
         var located=false;
         var height=0.0;
         var own=false;
         // Whether the walk stopped at an open edge, a fold or a degenerate projection rather
         // than running out of steps (a crossing farther than the walk reaches).
         var stopped=false;
-        for(var step=0u;step<steps;step+=1u) {
+        for(var step=0u;step<reach;step+=1u) {
             if VSM_DEBUG {vsm_dbg.y+=select(1u,0x10000u,primary<8u);}
+            vsm_visits+=1u;
             let v=vsm_triangle(batch,t);
             let a=(m*vec4<f32>(v[0],1.0)).xyz;let b=(m*vec4<f32>(v[1],1.0)).xyz;let c=(m*vec4<f32>(v[2],1.0)).xyz;
             hits|=vsm_hits_mask(r,a,b,c,mask&~hits);
@@ -1092,10 +1114,17 @@ fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
     var drift=0.0;var offset=0.0;
     for(var j=0u;j<8u;j+=1u) {
         let s=vsm_step(j);
-        drift=max(drift,length(s.xy)/max(s.z,1e-6));
-        offset=max(offset,distance(vsm_light(vsm_ray_origin(r,j)).xy,p.xy));
+        if (vsm_active&(1u<<j))!=0u {
+            drift=max(drift,length(s.xy)/max(s.z,1e-6));
+            offset=max(offset,distance(vsm_light(vsm_ray_origin(r,j)).xy,p.xy));
+        }
         vsm_last_store(j,0u);
     }
+    // N8e walk cap: past this many walked triangles, a receiver with a proven block takes
+    // every undecided direction as blocked (VSM_CAP_RULE 1: once half are proven; 2: also
+    // stop a receiver with none proven, its undecided directions lit).
+    let cap=vsm.n8e.z;
+    let majority=(countOneBits(vsm_active)+1u)/2u;
     // Heights past every caster; at least one step, since a contact closer than `near`
     // still needs its sample.
     let clear=max(vsm.depth.w-p.z,1.0001*near);
@@ -1118,7 +1147,7 @@ fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
     let ratio=pow(end/h,1.0/f32(count));
     let texel=vsm_texel(level);
     let lo=vsm.levels[level].origin.xy;
-    let steps=VSM_WALK_STEPS<<min(level-level0,2u);
+    let steps=VSM_WALK_STEPS<<min(level-level0,VSM_WALK_SHIFT);
     for(var k=0u;k<count;k+=1u) {
         h*=ratio;
         let start=below;
@@ -1164,6 +1193,12 @@ fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
             open&=~result.x;
             if j==8u {shared_last=result.y;} else {vsm_last_store(j,result.y);}
             if open==0u {return 0u;}
+            if cap!=0u && vsm_visits>=cap {
+                let proven=countOneBits(vsm_active&~open);
+                if proven>=select(1u,majority,VSM_CAP_RULE==1u) {return 0u;}
+                // Rule 2: a receiver with no proven block stops at the cap, lit where undecided.
+                if VSM_CAP_RULE==2u && proven==0u {return open;}
+            }
         }
     }
     if h>=clear {break;}
@@ -1203,6 +1238,8 @@ fn vsm_prepare(id:vec2<u32>)->VsmPixel {
     let seed=vsm_hash(id.x+id.y*size.x);
     let shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
     let slope=view.texel.z;
+    // N8e: the first k directions of the eight are evaluated.
+    vsm_active=0xffu>>(8u-vsm.n8e.x);
     // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
     vsm_dirs[0]=vsm_direction(0u,shift,l,u,v,slope);vsm_dirs[1]=vsm_direction(1u,shift,l,u,v,slope);
     vsm_dirs[2]=vsm_direction(2u,shift,l,u,v,slope);vsm_dirs[3]=vsm_direction(3u,shift,l,u,v,slope);
@@ -1216,18 +1253,31 @@ fn vsm_prepare(id:vec2<u32>)->VsmPixel {
     out.l=l;
     return out;
 }
-fn vsm_visible(id:vec2<u32>,blocked:u32) {
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(32u*(8u-countOneBits(blocked&0xffu))));
+override VSM_CAP_RULE:u32=0u;
+// The pixel's count from `visible` of the frame's k directions.
+fn vsm_visible(id:vec2<u32>,visible:u32) {
+    let k=vsm.n8e.x;
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>((256u*visible+k/2u)/k));
 }
-@compute @workgroup_size(8,4) fn vsm_lookup(@builtin(global_invocation_id) id:vec3<u32>) {
+// N8e rolling refresh: on a frame that keeps the last frame's camera, casters and settings,
+// one trace tile of every a x b block (n8e.y: a, b, then the tile's offset in the block) is
+// looked up again and the others keep their last counts in the output. Otherwise every tile.
+@compute @workgroup_size(8,4) fn vsm_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
-    if any(id.xy>=size) {return;}
-    if textureLoad(vsm_tiles,id.xy/VSM_TRACE_TILE,0).x==0u {return;}
-    if VSM_SKIP==1u {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(256u));return;}
-    let px=vsm_prepare(id.xy);
-    if !px.valid {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(256u));return;}
+    let rolling=vsm.n8e.y;
+    var tile=group.xy;
+    if (rolling>>16u)!=0u {
+        tile=tile*vec2<u32>(rolling&15u,(rolling>>4u)&15u)+vec2<u32>((rolling>>8u)&15u,(rolling>>12u)&15u);
+    }
+    let id=tile*VSM_TRACE_TILE+local.xy;
+    if any(id>=size) {return;}
+    if textureLoad(vsm_tiles,tile,0).x==0u {return;}
+    if VSM_SKIP==1u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
+    let px=vsm_prepare(id);
+    if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
     let r=px.r;
-    if VSM_SKIP==2u {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(u32(dot(vsm_shear[r.primitive&7u],vsm_own[0])>1e30)+256u));return;}
+    if VSM_SKIP==2u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(u32(dot(vsm_shear[r.primitive&7u],vsm_own[0])>1e30)+256u));return;}
+    vsm_visits=0u;
     let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
     var blocked=ring.blocked;
     vsm_dbg.x=ring.blocked|(min(px.level,0xffu)<<24u);
@@ -1236,7 +1286,7 @@ fn vsm_visible(id:vec2<u32>,blocked:u32) {
         vsm_dbg.x|=((0xffu&~blocked)&~open)<<8u;
         blocked=0xffu&~open;
     }
-    vsm_visible(id.xy,blocked);
+    vsm_visible(id,countOneBits(vsm_active&~blocked));
     if VSM_DEBUG {
         let index=2u*(id.x+id.y*size.x);
         vsm_debug[index]=vsm_dbg;

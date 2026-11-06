@@ -18,6 +18,10 @@
 //!
 //! Receivers and `(placement, primitive)` records come from traced primaries or the N1c
 //! visibility buffer; the shadow pass itself only rasterizes and reads buffers.
+//!
+//! N8e (docs/non-rt-n8e.md) spends quality surplus over Unreal on cost: a walk cap, a map
+//! that keeps its sun basis through small turns, and a rolling refresh that looks up one
+//! trace tile in eight per frame while the camera, casters and settings hold still.
 use super::*;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 
@@ -25,9 +29,9 @@ use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
-/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen rectangles and the 64
-/// per-batch horizon offsets.
-const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16 + 256;
+/// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen rectangles, the 64
+/// per-batch horizon offsets and N8e's uvec4.
+const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16 + 256 + 16;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
@@ -41,7 +45,8 @@ const ARGS_BYTES: u64 = 32;
 pub const VIRTUAL_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
-/// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md and non-rt-n8c.md.
+/// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md, non-rt-n8c.md and
+/// non-rt-n8e.md; N8c's output is `walk_cap: 0, refresh: 1, sun_hysteresis: 0.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualShadowSettings {
     /// Metres beyond which other surfaces are found only through the map. The receiver's
@@ -78,6 +83,27 @@ pub struct VirtualShadowSettings {
     /// what it was for (docs/non-rt-n8b.md S1), and the receiver's own relief there cost the
     /// quarry 0.85 ms for few blocks.
     pub first_block: u32,
+    /// N8e: directions evaluated per frame, 1-8: the first of each receiver's R2 sequence.
+    /// Visibility is the visible share of those (docs/non-rt-n8e.md).
+    pub directions: u32,
+    /// N8e walk cap: once a receiver's exact walks have visited this many triangles and one
+    /// of its directions is proven blocked, its undecided directions are taken as blocked
+    /// (0: no cap). Proven blocks only, so a fully lit receiver is never darkened by it; it
+    /// spends partial-shadow accuracy (quarry partial RMS .326 -> .353) to cut leaks by
+    /// two thirds and the cost by a sixth (docs/non-rt-n8e.md).
+    pub walk_cap: u32,
+    /// N8e rolling refresh: on a frame with the last frame's camera, casters, settings and
+    /// map, one trace tile in every `refresh` (1, 2, 4, 8 or 16) is looked up again and the
+    /// others keep their counts, so each is at most `refresh - 1` frames old. With the sun
+    /// turning inside `sun_hysteresis`, kept counts lag the sun by up to that many frames.
+    /// 1 looks up every tile every frame.
+    pub refresh: u32,
+    /// N8e map hysteresis (radians): the clipmap keeps its light basis, and its cached pages,
+    /// while the sun stays within this angle of the direction it was rasterized for. Every
+    /// lookup still tests the current sun's directions exactly; the map only finds candidates,
+    /// and its march and page requests widen their cone by this angle. 0 rasterizes again
+    /// whenever the sun turns.
+    pub sun_hysteresis: f32,
 }
 impl Default for VirtualShadowSettings {
     fn default() -> Self {
@@ -92,6 +118,10 @@ impl Default for VirtualShadowSettings {
             peel_own: false,
             caster_error_texels: -1.0,
             first_block: 2,
+            directions: 8,
+            walk_cap: 16,
+            refresh: 8,
+            sun_hysteresis: 0.01,
         }
     }
 }
@@ -105,9 +135,12 @@ impl VirtualShadowSettings {
             || !(self.finest_texel.is_finite() && self.finest_texel > 0.0)
             || !self.caster_error_texels.is_finite()
             || self.first_block > 2
+            || !(1..=8).contains(&self.directions)
+            || ![1, 2, 4, 8, 16].contains(&self.refresh)
+            || !(self.sun_hysteresis.is_finite() && (0.0..=0.05).contains(&self.sun_hysteresis))
         {
             return Err(Error::InvalidInput(
-                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel, finite caster error",
+                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel, finite caster error, 1..=8 directions, refresh 1/2/4/8/16, hysteresis in [0, 0.05] rad",
             ));
         }
         Ok(())
@@ -234,6 +267,8 @@ struct Groups {
 #[derive(Default)]
 struct Cache {
     light: Option<[u32; 3]>,
+    /// The sun direction the map was rasterized for (N8e `sun_hysteresis`).
+    toward: Option<glam::DVec3>,
     finest: Option<i32>,
     levels: usize,
     /// Window minimum page per level, in absolute light-space page units.
@@ -261,6 +296,12 @@ pub(super) struct VirtualState {
     /// request, compaction and raster passes and only runs the lookup.
     key: Vec<u64>,
     page_work: bool,
+    /// N8e rolling refresh: frames since the last full lookup, whether the next frame may
+    /// roll (cleared by the renderer when another pass writes the visibility target), and
+    /// this frame's schedule word (`VsmFrame::n8e.y`; 0 looks up every tile).
+    history_frames: u32,
+    pub rolling: bool,
+    schedule: u32,
     horizons: Option<Horizons>,
     /// Tests: run the `VSM_DEBUG` lookup and keep its per-pixel trace in `debug_buffer`.
     pub debug: bool,
@@ -374,6 +415,28 @@ fn texture(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
         binding,
         resource: wgpu::BindingResource::TextureView(v),
     }
+}
+
+/// N8e rolling refresh: the block of trace tiles (a x b) that shares one lookup per frame.
+fn refresh_block(refresh: u32) -> [u32; 2] {
+    match refresh {
+        2 => [2, 1],
+        4 => [2, 2],
+        8 => [4, 2],
+        16 => [4, 4],
+        _ => [1, 1],
+    }
+}
+/// The tile of the block a rolling frame looks up: blocks are visited in ordered-dither
+/// (Bayer) order, so consecutive frames refresh tiles far apart.
+fn refresh_tile(refresh: u32, frame: u32) -> [u32; 2] {
+    const BAYER: [[u32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    let [a, b] = refresh_block(refresh);
+    let mut cells: Vec<(u32, [u32; 2])> = (0..b)
+        .flat_map(|y| (0..a).map(move |x| (BAYER[y as usize][x as usize], [x, y])))
+        .collect();
+    cells.sort_unstable();
+    cells[(frame % refresh) as usize].1
 }
 
 /// Orthonormal sun basis (u, v, toward-light l), from the light direction alone so cached
@@ -656,6 +719,9 @@ impl VirtualState {
             levels: 0,
             key: vec![],
             page_work: true,
+            history_frames: 0,
+            rolling: false,
+            schedule: 0,
             horizons: None,
             debug: false,
             constants: vec![],
@@ -744,27 +810,32 @@ impl VirtualState {
             area.create_view(&Default::default()),
             ResourceKind::TextureView,
         );
-        let level = ledger.own(
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("N8 receiver levels"),
-                size: wgpu::Extent3d {
-                    width: size[0],
-                    height: size[1],
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Uint,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            }),
-            ResourceKind::Texture,
-        );
-        let level_view = ledger.own(
-            level.create_view(&Default::default()),
-            ResourceKind::TextureView,
-        );
+        let pixels = |label, [width, height]: [u32; 2]| {
+            let texture = ledger.own(
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R32Uint,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }),
+                ResourceKind::Texture,
+            );
+            let view = ledger.own(
+                texture.create_view(&Default::default()),
+                ResourceKind::TextureView,
+            );
+            (texture, view)
+        };
+        let (level, level_view) = pixels("N8 receiver levels", size);
         let slots = levels as u64 * u64::from(pages * pages);
         let debug_bytes = if self.debug {
             u64::from(size[0]) * u64::from(size[1]) * 32
@@ -943,10 +1014,22 @@ impl Renderer {
         self.ensure_virtual_casters(draws)?;
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        let slope = f64::from(self.shadows.settings.directional_disk_angle).tan() * 1.001;
+        // N8e: the map keeps the sun direction it was rasterized for while the sun stays
+        // within `sun_hysteresis` of it; the march and page requests then widen their cone by
+        // that angle (the lookup's directions are always the current sun's).
+        let kept = state.cache.toward.zip(state.cache.light).filter(|(m, _)| {
+            s.sun_hysteresis > 0.0
+                && m.angle_between(-travel.as_dvec3()) <= f64::from(s.sun_hysteresis)
+        });
+        let disk = f64::from(self.shadows.settings.directional_disk_angle);
+        let slope = (disk + f64::from(s.sun_hysteresis)).tan() * 1.001;
         let eye = camera.view().inverse().w_axis.truncate().as_dvec3();
-        let [u, v, l] = basis(-travel.as_dvec3());
-        let light_bits = (-travel).normalize().to_array().map(f32::to_bits);
+        let (toward, light_bits) = kept.unwrap_or((
+            -travel.as_dvec3(),
+            (-travel).normalize().to_array().map(f32::to_bits),
+        ));
+        state.cache.toward = Some(toward);
+        let [u, v, l] = basis(toward);
 
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
@@ -1197,7 +1280,6 @@ impl Renderer {
             let offset = offsets.get(b).copied().unwrap_or(0);
             frame.extend_from_slice(&offset.to_ne_bytes());
         }
-        debug_assert_eq!(frame.len(), FRAME_BYTES);
         state.levels = levels;
         state.stats = VirtualShadowStats {
             levels: levels as u32,
@@ -1215,7 +1297,8 @@ impl Renderer {
             [size.width, size.height],
             self.submissions,
         )?;
-        if state.debug && state.pipelines.debug.is_none() || state.constants != state.built {
+        let rebuild = state.constants != state.built;
+        if state.debug && state.pipelines.debug.is_none() || rebuild {
             let layout = &state.lookup_layout;
             let lookup = |label, debug: bool| {
                 let mut constants = state.constants.clone();
@@ -1237,7 +1320,7 @@ impl Renderer {
                 )
             };
             let debug = state.debug.then(|| lookup("vsm_lookup debug", true));
-            if state.constants != state.built {
+            if rebuild {
                 state.pipelines.lookup = lookup("vsm_lookup", false);
                 state.built = state.constants.clone();
             }
@@ -1259,6 +1342,16 @@ impl Renderer {
             casters.generation,
         ]);
         key.extend(light_bits.map(u64::from));
+        // The disk sets the march radius, so page requests depend on it too.
+        key.push(slope.to_bits());
+        // Receivers: the primary producer and its cut, so the rolling refresh never keeps
+        // counts of other receivers.
+        key.extend([
+            self.primary_mode as u64,
+            u64::from(self.lod_pixels.to_bits()),
+            u64::from(self.software_extent.to_bits()),
+            u64::from(self.lod_lift.to_bits()),
+        ]);
         for i in 0..levels {
             let o = state.cache.origins[i].unwrap_or_default();
             key.extend([o[0] as u64, o[1] as u64, u64::from(state.cache.epochs[i])]);
@@ -1266,6 +1359,28 @@ impl Renderer {
         state.page_work = created || !rects.is_empty() || key != state.key;
         state.stats.page_work = state.page_work;
         state.key = key;
+        // N8e rolling refresh: a frame that changes nothing but the sun (inside the map's
+        // hysteresis) keeps the counts of the tiles it does not look up. The renderer clears
+        // `rolling` whenever another pass writes the visibility target.
+        let rolling = state.rolling && !state.page_work && !rebuild && s.refresh > 1;
+        state.history_frames = if rolling {
+            state.history_frames.wrapping_add(1)
+        } else {
+            0
+        };
+        state.rolling = true;
+        let schedule = if rolling {
+            let [a, b] = refresh_block(s.refresh);
+            let [x, y] = refresh_tile(s.refresh, state.history_frames);
+            a | b << 4 | x << 8 | y << 12 | 1 << 16
+        } else {
+            0
+        };
+        state.schedule = schedule;
+        for value in [s.directions, schedule, s.walk_cap, 0] {
+            frame.extend_from_slice(&value.to_ne_bytes());
+        }
+        debug_assert_eq!(frame.len(), FRAME_BYTES);
         let state = self.virtual_shadows.as_mut().unwrap();
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
@@ -1454,7 +1569,17 @@ impl Renderer {
         pass.set_bind_group(0, &*g.lookup, &[]);
         pass.set_bind_group(1, arrays, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+        // One workgroup per trace tile; a rolling frame only one tile of every block.
+        let [a, b] = if state.schedule != 0 {
+            refresh_block(state.settings.refresh)
+        } else {
+            [1, 1]
+        };
+        pass.dispatch_workgroups(
+            width.div_ceil(8).div_ceil(a),
+            height.div_ceil(4).div_ceil(b),
+            1,
+        );
         let _ = &state.lookup_layout;
     }
 
@@ -1569,7 +1694,7 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        assert_eq!(FRAME_BYTES, 896);
+        assert_eq!(FRAME_BYTES, 912);
     }
     #[test]
     fn sun_basis_is_orthonormal_and_settings_validate() {
@@ -1590,5 +1715,39 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.validate().is_err());
+        for bad in [
+            VirtualShadowSettings {
+                refresh: 3,
+                ..Default::default()
+            },
+            VirtualShadowSettings {
+                directions: 0,
+                ..Default::default()
+            },
+            VirtualShadowSettings {
+                sun_hysteresis: 0.1,
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
+    }
+    /// N8e: every tile of a refresh block is looked up exactly once per `refresh` frames, so
+    /// no kept count is older than `refresh - 1` frames.
+    #[test]
+    fn rolling_refresh_visits_every_tile_once_per_cycle() {
+        for refresh in [1, 2, 4, 8, 16] {
+            let [a, b] = refresh_block(refresh);
+            assert_eq!(a * b, refresh);
+            for start in [1, 5] {
+                let mut seen: Vec<[u32; 2]> = (start..start + refresh)
+                    .map(|f| refresh_tile(refresh, f))
+                    .collect();
+                assert!(seen.iter().all(|&[x, y]| x < a && y < b));
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len() as u32, refresh);
+            }
+        }
     }
 }

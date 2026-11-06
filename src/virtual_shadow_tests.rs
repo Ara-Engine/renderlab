@@ -203,8 +203,12 @@ pub(super) fn diagnose(
     fs::write(out.join(format!("{label}-trace.u32x4")), trace).unwrap();
 }
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl).
-const SCREEN_CONSTANTS: [&str; 13] = [
+const SCREEN_CONSTANTS: [&str; 17] = [
     "VSM_SKIP",
+    "VSM_CAP_RULE",
+    "VSM_WALK_SHIFT",
+    "VSM_LEAN",
+    "VSM_LEAN_STEPS",
     "VSM_SHARE",
     "VSM_MIP",
     "VSM_HORIZON",
@@ -321,6 +325,34 @@ fn gpu_virtual_quarry_screen() {
         let turning = ms(&mut r);
         let [_, turned] = interactive_outputs(&r);
         row["turned_hash"] = serde_json::json!(sha256(&turned));
+        // N8e: the turned counts against Interactive at the turned sun (kept tiles lag it).
+        r.set_soft_shadows(SoftShadows::Interactive);
+        traced_frame(&mut r, &color, &camera, &mut asset, true);
+        let [turned_hit, turned_rt] = interactive_outputs(&r);
+        row["turned"] = agreement(&counts(&turned), &counts(&turned_rt), &turned_hit);
+        let mut sorted = turning.clone();
+        sorted.sort_by(f64::total_cmp);
+        row["turning_shadow_ms_max"] = serde_json::json!(sorted.last());
+        // N8e: the camera moving 1 mm a frame (sun fixed): every frame is a full lookup.
+        r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+        r.set_soft_shadows(SoftShadows::Virtual);
+        traced_frame(&mut r, &color, &camera, &mut asset, true);
+        let _ = ms(&mut r);
+        let pose = &cameras.frames[0];
+        for i in 1..=16 {
+            let step = Vec3::X * (0.001 * i as f32);
+            let moved = Camera::look_at(
+                Vec3::from_array(pose.eye) + step,
+                Vec3::from_array(pose.target) + step,
+                Vec3::from_array(pose.up),
+                pose.fov_y_radians,
+                pose.near,
+                pose.far,
+            )
+            .unwrap();
+            traced_frame(&mut r, &color, &moved, &mut asset, true);
+        }
+        row["moving_shadow_ms_p50"] = serde_json::json!(median(ms(&mut r)));
         row["variant"] = serde_json::json!(name);
         row["static_shadow_ms_p50"] = serde_json::json!(median(fixed));
         row["turning_shadow_ms_p50"] = serde_json::json!(median(turning));
