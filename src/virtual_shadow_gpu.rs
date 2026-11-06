@@ -21,7 +21,7 @@
 //!
 //! N8e (docs/non-rt-n8e.md) spends quality surplus over Unreal on cost: a walk cap, a map
 //! that keeps its sun basis through small turns, and a rolling refresh that looks up one
-//! trace tile in eight per frame while the camera, casters and settings hold still.
+//! trace tile in sixteen per frame while the camera, casters and settings hold still.
 use super::*;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 
@@ -120,7 +120,7 @@ impl Default for VirtualShadowSettings {
             first_block: 2,
             directions: 8,
             walk_cap: 16,
-            refresh: 8,
+            refresh: 16,
             sun_hysteresis: 0.01,
         }
     }

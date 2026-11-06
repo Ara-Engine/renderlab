@@ -2,6 +2,8 @@
 
 Follow-up unit to [N8c](non-rt-n8c.md), 2026-11-06 UTC, base `8af0ddf`, branch `t3/n8d-shadow-cost`. Brief (Islam, 2026-11-06): cut N8c's cost with levers that are conservative skips, so outputs stay byte-identical to N8c's default; targets quarry static ≤ about 0.6 ms, turning ≤ about 1.2 ms, no-RT frame ≤ 1.61 ms. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8e](non-rt-n8e.md)** spends the quality surplus instead: a walk cap, a map that keeps its sun basis through small turns, and a rolling refresh of one trace tile in sixteen on frames that hold still. Quarry static 3.0 → 0.72-0.95 ms, turning 5.0 → 0.70-0.96 ms, no-RT frame 1.55-1.71 ms, all above Unreal's quality except N8c's S1 pose 1 leaks. Frames with a moving camera or caster still cost a full lookup.
+
 ## Result
 
 **No lever cut the cost. Every target is missed, by the same margins as N8c. Every variant built was byte-identical to N8c on every bench where it was checked, and the retained code is byte-identical on all of them.** The retained change is a correctness fix for mirrored placements (below), which no bench exercises. Quality equals N8c's on every measure: Unreal VSM is beaten everywhere except S1 pose 1 (2 umbra leaks against 0), N8c's unchanged miss.

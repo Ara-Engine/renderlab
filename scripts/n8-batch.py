@@ -73,7 +73,8 @@ def manifests(root):
                                                        case="camera-0.25px-r0.04", frame=28, turn_degrees=0.0167, variants=variants)),
         "screen-s3": ("gpu_motion_virtual_screen", dict(scene=str(MOTION / "S3/fixture/scene.json"), output=str(root / "screen"),
                                                        case="sun-r0.04", frame=0, turn_degrees=0.0167, variants=variants)),
-        "screen-quarry": ("gpu_virtual_quarry_screen", dict(quarry, output=str(root / "screen"), turn_degrees=0.0286, variants=variants)),
+        "screen-quarry": ("gpu_virtual_quarry_screen", dict(quarry, output=str(root / "screen"), turn_degrees=0.0286, variants=variants,
+                                                         dump=os.environ.get("N8E_DUMP") == "1")),
         "diag-s3": ("gpu_motion_virtual_diagnose", dict(scene=str(MOTION / "S3/fixture/scene.json"), output=str(root / "diag"),
                                                      case="sun-r0.04", frames=[0])),
         "diag-quarry-variants": ("gpu_virtual_quarry_diagnose", dict(quarry, output=str(root / "diag"), variants=dict(

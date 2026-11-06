@@ -275,6 +275,10 @@ fn gpu_virtual_quarry_screen() {
     r.set_soft_shadows(SoftShadows::Interactive);
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     let [hit, rt] = interactive_outputs(&r);
+    if m["dump"].as_bool() == Some(true) {
+        fs::write(out.join("hit.u32x4"), &hit).unwrap();
+        fs::write(out.join("interactive.counts"), &rt).unwrap();
+    }
     // Bring the GPU to its working clocks before the first variant's timing.
     for _ in 0..30 {
         traced_frame(&mut r, &color, &camera, &mut asset, true);
@@ -307,6 +311,9 @@ fn gpu_virtual_quarry_screen() {
         let [_, n8] = interactive_outputs(&r);
         let mut row = agreement(&counts(&n8), &counts(&rt), &hit);
         row["hash"] = serde_json::json!(sha256(&n8));
+        if m["dump"].as_bool() == Some(true) {
+            fs::write(out.join(format!("{name}.counts")), &n8).unwrap();
+        }
         let _ = ms(&mut r);
         for _ in 0..24 {
             traced_frame(&mut r, &color, &camera, &mut asset, true);
