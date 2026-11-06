@@ -189,7 +189,8 @@ def main():
             candidates={};panels=[("Film visibility",film.vis(d["ref"],d["cover"]))]
             radiance_panels=[("Film",film.tone(d["hdr"])),("Film +4",film.tone(d["hdr"],4))]
             masks={}
-            for mode in ("hard","Exact","Interactive","Temporal"):
+            for mode in ("hard","Exact","Interactive","Temporal","Virtual"):
+                if not (folder/f"{mode}-n{128 if mode=='Temporal' else 32}.rgba16f").exists():continue
                 hdr=np.fromfile(folder/f"{mode}-n{128 if mode=='Temporal' else 32}.rgba16f",dtype="<f2").reshape(*d["ref"].shape,4).astype(float)
                 if mode=="Temporal":
                     counts=sum(np.fromfile(folder/f"{mode}-visibility-{half}.u32",dtype="<u4").reshape(*d["ref"].shape,2).astype(float) for half in (0,1))

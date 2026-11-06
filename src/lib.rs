@@ -35,6 +35,7 @@ pub use primary_ray::{PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, traced_l
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;
+pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
 pub use renderer::{Capture, CaptureInfo};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;

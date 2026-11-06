@@ -642,6 +642,17 @@ impl PrimaryState {
         })
     }
 
+    /// The traced geometry tables' layout, which N8 visibility binds as group 1.
+    pub(super) fn array_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.array_bindings
+    }
+    /// The prepared frame's placement-ordered models and geometry tables (N8).
+    pub(super) fn virtual_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::BindGroup)> {
+        self.geometry
+            .as_ref()
+            .map(|g| (&*g.models.value, &*g.arrays))
+    }
+
     #[cfg(test)]
     pub(super) fn test_fresh_bindings(&self) -> (&wgpu::BindGroupLayout, &wgpu::BindGroup) {
         (

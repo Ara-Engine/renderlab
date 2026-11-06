@@ -25,6 +25,35 @@ mod contact_fold_tests;
 #[path = "motion_bench_tests.rs"]
 mod motion_bench_tests;
 
+#[path = "virtual_shadow_tests.rs"]
+mod virtual_shadow_tests;
+
+/// Optional `virtual` manifest object overriding `VirtualShadowSettings` fields.
+fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSettings> {
+    let v = m.get("virtual")?;
+    let mut s = crate::VirtualShadowSettings::default();
+    let f = |key: &str, value: &mut f32| {
+        if let Some(x) = v[key].as_f64() {
+            *value = x as f32;
+        }
+    };
+    f("near", &mut s.near);
+    f("texels_per_pixel_log2", &mut s.texels_per_pixel_log2);
+    f("finest_texel", &mut s.finest_texel);
+    let u = |key: &str, value: &mut u32| {
+        if let Some(x) = v[key].as_u64() {
+            *value = x as u32;
+        }
+    };
+    u("pages", &mut s.pages);
+    u("march_samples", &mut s.march_samples);
+    u("bias_ulps", &mut s.bias_ulps);
+    if let Some(ring) = v["ring"].as_bool() {
+        s.ring = ring;
+    }
+    Some(s)
+}
+
 /// Two independent stratified halves of 512 samples (32 x 16 strata each), randomized in
 /// each stratum, so each half is an unbiased footprint estimate on its own.
 const T1_JITTER: &str = "\nfn film_jitter(i:u32)->vec2<f32> {\n let h=fresh_hash(i^0x6a09e667u);\n let q=vec2<f32>(f32(h>>8u),f32(fresh_hash(h)>>8u))*(1.0/16777216.0);\n let j=i%512u;\n return (vec2<f32>(f32(j%32u),f32(j/32u))+q)/vec2<f32>(32.0,16.0);\n}\n";

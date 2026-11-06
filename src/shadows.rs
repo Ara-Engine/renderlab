@@ -20,6 +20,15 @@ pub enum SoftShadows {
     /// which is below the film-quality bar. The known receiver concave-edge defect
     /// is being fixed separately. History costs 48 bytes per pixel plus tile flags.
     Temporal,
+    /// N8, the non-RT Interactive mode (docs/non-rt-n8.md): the same eight directions,
+    /// resolved without ray queries. The receiver triangle and its vertex 1-ring are
+    /// tested exactly with the watertight test; beyond `VirtualShadowSettings::near` a
+    /// short march through a cached sun clipmap (about one texel per pixel) finds
+    /// candidate occluders, each confirmed by an exact test of the map texel's triangle.
+    /// Casters thinner than a texel, other surfaces within `near` and occluders hidden
+    /// under another surface in light space can be missed. Requires `VIRTUAL_FEATURES`.
+    /// This unit still takes its receivers from traced camera hits.
+    Virtual,
 }
 
 /// Entries correspond exactly to the current `Lighting::lights` vector.
