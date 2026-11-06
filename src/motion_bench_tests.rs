@@ -621,8 +621,17 @@ fn gpu_motion_bench_batch() {
         serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
-    let mut r = renderer(false);
+    let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    if let Some(settings) = virtual_settings(&m) {
+        r.set_virtual_shadow_settings(settings).unwrap();
+    }
+    let selected = |key: &str, name: &str| {
+        m[key]
+            .as_array()
+            .is_none_or(|names| names.iter().any(|n| n.as_str() == Some(name)))
+    };
+    let repeats = m["repeats"].as_u64().unwrap_or(8) as usize;
     let mut scene = upload_scene(&mut r, &b);
     let color = target(&r, b.size[0], b.size[1]);
     let mut timings: Vec<serde_json::Value> = fs::read(out.join("timings.json"))
@@ -632,6 +641,9 @@ fn gpu_motion_bench_batch() {
     for track in &b.tracks {
         for &radius in &b.radii {
             let case = format!("{}-r{radius}", track.name);
+            if !selected("cases", &case) {
+                continue;
+            }
             let directory = out.join(&case);
             if directory.join("scores-renderlab.json").is_file()
                 || directory.join("reference-reuse.json").is_file()
@@ -658,13 +670,18 @@ fn gpu_motion_bench_batch() {
                 ("Exact", SoftShadows::Exact),
                 ("Interactive", SoftShadows::Interactive),
                 ("Temporal", SoftShadows::Temporal),
+                ("Virtual", SoftShadows::Virtual),
             ] {
+                // N8 is a disk-light mode; a zero radius takes the hard path.
+                if !selected("modes", name) || (mode == SoftShadows::Virtual && radius == 0.) {
+                    continue;
+                }
                 let path = directory.join(name);
                 fs::create_dir_all(&path).unwrap();
                 r.set_soft_shadows(mode);
                 // Separate uninterrupted production replays from diagnostic readbacks.
                 let mut records = vec![];
-                for repeat in 0..8 {
+                for repeat in 0..repeats {
                     r.shadows.test_reset_bases();
                     let warm = configure(
                         &mut r,
@@ -703,7 +720,7 @@ fn gpu_motion_bench_batch() {
                             .iter()
                             .find(|(rep, s)| *rep == repeat && s.frame == id)
                         {
-                            timings.push(serde_json::json!({"case":case,"mode":name,"repeat":repeat,"frame":index,"gpu_ms":s.render_span.as_secs_f64()*1000.,"cpu_service_ms":cpu,"visibility_ms":s.visibility_compute.map(|v|v.as_secs_f64()*1000.),"trace_ms":s.receiver_pass.map(|v|v.as_secs_f64()*1000.)}));
+                            timings.push(serde_json::json!({"case":case,"mode":name,"repeat":repeat,"frame":index,"gpu_ms":s.render_span.as_secs_f64()*1000.,"cpu_service_ms":cpu,"visibility_ms":s.visibility_compute.map(|v|v.as_secs_f64()*1000.),"trace_ms":s.receiver_pass.map(|v|v.as_secs_f64()*1000.),"virtual":(mode == SoftShadows::Virtual).then(|| format!("{:?}", r.virtual_shadow_stats()))}));
                         } else {
                             panic!(
                                 "missing production timing {case} {name} repeat {repeat} frame {index}"

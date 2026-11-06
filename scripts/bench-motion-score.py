@@ -107,8 +107,10 @@ def score_case(root,case,renderlab_only=False):
         index=pose["frame"];d=reference(directory/"reference",index,scene,pose);pops=s1.metrics.populations(d)
         refs=d["ref"];panels=[("Film",s1.film.tone(d["hdr"])),("Film visibility",s1.film.vis(refs,d["cover"]))]
         modes={}
-        for mode in ("hard","Exact","Interactive","Temporal"):
-            path=directory/mode;hdr=read_hdr(path/f"{index:04}.rgba16f",shape)
+        for mode in ("hard","Exact","Interactive","Temporal","Virtual"):
+            path=directory/mode
+            if not path.is_dir():continue
+            hdr=read_hdr(path/f"{index:04}.rgba16f",shape)
             if mode=="Temporal" and not (path/f"{index:04}-visibility.rgba16f").exists():
                 info=json.loads((path/f"{index:04}.json").read_text())
                 if info["reset"]:history=[]

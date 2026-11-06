@@ -51,8 +51,16 @@ fn gpu_contact_fold_batch() {
         serde_json::from_slice(&fs::read(m["scene"].as_str().unwrap()).unwrap()).unwrap();
     let root = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&root).unwrap();
-    let mut r = renderer(false);
+    let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    if let Some(settings) = virtual_settings(&m) {
+        r.set_virtual_shadow_settings(settings).unwrap();
+    }
+    let selected = |name: &str| {
+        m["modes"]
+            .as_array()
+            .is_none_or(|names| names.iter().any(|n| n.as_str() == Some(name)))
+    };
     let mut scene = vec![];
     for g in &b.meshes {
         let vertices: Vec<_> = g
@@ -150,7 +158,11 @@ fn gpu_contact_fold_batch() {
                 ("Exact", SoftShadows::Exact, 0.04),
                 ("Interactive", SoftShadows::Interactive, 0.04),
                 ("Temporal", SoftShadows::Temporal, 0.04),
+                ("Virtual", SoftShadows::Virtual, 0.04),
             ] {
+                if !selected(name) {
+                    continue;
+                }
                 let (lit, shadows) = lighting(&b, environment, radius);
                 r.set_lighting_and_shadows(&lit, &shadows).unwrap();
                 r.set_soft_shadows(mode);

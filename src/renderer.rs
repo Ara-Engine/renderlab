@@ -16,6 +16,9 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
+#[path = "virtual_shadow_gpu.rs"]
+mod virtual_shadow_gpu;
+pub use virtual_shadow_gpu::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
 #[path = "program_gpu.rs"]
 mod program_gpu;
 use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
@@ -498,6 +501,9 @@ pub struct Renderer {
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
     soft_mode: crate::SoftShadows,
+    /// `SoftShadows::Virtual` state, created by its first frame (N8).
+    virtual_shadows: Option<virtual_shadow_gpu::VirtualState>,
+    virtual_settings: VirtualShadowSettings,
     /// Identity of the traced modules, which also produce the HDR of traced frames.
     primary_hash: [u8; 32],
     /// Last installed prelude WGSL, composed again when traced visibility is selected.
@@ -955,6 +961,8 @@ impl Renderer {
             primary,
             primary_mode: PrimaryVisibility::Raster,
             soft_mode: crate::SoftShadows::Exact,
+            virtual_shadows: None,
+            virtual_settings: VirtualShadowSettings::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2652,6 +2660,14 @@ impl Renderer {
             result?;
             uploads.add(primary);
             self.uploads.add(primary);
+            if soft && self.soft_mode == crate::SoftShadows::Virtual {
+                let scopes = OperationScopes::new(&self.device);
+                let result = self.prepare_virtual(draws, camera, color.size());
+                if let Some(error) = scopes.finish() {
+                    return Err(self.fail(error.to_string()));
+                }
+                result?;
+            }
             if temporal {
                 self.ensure_film_kernel()?;
                 let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
@@ -2702,6 +2718,10 @@ impl Renderer {
                 if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
+                } else if soft && self.soft_mode == crate::SoftShadows::Virtual {
+                    // Traced receivers, then N8 visibility with no ray queries.
+                    self.encode_primary_visibility(&mut encoder, true, stamps(6));
+                    self.encode_virtual(&mut encoder, draws, stamps(8));
                 } else {
                     self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     if soft {
@@ -3131,6 +3151,9 @@ impl Renderer {
         self.shadows.collect(self.completed_submission);
         if let Some(fresh) = &mut self.fresh {
             fresh.collect(self.completed_submission);
+        }
+        if let Some(state) = &mut self.virtual_shadows {
+            state.collect(self.completed_submission);
         }
         if let Some(primary) = &mut self.primary {
             primary.collect(self.completed_submission);
