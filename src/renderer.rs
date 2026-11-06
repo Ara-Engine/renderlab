@@ -1346,6 +1346,81 @@ impl Renderer {
         data: &MeshData<'_>,
         tangents: Option<&asset::TangentStream>,
     ) -> Result<Option<Mesh>, Error> {
+        self.try_upload_mesh_prepared(data, tangents, None)
+    }
+
+    /// Validate and prepare owned primitives concurrently without submitting GPU
+    /// work. The returned order matches the input. Only traced-eligible meshes
+    /// allocate adjacency; source vectors move into immutable upload resources.
+    pub fn prepare_mesh_uploads(
+        &self,
+        primitives: Vec<asset::Primitive>,
+    ) -> Result<Vec<MeshUpload>, Error> {
+        self.check_fault()?;
+        #[cfg(test)]
+        if crate::receiver_adjacency::LEGACY.with(std::cell::Cell::get) {
+            return Ok(crate::receiver_adjacency::prepare_uploads(
+                primitives,
+                vec![],
+            ));
+        }
+        let eligible = primitives
+            .iter()
+            .map(|p| {
+                let data = MeshData {
+                    vertices: &p.vertices,
+                    indices: &p.indices,
+                };
+                let sizes = data.validate(self.limits)?;
+                let tangent_bytes =
+                    self.validate_mesh_tangents(&data, p.tangents.as_ref(), sizes)?;
+                if let Some(hardware) = &self.hardware_shadows {
+                    hardware.validate_mesh(
+                        &self.ledger,
+                        &self.device.limits(),
+                        sizes.0,
+                        sizes.1,
+                    )?;
+                }
+                Ok(self.receiver_adjacency_fits(sizes, tangent_bytes))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(crate::receiver_adjacency::prepare_uploads(
+            primitives, eligible,
+        ))
+    }
+
+    /// Busy leaves the prepared resource intact for retry. Preparation may also
+    /// be used with another renderer; its limits are checked again at upload.
+    pub fn try_upload_prepared_mesh(
+        &mut self,
+        prepared: &MeshUpload,
+    ) -> Result<Option<Mesh>, Error> {
+        let p = &prepared.primitive;
+        self.try_upload_mesh_prepared(
+            &MeshData {
+                vertices: &p.vertices,
+                indices: &p.indices,
+            },
+            p.tangents.as_ref(),
+            Some(prepared),
+        )
+    }
+
+    fn receiver_adjacency_fits(&self, sizes: (u64, u64), tangent_bytes: u64) -> bool {
+        let adjacency_bytes = sizes.1 + 4;
+        self.primary.is_some()
+            && sizes.1 + adjacency_bytes <= self.device.limits().max_storage_buffer_binding_size
+            && sizes.1 + adjacency_bytes <= self.device.limits().max_buffer_size
+            && sizes.0 + sizes.1 + tangent_bytes + adjacency_bytes <= self.limits.max_mesh_bytes
+    }
+
+    fn try_upload_mesh_prepared(
+        &mut self,
+        data: &MeshData<'_>,
+        tangents: Option<&asset::TangentStream>,
+        prepared: Option<&MeshUpload>,
+    ) -> Result<Option<Mesh>, Error> {
         self.check_fault()?;
         let started = Instant::now();
         let sizes = data.validate(self.limits)?;
@@ -1365,12 +1440,14 @@ impl Renderer {
         // one padding word. The suffix's length modulo three identifies its presence
         // to traced kernels; raster draws and BLASes retain the source index count.
         let adjacency_bytes = sizes.1 + 4;
-        let adjacency_fits = self.primary.is_some()
-            && sizes.1 + adjacency_bytes <= self.device.limits().max_storage_buffer_binding_size
-            && sizes.1 + adjacency_bytes <= self.device.limits().max_buffer_size
-            && sizes.0 + sizes.1 + tangent_bytes + adjacency_bytes <= self.limits.max_mesh_bytes;
+        let adjacency_fits = self.receiver_adjacency_fits(sizes, tangent_bytes);
         let adjacency_started = Instant::now();
-        let adjacency = adjacency_fits.then(|| crate::receiver_adjacency::build(data));
+        let prepared = prepared
+            .and_then(|p| p.adjacency.as_ref())
+            .filter(|_| adjacency_fits);
+        let built =
+            (adjacency_fits && prepared.is_none()).then(|| crate::receiver_adjacency::build(data));
+        let adjacency = prepared.or(built.as_ref());
         let adjacency_build = adjacency_started.elapsed();
         let adjacency_bytes = if adjacency.is_some() {
             adjacency_bytes
@@ -1474,14 +1551,28 @@ impl Renderer {
             &bytes[sizes.0 as usize..(sizes.0 + sizes.1) as usize],
         );
         if let Some(adjacency) = adjacency {
-            let mut suffix: Vec<u8> = adjacency
-                .neighbours
-                .iter()
-                .flat_map(|n| n.to_ne_bytes())
-                .collect();
-            suffix.extend_from_slice(&0u32.to_ne_bytes());
             let started = Instant::now();
-            self.queue.write_buffer(&index, sizes.1, &suffix);
+            // Fill staging directly: no second table-sized byte Vec or growth
+            // when appending the packed-suffix padding word.
+            {
+                let mut suffix = self
+                    .queue
+                    .write_buffer_with(
+                        &index,
+                        sizes.1,
+                        std::num::NonZeroU64::new(adjacency_bytes).unwrap(),
+                    )
+                    .unwrap();
+                let (words, _) = suffix.slice(..).into_chunks::<4>();
+                words.write_iter(
+                    adjacency
+                        .neighbours
+                        .iter()
+                        .copied()
+                        .chain([0])
+                        .map(u32::to_ne_bytes),
+                );
+            }
             let adjacency_upload = started.elapsed();
             self.uploads.geometry += adjacency_bytes;
             self.uploads.write_calls += 1;

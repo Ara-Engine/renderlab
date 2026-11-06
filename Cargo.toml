@@ -19,6 +19,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "parki
 pollster = "0.4"
 glam = "0.30.10"
 sha2 = "=0.10.9"
+# Shared work-stealing pool and allocation-free parallel sorts for runtime mesh preparation.
+rayon = "1.11"
 # Program composition checks and Parameters reflection; wgpu already validates with it.
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 
