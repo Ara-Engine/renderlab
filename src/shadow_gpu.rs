@@ -483,7 +483,9 @@ impl Renderer {
                 "soft visibility requires hardware 1x and exactly one shadowed directional light",
             ));
         }
-        if self.hardware_shadows.is_none() {
+        if self.hardware_shadows.is_none()
+            && self.primary_mode != PrimaryVisibility::VisibilityBuffer
+        {
             shadows.validate(lights, self.shadows.limits)?;
             return Ok(());
         }
@@ -638,7 +640,8 @@ impl Renderer {
         uploads: &mut UploadBytes,
     ) -> Result<(), Error> {
         let state = &mut self.shadows;
-        let raster = self.hardware_shadows.is_none();
+        let raster = self.hardware_shadows.is_none()
+            && self.primary_mode != PrimaryVisibility::VisibilityBuffer;
         if frame.is_none() && !state.ranges_published {
             return Ok(());
         }
@@ -761,11 +764,10 @@ impl Renderer {
     pub(super) fn stamp_shadows(&mut self, frame: ShadowFrame, draws: &[ShadowDraw<'_>]) {
         let mut count = 0;
         let mut triangles = 0;
-        for view in frame
-            .views
-            .iter()
-            .filter(|_| self.hardware_shadows.is_none())
-        {
+        for view in frame.views.iter().filter(|_| {
+            self.hardware_shadows.is_none()
+                && self.primary_mode != PrimaryVisibility::VisibilityBuffer
+        }) {
             for &caster in &view.caster_indices {
                 count += 1;
                 triangles +=

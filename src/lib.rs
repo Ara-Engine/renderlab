@@ -31,7 +31,10 @@ pub use material::{
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
-pub use primary_ray::{PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, traced_limits};
+pub use primary_ray::{
+    PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES, traced_limits,
+    visibility_limits,
+};
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;

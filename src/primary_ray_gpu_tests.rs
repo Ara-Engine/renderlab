@@ -10,6 +10,8 @@ mod film_reference_tests;
 
 #[path = "reload_tests.rs"]
 mod reload_tests;
+#[path = "visibility_buffer_tests.rs"]
+mod visibility_buffer_tests;
 
 const SEED_EDIT: (&str, &str) = (
     "    let seed=fresh_hash(pixel.x+pixel.y*width);",

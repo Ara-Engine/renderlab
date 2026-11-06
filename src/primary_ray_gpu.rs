@@ -45,6 +45,31 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
     Ok([hard, soft].map(|c| format!("{ENABLES}{c}\n{rays}")))
 }
 
+/// Same engine seams and material ABI, with no traversal declarations at all.
+pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
+    // Validate the affine/visibility seams even though this composition has no rays.
+    crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
+    let (before, rest) = wgsl
+        .split_once(crate::hardware_shadows::VISIBILITY_BEGIN)
+        .unwrap();
+    let (_, after) = rest
+        .split_once(crate::hardware_shadows::VISIBILITY_END)
+        .unwrap();
+    let fresh = include_str!("../shaders/fresh_shadows.wgsl");
+    let hash =
+        &fresh[fresh.find("fn fresh_hash(").unwrap()..fresh.find("fn fresh_direction(").unwrap()];
+    let soft = &fresh
+        [fresh.find("@group(0) @binding(6)").unwrap()..fresh.find("struct FreshReceiver").unwrap()];
+    let hard = "fn hard_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {return 1.0;}";
+    Ok([hard, soft].map(|body| format!("enable wgpu_binding_array;\n{before}\n{body}\n{after}\n{hash}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}", include_str!("../shaders/primary_rays.wgsl"))))
+}
+
+pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
+    let heads = non_rt_heads(wgsl)?;
+    let kernels = heads.clone().map(|h| format!("{h}\noverride FRESH_DIRECTIONS:u32=256u;\n@compute @workgroup_size(1) fn primary_trace() {{}}\n@compute @workgroup_size(1) fn primary_trace_receivers() {{}}\n@compute @workgroup_size(1) fn primary_trace_interactive() {{}}\n@compute @workgroup_size(1) fn fresh_compute() {{}}"));
+    Ok((kernels, finish_shading_heads(heads)?))
+}
+
 /// The engine's trace and visibility kernel modules: hard (camera rays and exact
 /// receivers) and soft (traced fresh visibility and the fused Interactive pass).
 pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
@@ -172,6 +197,9 @@ pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
         1,
     );
     heads[0].push_str("\n@group(0) @binding(23) var primary_receiver_epsilon:texture_2d<f32>;\n");
+    finish_shading_heads(heads)
+}
+fn finish_shading_heads(heads: [String; 2]) -> Result<[String; 2], Error> {
     if heads.iter().any(|h| h.matches(TANGENT_SEAM).count() != 1) {
         return Err(Error::InvalidInput(
             "traced primary shading requires the unchanged tangent vertex function",
@@ -277,11 +305,6 @@ pub(super) fn admit_draws(
             "traced primary visibility with hardware shadows requires opaque double-sided materials",
         ));
     }
-    if draws.iter().any(|d| d.mesh.acceleration.is_none()) {
-        return Err(Error::InvalidInput(
-            "traced primary visibility requires meshes uploaded to this hardware renderer",
-        ));
-    }
     placement_table(
         draws
             .iter()
@@ -334,14 +357,26 @@ impl Renderer {
                     slot.pipelines.temporal = None;
                 }
                 self.primary_sources = None;
-                self.primary.as_mut().unwrap().release(self.submissions);
+                if let Some(primary) = &mut self.primary {
+                    primary.release(self.submissions);
+                }
             }
-            PrimaryVisibility::Traced => {
+            PrimaryVisibility::Traced | PrimaryVisibility::VisibilityBuffer => {
+                if mode == PrimaryVisibility::Traced
+                    && (self.hardware_shadows.is_none() || !supported(&self.device))
+                {
+                    return Err(Error::InvalidInput(
+                        "traced primary visibility requires hardware ray queries and TRACED_FEATURES",
+                    ));
+                }
                 let state = self.primary.as_ref().ok_or(Error::InvalidInput(
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
-                let sources = shader_sources(&self.source)?;
-                let heads = shading_heads(&self.source)?;
+                let (sources, heads) = if self.hardware_shadows.is_some() {
+                    (shader_sources(&self.source)?, shading_heads(&self.source)?)
+                } else {
+                    non_rt_sources(&self.source)?
+                };
                 let scopes = OperationScopes::new(&self.device);
                 let pipelines = state.compile(&self.device, &self.ledger, &sources);
                 if let Some(error) = scopes.finish() {
@@ -365,6 +400,9 @@ impl Renderer {
             }
         }
         self.primary_mode = mode;
+        if mode != PrimaryVisibility::VisibilityBuffer {
+            self.visibility_buffer = None;
+        }
         Ok(())
     }
     pub fn primary_visibility(&self) -> PrimaryVisibility {
@@ -456,7 +494,7 @@ pub(super) struct Buffer {
     _allocation: Allocation,
 }
 impl Buffer {
-    fn new(r: &Renderer, label: &str, size: u64, usage: wgpu::BufferUsages) -> Self {
+    pub(super) fn new(r: &Renderer, label: &str, size: u64, usage: wgpu::BufferUsages) -> Self {
         Self {
             value: r.ledger.own(
                 r.device.create_buffer(&wgpu::BufferDescriptor {
@@ -646,6 +684,9 @@ impl PrimaryState {
     pub(super) fn array_layout(&self) -> &wgpu::BindGroupLayout {
         &self.array_bindings
     }
+    pub(super) fn frame_buffer(&self) -> &wgpu::Buffer {
+        &self.frame.as_ref().unwrap().0.value
+    }
     /// The prepared frame's placement-ordered models and geometry tables (N8).
     pub(super) fn virtual_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::BindGroup)> {
         self.geometry
@@ -664,10 +705,20 @@ impl PrimaryState {
     pub fn new(device: &wgpu::Device, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
         use wgpu::TextureFormat as F;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            let entries: Vec<_> = entries
+                .iter()
+                .copied()
+                .filter(|e| {
+                    !matches!(e.ty, wgpu::BindingType::AccelerationStructure { .. })
+                        || device
+                            .features()
+                            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                })
+                .collect();
             ledger.own(
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some(label),
-                    entries,
+                    entries: &entries,
                 }),
                 ResourceKind::BindGroupLayout,
             )
@@ -768,17 +819,24 @@ impl PrimaryState {
                 texture(21, uint),
             ],
         );
-        let array_bindings = group(
-            "primary draw geometry",
-            &[
-                read(0, 64),
-                read(1, 64),
-                per_draw(read(2, 16)),
-                per_draw(read(3, 4)),
-                per_draw(read(4, 16)),
-                read(5, 4),
-            ],
-        );
+        let array_entries = [
+            read(0, 64),
+            read(1, 64),
+            per_draw(read(2, 16)),
+            per_draw(read(3, 4)),
+            per_draw(read(4, 16)),
+            read(5, 4),
+        ]
+        .map(|e| wgpu::BindGroupLayoutEntry {
+            visibility: wgpu::ShaderStages::COMPUTE
+                | if e.binding == 4 {
+                    wgpu::ShaderStages::empty()
+                } else {
+                    wgpu::ShaderStages::VERTEX
+                },
+            ..e
+        });
+        let array_bindings = group("primary draw geometry", &array_entries);
         let filtered = wgpu::TextureSampleType::Float { filterable: true };
         let sampler = |binding| {
             per_draw(entry(
@@ -1533,12 +1591,15 @@ impl Renderer {
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             use wgpu::BindingResource as R;
-            let hardware = self.hardware_shadows.as_ref().unwrap();
+            let hardware = self.hardware_shadows.as_ref();
             let frame = &state.frame.as_ref().unwrap().0.value;
             let region = &state.region_buffer.as_ref().unwrap().value;
             let group = |layout: &wgpu::BindGroupLayout, entries: &[(u32, R<'_>)]| {
                 let entries: Vec<_> = entries
                     .iter()
+                    .filter(|(binding, _)| {
+                        hardware.is_some() || ![2, TRACE_SCENE].contains(binding)
+                    })
                     .map(|(binding, resource)| wgpu::BindGroupEntry {
                         binding: *binding,
                         resource: resource.clone(),
@@ -1554,8 +1615,11 @@ impl Renderer {
                 )
             };
             let camera = (0, self.uniform.as_entire_binding());
-            let scene = (2, hardware.scene().as_binding());
-            let trace_scene = (TRACE_SCENE, hardware.scene().as_binding());
+            let scene = (
+                2,
+                hardware.map_or_else(|| frame.as_entire_binding(), |h| h.scene().as_binding()),
+            );
+            let trace_scene = (TRACE_SCENE, scene.1.clone());
             let uniform = (10, frame.as_entire_binding());
             let hit = R::TextureView(&t.hit.view);
             let tiles = R::TextureView(&t.tiles.view);

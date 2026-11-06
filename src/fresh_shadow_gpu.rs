@@ -131,7 +131,15 @@ impl FreshState {
                         },
                         count: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .filter(|e| {
+                    e.binding != 2
+                        || device
+                            .features()
+                            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                })
+                .collect::<Vec<_>>(),
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -448,7 +456,9 @@ impl Renderer {
             });
         }
         let t = state.targets.as_mut().unwrap();
-        let hardware = self.hardware_shadows.as_ref().unwrap();
+        let Some(hardware) = self.hardware_shadows.as_ref() else {
+            return;
+        };
         let scene_generation = hardware.stats.tlas_builds + u64::from(hardware_build);
         if t.compute
             .as_ref()

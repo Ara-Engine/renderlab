@@ -18,6 +18,8 @@ mod primary_ray_gpu;
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
+#[path = "visibility_buffer.rs"]
+pub(crate) mod visibility_buffer;
 pub use virtual_shadow_gpu::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
 #[path = "program_gpu.rs"]
 mod program_gpu;
@@ -500,6 +502,7 @@ pub struct Renderer {
     /// Exists on hardware-shadow 1x renderers, which can trace primary visibility.
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
+    visibility_buffer: Option<visibility_buffer::VisibilityBuffer>,
     soft_mode: crate::SoftShadows,
     /// `SoftShadows::Virtual` state, created by its first frame (N8).
     virtual_shadows: Option<virtual_shadow_gpu::VirtualState>,
@@ -832,19 +835,23 @@ impl Renderer {
                 traced,
             )
         });
-        let fresh = (hardware.is_some() && options.samples == SampleCount::One).then(|| {
-            FreshState::new(
-                &device,
-                &ledger,
-                [
-                    &bindings,
-                    &instance_bindings,
-                    &material_bindings,
-                    &lighting.bindings,
-                ],
-            )
-        });
-        let primary = traced.then(|| PrimaryState::new(&device, &ledger, &lighting.bindings));
+        let raster_primary =
+            options.samples == SampleCount::One && visibility_buffer::supported(&device);
+        let fresh = ((hardware.is_some() || raster_primary) && options.samples == SampleCount::One)
+            .then(|| {
+                FreshState::new(
+                    &device,
+                    &ledger,
+                    [
+                        &bindings,
+                        &instance_bindings,
+                        &material_bindings,
+                        &lighting.bindings,
+                    ],
+                )
+            });
+        let primary = (traced || raster_primary)
+            .then(|| PrimaryState::new(&device, &ledger, &lighting.bindings));
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
@@ -960,6 +967,7 @@ impl Renderer {
             fresh,
             primary,
             primary_mode: PrimaryVisibility::Raster,
+            visibility_buffer: None,
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
@@ -1048,6 +1056,13 @@ impl Renderer {
         renderer.submit_upload(renderer.free_slot().unwrap());
         renderer.default_material = Some(material);
         renderer.check_fault()?;
+        if hardware.is_none()
+            && raster_primary
+            && renderer.device.features().contains(VIRTUAL_FEATURES)
+        {
+            renderer.set_primary_visibility(PrimaryVisibility::VisibilityBuffer)?;
+            renderer.set_soft_shadows(crate::SoftShadows::Virtual);
+        }
         Ok(renderer)
     }
 
@@ -1188,6 +1203,7 @@ impl Renderer {
         let fresh_source = self
             .fresh
             .as_ref()
+            .filter(|_| self.hardware_shadows.is_some())
             .map(|_| fresh_shadow_gpu::shader_source(wgsl))
             .transpose()
             .map_err(rejected)?;
@@ -1197,6 +1213,9 @@ impl Renderer {
             .primary
             .as_ref()
             .map(|_| {
+                if self.hardware_shadows.is_none() {
+                    return primary_ray_gpu::non_rt_sources(wgsl);
+                }
                 Ok::<_, Error>((
                     primary_ray_gpu::shader_sources(wgsl)?,
                     primary_ray_gpu::shading_heads(wgsl)?,
@@ -1319,6 +1338,7 @@ impl Renderer {
             self.programs[i].pipelines.install(variant, pair);
         }
         wgsl.clone_into(&mut self.source);
+        self.visibility_buffer = None;
         self.hardware_source = hardware_source;
         self.fresh_source = fresh_source;
         self.primary_sources = primary_sources;
@@ -1656,7 +1676,15 @@ impl Renderer {
             ..CpuFrame::default()
         };
         self.check_fault()?;
+        let (clusters, cluster_triangles) = if self.primary.is_some() {
+            visibility_buffer::clusters(data)
+        } else {
+            Default::default()
+        };
         Ok(Some(Mesh {
+            clusters,
+            cluster_triangles,
+            repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),
             acceleration,
             tangent,
             renderer: self.identity.clone(),
@@ -2165,8 +2193,34 @@ impl Renderer {
                 "camera aspect produces nonfinite projection",
             ));
         }
-        let traced = self.primary_mode == PrimaryVisibility::Traced && view_mode == ViewMode::Lit;
+        let traced = self.primary_mode != PrimaryVisibility::Raster && view_mode == ViewMode::Lit;
         if traced {
+            if self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                && matches!(
+                    self.soft_mode,
+                    SoftShadows::Interactive | SoftShadows::Temporal
+                )
+            {
+                return Err(Error::InvalidInput(
+                    "visibility-buffer primaries support Virtual or Exact soft shadows; Interactive and Temporal require traced primaries",
+                ));
+            }
+            if self.primary_mode == PrimaryVisibility::Traced
+                && draws.iter().any(|d| d.mesh.acceleration.is_none())
+            {
+                return Err(Error::InvalidInput(
+                    "traced primaries require acceleration structures",
+                ));
+            }
+            if self.hardware_shadows.is_none()
+                && self.shadows.enabled(view_mode)
+                && (self.soft_mode != crate::SoftShadows::Virtual
+                    || self.shadows.settings.directional_disk_angle <= 0.0)
+            {
+                return Err(Error::InvalidInput(
+                    "visibility-buffer shadows without RT require SoftShadows::Virtual and a nonzero disk",
+                ));
+            }
             primary_ray_gpu::admit_draws(
                 draws,
                 matrix,
@@ -2485,7 +2539,11 @@ impl Renderer {
     fn frame_paths(&self, view_mode: ViewMode, shadowed: bool, traced: bool) -> FramePaths {
         use program_gpu::Variant;
         let lit = view_mode == ViewMode::Lit;
-        let hardware_shadowed = shadowed && self.hardware_shadows.is_some();
+        let hardware_shadowed = shadowed
+            && (self.hardware_shadows.is_some()
+                || (traced
+                    && self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                    && self.soft_mode == crate::SoftShadows::Virtual));
         let soft = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
         #[cfg(test)]
         let soft = soft && (traced || !self.fresh_fragment_reference);
@@ -2496,7 +2554,10 @@ impl Renderer {
             hardware_shadowed,
             soft,
             fresh,
-            interactive: traced && soft && self.soft_mode == crate::SoftShadows::Interactive,
+            interactive: traced
+                && self.primary_mode == PrimaryVisibility::Traced
+                && soft
+                && self.soft_mode == crate::SoftShadows::Interactive,
             temporal,
             variant: if temporal {
                 Some(Variant::Temporal)
@@ -2650,8 +2711,10 @@ impl Renderer {
         }
         if traced {
             let scopes = OperationScopes::new(&self.device);
-            let hardware = self.hardware_shadows.as_ref().unwrap();
-            let scene_generation = hardware.stats.tlas_builds + u64::from(hardware_build);
+            let scene_generation = self
+                .hardware_shadows
+                .as_ref()
+                .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
             let mut primary = UploadBytes::default();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
@@ -2660,6 +2723,9 @@ impl Renderer {
             result?;
             uploads.add(primary);
             self.uploads.add(primary);
+            if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
+                self.prepare_visibility_buffer(draws, camera, color.size())?;
+            }
             if soft && self.soft_mode == crate::SoftShadows::Virtual {
                 let scopes = OperationScopes::new(&self.device);
                 let result = self.prepare_virtual(draws, camera, color.size());
@@ -2720,10 +2786,18 @@ impl Renderer {
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
                 } else if soft && self.soft_mode == crate::SoftShadows::Virtual {
                     // Traced receivers, then N8 visibility with no ray queries.
-                    self.encode_primary_visibility(&mut encoder, true, stamps(6));
+                    if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
+                        self.encode_visibility_buffer(&mut encoder, true, stamps(6));
+                    } else {
+                        self.encode_primary_visibility(&mut encoder, true, stamps(6));
+                    }
                     self.encode_virtual(&mut encoder, draws, stamps(8));
                 } else {
-                    self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                    if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
+                        self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
+                    } else {
+                        self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                    }
                     if soft {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
@@ -3005,7 +3079,7 @@ impl Renderer {
             timed,
             scene,
             primary: if traced {
-                PrimaryVisibility::Traced
+                self.primary_mode
             } else {
                 PrimaryVisibility::Raster
             },

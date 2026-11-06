@@ -168,10 +168,20 @@ impl FilmLayouts {
         use wgpu::TextureFormat as F;
         let uint = wgpu::TextureSampleType::Uint;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            let entries: Vec<_> = entries
+                .iter()
+                .copied()
+                .filter(|e| {
+                    !matches!(e.ty, wgpu::BindingType::AccelerationStructure { .. })
+                        || device
+                            .features()
+                            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                })
+                .collect();
             ledger.own(
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some(label),
-                    entries,
+                    entries: &entries,
                 }),
                 ResourceKind::BindGroupLayout,
             )

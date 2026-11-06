@@ -1,8 +1,10 @@
 //! Selectable primary visibility and the CPU side of the traced hit-record layout.
 use crate::Error;
 
-/// How lit 1x frames on a hardware ray-query renderer resolve camera visibility.
-/// Raster is the default, and the path every other renderer, view and geometry uses.
+/// How lit 1x regular-geometry frames resolve camera visibility. Raster is the
+/// portable default. A no-RT device requesting visibility-buffer and Virtual-shadow
+/// capabilities selects `VisibilityBuffer` and `SoftShadows::Virtual` at creation.
+/// Diagnostic views and virtual geometry still rasterize through the forward path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrimaryVisibility {
     #[default]
@@ -14,29 +16,46 @@ pub enum PrimaryVisibility {
     /// regular opaque double-sided draws. Diagnostic views and virtual geometry
     /// still rasterize.
     Traced,
+    /// Full-detail cluster rasterization into IDs and depth, followed by the same
+    /// exact receiver repair and programmable deferred shading as traced primaries.
+    /// At 1x, requires [`VISIBILITY_FEATURES`] and [`visibility_limits`], but no RT.
+    VisibilityBuffer,
 }
 
-/// Draws one traced frame can bind: descriptor-indexed geometry and material slots.
-pub const TRACED_DRAWS: u32 = 64;
-/// Device features traced visibility needs in addition to hardware ray queries.
-/// Hit-vertex return also marks every acceleration structure such a renderer builds.
-pub const TRACED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
-    .union(wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN)
+/// Descriptor indexing for deferred materials; no acceleration-structure features.
+pub const VISIBILITY_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::BUFFER_BINDING_ARRAY)
     .union(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY)
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
-/// Raises `limits` to the per-stage binding-array capacity traced visibility needs per
-/// draw slot: three geometry buffers, the material factor and program parameter buffers,
-/// three textures and three samplers (wgpu counts samplers in both limits). The Interactive trace also binds two
-/// views of the TLAS: camera rays with hit-vertex return and shadow rays without.
-pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
+
+/// Deferred material arrays and five resolve storage targets (hits, world, normal,
+/// coverage and receiver epsilon). No acceleration-structure limits are raised.
+pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
+        max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
             .max(11 * TRACED_DRAWS),
         max_binding_array_sampler_elements_per_shader_stage: limits
             .max_binding_array_sampler_elements_per_shader_stage
             .max(3 * TRACED_DRAWS),
+        ..limits
+    }
+}
+
+/// Draws one traced frame can bind: descriptor-indexed geometry and material slots.
+pub const TRACED_DRAWS: u32 = 64;
+/// Device features traced visibility needs in addition to hardware ray queries.
+/// Hit-vertex return also marks every acceleration structure such a renderer builds.
+pub const TRACED_FEATURES: wgpu::Features =
+    VISIBILITY_FEATURES.union(wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN);
+/// Raises `limits` to the per-stage binding-array capacity traced visibility needs per
+/// draw slot: three geometry buffers, the material factor and program parameter buffers,
+/// three textures and three samplers (wgpu counts samplers in both limits). The Interactive trace also binds two
+/// views of the TLAS: camera rays with hit-vertex return and shadow rays without.
+pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
+    let limits = visibility_limits(limits);
+    wgpu::Limits {
         max_acceleration_structures_per_shader_stage: limits
             .max_acceleration_structures_per_shader_stage
             .max(2),
