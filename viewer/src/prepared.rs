@@ -1,8 +1,9 @@
 use renderlab::{
-    Camera, Draw, Instances, Mat4, Material, MaterialDescriptor, Mesh, MeshData, Renderer, Texture,
-    TextureBinding, Vec3, Visibility, asset,
+    Camera, Draw, Instances, Mat4, Material, MaterialDescriptor, Mesh, MeshUpload, Renderer,
+    Texture, TextureBinding, Vec3, Visibility, asset,
 };
 use std::{
+    collections::VecDeque,
     fs::File,
     io::Read,
     path::Path,
@@ -26,6 +27,7 @@ pub struct Prepared {
     textures: Vec<Texture>,
     materials: Vec<Material>,
     meshes: Vec<Mesh>,
+    mesh_uploads: Option<VecDeque<MeshUpload>>,
     instances: Vec<Instances>,
     batches: Vec<Batch>,
     primitives: Vec<(usize, usize)>,
@@ -161,6 +163,7 @@ impl Prepared {
             textures: Vec::new(),
             materials: Vec::new(),
             meshes: Vec::new(),
+            mesh_uploads: None,
             instances: Vec::new(),
             batches,
             primitives,
@@ -231,16 +234,32 @@ impl Prepared {
                 }
             }
             UploadProgress::Geometry(i) => {
-                if let Some(&(mesh, primitive)) = self.primitives.get(i) {
-                    let p = &self.source.meshes[mesh].primitives[primitive];
-                    if let Some(m) = r.try_upload_mesh_with_tangents(
-                        &MeshData {
-                            vertices: &p.vertices,
-                            indices: &p.indices,
-                        },
-                        p.tangents.as_ref(),
-                    )? {
+                if self.mesh_uploads.is_none() {
+                    let started = Instant::now();
+                    let primitives = self
+                        .source
+                        .meshes
+                        .iter_mut()
+                        .flat_map(|mesh| {
+                            mesh.primitives.iter_mut().map(|p| asset::Primitive {
+                                vertices: std::mem::take(&mut p.vertices),
+                                tangents: p.tangents.take(),
+                                indices: std::mem::take(&mut p.indices),
+                                material: p.material,
+                            })
+                        })
+                        .collect();
+                    self.mesh_uploads = Some(r.prepare_mesh_uploads(primitives)?.into());
+                    eprintln!(
+                        "asset_mesh_preparation wall_ms={:.6} primitives={}",
+                        started.elapsed().as_secs_f64() * 1000.,
+                        self.primitives.len()
+                    );
+                }
+                if let Some(p) = self.mesh_uploads.as_ref().unwrap().front() {
+                    if let Some(m) = r.try_upload_prepared_mesh(p)? {
                         self.meshes.push(m);
+                        self.mesh_uploads.as_mut().unwrap().pop_front();
                         self.progress = UploadProgress::Geometry(i + 1);
                     }
                 } else {

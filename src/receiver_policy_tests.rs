@@ -1,6 +1,8 @@
 //! Production receiver-policy references and independent analytic fixtures.
 use super::*;
 
+#[path = "adjacency_parallel_gpu_tests.rs"]
+mod adjacency_parallel_gpu_tests;
 #[path = "receiver_diagnostic_tests.rs"]
 mod receiver_diagnostic_tests;
 #[path = "receiver_fold_tests.rs"]
