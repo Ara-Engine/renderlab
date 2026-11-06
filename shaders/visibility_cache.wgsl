@@ -82,6 +82,7 @@ const CACHE_SUBSTITUTED:u32=16u;
 const CACHE_RING:u32=17u;          // whole-triangle neighbours claimed
 const CACHE_PARTIAL_USED:u32=18u;
 const CACHE_RESOLVE_FOUND:u32=19u; // deferred pixels resolved from a cell
+const CACHE_PREFETCH_BUSY:u32=20u; // prefetch claims dropped: slot in flight or probe limit
 const CACHE_FILL_ARGS:u32=24u;
 const CACHE_RESOLVE_ARGS:u32=28u;
 const CACHE_DUMP:u32=32u;          // first mismatches: slot, bit pairs
@@ -216,7 +217,7 @@ fn cache_meta(stamp:u32,window:vec2<i32>)->u32 {
     return (stamp&0xffffu)|((u32(window.x)&0xffu)<<16u)|((u32(window.y)&0xffu)<<24u);
 }
 
-// The receiver at a cell's centroid: the placement's triangle, the side of the key, Îµ.
+// The receiver at a cell's centroid: the placement's triangle, the side of the key, ÃŽÂµ.
 struct CacheReceiver {world:vec3<f32>,geometric:vec3<f32>,epsilon:f32,thin:bool,side:u32};
 fn cache_receiver(a:u32,b:u32)->CacheReceiver {
     let placement=((a>>22u)&63u)-1u;let primitive=a&0x3fffffu;let level=a>>28u;
@@ -372,6 +373,7 @@ fn cache_prefetch(p:CachePixel) {
             let n=u32(i)+u32(j);
             if n>last || (up!=0u && n==last) {continue;}
             let f=cache_find(p.ka,cache_key_b(u32(i),u32(j),up,p.side),true);
+            if f.y==CACHE_BUSY || f.y==CACHE_OVER {atomicAdd(&cache_work[0].data[CACHE_PREFETCH_BUSY],1u);}
             if f.y==CACHE_NEW || (f.y==CACHE_FOUND && cache_claim(f.x)) {cache_push(f.x,1u);}
         }
         return;
@@ -381,6 +383,7 @@ fn cache_prefetch(p:CachePixel) {
         let k=cache_ring_key(p,e);
         if k.x==0u {continue;}
         let f=cache_find(k.x,k.y,true);
+        if f.y==CACHE_BUSY || f.y==CACHE_OVER {atomicAdd(&cache_work[0].data[CACHE_PREFETCH_BUSY],1u);}
         if f.y==CACHE_NEW {atomicAdd(&cache_work[0].data[CACHE_RING],1u);}
         if f.y==CACHE_NEW || (f.y==CACHE_FOUND && cache_claim(f.x)) {cache_push(f.x,1u);}
     }

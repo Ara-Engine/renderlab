@@ -39,11 +39,11 @@ pub mod work {
     pub const DUMP: usize = 32;
     pub const QUEUES: usize = 40;
     /// Counter names in word order, for summaries.
-    pub const NAMES: [&str; 20] = [
+    pub const NAMES: [&str; 21] = [
         "pending", "queued", "queued_prefetch", "probe_limit", "busy", "filled", "rays",
         "fallback", "mover_rays", "warm", "incomplete", "inserted", "fill_primary",
         "fill_prefetch", "mismatch", "checked", "substituted", "ring_claimed", "partial_used",
-        "resolve_found",
+        "resolve_found", "prefetch_busy",
     ];
     /// Words for `queue` entries per region and `pending` pixels.
     pub fn words(queue: u32, pending: u32) -> usize {

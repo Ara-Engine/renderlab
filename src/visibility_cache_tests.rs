@@ -338,7 +338,8 @@ fn summarize(frames: &[FrameStats]) -> serde_json::Value {
         "incomplete": spread_of(frames, c("incomplete")), "busy": spread_of(frames, c("busy")),
         "probe_limit": spread_of(frames, c("probe_limit")), "substituted": spread_of(frames, c("substituted")),
         "ring_claimed": spread_of(frames, c("ring_claimed")), "partial_used": spread_of(frames, c("partial_used")),
-        "resolve_found": spread_of(frames, c("resolve_found")), "warm": spread_of(frames, c("warm"))})
+        "resolve_found": spread_of(frames, c("resolve_found")), "warm": spread_of(frames, c("warm")),
+        "prefetch_busy": spread_of(frames, c("prefetch_busy")), "mover_rays": spread_of(frames, c("mover_rays"))})
 }
 
 /// The CPU mirror of cache_lookup's keys: placements as (mesh, model, normal rows), each
@@ -704,6 +705,7 @@ fn gpu_visibility_cache_probe() {
         let t = Instant::now();
         cache.clear(&r);
         let mut present: HashSet<Key> = HashSet::new();
+        let mut centres: HashSet<Key> = HashSet::new();
         let mut ambiguous: HashSet<Key> = HashSet::new();
         let mut frames = vec![];
         let mut cpu_ms = 0.0;
@@ -727,6 +729,7 @@ fn gpu_visibility_cache_probe() {
                     ambiguous.insert(alt);
                     ambiguous.extend(mirror.neighbours(&alt, m.footprint, eye).0);
                 }
+                centres.insert(m.key);
                 if present.contains(&m.key) {
                     continue;
                 }
@@ -743,6 +746,30 @@ fn gpu_visibility_cache_probe() {
         let gpu: HashMap<Key, [u32; 2]> = cache.slots(&r).iter().map(|s| (Key::unpack(s[0], s[1]), [s[2], s[3]])).collect();
         let only_gpu: Vec<&Key> = gpu.keys().filter(|k| !present.contains(k)).collect();
         let only_cpu: Vec<&Key> = present.iter().filter(|k| !gpu.contains_key(k)).collect();
+        // Each one-sided key: another key of the same triangle on the other side (a level or
+        // side decision differs), a prefetch-only key, or a centre.
+        let triangles = |set: &mut dyn Iterator<Item = &Key>| -> HashSet<(u32, u32)> { set.map(|k| (k.placement, k.primitive)).collect() };
+        let gpu_triangles = triangles(&mut gpu.keys());
+        let cpu_triangles = triangles(&mut present.iter());
+        let classify = |keys: &[&Key], other: &HashSet<(u32, u32)>| {
+            let mut c = BTreeMap::<&str, usize>::new();
+            for k in keys {
+                let class = if ambiguous.contains(*k) {
+                    "near_boundary"
+                } else if other.contains(&(k.placement, k.primitive)) {
+                    "same_triangle_other_key"
+                } else if centres.contains(*k) {
+                    "centre"
+                } else {
+                    "prefetch_only"
+                };
+                *c.entry(class).or_default() += 1;
+            }
+            c
+        };
+        let gpu_classes = classify(&only_gpu, &cpu_triangles);
+        let cpu_classes = classify(&only_cpu, &gpu_triangles);
+        let mut window_boundary = 0;
         let mut window_differences = 0;
         let mut disk_differences = 0;
         let mut incomplete = 0;
@@ -754,7 +781,11 @@ fn gpu_visibility_cache_probe() {
             let lattice = vc::lattice(k.a(), k.b());
             let window = chart.window(&lattice, l);
             let disk = chart.disk(&lattice, window, l);
-            window_differences += usize::from(vc::meta_window(*meta) != window);
+            if vc::meta_window(*meta) != window {
+                window_differences += 1;
+                let x = chart.centre(&lattice, l) - Vec2::splat(chart.window_radius(l) / chart.spacing);
+                window_boundary += usize::from((x - x.round()).abs().min_element() < 1e-4);
+            }
             incomplete += usize::from((bits >> 16) & disk != disk);
             disk_differences += usize::from((bits >> 16) != disk);
             if rng.below(64) == 0 && sample.len() < 20_000 {
@@ -763,6 +794,7 @@ fn gpu_visibility_cache_probe() {
         }
         let world = CpuRays::new(&quarry.meshes, &bvhs, &mirror.placements);
         let (mut rays, mut differ, mut differ_near) = (0, 0, 0);
+        let mut differ_examples = vec![];
         for (k, bits, window) in &sample {
             let lattice = vc::lattice(k.a(), k.b());
             let receiver = world.receiver(&mirror, k);
@@ -775,7 +807,12 @@ fn gpu_visibility_cache_probe() {
                 rays += 1;
                 if blocked != (bits & (1 << bit) != 0) {
                     differ += 1;
-                    differ_near += usize::from(world.blocked(&receiver, d, &scene, true).1 < 1e-6);
+                    let margin = world.blocked(&receiver, d, &scene, true).1;
+                    differ_near += usize::from(margin < 1e-6);
+                    if differ_examples.len() < 8 {
+                        differ_examples.push(serde_json::json!({"key": format!("{k:?}"), "bit": bit, "cpu_blocked": blocked, "margin_m": margin,
+                            "origin": receiver.world.to_array(), "direction": d.to_array(), "epsilon": receiver.epsilon}));
+                    }
                 }
             }
         }
@@ -786,7 +823,9 @@ fn gpu_visibility_cache_probe() {
             "only_cpu_near_boundary": only_cpu.iter().filter(|k| ambiguous.contains(k)).count(),
             "only_gpu_examples": only_gpu.iter().filter(|k| !ambiguous.contains(k)).take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
             "only_cpu_examples": only_cpu.iter().filter(|k| !ambiguous.contains(k)).take(8).map(|k| format!("{k:?}")).collect::<Vec<_>>(),
-            "window_differences": window_differences, "cone_mask_differences": disk_differences, "incomplete_cells": incomplete,
+            "only_gpu_classes": gpu_classes, "only_cpu_classes": cpu_classes, "cpu_centres": centres.len(),
+            "window_differences": window_differences, "window_differences_within_1e-4_of_a_lattice_line": window_boundary,
+            "cone_mask_differences": disk_differences, "incomplete_cells": incomplete, "ray_difference_examples": differ_examples,
             "sampled_cells": sample.len(), "sampled_rays": rays, "ray_differences": differ, "ray_differences_within_1um_of_an_edge": differ_near,
             "cpu_key_ms": cpu_ms, "replay_s": t.elapsed().as_secs_f64()})
     };

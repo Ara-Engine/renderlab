@@ -81,10 +81,9 @@ def quarry(probe, s1):
         d = film.decode(F0 / f"quarry-policy-p{pose}", pose)
         point = np.load(lb.REFERENCE / f"pose-{pose}-reference.npz")["ref"]
         pops = film.populations(d, point)
-        hit = np.fromfile(lb.R / f"pose-{pose}-seed-0-hits.u32", dtype="<u4").reshape(*SHAPE, 8)
-        prefix = hit[..., 0].copy().view("u1").reshape(*SHAPE, 4)
-        blocked = np.unpackbits(prefix, axis=-1, bitorder="little")[..., :8].sum(-1)
-        candidates = {"Exact": (lb.counts(pose, 0) / 256, None), "Interactive": ((8 - blocked.astype(float)) / 8, None)}
+        # The frozen Interactive hit masks are gone; this run's N0 Interactive (the software
+        # estimate, equal to hardware's except N0's edge class) stands in for Interactive.
+        candidates = {"Exact": (counts(F0 / f"quarry-policy-p{pose}" / f"pose-{pose}.exact.u32"), None)}
         native = np.load(lb.native_dir("vsm", pose) / "native.npz")
         candidates["Unreal-VSM"] = (native["visibility"].astype(float), native["valid"])
         for name, f in files.items():
@@ -99,8 +98,8 @@ def quarry(probe, s1):
                               film_missed=stat["missed_shadows"], film_false=stat["false_shadows"])
         cache = [k for k in rows if k.startswith("N7a")]
         full = {k: s1.scored(candidates[k][0], d, pops, np.ones(SHAPE, bool)) for k in cache}
-        vsm = s1.scored(*[candidates["Unreal-VSM"][0]], d, pops, candidates["Unreal-VSM"][1])
-        inter = s1.scored(candidates["Interactive"][0], d, pops, np.ones(SHAPE, bool))
+        vsm = s1.scored(candidates["Unreal-VSM"][0], d, pops, candidates["Unreal-VSM"][1])
+        inter = s1.scored(candidates["N0 Interactive (this run)"][0], d, pops, np.ones(SHAPE, bool))
         out[f"pose{pose}"] = dict(rows=rows, rule={k: rule(full[k], vsm, inter) for k in cache})
         print("quarry pose", pose, json.dumps({k: [r["partial"], r["contact"], r["occluded"], r["missed_shadows"], r["false_shadows"], r["solid_flips"]] for k, r in rows.items()}), flush=True)
     return out
@@ -151,7 +150,18 @@ def bench(name, root, s1, motion):
             frames.append(row)
             if index % 32 == 0:
                 print(name, case, "frame", index, flush=True)
-        out[case] = dict(summary=summarize(frames), rule_violations=broken, rule_frames_checked=sum(1 for f in frames if f["vsm"] and f["interactive_hw"]),
+        phases = {}
+        for f, t in zip(frames, timing["frames"]):
+            assert f["frame"] == t["frame"]
+            f["shadow_ms"] = sum(t["stats"][k] for k in ("lookup_ms", "plan_ms", "fill_ms", "resolve_ms"))
+            f["n0_ms"] = t["n0_interactive_ms"]
+        for phase in dict.fromkeys(f["phase"] for f in frames):
+            sel = [f for f in frames if f["phase"] == phase]
+            ms = sorted(f["shadow_ms"] for f in sel)
+            n0 = sorted(f["n0_ms"] for f in sel)
+            phases[phase] = dict(summarize(sel), cache_shadow_ms=dict(p50=ms[len(ms) // 2], p99=ms[int(0.99 * (len(ms) - 1))], max=ms[-1]),
+                                 n0_interactive_ms_p50=n0[len(n0) // 2], rule_violating_frames=sum(1 for v in broken if v["frame"] in {f["frame"] for f in sel}))
+        out[case] = dict(summary=summarize(frames), phases=phases, rule_violations=broken, rule_frames_checked=sum(1 for f in frames if f["vsm"] and f["interactive_hw"]),
                          reference_identity=dict(frames=len(identity), partial_n_equal=sum(i["partial_n"] for i in identity), sigma_equal=sum(i["sigma"] for i in identity)),
                          timing=timing["track"], cold=timing["cold_first_warmup_frame"], validation=timing["validation"])
         (stats_root / f"{case}-frames.json").write_text(json.dumps([{k: (compact(v) if isinstance(v, dict) and "partial" in v else v) for k, v in f.items()} for f in frames], indent=1))
