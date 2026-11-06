@@ -30,6 +30,47 @@ impl Drop for Sandbox {
 fn source() -> Vec<u8> {
     fixtures::sources().unwrap()[0].1.clone()
 }
+
+#[test]
+fn reprepare_preserves_original_and_roundtrips_adjacency_with_budget_admission() {
+    let dir = Sandbox::new();
+    let limits = CookLimits::default().prepared;
+    let mut legacy = prepare(&source(), Settings::default(), CookLimits::default()).unwrap();
+    for p in legacy.meshes.iter_mut().flat_map(|m| &mut m.primitives) {
+        p.adjacency = None;
+    }
+    let original = renderlab_asset::encode(&legacy, limits).unwrap();
+    let source_path = dir.path("original.rla");
+    let output_path = dir.path("adjacency.rla");
+    fs::write(&source_path, &original).unwrap();
+    assert!(adjacency::prepare_file(&source_path, &source_path, limits).is_err());
+    let mut too_small = legacy.clone();
+    let decoded_bytes = legacy.validate(limits).unwrap().decoded_bytes;
+    assert!(
+        adjacency::prepare(
+            &mut too_small,
+            renderlab_asset::Limits {
+                max_decoded_bytes: decoded_bytes,
+                ..limits
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(too_small, legacy);
+    adjacency::prepare_file(&source_path, &output_path, limits).unwrap();
+    assert_eq!(fs::read(&source_path).unwrap(), original);
+    let bytes = fs::read(output_path).unwrap();
+    assert_eq!(&bytes[..8], b"RLA\0\x03\0\0\0");
+    let mut cooked = renderlab_asset::decode(&bytes, limits).unwrap();
+    assert_eq!(
+        cooked,
+        prepare(&source(), Settings::default(), CookLimits::default()).unwrap()
+    );
+    for p in cooked.meshes.iter_mut().flat_map(|m| &mut m.primitives) {
+        p.adjacency = None;
+    }
+    assert_eq!(cooked, legacy);
+}
 fn mutate(bytes: &[u8], change: impl FnOnce(&mut Value, &mut Vec<u8>)) -> Vec<u8> {
     let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let mut root: Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
@@ -66,6 +107,13 @@ fn real_fixtures_preserve_owned_geometry_materials_transforms_roles_and_samplers
     assert_eq!(first, fixtures::sources().unwrap());
     let a = prepare(&first[0].1, Settings::default(), CookLimits::default()).unwrap();
     let c = a.validate(CookLimits::default().prepared).unwrap();
+    assert_eq!(c.adjacency_bytes, c.indices * 4);
+    for p in a.meshes.iter().flat_map(|m| &m.primitives) {
+        assert_eq!(
+            p.adjacency.as_ref().unwrap(),
+            &renderlab_asset::adjacency::build(&p.vertices, &p.indices).neighbours
+        );
+    }
     assert_eq!(
         (
             c.meshes,

@@ -28,6 +28,7 @@ fn asset(primitives: Vec<Primitive>, materials: Vec<Material>) -> Asset {
 pub fn closed_sphere(n: u32) -> Result<Asset> {
     ensure((2..=384).contains(&n), "sphere subdivisions outside 2..384")?;
     let mut p = Primitive {
+        adjacency: None,
         tangents: None,
         vertices: vec![],
         indices: vec![],
@@ -85,6 +86,7 @@ pub fn thin_sheet(n: u32) -> Result<Asset> {
     let mut primitives = vec![];
     for side in 0..2 {
         let mut p = Primitive {
+            adjacency: None,
             tangents: None,
             vertices: vec![],
             indices: vec![],
@@ -123,6 +125,7 @@ pub fn thin_sheet(n: u32) -> Result<Asset> {
         primitives.push(p);
     }
     let mut fins = Primitive {
+        adjacency: None,
         tangents: None,
         vertices: vec![],
         indices: vec![],

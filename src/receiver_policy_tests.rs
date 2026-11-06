@@ -6,6 +6,9 @@ mod receiver_diagnostic_tests;
 #[path = "receiver_fold_tests.rs"]
 mod receiver_fold_tests;
 
+#[path = "adjacency_preparation_tests.rs"]
+mod adjacency_preparation_tests;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Policy {
     Production,

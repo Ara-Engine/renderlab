@@ -324,6 +324,7 @@ fn write_fixture(
     for (i, object) in fixture.objects.iter().enumerate() {
         source.meshes.push(asset::Mesh {
             primitives: vec![asset::Primitive {
+                adjacency: None,
                 vertices: object.vertices.clone(),
                 tangents: None,
                 indices: object.indices.clone(),

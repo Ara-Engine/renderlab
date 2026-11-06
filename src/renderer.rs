@@ -1346,9 +1346,37 @@ impl Renderer {
         data: &MeshData<'_>,
         tangents: Option<&asset::TangentStream>,
     ) -> Result<Option<Mesh>, Error> {
+        self.try_upload_mesh_streams(data, tangents, None)
+    }
+
+    /// Upload prepared geometry, reusing cooked adjacency. Legacy primitives build it once here.
+    pub fn try_upload_primitive(
+        &mut self,
+        primitive: &asset::Primitive,
+    ) -> Result<Option<Mesh>, Error> {
+        self.try_upload_mesh_streams(
+            &MeshData {
+                vertices: &primitive.vertices,
+                indices: &primitive.indices,
+            },
+            primitive.tangents.as_ref(),
+            primitive.adjacency.as_deref(),
+        )
+    }
+
+    fn try_upload_mesh_streams(
+        &mut self,
+        data: &MeshData<'_>,
+        tangents: Option<&asset::TangentStream>,
+        prepared_adjacency: Option<&[u32]>,
+    ) -> Result<Option<Mesh>, Error> {
         self.check_fault()?;
         let started = Instant::now();
         let sizes = data.validate(self.limits)?;
+        if let Some(neighbours) = prepared_adjacency {
+            asset::adjacency::validate(data.indices, neighbours)
+                .map_err(|e| Error::InvalidInput(e.0))?;
+        }
         let tangent_bytes = self.validate_mesh_tangents(data, tangents, sizes)?;
         let mut preparation = started.elapsed();
         let poll = self.collect()?;
@@ -1370,7 +1398,10 @@ impl Renderer {
             && sizes.1 + adjacency_bytes <= self.device.limits().max_buffer_size
             && sizes.0 + sizes.1 + tangent_bytes + adjacency_bytes <= self.limits.max_mesh_bytes;
         let adjacency_started = Instant::now();
-        let adjacency = adjacency_fits.then(|| crate::receiver_adjacency::build(data));
+        let built = (adjacency_fits && prepared_adjacency.is_none())
+            .then(|| asset::adjacency::build(data.vertices, data.indices));
+        let adjacency = adjacency_fits
+            .then(|| prepared_adjacency.unwrap_or_else(|| &built.as_ref().unwrap().neighbours));
         let adjacency_build = adjacency_started.elapsed();
         let adjacency_bytes = if adjacency.is_some() {
             adjacency_bytes
@@ -1474,11 +1505,7 @@ impl Renderer {
             &bytes[sizes.0 as usize..(sizes.0 + sizes.1) as usize],
         );
         if let Some(adjacency) = adjacency {
-            let mut suffix: Vec<u8> = adjacency
-                .neighbours
-                .iter()
-                .flat_map(|n| n.to_ne_bytes())
-                .collect();
+            let mut suffix: Vec<u8> = adjacency.iter().flat_map(|n| n.to_ne_bytes()).collect();
             suffix.extend_from_slice(&0u32.to_ne_bytes());
             let started = Instant::now();
             self.queue.write_buffer(&index, sizes.1, &suffix);
@@ -1487,22 +1514,14 @@ impl Renderer {
             self.uploads.write_calls += 1;
             #[cfg(test)]
             eprintln!(
-                "receiver_adjacency triangles={} bytes={} boundary_halfedges={} ambiguous_halfedges={} degenerate_halfedges={} build_ms={:.6} upload_call_ms={:.6}",
+                "receiver_adjacency triangles={} bytes={} prepared={} build_ms={:.6} upload_call_ms={:.6}",
                 data.indices.len() / 3,
                 adjacency_bytes,
-                adjacency.boundary_halfedges,
-                adjacency.ambiguous_halfedges,
-                adjacency.degenerate_halfedges,
+                prepared_adjacency.is_some(),
                 adjacency_build.as_secs_f64() * 1000.,
                 adjacency_upload.as_secs_f64() * 1000.
             );
-            let _ = (
-                adjacency_build,
-                adjacency_upload,
-                adjacency.boundary_halfedges,
-                adjacency.ambiguous_halfedges,
-                adjacency.degenerate_halfedges,
-            );
+            let _ = (adjacency_build, adjacency_upload);
         }
         if let Some(t) = &tangent {
             self.queue

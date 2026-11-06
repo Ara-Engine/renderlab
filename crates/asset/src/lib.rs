@@ -1,9 +1,12 @@
 //! Owned prepared assets. No GPU, window, importer, codecs or math crate.
+pub mod adjacency;
 mod binary;
 pub mod environment;
 pub mod virtual_mesh;
 
-pub use binary::{NORMAL_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode, encode_mesh};
+pub use binary::{
+    ADJACENCY_SCHEMA_VERSION, NORMAL_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode, encode_mesh,
+};
 use std::fmt;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,6 +27,8 @@ pub struct Primitive {
     pub vertices: Vec<Vertex>,
     pub tangents: Option<TangentStream>,
     pub indices: Vec<u32>,
+    /// Triangle-major opposite-vertex edge neighbours; None uses the legacy upload builder.
+    pub adjacency: Option<Vec<u32>>,
     pub material: u32,
 }
 
@@ -275,6 +280,7 @@ pub struct Counts {
     pub indices: usize,
     pub tangent_vertices: usize,
     pub tangent_bytes: usize,
+    pub adjacency_bytes: usize,
     pub mip_levels: usize,
     pub texture_bytes: usize,
     /// Logical element bytes, excluding Vec headers, allocator overhead and spare capacity.
@@ -480,6 +486,12 @@ pub(crate) fn validate_mesh(mesh: &Mesh, counts: &mut Counts, limits: Limits) ->
         cap(counts.indices, limits.max_indices, "index limit")?;
         add(&mut counts.decoded_bytes, product(p.vertices.len(), 48)?)?;
         add(&mut counts.decoded_bytes, product(p.indices.len(), 4)?)?;
+        if let Some(neighbours) = &p.adjacency {
+            adjacency::validate(&p.indices, neighbours)?;
+            let bytes = product(neighbours.len(), 4)?;
+            add(&mut counts.adjacency_bytes, bytes)?;
+            add(&mut counts.decoded_bytes, bytes)?;
+        }
         if let Some(t) = &p.tangents {
             validate_tangents(&p.vertices, &p.indices, t)?;
             add(&mut counts.tangent_vertices, t.values.len())?;

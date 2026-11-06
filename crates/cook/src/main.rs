@@ -76,17 +76,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "source_bytes":r.source_bytes,"prepared_bytes":r.prepared_bytes,"geometry_sidecar_bytes":r.geometry_sidecar_bytes,
                 "reused_geometry_entries":r.reused_geometry_entries,"reused_geometry_bytes":r.reused_geometry_bytes,
                 "counts":{"meshes":c.meshes,"primitives":c.primitives,"placements":c.placements,"materials":c.materials,"textures":c.textures,
-                    "vertices":c.vertices,"indices":c.indices,"mip_levels":c.mip_levels,"texture_bytes":c.texture_bytes,"decoded_bytes":c.decoded_bytes},
+                    "vertices":c.vertices,"indices":c.indices,"adjacency_bytes":c.adjacency_bytes,"mip_levels":c.mip_levels,"texture_bytes":c.texture_bytes,"decoded_bytes":c.decoded_bytes},
                 "timings_us":{"source_read":r.source_read_us,"lookup_and_verify":r.lookup_us,"prepare":r.prepare_us,"encode_and_hash":r.encode_us,
                     "decode_and_geometry_verify":r.load_us,"publication":r.publication_us,"total":r.total_us}}));
+        },
+        ["prepare-adjacency", source, output] => {
+            println!("{}", renderlab_cook::adjacency::prepare_file(Path::new(source), Path::new(output), limits.prepared)?);
         },
         ["inspect",cache,manifest]=> {
             let loaded=load_manifest(Path::new(cache),Path::new(manifest),limits)?;
             let c=loaded.asset.validate(limits.prepared)?;
             println!("{}",json!({"limits":effective,"key":loaded.key,"payload_sha256":loaded.payload_hash,"meshes":c.meshes,"primitives":c.primitives,"placements":c.placements,
-                "vertices":c.vertices,"indices":c.indices,"textures":c.textures,"mip_levels":c.mip_levels,"decoded_bytes":c.decoded_bytes}));
+                "vertices":c.vertices,"indices":c.indices,"adjacency_bytes":c.adjacency_bytes,"textures":c.textures,"mip_levels":c.mip_levels,"decoded_bytes":c.decoded_bytes}));
         },
-        _=>return Err("usage: renderlab-cook fixtures DIRECTORY | cook SOURCE.glb CACHE CURRENT.manifest [--reject-missing-normals] [--normal-maps] | inspect CACHE MANIFEST".into())
+        _=>return Err("usage: renderlab-cook fixtures DIRECTORY | cook SOURCE.glb CACHE CURRENT.manifest [--reject-missing-normals] [--normal-maps] | inspect CACHE MANIFEST | prepare-adjacency SOURCE.rla OUTPUT.rla [--limits FILE]".into())
     }
     Ok(())
 }

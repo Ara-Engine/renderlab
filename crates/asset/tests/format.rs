@@ -12,6 +12,7 @@ fn fixture() -> Asset {
     Asset {
         meshes: vec![Mesh {
             primitives: vec![Primitive {
+                adjacency: None,
                 tangents: None,
                 vertices,
                 indices: vec![0, 1, 2],

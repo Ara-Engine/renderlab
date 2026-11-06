@@ -1,4 +1,4 @@
-"""Independent inspection of self-authored GLB and schema-1 prepared records."""
+"""Independent inspection of self-authored GLB and prepared records."""
 import hashlib
 import json
 import math
@@ -61,7 +61,9 @@ def inspect(source, cache, manifest):
         start = view.get('byteOffset', 0)
         dimensions.append(image_dimensions(binary[start:start + view['byteLength']]))
     manifest_bytes = manifest.read_bytes()
-    assert manifest_bytes[:8] == b'RLM\0\x01\0\0\0'
+    assert manifest_bytes[:4] == b'RLM\0'
+    manifest_version = int.from_bytes(manifest_bytes[4:8], 'little')
+    assert manifest_version in (1, 2, 3)
     payload_hash = manifest_bytes[40:72].hex()
     payload = (cache / 'assets' / payload_hash).read_bytes()
     assert hashlib.sha256(payload).hexdigest() == payload_hash
@@ -69,27 +71,51 @@ def inspect(source, cache, manifest):
     geometry_count = int.from_bytes(manifest_bytes[80:84], 'little')
     assert len(manifest_bytes) == 84 + geometry_count * 40
     reader = Reader(payload)
-    assert reader.take(8) == b'RLA\0\x01\0\0\0'
+    assert reader.take(4) == b'RLA\0'
+    schema = reader.u32()
+    assert 1 <= schema <= manifest_version
     meshes, placements, materials, textures = [reader.u32() for _ in range(4)]
     assert meshes == geometry_count
     vertices = indices = primitives = 0
     mesh_hashes = []
     for mesh_index in range(meshes):
-        start = reader.offset
         count = reader.u32()
         primitives += count
+        mesh_version = 1
+        records = []
         for _ in range(count):
             material, nv, ni = [reader.u32() for _ in range(3)]
             assert material < materials and nv > 0 and ni % 3 == 0
             vertices += nv
             indices += ni
+            basis, tangents = (reader.u32(), reader.u32()) if schema >= 2 else (0, 0)
+            assert basis in (0, 1, 2) and tangents == (nv if basis else 0)
+            adjacency = reader.u32() if schema >= 3 else 0
+            assert adjacency in (0, ni)
+            mesh_version = max(mesh_version, 3 if adjacency else 2 if tangents else 1)
+            attributes_start = reader.offset
             for _ in range(nv):
                 values = struct.unpack('<12f', reader.take(48))
                 assert all(math.isfinite(v) for v in values)
                 assert any(v != 0 for v in values[3:6])
+            for _ in range(tangents):
+                assert all(math.isfinite(v) for v in struct.unpack('<4f', reader.take(16)))
             for _ in range(ni):
                 assert reader.u32() < nv
-        geometry = b'RLG\0\x01\0\0\0' + payload[start:reader.offset]
+            attributes_end = reader.offset
+            for half in range(adjacency):
+                neighbour = reader.u32()
+                assert neighbour == 0xffffffff or (neighbour < ni // 3 and neighbour != half // 3)
+            records.append((material, nv, ni, basis, tangents, adjacency,
+                            payload[attributes_start:attributes_end], payload[attributes_end:reader.offset]))
+        geometry = b'RLG\0' + struct.pack('<II', mesh_version, count)
+        for material, nv, ni, basis, tangents, adjacency, attributes, neighbours in records:
+            geometry += struct.pack('<III', material, nv, ni)
+            if mesh_version >= 2:
+                geometry += struct.pack('<II', basis, tangents)
+            if mesh_version >= 3:
+                geometry += struct.pack('<I', adjacency)
+            geometry += attributes + neighbours
         digest = hashlib.sha256(geometry).hexdigest()
         entry = manifest_bytes[84 + mesh_index * 40:124 + mesh_index * 40]
         assert digest == entry[:32].hex()
@@ -106,10 +132,12 @@ def inspect(source, cache, manifest):
         factors = struct.unpack('<6f', reader.take(24))
         sided = reader.u32()
         refs = []
-        for _ in range(2):
+        for _ in range(3 if schema >= 2 else 2):
             present = reader.u32()
             assert present in (0, 1)
             refs.append([reader.u32() for _ in range(6)] if present else None)
+        if schema >= 2:
+            assert math.isfinite(struct.unpack('<f', reader.take(4))[0])
         material_records.append(dict(factors=factors, double_sided=sided, references=refs))
     texture_records = []
     texture_bytes = 0

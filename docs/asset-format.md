@@ -1,4 +1,9 @@
-# Prepared asset format, schema 1
+# Prepared asset format, schemas 1–3
+
+The original schema-1 layout below remains readable and byte-stable. Schema 2
+adds the [normal-map streams](m5-normal-maps.md#binary-and-cache-versions).
+New cooker output uses schema 3 for prepared triangle-edge adjacency; assets
+without adjacency still encode as schema 1 or 2 and use the legacy upload builder.
 
 Unit A supplies CPU preparation, not renderer integration or M3 acceptance. `renderlab-asset` has zero dependencies. Its owned public model is `Asset { meshes, placements, materials, textures }`. All math uses plain arrays. Mesh order, primitive order and selected-scene depth-first placement order are preserved. Placements refer to reusable meshes. The runtime can read a bounded prepared payload and call `decode(bytes, Limits)` without any cooker dependency.
 
@@ -29,6 +34,30 @@ Every primitive is nonempty and has a nonempty index count divisible by three. A
 Configurable development defaults (see [limits](limits.md)) are 256 MiB prepared input, 256 MiB decoded allocation budget, 4,096 meshes/materials, 16,384 primitives/placements, 256 role-correct textures, two million vertices, six million indices and maximum texture dimension 4,096. Limits are caller supplied and checked as totals across the asset. Decoder mip counts also have an absolute cap of 32. Allocation failure from the host allocator is not converted into a recoverable error.
 
 ## Cache identity and publication
+
+Schema 3 retains every schema-2 field. Each primitive adds a u32 adjacency count
+after the tangent basis/count and a little-endian u32 adjacency stream after its
+source indices. Count zero means absent; otherwise count must equal index count.
+Words are triangle-major, in opposite-vertex edge order: each is a neighbour
+triangle ID or `u32::MAX`. Self references and out-of-range IDs are rejected.
+The stream is charged to decoded-byte admission and `Counts.adjacency_bytes`;
+vertex/index limits continue to count source geometry. Reader count/byte checks
+precede allocation. Shader candidate checks still verify exact edge endpoints.
+
+Preparation uses exact source positions, welds signed zero and attribute seams,
+and retains missing entries for open, duplicate, degenerate and non-manifold
+edges. It never remaps source vertices or indices. Geometry sidecars include the
+stream and use schema 3 when present. The runtime uploads it into the existing
+index-buffer suffix (three words per triangle plus one GPU padding word), without
+welding. Device/mesh limits retain the existing original-buffer/probe fallback.
+
+The current cache algorithm appends `/exact-position-adjacency-v3` to the recipe
+below, invalidating old lookup keys. New manifests use version 3; readers retain
+versions 1–2 and reject payload versions newer than their manifest. An existing
+composed payload can be upgraded without source import using
+`renderlab-cook prepare-adjacency SOURCE.rla OUTPUT.rla --limits FILE`.
+The command requires a different output path, verifies the encoded payload and
+publishes it atomically. Source files remain intact.
 
 The cooker uses SHA-256 from pinned Rust `sha2 0.10.9` with normal CPU dispatch and no optional assembly/C build. Key input is the algorithm byte string `renderlab-cook/static-glb/area-mips/1/gltf-1.4.1/image-0.25.10/sha2-0.10.9`, schema u32, one settings byte (0 flat missing normals, 1 reject), sixteen u64 limit fields in `cache::key` order, then the complete source GLB bytes. New source-policy fields add a `source-policy-2` suffix and six u64 fields before the source only when they differ from their historical defaults; unchanged defaults retain exact keys. Policy stays in the lookup key so source-only admission cannot be bypassed by a warm hit; payload identity is independent of policy. No URI resolution or external dependency is permitted. Bump the algorithm identity when output algorithms or their dependency behavior change. Exact dependency resolution remains in Cargo.lock.
 

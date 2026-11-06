@@ -167,12 +167,16 @@ At 1920x1080 the two registered timing poses queue **20,612 / 20,380** pixels
 (**0.9940% / 0.9828%**). Only **2 / 0** hit records change. The hot result is kept
 for an unchanged receiver. Oversize queues fall back to the full quality kernel.
 
-Triangle adjacency is built on CPU upload from exact source positions, including
+Originally, triangle adjacency was built on CPU upload from exact source positions, including
 UV seams and signed zero. Open, degenerate, duplicate and non-manifold edges
 retain the camera-relative probe fallback. The three original indices precede
 three adjacency words per triangle in the same storage buffer, with one padding
 word. BLAS and raster draws use the original index count. Limits that cannot
 admit this derived suffix retain the original buffer and probe fallback.
+
+The [prepared-adjacency follow-through](m6-prepared-adjacency.md) moves that exact
+build into the cooker. Schema-3 assets upload the stored words directly;
+legacy/procedural meshes retain the same builder as a compatibility fallback.
 
 The full asset has 13,034,903 triangles in 12 meshes. Adjacency adds
 **156,418,884 bytes (149.17 MiB)**, with 19,481 boundary half-edges and no ambiguous

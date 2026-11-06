@@ -14,7 +14,6 @@ mod observe;
 mod primary_ray;
 mod program;
 pub mod program_watch;
-mod receiver_adjacency;
 mod renderer;
 mod shadow_plan;
 mod shadows;

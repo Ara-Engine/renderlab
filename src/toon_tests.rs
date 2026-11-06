@@ -212,15 +212,7 @@ impl Scene {
                 continue;
             }
             for p in &mesh.primitives {
-                meshes.push(admitted(r, |r| {
-                    r.try_upload_mesh_with_tangents(
-                        &MeshData {
-                            vertices: &p.vertices,
-                            indices: &p.indices,
-                        },
-                        p.tangents.as_ref(),
-                    )
-                }));
+                meshes.push(admitted(r, |r| r.try_upload_primitive(p)));
                 instances.push(admitted(r, |r| r.try_upload_instances(&models)));
                 material_ids.push(p.material as usize);
             }
@@ -413,6 +405,7 @@ fn load_scene(r: &mut Renderer, m: &serde_json::Value, toon: &Program, quarry: b
             });
             asset.meshes.push(asset::Mesh {
                 primitives: vec![asset::Primitive {
+                    adjacency: None,
                     vertices: o.vertices.clone(),
                     indices: o.indices.clone(),
                     tangents: None,

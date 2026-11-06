@@ -637,7 +637,7 @@ fn meshes(
             )?;
             ensure(
                 nv.checked_mul(48)
-                    .and_then(|n| n.checked_add(ni.checked_mul(4)?))
+                    .and_then(|n| n.checked_add(ni.checked_mul(8)?))
                     .is_some_and(|n| n <= limits.prepared.max_decoded_bytes),
                 "aggregate geometry byte limit",
             )?;
@@ -760,6 +760,7 @@ fn meshes(
                 (vertices, indices, None)
             };
             output.primitives.push(Primitive {
+                adjacency: Some(renderlab_asset::adjacency::build(&vertices, &indices).neighbours),
                 tangents,
                 vertices,
                 indices,

@@ -1,10 +1,10 @@
 //! Exact-position shared edges for the primary receiver repair. No topology guesses.
-use crate::MeshData;
+use crate::{Error, Result, Vertex};
 use std::collections::HashMap;
 
-pub(crate) const MISSING: u32 = u32::MAX;
+pub const MISSING: u32 = u32::MAX;
 
-pub(crate) struct Adjacency {
+pub struct Adjacency {
     /// Triangle-major, opposite-vertex edge order, matching barycentric weights.
     pub neighbours: Vec<u32>,
     pub boundary_halfedges: usize,
@@ -12,10 +12,11 @@ pub(crate) struct Adjacency {
     pub degenerate_halfedges: usize,
 }
 
-pub(crate) fn build(data: &MeshData<'_>) -> Adjacency {
-    let mut positions = HashMap::with_capacity(data.vertices.len());
-    let canonical: Vec<_> = data
-        .vertices
+/// Build after validating finite vertices, triangle indices and their u32 domains.
+/// Exact positions weld UV/normal seams and signed zero, without a tolerance.
+pub fn build(vertices: &[Vertex], indices: &[u32]) -> Adjacency {
+    let mut positions = HashMap::with_capacity(vertices.len());
+    let canonical: Vec<_> = vertices
         .iter()
         .enumerate()
         .map(|(i, v)| {
@@ -29,14 +30,14 @@ pub(crate) fn build(data: &MeshData<'_>) -> Adjacency {
         key: u64,
         half: u32,
     }
-    let mut edges = Vec::with_capacity(data.indices.len());
+    let mut edges = Vec::with_capacity(indices.len());
     let mut result = Adjacency {
-        neighbours: vec![MISSING; data.indices.len()],
+        neighbours: vec![MISSING; indices.len()],
         boundary_halfedges: 0,
         ambiguous_halfedges: 0,
         degenerate_halfedges: 0,
     };
-    for (triangle, indices) in data.indices.chunks_exact(3).enumerate() {
+    for (triangle, indices) in indices.chunks_exact(3).enumerate() {
         for edge in 0..3 {
             let a = canonical[indices[(edge + 1) % 3] as usize];
             let b = canonical[indices[(edge + 2) % 3] as usize];
@@ -59,7 +60,7 @@ pub(crate) fn build(data: &MeshData<'_>) -> Adjacency {
         }
         let group = &edges[start..end];
         if let [a, b] = group {
-            let opposite = |e: Edge| canonical[data.indices[e.half as usize] as usize];
+            let opposite = |e: Edge| canonical[indices[e.half as usize] as usize];
             if a.half / 3 != b.half / 3 && opposite(*a) != opposite(*b) {
                 result.neighbours[a.half as usize] = b.half / 3;
                 result.neighbours[b.half as usize] = a.half / 3;
@@ -76,10 +77,26 @@ pub(crate) fn build(data: &MeshData<'_>) -> Adjacency {
     result
 }
 
+/// Validate the stream's length and triangle references without rebuilding topology.
+/// The shader also checks candidate edge endpoints before accepting a neighbour.
+pub fn validate(indices: &[u32], neighbours: &[u32]) -> Result<()> {
+    if neighbours.len() != indices.len() {
+        return Err(Error("adjacency count must equal index count"));
+    }
+    let triangles = indices.len() / 3;
+    for (half, &neighbour) in neighbours.iter().enumerate() {
+        if neighbour != MISSING
+            && (neighbour as usize >= triangles || neighbour as usize == half / 3)
+        {
+            return Err(Error("invalid adjacency triangle"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Vertex;
     fn fixture(p: &[[f32; 3]], indices: &[u32]) -> Adjacency {
         let vertices: Vec<_> = p
             .iter()
@@ -90,10 +107,7 @@ mod tests {
                 color: [1.; 4],
             })
             .collect();
-        build(&MeshData {
-            vertices: &vertices,
-            indices,
-        })
+        build(&vertices, indices)
     }
     #[test]
     fn exact_position_seams_signed_zero_and_edge_order() {

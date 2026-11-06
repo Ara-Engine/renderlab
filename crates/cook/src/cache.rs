@@ -10,7 +10,7 @@ use std::{
 };
 
 const ALGORITHM: &[u8] =
-    b"renderlab-cook/static-glb/area-mips/1/gltf-1.4.1/image-0.25.10/sha2-0.10.9";
+    b"renderlab-cook/static-glb/area-mips/1/gltf-1.4.1/image-0.25.10/sha2-0.10.9/exact-position-adjacency-v3";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {
@@ -170,7 +170,7 @@ impl Manifest {
         )?;
         ensure(
             &bytes[..4] == b"RLM\0"
-                && matches!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1 | 2),
+                && matches!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1..=3),
             "unknown cache manifest version",
         )?;
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
@@ -253,12 +253,13 @@ fn load(
     }
     let lookup_us = lookup.elapsed().as_micros();
     let decode = Instant::now();
-    if manifest.version == 1 {
-        ensure(
-            bytes.get(4..8) == Some(&1u32.to_le_bytes()),
-            "extended payload in legacy manifest",
-        )?;
-    }
+    let payload_version = bytes
+        .get(4..8)
+        .map(|v| u32::from_le_bytes(v.try_into().unwrap()));
+    ensure(
+        payload_version.is_some_and(|v| v <= manifest.version),
+        "extended payload in legacy manifest",
+    )?;
     let asset = renderlab_asset::decode(&bytes, limits.prepared)?;
     ensure(
         asset.meshes.len() == manifest.geometry.len(),
@@ -389,7 +390,7 @@ pub fn cook_file(
         .map(|m| renderlab_asset::encode_mesh(m, limits.prepared).map_err(Error::from))
         .collect::<Result<Vec<_>>>()?;
     let manifest = Manifest {
-        version: if settings.normal_maps { 2 } else { 1 },
+        version: renderlab_asset::ADJACENCY_SCHEMA_VERSION,
         key: identity,
         payload: Entry {
             hash: hash(&bytes),
@@ -449,16 +450,17 @@ pub fn cook_file(
 mod tests {
     use super::*;
     #[test]
-    fn published_default_lookup_key_stays_compatible() {
+    fn adjacency_invalidates_legacy_lookup_keys_deterministically() {
         let [(name, source), _] = crate::fixtures::sources().unwrap();
         assert_eq!(name, "instanced-boxes.glb");
         let settings = Settings::default();
         let limits = CookLimits::default();
         let default_key = key(&source, settings, limits);
-        assert_eq!(
+        assert_ne!(
             hex(&default_key),
             "a90a6bab6dc8542b560933e68715879bf3dc4be7fca65289bf1397d6469e94ac"
         );
+        assert_eq!(default_key, key(&source, settings, limits));
         assert_ne!(
             default_key,
             key(

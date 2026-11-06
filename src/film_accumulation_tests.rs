@@ -294,7 +294,7 @@ fn centre_surface(
     (centre, forward)
 }
 
-fn t1_cameras(m: &serde_json::Value) -> Vec<Camera> {
+pub(super) fn t1_cameras(m: &serde_json::Value) -> Vec<Camera> {
     let cameras =
         cameras::Cameras::load(&PathBuf::from(m["t1_cameras"].as_str().unwrap())).unwrap();
     cameras.frames.iter().map(|f| f.camera().unwrap()).collect()
@@ -1004,13 +1004,23 @@ fn gpu_film_t1_footprint() {
     let (mut asset, _) = load_quarry(&m, &mut r);
     let color = target(&r, 1920, 1080);
     let cameras = t1_cameras(&m);
+    footprint_with(&m, &mut r, &mut asset, &color, &cameras);
+}
+
+pub(super) fn footprint_with(
+    m: &serde_json::Value,
+    r: &mut Renderer,
+    asset: &mut prepared::Prepared,
+    color: &wgpu::Texture,
+    cameras: &[Camera],
+) {
     let grid = m["grid"].as_u64().unwrap_or(1024) as u32;
     let source = footprint_source();
     let mut results = serde_json::Map::new();
     let start = Instant::now();
     for (pose, pixels) in m["footprint"].as_object().unwrap() {
         let camera = &cameras[pose.parse::<usize>().unwrap()];
-        let (surface, forward) = centre_surface(&mut r, &mut asset, &color, camera);
+        let (surface, forward) = centre_surface(r, asset, color, camera);
         let eye = camera.view().inverse().w_axis;
         // [x, y, expected] verifies the footprint; [x, y, expected, cx, cy, spacing] samples a
         // micro grid of that spacing around (cx, cy) inside the pixel.

@@ -2,6 +2,7 @@ use crate::*;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const NORMAL_SCHEMA_VERSION: u32 = 2;
+pub const ADJACENCY_SCHEMA_VERSION: u32 = 3;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -24,13 +25,16 @@ impl Writer {
             self.u32(p.material);
             self.count(p.vertices.len())?;
             self.count(p.indices.len())?;
-            if version == 2 {
+            if version >= 2 {
                 self.u32(match p.tangents.as_ref().map(|t| t.basis) {
                     None => 0,
                     Some(TangentBasis::Authored) => 1,
                     Some(TangentBasis::MikkTSpace) => 2,
                 });
                 self.count(p.tangents.as_ref().map_or(0, |t| t.values.len()))?;
+            }
+            if version >= 3 {
+                self.count(p.adjacency.as_ref().map_or(0, Vec::len))?;
             }
             for v in &p.vertices {
                 self.floats(&v.position);
@@ -45,6 +49,11 @@ impl Writer {
             }
             for &i in &p.indices {
                 self.u32(i);
+            }
+            if let Some(neighbours) = &p.adjacency {
+                for &neighbour in neighbours {
+                    self.u32(neighbour);
+                }
             }
         }
         Ok(())
@@ -81,7 +90,14 @@ impl Writer {
 pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
     asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
-    let version = if asset.extended() {
+    let version = if asset
+        .meshes
+        .iter()
+        .flat_map(|m| &m.primitives)
+        .any(|p| p.adjacency.is_some())
+    {
+        ADJACENCY_SCHEMA_VERSION
+    } else if asset.extended() {
         NORMAL_SCHEMA_VERSION
     } else {
         SCHEMA_VERSION
@@ -110,7 +126,7 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
         w.u32(u32::from(m.double_sided));
         w.reference(m.base_color_texture.map(|t| (t.texture, t.sampler)));
         w.reference(m.metallic_roughness_texture.map(|t| (t.texture, t.sampler)));
-        if version == 2 {
+        if version >= 2 {
             w.reference(m.normal_texture.map(|t| (t.texture, t.sampler)));
             w.floats(&[m.normal_texture.map_or(1., |t| t.scale)]);
         }
@@ -137,7 +153,9 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
 pub fn encode_mesh(mesh: &Mesh, limits: Limits) -> Result<Vec<u8>> {
     validate_mesh(mesh, &mut Counts::default(), limits)?;
     let mut w = Writer(b"RLG\0".to_vec());
-    let version = if mesh.primitives.iter().any(|p| p.tangents.is_some()) {
+    let version = if mesh.primitives.iter().any(|p| p.adjacency.is_some()) {
+        ADJACENCY_SCHEMA_VERSION
+    } else if mesh.primitives.iter().any(|p| p.tangents.is_some()) {
         2
     } else {
         1
@@ -252,7 +270,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -280,7 +298,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             let material = r.u32()?;
             let nv = r.count(limits.max_vertices.saturating_sub(vertices), 48, 48)?;
             let ni = r.count(limits.max_indices.saturating_sub(indices), 4, 4)?;
-            let tangents = if version == 2 {
+            let tangents = if version >= 2 {
                 let basis = match r.u32()? {
                     0 => None,
                     1 => Some(TangentBasis::Authored),
@@ -295,6 +313,15 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             } else {
                 None
             };
+            let adjacency_count = if version >= 3 {
+                let count = r.count(ni, 4, 4)?;
+                if count != 0 && count != ni {
+                    return Err(Error("adjacency count must equal index count"));
+                }
+                count
+            } else {
+                0
+            };
             add(&mut vertices, nv)?;
             add(&mut indices, ni)?;
             cap(
@@ -307,6 +334,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
                             0
                         })
                     })
+                    .and_then(|n| n.checked_add(product(adjacency_count, 4).ok()?))
                     .ok_or(Error("size overflow"))?,
                 r.data.len(),
                 "truncated primitive",
@@ -315,6 +343,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
                 vertices: Vec::with_capacity(nv),
                 tangents: None,
                 indices: Vec::with_capacity(ni),
+                adjacency: None,
                 material,
             };
             for _ in 0..nv {
@@ -339,6 +368,13 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
                 }
                 p.indices.push(i);
             }
+            if adjacency_count != 0 {
+                let mut neighbours = Vec::with_capacity(adjacency_count);
+                for _ in 0..adjacency_count {
+                    neighbours.push(r.u32()?);
+                }
+                p.adjacency = Some(neighbours);
+            }
             mesh.primitives.push(p);
         }
         a.meshes.push(mesh);
@@ -360,7 +396,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let metallic_roughness_texture = r
             .reference()?
             .map(|(texture, sampler)| MetallicRoughnessTexture { texture, sampler });
-        let normal_texture = if version == 2 {
+        let normal_texture = if version >= 2 {
             let reference = r.reference()?;
             let [scale] = r.floats()?;
             if reference.is_none() && scale != 1. {
@@ -388,7 +424,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let role = match r.u32()? {
             0 => TextureRole::BaseColorSrgb,
             1 => TextureRole::MetallicRoughnessLinear,
-            2 if version == 2 => TextureRole::NormalLinear,
+            2 if version >= 2 => TextureRole::NormalLinear,
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;

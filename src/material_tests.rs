@@ -586,6 +586,7 @@ fn prepared_viewer_bounds_batch_expansion_before_upload() {
         meshes: vec![asset::Mesh {
             primitives: vec![
                 asset::Primitive {
+                    adjacency: None,
                     tangents: None,
                     vertices: swatch_vertices([0.0; 2]).to_vec(),
                     indices: vec![0, 1, 2],

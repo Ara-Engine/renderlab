@@ -1,4 +1,5 @@
 //! Bounded static GLB preparation and content-addressed publication.
+pub mod adjacency;
 mod cache;
 pub mod environment;
 pub mod environment_fixture;

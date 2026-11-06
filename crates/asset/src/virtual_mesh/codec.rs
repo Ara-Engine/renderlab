@@ -339,6 +339,7 @@ pub fn decode_page(p: &Page, bytes: &[u8], actual_sha256: [u8; 32]) -> Result<Pa
     }
     let mut mesh = crate::Mesh {
         primitives: vec![crate::Primitive {
+            adjacency: None,
             tangents,
             vertices,
             indices,

@@ -381,7 +381,7 @@ fn normal_cache_namespaces_roundtrip_warm_and_repair_without_rewriting_legacy_ke
     .unwrap();
     assert!(warm.report.cache_hit);
     assert_eq!(cold.loaded.asset, warm.loaded.asset);
-    assert_eq!(&std::fs::read(&current).unwrap()[..8], b"RLM\0\x02\0\0\0");
+    assert_eq!(&std::fs::read(&current).unwrap()[..8], b"RLM\0\x03\0\0\0");
     assert!(directory.join("normal-v2/keys").is_dir());
     let rla = directory.join("normal.rla");
     std::fs::write(

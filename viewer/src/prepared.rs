@@ -1,5 +1,5 @@
 use renderlab::{
-    Camera, Draw, Instances, Mat4, Material, MaterialDescriptor, Mesh, MeshData, Renderer, Texture,
+    Camera, Draw, Instances, Mat4, Material, MaterialDescriptor, Mesh, Renderer, Texture,
     TextureBinding, Vec3, Visibility, asset,
 };
 use std::{
@@ -233,13 +233,7 @@ impl Prepared {
             UploadProgress::Geometry(i) => {
                 if let Some(&(mesh, primitive)) = self.primitives.get(i) {
                     let p = &self.source.meshes[mesh].primitives[primitive];
-                    if let Some(m) = r.try_upload_mesh_with_tangents(
-                        &MeshData {
-                            vertices: &p.vertices,
-                            indices: &p.indices,
-                        },
-                        p.tangents.as_ref(),
-                    )? {
+                    if let Some(m) = r.try_upload_primitive(p)? {
                         self.meshes.push(m);
                         self.progress = UploadProgress::Geometry(i + 1);
                     }

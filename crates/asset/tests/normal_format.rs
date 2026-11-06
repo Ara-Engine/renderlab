@@ -12,6 +12,7 @@ fn triangle() -> Asset {
     Asset {
         meshes: vec![Mesh {
             primitives: vec![Primitive {
+                adjacency: None,
                 vertices,
                 indices: vec![0, 1, 2],
                 material: 0,
@@ -21,6 +22,74 @@ fn triangle() -> Asset {
         materials: vec![Material::default()],
         ..Default::default()
     }
+}
+
+#[test]
+fn adjacency_v3_roundtrips_with_and_without_normal_maps_and_rejects_corruption() {
+    for mut asset in [triangle(), mapped()] {
+        let primitive = &mut asset.meshes[0].primitives[0];
+        primitive.adjacency =
+            Some(adjacency::build(&primitive.vertices, &primitive.indices).neighbours);
+        let limits = Limits::default();
+        let bytes = encode(&asset, limits).unwrap();
+        assert_eq!(&bytes[..8], b"RLA\0\x03\0\0\0");
+        assert_eq!(decode(&bytes, limits).unwrap(), asset);
+        assert_eq!(encode(&asset, limits).unwrap(), bytes);
+        assert_eq!(
+            &encode_mesh(&asset.meshes[0], limits).unwrap()[..8],
+            b"RLG\0\x03\0\0\0"
+        );
+        assert_eq!(asset.validate(limits).unwrap().adjacency_bytes, 12);
+        for end in 0..bytes.len() {
+            assert!(decode(&bytes[..end], limits).is_err(), "prefix {end}");
+        }
+        let mut corrupt = bytes.clone();
+        // Header 24, mesh 4, material/vertex/index 12, tangent basis/count 8.
+        corrupt[48..52].copy_from_slice(&2u32.to_le_bytes());
+        assert!(decode(&corrupt, limits).is_err());
+        let mut corrupt = bytes.clone();
+        let tangent_bytes = asset.meshes[0].primitives[0]
+            .tangents
+            .as_ref()
+            .map_or(0, |t| t.values.len() * 16);
+        let adjacency_start = 52 + 3 * 48 + tangent_bytes + 3 * 4;
+        corrupt[adjacency_start..adjacency_start + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            decode(&corrupt, limits).unwrap_err().0,
+            "invalid adjacency triangle"
+        );
+        let mut extra = bytes;
+        extra.push(0);
+        assert!(decode(&extra, limits).is_err());
+        let total = asset.validate(limits).unwrap().decoded_bytes;
+        assert!(
+            decode(
+                &encode(&asset, limits).unwrap(),
+                Limits {
+                    max_decoded_bytes: total - 1,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        let mut corrupt = asset.clone();
+        corrupt.meshes[0].primitives[0].adjacency = Some(vec![0; 3]);
+        assert!(encode(&corrupt, limits).is_err()); // Self reference.
+        corrupt.meshes[0].primitives[0].adjacency = Some(vec![1; 3]);
+        assert!(encode(&corrupt, limits).is_err()); // Out of range.
+        corrupt.meshes[0].primitives[0].adjacency = Some(vec![u32::MAX; 2]);
+        assert!(encode(&corrupt, limits).is_err());
+    }
+}
+
+#[test]
+fn adjacency_v3_can_mix_prepared_and_legacy_primitives() {
+    let mut asset = triangle();
+    let legacy = asset.meshes[0].primitives[0].clone();
+    asset.meshes[0].primitives[0].adjacency = Some(vec![adjacency::MISSING; 3]);
+    asset.meshes[0].primitives.push(legacy);
+    let bytes = encode(&asset, Limits::default()).unwrap();
+    assert_eq!(decode(&bytes, Limits::default()).unwrap(), asset);
 }
 
 fn mapped() -> Asset {
