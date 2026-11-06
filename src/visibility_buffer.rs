@@ -348,7 +348,7 @@ fn buffer_entry(
     }
 }
 /// One read-only storage buffer per draw slot: the meshes' cluster data.
-fn data_entry(binding: u32, stages: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+pub(super) fn data_entry(binding: u32, stages: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         count: std::num::NonZeroU32::new(crate::TRACED_DRAWS),
         ..buffer_entry(binding, false, false, stages)
@@ -437,14 +437,16 @@ fn bind(
 fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
     values.into_iter().flat_map(u32::to_ne_bytes).collect()
 }
-impl VisibilityBuffer {
-    fn new(r: &Renderer, draws: &[PreparedDraw<'_>], size: wgpu::Extent3d) -> Result<Self, Error> {
-        use wgpu::{
-            BindingResource as R, ShaderStages as S, TextureFormat as F, TextureUsages as U,
-        };
-        let state = r.primary.as_ref().unwrap();
-        let t = state.targets.as_ref().unwrap();
-        let fresh = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+/// Every draw's clusters once per placement, in traced placement order (16 words each,
+/// visibility_buffer.wgsl's `Cluster`), and the draws' LOD groups (8 words each), uploaded.
+/// N1c's primaries and N8c's shadow page raster both cull this table.
+pub(super) struct ClusterInstances {
+    pub count: u32,
+    pub clusters: Buffer,
+    pub groups: Buffer,
+}
+impl ClusterInstances {
+    pub fn new(r: &Renderer, draws: &[PreparedDraw<'_>]) -> Result<Self, Error> {
         let mut records = vec![];
         let mut groups = vec![];
         let mut placement = 0u32;
@@ -511,6 +513,53 @@ impl VisibilityBuffer {
             r.queue
                 .write_buffer(&group_buffer.value, 0, &words(groups.iter().copied()));
         }
+        Ok(Self {
+            count: count as u32,
+            clusters,
+            groups: group_buffer,
+        })
+    }
+}
+/// One read-only storage binding per draw slot: each draw's cluster data words, padded
+/// with `absent` (`data_entry`'s layout at binding 8).
+pub(super) fn cluster_data_group(
+    r: &Renderer,
+    layout: &wgpu::BindGroupLayout,
+    draws: &[PreparedDraw<'_>],
+    absent: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let data: Vec<_> = draws
+        .iter()
+        .map(|d| {
+            d.mesh
+                .clusters
+                .as_ref()
+                .unwrap()
+                .data
+                .as_entire_buffer_binding()
+        })
+        .chain(std::iter::repeat(absent.as_entire_buffer_binding()))
+        .take(crate::TRACED_DRAWS as usize)
+        .collect();
+    bind(
+        &r.device,
+        layout,
+        &[(8, wgpu::BindingResource::BufferArray(&data))],
+    )
+}
+impl VisibilityBuffer {
+    fn new(r: &Renderer, draws: &[PreparedDraw<'_>], size: wgpu::Extent3d) -> Result<Self, Error> {
+        use wgpu::{
+            BindingResource as R, ShaderStages as S, TextureFormat as F, TextureUsages as U,
+        };
+        let state = r.primary.as_ref().unwrap();
+        let t = state.targets.as_ref().unwrap();
+        let fresh = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let instances = ClusterInstances::new(r, draws)?;
+        let count = instances.count as usize;
+        let (clusters, group_buffer) = (instances.clusters, instances.groups);
+        let storage = wgpu::BufferUsages::STORAGE;
+        let limit = r.device.limits().max_storage_buffer_binding_size;
         let configs = std::array::from_fn(|_| {
             Buffer::new(r, "N1c view and pass", 176, wgpu::BufferUsages::UNIFORM)
         });
@@ -764,19 +813,6 @@ impl VisibilityBuffer {
         });
         let state = r.primary.as_ref().unwrap();
         let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
-        let data: Vec<_> = draws
-            .iter()
-            .map(|d| {
-                d.mesh
-                    .clusters
-                    .as_ref()
-                    .unwrap()
-                    .data
-                    .as_entire_buffer_binding()
-            })
-            .chain(std::iter::repeat(absent.value.as_entire_buffer_binding()))
-            .take(crate::TRACED_DRAWS as usize)
-            .collect();
         let cull_groups = std::array::from_fn(|i| {
             bind(
                 &r.device,
@@ -817,7 +853,7 @@ impl VisibilityBuffer {
                 ],
             )
         });
-        let data_group = bind(&r.device, &data_layout, &[(8, R::BufferArray(&data))]);
+        let data_group = cluster_data_group(r, &data_layout, draws, &absent.value);
         let views: Vec<_> = (0..levels)
             .map(|i| {
                 hzb.texture.create_view(&wgpu::TextureViewDescriptor {

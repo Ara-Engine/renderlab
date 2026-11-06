@@ -35,10 +35,13 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
 /// Deferred material arrays and five resolve storage targets (hits, world, normal,
-/// coverage and receiver epsilon). No acceleration-structure limits are raised.
+/// coverage and receiver epsilon), and ten storage buffers per stage for the Virtual
+/// shadow lookup's two 64-bit clipmap layers and their max-mips (N8c). No
+/// acceleration-structure limits are raised.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
+        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(10),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
             .max(11 * TRACED_DRAWS),

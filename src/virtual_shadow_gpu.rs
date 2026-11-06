@@ -1,22 +1,25 @@
-//! N8/N8b (docs/non-rt-n8.md, docs/non-rt-n8b.md): `SoftShadows::Virtual`, Interactive's
-//! eight sun directions with no ray queries or acceleration structure in the visibility pass.
+//! N8/N8b/N8c (docs/non-rt-n8.md, docs/non-rt-n8b.md, docs/non-rt-n8c.md):
+//! `SoftShadows::Virtual`, Interactive's eight sun directions with no ray queries or
+//! acceleration structure in the visibility pass.
 //!
 //! Near field: the receiver triangle and its vertex 1-ring (the exact-position edge
 //! adjacency stored after each mesh's indices), tested with the watertight test over the
 //! whole ray, unless a per-triangle ring horizon shows no ring triangle can block. Far
 //! field: a sun clipmap whose levels hold about one texel per receiver pixel, each with two
-//! layers of heights and triangle ids: the highest surface toward the sun and the next one
-//! below it (a depth peel). Like a virtual shadow map, work is page-driven: receivers request
-//! 128-texel pages at their level and every coarser one the march continues into, only stale
-//! requested pages are rasterized (stencil-masked), and rasterized pages stay cached until
-//! the sun turns, the level's window moves, or a moved caster's light-space bounds touch
-//! them. Memory is dense per level (no physical page pool). The march uses the map as an
-//! index only: a candidate texel is decided by an exact walk to the triangle under the ray.
+//! 64-bit layers of (height, triangle id): the highest surface toward the sun and the next
+//! one below it (a depth peel). Like a virtual shadow map, work is page-driven: receivers
+//! request 128-texel pages at their level and every coarser one the march continues into,
+//! only stale requested pages are rasterized, and rasterized pages stay cached until the sun
+//! turns, the level's window moves, or a moved caster's light-space bounds touch them.
+//! Casters are the meshes' visibility-buffer clusters, cut per level at a texel-scale error
+//! (N8c) and rasterized in software (small clusters) or hardware into the stale pages only.
+//! Memory is dense per level (no physical page pool). The march uses the map as an index
+//! only: a candidate texel is decided by an exact walk to the triangle under the ray.
 //!
-//! This unit consumes traced hit records and receivers; the shadow pass itself only
-//! rasterizes and reads textures. A raster visibility buffer producing the same
-//! `(placement, primitive)` records is the remaining step for a fully non-RT frame.
+//! Receivers and `(placement, primitive)` records come from traced primaries or the N1c
+//! visibility buffer; the shadow pass itself only rasterizes and reads buffers.
 use super::*;
+use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 
 /// Levels a frame can use; also the WGSL `VSM_MAX_LEVELS`.
 pub(super) const MAX_LEVELS: usize = 8;
@@ -27,16 +30,18 @@ const PAGE: u32 = 128;
 const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + MAX_RECTS * 16 + 256;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
-const TEMPLATE_BYTES: u64 = 32;
-const MAX_TEMPLATES: u64 = MAX_LEVELS as u64 * crate::TRACED_DRAWS as u64;
-/// Per-level `VsmPass` uniforms at the minimum dynamic-offset alignment.
+/// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
 const PASS_STRIDE: u64 = 256;
-/// Device features the page raster needs: triangle ids and placement-based first instances.
+const PASS_ENTRIES: usize = 16;
+/// Per-level WGSL `VsmArgs`: the software dispatch and the hardware draw.
+const ARGS_BYTES: u64 = 32;
+/// Device features the page raster needs: 64-bit (height, id) max atomics. Casters are the
+/// meshes' visibility-buffer clusters, so the device must also support
+/// `visibility_buffer::supported` when meshes are uploaded.
 pub const VIRTUAL_FEATURES: wgpu::Features =
-    wgpu::Features::PRIMITIVE_INDEX.union(wgpu::Features::INDIRECT_FIRST_INSTANCE);
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+    wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
-/// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md.
+/// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md and non-rt-n8c.md.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualShadowSettings {
     /// Metres beyond which other surfaces are found only through the map. The receiver's
@@ -60,6 +65,19 @@ pub struct VirtualShadowSettings {
     /// treated as folds the top layer decides: fewer exact walks (the quarry's static shadow
     /// cost falls from about 4.9 to 2.8 ms) for more leaks (docs/non-rt-n8b.md).
     pub peel_own: bool,
+    /// Caster LOD (N8c): a level rasterizes each mesh's clusterLOD cut whose simplification
+    /// error is within this many of its texels. Negative rasterizes original geometry only.
+    /// Meshes without an attached hierarchy always cast original geometry. Opt-in: on the
+    /// quarry the cut's caster surfaces shadow lit receivers beyond Unreal's floor, with and
+    /// without N1c's receiver lift, and moving shadow origins out by the cut error instead
+    /// loses too many umbra receivers (docs/non-rt-n8c.md). Hence the negative default.
+    pub caster_error_texels: f32,
+    /// The march's first step also tests the 2x2 texel block around the ray: near-contact
+    /// occluder edges that miss the texel centre (N8b). 0 off; 1 every surface (N8b); 2 only
+    /// other placements' surfaces beyond the texel under the ray (N8c): their contacts are
+    /// what it was for (docs/non-rt-n8b.md S1), and the receiver's own relief there cost the
+    /// quarry 0.85 ms for few blocks.
+    pub first_block: u32,
 }
 impl Default for VirtualShadowSettings {
     fn default() -> Self {
@@ -72,6 +90,8 @@ impl Default for VirtualShadowSettings {
             bias_ulps: 4,
             ring: true,
             peel_own: false,
+            caster_error_texels: -1.0,
+            first_block: 2,
         }
     }
 }
@@ -83,9 +103,11 @@ impl VirtualShadowSettings {
             || !(4..=32).contains(&self.pages)
             || !(2..=64).contains(&self.march_samples)
             || !(self.finest_texel.is_finite() && self.finest_texel > 0.0)
+            || !self.caster_error_texels.is_finite()
+            || self.first_block > 2
         {
             return Err(Error::InvalidInput(
-                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel",
+                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel, finite caster error",
             ));
         }
         Ok(())
@@ -101,7 +123,8 @@ pub struct VirtualShadowStats {
     pub invalidated_levels: u32,
     /// Moved-caster rectangles uploaded this frame.
     pub moved_rects: u32,
-    pub templates: u32,
+    /// Caster cluster instances the page raster culls.
+    pub clusters: u32,
     pub bytes: u64,
     /// Whether this frame ran the request, compaction and raster passes.
     pub page_work: bool,
@@ -110,10 +133,13 @@ pub struct VirtualShadowStats {
 struct Pipelines {
     mark: Owned<wgpu::ComputePipeline>,
     compact: Owned<wgpu::ComputePipeline>,
-    finalize: Owned<wgpu::ComputePipeline>,
-    clear: Owned<wgpu::RenderPipeline>,
-    caster: Owned<wgpu::RenderPipeline>,
-    caster_peel: Owned<wgpu::RenderPipeline>,
+    clear: Owned<wgpu::ComputePipeline>,
+    cull: Owned<wgpu::ComputePipeline>,
+    finish: Owned<wgpu::ComputePipeline>,
+    mip: Owned<wgpu::ComputePipeline>,
+    /// Software and hardware rasters: top layer, then peel layer.
+    software: [Owned<wgpu::ComputePipeline>; 2],
+    hardware: [Owned<wgpu::RenderPipeline>; 2],
     lookup: Owned<wgpu::ComputePipeline>,
     horizon: Owned<wgpu::ComputePipeline>,
     /// The lookup with `VSM_DEBUG`, built on first use (tests only).
@@ -122,7 +148,10 @@ struct Pipelines {
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
     compact: Owned<wgpu::BindGroupLayout>,
+    cull: Owned<wgpu::BindGroupLayout>,
     raster: Owned<wgpu::BindGroupLayout>,
+    mip: Owned<wgpu::BindGroupLayout>,
+    data: Owned<wgpu::BindGroupLayout>,
     pass: Owned<wgpu::BindGroupLayout>,
     lookup: Owned<wgpu::BindGroupLayout>,
     horizon: Owned<wgpu::BindGroupLayout>,
@@ -131,7 +160,7 @@ struct Layouts {
 /// per draw list by `vsm_horizon`. Elevations do not change under the similarity transforms
 /// the lookup accepts, so camera, sun and instance motion keep them.
 struct Horizons {
-    /// Each draw's vertex buffer and triangle count, in batch order.
+    /// Each draw's index buffer and addressed triangle count, in batch order.
     key: Vec<(usize, u32)>,
     /// First word of each batch's triangles.
     offsets: Vec<u32>,
@@ -142,23 +171,36 @@ struct Horizons {
     /// Whether this frame computes them (the first frame of a draw list).
     dispatch: bool,
 }
+/// The draw list's caster clusters (N8c): every draw's clusters per placement, their raster
+/// lists and the cluster data bindings. Rebuilt when the draw list changes.
+struct Casters {
+    /// Each draw's index buffer and placement count.
+    key: Vec<(usize, usize)>,
+    /// Bumped on every rebuild, so bind groups over these buffers follow.
+    generation: u64,
+    instances: ClusterInstances,
+    /// Per level the raster's indirect arguments (`ARGS_BYTES`), then per level software
+    /// and hardware cluster slots (`instances.count` each).
+    work: Owned<wgpu::Buffer>,
+    data: Owned<wgpu::BindGroup>,
+    _absent: Owned<wgpu::Buffer>,
+    /// Bits of the largest primitive ID (source and appended LOD triangles) in the map IDs.
+    primitive_bits: u32,
+    _allocation: Allocation,
+}
 /// Map storage sized by (levels, pages) and the per-pixel level target by image size.
 struct Resources {
     levels: usize,
     pages: u32,
     size: [u32; 2],
-    _depth: Owned<wgpu::Texture>,
-    depth_layers: Vec<Owned<wgpu::TextureView>>,
-    depth_sampled: Owned<wgpu::TextureView>,
-    _peel: Owned<wgpu::Texture>,
-    peel_layers: Vec<Owned<wgpu::TextureView>>,
-    peel_sampled: Owned<wgpu::TextureView>,
-    _peel_ids: Owned<wgpu::Texture>,
-    peel_id_layers: Vec<Owned<wgpu::TextureView>>,
-    peel_ids_sampled: Owned<wgpu::TextureView>,
-    _ids: Owned<wgpu::Texture>,
-    id_layers: Vec<Owned<wgpu::TextureView>>,
-    ids_sampled: Owned<wgpu::TextureView>,
+    /// Both layers: one 64-bit word per texel per level (normalized height << 32 | id).
+    top: Owned<wgpu::Buffer>,
+    peel: Owned<wgpu::Buffer>,
+    /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
+    mips: Owned<wgpu::Buffer>,
+    /// The hardware raster's attachment, which only sizes its raster area.
+    _area: Owned<wgpu::Texture>,
+    area: Owned<wgpu::TextureView>,
     _level: Owned<wgpu::Texture>,
     level_view: Owned<wgpu::TextureView>,
     /// Per-pixel decision trace (`VSM_DEBUG`), two uvec4s per pixel; 16 bytes unless
@@ -168,25 +210,23 @@ struct Resources {
     frame: Owned<wgpu::Buffer>,
     requests: Owned<wgpu::Buffer>,
     state: Owned<wgpu::Buffer>,
-    dirty: Owned<wgpu::Buffer>,
-    quad_args: Owned<wgpu::Buffer>,
-    caster_args: Owned<wgpu::Buffer>,
-    templates: Owned<wgpu::Buffer>,
+    /// Per page slot: 1 when it is cleared and rasterized this frame.
+    render: Owned<wgpu::Buffer>,
     pass: Owned<wgpu::Buffer>,
     _allocation: Allocation,
     groups: Option<Groups>,
 }
-/// Bind groups over this frame's receiver targets; rebuilt when any of them changes.
+/// Bind groups over this frame's receiver targets and casters; rebuilt when any changes.
 struct Groups {
     key: [wgpu::Texture; 4],
     models: wgpu::Buffer,
     horizons: wgpu::Buffer,
+    casters: u64,
     mark: Owned<wgpu::BindGroup>,
     compact: Owned<wgpu::BindGroup>,
-    /// The top pass samples the peel ids (unused there), the peel pass the top ids: a
-    /// pass never samples its own colour target.
+    cull: Owned<wgpu::BindGroup>,
     raster: Owned<wgpu::BindGroup>,
-    raster_peel: Owned<wgpu::BindGroup>,
+    mip: Owned<wgpu::BindGroup>,
     pass: Owned<wgpu::BindGroup>,
     lookup: Owned<wgpu::BindGroup>,
 }
@@ -204,11 +244,6 @@ struct Cache {
     models: Vec<[u32; 16]>,
     bounds: Vec<crate::shadow_plan::Bounds>,
 }
-/// One indirect caster draw: a draw's instances in one level.
-struct Template {
-    draw: usize,
-    level: usize,
-}
 pub(super) struct VirtualState {
     pub settings: VirtualShadowSettings,
     pub stats: VirtualShadowStats,
@@ -218,12 +253,9 @@ pub(super) struct VirtualState {
     resources: Option<Resources>,
     retired: Vec<(u64, Resources)>,
     cache: Cache,
-    templates: Vec<Template>,
+    casters: Option<Casters>,
+    retired_casters: Vec<(u64, Casters)>,
     levels: usize,
-    /// Stencil value marking this frame's stale pages, cycling through 1..=255 so no
-    /// per-frame stencil clear is needed. A page tagged 255 frames ago is only redrawn
-    /// with unchanged geometry, which cannot change its depths.
-    tag: u32,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -306,7 +338,7 @@ fn written(binding: u32) -> wgpu::BindGroupLayoutEntry {
 /// The module source: the shared draw-slot count, then shaders/virtual_shadow.wgsl.
 pub(super) fn shader_source() -> String {
     format!(
-        "enable wgpu_binding_array;\nenable primitive_index;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
         include_str!("../shaders/virtual_shadow.wgsl")
     )
@@ -348,6 +380,18 @@ fn basis(toward: glam::DVec3) -> [glam::DVec3; 3] {
     [u, v, l]
 }
 
+/// Triangles a mesh's primitive IDs address: source triangles plus appended LOD triangles,
+/// from the index buffer's layout (an optional exact-adjacency suffix doubles it, plus one
+/// word).
+fn addressed_triangles(mesh: &Mesh) -> u64 {
+    let words = mesh.index.size() / 4;
+    if words % 3 == 1 {
+        (words - 1) / 6
+    } else {
+        words / 3
+    }
+}
+
 impl VirtualState {
     pub fn new(
         device: &wgpu::Device,
@@ -369,6 +413,10 @@ impl VirtualState {
         };
         let uint = T::Uint;
         let float = T::Float { filterable: false };
+        let raster_stages = S::COMPUTE | S::VERTEX_FRAGMENT;
+        // Writable storage stays out of the vertex stage (no VERTEX_WRITABLE_STORAGE).
+        let writes = S::COMPUTE | S::FRAGMENT;
+        let reads = S::COMPUTE | S::VERTEX;
         let layouts = Layouts {
             mark: group(
                 "N8 page requests",
@@ -387,34 +435,47 @@ impl VirtualState {
                     frame_uniform(S::COMPUTE),
                     storage(1, false, S::COMPUTE),
                     storage(2, false, S::COMPUTE),
-                    storage(3, false, S::COMPUTE),
-                    storage(4, false, S::COMPUTE),
-                    storage(5, false, S::COMPUTE),
-                    storage(6, true, S::COMPUTE),
+                    storage(29, false, S::COMPUTE),
+                ],
+            ),
+            cull: group(
+                "N8c caster cut and cull",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    storage(25, true, S::COMPUTE),
+                    storage(26, true, S::COMPUTE),
+                    storage(27, false, S::COMPUTE),
+                    storage(29, false, S::COMPUTE),
                 ],
             ),
             raster: group(
-                "N8 page raster",
+                "N8c page raster",
                 &[
-                    frame_uniform(S::VERTEX_FRAGMENT),
-                    storage(11, true, S::VERTEX),
-                    storage(12, true, S::VERTEX),
-                    layout_entry(
-                        13,
-                        S::FRAGMENT,
-                        wgpu::BindingType::Texture {
-                            sample_type: uint,
-                            view_dimension: D::D2Array,
-                            multisampled: false,
-                        },
-                    ),
+                    frame_uniform(raster_stages),
+                    storage(25, true, reads),
+                    storage(29, false, writes),
+                    storage(31, false, writes),
+                    storage(32, false, writes),
+                    storage(33, true, reads),
                 ],
+            ),
+            mip: group(
+                "N8c max-mips",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    storage(16, true, S::COMPUTE),
+                    storage(36, false, S::COMPUTE),
+                ],
+            ),
+            data: group(
+                "N8c caster cluster data",
+                &[data_entry(8, S::COMPUTE | S::VERTEX)],
             ),
             pass: group(
                 "N8 page raster level",
                 &[layout_entry(
                     30,
-                    S::VERTEX_FRAGMENT,
+                    raster_stages,
                     wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -431,13 +492,12 @@ impl VirtualState {
                     sampled(9, float, D::D2),
                     sampled(10, float, D::D2),
                     written(15),
-                    sampled(16, T::Depth, D::D2Array),
-                    sampled(17, uint, D::D2Array),
+                    storage(16, true, S::COMPUTE),
                     sampled(18, uint, D::D2),
-                    sampled(19, T::Depth, D::D2Array),
+                    storage(19, true, S::COMPUTE),
                     storage(20, false, S::COMPUTE),
-                    sampled(21, uint, D::D2Array),
                     storage(24, true, S::COMPUTE),
+                    storage(35, true, S::COMPUTE),
                 ],
             ),
             horizon: group(
@@ -468,9 +528,21 @@ impl VirtualState {
         };
         let mark_layout = pipeline_layout("N8 page request ABI", &[Some(&layouts.mark)]);
         let compact_layout = pipeline_layout("N8 page cache ABI", &[Some(&layouts.compact)]);
+        let cull_layout =
+            pipeline_layout("N8c caster cull ABI", &[Some(&layouts.cull), Some(arrays)]);
+        let clear_layout = pipeline_layout("N8c page clear ABI", &[Some(&layouts.raster)]);
+        let mip_layout = pipeline_layout(
+            "N8c max-mip ABI",
+            &[Some(&layouts.mip), None, None, Some(&layouts.pass)],
+        );
         let raster_layout = pipeline_layout(
-            "N8 page raster ABI",
-            &[Some(&layouts.raster), Some(&layouts.pass)],
+            "N8c page raster ABI",
+            &[
+                Some(&layouts.raster),
+                Some(arrays),
+                Some(&layouts.data),
+                Some(&layouts.pass),
+            ],
         );
         let horizon_layout = pipeline_layout(
             "N8 ring horizon ABI",
@@ -487,47 +559,55 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
-        let compute = |entry, layout: &wgpu::PipelineLayout| {
+        let compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
             ledger.own(
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
                     layout: Some(layout),
                     module: &module,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
                     cache: None,
                 }),
                 ResourceKind::ComputePipeline,
             )
         };
-        let ids = [Some(wgpu::TextureFormat::R32Uint.into())];
-        let raster = |label,
-                      vs,
-                      fs: Option<&str>,
-                      targets: &[Option<wgpu::ColorTargetState>],
-                      buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-                      depth| {
+        let hardware = |label, peel: f64| {
+            let constants = [("VSM_PEEL_PASS", peel)];
             ledger.own(
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&raster_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
-                        entry_point: Some(vs),
+                        entry_point: Some("vs_vsm_cluster"),
                         compilation_options: Default::default(),
-                        buffers,
+                        buffers: &[],
                     },
-                    fragment: fs.map(|fs| wgpu::FragmentState {
+                    fragment: Some(wgpu::FragmentState {
                         module: &module,
-                        entry_point: Some(fs),
-                        compilation_options: Default::default(),
-                        targets,
+                        entry_point: Some("fs_vsm_cluster"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &constants,
+                            ..Default::default()
+                        },
+                        targets: &[],
                     }),
                     primitive: wgpu::PrimitiveState {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil: Some(depth),
+                    // The 64-bit max decides; the attachment only sizes the raster area.
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: AREA_FORMAT,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
                     multisample: Default::default(),
                     multiview_mask: None,
                     cache: None,
@@ -535,86 +615,21 @@ impl VirtualState {
                 ResourceKind::RenderPipeline,
             )
         };
-        let face = |compare, pass_op| wgpu::StencilFaceState {
-            compare,
-            fail_op: wgpu::StencilOperation::Keep,
-            depth_fail_op: wgpu::StencilOperation::Keep,
-            pass_op,
-        };
-        let stencil = |compare, pass_op, write_mask| wgpu::StencilState {
-            front: face(compare, pass_op),
-            back: face(compare, pass_op),
-            read_mask: 0xff,
-            write_mask,
-        };
-        // Stale pages: clear to the lowest height and open the stencil with the frame tag.
-        let clear_state = wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: stencil(
-                wgpu::CompareFunction::Always,
-                wgpu::StencilOperation::Replace,
-                0xff,
-            ),
-            bias: Default::default(),
-        };
-        let clear = raster(
-            "N8 stale page clear",
-            "vs_vsm_clear",
-            Some("fs_vsm_clear"),
-            &ids,
-            &[],
-            clear_state,
-        );
-        // Casters keep the highest surface toward the light, only inside opened pages.
-        let attributes = [wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x3,
-            offset: 0,
-            shader_location: 0,
-        }];
-        let vertices = [Some(wgpu::VertexBufferLayout {
-            array_stride: 48,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &attributes,
-        })];
-        let caster_state = wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Greater),
-            stencil: stencil(
-                wgpu::CompareFunction::Equal,
-                wgpu::StencilOperation::Keep,
-                0,
-            ),
-            bias: Default::default(),
-        };
-        let caster = raster(
-            "N8 page casters",
-            "vs_vsm_caster",
-            Some("fs_vsm_caster"),
-            &ids,
-            &vertices,
-            caster_state.clone(),
-        );
-        // The peel layer: the highest surface other than the top triangle.
-        let caster_peel = raster(
-            "N8 page peel",
-            "vs_vsm_caster",
-            Some("fs_vsm_peel"),
-            &ids,
-            &vertices,
-            caster_state,
-        );
         let pipelines = Pipelines {
-            mark: compute("vsm_mark", &mark_layout),
-            compact: compute("vsm_compact", &compact_layout),
-            finalize: compute("vsm_finalize", &compact_layout),
-            clear,
-            caster,
-            caster_peel,
-            lookup: compute("vsm_lookup", &lookup_layout),
-            horizon: compute("vsm_horizon", &horizon_layout),
+            mark: compute("vsm_mark", &mark_layout, &[]),
+            compact: compute("vsm_compact", &compact_layout, &[]),
+            clear: compute("vsm_clear", &clear_layout, &[]),
+            cull: compute("vsm_cull", &cull_layout, &[]),
+            finish: compute("vsm_finish", &cull_layout, &[]),
+            mip: compute("vsm_mip", &mip_layout, &[]),
+            software: [0.0, 1.0]
+                .map(|peel| compute("vsm_raster", &raster_layout, &[("VSM_PEEL_PASS", peel)])),
+            hardware: [
+                hardware("N8c hardware page casters", 0.0),
+                hardware("N8c hardware page peel", 1.0),
+            ],
+            lookup: compute("vsm_lookup", &lookup_layout, &[]),
+            horizon: compute("vsm_horizon", &horizon_layout, &[]),
             debug: None,
         };
         Self {
@@ -626,9 +641,9 @@ impl VirtualState {
             resources: None,
             retired: vec![],
             cache: Cache::default(),
-            templates: vec![],
+            casters: None,
+            retired_casters: vec![],
             levels: 0,
-            tag: 0,
             key: vec![],
             page_work: true,
             horizons: None,
@@ -640,6 +655,7 @@ impl VirtualState {
     }
 
     /// The last debug frame's trace buffer (`debug` must have been set for it).
+    #[cfg(test)]
     pub fn debug_buffer(&self) -> Option<&wgpu::Buffer> {
         self.resources
             .as_ref()
@@ -655,7 +671,7 @@ impl VirtualState {
         settings.validate()?;
         if settings != self.settings {
             self.settings = settings;
-            // Every cached page depends on the level ladder and window size.
+            // Every cached page depends on the level ladder, window size and caster cut.
             self.cache = Cache::default();
             if let Some(old) = self.resources.take() {
                 self.retired.push((last, old));
@@ -666,6 +682,7 @@ impl VirtualState {
 
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
+        self.retired_casters.retain(|(last, _)| *last > completed);
     }
 
     fn ensure_resources(
@@ -675,82 +692,47 @@ impl VirtualState {
         levels: usize,
         size: [u32; 2],
         last: u64,
-    ) -> bool {
+    ) -> Result<bool, Error> {
         let pages = self.settings.pages;
         if self.resources.as_ref().is_some_and(|r| {
             r.levels >= levels && r.pages == pages && r.size == size && r.debug_sized == self.debug
         }) {
-            return false;
+            return Ok(false);
         }
         // Grow-only in levels, so the ladder can shift without reallocating.
         let levels = levels.max(self.resources.as_ref().map_or(0, |r| r.levels));
+        let side = pages * PAGE;
+        let map_bytes = u64::from(side) * u64::from(side) * levels as u64 * 8;
+        if map_bytes > device.limits().max_storage_buffer_binding_size {
+            return Err(Error::InvalidInput(
+                "SoftShadows::Virtual clipmap layer exceeds the storage binding limit; use fewer pages",
+            ));
+        }
         if let Some(old) = self.resources.take() {
             self.retired.push((last, old));
         }
         // Fresh storage is all stale without touching the cache: its page epochs are zero,
         // and level epochs start at one.
-        let side = pages * PAGE;
-        let layers = |label, format: wgpu::TextureFormat, aspect| {
-            let texture = ledger.own(
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: side,
-                        height: side,
-                        depth_or_array_layers: levels as u32,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                }),
-                ResourceKind::Texture,
-            );
-            let per_layer = (0..levels as u32)
-                .map(|layer| {
-                    ledger.own(
-                        texture.create_view(&wgpu::TextureViewDescriptor {
-                            dimension: Some(wgpu::TextureViewDimension::D2),
-                            base_array_layer: layer,
-                            array_layer_count: Some(1),
-                            ..Default::default()
-                        }),
-                        ResourceKind::TextureView,
-                    )
-                })
-                .collect();
-            let all = ledger.own(
-                texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
-                    aspect,
-                    ..Default::default()
-                }),
-                ResourceKind::TextureView,
-            );
-            (texture, per_layer, all)
-        };
-        let (depth, depth_layers, depth_sampled) = layers(
-            "N8 clipmap heights and page stencil",
-            DEPTH_FORMAT,
-            wgpu::TextureAspect::DepthOnly,
+        let area = ledger.own(
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("N8c hardware raster area"),
+                size: wgpu::Extent3d {
+                    width: side,
+                    height: side,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: AREA_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
         );
-        let (peel, peel_layers, peel_sampled) = layers(
-            "N8 clipmap peel heights and page stencil",
-            DEPTH_FORMAT,
-            wgpu::TextureAspect::DepthOnly,
-        );
-        let (peel_ids, peel_id_layers, peel_ids_sampled) = layers(
-            "N8 clipmap peel triangles",
-            wgpu::TextureFormat::R32Uint,
-            wgpu::TextureAspect::All,
-        );
-        let (ids, id_layers, ids_sampled) = layers(
-            "N8 clipmap top triangles",
-            wgpu::TextureFormat::R32Uint,
-            wgpu::TextureAspect::All,
+        let area_view = ledger.own(
+            area.create_view(&Default::default()),
+            ResourceKind::TextureView,
         );
         let level = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
@@ -791,26 +773,21 @@ impl VirtualState {
             )
         };
         use wgpu::BufferUsages as B;
-        let bytes = u64::from(side) * u64::from(side) * levels as u64 * 16
+        let mip_bytes = (u64::from(side) * u64::from(side) - 1) / 3 * 4 * levels as u64;
+        let bytes = 2 * map_bytes
+            + mip_bytes
+            + u64::from(side) * u64::from(side) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
-            + slots * 12
-            + MAX_TEMPLATES * (TEMPLATE_BYTES + 20);
+            + slots * 12;
         self.resources = Some(Resources {
             levels,
             pages,
             size,
-            _depth: depth,
-            depth_layers,
-            depth_sampled,
-            _peel: peel,
-            peel_layers,
-            peel_sampled,
-            _peel_ids: peel_ids,
-            peel_id_layers,
-            peel_ids_sampled,
-            _ids: ids,
-            id_layers,
-            ids_sampled,
+            top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
+            peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
+            mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
+            _area: area,
+            area: area_view,
             _level: level,
             level_view,
             debug: buffer("N8 decision trace", debug_bytes, B::STORAGE | B::COPY_SRC),
@@ -818,38 +795,21 @@ impl VirtualState {
             frame: buffer("N8 frame", FRAME_BYTES as u64, B::UNIFORM),
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
             state: buffer("N8 page epochs", slots * 4, B::STORAGE),
-            dirty: buffer(
-                "N8 stale pages",
-                MAX_LEVELS as u64 * 4 + slots * 4,
-                B::STORAGE,
-            ),
-            quad_args: buffer(
-                "N8 stale page draws",
-                MAX_LEVELS as u64 * 16,
-                B::STORAGE | B::INDIRECT,
-            ),
-            caster_args: buffer(
-                "N8 caster draws",
-                MAX_TEMPLATES * 20,
-                B::STORAGE | B::INDIRECT,
-            ),
-            templates: buffer(
-                "N8 caster templates",
-                MAX_TEMPLATES * TEMPLATE_BYTES,
-                B::STORAGE,
-            ),
+            render: buffer("N8c pages rasterized this frame", slots * 4, B::STORAGE),
             pass: buffer(
-                "N8 level uniforms",
-                MAX_LEVELS as u64 * PASS_STRIDE,
+                "N8 level and mip uniforms",
+                PASS_ENTRIES as u64 * PASS_STRIDE,
                 B::UNIFORM,
             ),
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
             groups: None,
         });
         self.stats.bytes = bytes;
-        true
+        Ok(true)
     }
 }
+/// The hardware raster's area attachment.
+const AREA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth16Unorm;
 
 impl Renderer {
     /// Tuning for `SoftShadows::Virtual`; a change drops every cached page.
@@ -872,8 +832,75 @@ impl Renderer {
             .map_or_else(Default::default, |s| s.stats)
     }
 
+    /// The draw list's caster clusters, rebuilt when its meshes or placement counts change.
+    fn ensure_virtual_casters(&mut self, draws: &[PreparedDraw<'_>]) -> Result<(), Error> {
+        let key: Vec<(usize, usize)> = draws
+            .iter()
+            .map(|d| (Arc::as_ptr(&d.mesh.index) as usize, d.instances.len()))
+            .collect();
+        let state = self.virtual_shadows.as_ref().unwrap();
+        if state.casters.as_ref().is_some_and(|c| c.key == key) {
+            return Ok(());
+        }
+        if draws.iter().any(|d| d.mesh.clusters.is_none()) {
+            return Err(Error::InvalidInput(
+                "SoftShadows::Virtual casts from visibility-buffer clusters; upload meshes on a device with VISIBILITY_FEATURES, VISIBILITY_RASTER_FEATURES and visibility limits",
+            ));
+        }
+        let instances = ClusterInstances::new(self, draws)?;
+        let mut primitive_bits = 1u32;
+        for d in draws {
+            let triangles = addressed_triangles(d.mesh).clamp(1, u64::from(u32::MAX)) as u32;
+            primitive_bits = primitive_bits.max(32 - triangles.leading_zeros());
+        }
+        let work_bytes =
+            MAX_LEVELS as u64 * (ARGS_BYTES + 2 * u64::from(instances.count.max(1)) * 4);
+        let work = self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("N8c page raster arguments and cluster lists"),
+                size: work_bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
+        let absent = self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("N8c absent cluster data"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
+        let state = self.virtual_shadows.as_ref().unwrap();
+        let data = self.ledger.own(
+            cluster_data_group(self, &state.layouts.data, draws, &absent),
+            ResourceKind::BindGroup,
+        );
+        let allocation = self.ledger.allocate(AllocationKind::Shadow, work_bytes);
+        let state = self.virtual_shadows.as_mut().unwrap();
+        let generation = state.casters.as_ref().map_or(0, |c| c.generation + 1);
+        if let Some(old) = state.casters.take() {
+            state.retired_casters.push((self.submissions, old));
+        }
+        state.casters = Some(Casters {
+            key,
+            generation,
+            instances,
+            work,
+            data,
+            _absent: absent,
+            primitive_bits,
+            _allocation: allocation,
+        });
+        Ok(())
+    }
+
     /// Plans this frame's levels, windows and cache invalidation, uploads them, and builds
-    /// bind groups over the traced receiver targets. Call after `prepare_primary`.
+    /// bind groups over the receiver targets. Call after the primaries are prepared.
     pub(super) fn prepare_virtual(
         &mut self,
         draws: &[PreparedDraw<'_>],
@@ -882,7 +909,7 @@ impl Renderer {
     ) -> Result<(), Error> {
         if !self.device.features().contains(VIRTUAL_FEATURES) {
             return Err(Error::InvalidInput(
-                "SoftShadows::Virtual requires VIRTUAL_FEATURES (primitive index, indirect first instance)",
+                "SoftShadows::Virtual requires VIRTUAL_FEATURES (64-bit storage max atomics)",
             ));
         }
         let Some(Light::Directional { travel, .. }) = self.lighting.source_lights.first().copied()
@@ -900,9 +927,10 @@ impl Renderer {
                 &self.lighting.bindings,
             );
             state.settings = self.virtual_settings;
-            self.pipelines.created += 6;
+            self.pipelines.created += 10;
             self.virtual_shadows = Some(state);
         }
+        self.ensure_virtual_casters(draws)?;
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
         let slope = f64::from(self.shadows.settings.directional_disk_angle).tan() * 1.001;
@@ -997,7 +1025,6 @@ impl Renderer {
         let pages = i64::from(s.pages);
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         let mut level_bytes = [0u8; MAX_LEVELS * 32];
-        let mut windows = [[glam::DVec2::ZERO; 2]; MAX_LEVELS];
         for i in 0..levels {
             let texel = f64::from(s.finest_texel) * 2f64.powi(finest + i as i32);
             let page = texel * f64::from(PAGE);
@@ -1012,9 +1039,14 @@ impl Renderer {
                 cache.epochs[i] = cache.epochs[i].wrapping_add(1).max(1);
             }
             let lo = glam::DVec2::new(origin[0] as f64 * page, origin[1] as f64 * page) - eye_light;
-            windows[i] = [lo, lo + glam::DVec2::splat(page * pages as f64)];
+            // The caster cut's error bound at this level (negative: original geometry).
+            let caster_error = if s.caster_error_texels < 0.0 {
+                -1.0
+            } else {
+                f64::from(s.caster_error_texels) * texel
+            };
             let entry = &mut level_bytes[i * 32..i * 32 + 32];
-            for (k, value) in [lo.x as f32, lo.y as f32, texel as f32, 0.0]
+            for (k, value) in [lo.x as f32, lo.y as f32, texel as f32, caster_error as f32]
                 .iter()
                 .enumerate()
             {
@@ -1029,38 +1061,9 @@ impl Renderer {
         }
         // Absolute level of index 0, which vsm_select reads from levels[0].info.y.
         level_bytes[20..24].copy_from_slice(&finest.to_ne_bytes());
-        // Caster draws per level: every draw whose light-space bounds touch the window.
-        state.templates.clear();
-        let mut template_bytes = vec![];
-        let mut placement = 0u32;
-        let mut primitive_bits = 1u32;
-        for (d, draw) in draws.iter().enumerate() {
-            let n = draw.instances.state.models.len() as u32;
-            let triangles = draw.mesh.index_count / 3;
-            primitive_bits = primitive_bits.max(32 - triangles.max(1).leading_zeros());
-            let mut lo = glam::DVec2::INFINITY;
-            let mut hi = glam::DVec2::NEG_INFINITY;
-            for b in &state.cache.bounds[placement as usize..(placement + n) as usize] {
-                let [a, z] = rect(b);
-                lo = lo.min(a);
-                hi = hi.max(z);
-            }
-            for (i, window) in windows.iter().enumerate().take(levels) {
-                if n == 0
-                    || hi.x < window[0].x
-                    || hi.y < window[0].y
-                    || lo.x > window[1].x
-                    || lo.y > window[1].y
-                {
-                    continue;
-                }
-                state.templates.push(Template { draw: d, level: i });
-                for value in [draw.mesh.index_count, n, 0, 0, placement, i as u32, 0, 0] {
-                    template_bytes.extend_from_slice(&value.to_ne_bytes());
-                }
-            }
-            placement += n;
-        }
+        let casters = state.casters.as_ref().unwrap();
+        let primitive_bits = casters.primitive_bits;
+        let cluster_count = casters.instances.count;
         if 32 - (placements as u32 + 1).leading_zeros() + primitive_bits > 32 {
             return Err(Error::InvalidInput(
                 "SoftShadows::Virtual packs placement and primitive into 32 bits; the scene exceeds that",
@@ -1087,12 +1090,12 @@ impl Renderer {
         for value in [
             levels as u32,
             s.pages,
-            state.templates.len() as u32,
+            cluster_count,
             rects.len() as u32,
             primitive_bits,
             s.march_samples,
             s.bias_ulps,
-            u32::from(s.ring) | u32::from(s.peel_own) << 1,
+            u32::from(s.ring) | u32::from(s.peel_own) << 1 | s.first_block << 2,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
@@ -1104,9 +1107,15 @@ impl Renderer {
             }
         }
         // Ring horizons: (re)built when the draw list's geometry changes.
+        // Every addressed triangle, appended LOD triangles included (LOD receivers).
         let horizon_key: Vec<(usize, u32)> = draws
             .iter()
-            .map(|d| (Arc::as_ptr(&d.mesh.vertex) as usize, d.mesh.index_count / 3))
+            .map(|d| {
+                (
+                    Arc::as_ptr(&d.mesh.index) as usize,
+                    addressed_triangles(d.mesh) as u32,
+                )
+            })
             .collect();
         if state.horizons.as_ref().is_none_or(|h| h.key != horizon_key) {
             let mut offsets = vec![];
@@ -1180,13 +1189,12 @@ impl Renderer {
         }
         debug_assert_eq!(frame.len(), FRAME_BYTES);
         state.levels = levels;
-        state.tag = state.tag % 255 + 1;
         state.stats = VirtualShadowStats {
             levels: levels as u32,
             finest_level: finest,
             invalidated_levels: invalidated[..levels].iter().filter(|&&b| b).count() as u32,
             moved_rects: rects.len() as u32,
-            templates: state.templates.len() as u32,
+            clusters: cluster_count,
             bytes: state.stats.bytes,
             page_work: true,
         };
@@ -1196,7 +1204,7 @@ impl Renderer {
             levels,
             [size.width, size.height],
             self.submissions,
-        );
+        )?;
         if state.debug && state.pipelines.debug.is_none() || state.constants != state.built {
             let layout = &state.lookup_layout;
             let lookup = |label, debug: bool| {
@@ -1225,6 +1233,7 @@ impl Renderer {
             }
             state.pipelines.debug = debug;
         }
+        let casters = state.casters.as_ref().unwrap();
         let mut key: Vec<u64> = camera
             .view()
             .to_cols_array()
@@ -1237,37 +1246,27 @@ impl Renderer {
             u64::from(size.height),
             finest as u64,
             levels as u64,
+            casters.generation,
         ]);
         key.extend(light_bits.map(u64::from));
         for i in 0..levels {
             let o = state.cache.origins[i].unwrap_or_default();
             key.extend([o[0] as u64, o[1] as u64, u64::from(state.cache.epochs[i])]);
         }
-        for t in &state.templates {
-            let draw = &draws[t.draw];
-            key.extend([
-                t.draw as u64,
-                t.level as u64,
-                Arc::as_ptr(&draw.mesh.vertex) as u64,
-                draw.instances.state.models.len() as u64,
-            ]);
-        }
         state.page_work = created || !rects.is_empty() || key != state.key;
         state.stats.page_work = state.page_work;
         state.key = key;
         let state = self.virtual_shadows.as_mut().unwrap();
+        let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
-        if !template_bytes.is_empty() {
-            self.queue.write_buffer(&r.templates, 0, &template_bytes);
-        }
-        let mut pass = vec![0u8; MAX_LEVELS * PASS_STRIDE as usize];
-        for i in 0..MAX_LEVELS {
+        let mut pass = vec![0u8; PASS_ENTRIES * PASS_STRIDE as usize];
+        for i in 0..PASS_ENTRIES {
             pass[i * PASS_STRIDE as usize..i * PASS_STRIDE as usize + 4]
                 .copy_from_slice(&(i as u32).to_ne_bytes());
         }
         self.queue.write_buffer(&r.pass, 0, &pass);
-        self.uploads.shadows += (FRAME_BYTES + template_bytes.len() + pass.len()) as u64;
+        self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
 
         let primary = self.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
@@ -1280,10 +1279,12 @@ impl Renderer {
             (*fresh.visibility.texture).clone(),
         ];
         let horizons = (*state.horizons.as_ref().unwrap().buffer).clone();
-        if r.groups
-            .as_ref()
-            .is_none_or(|g| g.key != key || &g.models != arrays_models || g.horizons != horizons)
-        {
+        if r.groups.as_ref().is_none_or(|g| {
+            g.key != key
+                || &g.models != arrays_models
+                || g.horizons != horizons
+                || g.casters != casters.generation
+        }) {
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
             let hit = view(&targets.hit.texture);
             let tiles = view(&targets.tiles.texture);
@@ -1299,10 +1300,12 @@ impl Renderer {
                     )
                 };
             let l = &state.layouts;
+            let clusters = &casters.instances.clusters.value;
             let groups = Groups {
                 key,
                 models: arrays_models.clone(),
                 horizons: horizons.clone(),
+                casters: casters.generation,
                 mark: group(
                     "N8 page requests",
                     &l.mark,
@@ -1322,31 +1325,36 @@ impl Renderer {
                         buffer(0, &r.frame),
                         buffer(1, &r.requests),
                         buffer(2, &r.state),
-                        buffer(3, &r.dirty),
-                        buffer(4, &r.quad_args),
-                        buffer(5, &r.caster_args),
-                        buffer(6, &r.templates),
+                        buffer(29, &r.render),
+                    ],
+                ),
+                cull: group(
+                    "N8c caster cut and cull",
+                    &l.cull,
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(25, clusters),
+                        buffer(26, &casters.instances.groups.value),
+                        buffer(27, &casters.work),
+                        buffer(29, &r.render),
                     ],
                 ),
                 raster: group(
-                    "N8 page raster",
+                    "N8c page raster",
                     &l.raster,
                     &[
                         buffer(0, &r.frame),
-                        buffer(11, &r.dirty),
-                        buffer(12, arrays_models),
-                        texture(13, &r.peel_ids_sampled),
+                        buffer(25, clusters),
+                        buffer(29, &r.render),
+                        buffer(31, &r.top),
+                        buffer(32, &r.peel),
+                        buffer(33, &casters.work),
                     ],
                 ),
-                raster_peel: group(
-                    "N8 page peel raster",
-                    &l.raster,
-                    &[
-                        buffer(0, &r.frame),
-                        buffer(11, &r.dirty),
-                        buffer(12, arrays_models),
-                        texture(13, &r.ids_sampled),
-                    ],
+                mip: group(
+                    "N8c max-mips",
+                    &l.mip,
+                    &[buffer(0, &r.frame), buffer(16, &r.top), buffer(36, &r.mips)],
                 ),
                 pass: group(
                     "N8 page raster level",
@@ -1370,13 +1378,12 @@ impl Renderer {
                         texture(9, &fresh.world.view),
                         texture(10, &fresh.normal.view),
                         texture(15, &fresh.visibility.view),
-                        texture(16, &r.depth_sampled),
-                        texture(17, &r.ids_sampled),
+                        buffer(16, &r.top),
                         texture(18, &r.level_view),
-                        texture(19, &r.peel_sampled),
+                        buffer(19, &r.peel),
                         buffer(20, &r.debug),
-                        texture(21, &r.peel_ids_sampled),
                         buffer(24, &horizons),
+                        buffer(35, &r.mips),
                     ],
                 ),
             };
@@ -1385,27 +1392,23 @@ impl Renderer {
         Ok(())
     }
 
-    /// Page requests, cache compaction, stale-page raster and the 8-direction lookup into
-    /// the fresh visibility target. `timestamps` brackets all of it.
+    /// Page requests, compaction and the stale-page raster, then the 8-direction lookup
+    /// into the fresh visibility target. `timestamps` brackets all of it.
     pub(super) fn encode_virtual(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        draws: &[PreparedDraw<'_>],
         timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.virtual_shadows.as_ref().unwrap();
         let r = state.resources.as_ref().unwrap();
         let g = r.groups.as_ref().unwrap();
         let p = &state.pipelines;
-        let slots = state.levels as u64 * u64::from(r.pages * r.pages);
         let [width, height] = r.size;
         if state.debug {
             encoder.clear_buffer(&r.debug, 0, None);
         }
         if state.page_work {
-            encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
-            encoder.clear_buffer(&r.dirty, 0, Some(MAX_LEVELS as u64 * 4));
-            self.encode_virtual_pages(encoder, draws, timestamps.as_ref());
+            self.encode_virtual_pages(encoder, timestamps.as_ref());
         }
         let primary = self.primary.as_ref().unwrap();
         let (_, arrays) = primary.virtual_geometry().unwrap();
@@ -1445,22 +1448,27 @@ impl Renderer {
         let _ = &state.lookup_layout;
     }
 
-    /// Requests, compaction and the stale-page raster of every level.
+    /// Requests and compaction, then for the stale pages: clear, the per-level caster cut
+    /// and cull, and the software and hardware rasters of the top layer, then the peel layer.
     fn encode_virtual_pages(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        draws: &[PreparedDraw<'_>],
         timestamps: Option<&wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.virtual_shadows.as_ref().unwrap();
         let r = state.resources.as_ref().unwrap();
         let g = r.groups.as_ref().unwrap();
+        let casters = state.casters.as_ref().unwrap();
         let p = &state.pipelines;
         let slots = state.levels as u64 * u64::from(r.pages * r.pages);
         let [width, height] = r.size;
+        let (_, arrays) = self.primary.as_ref().unwrap().virtual_geometry().unwrap();
+        encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+        encoder.clear_buffer(&r.render, 0, Some(slots * 4));
+        encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("N8 page requests and cache"),
+                label: Some("N8 page requests, cache and caster cull"),
                 timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {
                     query_set: t.query_set,
                     beginning_of_pass_write_index: t.beginning_of_pass_write_index,
@@ -1473,101 +1481,65 @@ impl Renderer {
             pass.set_pipeline(&p.compact);
             pass.set_bind_group(0, &*g.compact, &[]);
             pass.dispatch_workgroups(slots.div_ceil(64) as u32, 1, 1);
-            pass.set_pipeline(&p.finalize);
-            pass.dispatch_workgroups(
-                (state.templates.len().max(state.levels) as u32).div_ceil(64),
-                1,
-                1,
-            );
+            pass.set_pipeline(&p.clear);
+            pass.set_bind_group(0, &*g.raster, &[]);
+            pass.dispatch_workgroups(slots as u32, 1, 1);
+            pass.set_pipeline(&p.cull);
+            pass.set_bind_group(0, &*g.cull, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            let groups = casters.instances.count.div_ceil(64).max(1);
+            pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+            pass.set_pipeline(&p.finish);
+            pass.dispatch_workgroups(1, 1, 1);
         }
-        for level in 0..state.levels {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("N8 stale page raster"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &r.id_layers[level],
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &r.depth_layers[level],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }),
-                ..Default::default()
-            });
-            self.encode_virtual_layer(&mut pass, draws, level, [&p.clear, &p.caster], &g.raster);
-            drop(pass);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("N8 stale page peel"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &r.peel_id_layers[level],
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &r.peel_layers[level],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }),
-                ..Default::default()
-            });
-            self.encode_virtual_layer(
-                &mut pass,
-                draws,
-                level,
-                [&p.clear, &p.caster_peel],
-                &g.raster_peel,
-            );
-        }
-    }
-
-    /// One layer of one level: stale pages cleared and tagged, then every caster draw of
-    /// the level, stencil-tested against the tag (zero instances when nothing is stale).
-    fn encode_virtual_layer(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        draws: &[PreparedDraw<'_>],
-        level: usize,
-        [clear, caster]: [&wgpu::RenderPipeline; 2],
-        raster: &wgpu::BindGroup,
-    ) {
-        let state = self.virtual_shadows.as_ref().unwrap();
-        let r = state.resources.as_ref().unwrap();
-        let g = r.groups.as_ref().unwrap();
-        pass.set_stencil_reference(state.tag);
-        pass.set_bind_group(0, raster, &[]);
-        pass.set_bind_group(1, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
-        pass.set_pipeline(clear);
-        pass.draw_indirect(&r.quad_args, level as u64 * 16);
-        pass.set_pipeline(caster);
-        for (t, template) in state.templates.iter().enumerate() {
-            if template.level != level {
-                continue;
+        for layer in 0..2 {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("N8c software page raster"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&p.software[layer]);
+                pass.set_bind_group(0, &*g.raster, &[]);
+                pass.set_bind_group(1, arrays, &[]);
+                pass.set_bind_group(2, &*casters.data, &[]);
+                for level in 0..state.levels {
+                    pass.set_bind_group(3, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
+                    pass.dispatch_workgroups_indirect(&casters.work, level as u64 * ARGS_BYTES);
+                }
             }
-            let mesh = draws[template.draw].mesh;
-            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed_indirect(&r.caster_args, t as u64 * 20);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("N8c hardware page raster"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &r.area,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&p.hardware[layer]);
+            pass.set_bind_group(0, &*g.raster, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &*casters.data, &[]);
+            for level in 0..state.levels {
+                pass.set_bind_group(3, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
+                pass.draw_indirect(&casters.work, level as u64 * ARGS_BYTES + 16);
+            }
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("N8c clipmap max-mips"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&p.mip);
+        pass.set_bind_group(0, &*g.mip, &[]);
+        let side = r.pages * PAGE;
+        for mip in 1..=side.trailing_zeros() {
+            let s = side >> mip;
+            pass.set_bind_group(3, &*g.pass, &[mip * PASS_STRIDE as u32]);
+            pass.dispatch_workgroups(s.div_ceil(8), s.div_ceil(8), state.levels as u32);
         }
     }
 }

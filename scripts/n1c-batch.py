@@ -30,6 +30,8 @@ def main():
     p.add_argument("--stage-repeats", type=int, default=8)
     p.add_argument("--no-lod", action="store_true", help="original geometry clusters only")
     p.add_argument("--no-reference", action="store_true")
+    p.add_argument("--caster-error", type=float, nargs="+", help="N8c caster cut errors (texels; negative: original geometry)")
+    p.add_argument("--turn", type=int, default=0, help="N8c sun-turning frames timed after each configuration")
     a = p.parse_args()
     a.root.mkdir(parents=True, exist_ok=True)
     record = []
@@ -43,7 +45,11 @@ def main():
             test = "gpu_visibility_quarry"
             m.update(json.loads(QUARRY.read_text()), output=str(a.root / step),
                      reference=not (a.timing or a.no_reference), lod_pixels=a.lod, software_extent=a.extent, lod_lift=a.lift,
-                     poses=a.poses, stage_repeats=a.stage_repeats)
+                     poses=a.poses, stage_repeats=a.stage_repeats, turn_frames=a.turn)
+            if a.caster_error:
+                m["caster_error"] = a.caster_error
+            if os.environ.get("N8_VIRTUAL"):
+                m["virtual"] = json.loads(os.environ["N8_VIRTUAL"])
             if not a.no_lod:
                 m.update(virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
         else:

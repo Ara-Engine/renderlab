@@ -1,4 +1,5 @@
-// N8/N8b: non-RT Interactive sun visibility (docs/non-rt-n8.md, docs/non-rt-n8b.md). No ray
+// N8/N8b/N8c: non-RT Interactive sun visibility (docs/non-rt-n8.md, non-rt-n8b.md,
+// non-rt-n8c.md). No ray
 // queries and no acceleration structure: each receiver's 8 Interactive directions get
 //   - an exact watertight test against the receiver triangle and its vertex 1-ring, over
 //     the whole ray (the existing edge adjacency, walked as vertex fans; skipped where the
@@ -11,10 +12,12 @@
 // so an occluder under a higher sheet stays visible. A sample whose layer surface is above
 // the ray is decided exactly: a walk from that texel's triangle to the triangle under the
 // ray, refined toward the predicted crossing (vsm_top_hits); no texel height blocks a ray.
+// Near steps are shared by all eight directions and later steps first test a max-mip of
+// the top layer over the cone's footprint (N8c).
 // The clipmap is page-driven like a virtual shadow map: receivers request 128-texel
-// pages, only requested pages that are stale are rasterized (stencil-masked), and
-// rasterized pages stay valid until the sun turns, the level window moves, or a
-// moved object's light-space bounds touch them.
+// pages, only requested pages that are stale are rasterized, from the meshes' clusters
+// (N8c; optionally a per-level LOD cut), and rasterized pages stay valid until the sun turns, the
+// level window moves, or a moved object's light-space bounds touch them.
 // virtual_shadow_gpu.rs prepends PRIMARY_BATCHES and owns every layout below.
 
 const VSM_PAGE:u32=128u;
@@ -25,21 +28,25 @@ const VSM_MISSING:u32=0xffffffffu;
 // Ring walk bound per fan direction; valence above this is truncated.
 const VSM_FAN_STEPS:u32=24u;
 
-// x0/y0: window minimum corner in eye-relative light-space metres; texel: metres.
+// origin: window minimum corner in eye-relative light-space metres, texel (metres) and the
+// caster cut's error bound (metres; negative: original geometry). info: page epoch and
+// absolute level (levels[0].info.y).
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
 struct VsmFrame {
     u:vec4<f32>,v:vec4<f32>,l:vec4<f32>,
     // xyz: world eye; w: pixel footprint per metre of distance (2 tan(fov_y/2)/height).
     eye:vec4<f32>,
     // x: lowest caster height along l, y: 1/height range, z: height range, w: highest.
+    // Map heights are normalized to this range.
     depth:vec4<f32>,
     // x: near split r (m), y: finest texel s0 (m), z: disk slope, w: log2 texels per pixel.
     params:vec4<f32>,
-    // x: levels, y: pages per window side, z: caster templates, w: invalidation rects.
+    // x: levels, y: pages per window side, z: caster cluster instances, w: invalidation rects.
     counts:vec4<u32>,
     // x: primitive bits of the id map, y: march samples per direction, z: bias in ulps of
     // height range, w: bit 0 to walk the receiver's vertex 1-ring (else its own triangle
-    // only), bit 1 to peel under the top layer's own placement too (N8b `peel_own`).
+    // only), bit 1 to peel under the top layer's own placement too (N8b `peel_own`), bits 2-3
+    // the first-step block mode (N8c `first_block`).
     misc:vec4<u32>,
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
     // Eye-relative light-space xy rectangles (min.xy, max.xy) of moved casters.
@@ -124,16 +131,11 @@ fn vsm_covered(id:vec2<u32>)->bool {
     textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(level));
 }
 
-// ---- Page cache: stale requested pages become this frame's raster list ----
-struct VsmDirty {counts:array<atomic<u32>,VSM_MAX_LEVELS>,pages:array<u32>};
-struct VsmDraw {vertex_count:u32,instance_count:u32,first_vertex:u32,first_instance:u32};
-struct VsmIndexed {index_count:u32,instance_count:u32,first_index:u32,base_vertex:u32,first_instance:u32};
-struct VsmTemplate {args:VsmIndexed,level:u32,pad0:u32,pad1:u32};
+// ---- Page cache: stale requested pages are flagged for this frame's raster ----
 @group(0) @binding(2) var<storage,read_write> vsm_state:array<u32>;
-@group(0) @binding(3) var<storage,read_write> vsm_dirty:VsmDirty;
-@group(0) @binding(4) var<storage,read_write> vsm_quad_args:array<VsmDraw>;
-@group(0) @binding(5) var<storage,read_write> vsm_caster_args:array<VsmIndexed>;
-@group(0) @binding(6) var<storage,read> vsm_templates:array<VsmTemplate>;
+// Per page slot: 1 when the page is cleared and rasterized this frame (zeroed by the
+// encoder on page-work frames).
+@group(0) @binding(29) var<storage,read_write> vsm_render:array<u32>;
 
 fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     let size=f32(VSM_PAGE)*vsm_texel(level);
@@ -154,8 +156,7 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     let moved=vsm_moved(level,page);
     if vsm_requests[id.x]!=0u {
         if vsm_state[id.x]!=epoch || moved {
-            let n=atomicAdd(&vsm_dirty.counts[level],1u);
-            vsm_dirty.pages[level*per+n]=local;
+            vsm_render[id.x]=1u;
             vsm_state[id.x]=epoch;
         }
     } else if moved {
@@ -163,70 +164,229 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
         vsm_state[id.x]=0u;
     }
 }
-@compute @workgroup_size(64) fn vsm_finalize(@builtin(global_invocation_id) id:vec3<u32>) {
-    if id.x<vsm.counts.x {
-        vsm_quad_args[id.x]=VsmDraw(6u,atomicLoad(&vsm_dirty.counts[id.x]),0u,0u);
-    }
-    if id.x<vsm.counts.z {
-        let t=vsm_templates[id.x];
-        var args=t.args;
-        // Levels without stale requested pages issue zero-instance draws: no vertex work.
-        if atomicLoad(&vsm_dirty.counts[t.level])==0u {args.instance_count=0u;}
-        vsm_caster_args[id.x]=args;
-    }
-}
 
-// ---- Page raster: one pass per level, stencil-masked to the stale pages ----
-struct VsmPages {counts:array<u32,VSM_MAX_LEVELS>,pages:array<u32>};
-@group(0) @binding(11) var<storage,read> vsm_raster_pages:VsmPages;
-@group(0) @binding(12) var<storage,read> vsm_models:array<mat4x4<f32>>;
+// ---- Page raster (N8c): a per-level cluster cut, culled to this frame's stale pages ----
+// Casters are the meshes' visibility-buffer clusters (visibility_buffer.rs): original
+// geometry, or a clusterLOD hierarchy whose cut at level k keeps every cluster whose
+// simplification error is within levels[k].origin.w metres (texel-scale; negative draws
+// original geometry only). The cut depends on the sun's clipmap alone, so camera motion
+// keeps cached pages valid. Small clusters are rasterized in software, one workgroup per
+// cluster; large ones in hardware. Both write max(height << 32 | id) per texel centre into
+// 64-bit maps, top layer first, then the peel layer: the highest surface other than the
+// texel's top triangle. Writes are confined to the pages flagged in vsm_render.
+struct VsmCluster {lo:vec3<f32>,vertices:u32,hi:vec3<f32>,triangles:u32,owner:u32,refined:u32,primitives:u32,counts:u32,placement:u32,pad0:u32,pad1:u32,pad2:u32};
+struct VsmGroup {sphere:vec4<f32>,error:f32,pad0:u32,pad1:u32,pad2:u32};
+@group(0) @binding(25) var<storage,read> vsm_clusters:array<VsmCluster>;
+@group(0) @binding(26) var<storage,read> vsm_groups:array<VsmGroup>;
+// Per level: software dispatch (x, y, z, count) and hardware draw (vertices, instances,
+// first vertex, first instance), zeroed by the encoder before the cull; then per level
+// software cluster slots and hardware ones (counts.z each).
+struct VsmArgs {sw_x:u32,sw_y:u32,sw_z:u32,sw_count:atomic<u32>,hw_vertices:u32,hw_instances:atomic<u32>,hw_first:u32,hw_first_instance:u32};
+struct VsmWork {args:array<VsmArgs,VSM_MAX_LEVELS>,lists:array<u32>};
+@group(0) @binding(27) var<storage,read_write> vsm_work:VsmWork;
+// A read-only view for the raster, which also uses the arguments as its indirect buffer.
+@group(0) @binding(33) var<storage,read> vsm_work_in:array<u32>;
+const VSM_LISTS:u32=8u*VSM_MAX_LEVELS;
+@group(0) @binding(31) var<storage,read_write> vsm_top_map:array<atomic<u64>>;
+@group(0) @binding(32) var<storage,read_write> vsm_peel_map:array<atomic<u64>>;
+// Its own group: wgpu forbids binding arrays beside uniform buffers.
+@group(2) @binding(8) var<storage,read> vsm_cluster_data:binding_array<VsmU32s,PRIMARY_BATCHES>;
 struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
-@group(1) @binding(30) var<uniform> vsm_pass:VsmPass;
-// The top layer's ids, which the peel pass excludes.
-@group(0) @binding(13) var vsm_top_ids:texture_2d_array<u32>;
+@group(3) @binding(30) var<uniform> vsm_pass:VsmPass;
+// Clusters whose light-space box spans more texels than this use the hardware raster.
+override VSM_SW_EXTENT:f32=32.0;
+// The peel-layer variant of the raster entry points.
+override VSM_PEEL_PASS:bool=false;
 
-fn vsm_clip(level:u32,p:vec3<f32>)->vec4<f32> {
-    let origin=vsm.levels[level].origin.xy;let extent=vsm_extent(level);
-    let xy=(p.xy-origin)/extent;
-    return vec4<f32>(xy.x*2.0-1.0,1.0-xy.y*2.0,(p.z-vsm.depth.x)*vsm.depth.y,1.0);
+// World-space simplification error of group g under placement's conservative affine
+// scale (visibility_buffer_cull.wgsl's group_error without the projection).
+fn vsm_group_error(g:u32,placement:u32)->f32 {
+    let s=vsm_groups[g];
+    if s.error>=3.0e38 {return 3.0e38;}
+    let m=models[placement];
+    let a=abs(m[0].xyz);let b=abs(m[1].xyz);let c=abs(m[2].xyz);
+    let columns=max(a.x+a.y+a.z,max(b.x+b.y+b.z,c.x+c.y+c.z));
+    let rows=max(a.x+b.x+c.x,max(a.y+b.y+c.y,a.z+b.z+c.z));
+    return s.error*sqrt(columns*rows);
 }
-@vertex fn vs_vsm_clear(@builtin(vertex_index) corner:u32,@builtin(instance_index) n:u32)->@builtin(position) vec4<f32> {
-    let level=vsm_pass.level;let pages=vsm.counts.y;
-    let local=vsm_raster_pages.pages[level*pages*pages+n];
-    let page=vec2<u32>(local%pages,local/pages);
-    var corners=array<vec2<u32>,6>(vec2<u32>(0u,0u),vec2<u32>(1u,0u),vec2<u32>(0u,1u),vec2<u32>(0u,1u),vec2<u32>(1u,0u),vec2<u32>(1u,1u));
-    // Page corners are exact binary fractions of the window.
-    let xy=vec2<f32>(page+corners[corner])/f32(pages);
-    return vec4<f32>(xy.x*2.0-1.0,1.0-xy.y*2.0,0.0,1.0);
+@compute @workgroup_size(64) fn vsm_cull(@builtin(global_invocation_id) id:vec3<u32>) {
+    let index=id.x+id.y*65535u*64u;
+    if index>=vsm.counts.z {return;}
+    let c=vsm_clusters[index];
+    let m=models[c.placement];
+    var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
+    for(var i=0u;i<8u;i+=1u) {
+        let p=vec3<f32>(select(c.lo.x,c.hi.x,(i&1u)!=0u),select(c.lo.y,c.hi.y,(i&2u)!=0u),select(c.lo.z,c.hi.z,(i&4u)!=0u));
+        let q=vsm_light((m*vec4<f32>(p,1.0)).xyz).xy;
+        lo=min(lo,q);hi=max(hi,q);
+    }
+    let coarse=vsm_group_error(c.owner,c.placement);
+    let own=select(vsm_group_error(c.refined,c.placement),-3.4e38,c.refined==0xffffffffu);
+    let pages=vsm.counts.y;
+    for(var level=0u;level<vsm.counts.x;level+=1u) {
+        // clusterlod's cut: the coarser group is too coarse, this cluster fine enough.
+        let bound=vsm.levels[level].origin.w;
+        if !(coarse>bound && own<=bound) {continue;}
+        let texel=vsm_texel(level);
+        let page=f32(VSM_PAGE)*texel;
+        let origin=vsm.levels[level].origin.xy;
+        // One texel of padding covers the rounding between box and raster transforms.
+        let a=floor((lo-vec2<f32>(texel)-origin)/page);
+        let b=floor((hi+vec2<f32>(texel)-origin)/page);
+        if any(b<vec2<f32>(0.0)) || any(a>=vec2<f32>(f32(pages))) {continue;}
+        let p0=vec2<u32>(max(a,vec2<f32>(0.0)));
+        let p1=vec2<u32>(min(b,vec2<f32>(f32(pages-1u))));
+        var stale=false;
+        for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
+            for(var x=p0.x;x<=p1.x;x+=1u) {
+                if vsm_render[(level*pages+y)*pages+x]!=0u {stale=true;break;}
+            }
+        }
+        if !stale {continue;}
+        let extent=(hi-lo)/texel;
+        let n=vsm.counts.z;
+        if max(extent.x,extent.y)>VSM_SW_EXTENT {
+            let slot=atomicAdd(&vsm_work.args[level].hw_instances,1u);
+            vsm_work.lists[(2u*level+1u)*n+slot]=index;
+        } else {
+            let slot=atomicAdd(&vsm_work.args[level].sw_count,1u);
+            vsm_work.lists[2u*level*n+slot]=index;
+        }
+    }
 }
-@fragment fn fs_vsm_clear()->@location(0) u32 {return 0u;}
-
-struct VsmCaster {@builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) placement:u32,@location(1) light:vec3<f32>};
-@vertex fn vs_vsm_caster(@location(0) position:vec3<f32>,@builtin(instance_index) placement:u32)->VsmCaster {
-    let world=(vsm_models[placement]*vec4<f32>(position,1.0)).xyz;
-    let p=vsm_light(world);
-    return VsmCaster(vsm_clip(vsm_pass.level,p),placement,p);
+@compute @workgroup_size(8) fn vsm_finish(@builtin(local_invocation_index) level:u32) {
+    let n=atomicLoad(&vsm_work.args[level].sw_count);
+    vsm_work.args[level].sw_x=min(n,65535u);
+    vsm_work.args[level].sw_y=select(0u,(n+65534u)/65535u,n!=0u);
+    vsm_work.args[level].sw_z=1u;
+    vsm_work.args[level].hw_vertices=384u;
+    vsm_work.args[level].hw_first=0u;
+    vsm_work.args[level].hw_first_instance=0u;
+}
+// Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
+@compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    if vsm_render[slot]==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        let t=corner+vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        let i=(level*side+t.y)*side+t.x;
+        atomicStore(&vsm_top_map[i],0lu);
+        atomicStore(&vsm_peel_map[i],0lu);
+    }
+}
+// The map word of one caster fragment at texel t of `level` (normalized height in [0,1]).
+fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
+    let pages=vsm.counts.y;
+    let page=t/VSM_PAGE;
+    if vsm_render[(level*pages+page.y)*pages+page.x]==0u {return;}
+    let side=pages*VSM_PAGE;
+    let i=(level*side+t.y)*side+t.x;
+    let value=(u64(bitcast<u32>(clamp(height,0.0,1.0)))<<32u)|u64(id);
+    if VSM_PEEL_PASS {
+        // Only one triangle of a watertight surface covers a texel centre, so this is the
+        // next surface down.
+        if u32(atomicLoad(&vsm_top_map[i])&0xfffffffflu)==id {return;}
+        atomicMax(&vsm_peel_map[i],value);
+    } else {
+        atomicMax(&vsm_top_map[i],value);
+    }
 }
 // Placement + 1 and primitive, so the lookup can recognize the receiver's own 1-ring.
-@fragment fn fs_vsm_caster(input:VsmCaster,@builtin(primitive_index) primitive:u32)->@location(0) u32 {
-    return ((input.placement+1u)<<vsm.misc.x)|primitive;
+fn vsm_cluster_id(c:VsmCluster,batch:u32,local:u32)->u32 {
+    var primitive=c.primitives+local;
+    if (c.counts&0x10000u)!=0u {primitive=vsm_cluster_data[batch].data[c.primitives+local];}
+    return ((c.placement+1u)<<vsm.misc.x)|primitive;
 }
-// The peel layer: the highest surface other than the texel's top triangle. Only one
-// triangle of a watertight surface covers a texel centre, so this is the next surface down.
-@fragment fn fs_vsm_peel(input:VsmCaster,@builtin(primitive_index) primitive:u32)->@location(0) u32 {
-    let id=((input.placement+1u)<<vsm.misc.x)|primitive;
-    let top=textureLoad(vsm_top_ids,vec2<i32>(input.position.xy),i32(vsm_pass.level),0).x;
-    if top==id {discard;}
-    return id;
+// A cluster vertex in level texels (x, y) and normalized height.
+fn vsm_cluster_vertex(c:VsmCluster,batch:u32,local:u32,level:u32)->vec3<f32> {
+    let o=c.vertices+3u*local;
+    let d=&vsm_cluster_data[batch].data;
+    let p=vec3<f32>(bitcast<f32>((*d)[o]),bitcast<f32>((*d)[o+1u]),bitcast<f32>((*d)[o+2u]));
+    let q=vsm_light((models[c.placement]*vec4<f32>(p,1.0)).xyz);
+    let texel=vsm_texel(level);
+    return vec3<f32>((q.xy-vsm.levels[level].origin.xy)/texel,(q.z-vsm.depth.x)*vsm.depth.y);
+}
+var<workgroup> vsm_wg_texels:array<vec3<f32>,128>;
+var<workgroup> vsm_wg_cluster:u32;
+fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
+// Software raster: the cluster's vertices are transformed once into workgroup memory, then
+// one invocation per triangle samples the texel centres it covers. Vertices snap to 8
+// subpixel bits with exact integer edge functions; edges are inclusive (the max makes double
+// coverage harmless) and both windings are kept.
+@compute @workgroup_size(128) fn vsm_raster(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let level=vsm_pass.level;
+    let slot=group.x+group.y*65535u;
+    let n=vsm.counts.z;
+    if li==0u {vsm_wg_cluster=select(VSM_NONE,vsm_work_in[VSM_LISTS+2u*level*n+slot],slot<vsm_work_in[8u*level+3u]);}
+    let index=workgroupUniformLoad(&vsm_wg_cluster);
+    if index==VSM_NONE {return;}
+    let c=vsm_clusters[index];
+    let batch=primary_placements[c.placement]&0x1fffffffu;
+    if li<((c.counts>>8u)&255u) {vsm_wg_texels[li]=vsm_cluster_vertex(c,batch,li,level);}
+    workgroupBarrier();
+    if li>=(c.counts&255u) {return;}
+    let t=vsm_cluster_data[batch].data[c.triangles+li];
+    let s0=vsm_wg_texels[t&255u];var s1=vsm_wg_texels[(t>>8u)&255u];var s2=vsm_wg_texels[(t>>16u)&255u];
+    let a=vec2<i32>(round(s0.xy*256.0));var b=vec2<i32>(round(s1.xy*256.0));var d=vec2<i32>(round(s2.xy*256.0));
+    let area=vsm_edge(a,b,d);
+    if area==0 {return;}
+    if area<0 {let p=b;b=d;d=p;let z=s1;s1=s2;s2=z;}
+    let inverse=1.0/f32(abs(area));
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    // Texel centres are at 256x+128 subpixels.
+    let lo=max(min(a,min(b,d)),vec2<i32>(0));
+    let hi=min(max(a,max(b,d)),vec2<i32>(side*256-1));
+    let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
+    let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
+    let id=vsm_cluster_id(c,batch,li);
+    for(var y=first.y;y<=last.y;y+=1) {
+        for(var x=first.x;x<=last.x;x+=1) {
+            let p=vec2<i32>(x*256+128,y*256+128);
+            let w0=vsm_edge(b,d,p);let w1=vsm_edge(d,a,p);let w2=vsm_edge(a,b,p);
+            if (w0|w1|w2)<0 {continue;}
+            let z=(f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse;
+            vsm_write(level,vec2<u32>(u32(x),u32(y)),z,id);
+        }
+    }
+}
+// Hardware raster of large clusters: one instance per cluster, 128 triangle slots; unused
+// slots collapse to a point. The attachment only sizes the raster area.
+struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32};
+@vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
+    let level=vsm_pass.level;
+    let index=vsm_work_in[VSM_LISTS+(2u*level+1u)*vsm.counts.z+instance];
+    let c=vsm_clusters[index];let local=vertex/3u;
+    var out:VsmHw;
+    out.position=vec4<f32>(0.0,0.0,0.0,1.0);
+    if local<(c.counts&255u) {
+        let batch=primary_placements[c.placement]&0x1fffffffu;
+        let t=vsm_cluster_data[batch].data[c.triangles+local];
+        let s=vsm_cluster_vertex(c,batch,(t>>(8u*(vertex%3u)))&255u,level);
+        let side=f32(vsm.counts.y*VSM_PAGE);
+        out.position=vec4<f32>(s.x/side*2.0-1.0,1.0-s.y/side*2.0,0.5,1.0);
+        out.height=s.z;
+        out.id=vsm_cluster_id(c,batch,local);
+    }
+    return out;
+}
+@fragment fn fs_vsm_cluster(input:VsmHw) {
+    vsm_write(vsm_pass.level,vec2<u32>(input.position.xy),input.height,input.id);
 }
 
 // ---- Lookup: exact 1-ring, then the map march beyond `near` ----
 @group(0) @binding(15) var vsm_output:texture_storage_2d<r32uint,write>;
-@group(0) @binding(16) var vsm_depth:texture_depth_2d_array;
-@group(0) @binding(17) var vsm_ids:texture_2d_array<u32>;
+// The 64-bit maps as (id, normalized height bits) words; empty texels are zero.
+@group(0) @binding(16) var<storage,read> vsm_top_words:array<vec2<u32>>;
 @group(0) @binding(18) var vsm_level_in:texture_2d<u32>;
-@group(0) @binding(19) var vsm_peel:texture_depth_2d_array;
-@group(0) @binding(21) var vsm_peel_ids:texture_2d_array<u32>;
+@group(0) @binding(19) var<storage,read> vsm_peel_words:array<vec2<u32>>;
+fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
+    let side=vsm.counts.y*VSM_PAGE;
+    return (level*side+u32(cell.y))*side+u32(cell.x);
+}
 
 struct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};
 struct VsmVec4s {data:array<vec4<f32>>};
@@ -331,6 +491,8 @@ var<private> vsm_cone:f32;
 // Diagnostics (VSM_DEBUG only): the trace scripts/n8-diagnose.py classifies, two uvec4s per
 // pixel. Whole-vector read-modify-writes of named components only.
 //   x: ring-blocked directions (0-7) | map-blocked (8-15) | level (24-31)
+//   y: triangles visited by shared walks (0-15) | by per-direction walks (16-31)
+//   z: shared candidates decided (0-15) | per-direction candidates (16-31)
 //   w: ring triangles tested (0-15) | fan stopped by: step cap (16), open edge (17),
 //      non-manifold corner (18)
 // The second word is reserved (zero).
@@ -346,9 +508,10 @@ override VSM_ASCEND:bool=true;
 // `near`, as N8 did).
 override VSM_FAR:bool=true;
 override VSM_ORIGIN_STEP:bool=true;
-// The first step tests the 2x2 texel block around the ray, not only the texel under it:
-// near-contact occluder edges that miss the texel centre (N8b).
-override VSM_FIRST_BLOCK:bool=true;
+// The first step's 2x2 texel block around the ray (VirtualShadowSettings::first_block, misc.w
+// bits 2-3): near-contact occluder edges that miss the texel centre (N8b). 1: every
+// placement (N8b); 2: beyond the texel under the ray, only other placements' surfaces; 0: off.
+fn vsm_block_mode()->u32 {return (vsm.misc.w>>2u)&3u;}
 @group(0) @binding(20) var<storage,read_write> vsm_debug:array<vec4<u32>>;
 var<private> vsm_dbg:vec4<u32>;
 fn vsm_permute(v:vec3<f32>)->vec3<f32> {return vec3<f32>(v[vsm_axes.x],v[vsm_axes.y],v[vsm_axes.z]);}
@@ -643,37 +806,53 @@ override VSM_REFINE:u32=3u;
 // The continuity rule's reach: the predicted crossing must lie this many spans of the last
 // located triangle beyond the sample (0: any ray still below after the refinements).
 override VSM_SPAN:f32=1.5;
-// The current direction's ray origin and the exact tests' tmin (the receiver's epsilon).
-var<private> vsm_ray_from:vec3<f32>;
-var<private> vsm_tmin:f32;
-fn vsm_triangle_hits(batch:u32,primitive:u32,placement:u32,j:u32)->bool {
-    let v=vsm_triangle(batch,primitive);
-    let m=models[placement];
-    let o=vsm_ray_from;
-    let a=vsm_permute((m*vec4<f32>(v[0],1.0)).xyz-o);
-    let b=vsm_permute((m*vec4<f32>(v[1],1.0)).xyz-o);
-    let c=vsm_permute((m*vec4<f32>(v[2],1.0)).xyz-o);
-    return vsm_hits_sheared(vsm_shear[j],a,b,c,vsm_tmin);
+// N8c: share the near steps across the eight directions while the cone's footprint stays
+// within this many texels, and test the max-mip over the footprint before later steps.
+override VSM_SHARE:f32=0.5;
+override VSM_MIP:bool=true;
+// Directions (bit j) among `mask` that the world-space triangle (a, b, c) blocks: the
+// watertight test from each direction's ray origin, from the receiver's epsilon on.
+fn vsm_hits_mask(r:VsmReceiver,a:vec3<f32>,b:vec3<f32>,c:vec3<f32>,mask:u32)->u32 {
+    var hits=0u;
+    if r.thin {
+        for(var j=0u;j<8u;j+=1u) {
+            if (mask&(1u<<j))==0u {continue;}
+            let o=vsm_ray_origin(r,j);
+            if vsm_hits_sheared(vsm_shear[j],vsm_permute(a-o),vsm_permute(b-o),vsm_permute(c-o),r.epsilon) {hits|=1u<<j;}
+        }
+    } else {
+        let o=vsm_shared_origin;
+        let pa=vsm_permute(a-o);let pb=vsm_permute(b-o);let pc=vsm_permute(c-o);
+        for(var j=0u;j<8u;j+=1u) {
+            if (mask&(1u<<j))!=0u && vsm_hits_sheared(vsm_shear[j],pa,pb,pc,r.epsilon) {hits|=1u<<j;}
+        }
+    }
+    return hits;
 }
-// Whether direction j's ray crosses the surface the texel's triangle `id` belongs to (N8b).
-// Scan triangles are often smaller than a texel, so the triangle rasterized at the texel
-// centre need not be the one above the ray. Walk across the exact-position adjacency to the
-// triangle under the sample's light-space xy (leaving each triangle across the edge the
-// point is most outside of), testing every triangle visited exactly from the receiver's own
-// epsilon on (an occluder of another mesh can be closer than `near`). If the sample is below
-// that triangle's plane, the ray rises to it farther along its drift: predict that crossing
-// xy, walk there, and repeat, so the crossing triangle itself is tested. 1: an exact hit.
-// 2: after the refinements the ray is still exactly below an interior triangle and the
+fn vsm_triangle_mask(r:VsmReceiver,batch:u32,primitive:u32,m:mat4x4<f32>,mask:u32)->u32 {
+    let v=vsm_triangle(batch,primitive);
+    return vsm_hits_mask(r,(m*vec4<f32>(v[0],1.0)).xyz,(m*vec4<f32>(v[1],1.0)).xyz,(m*vec4<f32>(v[2],1.0)).xyz,mask);
+}
+// The exact decision of the surface the texel's triangle `id` belongs to (N8b), for the rays
+// of `mask` around one aim. Scan triangles are often smaller than a texel, so the triangle
+// rasterized at the texel centre need not be the one above the ray. Walk across the
+// exact-position adjacency to the triangle under the aim's light-space xy (leaving each
+// triangle across the edge the point is most outside of), testing every triangle visited,
+// and the located triangle's edge neighbours, exactly against every direction in `mask`
+// (N8c; N8b tested one direction). If the aim height `q.z` is below the located triangle's
+// plane, the ray `step3` rises to it farther along its drift: predict that crossing xy, walk
+// there, and repeat, so the crossing triangle itself is tested. x: the blocked directions;
+// it stops early once direction `primary` (8: every direction of `mask`) is blocked. Bit 8:
+// after the refinements `step3`'s ray is still exactly below an interior triangle and the
 // predicted crossing lies beyond the triangles tested (VSM_SPAN spans of the last), so the
-// surface is taken to continue there: a far or steep crossing. Never for the receiver's own
+// surface is taken to continue there (N8b's continuity rule). Never for the receiver's own
 // triangle or 1-ring (tested over the whole ray), at an open edge (the ray may escape), or
-// for a ray grazing a crest.
-fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,j:u32,q:vec3<f32>,step3:vec3<f32>,steps:u32)->u32 {
-    vsm_ray_from=vsm_ray_origin(r,j);
-    vsm_tmin=r.epsilon;
+// for a ray grazing a crest. Bit 9: the walk ended with the ray exactly below the last
+// located interior triangle, which y names (the shared walk's cue for per-direction ones).
+fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f32>,step3:vec3<f32>,steps:u32)->vec2<u32> {
     let batch=primary_placements[placement]&0x1fffffffu;
     let m=models[placement];
-    let o=vsm_ray_from;
+    let stop=select(mask,1u<<primary,primary<8u);
     var t=id&((1u<<vsm.misc.x)-1u);
     var previous=VSM_MISSING;
     // The current walk aim and the ray's light-space height there.
@@ -681,6 +860,7 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,j:u32,q:vec3<f32>,step3:vec3<
     var ray=q.z;
     var below=false;
     var span=0.0;
+    var hits=0u;
     for(var phase=0u;phase<=VSM_REFINE;phase+=1u) {
         var located=false;
         var height=0.0;
@@ -689,9 +869,11 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,j:u32,q:vec3<f32>,step3:vec3<
         // than running out of steps (a crossing farther than the walk reaches).
         var stopped=false;
         for(var step=0u;step<steps;step+=1u) {
+            if VSM_DEBUG {vsm_dbg.y+=select(1u,0x10000u,primary<8u);}
             let v=vsm_triangle(batch,t);
             let a=(m*vec4<f32>(v[0],1.0)).xyz;let b=(m*vec4<f32>(v[1],1.0)).xyz;let c=(m*vec4<f32>(v[2],1.0)).xyz;
-            if vsm_hits_sheared(vsm_shear[j],vsm_permute(a-o),vsm_permute(b-o),vsm_permute(c-o),vsm_tmin) {return 1u;}
+            hits|=vsm_hits_mask(r,a,b,c,mask&~hits);
+            if (hits&stop)==stop {return vec2<u32>(hits,t);}
             let la=vsm_light(a);let lb=vsm_light(b);let lc=vsm_light(c);
             let area=(lb.x-la.x)*(lc.y-la.y)-(lb.y-la.y)*(lc.x-la.x);
             if area==0.0 {stopped=true;break;}
@@ -726,7 +908,10 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,j:u32,q:vec3<f32>,step3:vec3<
         for(var e=0u;e<3u;e+=1u) {
             let n=vsm_neighbour(batch,t,e);
             interior=interior && n!=VSM_MISSING;
-            if n!=VSM_MISSING && n!=previous && vsm_triangle_hits(batch,n,placement,j) {return 1u;}
+            if n!=VSM_MISSING && n!=previous {
+                hits|=vsm_triangle_mask(r,batch,n,m,mask&~hits);
+                if (hits&stop)==stop {return vec2<u32>(hits,t);}
+            }
         }
         // A refinement aim beyond the walk's reach keeps the previous phase's verdict.
         if !located && !stopped && phase>0u {break;}
@@ -739,145 +924,318 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,j:u32,q:vec3<f32>,step3:vec3<
         aim+=step3.xy*(gap/step3.z);
         ray+=gap;
     }
-    if VSM_CONTINUE && below && distance(aim,q.xy)>VSM_SPAN*span {return 2u;}
-    return 0u;
+    if VSM_CONTINUE && below && distance(aim,q.xy)>VSM_SPAN*span {hits|=0x100u;}
+    if below {hits|=0x200u;}
+    return vec2<u32>(hits,t);
 }
-// SMRT-style march of one direction: geometric steps from `near` through the receiver's
-// level, then each coarser one (N8b), up to the highest caster. Step i covers the ray
-// heights since the previous step, the first from the ray origin itself (N8b: contacts of
-// other meshes inside `near`); its texel is a candidate when a layer surface is above that
-// range (and above the receiver's own plane at the texel centre), and the candidate is
-// decided exactly by vsm_top_hits. Most lit samples cost one depth load.
-fn vsm_far(r:VsmReceiver,ring:f32,level0:u32,j:u32)->bool {
+// ---- Max-mips of the top layer (N8c): per clip level, mips 1..log2(side) concatenated ----
+@group(0) @binding(35) var<storage,read> vsm_mips:array<f32>;
+@group(0) @binding(36) var<storage,read_write> vsm_mips_out:array<f32>;
+// First word of `mip` (>= 1) of clip `level`: the mips before it hold (side^2 - s^2)/3
+// words, s the side of mip - 1.
+fn vsm_mip_base(level:u32,mip:u32)->u32 {
+    let side=vsm.counts.y*VSM_PAGE;
+    let s=side>>(mip-1u);
+    return level*((side*side-1u)/3u)+(side*side-s*s)/3u;
+}
+// One mip (vsm_pass.level) of every clip level (z): the largest normalized top height of
+// the 2x2 cells below. Rebuilt on every page-work frame.
+@compute @workgroup_size(8,8) fn vsm_mip(@builtin(global_invocation_id) id:vec3<u32>) {
+    let mip=vsm_pass.level;let level=id.z;
+    if level>=vsm.counts.x {return;}
+    let side=vsm.counts.y*VSM_PAGE;let s=side>>mip;
+    if any(id.xy>=vec2<u32>(s)) {return;}
+    var h=0.0;
+    for(var k=0u;k<4u;k+=1u) {
+        let c=id.xy*2u+vec2<u32>(k&1u,k>>1u);
+        if mip==1u {
+            h=max(h,bitcast<f32>(vsm_top_words[(level*side+c.y)*side+c.x].y));
+        } else {
+            h=max(h,vsm_mips_out[vsm_mip_base(level,mip-1u)+c.y*(2u*s)+c.x]);
+        }
+    }
+    vsm_mips_out[vsm_mip_base(level,mip)+id.y*s+id.x]=h;
+}
+// Whether no top-layer texel centre a ray can sample within `radius` of `centre` (light xy)
+// at clip `level` is above `lower`: the max over at most 2x2 cells of the mip whose cells
+// span the footprint. Conservative: false at window edges.
+fn vsm_mip_clear(level:u32,centre:vec2<f32>,radius:f32,lower:f32)->bool {
+    let texel=vsm_texel(level);
+    let side=vsm.counts.y*VSM_PAGE;
+    let x=(centre-vsm.levels[level].origin.xy)/texel;
+    let a=floor(x-vec2<f32>(radius/texel));let b=floor(x+vec2<f32>(radius/texel));
+    if any(a<vec2<f32>(0.0)) || any(b>=vec2<f32>(f32(side))) {return false;}
+    let span=max(b.x-a.x,b.y-a.y)+1.0;
+    let mip=u32(ceil(log2(span)));
+    var h=0.0;
+    if mip==0u {
+        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*side+u32(a.x)].y);
+    } else {
+        let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
+        let s=side>>mip;let base=vsm_mip_base(level,mip);
+        h=max(max(vsm_mips[base+ia.y*s+ia.x],vsm_mips[base+ia.y*s+ib.x]),max(vsm_mips[base+ib.y*s+ia.x],vsm_mips[base+ib.y*s+ib.x]));
+    }
+    return fma(h,vsm.depth.z,vsm.depth.x)<=lower;
+}
+
+// Per direction, the last map triangle decided (N8b's repeat filter).
+var<private> vsm_last:array<u32,8>;
+fn vsm_last_store(j:u32,id:u32) {
+    // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
+    switch j {
+        case 0u {vsm_last[0]=id;} case 1u {vsm_last[1]=id;} case 2u {vsm_last[2]=id;} case 3u {vsm_last[3]=id;}
+        case 4u {vsm_last[4]=id;} case 5u {vsm_last[5]=id;} case 6u {vsm_last[6]=id;} default {vsm_last[7]=id;}
+    }
+}
+// Light-space step of direction j per unit ray parameter.
+fn vsm_step(j:u32)->vec3<f32> {
     let d=vsm_dirs[j];
-    let p=vsm_light(vsm_ray_origin(r,j));
-    let step=vec3<f32>(dot(d,vsm.u.xyz),dot(d,vsm.v.xyz),dot(d,vsm.l.xyz));
+    return vec3<f32>(dot(d,vsm.u.xyz),dot(d,vsm.v.xyz),dot(d,vsm.l.xyz));
+}
+// One map texel's candidates for the rays of `open` sampled at light-space `q` (N8b): the
+// top layer, then the peel layer below it while that is above the ray too, each decided
+// exactly by vsm_top_hits unless it is the receiver's own triangle, a 1-ring member already
+// tested over the whole ray, or `last`. `j` < 8 decides one direction's sample (stopping at
+// its first block, continuity applying to it); 8 decides a shared sample of every open
+// direction around the central ray. `foreign` decides only other placements' surfaces.
+// Returns the newly blocked directions and the last candidate tested.
+fn vsm_texel_hits(r:VsmReceiver,ring:f32,p:vec2<f32>,cell:vec2<i32>,level:u32,lower:f32,open:u32,j:u32,q:vec3<f32>,step3:vec3<f32>,steps:u32,last:u32,foreign:bool)->vec2<u32> {
+    let bits=vsm.misc.x;
+    let texel=vsm_texel(level);
+    let bias=f32(vsm.misc.z)*vsm.depth.z*5.960464477539063e-8;
+    let word=vsm_word(cell,level);
+    let top_word=vsm_top_words[word];
+    let top=fma(bitcast<f32>(top_word.y),vsm.depth.z,vsm.depth.x);
+    if top<=lower+bias {return vec2<u32>(0u,last);}
+    var blocked=0u;
+    var tested=last;
+    var above=0u;
+    for(var layer=0u;layer<select(1u,2u,VSM_PEEL);layer+=1u) {
+        var id=0u;
+        if layer==0u {
+            id=top_word.x;
+            above=id>>bits;
+        } else {
+            let peel_word=vsm_peel_words[word];
+            let peel=fma(bitcast<f32>(peel_word.y),vsm.depth.z,vsm.depth.x);
+            if peel<=lower+bias {break;}
+            id=peel_word.x;
+            // A surface hidden under its own placement is usually a fold of it, whose
+            // crossings the top walk decides; `peel_own` tests those too (scan overhangs).
+            if (vsm.misc.w&2u)==0u && id>>bits==above {break;}
+        }
+        if id==0u {continue;}
+        let placement=(id>>bits)-1u;
+        // Ring members were tested exactly over the whole ray; without the ring walk only
+        // the receiver's own triangle was, and its neighbours are decided here.
+        if placement==r.slot && (id&((1u<<bits)-1u))==r.primitive {continue;}
+        if foreign && placement==r.slot {continue;}
+        if (vsm.misc.w&1u)!=0u && placement==r.slot && distance(q.xy,p)<=ring+2.0*texel && vsm_in_ring(r,id) {continue;}
+        if id==tested {continue;}
+        tested=id;
+        if VSM_DEBUG {vsm_dbg.z+=select(1u,0x10000u,j<8u);}
+        // One direction's sample tests its own ray (N8b); a shared one every open ray.
+        let mask=select(open&~blocked,(1u<<j)&open,j<8u);
+        // Attempt 0 is the sample's walk. After a shared walk that ended with the central ray
+        // exactly below an interior surface, which each open ray crosses (or escapes) along
+        // its own drift, attempts 1-8 refine each from the located triangle with its own
+        // continuity. One call site keeps the walk inlined once.
+        var located=id;
+        var refine=false;
+        for(var attempt=0u;attempt<9u;attempt+=1u) {
+            var m=mask;var k=j;var qk=q;var sk=step3;
+            if attempt>0u {
+                k=attempt-1u;
+                if !refine || ((open&~blocked)&(1u<<k))==0u {continue;}
+                sk=vsm_step(k);
+                let pk=vsm_light(vsm_ray_origin(r,k));
+                qk=vec3<f32>(pk.xy+sk.xy*((q.z-pk.z)/sk.z),q.z);
+                m=1u<<k;
+            }
+            let found=vsm_top_hits(r,located,placement,m,k,qk,sk,steps);
+            let hits=found.x;
+            if attempt>0u {
+                if (hits&0x1ffu)!=0u {blocked|=1u<<k;}
+                continue;
+            }
+            blocked|=hits&0xffu;
+            if j<8u {
+                if (hits&0x100u)!=0u {blocked|=1u<<j;}
+                break;
+            }
+            refine=(hits&0x200u)!=0u;
+            if !refine {break;}
+            located=(id&~((1u<<bits)-1u))|found.y;
+        }
+        if (open&~blocked)==0u || (j<8u && (blocked&(1u<<j))!=0u) {break;}
+    }
+    return vec2<u32>(blocked,tested);
+}
+// The far march (N8b's schedule, N8c's order): heights above the receiver's origin at
+// geometric steps from the origin through the receiver's level, then two per coarser level,
+// up to the highest caster. Step i covers the ray heights since the previous step, the
+// first from the origin itself (contacts of other meshes inside `near`); a texel is a
+// candidate when a layer surface is above that range (and above the receiver's own plane at
+// the texel centre), decided exactly by vsm_top_hits. Steps whose cone footprint (the eight
+// directions' samples) stays within VSM_SHARE texels are shared: each texel any direction
+// can sample there (the 2x2 block around the ray at the first step) is checked once, and a
+// candidate's walk is tested against every open direction. Later steps first test the
+// max-mip over the footprint (VSM_MIP); only where a surface may be above the ray does each
+// open direction sample its own texel, as N8b did. Returns the directions left open.
+fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
+    var open=open0;
+    let p=vsm_light(vsm_shared_origin);
     let near=vsm.params.x;
-    if step.z<=0.0 {return false;}
-    // The ray parameter past every caster; at least one step, since a contact closer than
-    // `near` still needs its sample.
-    let clear=max((vsm.depth.w-p.z)/step.z,1.0001*near);
+    // The cone's radius per unit height around the central ray, and the thin origins'
+    // offsets from the central one.
+    var drift=0.0;var offset=0.0;
+    for(var j=0u;j<8u;j+=1u) {
+        let s=vsm_step(j);
+        drift=max(drift,length(s.xy)/max(s.z,1e-6));
+        offset=max(offset,distance(vsm_light(vsm_ray_origin(r,j)).xy,p.xy));
+        vsm_last_store(j,0u);
+    }
+    // Heights past every caster; at least one step, since a contact closer than `near`
+    // still needs its sample.
+    let clear=max(vsm.depth.w-p.z,1.0001*near);
     let size=i32(vsm.counts.y*VSM_PAGE);
     // The origin-side receiver plane in light space, for texel-centre extrapolation.
-    let toward=select(lighting.eye-r.world,d,r.thin);
+    let toward=select(lighting.eye-r.world,vsm.l.xyz,r.thin);
     let n=select(-r.geometric,r.geometric,dot(r.geometric,toward)>=0.0);
     let nl=vec3<f32>(dot(n,vsm.u.xyz),dot(n,vsm.v.xyz),dot(n,vsm.l.xyz));
     let facing=nl.z>0.0;
     let gradient=-nl.xy/max(nl.z,0.05);
     let bias=f32(vsm.misc.z)*vsm.depth.z*5.960464477539063e-8;
     let samples=max(vsm.misc.y,1u);
-    let bits=vsm.misc.x;
-    var tested=0u;
-    var t=near;
-    var below=select(fma(step.z,near,p.z),p.z,VSM_ORIGIN_STEP);
+    var shared_last=0u;
+    var h=near;
+    var below=select(p.z+near,p.z,VSM_ORIGIN_STEP);
     for(var level=level0;level<select(level0+1u,vsm.counts.x,VSM_ASCEND);level+=1u) {
-    let end=min(max(vsm_cap(level)/step.z,1.0001*near),clear);
-    if end<=t {continue;}
+    let end=min(max(vsm_cap(level),1.0001*near),clear);
+    if end<=h {continue;}
     let count=select(VSM_EXTRA_SAMPLES,samples,level==level0);
-    let ratio=pow(end/t,1.0/f32(count));
+    let ratio=pow(end/h,1.0/f32(count));
     let texel=vsm_texel(level);
     let lo=vsm.levels[level].origin.xy;
     let steps=VSM_WALK_STEPS<<min(level-level0,2u);
     for(var k=0u;k<count;k+=1u) {
-        t*=ratio;
-        let q=fma(step,vec3<f32>(t),p);
+        h*=ratio;
         let start=below;
-        below=q.z;
-        let block=VSM_FIRST_BLOCK && level==level0 && k==0u;
-        let corner=vec2<i32>(floor((q.xy-lo)/texel-vec2<f32>(0.5)));
-        for(var c=0u;c<select(1u,4u,block);c+=1u) {
-        let cell=select(vec2<i32>(floor((q.xy-lo)/texel)),corner+vec2<i32>(i32(c&1u),i32(c>>1u)),block);
-        if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(size)) {continue;}
-        var lower=start;
-        if facing {
-            let centre=lo+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
-            lower=max(lower,p.z+dot(gradient,centre-p.xy));
-        }
-        let top=fma(textureLoad(vsm_depth,cell,level,0),vsm.depth.z,vsm.depth.x);
-        if top<=lower+bias {continue;}
-        // The top layer, then the peel layer below it while that is above the ray too. A
-        // surface hidden under its own placement is usually a fold of it, whose crossings
-        // the top walk decides; `peel_own` tests those too (scan overhangs).
-        var above=0u;
-        for(var layer=0u;layer<select(1u,2u,VSM_PEEL);layer+=1u) {
-            var id=0u;
-            if layer==0u {
-                id=textureLoad(vsm_ids,cell,level,0).x;
-                above=id>>bits;
-            } else {
-                let peel=fma(textureLoad(vsm_peel,cell,level,0),vsm.depth.z,vsm.depth.x);
-                if peel<=lower+bias {break;}
-                id=textureLoad(vsm_peel_ids,cell,level,0).x;
-                if (vsm.misc.w&2u)==0u && id>>bits==above {break;}
+        below=p.z+h;
+        let radius=offset+drift*h;
+        let block=vsm_block_mode()!=0u && level==level0 && k==0u;
+        let shared_step=radius<=VSM_SHARE*texel;
+        if !shared_step && VSM_MIP && vsm_mip_clear(level,p.xy,radius,start+bias) {continue;}
+        // Shared: every cell a direction's sample (or its first-step 2x2 block) can touch,
+        // decided once for all open rays. Otherwise each open direction's own cell (or 2x2
+        // block), as N8b. One call site keeps vsm_texel_hits inlined once.
+        let x=(p.xy-lo)/texel;
+        let reach=vec2<f32>(radius/texel);
+        let a=vec2<i32>(floor(x-reach-vec2<f32>(select(0.0,0.5,block))));
+        let b=vec2<i32>(floor(x+reach-vec2<f32>(select(0.0,0.5,block))))+vec2<i32>(select(0,1,block));
+        let width=u32(b.x-a.x+1);
+        let cells=select(select(1u,4u,block),width*u32(b.y-a.y+1),shared_step);
+        let slots=select(8u*cells,cells,shared_step);
+        for(var slot=0u;slot<slots;slot+=1u) {
+            var j=8u;
+            var cell=a+vec2<i32>(i32(slot%width),i32(slot/width));
+            var q=vec3<f32>(p.xy,p.z+h);
+            var s=vec3<f32>(0.0,0.0,1.0);
+            var o=p;
+            if !shared_step {
+                j=slot/cells;
+                if (open&(1u<<j))==0u {continue;}
+                s=vsm_step(j);
+                o=vsm_light(vsm_ray_origin(r,j));
+                q=vec3<f32>(o.xy+s.xy*(h/s.z),o.z+h);
+                let c=slot%cells;
+                cell=select(vec2<i32>(floor((q.xy-lo)/texel)),vec2<i32>(floor((q.xy-lo)/texel-vec2<f32>(0.5)))+vec2<i32>(i32(c&1u),i32(c>>1u)),block);
             }
-            if id==0u {continue;}
-            let placement=(id>>bits)-1u;
-            // Ring members were tested exactly over the whole ray; without the ring walk
-            // only the receiver's own triangle was, and its neighbours are decided here.
-            if placement==r.slot && (id&((1u<<bits)-1u))==r.primitive {continue;}
-            if (vsm.misc.w&1u)!=0u && placement==r.slot && distance(q.xy,p.xy)<=ring+2.0*texel && vsm_in_ring(r,id) {continue;}
-            if id==tested {continue;}
-            tested=id;
-            if vsm_top_hits(r,id,placement,j,q,step,steps)!=0u {return true;}
-        }
+            if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(size)) {continue;}
+            var lower=start-p.z+o.z;
+            if facing {
+                let centre=lo+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
+                lower=max(lower,o.z+dot(gradient,centre-o.xy));
+            }
+            let last=select(vsm_last[min(j,7u)],shared_last,j==8u);
+            let foreign=block && vsm_block_mode()==2u && any(cell!=vec2<i32>(floor((q.xy-lo)/texel)));
+            let result=vsm_texel_hits(r,ring,o.xy,cell,level,lower,open,j,q,s,steps,last,foreign);
+            open&=~result.x;
+            if j==8u {shared_last=result.y;} else {vsm_last_store(j,result.y);}
+            if open==0u {return 0u;}
         }
     }
-    if t>=clear {break;}
+    if h>=clear {break;}
     }
-    return false;
+    return open;
 }
 
+// ---- The lookup passes ----
+// Cost screens only: 1 writes every covered pixel lit with no other work, 2 also sets up
+// the receiver and its eight directions.
+override VSM_SKIP:u32=0u;
+struct VsmPixel {valid:bool,r:VsmReceiver,level:u32,l:vec3<f32>};
+// One receiver's setup: its record, Interactive's eight directions, its own triangle,
+// origin and ray permutation. invalid: unlit or not shadowed (visibility 256).
+fn vsm_prepare(id:vec2<u32>)->VsmPixel {
+    var out:VsmPixel;
+    let size=textureDimensions(vsm_world);
+    let p=vec2<i32>(id);
+    let record=textureLoad(vsm_hit,p,0);
+    let normal=textureLoad(vsm_normal,p,0);
+    let light=lights[0];
+    if record.x==0u || normal.w==0.0 || light.kind.z==0u {return out;}
+    let world=textureLoad(vsm_world,p,0);
+    // fresh_estimate's cascade coverage and light basis, so directions match Interactive.
+    let depth=dot(shadow_views[light.kind.y].camera_depth,vec4<f32>(world.xyz,1.0));
+    var layer=VSM_NONE;
+    for(var i=0u;i<light.kind.z;i+=1u) {
+        let coverage=shadow_views[light.kind.y+i].coverage_bias;
+        if depth>=coverage.x && depth<=coverage.y {layer=light.kind.y+i;break;}
+    }
+    if layer==VSM_NONE {return out;}
+    let view=shadow_views[layer];
+    let slot=record.x-1u;
+    out.r=VsmReceiver(world.xyz,normal.xyz,world.w,normal.w<0.0,slot,primary_placements[slot]&0x1fffffffu,record.y);
+    let l=-light.travel_outer.xyz;
+    let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
+    let seed=vsm_hash(id.x+id.y*size.x);
+    let shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
+    let slope=view.texel.z;
+    // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
+    vsm_dirs[0]=vsm_direction(0u,shift,l,u,v,slope);vsm_dirs[1]=vsm_direction(1u,shift,l,u,v,slope);
+    vsm_dirs[2]=vsm_direction(2u,shift,l,u,v,slope);vsm_dirs[3]=vsm_direction(3u,shift,l,u,v,slope);
+    vsm_dirs[4]=vsm_direction(4u,shift,l,u,v,slope);vsm_dirs[5]=vsm_direction(5u,shift,l,u,v,slope);
+    vsm_dirs[6]=vsm_direction(6u,shift,l,u,v,slope);vsm_dirs[7]=vsm_direction(7u,shift,l,u,v,slope);
+    vsm_own=vsm_triangle(out.r.batch,out.r.primitive);
+    vsm_shared_origin=vsm_origin(out.r,l);
+    vsm_prepare_rays(l);
+    out.valid=true;
+    out.level=textureLoad(vsm_level_in,p,0).x;
+    out.l=l;
+    return out;
+}
+fn vsm_visible(id:vec2<u32>,blocked:u32) {
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(32u*(8u-countOneBits(blocked&0xffu))));
+}
 @compute @workgroup_size(8,4) fn vsm_lookup(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(vsm_world);
     if any(id.xy>=size) {return;}
     if textureLoad(vsm_tiles,id.xy/VSM_TRACE_TILE,0).x==0u {return;}
-    let p=vec2<i32>(id.xy);
-    let record=textureLoad(vsm_hit,p,0);
-    let normal=textureLoad(vsm_normal,p,0);
-    var visible=256u;
-    let light=lights[0];
-    if record.x!=0u && normal.w!=0.0 && light.kind.z!=0u {
-        let world=textureLoad(vsm_world,p,0);
-        // fresh_estimate's cascade coverage and light basis, so directions match Interactive.
-        let depth=dot(shadow_views[light.kind.y].camera_depth,vec4<f32>(world.xyz,1.0));
-        var layer=VSM_NONE;
-        for(var i=0u;i<light.kind.z;i+=1u) {
-            let coverage=shadow_views[light.kind.y+i].coverage_bias;
-            if depth>=coverage.x && depth<=coverage.y {layer=light.kind.y+i;break;}
-        }
-        if layer!=VSM_NONE {
-            let view=shadow_views[layer];
-            let slot=record.x-1u;
-            let r=VsmReceiver(world.xyz,normal.xyz,world.w,normal.w<0.0,slot,primary_placements[slot]&0x1fffffffu,record.y);
-            let l=-light.travel_outer.xyz;
-            let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
-            let seed=vsm_hash(id.x+id.y*size.x);
-            let shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
-            let slope=view.texel.z;
-            // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
-            vsm_dirs[0]=vsm_direction(0u,shift,l,u,v,slope);vsm_dirs[1]=vsm_direction(1u,shift,l,u,v,slope);
-            vsm_dirs[2]=vsm_direction(2u,shift,l,u,v,slope);vsm_dirs[3]=vsm_direction(3u,shift,l,u,v,slope);
-            vsm_dirs[4]=vsm_direction(4u,shift,l,u,v,slope);vsm_dirs[5]=vsm_direction(5u,shift,l,u,v,slope);
-            vsm_dirs[6]=vsm_direction(6u,shift,l,u,v,slope);vsm_dirs[7]=vsm_direction(7u,shift,l,u,v,slope);
-            vsm_own=vsm_triangle(r.batch,r.primitive);
-            vsm_shared_origin=vsm_origin(r,l);
-            vsm_prepare_rays(l);
-            let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,l));
-            var blocked=ring.blocked;
-            let level=textureLoad(vsm_level_in,p,0).x;
-            vsm_dbg.x=ring.blocked|(min(level,0xffu)<<24u);
-            if VSM_FAR && level!=VSM_NONE && blocked!=0xffu {
-                for(var j=0u;j<8u;j+=1u) {
-                    if (blocked&(1u<<j))==0u && vsm_far(r,ring.radius,level,j) {
-                        blocked|=1u<<j;
-                        vsm_dbg.x|=1u<<(8u+j);
-                    }
-                }
-            }
-            visible=32u*(8u-countOneBits(blocked));
-        }
+    if VSM_SKIP==1u {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(256u));return;}
+    let px=vsm_prepare(id.xy);
+    if !px.valid {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(256u));return;}
+    let r=px.r;
+    if VSM_SKIP==2u {textureStore(vsm_output,vec2<i32>(id.xy),vec4<u32>(u32(dot(vsm_shear[r.primitive&7u],vsm_own[0])>1e30)+256u));return;}
+    let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
+    var blocked=ring.blocked;
+    vsm_dbg.x=ring.blocked|(min(px.level,0xffu)<<24u);
+    if VSM_FAR && px.level!=VSM_NONE && blocked!=0xffu {
+        let open=vsm_march(r,ring.radius,px.level,0xffu&~blocked);
+        vsm_dbg.x|=((0xffu&~blocked)&~open)<<8u;
+        blocked=0xffu&~open;
     }
-    textureStore(vsm_output,p,vec4<u32>(visible));
+    vsm_visible(id.xy,blocked);
     if VSM_DEBUG {
         let index=2u*(id.x+id.y*size.x);
         vsm_debug[index]=vsm_dbg;

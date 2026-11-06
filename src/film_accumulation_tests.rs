@@ -40,6 +40,7 @@ fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSetting
     f("near", &mut s.near);
     f("texels_per_pixel_log2", &mut s.texels_per_pixel_log2);
     f("finest_texel", &mut s.finest_texel);
+    f("caster_error_texels", &mut s.caster_error_texels);
     let u = |key: &str, value: &mut u32| {
         if let Some(x) = v[key].as_u64() {
             *value = x as u32;
@@ -48,6 +49,7 @@ fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSetting
     u("pages", &mut s.pages);
     u("march_samples", &mut s.march_samples);
     u("bias_ulps", &mut s.bias_ulps);
+    u("first_block", &mut s.first_block);
     if let Some(ring) = v["ring"].as_bool() {
         s.ring = ring;
     }

@@ -691,6 +691,26 @@ fn gpu_visibility_quarry() {
         visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
     );
     let lifts = list("lod_lift", visibility_buffer::DEFAULT_LOD_LIFT);
+    // N8c: shadow caster cut errors (texels; negative = original geometry) and sun-turning
+    // frames timed after each configuration's static frames.
+    let mut base = crate::VirtualShadowSettings::default();
+    if let Some(v) = m.get("virtual") {
+        if let Some(x) = v["first_block"].as_u64() {
+            base.first_block = x as u32;
+        }
+        if let Some(x) = v["march_samples"].as_u64() {
+            base.march_samples = x as u32;
+        }
+    }
+    let caster_errors = m["caster_error"]
+        .as_array()
+        .map(|v| v.iter().map(|x| Some(x.as_f64().unwrap() as f32)).collect())
+        .unwrap_or_else(|| vec![None]);
+    let turn_frames = m["turn_frames"].as_u64().unwrap_or(0) as usize;
+    let lighting =
+        lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let shadows = r.shadows.settings.clone();
     let poses: Vec<usize> = m["poses"].as_array().map_or(vec![0, 1, 0], |v| {
         v.iter().map(|x| x.as_u64().unwrap() as usize).collect()
     });
@@ -731,26 +751,44 @@ fn gpu_visibility_quarry() {
         }
         let mut configs = vec![];
         if !no_rt {
-            configs.push((PrimaryVisibility::Traced, 0., 0., 0.));
+            // Traced receivers are full detail, so their casters are too.
+            configs.push((PrimaryVisibility::Traced, 0., 0., 0., Some(-1.)));
         }
         for &lod in &lods {
             for &extent in &extents {
                 for &lift in &lifts {
-                    configs.push((PrimaryVisibility::VisibilityBuffer, lod, extent, lift));
+                    for &caster in &caster_errors {
+                        configs.push((
+                            PrimaryVisibility::VisibilityBuffer,
+                            lod,
+                            extent,
+                            lift,
+                            caster,
+                        ));
+                    }
                 }
             }
         }
-        for (mode, lod, extent, lift) in configs {
+        for (mode, lod, extent, lift, caster) in configs {
             r.primary_mode = mode;
             r.set_lod_error_pixels(lod);
             r.set_software_raster_extent(extent);
             r.set_lod_receiver_lift(lift);
+            r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
+                caster_error_texels: caster.unwrap_or(base.caster_error_texels),
+                ..base
+            })
+            .unwrap();
+            let suffix = match caster {
+                Some(c) if mode != PrimaryVisibility::Traced => format!("-ce{c}"),
+                _ => String::new(),
+            };
             let label = if mode == PrimaryVisibility::Traced {
                 format!("p{pose}-Traced")
             } else if lift != 0. {
-                format!("p{pose}-lod{lod}-sw{extent}-lift{lift}")
+                format!("p{pose}-lod{lod}-sw{extent}-lift{lift}{suffix}")
             } else {
-                format!("p{pose}-lod{lod}-sw{extent}")
+                format!("p{pose}-lod{lod}-sw{extent}{suffix}")
             };
             let warm = if m["timing"].as_bool() == Some(true) {
                 32
@@ -782,6 +820,39 @@ fn gpu_visibility_quarry() {
             }
             r.test_drain("N1c quarry timing tail");
             timing(&mut r, &label, &mut rows);
+            if turn_frames > 0 {
+                // N8c: the sun turning every frame re-rasterizes every requested page.
+                let Light::Directional { travel, lux } = lighting.lights[0] else {
+                    panic!("quarry sun");
+                };
+                for i in 0..turn_frames {
+                    let mut lit = lighting.clone();
+                    lit.lights[0] = Light::Directional {
+                        travel: Mat4::from_rotation_y(0.0005 * (i + 1) as f32)
+                            .transform_vector3(travel),
+                        lux,
+                    };
+                    r.set_lighting_and_shadows(&lit, &shadows).unwrap();
+                    render(
+                        &mut r,
+                        &color,
+                        &camera,
+                        &mut asset.draws(Visibility::Frustum),
+                    );
+                    timing(&mut r, &format!("{label}-turn"), &mut rows);
+                }
+                r.test_drain("N8c quarry turning tail");
+                timing(&mut r, &format!("{label}-turn"), &mut rows);
+                r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+                render(
+                    &mut r,
+                    &color,
+                    &camera,
+                    &mut asset.draws(Visibility::Frustum),
+                );
+                r.test_drain("N8c quarry sun restored");
+                let _ = r.poll().unwrap();
+            }
             if let Some(first) = first {
                 let settled = first == hit_record(&r);
                 changed.push(

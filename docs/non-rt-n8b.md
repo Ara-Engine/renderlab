@@ -2,6 +2,8 @@
 
 Follow-up unit to [N8](non-rt-n8.md), 2026-11-06 UTC, base `aee5007`, branch `t3/n8b-virtual-shadow-quality`. Bar (Islam, 2026-11-06): Unreal's quality on every measure at about Unreal's cost. Labels: **M** measured here, **I** inference.
 
+**Follow-up: [N8c](non-rt-n8c.md)** rasterizes pages from cluster lists, shares the near march across directions and adds max-mips: quarry static 5.95 → 3.1-3.4 ms, sun turning 24 → 4.6-4.8 ms, quality still above Unreal but with more leaks than N8b. The lookup described below is N8b's.
+
 ## Result
 
 **Quality: N8b now beats Unreal VSM on every measured quantity of S2, S3 and the quarry, and beats N8 on every measure of all four benches. One miss remains: S1 pose 1 has 2 umbra leaks against VSM's 0. Cost: worse than N8 and well above Unreal's. The lookup now does exact work where N8 guessed, and the cost levers delivered little (horizon) or were not reached (caster LOD, panning, static/dynamic split).**

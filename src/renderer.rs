@@ -2805,7 +2805,7 @@ impl Renderer {
                     } else {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
-                    self.encode_virtual(&mut encoder, draws, stamps(8));
+                    self.encode_virtual(&mut encoder, stamps(8));
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
