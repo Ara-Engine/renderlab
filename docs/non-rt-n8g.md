@@ -144,7 +144,7 @@ HDR RMS is .0099-.0115 on S2 and .0146-.0152 on S3, against VSM's .0145-.0154 an
   - `edits/`: the scripted edits.
   - `runs/`: every lease's log, preflight and memory samples.
 
-  Raw dumps over 5 MB were deleted after summarizing; they are listed in `deleted-raw.txt`. GPU Trace files were deleted after export.
+  Raw dumps and scored raw frames (1,659 files, about 7.1 GB: counts, hits, HDR and world arrays, S1-S3 rgba16f frames, GPU Trace files after export, staged binaries) were deleted and are listed in `deleted-raw.txt`. What remains (1.7 GB) is almost all N7a's hardlinked S2/S3 references.
 - **Invalid early baselines.** In leases p2b-p5 the "base" ran HEAD's unmasked shader on binaries that pack record slots into the horizon offsets. Those base timings and hashes are invalid (its ring-horizon skip read past its batch) and are not used above. The final lease's `basefix` base reproduces N8f's hashes. p2's first records run fell back to chains, because one 4 M-triangle batch exceeded a single binding; that motivated the segments. As an unpatched control it read 2.52-2.54 ms on camera frames, matching N8f.
 - **Build and environment.** Development/test profile, RTX 4070 SUPER, NVIDIA 617.14, Vulkan; validation off for timing and traces, on for S1-S3. The final binary and shader hashes are in `final-binaries.sha256`. The Cargo target and staged binaries were removed after the gate.
 - **Gate.** `cargo test -p renderlab --lib -j 2` exits 0 on the committed source: 106 passed, 0 failed, 107 ignored. It also exited 0 inside the final lease, before formatting. Clippy (`-D warnings -A clippy::nonminimal_bool -A clippy::items_after_test_module`) passes on renderlab and renderlab-viewer, and fmt passes.
