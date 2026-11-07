@@ -24,6 +24,20 @@ struct File {
     /// The text last offered to the renderer.
     text: String,
     rejected: bool,
+    queued: Option<Change>,
+}
+
+struct Change {
+    detected: Instant,
+    file_age: Duration,
+    retry: bool,
+}
+
+struct Pending {
+    index: usize,
+    text: String,
+    change: Change,
+    job: crate::renderer::ProgramReload,
 }
 
 /// One reload attempt.
@@ -40,6 +54,7 @@ pub struct Reload {
 
 pub struct ShaderWatch {
     files: Vec<File>,
+    pending: Option<Pending>,
 }
 
 impl ShaderWatch {
@@ -53,14 +68,17 @@ impl ShaderWatch {
                     kind: Kind::Standard,
                     text: crate::STANDARD_PROGRAM.into(),
                     rejected: false,
+                    queued: None,
                 },
                 File {
                     path: prelude,
                     kind: Kind::Prelude,
                     text: prelude_text,
                     rejected: false,
+                    queued: None,
                 },
             ],
+            pending: None,
         }
     }
 
@@ -80,6 +98,7 @@ impl ShaderWatch {
             kind: kind.clone(),
             text: accepted_source.into(),
             rejected: false,
+            queued: None,
         };
         if let Some(existing) = self.files.iter_mut().find(|f| f.kind == kind) {
             *existing = file;
@@ -101,6 +120,7 @@ impl ShaderWatch {
             kind: Kind::Prelude,
             text: accepted_source.into(),
             rejected: false,
+            queued: None,
         };
         if let Some(existing) = self.files.iter_mut().find(|f| f.kind == Kind::Prelude) {
             *existing = file;
@@ -111,7 +131,10 @@ impl ShaderWatch {
 
     /// A watcher for registered programs only, without engine-file watches.
     pub fn programs_only() -> Self {
-        Self { files: vec![] }
+        Self {
+            files: vec![],
+            pending: None,
+        }
     }
 
     /// Whether a file's current text is rejected, so the last working pipelines render.
@@ -156,6 +179,118 @@ impl ShaderWatch {
         reloads
     }
 
+    /// Nonblocking program reloads: one owned compile job, with newer saves coalesced
+    /// per file. Frames keep using the previous revision. Finished results install
+    /// between frames only if both file contents and renderer snapshot still match.
+    /// Prelude edits use the existing synchronous transaction after the worker settles.
+    /// Do not mix this with `poll`, or re-register watches while a job is pending.
+    pub fn poll_async(&mut self, renderer: &mut Renderer) -> Vec<Reload> {
+        for file in &mut self.files {
+            let Ok(text) = std::fs::read_to_string(&file.path) else {
+                continue;
+            };
+            if text != file.text {
+                file.text = text;
+                let file_age = std::fs::metadata(&file.path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|saved| SystemTime::now().duration_since(saved).ok())
+                    .unwrap_or_default();
+                file.queued = Some(Change {
+                    detected: Instant::now(),
+                    file_age,
+                    retry: false,
+                });
+            }
+        }
+        let mut reloads = vec![];
+        if self.pending.as_ref().is_some_and(|p| p.job.is_finished()) {
+            let pending = self.pending.take().unwrap();
+            let file = &mut self.files[pending.index];
+            if pending.text == file.text && pending.job.current(renderer) {
+                let change = file.queued.take().unwrap_or(pending.change);
+                let result = renderer.finish_program_reload(pending.job);
+                file.rejected = matches!(result, Err(ReloadError::Rejected { .. }));
+                reloads.push(Reload {
+                    kind: file.kind.clone(),
+                    path: file.path.clone(),
+                    result,
+                    detected: change.detected,
+                    file_age: change.file_age,
+                    retry: change.retry,
+                });
+            } else {
+                // A renderer change needs a fresh snapshot even when the file did not
+                // change. Preserve the original save timestamp for latency accounting.
+                file.queued.get_or_insert(pending.change);
+                pending.job.discard();
+            }
+        }
+        if reloads.iter().any(|r| r.result.is_ok()) {
+            for file in &mut self.files {
+                if file.rejected && file.queued.is_none() {
+                    file.queued = Some(Change {
+                        detected: Instant::now(),
+                        file_age: Duration::ZERO,
+                        retry: true,
+                    });
+                }
+            }
+        }
+        if self.pending.is_none()
+            && let Some(index) = self.files.iter().position(|f| f.queued.is_some())
+        {
+            let file = &mut self.files[index];
+            let change = file.queued.take().unwrap();
+            let program = match &file.kind {
+                Kind::Prelude => None,
+                Kind::Standard => Some(renderer.standard_program().clone()),
+                Kind::Program(program) => Some(program.clone()),
+            };
+            if let Some(program) = program {
+                match renderer.start_program_reload(&program, &file.text) {
+                    Ok(job) => {
+                        self.pending = Some(Pending {
+                            index,
+                            text: file.text.clone(),
+                            change,
+                            job,
+                        })
+                    }
+                    Err(result) => reloads.push(Reload {
+                        kind: file.kind.clone(),
+                        path: file.path.clone(),
+                        result: Err(result),
+                        detected: change.detected,
+                        file_age: change.file_age,
+                        retry: change.retry,
+                    }),
+                }
+            } else {
+                let reload = self.reload(
+                    index,
+                    renderer,
+                    change.detected,
+                    change.file_age,
+                    change.retry,
+                );
+                if reload.result.is_ok() {
+                    for file in &mut self.files {
+                        if file.rejected && file.queued.is_none() {
+                            file.queued = Some(Change {
+                                detected: Instant::now(),
+                                file_age: Duration::ZERO,
+                                retry: true,
+                            });
+                        }
+                    }
+                }
+                reloads.push(reload);
+            }
+        }
+        reloads
+    }
+
     fn reload(
         &mut self,
         i: usize,
@@ -181,6 +316,16 @@ impl ShaderWatch {
             detected,
             file_age,
             retry,
+        }
+    }
+}
+
+impl Drop for ShaderWatch {
+    fn drop(&mut self) {
+        // Compile jobs never outlive their owner, including when a viewer closes
+        // halfway through an edit. This wait is only on watcher shutdown.
+        if let Some(pending) = self.pending.take() {
+            pending.job.discard();
         }
     }
 }

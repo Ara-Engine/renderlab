@@ -11,14 +11,48 @@ use crate::program::{
     self, Composed, MaterialParameters, ParameterLayout, ProgramShared, STANDARD_PROGRAM, Stage,
 };
 use primary_ray_gpu::film_accumulation;
-use std::sync::{Mutex, Weak};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    sync::{Mutex, Weak},
+};
+
+type Module = Arc<Owned<wgpu::ShaderModule>>;
+
+/// Retains wgpu's validated naga IR and emitted module for recent compositions. The
+/// source hash includes the prelude, program, stage and parameter declaration.
+#[derive(Default)]
+pub(super) struct ModuleCache(Mutex<VecDeque<([u8; 32], Module)>>);
+impl ModuleCache {
+    fn get(&self, source: &str) -> Option<Module> {
+        let key: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, m)| m.clone())
+    }
+    fn insert(&self, source: &str, module: Module) {
+        let mut entries = self.0.lock().unwrap();
+        let key: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+        entries.retain(|(k, _)| *k != key);
+        if entries.len() == 32 {
+            entries.pop_front();
+        }
+        entries.push_back((Sha256::digest(source.as_bytes()).into(), module));
+    }
+}
 
 #[cfg(test)]
 #[path = "program_api_tests.rs"]
 mod api_tests;
+#[path = "program_reload.rs"]
+mod program_reload;
 #[cfg(test)]
 #[path = "toon_tests.rs"]
 mod toon_tests;
+pub(crate) use program_reload::ProgramReload;
 
 /// A program pipeline set a frame shades with. Raster sets are pairs indexed by tangent
 /// stream; the traced set is indexed by `Shading`.
@@ -92,9 +126,13 @@ impl ProgramPipelines {
 /// an A/B toggle) is then a cache hit instead of a driver compile. Once `LIMIT` pipelines
 /// have gone through it, the next transaction replaces it, dropping that history, which
 /// bounds its memory over a long editing session.
+/// Applications can persist it with `Renderer::set_program_cache_directory`; recent
+/// composed modules retain wgpu's validated naga IR in a separate bounded cache.
 pub(super) struct ProgramCache {
     cache: Option<wgpu::PipelineCache>,
     pipelines: u64,
+    path: Option<PathBuf>,
+    pub modules: Arc<ModuleCache>,
 }
 impl ProgramCache {
     /// About 93 KB of driver data per lit pipeline was measured (fast-shader-reload.md).
@@ -106,6 +144,8 @@ impl ProgramCache {
                 .contains(wgpu::Features::PIPELINE_CACHE)
                 .then(|| Self::create(device)),
             pipelines: 0,
+            path: None,
+            modules: Arc::default(),
         }
     }
     fn create(device: &wgpu::Device) -> wgpu::PipelineCache {
@@ -133,6 +173,59 @@ impl ProgramCache {
     pub fn get(&self) -> Option<&wgpu::PipelineCache> {
         self.cache.as_ref()
     }
+
+    fn persist(&self) -> std::io::Result<()> {
+        let (Some(path), Some(cache)) = (&self.path, &self.cache) else {
+            return Ok(());
+        };
+        let Some(data) = cache.get_data().filter(|d| d.len() <= CACHE_BYTES) else {
+            return Ok(());
+        };
+        let mut bytes = Sha256::digest(&data).to_vec();
+        bytes.extend(data);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        // Same-directory replacement is atomic, including on Windows. Each process has
+        // its own temporary file; concurrent viewers may replace one another's cache.
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temporary, bytes)?;
+        let result = std::fs::rename(&temporary, path);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+}
+
+const CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn cache_data(bytes: &[u8]) -> Option<&[u8]> {
+    let (hash, data) = bytes.split_at_checked(32)?;
+    (data.len() <= CACHE_BYTES && Sha256::digest(data).as_slice() == hash).then_some(data)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn cache_rejects_truncation_and_corruption() {
+        let data = b"opaque wgpu data";
+        let mut bytes = Sha256::digest(data).to_vec();
+        bytes.extend(data);
+        assert_eq!(cache_data(&bytes), Some(data.as_slice()));
+        assert!(cache_data(&bytes[..31]).is_none());
+        bytes[33] ^= 1;
+        assert!(cache_data(&bytes).is_none());
+    }
+}
+
+impl Drop for ProgramCache {
+    fn drop(&mut self) {
+        if self.pipelines > 0
+            && let Err(error) = self.persist()
+        {
+            eprintln!("program_pipeline_cache_save_failed={error}");
+        }
+    }
 }
 
 /// One created pipeline of a set.
@@ -144,15 +237,15 @@ pub(super) enum Built {
 /// One program's modules for every path the renderer has, created (and so validated by
 /// naga against each composition) inside its creation or reload transaction.
 pub(super) struct ProgramModules {
-    lit: Owned<wgpu::ShaderModule>,
-    hardware: Option<Owned<wgpu::ShaderModule>>,
-    fresh: Option<Owned<wgpu::ShaderModule>>,
+    lit: Module,
+    hardware: Option<Module>,
+    fresh: Option<Module>,
     /// Hard and Soft shading, present exactly while traced primary visibility is selected.
-    pub traced: Option<[Owned<wgpu::ShaderModule>; 2]>,
+    pub traced: Option<[Module; 2]>,
     /// Temporal film shading, present with `traced`; its pipeline compiles on first use.
-    pub temporal: Option<Owned<wgpu::ShaderModule>>,
+    pub temporal: Option<Module>,
     /// `Stage::TracedStreamed` Hard and Soft shading, built with `ProgramPipelines::streamed`.
-    pub streamed: Option<[Owned<wgpu::ShaderModule>; 2]>,
+    pub streamed: Option<[Module; 2]>,
 }
 impl ProgramModules {
     pub fn has(&self, variant: Variant) -> bool {
@@ -266,6 +359,7 @@ pub(super) struct ProgramAbi<'a> {
     pub fresh: Option<&'a FreshState>,
     pub primary: Option<&'a PrimaryState>,
     pub cache: Option<&'a wgpu::PipelineCache>,
+    pub modules: &'a ModuleCache,
 }
 
 pub(super) struct Compiled {
@@ -273,15 +367,23 @@ pub(super) struct Compiled {
     pub layout: Option<ParameterLayout>,
 }
 
-fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Owned<wgpu::ShaderModule> {
-    abi.ledger.own(
-        abi.device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
-            }),
-        ResourceKind::ShaderModule,
-    )
+fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
+    if let Some(module) = abi.modules.get(&composed.source) {
+        return module;
+    }
+    let module = Arc::new(
+        abi.ledger.own(
+            abi.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
+                }),
+            ResourceKind::ShaderModule,
+        ),
+    );
+    // Invalid modules must not enter the cache: their scoped validation error would
+    // otherwise disappear on a later hit. Cache only after this module's scopes pass.
+    module
 }
 fn scope_error(label: &str, error: wgpu::Error, traced: &[Composed]) -> Error {
     match error {
@@ -311,15 +413,14 @@ pub(super) fn compile_program(
             "program `{label}`: struct Parameters must be declared at module scope"
         )));
     }
-    let mut traced_sources: Vec<Composed> = abi
-        .primary
-        .and(preludes.traced)
+    let mut traced_sources: Vec<Composed> = preludes
+        .traced
         .into_iter()
         .flatten()
         .map(|head| program::compose(head, source, Stage::Traced, parameters))
         .collect();
     // The temporal module follows the Soft one; naga checks it in the same transaction.
-    if let Some(heads) = abi.primary.and(preludes.traced) {
+    if let Some(heads) = preludes.traced {
         let head = film_accumulation::shading_head(&heads[1])?;
         traced_sources.push(film_accumulation::compose_shading(
             &head, source, parameters,
@@ -335,8 +436,8 @@ pub(super) fn compile_program(
     };
     let modules = ProgramModules {
         lit: module(abi, label, &raster),
-        hardware: abi.hardware.and(preludes.hardware).map(raster_variant),
-        fresh: abi.fresh.and(preludes.fresh).map(raster_variant),
+        hardware: preludes.hardware.map(raster_variant),
+        fresh: preludes.fresh.map(raster_variant),
         traced: (!traced_sources.is_empty())
             .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i]))),
         temporal: traced_sources.get(2).map(|c| module(abi, label, c)),
@@ -344,6 +445,27 @@ pub(super) fn compile_program(
     };
     if let Some(error) = scopes.finish() {
         return Err(scope_error(label, error, &traced_sources));
+    }
+    abi.modules.insert(&raster.source, modules.lit.clone());
+    for (head, module) in [
+        (preludes.hardware, &modules.hardware),
+        (preludes.fresh, &modules.fresh),
+    ] {
+        if let (Some(head), Some(module)) = (head, module) {
+            abi.modules.insert(
+                &program::compose(head, source, Stage::Raster, parameters).source,
+                module.clone(),
+            );
+        }
+    }
+    for (composed, module) in traced_sources.iter().zip(
+        modules
+            .traced
+            .iter()
+            .flatten()
+            .chain(modules.temporal.iter()),
+    ) {
+        abi.modules.insert(&composed.source, module.clone());
     }
     Ok(Compiled { modules, layout })
 }
@@ -430,6 +552,47 @@ pub(super) fn standard_slot(
 }
 
 impl Renderer {
+    /// Enables a persistent cache in an application-owned directory. Configure before
+    /// the first lit frame. Files include a checksum, wgpu version and adapter/driver
+    /// identity; damaged or obsolete files start empty. Saving happens on renderer drop.
+    pub fn set_program_cache_directory(
+        &mut self,
+        directory: &Path,
+        adapter: &wgpu::AdapterInfo,
+    ) -> std::io::Result<()> {
+        if self.program_cache.cache.is_none() {
+            return Ok(());
+        }
+        let Some(key) = wgpu::util::pipeline_cache_key(adapter) else {
+            return Ok(());
+        };
+        let driver = Sha256::digest(format!("{adapter:?}").as_bytes());
+        let path = directory.join(format!("wgpu30-{key}-{driver:x}.bin"));
+        let bytes = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.len() <= CACHE_BYTES as u64 + 32 => {
+                Some(std::fs::read(&path)?)
+            }
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let data = bytes.as_deref().and_then(cache_data);
+        // SAFETY: the application-owned file contains only wgpu 30 get_data() output.
+        // Its checksum rejects partial/corrupt writes; wgpu validates its own header
+        // and driver compatibility, falling back to an empty cache on stale data.
+        self.program_cache.cache = Some(unsafe {
+            self.device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("persistent program pipelines"),
+                    data,
+                    fallback: true,
+                })
+        });
+        self.program_cache.path = Some(path);
+        self.program_cache.pipelines = 0;
+        Ok(())
+    }
+
     /// The built-in photoreal program, shaders/programs/standard.wgsl, which materials
     /// without a program use. It reloads like any program.
     pub fn standard_program(&self) -> &crate::Program {
@@ -524,6 +687,18 @@ impl Renderer {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
+        Ok(self.install_program(p, source, compiled, variants, built, compile))
+    }
+
+    fn install_program(
+        &mut self,
+        p: &crate::Program,
+        source: &str,
+        compiled: Compiled,
+        variants: Vec<Variant>,
+        built: Vec<Vec<Built>>,
+        compile: Duration,
+    ) -> ReloadReport {
         self.pipelines.successes += 1;
         self.pipelines.installations += 1;
         self.pipelines.created += pipeline_count(&built);
@@ -539,11 +714,11 @@ impl Renderer {
         source.clone_into(&mut slot.source);
         self.update_hashes();
         self.revision.0 += 1;
-        Ok(ReloadReport {
+        ReloadReport {
             revision: self.revision,
             compile,
             zeroed_parameters: zeroed,
-        })
+        }
     }
 
     /// The sets of program `id` the last frame drew with that `modules` can build: what a
@@ -779,7 +954,7 @@ impl Renderer {
     pub(super) fn compile_traced_modules(
         &self,
         heads: &[String; 2],
-    ) -> Result<Vec<([Owned<wgpu::ShaderModule>; 2], Owned<wgpu::ShaderModule>)>, Error> {
+    ) -> Result<Vec<([Module; 2], Module)>, Error> {
         let abi = self.program_abi();
         let temporal = film_accumulation::shading_head(&heads[1])?;
         let mut out = vec![];
@@ -816,6 +991,7 @@ impl Renderer {
                 .as_ref()
                 .filter(|_| self.pipeline.primary.is_some()),
             cache: self.program_cache.get(),
+            modules: &self.program_cache.modules,
         }
     }
     pub(super) fn preludes(&self) -> Preludes<'_> {

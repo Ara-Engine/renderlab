@@ -322,6 +322,7 @@ struct View {
     shaders: shader_watch::ShaderWatch,
     shader_rejected: bool,
     shader_check: Instant,
+    settings_check: Instant,
     lighting_file: lighting_settings::LightingFile,
     environment_file: environment_settings::EnvironmentFile,
     hdr_capture: Option<renderlab::Capture>,
@@ -498,6 +499,18 @@ impl View {
             },
             &source,
         )?;
+        let program_cache = std::env::var_os("RENDERLAB_PIPELINE_CACHE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|p| PathBuf::from(p).join("Renderlab/pipelines"))
+            });
+        if let Some(directory) = program_cache
+            && let Err(error) =
+                renderer.set_program_cache_directory(&directory, &adapter.get_info())
+        {
+            eprintln!("program_pipeline_cache_load_failed={error}");
+        }
         if latency_probe {
             eprintln!(
                 "latency_stage=renderer_pipeline_setup ms={:.3}",
@@ -583,6 +596,7 @@ impl View {
             shaders,
             shader_rejected: false,
             shader_check: Instant::now(),
+            settings_check: Instant::now(),
             lighting_file,
             environment_file,
             hdr_capture: None,
@@ -706,15 +720,18 @@ impl View {
             }
         }
         self.environment_file.advance(&mut self.renderer)?;
-        if self.shader_check.elapsed() >= Duration::from_millis(50) {
-            self.shader_check = Instant::now();
+        if self.settings_check.elapsed() >= Duration::from_millis(50) {
+            self.settings_check = Instant::now();
             if let Some(path) = &options.environment_settings {
                 self.environment_file.poll(path, &mut self.renderer);
             }
             if let Some(path) = &options.lighting {
                 self.lighting_file.poll(path, &mut self.renderer);
             }
-            for reload in self.shaders.poll(&mut self.renderer) {
+        }
+        if self.shader_check.elapsed() >= Duration::from_millis(10) {
+            self.shader_check = Instant::now();
+            for reload in self.shaders.poll_async(&mut self.renderer) {
                 let file = reload.path.display();
                 match reload.result {
                     Ok(report) => {
