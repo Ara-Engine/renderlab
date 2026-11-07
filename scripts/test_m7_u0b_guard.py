@@ -7,6 +7,7 @@ import tempfile
 import json
 import subprocess
 import sys
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +16,30 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_native_process_inventory_keeps_identity_and_rejects_query_errors(self):
+        rows=host.native_process_inventory()
+        current=next(p for p in rows if p["ProcessId"]==os.getpid())
+        self.assertEqual(current["ParentProcessId"],os.getppid())
+        self.assertEqual(Path(current["ExecutablePath"]).resolve(),Path(sys.executable).resolve())
+        module=host.load("m7-u0-ue")
+        with patch.object(host,"load",return_value=module),\
+             patch.object(host,"native_process_inventory",side_effect=OSError("injected native snapshot failure")):
+            wrapped=host.ue(allow_game=True)
+            snapshot=wrapped.MONITOR_STATE()
+            self.assertEqual(snapshot["available_gib"],0)
+            self.assertEqual(snapshot["foreign_renderers"][0]["Name"],"u0b-monitor-error")
+            self.assertIn("native snapshot failure",snapshot["monitor_error"])
+        processes=[dict(Name=name,ProcessId=pid,ParentProcessId=0,ExecutablePath=path)
+            for name,pid,path in (("cs2.exe",2000000001,"E:/Steam/steamapps/common/cs2/cs2.exe"),
+                ("reference-tests.exe",2000000002,"E:/renderlab-work/foreign/reference-tests.exe"),
+                ("cargo.exe",2000000003,"C:/tools/cargo.exe"))]
+        with patch.object(host,"native_process_inventory",return_value=rows+processes),\
+             patch.object(host.subprocess,"run",return_value=subprocess.CompletedProcess([],0,"GPU inventory","")):
+            actual=wrapped.E2E.state()
+        self.assertIn(2000000001,[p["ProcessId"] for p in actual["games"]])
+        self.assertIn(2000000002,[p["ProcessId"] for p in actual["foreign_renderers"]])
+        self.assertIn(2000000003,[p["ProcessId"] for p in actual["builds"]])
+
     def test_compiler_valve_is_timing_only_while_ram_floor_stays_mandatory(self):
         scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True)
         class Waiting(Exception):pass
@@ -24,7 +49,7 @@ class LeaseTests(unittest.TestCase):
             module=SimpleNamespace(START_GIB=4.,FLAGS=0,E2E=memory,
                 save=lambda p,v:p.write_text(json.dumps(v)))
             with patch.object(host,"OUT",root),\
-                 patch.object(host.subprocess,"run",return_value=subprocess.CompletedProcess([],0,'"cargo.exe"',"")),\
+                 patch.object(host,"native_process_inventory",return_value=[dict(Name="cargo.exe")]),\
                  patch.object(host.time,"sleep",side_effect=Waiting):
                 record=host.cpu_readiness(module,timing=False)
                 self.assertFalse(record["waiting"])
@@ -33,6 +58,9 @@ class LeaseTests(unittest.TestCase):
                 with self.assertRaises(Waiting):host.cpu_readiness(module,timing=True)
                 memory.available_gib=lambda:3.99
                 with self.assertRaises(Waiting):host.cpu_readiness(module,timing=False)
+                memory.available_gib=lambda:8.
+                with patch.object(host,"native_process_inventory",side_effect=OSError("injected inventory failure")):
+                    with self.assertRaises(Waiting):host.cpu_readiness(module,timing=False)
         module=host.load("m7-u0-ue")
         with patch.object(host,"load",return_value=module),\
              patch.object(module.E2E,"state",side_effect=lambda:dict(games=[],foreign_renderers=[],builds=[dict(Name="cargo.exe")])):

@@ -118,7 +118,7 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **10 tests** after the telemetry-routing and
+are unchanged. The focused Python suite passes **11 tests** after the telemetry-routing and
 bounded static-matrix handoff checks.
 
 ## Retained quarry references
@@ -617,7 +617,7 @@ is gone for 60 seconds.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
-inventory and the PDH memory guard remain mandatory and fail closed. Seven focused CPU
+inventory and the PDH memory guard remain mandatory and fail closed. Eight focused CPU
 guard tests cover this routing, native memory, failed inventory after a successful child
 exit, ordinary monitor failure, the atomic-acquisition race and requeuing every unfinished
 static configuration after a short lease. The floor scorer also rejects process failures
@@ -636,6 +636,19 @@ claims. The 60-second compiler-free valve and an exclusive quiet window are reta
 timing rows. Replacement SV timing rows pause the wallpaper through its supported setting,
 restore it in `finally`, and reject a run if a foreign build appears during live monitoring.
 CPU checks verify this distinction without disabling the RAM start floor.
+
+A further attempt, `process-282cdf92`, is rejected on the same mandatory WMI process-query
+timeout after 206.05 seconds (minimum RAM **4.082 GiB**), with no accepted archive. Its lease
+releases at **22:54:33.551Z**. Full process enumeration now uses a read-only native
+[Win32 process snapshot](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w)
+and [executable-path query](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew).
+The existing name/path game and renderer classification, PID ownership and parent traversal
+are unchanged. Protected/exited-process path errors retain the process name/PID with a null
+path, as WMI did; unexpected API errors reject the inventory. Preflight/live checks and the
+compiler valve use this inventory. A CPU probe reads **466 processes in 0.0207 seconds**
+under the foreign load; this is a guard diagnostic, not renderer performance. Tests verify
+the real current PID/parent/path, synthetic game/renderer/build classification and failed
+native queries. No renderer, shader or reference binary changes for this repair.
 
 After their summaries and full-image inspection, **113 native HDR archives over 5 MB** were
 deleted. Their per-case cleanup ledgers preserve hashes; score JSON, readbacks and inspected
