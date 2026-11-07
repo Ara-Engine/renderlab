@@ -98,8 +98,9 @@ const GI_ORPHAN:u32=2u;
 const GI_PARTIAL:u32=4u;
 const GI_QUEUED:u32=8u;
 
-fn gi_word(i:u32) -> u32 { return gi_table[i]; }
-fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_table[i]); }
+// Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
+// shading a vec4 array (gi_api.wgsl) so records load whole.
+fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_word(i)); }
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
 fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*GI_COLD_WORDS; }
 
@@ -201,13 +202,13 @@ fn gi_find(key:vec2<u32>) -> u32 {
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
     for(var i=0u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((key.y+i)&(GI_BUCKET-1u));
-        if (gi_table[gi_hot(slot)]&GI_KEY_BITS)==key.x { return slot; }
+        if (gi_word(gi_hot(slot))&GI_KEY_BITS)==key.x { return slot; }
     }
     return 0xffffffffu;
 }
 // SH coefficient j (band j / 3, channel j % 3) of a hot record, before its scale.
 fn gi_half(hot:u32, j:u32) -> f32 {
-    let pair=unpack2x16float(gi_table[hot+2u+(j>>1u)]);
+    let pair=unpack2x16float(gi_word(hot+2u+(j>>1u)));
     return select(pair.x,pair.y,(j&1u)!=0u);
 }
 

@@ -34,6 +34,25 @@ const INDIRECT_API: [&str; 2] = [
 /// The engine inputs `INDIRECT_API` defines.
 const INDIRECT_INPUTS: [&str; 1] = ["indirect_irradiance"];
 
+/// A world radiance cache shader's source (`name` under shaders/). Test builds read the
+/// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
+/// shader variants on one binary, one process per variant (docs/m7-g1b.md).
+pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'static, str> {
+    #[cfg(test)]
+    if let Some(text) = std::env::var_os("RENDERLAB_GI_SHADERS")
+        .and_then(|dir| std::fs::read_to_string(std::path::Path::new(&dir).join(name)).ok())
+    {
+        return text.into();
+    }
+    let _ = name;
+    builtin.into()
+}
+fn indirect_api() -> String {
+    let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
+    source.push_str(&gi_shader("gi_api.wgsl", INDIRECT_API[1]));
+    source
+}
+
 /// Source of a shading program: WGSL without bindings that defines
 /// `fn surface(input: SurfaceInput) -> Surface` and
 /// `fn shade(s: Surface, input: SurfaceInput) -> vec3<f32>` (exposed linear HDR), and may
@@ -296,7 +315,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         ),
     };
     let indirect = if uses_indirect(program) {
-        INDIRECT_API.concat()
+        indirect_api()
     } else {
         String::new()
     };

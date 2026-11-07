@@ -729,7 +729,7 @@ fn profile_json(r: &mut Renderer) -> Json {
     json!({
         "us": {"probe": p.probe, "claim": p.claim, "resolve": p.resolve, "scan": p.scan,
                "args": p.args, "trace": p.trace(), "setup": p.setup, "rays": p.rays, "finish": p.finish,
-               "integrate": p.integrate, "total": p.total()},
+               "integrate": p.integrate, "clear": p.clear, "total": p.total()},
         "counters": {"misses": c.misses, "traces": c.traces, "integrates": c.integrates,
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
@@ -859,7 +859,7 @@ fn sequence(
             "total": pass(|p| p.total()), "probe": pass(|p| p.probe), "claim": pass(|p| p.claim),
             "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "trace": pass(|p| p.trace()),
             "setup": pass(|p| p.setup), "rays": pass(|p| p.rays), "finish": pass(|p| p.finish),
-            "integrate": pass(|p| p.integrate),
+            "integrate": pass(|p| p.integrate), "clear": pass(|p| p.clear),
         },
     })
 }
@@ -975,9 +975,38 @@ fn gpu_gi_sky_visibility_sv() {
             }
         };
         let mut rig = rig(&sv, path, device);
+        // RENDERLAB_M7_G1_PROFILING=0: no per-pass timestamps (frame spans only).
+        let profiling = env("RENDERLAB_M7_G1_PROFILING").as_deref() != Some("0");
+        rig.r.set_indirect_profiling(profiling);
         let label = format!("{path:?}").to_lowercase();
         let [standard, materials, toon] = std::mem::take(&mut rig.materials);
         let mut path_json = json!({});
+        // Profile: RENDERLAB_M7_G1_PROFILE_FRAMES frames of the default settings with the
+        // camera wrapping back and forth over 48 cm at 1 cm a frame, for an external GPU
+        // trace (Nsight) to land in camera motion.
+        // RENDERLAB_M7_G1_PROFILE_MODE: "camera" (default; after the first sweep every
+        // cell exists, so it profiles the per-pixel passes), "rotation" (a fixed rotation
+        // of period 16 re-traces a sixteenth of the cells every frame, so tracing runs) or
+        // "standard" (camera, with the standard program instead of the Lambert gate).
+        if section("profile") {
+            let frames: usize = env("RENDERLAB_M7_G1_PROFILE_FRAMES").map_or(0, |s| s.parse().unwrap());
+            let mode = env("RENDERLAB_M7_G1_PROFILE_MODE").unwrap_or_else(|| "camera".into());
+            let (_, eye, target) = poses[0].clone();
+            rig.settings(IndirectSettings {
+                enabled: true,
+                rotation_period: if mode == "rotation" { 16 } else { 0 },
+                ..Default::default()
+            });
+            rig.r.reset_indirect();
+            let program = if mode == "standard" { &standard } else { &materials };
+            if frames > 0 {
+                path_json["profile"] = sequence(&mut rig, &sv, program, frames, |_, t| {
+                    let k = t % 96;
+                    let d = Vec3::new(0.01 * k.min(96 - k) as f32, 0.0, 0.0);
+                    (eye + d, target + d)
+                });
+            }
+        }
         // The measured configurations name rotation explicitly: "trilinear-4px" and "on"
         // are unrotated, "rotated-4px" and the "rotated" timing rows are the default.
         let base = IndirectSettings {
@@ -1345,6 +1374,13 @@ fn gpu_gi_sky_visibility_sv() {
         // turn `visits` times (timing[label] lists the visits).
         if section("timing") {
             let (_, eye, target) = poses[0].clone();
+            // RENDERLAB_M7_G1_TIMING_PROGRAM=standard times the standard program (the
+            // default material) instead of the Lambert gate.
+            let timed = if env("RENDERLAB_M7_G1_TIMING_PROGRAM").as_deref() == Some("standard") {
+                &standard
+            } else {
+                &materials
+            };
             let mut timing = json!({"off": [], "on": [], "rotated": [], "serial": [], "best": []});
             let best = IndirectSettings {
                 level_blend: 0.125,
@@ -1371,22 +1407,32 @@ fn gpu_gi_sky_visibility_sv() {
                 ),
                 ("best", best),
             ];
+            // RENDERLAB_M7_G1_TIMING: a comma list of the labels to visit (all by default).
+            let wanted = env("RENDERLAB_M7_G1_TIMING");
+            let order: Vec<_> = order
+                .into_iter()
+                .filter(|(l, _)| {
+                    wanted
+                        .as_deref()
+                        .is_none_or(|w| w.split(',').any(|x| x.trim() == *l))
+                })
+                .collect();
             // Warm-up, discarded: clocks and caches settle before the first visit.
             rig.settings(base);
             rig.r.reset_indirect();
-            sequence(&mut rig, &sv, &materials, 64, |_, t| {
+            sequence(&mut rig, &sv, timed, 64, |_, t| {
                 let d = Vec3::new(0.01 * t as f32, 0.0, 0.0);
                 (eye + d, target + d)
             });
-            for (label, s) in (0..visits).flat_map(|_| order) {
+            for &(label, s) in (0..visits).flat_map(|_| &order) {
                 rig.settings(s);
                 rig.r.reset_indirect();
-                let still = sequence(&mut rig, &sv, &materials, 24, |_, _| (eye, target));
-                let camera = sequence(&mut rig, &sv, &materials, 48, |_, t| {
+                let still = sequence(&mut rig, &sv, timed, 24, |_, _| (eye, target));
+                let camera = sequence(&mut rig, &sv, timed, 48, |_, t| {
                     let d = Vec3::new(0.01 * t as f32, 0.0, 0.0);
                     (eye + d, target + d)
                 });
-                let caster = sequence(&mut rig, &sv, &materials, 48, |rig, t| {
+                let caster = sequence(&mut rig, &sv, timed, 48, |rig, t| {
                     rig.instances[sphere]
                         .set(
                             0,
@@ -1396,7 +1442,7 @@ fn gpu_gi_sky_visibility_sv() {
                     (eye, target)
                 });
                 rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
-                let cut = sequence(&mut rig, &sv, &materials, 16, |rig, t| {
+                let cut = sequence(&mut rig, &sv, timed, 16, |rig, t| {
                     if t % 2 == 0 {
                         rig.r.reset_indirect();
                     }
@@ -1404,7 +1450,7 @@ fn gpu_gi_sky_visibility_sv() {
                 });
                 // Environment steps: a new sky radiance every frame (no rays: the
                 // cells re-integrate their stored bits).
-                let environment = sequence(&mut rig, &sv, &materials, 16, |rig, t| {
+                let environment = sequence(&mut rig, &sv, timed, 16, |rig, t| {
                     let k = 1.0 + 0.05 * (t % 2) as f32;
                     rig.r
                         .set_lighting(&Lighting {

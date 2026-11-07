@@ -2,27 +2,31 @@
 // Composed after the built-in prelude, primary_rays.wgsl, gi_cells.wgsl and one ray
 // source (gi_rays_hardware.wgsl or gi_rays_software.wgsl); src/gi_cache.rs owns the
 // buffers and the per-frame order:
-//   gi_probe    covered pixels list the cells they read, deduplicated per tile; each
-//               tile then finds its unique cells once, marks them seen, and lists the
-//               missing ones in the frame's request table (once per frame);
+//   gi_probe    covered pixels list the cells they read, deduplicated per 16x16 tile;
+//               each tile then finds its unique cells once, marks them seen, and lists
+//               the missing ones in the frame's request table (once per frame);
 //   gi_args_misses sizes the claim and resolve dispatches from the listed misses;
 //   gi_claim    each miss picks a free slot as the table stands and raises the slot's
 //               claim word to its priority (atomicMax, C4);
 //   gi_resolve  the highest claim writes the cell and queues it for tracing; claim and
-//               resolve repeat in rounds, so collisions retry within the frame;
+//               resolve repeat in rounds, so collisions retry within the frame; the
+//               last round (gi_resolve_last) also clears each miss's request entry;
 //   gi_scan     on event frames only: moved casters invalidate the direction slots
 //               whose fixed rays they reach (the whole cell when they reach its
 //               cube) and re-queue it, the fixed rotation re-queues
 //               (slot+frame) mod P == 0, an environment change re-integrates, and
 //               partially traced cells (W1 form 2) re-queue;
-//   gi_args     sizes the indirect setup/finish and integrate dispatches;
+//   gi_args     sizes the indirect setup, finish and integrate dispatches;
 //   gi_setup    one thread per queued cell: the canonical query point when it has
 //               none, then one ray item per unknown (or this phase's) direction;
-//   gi_args_rays sizes the rays dispatch from the items setup allocated;
+//   gi_args_rays sizes the rays dispatch from the items setup allocated, and arms a
+//               full request-table clear when the miss list overflowed;
 //   gi_rays     one thread per ray item: that direction's visibility bit;
-//   gi_finish   one thread per queued cell: the bits into its direction slots and the
-//               SH over every slot, replacing the value (W1);
-//   gi_integrate the SH again from the stored bits, with no rays.
+//   gi_finish   one workgroup per queued cell: the bits into its direction slots and
+//               the SH over every slot, replacing the value (W1);
+//   gi_integrate the SH again from the stored bits, with no rays (environment frames);
+//   gi_clear_requests the whole request table, only when armed.
+// src/gi_cache.rs skips the scan and integrate passes on frames that have no event.
 // Every new or invalidated cell is traced in the frame it appears: no ranking decides
 // which cells are traced (W2). No reservoirs or resampling anywhere (C1).
 
@@ -69,6 +73,7 @@ const GI_CREATED:u32=0xfffffffeu;
 const GI_ENV_ROUGHNESS:f32=0.35;
 
 @group(0) @binding(30) var<storage,read_write> gi_table:array<u32>;
+fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 @group(0) @binding(31) var<storage,read_write> gi_work:array<atomic<u32>>;
 @group(0) @binding(32) var<uniform> gi_frame:GiFrame;
 struct GiVec4s { data:array<vec4<f32>> };
@@ -93,10 +98,18 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
 }
 
 // ---- probe: per-tile unique cells, then one lookup each ----
-const GI_LOCAL:u32=256u;
+// Pixels per probe tile side (src/gi_cache.rs PROBE_TILE): 16x16 tiles find each
+// unique cell once per tile, a quarter as many tiles as 8x8 and about 40% fewer finds.
+const GI_PROBE_TILE:u32=16u;
+const GI_PROBE_LANES:u32=GI_PROBE_TILE*GI_PROBE_TILE;
+const GI_LOCAL:u32=512u;
 var<workgroup> gi_local_key:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_priority:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
+// The tile's unique cells as hash slots, in insertion order, so the find loop visits
+// only occupied entries (one pass for up to GI_PROBE_LANES cells).
+var<workgroup> gi_local_list:array<u32,GI_LOCAL>;
+var<workgroup> gi_local_count:atomic<u32>;
 
 // Adds one cell to the tile's set; the lowest pixel priority that wants it is kept.
 fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
@@ -107,6 +120,7 @@ fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
         if r.exchanged {
             gi_local_def[h]=vec4<u32>(level|(bin<<8u),bitcast<vec3<u32>>(cell));
             atomicMin(&gi_local_priority[h],priority);
+            gi_local_list[atomicAdd(&gi_local_count,1u)]=h;
             return;
         }
         if r.old_value==key.x {
@@ -169,11 +183,12 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         }
     }
 }
-@compute @workgroup_size(8,8) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    for(var i=lane;i<GI_LOCAL;i+=64u) {
+@compute @workgroup_size(16,16) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    for(var i=lane;i<GI_LOCAL;i+=GI_PROBE_LANES) {
         atomicStore(&gi_local_key[i],0u);
         atomicStore(&gi_local_priority[i],0xffffffffu);
     }
+    if lane==0u { atomicStore(&gi_local_count,0u); }
     workgroupBarrier();
     let p=grid.xy+gi_frame.region.xy;
     let size=textureDimensions(primary_hit);
@@ -212,17 +227,17 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
     workgroupBarrier();
     // Each unique cell once: found cells are marked seen, missing ones are listed.
     let capacity=gi_frame.counts.w;
-    for(var i=lane;i<GI_LOCAL;i+=64u) {
-        if atomicLoad(&gi_local_key[i])==0u { continue; }
+    let unique=min(atomicLoad(&gi_local_count),GI_LOCAL);
+    for(var k=lane;k<unique;k+=GI_PROBE_LANES) {
+        let i=gi_local_list[k];
         let def=gi_local_def[i];
         let key=gi_key(def.x&0xffu,def.x>>8u,bitcast<vec3<i32>>(def.yzw));
         let slot=gi_find(key);
         if slot!=0xffffffffu {
-            // Tiles sharing a cell store the same frame: the race is benign, and only the
-            // first store per frame dirties the sector.
-            let seen=gi_cold(slot)+GI_C_SEEN;
-            let frame=gi_word(GI_H_FRAME);
-            if gi_table[seen]!=frame { gi_table[seen]=frame; }
+            // Tiles sharing a cell store the same frame: the race is benign. The store is
+            // unconditional: reading the stamp first stalled the probe on a second
+            // dependent load per cell.
+            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
             continue;
         }
         // Tiles share cells: the frame's request table lists each missing cell once and
@@ -291,9 +306,29 @@ fn gi_evictable(slot:u32) -> bool {
     atomicAdd(&gi_work[GI_W_FULL],1u);
 }
 @compute @workgroup_size(64) fn gi_resolve(@builtin(global_invocation_id) id:vec3<u32>) {
+    gi_resolve_miss(id.x);
+}
+// The last round also empties the frame's request table: each listed miss clears its
+// own entry once it no longer reads it, so the table is clean for the next frame
+// without clearing all of it. (Entries a full miss list could not list are cleared by
+// gi_clear_requests on the next frame; gi_args_rays arms it.)
+@compute @workgroup_size(64) fn gi_resolve_last(@builtin(global_invocation_id) id:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[GI_W_MISSES]),gi_frame.counts.w);
     if id.x>=count { return; }
-    let base=gi_frame.offsets.y+id.x*GI_MISS_WORDS;
+    gi_resolve_miss(id.x);
+    let entry=gi_frame.requests.x+atomicLoad(&gi_work[gi_frame.offsets.y+id.x*GI_MISS_WORDS+4u])*2u;
+    atomicStore(&gi_work[entry],0u);
+    atomicStore(&gi_work[entry+1u],0u);
+}
+// Every request-table word, after a frame whose miss list overflowed.
+@compute @workgroup_size(64) fn gi_clear_requests(@builtin(global_invocation_id) id:vec3<u32>) {
+    let words=(gi_frame.requests.y+1u)*2u;
+    for(var i=id.x;i<words;i+=GI_CLEAR_THREADS) { atomicStore(&gi_work[gi_frame.requests.x+i],0u); }
+}
+fn gi_resolve_miss(index:u32) {
+    let count=min(atomicLoad(&gi_work[GI_W_MISSES]),gi_frame.counts.w);
+    if index>=count { return; }
+    let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     let slot=atomicLoad(&gi_work[base+5u]);
     if slot>=GI_CREATED { return; }
     if atomicLoad(&gi_work[GI_W_CLAIMS+slot])!=gi_miss_priority(base) {
@@ -379,14 +414,8 @@ fn gi_sky(d:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 { return environment_radiance(environment_direction(d),GI_ENV_ROUGHNESS); }
     return lighting.environment;
 }
-// One cell's SH, accumulated in a fixed direction order (deterministic).
+// One lane's or cell's SH sums (gi_lane_add, gi_lane_reduce).
 var<private> gi_cell_sh:array<vec3<f32>,9>;
-fn gi_sh_add(d:vec3<f32>, open:bool) {
-    if !open { return; }
-    let radiance=gi_sky(d)*(6.283185307179586/f32(GI_DIRECTIONS));
-    gi_sh_basis(d);
-    for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]+=radiance*gi_y[i]; }
-}
 // The sum replaces the slot's SH, stored as halves of one f32 scale: no blend with
 // any earlier value (W1).
 fn gi_store_sh(slot:u32) {
@@ -550,60 +579,124 @@ fn gi_point(cold:u32) -> vec3<f32> {
         atomicOr(&gi_work[staged+id.x/32u],1u<<(id.x%32u));
     }
 }
-// One thread per queued cell: its items' bits into the direction slots, then the SH
-// over every slot in fixed direction order, replacing the value (W1). Untraced
-// directions (W1 form 2) count as open sky until their phase comes round.
-@compute @workgroup_size(64) fn gi_finish(@builtin(global_invocation_id) id:vec3<u32>) {
-    let count=min(atomicLoad(&gi_work[GI_W_TRACES]),gi_frame.offsets.x);
-    if id.x>=count { return; }
-    let slot=atomicLoad(&gi_work[gi_frame.offsets.z+id.x]);
-    let cold=gi_cold(slot);
-    if (gi_table[cold+GI_C_STATE]&GI_ORPHAN)!=0u { return; }
-    let c=gi_cell(slot);
-    let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
-    let staged=gi_frame.requests.z+GI_RAY_ITEMS;
-    var at=gi_table[cold+GI_C_BASE];
-    for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
-    var all_known=true;
-    for(var w=0u;w<GI_WORDS;w+=1u) {
-        let pending=gi_table[cold+GI_C_PENDING+w];
-        var bits=gi_table[cold+GI_C_BITS+w];
-        let known=gi_table[cold+GI_C_KNOWN+w]|pending;
-        for(var b=0u;b<32u;b+=1u) {
-            let bit=1u<<b;
-            if (pending&bit)!=0u {
-                let visible=(atomicLoad(&gi_work[staged+at/32u])&(1u<<(at%32u)))!=0u;
-                bits=select(bits&~bit,bits|bit,visible);
-                at+=1u;
-            }
-            gi_sh_add(gi_direction(frame,c.key,w*32u+b),(bits&bit)!=0u || (known&bit)==0u);
-        }
-        all_known=all_known && known==0xffffffffu;
-        gi_table[cold+GI_C_BITS+w]=bits;
-        gi_table[cold+GI_C_KNOWN+w]=known;
-        gi_table[cold+GI_C_PENDING+w]=0u;
-    }
-    gi_store_sh(slot);
-    // The item base depends on allocation order: cleared, so the table is deterministic.
-    gi_table[cold+GI_C_BASE]=0u;
-    gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known);
-    gi_table[gi_hot(slot)]=c.key.x|GI_VALID;
+// ---- finish and integrate: one workgroup per cell, one lane per fixed direction ----
+// Each lane forms its directions' SH terms; a fixed binary tree in workgroup memory sums
+// them (deterministic, no atomics on values), and lane 0 stores the result. The value
+// replaces the stored one (W1): no blend with any earlier value.
+const GI_SH_LANES:u32=64u;
+var<workgroup> gi_wg_sh:array<f32,1728>;
+var<workgroup> gi_wg_bits:array<atomic<u32>,GI_MAX_WORDS>;
+var<workgroup> gi_wg_cell:vec2<u32>;
+var<workgroup> gi_wg_count:u32;
+// Adds direction k's term, when it is open, to this lane's sums (gi_cell_sh).
+fn gi_lane_add(c:GiCell, frame:mat3x3<f32>, k:u32, open:bool) {
+    if !open { return; }
+    let d=gi_direction(frame,c.key,k);
+    let radiance=gi_sky(d)*(6.283185307179586/f32(GI_DIRECTIONS));
+    gi_sh_basis(d);
+    for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]+=radiance*gi_y[i]; }
 }
-@compute @workgroup_size(64) fn gi_integrate(@builtin(global_invocation_id) id:vec3<u32>) {
-    let count=min(atomicLoad(&gi_work[GI_W_INTEGRATES]),gi_frame.offsets.x);
-    if id.x>=count { return; }
-    let slot=atomicLoad(&gi_work[gi_frame.offsets.w+id.x]);
-    let c=gi_cell(slot);
-    let cold=gi_cold(slot);
-    let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
-    for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
-    for(var k=0u;k<GI_DIRECTIONS;k+=1u) {
-        let bit=1u<<(k%32u);
-        let visible=(gi_table[cold+GI_C_BITS+k/32u]&bit)!=0u;
-        let traced=(gi_table[cold+GI_C_KNOWN+k/32u]&bit)!=0u;
-        gi_sh_add(gi_direction(frame,c.key,k),visible || !traced);
+// Sums every lane's gi_cell_sh into lane 0's, in a fixed tree order.
+fn gi_lane_reduce(lane:u32) {
+    for(var i=0u;i<9u;i+=1u) {
+        gi_wg_sh[(i*3u)*GI_SH_LANES+lane]=gi_cell_sh[i].x;
+        gi_wg_sh[(i*3u+1u)*GI_SH_LANES+lane]=gi_cell_sh[i].y;
+        gi_wg_sh[(i*3u+2u)*GI_SH_LANES+lane]=gi_cell_sh[i].z;
     }
-    gi_store_sh(slot);
+    workgroupBarrier();
+    for(var stride=GI_SH_LANES/2u;stride>0u;stride/=2u) {
+        if lane<stride {
+            for(var j=0u;j<27u;j+=1u) {
+                gi_wg_sh[j*GI_SH_LANES+lane]+=gi_wg_sh[j*GI_SH_LANES+lane+stride];
+            }
+        }
+        workgroupBarrier();
+    }
+    if lane==0u {
+        for(var i=0u;i<9u;i+=1u) {
+            gi_cell_sh[i]=vec3<f32>(gi_wg_sh[(i*3u)*GI_SH_LANES],gi_wg_sh[(i*3u+1u)*GI_SH_LANES],gi_wg_sh[(i*3u+2u)*GI_SH_LANES]);
+        }
+    }
+}
+// Queued cells (finish) or cells to re-integrate, as a uniform count: lane 0 reads it.
+fn gi_uniform_count(lane:u32, counter:u32) -> u32 {
+    if lane==0u { gi_wg_count=min(atomicLoad(&gi_work[counter]),gi_frame.offsets.x); }
+    return workgroupUniformLoad(&gi_wg_count);
+}
+// Each queued cell: its items' bits into the direction slots, then the SH over every
+// slot, replacing the value (W1). Untraced directions (W1 form 2) count as open sky
+// until their phase comes round. A fixed grid of workgroups loops over the queue.
+@compute @workgroup_size(64) fn gi_finish(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let count=gi_uniform_count(lane,GI_W_TRACES);
+    let staged=gi_frame.requests.z+GI_RAY_ITEMS;
+    for(var index=group.x;index<count;index+=groups.x) {
+        if lane==0u {
+            let slot=atomicLoad(&gi_work[gi_frame.offsets.z+index]);
+            gi_wg_cell=vec2<u32>(slot,gi_table[gi_cold(slot)+GI_C_STATE]);
+        }
+        if lane<GI_MAX_WORDS { atomicStore(&gi_wg_bits[lane],0u); }
+        let cell=workgroupUniformLoad(&gi_wg_cell);
+        if (cell.y&GI_ORPHAN)!=0u { continue; }
+        let slot=cell.x;
+        let cold=gi_cold(slot);
+        let c=gi_cell(slot);
+        let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
+        let base=gi_table[cold+GI_C_BASE];
+        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var k=lane;k<GI_DIRECTIONS;k+=GI_SH_LANES) {
+            let w=k/32u;
+            let bit=1u<<(k%32u);
+            let pending=gi_table[cold+GI_C_PENDING+w];
+            var visible=(gi_table[cold+GI_C_BITS+w]&bit)!=0u;
+            if (pending&bit)!=0u {
+                // This direction's item: the pending directions before it, in order.
+                var rank=countOneBits(pending&(bit-1u));
+                for(var v=0u;v<w;v+=1u) { rank+=countOneBits(gi_table[cold+GI_C_PENDING+v]); }
+                let at=base+rank;
+                visible=(atomicLoad(&gi_work[staged+at/32u])&(1u<<(at%32u)))!=0u;
+            }
+            if visible { atomicOr(&gi_wg_bits[w],bit); }
+            let known=((gi_table[cold+GI_C_KNOWN+w]|pending)&bit)!=0u;
+            gi_lane_add(c,frame,k,visible || !known);
+        }
+        gi_lane_reduce(lane);
+        if lane==0u {
+            var all_known=true;
+            for(var w=0u;w<GI_WORDS;w+=1u) {
+                let known=gi_table[cold+GI_C_KNOWN+w]|gi_table[cold+GI_C_PENDING+w];
+                all_known=all_known && known==0xffffffffu;
+                gi_table[cold+GI_C_BITS+w]=atomicLoad(&gi_wg_bits[w]);
+                gi_table[cold+GI_C_KNOWN+w]=known;
+                gi_table[cold+GI_C_PENDING+w]=0u;
+            }
+            gi_store_sh(slot);
+            // The item base depends on allocation order: cleared, so the table is deterministic.
+            gi_table[cold+GI_C_BASE]=0u;
+            gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known);
+            gi_table[gi_hot(slot)]=c.key.x|GI_VALID;
+        }
+        // Lane 0 has read gi_wg_bits before the next cell clears them.
+        workgroupBarrier();
+    }
+}
+// Each listed cell's SH again from its stored bits, with no rays (environment changes).
+@compute @workgroup_size(64) fn gi_integrate(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let count=gi_uniform_count(lane,GI_W_INTEGRATES);
+    for(var index=group.x;index<count;index+=groups.x) {
+        let slot=atomicLoad(&gi_work[gi_frame.offsets.w+index]);
+        let c=gi_cell(slot);
+        let cold=gi_cold(slot);
+        let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
+        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var k=lane;k<GI_DIRECTIONS;k+=GI_SH_LANES) {
+            let bit=1u<<(k%32u);
+            let visible=(gi_table[cold+GI_C_BITS+k/32u]&bit)!=0u;
+            let traced=(gi_table[cold+GI_C_KNOWN+k/32u]&bit)!=0u;
+            gi_lane_add(c,frame,k,visible || !traced);
+        }
+        gi_lane_reduce(lane);
+        if lane==0u { gi_store_sh(slot); }
+    }
 }
 
 // ---- event scan ----
@@ -681,21 +774,33 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
 }
 
 // ---- indirect arguments, in their own buffer: never bound by the dispatch reading them ----
-@group(0) @binding(33) var<storage,read_write> gi_dispatch:array<u32,16>;
+@group(0) @binding(33) var<storage,read_write> gi_dispatch:array<u32,24>;
+// Threads of the full request-table clear: a fixed grid looping over the table.
+const GI_CLEAR_THREADS:u32=65536u;
 // One thread per item, 64 per workgroup (at most 2^21 items: 32768 groups).
 fn gi_set_dispatch(at:u32, items:u32) {
     gi_dispatch[at]=(items+63u)/64u;
     gi_dispatch[at+1u]=1u;
     gi_dispatch[at+2u]=1u;
 }
-// Before setup: queued cells (setup and finish) at 0, integrations at 4.
+// Workgroups of the per-cell passes (finish, integrate): one per cell, at most this
+// many; each loops over the rest.
+const GI_CELL_GROUPS:u32=16384u;
+// Before setup: queued cells (setup, one thread each) at 0, integrations at 4 and finish
+// at 20 (one workgroup per cell).
 @compute @workgroup_size(1) fn gi_args() {
     gi_set_dispatch(0u,atomicLoad(&gi_work[GI_W_TRACES]));
-    gi_set_dispatch(4u,atomicLoad(&gi_work[GI_W_INTEGRATES]));
+    let integrates=min(atomicLoad(&gi_work[GI_W_INTEGRATES]),GI_CELL_GROUPS);
+    gi_dispatch[4u]=integrates;gi_dispatch[5u]=1u;gi_dispatch[6u]=1u;
+    let traces=min(atomicLoad(&gi_work[GI_W_TRACES]),GI_CELL_GROUPS);
+    gi_dispatch[20u]=traces;gi_dispatch[21u]=1u;gi_dispatch[22u]=1u;
 }
-// After setup, which allocates them: ray items at 8.
+// After setup, which allocates them: ray items at 8. Also arms next frame's full
+// request-table clear (16) when this frame's miss list overflowed, which leaves
+// entries no listed miss clears.
 @compute @workgroup_size(1) fn gi_args_rays() {
     gi_set_dispatch(8u,min(atomicLoad(&gi_work[GI_W_ITEMS]),GI_RAY_ITEMS));
+    gi_set_dispatch(16u,select(0u,GI_CLEAR_THREADS,atomicLoad(&gi_work[GI_W_MISS_OVERFLOW])!=0u));
 }
 // After the probe: the listed misses (claim and resolve) at 12. The count may pass the
 // list's capacity; those threads return.

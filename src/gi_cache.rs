@@ -30,8 +30,13 @@ const CLAIM_ROUNDS: u32 = 3;
 /// traced in parallel. A frame wanting more traces the rest in setup, per cell.
 const RAY_ITEMS: u32 = 1 << 20;
 /// Probe, miss arguments, three claim and resolve rounds, scan, arguments, setup, ray
-/// arguments, rays, finish and integrate.
-const PROFILE_STAMPS: u32 = 2 * (9 + 2 * CLAIM_ROUNDS);
+/// arguments, rays, finish, integrate and the armed request-table clear.
+const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
+/// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
+const PROBE_TILE: u32 = 16;
+/// Indirect dispatch arguments: setup 0, integrate 16, rays 32, misses 48, the armed
+/// request-table clear 64 and finish 80 (bytes; shaders/gi_cache.wgsl gi_dispatch).
+const DISPATCH_BYTES: u64 = 96;
 /// Frames the profile ring holds, and its per-frame stride (resolve offsets are
 /// 256-byte aligned).
 const PROFILE_RING: u64 = 64;
@@ -169,6 +174,8 @@ pub struct IndirectProfile {
     pub rays: f64,
     pub finish: f64,
     pub integrate: f64,
+    /// The full request-table clear, which runs only after a miss list overflowed.
+    pub clear: f64,
 }
 impl IndirectProfile {
     pub fn trace(&self) -> f64 {
@@ -182,6 +189,7 @@ impl IndirectProfile {
             + self.args
             + self.trace()
             + self.integrate
+            + self.clear
     }
 }
 
@@ -229,6 +237,8 @@ struct Pipelines {
     probe: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
     resolve: Owned<wgpu::ComputePipeline>,
+    resolve_last: Owned<wgpu::ComputePipeline>,
+    clear_requests: Owned<wgpu::ComputePipeline>,
     scan: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
     args_rays: Owned<wgpu::ComputePipeline>,
@@ -278,6 +288,8 @@ struct Profile {
 struct Plan {
     groups: [u32; 2],
     scan: bool,
+    /// The environment changed: cells re-integrate their stored bits.
+    integrate: bool,
     clear: bool,
 }
 enum Retired {
@@ -369,16 +381,23 @@ pub(super) fn kernel_source(software: bool, directions: u32) -> String {
     } else {
         "enable wgpu_binding_array;\nenable wgpu_ray_query;\nenable wgpu_ray_query_vertex_return;\n"
     };
+    use crate::program::gi_shader;
     let rays = if software {
-        include_str!("../shaders/gi_rays_software.wgsl")
+        gi_shader(
+            "gi_rays_software.wgsl",
+            include_str!("../shaders/gi_rays_software.wgsl"),
+        )
     } else {
-        include_str!("../shaders/gi_rays_hardware.wgsl")
+        gi_shader(
+            "gi_rays_hardware.wgsl",
+            include_str!("../shaders/gi_rays_hardware.wgsl"),
+        )
     };
-    let cells = include_str!("../shaders/gi_cells.wgsl");
+    let cells = gi_shader("gi_cells.wgsl", include_str!("../shaders/gi_cells.wgsl"));
     let line = "const GI_DIRECTIONS:u32=64u;";
     assert_eq!(cells.matches(line).count(), 1);
     let cells = cells.replace(line, &format!("const GI_DIRECTIONS:u32={directions}u;"));
-    let kernels = include_str!("../shaders/gi_cache.wgsl");
+    let kernels = gi_shader("gi_cache.wgsl", include_str!("../shaders/gi_cache.wgsl"));
     assert_eq!(
         kernels
             .matches(&format!("const GI_RAY_ITEMS:u32={RAY_ITEMS}u;"))
@@ -473,7 +492,7 @@ impl Renderer {
                 ),
                 dispatch: buffer(
                     "indirect cache dispatch",
-                    64,
+                    DISPATCH_BYTES,
                     storage | wgpu::BufferUsages::INDIRECT,
                 ),
                 slots,
@@ -661,6 +680,7 @@ impl Renderer {
                     rays: pass(6 + 2 * rounds),
                     finish: pass(7 + 2 * rounds),
                     integrate: pass(8 + 2 * rounds),
+                    clear: pass(9 + 2 * rounds),
                 }
             })
             .collect())
@@ -882,6 +902,8 @@ impl Renderer {
             probe: compute("gi_probe", main),
             claim: compute("gi_claim", main),
             resolve: compute("gi_resolve", main),
+            resolve_last: compute("gi_resolve_last", main),
+            clear_requests: compute("gi_clear_requests", main),
             scan: compute("gi_scan", main),
             args: compute("gi_args", &layouts.args_pipeline),
             args_rays: compute("gi_args_rays", &layouts.args_pipeline),
@@ -1241,8 +1263,8 @@ impl Renderer {
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
         let groups = [
-            (region[2] - region[0]).div_ceil(8),
-            (region[3] - region[1]).div_ceil(8),
+            (region[2] - region[0]).div_ceil(PROBE_TILE),
+            (region[3] - region[1]).div_ceil(PROBE_TILE),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
         // A view whose every input is unchanged has nothing to trace once its cells
@@ -1270,6 +1292,7 @@ impl Renderer {
         self.gi.plan = Some(Plan {
             groups,
             scan: flags != 0,
+            integrate: environment_changed,
             clear,
         });
         self.prepare_gi_groups(software, scene_generation)?;
@@ -1384,14 +1407,14 @@ impl GiState {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
         }
         encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
-        // The staged ray bits and the request table: everything after the counters,
-        // claims, misses, both queues and the ray items.
+        // The staged ray bits, after the counters, claims, misses, both queues and the ray
+        // items. The request table after them is left clean by the last resolve round.
         let staged_at = (COUNTER_WORDS
             + u64::from(r.slots) * 3
             + u64::from(r.misses) * MISS_WORDS
             + u64::from(RAY_ITEMS))
             * 4;
-        encoder.clear_buffer(&r.work, staged_at, None);
+        encoder.clear_buffer(&r.work, staged_at, Some(u64::from(RAY_ITEMS / 32) * 4));
         let queries = self.profile.as_ref().map(|p| &*p.queries);
         let ring = self
             .profile
@@ -1435,8 +1458,10 @@ impl GiState {
                 pass.set_bind_group(0, &*g.args, &[]);
                 pass.dispatch_workgroups(1, 1, 1);
             };
-        // Indirect arguments, each sized once its count is final: queued cells at 0,
-        // integrations at 16, ray items at 32 (after setup), misses at 48 (after the probe).
+        // Indirect arguments, each sized once its count is final (DISPATCH_BYTES).
+        // Passes with no work this frame (scan and integrate without an event) are not
+        // encoded; when profiling they are empty passes, so every stamp is written.
+        let profiling = queries.is_some();
         main_pass(
             encoder,
             "indirect cache probe",
@@ -1455,28 +1480,21 @@ impl GiState {
                 None,
                 Some(48),
             );
+            let last = k + 1 == CLAIM_ROUNDS;
             main_pass(
                 encoder,
                 "indirect cache resolve",
-                &p.resolve,
+                if last { &p.resolve_last } else { &p.resolve },
                 3 + 2 * k,
                 None,
                 Some(48),
             );
         }
         let s = 2 + 2 * CLAIM_ROUNDS;
-        main_pass(
-            encoder,
-            "indirect cache scan",
-            &p.scan,
-            s,
-            Some(if plan.scan {
-                [r.slots.div_ceil(64), 1]
-            } else {
-                [0, 0]
-            }),
-            None,
-        );
+        if plan.scan || profiling {
+            let groups = plan.scan.then(|| [r.slots.div_ceil(64), 1]);
+            main_pass(encoder, "indirect cache scan", &p.scan, s, groups, None);
+        }
         args_pass(encoder, &p.args, s + 1);
         main_pass(
             encoder,
@@ -1487,23 +1505,42 @@ impl GiState {
             Some(0),
         );
         args_pass(encoder, &p.args_rays, s + 3);
-        for (k, (label, pipeline, offset)) in [
-            ("indirect cache rays", &p.rays, 32),
-            ("indirect cache finish", &p.finish, 0),
-            ("indirect cache integrate", &p.integrate, 16),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        main_pass(
+            encoder,
+            "indirect cache rays",
+            &p.rays,
+            s + 4,
+            None,
+            Some(32),
+        );
+        main_pass(
+            encoder,
+            "indirect cache finish",
+            &p.finish,
+            s + 5,
+            None,
+            Some(80),
+        );
+        if plan.integrate || profiling {
+            let offset = plan.integrate.then_some(16);
             main_pass(
                 encoder,
-                label,
-                pipeline,
-                s + 4 + k as u32,
+                "indirect cache integrate",
+                &p.integrate,
+                s + 6,
                 None,
-                Some(offset),
+                offset,
             );
         }
+        // Zero groups unless this frame's miss list overflowed (gi_args_rays).
+        main_pass(
+            encoder,
+            "indirect cache request clear",
+            &p.clear_requests,
+            s + 7,
+            None,
+            Some(64),
+        );
         if let Some(profile) = self.profile.as_mut() {
             let slot = profile.written % PROFILE_RING;
             encoder.resolve_query_set(

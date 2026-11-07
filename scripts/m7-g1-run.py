@@ -16,7 +16,10 @@ import shutil
 import subprocess
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = Path("E:/renderlab-work/m7-g1")
+# The owning unit: m7-g1, or a follow-up such as m7-g1b (scripts/m7-g1b-run.py), with its
+# own schedule owner name and evidence root.
+UNIT = os.environ.get("M7_G1_UNIT", "m7-g1")
+OUT = Path("E:/renderlab-work") / UNIT
 TARGET = OUT / "target"
 BINARY = OUT / "bin/g1-tests.exe"
 BENCH = Path("E:/renderlab-work/m7-u0/scenes/SV/scene.json")
@@ -27,7 +30,7 @@ def ue():
     spec = importlib.util.spec_from_file_location("m7_u0_ue", REPO / "scripts/m7-u0-ue.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.OWNER = "m7-g1"
+    module.OWNER = UNIT
     module.OUT = OUT
     return module
 
@@ -212,7 +215,7 @@ def gpu(args):
     # Each binary is one process writing its own subdirectory, in order, inside one lease
     # (a paired A/B of staged builds); a single binary writes the label directory itself.
     binaries = [Path(b) for b in args.binary] or [BINARY]
-    with u.lease("g1-" + args.label, args.minutes) as owner:
+    with u.lease(UNIT[3:] + "-" + args.label, args.minutes) as owner:
         out.mkdir(parents=True)
         try:
             for binary in binaries:
@@ -255,8 +258,10 @@ def functional_gate(result, full=True):
 
 def plan(args):
     """One lease running a JSON list of steps in order: {name, binary, sections, configs,
-    visits, gate}. A step with gate "functional" stops the plan (and the lease) when its
-    gates fail. Each step writes runs/<label>/<name>."""
+    visits, gate, shaders, env}. `shaders` names a directory of GI shader variants
+    (RENDERLAB_GI_SHADERS, read by test builds); `env` adds variables. A step with gate
+    "functional" stops the plan (and the lease) when its gates fail. Each step writes
+    runs/<label>/<name>. Only `--quiet` plans announce a QUIET window."""
     import datetime as dt
     import re
     import time
@@ -297,34 +302,52 @@ def plan(args):
     if args.check_only:
         print("CLEAR: the plan could start now")
         return
-    base_env = dict(os.environ, RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
+    base_env = dict(os.environ, RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK", RENDERLAB_M7_G1_REFS=str(OUT / "refs"),
                     RENDERLAB_M7_G1_BENCH=str(BENCH), RENDERLAB_M7_G1_SPP=str(args.spp), RENDERLAB_M7_G1_QUICK="0",
                     RENDERLAB_M7_G1_PATHS=args.paths, VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
     base_env.pop("VK_INSTANCE_LAYERS", None)
     log = []
-    with u.lease("g1-" + args.label, args.minutes) as owner:
+    with u.lease(UNIT[3:] + "-" + args.label, args.minutes) as owner:
         out.mkdir(parents=True)
         now = u.utc()
-        with u.SCHEDULE.open("a", encoding="utf-8") as f:
-            f.write(f"\n[{u.OWNER} QUIET active] owner={u.OWNER} label={args.label} start={now.isoformat()} "
-                    f"end={(now + dt.timedelta(minutes=args.minutes)).isoformat()}; no other GPU lease or compiler/heavy "
-                    "build inside. Headless only: no window, focus, input or capture.\n")
+        if args.quiet:
+            with u.SCHEDULE.open("a", encoding="utf-8") as f:
+                f.write(f"\n[{u.OWNER} QUIET active] owner={u.OWNER} label={args.label} start={now.isoformat()} "
+                        f"end={(now + dt.timedelta(minutes=args.minutes)).isoformat()}; no other GPU lease or compiler/heavy "
+                        "build inside. Headless only: no window, focus, input or capture.\n")
         try:
             for step in steps:
                 target = out / step["name"]
                 target.mkdir()
                 env = dict(base_env, RENDERLAB_M7_G1_OUT=str(target), RENDERLAB_M7_G1_VISITS=str(step.get("visits", 1)))
-                for key, var in [("sections", "RENDERLAB_M7_G1_SECTIONS"), ("configs", "RENDERLAB_M7_G1_CONFIGS")]:
+                for key, var in [("sections", "RENDERLAB_M7_G1_SECTIONS"), ("configs", "RENDERLAB_M7_G1_CONFIGS"),
+                                 ("shaders", "RENDERLAB_GI_SHADERS")]:
                     if step.get(key):
                         env[var] = step[key]
+                env.update({k: str(v) for k, v in step.get("env", {}).items()})
                 start = time.time()
                 binary = BINARY.with_name(step["binary"] + ".exe")
                 # A "lib" step runs the whole non-ignored lib suite (`cargo test -p renderlab
-                # --lib`): renderlab test binaries run only inside a lease holding the lock.
-                command = ([binary, "--test-threads=2"] if step.get("lib") else
-                           [binary, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
-                u.guarded(command, target / "run", timeout=max(60, int(u.remaining_seconds(owner)) - 30),
-                          cwd=REPO, env=env)
+                # --lib`): renderlab test binaries run only inside a lease holding the lock. A
+                # "test" step runs the non-ignored tests matching a filter (e.g. the naga checks
+                # of a shader variant). A "command" step runs a list ({binary} replaced), e.g.
+                # an Nsight GPU trace of the binary; "kill_after" names an image to stop after it,
+                # and "copy_binary" stages the binary as bin/g1b-trace.exe (the traced image).
+                if step.get("command"):
+                    command = [str(c).replace("{binary}", str(binary)) for c in step["command"]]
+                    if step.get("copy_binary"):
+                        shutil.copy2(binary, BINARY.with_name("g1b-trace.exe"))
+                elif step.get("test"):
+                    command = [binary, step["test"], "--test-threads=2"]
+                else:
+                    command = ([binary, "--test-threads=2"] if step.get("lib") else
+                               [binary, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
+                try:
+                    u.guarded(command, target / "run", timeout=max(60, int(u.remaining_seconds(owner)) - 30),
+                              cwd=REPO, env=env)
+                finally:
+                    if step.get("kill_after"):
+                        subprocess.run(["taskkill", "/IM", step["kill_after"], "/F", "/T"], capture_output=True)
                 entry = dict(step=step["name"], seconds=round(time.time() - start, 1))
                 if step.get("lib"):
                     process = json.loads((target / "run" / "process.json").read_text())
@@ -342,8 +365,9 @@ def plan(args):
             (out / "contention.json").write_text(json.dumps(dict(hold=hold_state(u)), indent=2))
     failed = [e for e in log if e.get("failures")]
     done = len(log) == len(steps) and not failed
+    kind = "QUIET" if args.quiet else "plan"
     with u.SCHEDULE.open("a", encoding="utf-8") as f:
-        f.write(f"\n[{u.OWNER} QUIET {'completed' if done else 'stopped'}] label={args.label} "
+        f.write(f"\n[{u.OWNER} {kind} {'completed' if done else 'stopped'}] label={args.label} "
                 f"{len(log)}/{len(steps)} steps{'; gates failed, lease released early' if failed else ''}. "
                 f"{u.utc().isoformat()}\n")
 
@@ -374,6 +398,7 @@ def main():
     p.add_argument("--paths", default="rt,nonrt")
     p.add_argument("--after", default="", help="comma list of owners whose completion tag must follow our queue line")
     p.add_argument("--check-only", action="store_true", help="exit 0 if the plan could start now, 3 if deferred")
+    p.add_argument("--quiet", action="store_true", help="announce a QUIET window (final cost claims only)")
     p.add_argument("--force-schedule", action="store_true", help="ignore pending requests (root-assigned slot)")
     args = parser.parse_args()
     dict(build=build, gpu=gpu, plan=plan)[args.command](args)
