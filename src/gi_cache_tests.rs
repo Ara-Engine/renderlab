@@ -728,8 +728,8 @@ fn profile_json(r: &mut Renderer) -> Json {
     let c = r.indirect_counters().unwrap().unwrap_or_default();
     json!({
         "us": {"probe": p.probe, "claim": p.claim, "resolve": p.resolve, "scan": p.scan,
-               "args": p.args, "trace": p.trace(), "setup": p.setup, "rays": p.rays, "finish": p.finish,
-               "integrate": p.integrate, "clear": p.clear, "total": p.total()},
+               "trace": p.trace(), "setup": p.setup, "rays": p.rays, "finish": p.finish,
+               "integrate": p.integrate, "total": p.total()},
         "counters": {"misses": c.misses, "traces": c.traces, "integrates": c.integrates,
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
@@ -859,7 +859,7 @@ fn sequence(
             "total": pass(|p| p.total()), "probe": pass(|p| p.probe), "claim": pass(|p| p.claim),
             "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "trace": pass(|p| p.trace()),
             "setup": pass(|p| p.setup), "rays": pass(|p| p.rays), "finish": pass(|p| p.finish),
-            "integrate": pass(|p| p.integrate), "clear": pass(|p| p.clear),
+            "integrate": pass(|p| p.integrate),
         },
     })
 }
@@ -989,7 +989,8 @@ fn gpu_gi_sky_visibility_sv() {
         // of period 16 re-traces a sixteenth of the cells every frame, so tracing runs) or
         // "standard" (camera, with the standard program instead of the Lambert gate).
         if section("profile") {
-            let frames: usize = env("RENDERLAB_M7_G1_PROFILE_FRAMES").map_or(0, |s| s.parse().unwrap());
+            let frames: usize =
+                env("RENDERLAB_M7_G1_PROFILE_FRAMES").map_or(0, |s| s.parse().unwrap());
             let mode = env("RENDERLAB_M7_G1_PROFILE_MODE").unwrap_or_else(|| "camera".into());
             let (_, eye, target) = poses[0].clone();
             rig.settings(IndirectSettings {
@@ -998,7 +999,11 @@ fn gpu_gi_sky_visibility_sv() {
                 ..Default::default()
             });
             rig.r.reset_indirect();
-            let program = if mode == "standard" { &standard } else { &materials };
+            let program = if mode == "standard" {
+                &standard
+            } else {
+                &materials
+            };
             if frames > 0 {
                 path_json["profile"] = sequence(&mut rig, &sv, program, frames, |_, t| {
                     let k = t % 96;
@@ -1009,9 +1014,12 @@ fn gpu_gi_sky_visibility_sv() {
         }
         // The measured configurations name rotation explicitly: "trilinear-4px" and "on"
         // are unrotated, "rotated-4px" and the "rotated" timing rows are the default.
+        // Every configuration names its cut refill: 1 (none) here, 4 in "spread". The
+        // shipping default (0) picks 4 on software rays and 1 on hardware rays.
         let base = IndirectSettings {
             enabled: true,
             rotate_directions: false,
+            cut_phases: 1,
             ..Default::default()
         };
         // Configurations: GI off (the pre-M7 image), then the W3 lookups and cell sizes.
@@ -1087,6 +1095,16 @@ fn gpu_gi_sky_visibility_sv() {
                         ..base
                     },
                 ),
+                // The cut refill: the default (rotated) with four direction groups over the
+                // frames after a reset.
+                (
+                    "spread-4px",
+                    IndirectSettings {
+                        rotate_directions: true,
+                        cut_phases: 4,
+                        ..base
+                    },
+                ),
             ]);
         }
         // RENDERLAB_M7_G1_CONFIGS: a comma list of the configurations to score (all by default).
@@ -1097,6 +1115,15 @@ fn gpu_gi_sky_visibility_sv() {
                     .as_deref()
                     .is_none_or(|w| w.split(',').any(|x| x.trim() == *c))
         });
+        // A discarded frame and hit readback per pose first: the first scored pose of a
+        // process otherwise counted ~20% fewer pixels (an unexplained harness artifact,
+        // seen on the first configuration only; docs/m7-g1b.md).
+        if !configs.is_empty() {
+            for (_, eye, target) in &poses {
+                rig.frame(&sv, *eye, *target, &materials);
+                let _ = rig.placements(&sv);
+            }
+        }
         for (config, s) in &configs {
             let mut config_json = json!({});
             for (((pose, eye, target), reference), standard_ref) in
@@ -1369,6 +1396,97 @@ fn gpu_gi_sky_visibility_sv() {
             }
             rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
         }
+        // Rotating environment: a directional prepared map yawing 15 degrees a frame. A yaw
+        // re-integrates every cell from its stored bits (no rays), so each stepped frame must
+        // equal a fresh cache at the same yaw (0 frames lag). Then a continuous rotating
+        // sequence times it. The reference tracer has only a constant sky, so this checks
+        // lag and cost, not error against a path-traced map.
+        if section("environment") {
+            let (_, eye, target) = poses[0].clone();
+            rig.settings(IndirectSettings {
+                enabled: true,
+                cut_phases: 1,
+                ..Default::default()
+            });
+            let prepared = directional_environment(sv.sky);
+            let map = loop {
+                if let Some(map) = rig.r.try_upload_environment(&prepared).unwrap() {
+                    break map;
+                }
+                rig.r.test_drain("G1 environment upload");
+            };
+            let yaw = |rig: &mut Rig, degrees: f32| {
+                rig.r
+                    .set_environment(
+                        Some(&map),
+                        EnvironmentParameters {
+                            rotation_y_radians: degrees.to_radians(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            };
+            yaw(&mut rig, 0.0);
+            rig.r.reset_indirect();
+            for _ in 0..3 {
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let mut steps = vec![];
+            for t in 1..=6 {
+                let degrees = 15.0 * t as f32;
+                // The rolled cache: the previous frame's cells, re-integrated at this yaw.
+                yaw(&mut rig, degrees);
+                rig.frame(&sv, eye, target, &materials);
+                let counters = rig.r.indirect_counters().unwrap().unwrap_or_default();
+                let rolled = rig.radiance(&sv);
+                // A fresh cache at the same yaw.
+                rig.r.reset_indirect();
+                for _ in 0..3 {
+                    rig.frame(&sv, eye, target, &materials);
+                }
+                let fresh = rig.radiance(&sv);
+                let open = {
+                    rig.settings(IndirectSettings::default());
+                    rig.frame(&sv, eye, target, &materials);
+                    let open = rig.radiance(&sv);
+                    rig.settings(IndirectSettings {
+                        enabled: true,
+                        cut_phases: 1,
+                        ..Default::default()
+                    });
+                    open
+                };
+                if t == 3 {
+                    png(
+                        &out.join(format!("{label}-environment-yaw45.png")),
+                        sv.size,
+                        rolled.iter().copied(),
+                        (sv.exposure).exp2(),
+                    );
+                }
+                // How much the yaw changes the occluded sky, so equality is not vacuous.
+                let changed = rolled.iter().zip(&open).filter(|(a, b)| a != b).count();
+                steps.push(json!({"yaw_degrees": degrees,
+                    "rolled_equals_fresh": hash_image(&rolled) == hash_image(&fresh),
+                    "pixels_differing": rolled.iter().zip(&fresh).filter(|(a, b)| a != b).count(),
+                    "pixels_differing_from_open_sky": changed,
+                    "integrates": counters.integrates, "traces": counters.traces, "rays": counters.rays}));
+                // Back to the rolled state for the next step: settled at this yaw.
+                rig.r.reset_indirect();
+                for _ in 0..3 {
+                    rig.frame(&sv, eye, target, &materials);
+                }
+            }
+            // A continuous rotation, 1 degree a frame, camera still.
+            rig.r.reset_indirect();
+            let rotating = sequence(&mut rig, &sv, &materials, 48, |rig, t| {
+                yaw(rig, t as f32);
+                (eye, target)
+            });
+            path_json["environment"] = json!({"steps": steps, "rotating": rotating});
+            rig.r.set_environment(None, Default::default()).unwrap();
+            rig.settings(base);
+        }
         // Timing: continuous sequences for the cache off (the pre-M7 frame), unrotated,
         // rotated (the default), serial tracing and the best-quality variant, visited in
         // turn `visits` times (timing[label] lists the visits).
@@ -1381,7 +1499,8 @@ fn gpu_gi_sky_visibility_sv() {
             } else {
                 &materials
             };
-            let mut timing = json!({"off": [], "on": [], "rotated": [], "serial": [], "best": []});
+            let mut timing =
+                json!({"off": [], "on": [], "rotated": [], "serial": [], "best": [], "spread": []});
             let best = IndirectSettings {
                 level_blend: 0.125,
                 directions: 128,
@@ -1406,6 +1525,14 @@ fn gpu_gi_sky_visibility_sv() {
                     },
                 ),
                 ("best", best),
+                (
+                    "spread",
+                    IndirectSettings {
+                        rotate_directions: true,
+                        cut_phases: 4,
+                        ..base
+                    },
+                ),
             ];
             // RENDERLAB_M7_G1_TIMING: a comma list of the labels to visit (all by default).
             let wanted = env("RENDERLAB_M7_G1_TIMING");
@@ -1515,6 +1642,73 @@ fn gpu_gi_sky_visibility_sv() {
         serde_json::to_vec_pretty(&results).unwrap(),
     )
     .unwrap();
+}
+/// A directional sky for the rotating-environment test: SV's constant sky on average,
+/// brighter toward one azimuth and elevation, dim below the horizon, so a yaw changes the
+/// occluded irradiance. A legacy mip chain (16 to 1) of the unfiltered radiance, and a
+/// brute-force cosine-convolved irradiance cube; exact filtering does not matter here.
+fn directional_environment(sky: [f32; 3]) -> crate::asset::environment::PreparedEnvironment {
+    use crate::asset::environment::{
+        self as env, CubeFace, CubeLevel, Metadata, PreparedEnvironment, RadianceUnits,
+    };
+    let sun = Vec3::new(0.8, 0.5, 0.33).normalize();
+    let radiance = |d: [f64; 3]| -> [f32; 3] {
+        let d = Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
+        let lobe = d.dot(sun).max(0.0).powi(6);
+        let k = if d.y < 0.0 { 0.1 } else { 0.35 + 3.0 * lobe };
+        sky.map(|v| v * k)
+    };
+    let level = |size: u32, value: &dyn Fn([f64; 3]) -> [f32; 3]| {
+        let mut pixels = vec![];
+        for face in CubeFace::ALL {
+            for y in 0..size {
+                for x in 0..size {
+                    pixels.push(value(face.direction([
+                        2. * (x as f64 + 0.5) / size as f64 - 1.,
+                        2. * (y as f64 + 0.5) / size as f64 - 1.,
+                    ])));
+                }
+            }
+        }
+        CubeLevel::new(size, pixels, env::Limits::default()).unwrap()
+    };
+    // Irradiance around n: midpoint quadrature over the sphere.
+    let irradiance = |n: [f64; 3]| -> [f32; 3] {
+        let (nz, np) = (32, 64);
+        let mut e = [0.0f64; 3];
+        for i in 0..nz {
+            let z = 1.0 - 2.0 * (i as f64 + 0.5) / nz as f64;
+            let r = (1.0 - z * z).sqrt();
+            for j in 0..np {
+                let phi = (j as f64 + 0.5) / np as f64 * std::f64::consts::TAU;
+                let d = [r * phi.cos(), z, r * phi.sin()];
+                let c = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+                if c > 0.0 {
+                    let l = radiance(d);
+                    for k in 0..3 {
+                        e[k] += c * f64::from(l[k]);
+                    }
+                }
+            }
+        }
+        let w = 4.0 * std::f64::consts::PI / (nz * np) as f64;
+        e.map(|v| (v * w) as f32)
+    };
+    PreparedEnvironment::new(
+        Metadata {
+            units: RadianceUnits::CandelasPerSquareMetre,
+            source_radiance_scale: 1.0,
+            rotation_y_radians: 0.0,
+            generator_hash: [0x91; 32],
+        },
+        level(8, &irradiance),
+        [16, 8, 4, 2, 1]
+            .into_iter()
+            .map(|size| level(size, &radiance))
+            .collect(),
+        env::Limits::default(),
+    )
+    .unwrap()
 }
 fn hash_words(words: &[u32]) -> String {
     use sha2::Digest;

@@ -90,7 +90,9 @@ def build(args):
     command = ["cargo", "test", "-p", "renderlab", "--lib", "--no-run", "-j", "2", "--target-dir", str(TARGET),
                "--message-format=json"]
     u = ue()
-    if (line := quiet_active(u)):
+    # Never inside a quiet window; with --beside-leases, other owners' functional (non-quiet)
+    # leases do not block a two-job build (CPU only, no GPU work).
+    if (line := quiet_active(u, any_lease=not args.beside_leases)):
         print(f"DEFERRED: quiet window: {line[:160]}")
         raise SystemExit(3)
     log = (OUT / "build.jsonl").open("w")
@@ -375,8 +377,9 @@ def plan(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("build").add_argument("--as", dest="name", default=BINARY.stem,
-                                         help="staged name under bin/ (variants for a paired A/B)")
+    p = sub.add_parser("build")
+    p.add_argument("--as", dest="name", default=BINARY.stem, help="staged name under bin/ (variants for a paired A/B)")
+    p.add_argument("--beside-leases", action="store_true", help="start beside other owners' non-quiet leases")
     p = sub.add_parser("gpu")
     p.add_argument("label")
     p.add_argument("--minutes", type=int, default=10)

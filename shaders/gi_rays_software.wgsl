@@ -19,10 +19,14 @@ fn gi_safe_inverse(d:vec3<f32>) -> vec3<f32> {
     return vec3<f32>(1.0)/select(d,tiny,abs(d)<vec3<f32>(1e-30));
 }
 fn gi_slab(o:vec3<f32>, inv:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>, tmin:f32, tmax:f32) -> bool {
+    return gi_slab_near(o,inv,lo,hi,tmin,tmax)<=tmax;
+}
+// The box's entry distance in [tmin, tmax], or a value above tmax when the ray misses it.
+fn gi_slab_near(o:vec3<f32>, inv:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>, tmin:f32, tmax:f32) -> f32 {
     let a=(lo-o)*inv;let b=(hi-o)*inv;
     let near=max(max(max(min(a.x,b.x),min(a.y,b.y)),min(a.z,b.z)),tmin);
     let far=min(min(min(max(a.x,b.x),max(a.y,b.y)),max(a.z,b.z)),tmax);
-    return near<=far;
+    return select(3.4028235e38,near,near<=far);
 }
 // Moller-Trumbore, both faces; t in (tmin, tmax).
 fn gi_triangle(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, tmin:f32, tmax:f32) -> f32 {
@@ -81,14 +85,35 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
             }
             let n=nodes+child*20u;
             let origin_q=gi_gv(n);let step=gi_gv(n+3u);
+            // The four children's entry distances (misses above best.t), then pushed far to
+            // near so the nearest is visited first: closest-hit rays shrink best.t early and
+            // first-hit rays reach a blocker sooner. The order is fixed by the distances.
+            var t0=3.4028235e38;var t1=3.4028235e38;var t2=3.4028235e38;var t3=3.4028235e38;
+            let c0=gi_geometry[n+6u];let c1=gi_geometry[n+7u];let c2=gi_geometry[n+8u];let c3=gi_geometry[n+9u];
+            let lx=gi_geometry[n+10u];let ly=gi_geometry[n+11u];let lz=gi_geometry[n+12u];
+            let hx=gi_geometry[n+13u];let hy=gi_geometry[n+14u];let hz=gi_geometry[n+15u];
             for(var s=0u;s<4u;s+=1u) {
-                let next=gi_geometry[n+6u+s];
+                let next=select(select(select(c3,c2,s==2u),c1,s==1u),c0,s==0u);
                 if next==GI_BVH_EMPTY { continue; }
                 let shift=8u*s;
-                let lq=vec3<f32>(vec3<u32>(gi_geometry[n+10u]>>shift,gi_geometry[n+11u]>>shift,gi_geometry[n+12u]>>shift)&vec3<u32>(0xffu));
-                let hq=vec3<f32>(vec3<u32>(gi_geometry[n+13u]>>shift,gi_geometry[n+14u]>>shift,gi_geometry[n+15u]>>shift)&vec3<u32>(0xffu));
-                if gi_slab(o,inv,origin_q+step*lq,origin_q+step*hq,tmin,best.t) && sp<GI_BVH_STACK {
-                    stack[sp]=next;
+                let lq=vec3<f32>(vec3<u32>(lx>>shift,ly>>shift,lz>>shift)&vec3<u32>(0xffu));
+                let hq=vec3<f32>(vec3<u32>(hx>>shift,hy>>shift,hz>>shift)&vec3<u32>(0xffu));
+                let t=gi_slab_near(o,inv,origin_q+step*lq,origin_q+step*hq,tmin,best.t);
+                if s==0u { t0=t; } else if s==1u { t1=t; } else if s==2u { t2=t; } else { t3=t; }
+            }
+            // Four-element sorting network on (distance, child), descending. Distances are
+            // nonnegative, so their bits order like the floats; children stay integers.
+            var a0=vec2<u32>(bitcast<u32>(t0),c0);var a1=vec2<u32>(bitcast<u32>(t1),c1);
+            var a2=vec2<u32>(bitcast<u32>(t2),c2);var a3=vec2<u32>(bitcast<u32>(t3),c3);
+            if a0.x<a1.x { let x=a0;a0=a1;a1=x; }
+            if a2.x<a3.x { let x=a2;a2=a3;a3=x; }
+            if a0.x<a2.x { let x=a0;a0=a2;a2=x; }
+            if a1.x<a3.x { let x=a1;a1=a3;a3=x; }
+            if a1.x<a2.x { let x=a1;a1=a2;a2=x; }
+            for(var s=0u;s<4u;s+=1u) {
+                let e=select(select(select(a3,a2,s==2u),a1,s==1u),a0,s==0u);
+                if bitcast<f32>(e.x)<=best.t && sp<GI_BVH_STACK {
+                    stack[sp]=e.y;
                     sp+=1u;
                 }
             }

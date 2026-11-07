@@ -14,7 +14,7 @@ fn gi_hot_load(slot:u32) -> GiHot {
 }
 // The slot a key's insert tries first: its start offset in its bucket.
 fn gi_hot_start(key:vec2<u32>) -> u32 {
-    return ((key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u))+(key.y&(GI_BUCKET-1u));
+    return ((key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u))+(gi_start(key)&(GI_BUCKET-1u));
 }
 // The record of `key` given the record at its start slot, with r0.x zero when it is
 // absent. The start record loads before its key is compared, so the usual case (the
@@ -24,7 +24,7 @@ fn gi_hot_settle(first:GiHot, key:vec2<u32>) -> GiHot {
     if (first.r0.x&GI_KEY_BITS)==key.x { return first; }
     let bucket=(key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u);
     for(var i=1u;i<GI_BUCKET;i+=1u) {
-        let slot=bucket+((key.y+i)&(GI_BUCKET-1u));
+        let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         if (gi_word(gi_hot(slot))&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }
     }
     return GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
@@ -86,6 +86,12 @@ fn gi_open_irradiance(n:vec3<f32>) -> vec3<f32> {
 fn gi_intensity(e:vec3<f32>) -> vec3<f32> {
     return min(e*lighting.map.z,vec3<f32>(3.4028235e38));
 }
+// Cached values in lux: a map's cells hold its radiance (intensity applies here); a
+// constant sky's cells hold unit radiance, scaled here by the current constant.
+fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
+    if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { return gi_intensity(e); }
+    return min(e*lighting.environment,vec3<f32>(3.4028235e38));
+}
 
 // Incident irradiance in lux, unexposed, around `n` at the engine's receiver: the
 // occluded sky from the world radiance cache (M7 G1; bounce arrives with G2). The
@@ -112,16 +118,13 @@ fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     }
     if total>0.0 {
         e=max(e/total,vec3<f32>(0.0));
-        if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { e=gi_intensity(e); }
-        return e;
+        return gi_sky_scale(e);
     }
     // Neither level has a value here: coarser levels, then the open environment.
     for(var level=max(pick.lo,pick.hi)+1u;level<levels;level+=1u) {
         let s=gi_sample(world,level,bin);
         if s.w<=1e-6 { continue; }
-        var level_e=max(s.rgb/s.w,vec3<f32>(0.0));
-        if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { level_e=gi_intensity(level_e); }
-        return level_e;
+        return gi_sky_scale(max(s.rgb/s.w,vec3<f32>(0.0)));
     }
     return gi_open_irradiance(n);
 }
