@@ -188,6 +188,8 @@ RMS rows subtract split-half reference noise; F6 subtracts consecutive physical-
 
 The self-final proxy is the earlier full-image diagnostic (mean <0.5 and p99 <4 relative to the last held frame), not a film-settle result or an equivalent of the original Exact gate. A stable image can retain a large physical error. Whole-frame/error sheets at 64 and 95, L0 and L4, have been inspected. These combined final-colour errors include lighting/material/shadow differences as well as reconstruction; the two paths' difference is retained without attributing it solely to TSR. After scoring and inspection, both native raw inputs were hash-recorded and deleted (**2,654,208,000 bytes**). Regeneration recipes, runtime/camera/exposure/jitter checks and all summaries remain.
 
+`scripts/m7-tr0-report.py` exports `report/s2g-score-summary.json` and `.md` under the evidence root. These tables add L4 frame quantiles, material centroid/peak drift and thresholded background-error extent, with source-score and script hashes. Each missing full track stays unavailable. F6 includes actual camera changes (including the final step into the hold) or every continuously changing Sun input; a stationary camera does not exclude the Sun track. Centroid/peak displacement and nearest-edge error extent are diagnostics, not a connected silhouette-trail width.
+
 ## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
@@ -284,7 +286,7 @@ TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding i
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
-- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. The current eight S2G inputs remain pending scoring and will be deleted after their summaries are complete.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. Both completed quarter-pixel S2G inputs are deleted; the other six native inputs remain until scoring and inspection finish.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
@@ -319,6 +321,7 @@ py -3 -B scripts/m7-tr0-s2g.py trace physical --phase camera --limit 129 --wait-
 py -3 -B scripts/m7-tr0-s2g.py ages --tracks s2g-camera-0.25px
 py -3 -B scripts/m7-tr0.py score g25-e-n-s1 --reference E:/renderlab-work/m7-tr0/s2g/physical/d8bd9a8e --ages E:/renderlab-work/m7-tr0/s2g/ages
 py -3 -B scripts/m7-tr0-bar.py
+py -3 -B scripts/m7-tr0-report.py
 py -3 -B scripts/m7-tr0-retention.py
 # Only after all scoring is summarized:
 py -3 -B scripts/m7-tr0.py clean <fresh-label>

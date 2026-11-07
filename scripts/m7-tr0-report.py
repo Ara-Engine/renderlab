@@ -177,6 +177,88 @@ if all(path.exists() for path in quarter_paths):
     save(figure, "s2g-quarter-comparison")
 
 matrix = read("s2g/synchronized-candidates.json")
+summary_cases = []
+for case in matrix:
+    score_path = ROOT / "runs" / case["label"] / "physical-scores.json"
+    if not score_path.exists():
+        summary_cases.append(dict(case, complete=False, measures={}))
+        continue
+    score = read("runs/" + case["label"] + "/physical-scores.json")
+    complete = {r["frame"] for r in score["rows"]} == set(range(160)) and not score["missing_frames"]
+    if not complete:
+        summary_cases.append(dict(case, complete=False, measures={}))
+        continue
+    recipe = read("runs/" + case["label"] + "/recipe.json")
+    rows_by_frame = {r["frame"]: r for r in score["rows"]}
+    measures = {}
+
+    def metric(name, values):
+        measures[name] = values
+
+    def quantiles(values):
+        return np.quantile(values, [.5, .95]).tolist() if values else None
+
+    for channel in ("L0", "L4"):
+        metric(f"All-frame covered {channel} RMS, p50 / p95", quantiles([
+            r["measures"][channel]["all-covered"]["rms_noise_subtracted"] for r in score["rows"]]))
+    for population in ("all-covered", "metal-0.1", "dielectric-0.2", "edge", "background-centre"):
+        metric(f"Frame 64 {population} L0 / L4 RMS", [rows_by_frame[64]["measures"][c][population]["rms_noise_subtracted"]
+                                                          for c in ("L0", "L4")])
+    for population, ages in (("all-covered", (3, 7)), ("background-centre", (7,))):
+        pools = [score["transient_pools"].get(f"revealed/{age}/{population}/L0") for age in ages]
+        metric(f"Revealed {population} L0, age " + " / ".join(map(str, ages)),
+               [p["tsr_rms_noise_subtracted"] for p in pools] if all(pools) else None)
+    changed = rows_by_frame[72].get("changed", {}).get("measures")
+    if changed:
+        metric("Frame 72 eight-frame changed-mask L0 / L4 RMS", [changed[c]["tsr_rms_noise_subtracted"] for c in ("L0", "L4")])
+        metric("Frame 72 changed-mask L0 signed mean / SE", [changed["L0"]["tsr_signed_mean"], changed["L0"]["tsr_se"]])
+    for channel in ("L0", "L4"):
+        moving = [r["tsr_rms"] for r in score["motion_residuals"] if r["channel"] == channel and r["tsr_rms"] is not None
+                  and (not r["static"] or case["track"] == "s2g-sun-0.25deg")]
+        metric(f"Input-changing F6 {channel} residual, p50 / p95", quantiles(moving))
+    is_camera = case["track"].startswith("s2g-camera-")
+    if is_camera:
+        steps = [next(r for r in score["motion_residuals"] if r["frames"] == [80, 81] and r["channel"] == c)
+                 for c in ("L0", "L4")]
+        metric("Hold 80 to 81 age-at-least-8 L0 / L4 step", [r["tsr_step_rms"] for r in steps])
+        diagnostic = read("runs/" + case["label"] + "/hold-diagnostic.json")
+        metric("Full-image self-final settle proxy, frames", diagnostic["settle_offset"])
+    for frame in (64, 95 if is_camera else 159):
+        metric(f"Frame {frame} metal / dielectric highlight energy ratio", [rows_by_frame[frame]["highlights"][p]["energy_ratio"]
+                                                                              for p in ("metal-0.1", "dielectric-0.2")])
+        for population in ("metal-0.1", "dielectric-0.2"):
+            metric(f"Frame {frame} {population} centroid / peak drift, pixels", [rows_by_frame[frame]["highlights"][population][k]
+                                                                                   for k in ("centroid_drift_px", "peak_drift_px")])
+    for channel in ("L0", "L4"):
+        extent = rows_by_frame[64]["background_error_extent"][channel]["values"]["tsr"]
+        metric(f"Frame 64 age-at-least-32 background error pixels over 1 / 4 / 8 {channel} codes", [extent[t]["pixels"] for t in ("1", "4", "8")])
+    summary_cases.append(dict(case, complete=True, measures=measures,
+                              score_sha256=sources[str(score_path)], age_protocol=score["age_protocol"]))
+
+summary = dict(cases=summary_cases, complete=all(c["complete"] for c in summary_cases),
+               script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+               scope="Combined final-colour physical error, not a decomposition of TSR error. D8, black primary, zero shutter, registered exposure. Missing entries are unavailable, never passes.",
+               limitations=["Original post-TSR R_F and R_D estimands unavailable", "Film-settle gate unavailable; self-final proxy is diagnostic only",
+                            "Sun turns continuously: no camera disocclusion or stop/hold event", "Centroid/peak drifts are fixed-mask diagnostics, not connected trail widths"])
+(OUT / "s2g-score-summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
+table = ["# S2G retained physical-score tables", "", summary["scope"], ""]
+for track in ("s2g-camera-0.25px", "s2g-camera-0.5px", "s2g-camera-1px", "s2g-sun-0.25deg"):
+    pair = [next(c for c in summary_cases if c["track"] == track and c["path"] == p) for p in ("vsm-nort", "hrt")]
+    table += ["## " + track, "", "| Measure | Epic no RT | Epic HRT |", "|---|---:|---:|"]
+    names = dict.fromkeys(name for c in pair for name in c["measures"])
+    if not names:
+        table.append("| Complete registered physical score | Unavailable | Unavailable |")
+    for name in names:
+        values = []
+        for case in pair:
+            value = case["measures"].get(name)
+            values.append("Unavailable" if value is None else " / ".join(f"{v:.6g}" for v in value) if isinstance(value, list) else f"{value:.6g}")
+        table.append("| " + name + " | " + " | ".join(values) + " |")
+    table.append("")
+table += ["RMS subtracts split-half reference noise. F6 subtracts consecutive physical-reference changes, with shared age >=8.",
+          "Camera tracks stop at frame 64; Sun changes continuously. Revealed-age pools contain different pixels at each age.",
+          "Self-final settle compares against the last held image, not an independent film bar. Original film-settle counts remain unavailable.", ""]
+(OUT / "s2g-score-summary.md").write_text("\n".join(table), encoding="utf-8")
 if all((ROOT / "runs" / c["label"] / "physical-scores.json").exists() for c in matrix):
     glossy = [(c, read("runs/" + c["label"] + "/physical-scores.json")) for c in matrix]
     if all(len(s["rows"]) == 160 and not s["missing_frames"] for _, s in glossy):
