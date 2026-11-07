@@ -209,7 +209,7 @@ pub(super) fn diagnose(
 const SCREEN_CONSTANTS: [&str; 63] = [
     "VSM_SPLIT",
     "VMAP_QUEUE_SPREAD",
-    "VSM_QUEUED_SPREAD",
+    "VMAP_QUEUE_LANES",
     "VMAP_SOFT",
     "VMAP_RING",
     "VMAP_FAR_REACH",
