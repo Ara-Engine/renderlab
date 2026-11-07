@@ -112,11 +112,12 @@ fn surface_stats(
     if !on {
         return;
     }
-    if let Some([probes, hits, reached, sun, unshown, misses]) = r.test_surface_stats() {
-        stats.push(
-            serde_json::json!({"label": label, "frame": frame, "probes": probes, "hits": hits,
-            "caster_reached": reached, "sun_refreshes": sun, "unshown": unshown, "misses": misses}),
-        );
+    if let Some([probes, hits, reached, sun, unshown, misses, overflow, fills]) =
+        r.test_surface_stats()
+    {
+        stats.push(serde_json::json!({"label": label, "frame": frame, "probes": probes,
+            "hits": hits, "caster_reached": reached, "sun_refreshes": sun, "unshown": unshown,
+            "misses": misses, "margin_overflow": overflow, "fills": fills}));
     }
 }
 /// N8h: the renderer's GPU memory by owner (ledger), wgpu's HAL counters and the

@@ -137,6 +137,7 @@ impl SurfaceCache {
                 storage(20, false, S::COMPUTE),
                 uniform(49, UNIFORM_BYTES),
                 storage(50, false, S::COMPUTE),
+                storage(51, false, S::COMPUTE),
                 sampled(52, uint, D::D2),
                 storage(53, false, S::COMPUTE),
             ],
@@ -388,6 +389,7 @@ impl SurfaceCache {
                     buffer(20, &r.queue),
                     buffer(49, &self.uniform),
                     buffer(50, &self.table),
+                    buffer(51, &self.stats),
                     texture(52, output),
                     buffer(53, &self.claims),
                 ],
@@ -456,15 +458,15 @@ impl SurfaceCache {
     }
 
     /// Tests: the last frame's counters (probed receivers, hits, cells the caster test retired,
-    /// sun refreshes, cells found but not shown; `VSC_STATS` only) and its queued walks (both
-    /// ends).
+    /// sun refreshes, cells found but not shown, certified walks past the largest margin, fill
+    /// claims; `VSC_STATS` only) and its queued walks (both ends).
     #[cfg(test)]
     pub(super) fn read_stats(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         r: &Resources,
-    ) -> [u32; 6] {
+    ) -> [u32; 8] {
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("N8n surface counters readback"),
             size: 64,
@@ -494,6 +496,8 @@ impl SurfaceCache {
             word(3),
             word(4),
             word(8) + word(14),
+            word(5),
+            word(6),
         ]
     }
 }
@@ -501,7 +505,7 @@ impl SurfaceCache {
 #[cfg(test)]
 impl Renderer {
     /// Tests: `SurfaceCache::read_stats` of the last frame, after a drain.
-    pub(crate) fn test_surface_stats(&mut self) -> Option<[u32; 6]> {
+    pub(crate) fn test_surface_stats(&mut self) -> Option<[u32; 8]> {
         self.test_drain("N8n surface counters");
         let state = self.virtual_shadows.as_ref()?;
         let surface = state.surface.as_ref()?;
@@ -539,7 +543,7 @@ mod tests {
             (3, None),
         ];
         let insert: Layout = &[
-            (0, Some(&[0, 7, 8, 9, 10, 20, 49, 50, 52, 53])),
+            (0, Some(&[0, 7, 8, 9, 10, 20, 49, 50, 51, 52, 53])),
             (3, None),
         ];
         let passes: [(&str, Layout); 5] = [
