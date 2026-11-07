@@ -41,8 +41,11 @@ Completed capture inventory at this checkpoint:
 | `j-e-v-c1` | Quarry Q-sun-jump, Epic/VSM | 33 | 33 pass | 33 pass | This earlier capture predates the light readback; provisional |
 | `sf-e-v-c1` | Quarry Q-sun-fast, Epic/VSM | 64 | 64 pass | 64 pass | 64 pass |
 | `g-e-v-c1` | S2G camera 1 px/frame, Epic/VSM | 160 | 160 pass | 160 pass (`2^-12`) | 160 pass |
+| `gz-e-n-c2` | S2G sun 0.25°/frame, Epic/VSM globally no RT | 160 | 160 pass | 160 pass (`2^-12`) | 160 pass; sun diameter pass |
+| `g25-e-n-c1` | S2G camera 0.25 px/frame, Epic/VSM globally no RT | 160 | 160 pass | 160 pass (`2^-12`) | 160 pass; sun diameter pass |
+| `g50-e-r-c2` | S2G camera 0.5 px/frame, Epic/HRT | 160 | 160 pass | 160 pass (`2^-12`) | 160 pass; sun diameter pass |
 
-S2G uses U0b's separate `E:/renderlab-work/m7-u0b/ue-package`, `/Game/M7U0b/S2G/Bench`; U0's original package is untouched. The other S2G camera speeds and continuous-sun track, additional High/HRT runs, Q-zoom and Q-sun-slow remain outstanding. Smoke captures are not quality samples.
+S2G uses U0b's separate `E:/renderlab-work/m7-u0b/ue-package`, `/Game/M7U0b/S2G/Bench`; U0's original package is untouched. Every S2G camera speed and the continuous-sun track now has a native capture; the complete paired RT/non-RT matrix, additional High rows, Q-zoom and Q-sun-slow remain outstanding. Smoke captures are not quality samples.
 
 **Shared primary-background protocol (Islam, 2026-11-07): black everywhere.** Black is applied to primary misses **before temporal accumulation/integration**, with the environment still illuminating surfaces. Unreal already clears black. The reference uses per-sample black-primary compositing, including silhouette coverage; no post-composite or sky exclusion mask is used. The black-primary T1b control below passed, so the staged colored-clear Unreal fallback was cancelled. **Background-sky silhouette behavior is untested under this protocol.**
 
@@ -90,7 +93,9 @@ TSR's post-TSR colour must not be presented as film visibility `R_F`. A native s
 
 These are a **separate estimand**, not replacements for the frozen-bar ratios above. U0b's lossless `quarry-final` archives contain unexposed cd/m² full-radiance split halves, finite-disk physical direct radiance, conditioned visibility and geometric populations. Direct radiance differs from the original delta-BRDF D estimand; combined error also includes foreground material/lighting differences, not just reconstruction. Zero shutter matches Unreal's disabled motion blur. No fitted gain, exposure or geometry alignment is used.
 
-Initial CPU scoring uses the 4096-spp static p0 and 1024-spp frame 001/047 archives, 32 visibility rays per accepted primary. Canonical f32 camera inputs allow exact return-pose reuse; archive hashes, projection and black-primary metadata are checked. The current six scored output frames are 0, 1, 47, 113, 159 and 160; **155 frames still lack references**, so this cannot certify the motion gate. Full JSON retains raw/noise-subtracted RMS, signed mean and SE, maxima, reference noise, background distance bands and reference-subtracted consecutive-frame flicker. Age-32 comparisons and age-0–7 pools use the restored fixed T1b masks for both methods.
+CPU scoring uses the 4096-spp static p0 and 1024-spp moving/held-pose archives, 32 visibility rays per accepted primary. Canonical f32 camera inputs allow exact return-pose reuse; archive hashes, projection and black-primary metadata are checked. Currently **45/161 output frames, including 16/60 original T1b scored checkpoints**, have references; **116 output frames and 44 original checkpoints remain missing**. This cannot certify the motion gate. Full JSON retains raw/noise-subtracted RMS, signed mean and SE, maxima, reference noise, background distance bands and reference-subtracted consecutive-frame flicker. Age-32 comparisons and age-0–7 pools use the restored fixed T1b masks for both methods.
+
+The static p0/p1 black-primary metadata was added retrospectively by U0b after a fail-closed metadata check. `quarry-final/black-primary-provenance.json` records source checkpoint `aea9dd4`, its hard-coded black primary-miss branch, original process record and a CPU audit of the top 64 rows (all primary misses, split L/D exactly zero). Archive hashes are unchanged. No immutable per-run source snapshot was saved; this is explicitly retrospective source validation, not fabricated runtime readback.
 
 Illustrative **frame 160**, same T1b age ≥32 pixels, reference-noise-subtracted RMS in F0 codes (Epic/HRT):
 
@@ -103,24 +108,71 @@ Illustrative **frame 160**, same T1b age ≥32 pixels, reference-noise-subtracte
 | Background-centre L0 | 2.6889 | 0.3228 |
 | Background-centre L4 | 8.2257 | 0.9652 |
 
-Frame 159→160 reference-subtracted covered/same-placement, age ≥8 residual is **4.5054 versus 3.3345 L0**, and **6.3084 versus 3.9708 L4** (T1b black versus TSR). These sparse rows show mixed combined-radiance behavior; they establish neither universal superiority nor the original frozen gate. The complete pending witness set and held-pose reuse will supply the measured settle curve and fixed-population hold flicker.
+Frame 159→160 reference-subtracted covered/same-placement, age ≥8 residual is **4.5054 versus 3.3345 L0**, and **6.3084 versus 3.9708 L4** (T1b black versus TSR Epic/HRT). These sparse rows show mixed combined-radiance behavior; they establish neither universal superiority nor the original frozen gate. The remaining event witnesses are required for the complete film-settle curve.
 
-## Cost method and initial screen
+The current physical-reference side by side at **frame 64** uses the same T1b age ≥32 masks. Values are L0 / L4 noise-subtracted RMS codes; this table is distinct from the historical ×bar table:
+
+| Measure | T1b black replay | TSR Epic/HRT | TSR Epic/VSM, no RT | TSR High/VSM |
+|---|---:|---:|---:|---:|
+| All-covered | 10.9147 / 17.5928 | 11.2447 / 16.6660 | 11.2464 / 16.6678 | 11.5701 / 17.0904 |
+| Partial | 13.9361 / 22.5536 | 13.4978 / 20.9950 | 13.5073 / 21.0046 | 14.1688 / 21.9287 |
+| Occluded | 28.9862 / 49.8995 | 31.2899 / 51.9517 | 31.2912 / 51.9528 | 31.4286 / 52.3805 |
+| Edge | 23.5702 / 50.4996 | 17.8147 / 31.8806 | 17.8157 / 31.8781 | 18.6064 / 35.7946 |
+| Background-centre | 1.5840 / 5.4559 | 0.3714 / 1.1681 | 0.3711 / 1.1675 | 0.5970 / 1.8505 |
+| Hold frame 96, all-covered | 10.4028 / 16.9126 | 11.1930 / 16.5618 | 11.1944 / 16.5635 | 11.2989 / 16.7540 |
+| Hold 80→81 covered/same-placement, age ≥8 step RMS | 0.2774 / 0.3314 | 0.4320 / 0.4776 | 0.4325 / 0.4782 | 0.2785 / 0.3089 |
+
+Silhouette and recovery measurements on that same new target:
+
+| Measure | T1b black replay | TSR Epic/HRT | TSR Epic/VSM, no RT | TSR High/VSM |
+|---|---:|---:|---:|---:|
+| Frame 64 background L0 RMS, 1.5–3 px from edge | 11.2921 | 0.00406 | 0.00407 | 0.02128 |
+| Frame 64 background L0 RMS, 3–6 px from edge | 8.1884 | 0.00641 | 0.00641 | 0.01010 |
+| Revealed age 3, all-covered L0 | 20.7580 | 5.8874 | 5.8922 | 7.9817 |
+| Revealed age 7, all-covered L0 | 18.8087 | 9.1064 | 9.1073 | 10.6791 |
+| Revealed age 7, background-centre L0 | 42.1877 | 4.1748 | 4.1761 | 7.4430 |
+
+Distance bands use raw RMS (the reference is nearly black there); recovery rows subtract split-half reference noise. The recovery pools currently contain only **87, 109 and 499 pixels**, respectively, from available original checkpoints, so their coverage is explicitly partial. They do not replace T1b's full historical pooled scores. The 0–1.5 px band retains large true silhouette-integration error and is also recorded; a small wider-band RMS is not a zero-pixel trail-width claim. Film settle and frame-72 changed-mask/ghost-bias certification still await frame 56 and the remaining event references. The measured fixed-population hold step is now available above; the earlier self-residual diagnostic remains separately labelled.
+
+## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
 
 The native CSV `GPUTime` is the whole GPU-frame measure. `GPU/TemporalSuperResolution` is a pass stat, not a substitute for the frame's end-to-end increment. Both and the per-frame A/B deltas are retained. CPU/frame wall time is not substituted for GPU time. No Cargo runs inside a TR0 lease.
 
-Current **desktop screens only**, RTX 4070 SUPER 12 GB / NVIDIA 617.14 / Ryzen 7 7800X3D. All completed visits are pooled without favourable-visit filtering in `cost-summary.json`. Capture processes and a block aborted below 2 GiB are excluded:
+**Qualified quiet window `tq1`, 15:47:56–15:53:09Z**, after rt1c's quiet release and before dl3: one exclusive shared lease, no Cargo, no game or competing GPU work. Hardware: **RTX 4070 SUPER 12 GB / NVIDIA 617.14 / Ryzen 7 7800X3D**. The supported wallpaper pause was restored; saved quiet-start inventory reports **0% GPU use** and no game. The helper's actual timestamped proof is under `quiet/tq1/windows/20261107T154756494849Z/`.
 
-| Q-walk path / preset | A/B pairs; frames/method | No-AA frame p50 | TSR frame p50 / p95 | Paired frame increment p50 / p95 | TSR pass p50 / p95 |
-|---|---:|---:|---:|---:|---:|
-| VSM / Epic | 4; 612 | 1.7015 | 3.2094 / 4.2713 | 1.4966 / 2.4654 | 1.2083 / 1.8011 |
-| VSM / High | 2; 306 | 1.6657 | 2.7438 / 2.7967 | 1.0723 / 1.1380 | 0.8171 / 0.8285 |
-| HRT / Epic | 2; 306 | 1.7813 | 3.2662 / 3.3296 | 1.4837 / 1.5567 | 1.2175 / 1.2357 |
-| VSM, globally no RT / Epic | 2; 306 | 1.6623 | 3.2332 / 3.2997 | 1.5648 / 1.6487 | 1.2031 / 1.2091 |
+All **32 processes** passed their runtime settings, SM6, sun-diameter, process-exit and memory checks. CPU `quiet-check` verified zero native TSR stat on every measured no-AA frame and a positive stat on every TSR frame. Four processes per configuration yield **eight A/B pairs**, **1,224 Q-walk frames/method** or **1,216 S2G frames/method**. Configuration order reverses on alternate visits. All visits are pooled without favorable filtering.
 
-This is not the final quiet denominator and certifies no 2× claim. The original U0 screen (TSR pass 1.41–1.59 ms) is another workload/state screen, not silently averaged into this table. T1b's recorded total span was 1.108–1.128 ms, +0.203–0.223 ms over Interactive, on its separate Vulkan run; those are historical measurements, not a matched TSR A/B.
+All values below are **milliseconds**. S2G uses its full registered 1 px/frame camera track, including hold and return. The lighting scope is the matched direct/environment subset above, not Lumen:
+
+| Track / path | Preset | No-AA frame p50 | TSR frame p50 / p95 / p99 | Paired frame increment p50 / p95 / p99 | TSR pass p50 |
+|---|---|---:|---:|---:|---:|
+| Q-walk / globally no-RT VSM | Epic | 1.6667 | 3.2313 / 3.2911 / 3.3572 | 1.5615 / 1.6378 / 1.7061 | 1.2033 |
+| Q-walk / globally no-RT VSM | High | 1.6652 | 2.8383 / 2.8936 / 2.9481 | 1.1694 / 1.2419 / 1.2833 | 0.8161 |
+| Q-walk / HRT | Epic | 1.7776 | 3.2363 / 3.3014 / 3.4177 | 1.4546 / 1.5377 / 1.6324 | 1.2094 |
+| Q-walk / HRT | High | 1.7793 | 2.8471 / 2.9038 / 2.9989 | 1.0610 / 1.1480 / 1.2102 | 0.8232 |
+| S2G / globally no-RT VSM | Epic | 1.2441 | 2.6452 / 2.6851 / 2.7073 | 1.4011 / 1.4621 / 1.4860 | 1.2185 |
+| S2G / globally no-RT VSM | High | 1.2417 | 2.2402 / 2.2795 / 2.3021 | 0.9967 / 1.0534 / 1.0835 | 0.8223 |
+| S2G / HRT | Epic | 1.6436 | 2.9949 / 3.0247 / 3.0667 | 1.3499 / 1.4409 / 1.4697 | 1.2309 |
+| S2G / HRT | High | 1.6369 | 2.5784 / 2.6178 / 2.6557 | 0.9424 / 1.0292 / 1.0757 | 0.8274 |
+
+**Retained whole-frame outlier:** `tq1-g-r-e-1`, first pair, CSV input index 19: **22.4824 ms**, paired no-AA 1.6452 ms, TSR pass **1.2277 ms**. Other named GPU counters do not explain that whole-frame spike; no cause is asserted. It remains in every percentile and maximum. The other seven configurations' measured maxima are 2.79–3.77 ms. This record does not certify a no-spike claim.
+
+Concrete **p50 ceilings for TR1**, in addition to beating Epic on every quality measure and the corresponding tail statistics:
+
+| Epic comparator | TR1 reconstruction increment ≤ | TR1 total frame ≤ |
+|---|---:|---:|
+| Q-walk, no RT | 0.78075 ms | 1.61565 ms |
+| Q-walk, HRT | 0.727325 ms | 1.618175 ms |
+| S2G, no RT | 0.700575 ms | 1.322625 ms |
+| S2G, HRT | 0.67495 ms | 1.497425 ms |
+
+These ceilings use the paired **end-to-end increment**, not half the standalone TSR marker. No TR1 implementation has been timed or qualified here. `cost-per-frame.csv` retains **1,220 per-input-frame rows** with eight paired samples each, median/p95 frame and pass costs; the first eight cold-repeat frames are excluded as registered and remain in raw CSV. `cost-summary.json` keeps `quiet` and earlier `screen` rows separate. Capture processes and the memory-aborted earlier block are excluded. All game-time timing is ineligible; none supplies this table.
+
+Cost rows are keyed to the registered **CSV input chronology**. Installed `LaunchEngineLoop.cpp` records `GPUTime` from `RHIGetGPUFrameCycles()`, which reads the latest completed GPU-frame value. Its asynchronous reporting lag has not been independently calibrated to each camera pose; the qualified denominator is the pooled paired full-track measurement. Native HDR camera/light alignment is independently verified and does not inherit this timing-attribution limit.
+
+T1b's recorded total span was 1.108–1.128 ms, +0.203–0.223 ms over Interactive, on its separate Vulkan run. Those historical measurements and U0's earlier 1.41–1.59 ms TSR-pass screen are not pooled into the quiet denominator.
 
 ## Settle diagnostics and remaining work
 
@@ -130,6 +182,12 @@ On Q-walk, High/VSM's full-image median hold step is **0.1349 code**, with the p
 
 U0b now supplies quarry textures/RLE2 illumination and black-primary references. T1b's age masks have been recovered and verified above. U0b is prioritizing Q-walk 48/49, 63/64, 56 and return witnesses around 120/128; pose 64 also supplies every held frame 65–96. Original frozen raw references and Exact images remain deleted. The new physical target and old recorded bars stay separate. The full capture/reference matrix, post-TSR direct/visibility estimands, every-event film settle, and final quiet costs remain incomplete.
 
+**S2G reference probe rejected:** `gr-1p-64-a` used U0b's retained tracer with unchanged S2G geometry, illumination and black primary background at the registered 1 px/frame track's frame 64. The first 1024-spp image had zero invalid pixels; the same-seed replay then differed and the test exited 101. Its 5.06-second render and 11.65-second process times are game-contended diagnostics, not performance evidence. The process is stopped and its lease was released at 15:14:39Z. No reference from that probe is accepted or scored. Raw output and generated source remain for U0b's diagnosis. Subsequent probes pin the shared executable by copy and hash, and request geometry/D/V export explicitly.
+
+U0b narrowed this to independent acceleration-structure rebuilds: three 1024-spp repetitions on a fixed AS/pipeline are bit-identical, as are fixed-AS runs that recreate the shader module/pipeline. Independent AS rebuilds differ by at most two f32 ULPs in RGB; **all 80-byte geometry records, centre points/normals/IDs, accepted counts, D and visibility sums remain byte-identical**, with zero invalid pixels. The latest reported maximum absolute RGB difference is 0.00390625 cd/m², full-image RMS 3.32e-6. This is a bounded diagnostic, **not reference acceptance**; U0b's AS-build-preference check is pending. Native TSR data is unaffected.
+
+TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding its 45-second contention cutoff with only 3.117 GiB available RAM, and continued CPU scoring. Short native captures resumed after headroom improved. The **game hold was released at 15:36:21Z**. TR0 explicitly reserved the second quiet window after rt1c, before dl3 and U0b's long timings. The queued `tq1` cost matrix uses one exclusive lease; old screens and any game-time timings remain separate and cannot supply the final speed denominator.
+
 ## Safety, provenance and retention
 
 - Shared atomic directory lock: `D:/Coding/renderlab-work/gpu-slot.lock`, with token-checked release and reservation/release lines in `E:/renderlab-work/gpu-schedule.md`. Each own run is blocked to completion. A busy lock defers the run; it never removes another worker's lock.
@@ -138,7 +196,7 @@ U0b now supplies quarry textures/RLE2 illumination and black-primary references.
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
-- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for reference scoring. After the black control, original colored-replay full HDR is also summarized and deleted. Current ledgers total **18.86 GB** including the new no-RT capture's unused resources; every deletion is hashed. Remaining large inputs are pending scoring and will be deleted after their summaries are complete.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for reference scoring. After the black control, original colored-replay full HDR is also summarized and deleted. Current ledgers total **22.84 GB** including the new no-RT and S2G captures' unused resources; every deletion is hashed. Remaining large inputs are pending scoring and will be deleted after their summaries are complete.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
@@ -162,6 +220,10 @@ py -3 -B scripts/m7-tr0.py history <black-label> --black-background --minutes 3
 py -3 -B scripts/m7-tr0.py black-check <black-label> --baseline <restore-label> --reference E:/renderlab-work/m7-u0b/reference/quarry-final/quarry-p0.npz
 # Score both candidates on the new physical target, without reusing the old bar:
 py -3 -B scripts/m7-tr0.py score w-e-r-c1 --reference E:/renderlab-work/m7-u0b/reference/quarry-final --history t1b-black-b
+# Quiet cost matrix: only after the preceding rt1c quiet release, with the retained U0b quiet helper:
+py -3 -B scripts/m7-tr0.py quiet <quiet-label> --quiet-tool <checkout>/scripts/m7-u0b.py
+# S2G references require U0b's qualified retained binary; rejected replay output is never accepted:
+py -3 -B scripts/m7-tr0.py reference <reference-label> --track s2g-camera-1px --frames 64 --compact-tool <checkout>/scripts/m7-u0b-score.py
 # Only after all scoring is summarized:
 py -3 -B scripts/m7-tr0.py clean <fresh-label>
 ```

@@ -8,6 +8,8 @@ are reused only after the original replay and black-primary controls pass.
 import argparse
 import csv
 import copy
+import contextlib
+import datetime as dt
 import hashlib
 import importlib.util
 import json
@@ -25,6 +27,8 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 ROOT = Path("E:/renderlab-work/m7-tr0")
 T1 = Path("E:/renderlab-work/t1-gpu")
+SCRIPT_BYTES = Path(__file__).read_bytes()
+SCRIPT_SHA = hashlib.sha256(SCRIPT_BYTES).hexdigest()
 
 
 def load(name):
@@ -36,7 +40,12 @@ def load(name):
 
 U0 = load("m7-u0-ue")
 U0.OUT, U0.OWNER = ROOT, "m7-tr0"
+ORIGINAL_PACKAGE_DIR = U0.PACKAGE_DIR
 _engine_tool = U0.engine_tool
+_preflight = U0.preflight
+# Queue outside the lease. A foreign process must not consume a short lease
+# in U0's normal 180-second preflight wait and allow a late child launch.
+U0.preflight = lambda path, wait_seconds=0: _preflight(path, wait_seconds=0)
 NATIVE = load("bench-motion-score")
 
 
@@ -214,9 +223,12 @@ def readback(out, quality, path):
     angle_expected = recipe.get("sun_diameter_degrees")
     angle_check = dict(expected=angle_expected, actual=source_angles,
                        ok=angle_expected is not None and bool(source_angles) and all(abs(v - angle_expected) < 1e-5 for v in source_angles))
+    sky_intensities = [float(m.group(1)) for m in re.finditer(r"SkyLightComponent.*\.Intensity = ([0-9.eE+-]+)", log)]
+    sun_only = recipe.get("program", "full") == "sun"
     result = dict(ok=all(c["ok"] for c in checks + camera_checks + light_checks), checks=checks, camera_checks=camera_checks,
                   light_checks=light_checks, light_readback_complete=not light_poses or len(light_checks) == len(light_poses),
                   sun_angle=angle_check,
+                  sun_only_sky_disabled=not sun_only or bool(sky_intensities) and all(v == 0 for v in sky_intensities),
                   camera_readbacks=cameras,
                   d3d12_sm6="PCD3D_SM6" in log and "LogD3D12RHI" in log,
                   commandline_offscreen="-RenderOffscreen" in log)
@@ -225,6 +237,8 @@ def readback(out, quality, path):
         raise ValueError("runtime readback failed: " + str(out))
     if angle_expected is not None and not angle_check["ok"]:
         raise ValueError("runtime sun-diameter readback failed: " + str(out))
+    if not result["sun_only_sky_disabled"]:
+        raise ValueError("sun-only capture lacks zero SkyLight intensity readback")
 
 
 def run(args):
@@ -232,19 +246,15 @@ def run(args):
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
         print("Waiting for shared GPU/memory guard (bounded)", flush=True)
-        while U0.LOCK.exists() or U0.E2E.available_gib() < 4:
+        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
             if time.monotonic() >= deadline:
                 print("deferred: GPU/memory wait expired; no lease acquired", flush=True)
                 raise SystemExit(3)
             time.sleep(2)
     source = json.loads((ROOT / "inputs" / (args.track + ".json")).read_text())
     glossy = source.get("scene") == "S2G"
-    if glossy:
-        U0.PACKAGE_DIR = args.package_dir or Path("E:/renderlab-work/m7-u0b/ue-package")
-        U0.PACKAGE = U0.PACKAGE_DIR / "Windows/Engine/Binaries/Win64/UnrealGame.exe"
-    elif args.package_dir:
-        U0.PACKAGE_DIR = args.package_dir
-        U0.PACKAGE = U0.PACKAGE_DIR / "Windows/Engine/Binaries/Win64/UnrealGame.exe"
+    U0.PACKAGE_DIR = args.package_dir or (Path("E:/renderlab-work/m7-u0b/ue-package") if glossy else ORIGINAL_PACKAGE_DIR)
+    U0.PACKAGE = U0.PACKAGE_DIR / "Windows/Engine/Binaries/Win64/UnrealGame.exe"
     if not U0.PACKAGE.exists():
         raise SystemExit("package not ready: " + str(U0.PACKAGE))
     frames = source["frames"]
@@ -252,6 +262,7 @@ def run(args):
         frames = frames[:9]
     out = ROOT / "runs" / args.label
     out.mkdir(parents=True, exist_ok=False)
+    (out / "capture-source.py").write_bytes(SCRIPT_BYTES)
     start = 96
     events = [(40, f"DumpCVars -csv={(out / 'cvars.csv').as_posix()}")]
     # Each repeat starts with a reset, so repeats exercise the same cold input sequence.
@@ -283,6 +294,8 @@ def run(args):
     sun_diameter = math.degrees(2 * source["sun_radius"]) if glossy else math.degrees(.08)
     config.append(f"set DirectionalLightComponent LightSourceAngle {sun_diameter:.9f}")
     config.append("getall DirectionalLightComponent LightSourceAngle")
+    if args.program == "sun":
+        config += ["set SkyLightComponent Intensity 0", "ShowFlag.SkyLighting 0", "getall SkyLightComponent Intensity"]
     expected_fov = math.degrees(2 * math.atan(math.tan(frames[0]["fov_y_radians"] / 2) * 1920 / 1080))
     initial = copy.deepcopy(frames[0])
     if args.track == "q-sun-jump":
@@ -334,10 +347,10 @@ def run(args):
     actual_command = [str(c) for c in command[:2]] + ["-CmdLineFile=" + command_file.as_posix()]
     save(out / "recipe.json", dict(track=args.track, path=args.path, quality=args.quality, capture=args.capture,
           smoke=args.smoke, start=start, frames=frames, repeats=repeats, gap=16, csv_frames=count,
-          sequence_sha256=digest(ROOT / "inputs" / (args.track + ".json")), script_sha256=digest(__file__),
+          sequence_sha256=digest(ROOT / "inputs" / (args.track + ".json")), script_sha256=SCRIPT_SHA,
           package_exe_sha256=digest(U0.PACKAGE), exposure_stops=source.get("exposure_stops", -14),
           sun_diameter_degrees=sun_diameter,
-          scene="S2G" if glossy else "quarry", shutter=0,
+          scene="S2G" if glossy else "quarry", shutter=0, program=args.program,
           note="Timing: 2 no-AA/TSR paired full-track replays in one process; four invocations give eight pairs. Even repeats no AA, odd repeats TSR. Cold reset per replay. Capture and timing are separate processes. No reference score implied."))
     csv_root = U0.PACKAGE_DIR / "Windows/M5Calibration/Saved/Profiling/CSV"
     before = set(csv_root.glob("*.csv"))
@@ -348,7 +361,8 @@ def run(args):
             save(out / "package-identity.json", dict(executable_sha256=digest(U0.PACKAGE),
                  paks={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.pak")},
                  utocs={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.utoc")}))
-            U0.guarded(actual_command, out, timeout=min(args.minutes * 60 - 20, 120) if policy["state"] == "relaxed" else args.minutes * 60 - 20, cwd=U0.PACKAGE.parent)
+            default_timeout = min(args.minutes * 60 - 20, 120) if policy["state"] == "relaxed" else args.minutes * 60 - 20
+            U0.guarded(actual_command, out, timeout=getattr(args, "timeout_seconds", default_timeout), cwd=U0.PACKAGE.parent)
     finally:
         # Only the exclusively-created directory and its own copied macros.
         if short_dir.parent.resolve() != U0.PACKAGE.parent.parent.resolve():
@@ -413,7 +427,9 @@ def summarize(args):
         save(out / "timing.json", dict(by_method=by_method, paired_delta_p50_ms=float(np.median(pairs)),
              paired_delta_p95_ms=float(np.quantile(pairs, .95)), pairs=len(pairs), valid_timing=not recipe["smoke"],
              per_frame=frame_costs,
-             activity_policy=policy, contended=True, eligible_for_speed_claim=False,
+             activity_policy=policy, contended=policy.get("state") != "quiet",
+             eligible_for_speed_claim=policy.get("state") == "quiet" and policy.get("speed_claim_eligible", False),
+             quiet_window=policy.get("quiet_window"),
              scope="2 adjacent no-AA/TSR full-track pairs per process, same frame indices, first 8 frames excluded per track. Four processes give eight pairs. Native CSV GPUTime plus TSR stat. Desktop contention recorded in preflight."))
         print(json.dumps(by_method, indent=2))
         return
@@ -498,7 +514,7 @@ def clean(args):
     root = (ROOT / "runs" / args.label).resolve()
     if ROOT.resolve() not in root.parents or not root.is_dir():
         raise ValueError("cleanup outside owned run")
-    if not (root / "capture-readback.json").exists() and not (root / "history-readback.json").exists():
+    if not any((root / name).exists() for name in ("capture-readback.json", "history-readback.json", "reference-readback.json")):
         raise ValueError("summarize before cleanup")
     deleted = []
     for path in root.rglob("*"):
@@ -573,26 +589,146 @@ def cost(_):
         readback = json.loads((path.parent / "readback.json").read_text())
         if process["exit_code"] or process["failures"] or not readback["ok"]:
             raise ValueError("invalid process was labelled valid timing")
-        key = (recipe["track"], recipe["path"], recipe["quality"])
+        quiet_root = ROOT / "quiet" / str(timing.get("quiet_window"))
+        certificate, validation = quiet_root / "certificate.json", quiet_root / "readback-validation.json"
+        qualified = bool(timing.get("eligible_for_speed_claim") and certificate.exists() and validation.exists() and
+                         json.loads(certificate.read_text()).get("eligible_for_speed_claim") and
+                         json.loads(validation.read_text()).get("passed"))
+        key = (recipe["track"], recipe["path"], recipe["quality"], recipe.get("program", "full"), "quiet" if qualified else "screen")
         group = groups.setdefault(key, dict(visits=[], samples=[]))
         group["visits"].append(dict(label=path.parent.name, preflight_sha256=digest(path.parent / "preflight.json"),
                                      process_sha256=digest(path.parent / "process.json"),
                                      minimum_available_gib=process["minimum_available_gib"],
                                      activity_policy=timing.get("activity_policy", {"state": "pre-game-screen"}),
-                                     eligible_for_speed_claim=False))
+                                     eligible_for_speed_claim=qualified,
+                                     quiet_window=timing.get("quiet_window")))
         group["samples"].extend(timing["per_frame"])
-    rows = []
-    for (track, shadow_path, quality), group in groups.items():
+    rows, per_frame = [], []
+    for (track, shadow_path, quality, program, scope), group in groups.items():
         samples = group.pop("samples")
-        row = dict(track=track, path=shadow_path, quality=quality, **group,
+        row = dict(track=track, path=shadow_path, quality=quality, program=program, scope=scope, **group,
                    pairs=len(group["visits"]) * 2, paired_frames=len(samples), stats={})
         for key in ("no_aa_gpu_ms", "tsr_gpu_ms", "tsr_pass_ms", "frame_increment_ms"):
             values = [s["tsr_gpu_ms"] - s["no_aa_gpu_ms"] if key == "frame_increment_ms" else s[key] for s in samples]
-            row["stats"][key] = dict(p50=float(np.median(values)), p95=float(np.quantile(values, .95)))
+            row["stats"][key] = dict(p50=float(np.median(values)), p95=float(np.quantile(values, .95)),
+                                     p99=float(np.quantile(values, .99)), minimum=float(min(values)), maximum=float(max(values)))
+        if scope == "quiet":
+            for frame in sorted({s["frame"] for s in samples}):
+                chosen = [s for s in samples if s["frame"] == frame]
+                r = dict(track=track, path=shadow_path, quality=quality, frame=frame,
+                         phase=chosen[0]["phase"], pairs=len(chosen))
+                for key in ("no_aa_gpu_ms", "tsr_gpu_ms", "tsr_pass_ms", "frame_increment_ms"):
+                    values = [s["tsr_gpu_ms"] - s["no_aa_gpu_ms"] if key == "frame_increment_ms" else s[key] for s in chosen]
+                    r[key + "_p50"] = float(np.median(values))
+                    r[key + "_p95"] = float(np.quantile(values, .95))
+                per_frame.append(r)
         rows.append(row)
-    save(ROOT / "cost-summary.json", dict(rows=rows, quiet_window=False,
-         note="All completed paired visits, no favourable-visit filtering. Capture/failed/memory-aborted runs excluded. No final 2x/default claim."))
-    print(json.dumps(rows, indent=2))
+    save(ROOT / "cost-summary.json", dict(rows=rows,
+         note="Quiet certificates and desktop screens are separate rows. All completed paired visits, no favourable-visit filtering. Capture/failed/memory-aborted runs excluded. No TR1/default claim."))
+    if per_frame:
+        with (ROOT / "cost-per-frame.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(per_frame[0]))
+            writer.writeheader()
+            writer.writerows(per_frame)
+    print(json.dumps([dict(track=r["track"], path=r["path"], quality=r["quality"], scope=r["scope"],
+                           pairs=r["pairs"], stats=r["stats"]) for r in rows], indent=2))
+
+
+def quiet(args):
+    """One exclusive cost window, second in Islam's release order; no nested leases."""
+    policy = headless_policy(args.minutes)
+    if policy["state"] != "released":
+        raise SystemExit("quiet costs wait for GAME HOLD RELEASED")
+    root = ROOT / "quiet" / args.label
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "measurement-source.py").write_bytes(SCRIPT_BYTES)
+    deadline = time.monotonic() + args.wait_seconds
+    release_time = dt.datetime.fromisoformat(re.search(r"\d{4}-\d\d-\d\dT[0-9:]+Z", policy["directive"]).group())
+    while True:
+        lines = U0.SCHEDULE.read_text(encoding="utf-8").splitlines()
+        preceding = [line for line in lines if line.startswith("rt1c ") and "quiet" in line.lower() and "released" in line]
+        ready = any((m := re.search(r"released (\S+)", line)) and dt.datetime.fromisoformat(m.group(1)) > release_time for line in preceding)
+        if ready and not U0.LOCK.exists() and U0.E2E.available_gib() >= 4:
+            break
+        if time.monotonic() >= deadline:
+            raise SystemExit("quiet queue deferred; rt1c quiet release/slot/headroom not ready")
+        if activity_policy()["state"] != "released":
+            raise SystemExit("quiet queue stopped by game directive")
+        time.sleep(2)
+    spec = importlib.util.spec_from_file_location("u0b_quiet", args.quiet_tool)
+    helper_bytes = args.quiet_tool.read_bytes()
+    (root / "quiet-helper-source.py").write_bytes(helper_bytes)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    if args.quiet_tool.read_bytes() != helper_bytes:
+        raise RuntimeError("quiet helper changed while loading; no lease acquired")
+    variants = [(track, path, quality) for track in ("q-walk", "s2g-camera-1px")
+                for path in ("vsm-nort", "hrt") for quality in (3, 2)]
+    visits = []
+    complete = False
+    original_lease = U0.lease
+    with original_lease(args.label, args.minutes) as owner:
+        try:
+            with helper.quiet_desktop(U0, root) as quiet_window:
+                proof_root = Path(quiet_window) if quiet_window else root
+                U0.lease = lambda label, minutes: contextlib.nullcontext(owner)
+                for visit in range(4):
+                    for track, shadow_path, quality in variants if visit % 2 == 0 else reversed(variants):
+                        if U0.remaining_seconds(owner) < 45 or activity_policy()["directive"] != policy["directive"]:
+                            raise RuntimeError("quiet lease/directive ended before matrix completed")
+                        label = f"{args.label}-{'q' if track == 'q-walk' else 'g'}-{'n' if shadow_path == 'vsm-nort' else 'r'}-{'e' if quality == 3 else 'h'}-{visit}"
+                        print("quiet visit", label, flush=True)
+                        run(argparse.Namespace(label=label, track=track, quality=quality, path=shadow_path,
+                            capture=False, smoke=False, program="full", minutes=2, wait_seconds=0, package_dir=None,
+                            timeout_seconds=min(100, int(U0.remaining_seconds(owner)) - 10)))
+                        save(ROOT / "runs" / label / "activity-policy.json", dict(state="quiet", speed_claim_eligible=True,
+                             quiet_window=args.label, release_directive=policy["directive"], wallpaper_start=str(proof_root / "quiet-start.json")))
+                        summarize(argparse.Namespace(label=label))
+                        visits.append(label)
+                        save(root / "visits.json", visits)
+            complete = True
+        finally:
+            U0.lease = original_lease
+            save(root / "certificate.json", dict(complete=complete, visits=visits, script_sha256=SCRIPT_SHA,
+                 helper_sha256=hashlib.sha256(helper_bytes).hexdigest(), preceding_rt1c_release=preceding,
+                 eligible_for_speed_claim=complete and activity_policy()["directive"] == policy["directive"],
+                 note="Exclusive outer lease, game released, supported wallpaper pause restored in finally, <=3% GPU start, four processes/two A-B pairs each per configuration. No captures or Cargo in this window."))
+    quiet_check(argparse.Namespace(label=args.label))
+    cost(None)
+
+
+def quiet_check(args):
+    """Validate recorded AA toggles and every qualified process without new GPU work."""
+    root = ROOT / "quiet" / args.label
+    certificate = json.loads((root / "certificate.json").read_text())
+    proofs = list(root.rglob("quiet-start.json"))
+    checks = []
+    for label in certificate["visits"]:
+        out = ROOT / "runs" / label
+        recipe, process, readback = [json.loads((out / f).read_text()) for f in ("recipe.json", "process.json", "readback.json")]
+        csv_rows = list(csv.reader((out / "profile.csv").open(encoding="utf-8-sig")))
+        header, rows = csv_rows[0], csv_rows[1:]
+        column = header.index("GPU/TemporalSuperResolution")
+        ranges = []
+        toggle_ok = True
+        n = len(recipe["frames"])
+        for repeat in range(recipe["repeats"]):
+            values = [float(rows[recipe["start"] + repeat * (n + recipe["gap"]) + i][column] or 0) for i in range(8, n)]
+            ranges.append([min(values), max(values)])
+            toggle_ok &= max(values) == 0 if repeat % 2 == 0 else min(values) > 0
+        checks.append(dict(label=label, toggle_ranges=ranges, toggles_ok=bool(toggle_ok),
+            runtime_ok=readback["ok"] and readback["d3d12_sm6"] and readback["sun_angle"]["ok"],
+            process_ok=process["exit_code"] == 0 and not process["failures"] and process["minimum_available_gib"] >= 2,
+            csv_sha256=digest(out / "profile.csv"), minimum_available_gib=process["minimum_available_gib"]))
+    proof_ok = len(proofs) == 1 and float(json.loads(proofs[0].read_text())[-1]["gpu"].split(",")[2]) <= 3
+    passed = certificate["eligible_for_speed_claim"] and len(checks) == 32 and proof_ok and all(
+        c["toggles_ok"] and c["runtime_ok"] and c["process_ok"] for c in checks)
+    save(root / "readback-validation.json", dict(passed=bool(passed), checks=checks,
+         quiet_start=str(proofs[0]) if proofs else None, quiet_start_ok=proof_ok,
+         note="CSV zero-TSR/no-AA and positive-TSR blocks checked at every measured frame; runtime settings, SM6, exact sun diameter, process exit and live memory guards checked. No GPU rerun."))
+    if not passed:
+        raise ValueError("quiet readback validation failed")
+    print("quiet readback passed", len(checks), "processes", flush=True)
 
 
 def history(args):
@@ -605,7 +741,7 @@ def history(args):
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
         print("Waiting for bounded historical-replay GPU gap", flush=True)
-        while U0.LOCK.exists() or U0.E2E.available_gib() < 4:
+        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
             if time.monotonic() >= deadline:
                 raise SystemExit(3)
             time.sleep(2)
@@ -692,6 +828,98 @@ def black_check(args):
     print("black-clear compatibility passed", int(cover.sum()), "cold covered pixels; age files", len(age_checks))
 
 
+def reference(args):
+    """Run U0b's retained tracer on unchanged S2G geometry and registered zero-shutter poses."""
+    policy = headless_policy(args.minutes)
+    if not args.track.startswith("s2g-"):
+        raise ValueError("quarry references are supplied by U0b; this interface owns S2G only")
+    if policy["state"] == "relaxed" and len(args.frames) > 3:
+        raise ValueError("at most three reference frames per game-play batch")
+    sequence = json.loads((ROOT / "inputs" / (args.track + ".json")).read_text())
+    source = Path("E:/renderlab-work/m7-u0b/scenes/S2G/scene.json")
+    scene = json.loads(source.read_text())
+    if scene.get("camera_background") != [0., 0., 0.]:
+        raise ValueError("S2G reference source must preserve sky illumination with black primary misses")
+    if scene["size"] != [1920, 1080]:
+        raise ValueError("reference source must retain registered 1920x1080 size")
+    if args.wait_seconds:
+        deadline = time.monotonic() + args.wait_seconds
+        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
+            if time.monotonic() >= deadline:
+                print("deferred: no reference lease acquired", flush=True)
+                raise SystemExit(3)
+            time.sleep(2)
+    root = ROOT / "runs" / args.label
+    root.mkdir(parents=True, exist_ok=False)
+    (root / "reference-source.py").write_bytes(SCRIPT_BYTES)
+    output = root / "data"
+    output.mkdir()
+    cases, entries = [], []
+    for index in args.frames:
+        p = sequence["frames"][index]
+        copy_scene = dict(scene, poses=[dict(name=args.track.removeprefix("s2g-") + f"-{index:03}",
+                                            eye=p["eye"], target=p["target"])])
+        copy_scene["sun"] = dict(scene["sun"], to_light=p["to_light"])
+        destination = root / "inputs" / str(index) / "s2g" / "scene.json"
+        destination.parent.mkdir(parents=True)
+        destination.write_text(json.dumps(copy_scene, separators=(",", ":")), encoding="utf-8")
+        name = args.track + f"-{index:03}"
+        cases.append(dict(name=name, frame=dict(name=name, open={k: p[k] for k in ("eye", "target")},
+                         close={k: p[k] for k in ("eye", "target")}, to_light=p["to_light"],
+                         fov_y=p["fov_y_radians"], width=1920, height=1080, sky_only=False),
+                         input=str(destination), input_sha256=digest(destination)))
+        entries.append(str(destination.parent) + "@" + str(args.samples))
+    binary_sha = digest(args.binary)
+    pinned_binary = root / "reference-tests.exe"
+    shutil.copyfile(args.binary, pinned_binary)
+    if digest(pinned_binary) != binary_sha or digest(args.binary) != binary_sha:
+        raise ValueError("reference executable changed while pinning")
+    save(root / "reference-recipe.json", dict(cases=cases, source=str(source), source_sha256=digest(source),
+         binary=str(args.binary), pinned_binary=str(pinned_binary), binary_sha256=binary_sha, compactor=str(args.compact_tool),
+         compactor_sha256=digest(args.compact_tool), samples=args.samples, activity_policy=policy,
+         illumination="Original S2G constant sky and finite-disk sun; camera_background black before integration"))
+    env = dict(os.environ, RENDERLAB_M7_BENCHES=";".join(entries), RENDERLAB_M7_REFERENCE_OUT=str(output),
+               RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
+               VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation", RAYON_NUM_THREADS="2",
+               OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2", RENDERLAB_M7_CAPTURE_GEOMETRY="1")
+    env.pop("VK_INSTANCE_LAYERS", None)
+    test = "reference::tests::gpu_reference_benches"
+    policy = headless_policy(args.minutes)
+    with U0.lease(args.label, args.minutes):
+        U0.guarded([pinned_binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
+                   root, timeout=min(120, args.minutes * 60 - 15), cwd=REPO, env=env)
+    if digest(pinned_binary) != binary_sha:
+        raise ValueError("pinned reference executable changed during the run")
+    spec = importlib.util.spec_from_file_location("u0b_compact", args.compact_tool)
+    compact = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compact)
+    for case in cases:
+        path = output / (case["name"] + ".json")
+        meta = json.loads(path.read_text())
+        if meta["scene_sha256"] != case["input_sha256"] or meta["invalid_pixels"]:
+            raise ValueError("reference scene identity or finite-pixel check failed")
+        meta.update(frame=case["frame"], bench="S2G", camera_background=[0., 0., 0.],
+                    reference_binary_sha256=binary_sha, source_scene_sha256=digest(source),
+                    population_instances={name: [i + 1 for i, mesh in enumerate(scene["meshes"]) if mesh["name"] in names]
+                                          for name, names in scene["populations"].items()})
+        save(path, meta)
+        compact.compact(argparse.Namespace(root=output, name=case["name"]))
+    replay = json.loads((output / "replay.json").read_text())
+    if not replay["bit_identical"]:
+        raise ValueError("U0b reference same-seed replay differs")
+    save(root / "reference-readback.json", dict(cases=cases, binary_sha256=binary_sha, replay=replay, complete=True))
+    # These generated copies are reproducible from the retained scene and small recipe.
+    deleted = []
+    for case in cases:
+        path = Path(case["input"])
+        if root.resolve() not in path.resolve().parents:
+            raise ValueError("generated-scene cleanup outside owned reference run")
+        deleted.append(dict(path=str(path), bytes=path.stat().st_size, sha256=digest(path)))
+        path.unlink()
+    save(root / "deleted-generated-scenes.json", deleted)
+    print("reference cases compacted", len(cases), output, flush=True)
+
+
 def score(args):
     """Score native colour against U0b lossless, zero-shutter physical references.
 
@@ -701,6 +929,9 @@ def score(args):
     from scipy.ndimage import distance_transform_edt
     out = ROOT / "runs" / args.label
     recipe = json.loads((out / "recipe.json").read_text())
+    program = recipe.get("program", "full")
+    prefix = "D" if program == "sun" else "L"
+    (out / "scoring-source.py").write_bytes(SCRIPT_BYTES)
     capture = json.loads((out / "capture-readback.json").read_text())
     if not recipe["capture"] or recipe["smoke"] or capture.get("exposure_readback_frames") != len(recipe["frames"]):
         raise ValueError("full capture and per-frame exposure proof required before scoring")
@@ -752,6 +983,7 @@ def score(args):
             raise ValueError("historical image/history/counter identity is not verified")
     rows, residuals, missing, transient = [], [], [], {}
     previous = None
+    cached_archive, cached_arrays, cached_sha = None, None, None
     for i, (_, events) in enumerate(sorted(groups.items())):
         p = recipe["frames"][i]
         source = references.get(camera_key(p))
@@ -771,16 +1003,49 @@ def score(args):
         old_hdr, age = None, None
         if historical:
             age_path = historical / "data" / f"age-f{i:03}.u8"
-            hdr_path = historical / "data" / f"full-f{i:03}.rgba16f"
-            if age_path.exists() and hdr_path.exists():
+            hdr_path = historical / "data" / f"{program}-f{i:03}.rgba16f"
+            if age_path.exists():
                 age = np.fromfile(age_path, dtype="u1").reshape(1080, 1920)
+            if hdr_path.exists():
                 old_hdr = np.fromfile(hdr_path, dtype="<f2").reshape(1080, 1920, 4)[..., :3].astype("f4")
-        with np.load(archive) as ref:
+        if archive != cached_archive:
+            with np.load(archive) as loaded:
+                cached_arrays = {k: loaded[k] for k in loaded.files
+                                 if k in ("L0", "L1", "D0", "D1", "visibility", "hit") or k.startswith("pop_")}
+            if recipe.get("scene") == "S2G":
+                if "hit" not in cached_arrays or not meta.get("population_instances"):
+                    raise ValueError("S2G scoring requires reference geometry and registered material populations")
+                for name, instances in meta["population_instances"].items():
+                    cached_arrays["pop_" + name] = np.isin(cached_arrays["hit"][..., 0], instances)
+            cached_archive, cached_sha = archive, digest(archive)
+        with contextlib.nullcontext(cached_arrays) as ref:
             scale = 2 ** recipe.get("exposure_stops", -14)
-            mean = (ref["L0"] + ref["L1"]) * .5 * scale
-            halves = [ref[k] * scale for k in ("L0", "L1")]
-            result = dict(frame=i, reference=str(archive), reference_sha256=digest(archive),
+            mean = (ref[prefix + "0"] + ref[prefix + "1"]) * .5 * scale
+            halves = [ref[k] * scale for k in (prefix + "0", prefix + "1")]
+            result = dict(frame=i, reference=str(archive), reference_sha256=cached_sha,
                           samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={})
+            if recipe.get("scene") == "S2G":
+                reference_luma = mean @ np.array([.2126, .7152, .0722])
+                candidate_luma = hdr[..., :3] @ np.array([.2126, .7152, .0722])
+                highlights = {}
+                for name in meta["population_instances"]:
+                    mask = ref["pop_" + name]
+                    if not mask.any():
+                        continue
+                    threshold = float(np.quantile(reference_luma[mask], .95))
+                    highlight = mask & (reference_luma >= threshold)
+                    coordinates = np.column_stack(np.nonzero(highlight)).astype("f8")
+                    r, c = reference_luma[highlight], candidate_luma[highlight]
+                    reference_centre = (coordinates * r[:, None]).sum(0) / max(float(r.sum()), 1e-30)
+                    candidate_centre = (coordinates * c[:, None]).sum(0) / max(float(c.sum()), 1e-30)
+                    r_peak = np.array(np.unravel_index(np.where(mask, reference_luma, -np.inf).argmax(), mask.shape))
+                    c_peak = np.array(np.unravel_index(np.where(mask, candidate_luma, -np.inf).argmax(), mask.shape))
+                    highlights[name] = dict(pixels=int(highlight.sum()), threshold_exposed_luminance=threshold,
+                         energy_ratio=float(c.sum() / max(float(r.sum()), 1e-30)),
+                         centroid_drift_px=float(np.linalg.norm(candidate_centre - reference_centre)),
+                         peak_drift_px=float(np.linalg.norm(c_peak - r_peak)),
+                         definition="Reference top-5% luminance within registered current-centre material mask; energy and centroid use that fixed mask, peaks use the entire material mask")
+                result["highlights"] = highlights
             distance = distance_transform_edt(~ref["pop_edge"]) if "pop_edge" in ref else None
             result["background_distance_bands"] = {}
             background_checks = []
@@ -813,7 +1078,7 @@ def score(args):
                 old_error = codes(old_hdr, stops) - reference if old_hdr is not None else None
                 old_e2 = np.mean(old_error ** 2, -1) if old_error is not None else None
                 pops = {}
-                for key in ref.files:
+                for key in ref:
                     if key.startswith("pop_"):
                         mask = ref[key]
                         if mask.any():
@@ -834,16 +1099,19 @@ def score(args):
                                     pops[key[4:]]["same_t1b_age32_pixels"] = dict(n=int(converged.sum()),
                                         tsr=float(np.sqrt(max(0, float((e2 - v2)[converged].mean())))),
                                         t1b=float(np.sqrt(max(0, float((old_e2 - v2)[converged].mean())))))
-                                for value in range(8):
-                                    for event in ("start", "revealed"):
-                                        selected = mask & (age == value) & ((i - age == 0) if event == "start" else (i - age > 0))
-                                        if selected.any():
-                                            name = f"{event}/{value}/{key[4:]}/L{stops}"
+                                fresh = mask & (age < 8)
+                                for event in ("start", "revealed"):
+                                    selected = fresh & ((age == i) if event == "start" else (age < i))
+                                    if selected.any():
+                                        bins = age[selected]
+                                        counts = np.bincount(bins, minlength=8)
+                                        sums = [np.bincount(bins, weights=a[selected], minlength=8) for a in (e2, old_e2, v2)]
+                                        for value in np.flatnonzero(counts):
+                                            name = f"{event}/{value}/{key[4:]}/{prefix}{stops}"
                                             pool = transient.setdefault(name, dict(n=0, tsr_e2=0., t1b_e2=0., reference_v2=0.))
-                                            pool["n"] += int(selected.sum())
-                                            pool["tsr_e2"] += float(e2[selected].sum())
-                                            pool["t1b_e2"] += float(old_e2[selected].sum())
-                                            pool["reference_v2"] += float(v2[selected].sum())
+                                            pool["n"] += int(counts[value])
+                                            for field, values in zip(("tsr_e2", "t1b_e2", "reference_v2"), sums, strict=True):
+                                                pool[field] += float(values[value])
                 if distance is not None and "pop_background-centre" in ref:
                     bands = {}
                     for low, high in ((0, 1.5), (1.5, 3), (3, 6), (6, float("inf"))):
@@ -855,13 +1123,13 @@ def score(args):
                             if old_e2 is not None:
                                 band["t1b_rms"] = float(np.sqrt(old_e2[mask].mean()))
                             bands[f"{low:g}-{high:g}"] = band
-                    result["background_distance_bands"][f"L{stops}"] = bands
-                result["measures"][f"L{stops}"] = pops
+                    result["background_distance_bands"][f"{prefix}{stops}"] = bands
+                result["measures"][f"{prefix}{stops}"] = pops
                 if changed is not None and changed.any():
                     field = dict(tsr_rms=float(np.sqrt(e2[changed].mean())), tsr_signed_mean=float(error[changed].mean()))
                     if old_e2 is not None:
                         field.update(t1b_rms=float(np.sqrt(old_e2[changed].mean())), t1b_signed_mean=float(old_error[changed].mean()))
-                    result["changed"]["measures"][f"L{stops}"] = field
+                    result["changed"]["measures"][f"{prefix}{stops}"] = field
                 if previous is not None and previous[0] == i - 1:
                     d_reference = reference - codes(previous[2], stops)
                     residual = candidate - codes(previous[1], stops) - d_reference
@@ -871,7 +1139,8 @@ def score(args):
                         covered &= ref["hit"][..., 0] == previous[4]
                     if age is not None:
                         covered &= age >= 8
-                    field = dict(frames=[i - 1, i], channel=f"L{stops}", pixels=int(covered.sum()),
+                    field = dict(frames=[i - 1, i], channel=f"{prefix}{stops}", pixels=int(covered.sum()),
+                         phase=p.get("phase"), static=camera_key(p) == camera_key(recipe["frames"][i - 1]),
                          tsr_rms=float(np.sqrt((residual[covered] ** 2).mean())) if covered.any() else None,
                          tsr_step_rms=float(np.sqrt((step[covered] ** 2).mean())) if covered.any() else None,
                          age_filter_available=age is not None)
@@ -884,16 +1153,24 @@ def score(args):
                         ref["pop_all-covered"] if "pop_all-covered" in ref else ref["pop_image"],
                         ref["hit"][..., 0].copy() if "hit" in ref else None, old_hdr)
             rows.append(result)
+            if len(rows) % 16 == 0:
+                print("physical frames scored", len(rows), "through input", i, flush=True)
     for pool in transient.values():
         for name in ("tsr", "t1b"):
             pool[name + "_rms"] = math.sqrt(pool[name + "_e2"] / pool["n"])
             pool[name + "_rms_noise_subtracted"] = math.sqrt(max(0, (pool[name + "_e2"] - pool["reference_v2"]) / pool["n"]))
+    original_checkpoints = set(json.loads((historical / "data/motion.json").read_text())["scored"]) if historical else set()
+    covered_checkpoints = original_checkpoints & {r["frame"] for r in rows}
     save(out / "physical-scores.json", dict(rows=rows, missing_frames=missing, motion_residuals=residuals,
-         transient_pools=transient, historical_variant=args.history,
+         transient_pools=transient, historical_variant=args.history, program=program,
+         script_sha256=SCRIPT_SHA, recipe_sha256=digest(out / "recipe.json"),
+         original_checkpoints=dict(total=len(original_checkpoints), scored=len(covered_checkpoints),
+                                   missing=sorted(original_checkpoints - covered_checkpoints)),
          compared_with="U0b physical, disk-integrated multi-bounce reference, zero shutter, no fitting",
          carried_t1b_is_same_estimand=False,
          matched_temporal_comparison_certified=False,
-         unavailable=["T1b original-bar ratios", "post-TSR R_D/R_F", "film-reference settle without every event frame"],
+         unavailable=["T1b original-bar ratios", "post-TSR R_F"] + (["post-TSR R_D"] if program == "full" else []) +
+                     ["film-reference settle without every event frame"],
          note="Check primary-background semantics before any dominance claim. Corner diagnostics are evidence, not a replacement for full-image validation. Both raw and reference-noise-subtracted errors retained; sparse references cannot certify the motion gate."))
     print("physical reference frames scored", len(rows), "missing", len(missing))
 
@@ -911,6 +1188,7 @@ def main():
     p.add_argument("--quality", type=int, choices=(2, 3), default=3)
     p.add_argument("--path", choices=("vsm", "vsm-nort", "hrt"), default="vsm")
     p.add_argument("--capture", action="store_true")
+    p.add_argument("--program", choices=("full", "sun"), default="full")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--minutes", type=int, default=6)
     p.add_argument("--wait-seconds", type=int, default=0)
@@ -926,13 +1204,29 @@ def main():
     p.add_argument("--minutes", type=int, default=3)
     p.add_argument("--wait-seconds", type=int, default=0)
     p.add_argument("--black-background", action="store_true")
+    p = commands.add_parser("reference")
+    p.add_argument("label")
+    p.add_argument("--track", required=True)
+    p.add_argument("--frames", type=int, nargs="+", required=True)
+    p.add_argument("--samples", type=int, default=1024)
+    p.add_argument("--binary", type=Path, default=Path("E:/renderlab-work/m7-u0b/bin/reference-tests.exe"))
+    p.add_argument("--compact-tool", type=Path, default=REPO / "scripts/m7-u0b-score.py")
+    p.add_argument("--minutes", type=int, default=3)
+    p.add_argument("--wait-seconds", type=int, default=0)
+    p = commands.add_parser("quiet")
+    p.add_argument("label")
+    p.add_argument("--minutes", type=int, default=8)
+    p.add_argument("--wait-seconds", type=int, default=900)
+    p.add_argument("--quiet-tool", type=Path, default=REPO / "scripts/m7-u0b.py")
+    commands.add_parser("quiet-check").add_argument("label")
     p = commands.add_parser("black-check")
     p.add_argument("label")
     p.add_argument("--baseline", required=True)
     p.add_argument("--reference", type=Path, required=True)
     args = parser.parse_args()
     {"plan": plan, "run": run, "summarize": summarize, "clean": clean, "prune": prune, "baseline": baseline,
-     "score": score, "cost": cost, "history": history, "history-check": history_check, "black-check": black_check}[args.command](args)
+     "score": score, "cost": cost, "history": history, "history-check": history_check, "black-check": black_check,
+     "reference": reference, "quiet": quiet, "quiet-check": quiet_check}[args.command](args)
 
 
 if __name__ == "__main__":
