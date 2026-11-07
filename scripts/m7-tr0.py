@@ -176,6 +176,21 @@ def settings(quality, path):
     return commands
 
 
+def colour_input(dump, events, recipe):
+    candidates = []
+    for event in events:
+        if not event["EventName"].startswith("Tonemap "):
+            continue
+        for name in event["InputResources"]:
+            resource = dump.resources[name.split(".")[0]]["Name"]
+            matches = (resource == "SceneColor" or resource.endswith(".SceneColor") or resource == "SceneColorResolve") if recipe.get("aa", "tsr") == "none" else resource in ("TSR.Output", "TSR.History.Color")
+            if matches:
+                candidates.append((event, name))
+    if len(candidates) != 1:
+        raise ValueError("expected one native Tonemap colour input, found " + str(len(candidates)))
+    return candidates[0]
+
+
 def readback(out, quality, path):
     rows = U0.cvar_rows(out / "cvars.csv")
     expected = {"sg.AntiAliasingQuality": str(quality), "r.AntiAliasingMethod": "4", "r.ScreenPercentage": "100",
@@ -189,6 +204,14 @@ def readback(out, quality, path):
     log = (out / "ue.log").read_text(encoding="utf-8-sig", errors="replace")
     cameras = [line for line in log.splitlines() if "CameraCachePrivate =" in line]
     recipe = json.loads((out / "recipe.json").read_text())
+    expected_offset = recipe.get("exposure_offset", 0)
+    actual_offset = rows.get("r.ExposureOffset")
+    checks.append(dict(name="r.ExposureOffset", expected=str(expected_offset), actual=actual_offset,
+                       ok=actual_offset is not None and U0.same(actual_offset["value"], str(expected_offset))))
+    for check in checks:
+        if check["name"] == "r.AntiAliasingMethod":
+            check["expected"] = "0" if recipe.get("aa", "tsr") == "none" else "4"
+            check["ok"] = check["actual"] is not None and U0.same(check["actual"]["value"], check["expected"])
     camera_checks = []
     if recipe["capture"]:
         if len(cameras) != len(recipe["frames"]):
@@ -258,12 +281,19 @@ def run(args):
     if not U0.PACKAGE.exists():
         raise SystemExit("package not ready: " + str(U0.PACKAGE))
     frames = source["frames"]
+    static_frame = getattr(args, "static_frame", None)
+    exposure_offset = getattr(args, "exposure_offset", 0.)
+    if exposure_offset and (static_frame is None or not args.capture):
+        raise ValueError("exposure offsets are static capture diagnostics only")
+    if static_frame is not None:
+        frames = [frames[static_frame]]
     if args.smoke:
         frames = frames[:9]
     out = ROOT / "runs" / args.label
     out.mkdir(parents=True, exist_ok=False)
     (out / "capture-source.py").write_bytes(SCRIPT_BYTES)
-    start = 96
+    settle = getattr(args, "settle_frames", 0)
+    start = 96 + settle
     events = [(40, f"DumpCVars -csv={(out / 'cvars.csv').as_posix()}")]
     # Each repeat starts with a reset, so repeats exercise the same cold input sequence.
     # Installed UE's FCommandLine is 16 KiB. Two full-track A/B pairs fit;
@@ -273,9 +303,9 @@ def run(args):
         offset = start + repeat * (len(frames) + 16)
         if not args.capture:
             events.append((offset - 12, f"r.AntiAliasingMethod {0 if repeat % 2 == 0 else 4}"))
-        events.append((offset - 1, "r.ResetViewState"))
+        events.append((offset - 1 - settle, "r.ResetViewState"))
         if args.capture:
-            events.append((offset - 1, macro(out, "arm", ["r.DumpGPU.Root Tonemap*", f"r.DumpGPU.FrameCount {len(frames)}",
+            events.append((offset - 1, macro(out, "arm", [f"r.DumpGPU.Root {getattr(args, 'dump_root', 'Tonemap*')}", f"r.DumpGPU.FrameCount {len(frames)}",
                           f"r.DumpGPU.Directory {(out / 'dump').as_posix()}", "DumpGPU"])))
         for i, p in enumerate(frames):
             lines = (["getall PlayerCameraManager CameraCachePrivate"] +
@@ -291,6 +321,9 @@ def run(args):
                           (["getall DirectionalLightComponent RelativeRotation"] if "to_light" in frames[-1] else []))))
     count = start + repeats * (len(frames) + 16) + (96 if args.capture else 0)
     config = settings(args.quality, args.path)
+    config.append(f"r.ExposureOffset {exposure_offset:g}")
+    if getattr(args, "aa", "tsr") == "none":
+        config.append("r.AntiAliasingMethod 0")
     sun_diameter = math.degrees(2 * source["sun_radius"]) if glossy else math.degrees(.08)
     config.append(f"set DirectionalLightComponent LightSourceAngle {sun_diameter:.9f}")
     config.append("getall DirectionalLightComponent LightSourceAngle")
@@ -348,9 +381,12 @@ def run(args):
     save(out / "recipe.json", dict(track=args.track, path=args.path, quality=args.quality, capture=args.capture,
           smoke=args.smoke, start=start, frames=frames, repeats=repeats, gap=16, csv_frames=count,
           sequence_sha256=digest(ROOT / "inputs" / (args.track + ".json")), script_sha256=SCRIPT_SHA,
-          package_exe_sha256=digest(U0.PACKAGE), exposure_stops=source.get("exposure_stops", -14),
+          package_exe_sha256=digest(U0.PACKAGE), exposure_stops=source.get("exposure_stops", -14) + exposure_offset,
+          registered_exposure_stops=source.get("exposure_stops", -14), exposure_offset=exposure_offset,
+          diagnostic_only=bool(exposure_offset),
           sun_diameter_degrees=sun_diameter,
           scene="S2G" if glossy else "quarry", shutter=0, program=args.program,
+          aa=getattr(args, "aa", "tsr"), static_source_frame=static_frame, settle_frames=settle,
           note="Timing: 2 no-AA/TSR paired full-track replays in one process; four invocations give eight pairs. Even repeats no AA, odd repeats TSR. Cold reset per replay. Capture and timing are separate processes. No reference score implied."))
     csv_root = U0.PACKAGE_DIR / "Windows/M5Calibration/Saved/Profiling/CSV"
     before = set(csv_root.glob("*.csv"))
@@ -456,15 +492,10 @@ def summarize(args):
         return 255 * np.where(linear <= .0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - .055)
     if hold_indices:
         target_events = sorted(grouped.items())[hold_indices[-1]][1]
-        p, name = next((p, name) for p in target_events for name in p["InputResources"]
-                       if dump.resources[name.split(".")[0]]["Name"] in ("TSR.Output", "TSR.History.Color"))
+        p, name = colour_input(dump, target_events, recipe)
         target_codes = codes_for(NATIVE.resource(dump, name, p)[0])
     for i, (frame, events) in enumerate(sorted(grouped.items())):
-        candidates = [(p, name) for p in events for name in p["InputResources"]
-                      if dump.resources[name.split(".")[0]]["Name"] in ("TSR.Output", "TSR.History.Color")]
-        if len(candidates) != 1:
-            raise ValueError(f"expected one Tonemap TSR.Output input at frame {i}: {len(candidates)}")
-        consumer, name = candidates[0]
+        consumer, name = colour_input(dump, events, recipe)
         values, identity = NATIVE.resource(dump, name, consumer)
         if values.shape[:2] != (1080, 1920) or not np.isfinite(values).all():
             raise ValueError("invalid native post-TSR HDR")
@@ -927,11 +958,14 @@ def score(args):
     internal restart ages or an invented post-TSR visibility output.
     """
     from scipy.ndimage import distance_transform_edt
+    if args.output_tag and not re.fullmatch(r"[A-Za-z0-9_-]+", args.output_tag):
+        raise ValueError("batch output tag must be a plain filename label")
     out = ROOT / "runs" / args.label
     recipe = json.loads((out / "recipe.json").read_text())
     program = recipe.get("program", "full")
     prefix = "D" if program == "sun" else "L"
-    (out / "scoring-source.py").write_bytes(SCRIPT_BYTES)
+    selected_frames = set(args.frames) if args.frames else None
+    (out / ("physical-witness-source.py" if selected_frames else "scoring-source.py")).write_bytes(SCRIPT_BYTES)
     capture = json.loads((out / "capture-readback.json").read_text())
     if not recipe["capture"] or recipe["smoke"] or capture.get("exposure_readback_frames") != len(recipe["frames"]):
         raise ValueError("full capture and per-frame exposure proof required before scoring")
@@ -945,7 +979,7 @@ def score(args):
             values += p["to_light"]
         return np.asarray(values, dtype="<f4").tobytes()
     references = {}
-    paths = list(args.reference.glob(recipe["track"] + "-*.json"))
+    paths = list(args.reference.glob(("s2g-" if recipe.get("scene") == "S2G" else recipe["track"] + "-") + "*.json"))
     if recipe["track"] == "q-walk":
         paths += list(args.reference.glob("quarry-p*.json"))
     for path in paths:
@@ -981,10 +1015,19 @@ def score(args):
         check = json.loads((historical / "history-readback.json").read_text())
         if not check["age_masks_compatible"]:
             raise ValueError("historical image/history/counter identity is not verified")
+    if args.ages:
+        if historical:
+            raise ValueError("external geometry ages cannot replace historical T1b controls")
+        protocol = json.loads((args.ages / "protocol.json").read_text())
+        if protocol["source_sequences"][recipe["track"]] != recipe["sequence_sha256"]:
+            raise ValueError("external ages use a different registered sequence")
     rows, residuals, missing, transient = [], [], [], {}
     previous = None
     cached_archive, cached_arrays, cached_sha = None, None, None
     for i, (_, events) in enumerate(sorted(groups.items())):
+        if selected_frames is not None and i not in selected_frames:
+            previous = None
+            continue
         p = recipe["frames"][i]
         source = references.get(camera_key(p))
         if source is None:
@@ -995,11 +1038,15 @@ def score(args):
         frame = meta["frame"]
         if (frame["width"], frame["height"]) != (1920, 1080) or abs(frame["fov_y"] - p["fov_y_radians"]) > 1e-9:
             raise ValueError("reference projection mismatch")
-        consumer, name = next((e, n) for e in events for n in e["InputResources"]
-                              if dump.resources[n.split(".")[0]]["Name"] in ("TSR.Output", "TSR.History.Color"))
+        consumer, name = colour_input(dump, events, recipe)
         hdr, identity = NATIVE.resource(dump, name, consumer)
         if identity["sha256"] != capture["identities"][i]["hdr"]["sha256"]:
             raise ValueError("candidate bytes changed since capture readback")
+        # Exposure diagnostics use measured native PE to return to registered
+        # display units. This fixed conversion is never fitted to the image.
+        registered_scale = 2 ** recipe.get("registered_exposure_stops", recipe.get("exposure_stops", -14))
+        measured_scale = capture["identities"][i]["exposure"]["values"][0]
+        hdr = hdr * (registered_scale / measured_scale)
         old_hdr, age = None, None
         if historical:
             age_path = historical / "data" / f"age-f{i:03}.u8"
@@ -1008,6 +1055,11 @@ def score(args):
                 age = np.fromfile(age_path, dtype="u1").reshape(1080, 1920)
             if hdr_path.exists():
                 old_hdr = np.fromfile(hdr_path, dtype="<f2").reshape(1080, 1920, 4)[..., :3].astype("f4")
+        if args.ages:
+            with np.load(args.ages / recipe["track"] / f"f{i:03}.npz") as age_file:
+                age = age_file["age"]
+            if age.shape != (1080, 1920) or age.dtype != np.uint8:
+                raise ValueError("invalid external geometry-age buffer")
         if archive != cached_archive:
             with np.load(archive) as loaded:
                 cached_arrays = {k: loaded[k] for k in loaded.files
@@ -1019,11 +1071,11 @@ def score(args):
                     cached_arrays["pop_" + name] = np.isin(cached_arrays["hit"][..., 0], instances)
             cached_archive, cached_sha = archive, digest(archive)
         with contextlib.nullcontext(cached_arrays) as ref:
-            scale = 2 ** recipe.get("exposure_stops", -14)
+            scale = registered_scale
             mean = (ref[prefix + "0"] + ref[prefix + "1"]) * .5 * scale
             halves = [ref[k] * scale for k in (prefix + "0", prefix + "1")]
             result = dict(frame=i, reference=str(archive), reference_sha256=cached_sha,
-                          samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={})
+                          samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={}, transient_pools={})
             if recipe.get("scene") == "S2G":
                 reference_luma = mean @ np.array([.2126, .7152, .0722])
                 candidate_luma = hdr[..., :3] @ np.array([.2126, .7152, .0722])
@@ -1048,6 +1100,7 @@ def score(args):
                 result["highlights"] = highlights
             distance = distance_transform_edt(~ref["pop_edge"]) if "pop_edge" in ref else None
             result["background_distance_bands"] = {}
+            result["background_error_extent"] = {}
             background_checks = []
             for y, x in ((0, 0), (0, 1919), (1079, 0), (1079, 1919)):
                 if "pop_background-centre" in ref and ref["pop_background-centre"][y, x]:
@@ -1098,20 +1151,34 @@ def score(args):
                                 if converged.any():
                                     pops[key[4:]]["same_t1b_age32_pixels"] = dict(n=int(converged.sum()),
                                         tsr=float(np.sqrt(max(0, float((e2 - v2)[converged].mean())))),
-                                        t1b=float(np.sqrt(max(0, float((old_e2 - v2)[converged].mean())))))
+                                        t1b=float(np.sqrt(max(0, float((old_e2 - v2)[converged].mean())))),
+                                        tsr_signed_mean=float(error[converged].mean()),
+                                        t1b_signed_mean=float(old_error[converged].mean()),
+                                        tsr_se=float(error.mean(-1)[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0,
+                                        t1b_se=float(old_error.mean(-1)[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0)
+                            if age is not None:
+                                converged = mask & (age >= 32)
+                                if converged.any():
+                                    pops[key[4:]]["shared_age32"] = dict(n=int(converged.sum()),
+                                        rms_noise_subtracted=float(np.sqrt(max(0, float((e2 - v2)[converged].mean())))),
+                                        signed_mean=float(error[converged].mean()))
                                 fresh = mask & (age < 8)
                                 for event in ("start", "revealed"):
                                     selected = fresh & ((age == i) if event == "start" else (age < i))
                                     if selected.any():
                                         bins = age[selected]
                                         counts = np.bincount(bins, minlength=8)
-                                        sums = [np.bincount(bins, weights=a[selected], minlength=8) for a in (e2, old_e2, v2)]
+                                        fields = {"tsr_e2": e2, "reference_v2": v2}
+                                        if old_e2 is not None:
+                                            fields["t1b_e2"] = old_e2
+                                        sums = {field: np.bincount(bins, weights=a[selected], minlength=8) for field, a in fields.items()}
                                         for value in np.flatnonzero(counts):
                                             name = f"{event}/{value}/{key[4:]}/{prefix}{stops}"
-                                            pool = transient.setdefault(name, dict(n=0, tsr_e2=0., t1b_e2=0., reference_v2=0.))
-                                            pool["n"] += int(counts[value])
-                                            for field, values in zip(("tsr_e2", "t1b_e2", "reference_v2"), sums, strict=True):
-                                                pool[field] += float(values[value])
+                                            for target in (transient, result["transient_pools"]):
+                                                pool = target.setdefault(name, dict(n=0))
+                                                pool["n"] += int(counts[value])
+                                                for field, values in sums.items():
+                                                    pool[field] = pool.get(field, 0.) + float(values[value])
                 if distance is not None and "pop_background-centre" in ref:
                     bands = {}
                     for low, high in ((0, 1.5), (1.5, 3), (3, 6), (6, float("inf"))):
@@ -1124,11 +1191,33 @@ def score(args):
                                 band["t1b_rms"] = float(np.sqrt(old_e2[mask].mean()))
                             bands[f"{low:g}-{high:g}"] = band
                     result["background_distance_bands"][f"{prefix}{stops}"] = bands
+                    base = ref["pop_background-centre"] & (distance >= 1.5)
+                    if age is not None:
+                        base &= age >= 32
+                    extents = {}
+                    for name, value in (("tsr", error), ("t1b", old_error)):
+                        if value is None:
+                            continue
+                        magnitude = np.abs(value).mean(-1)
+                        extents[name] = {}
+                        for threshold in (1, 4, 8):
+                            selected = base & (magnitude > threshold)
+                            count = int(selected.sum())
+                            extents[name][str(threshold)] = dict(pixels=count,
+                                p95_distance_px=float(np.quantile(distance[selected], .95)) if count else 0,
+                                maximum_distance_px=float(distance[selected].max()) if count else 0)
+                    result["background_error_extent"][f"{prefix}{stops}"] = dict(values=extents,
+                         age32_filter_available=age is not None,
+                         definition="Background-centre pixels at least 1.5px from reference edge; mean absolute RGB error exceeds 1/4/8 F0 codes. Extent is nearest-edge distance, not a connected-trail length or the old visual-width estimate.")
                 result["measures"][f"{prefix}{stops}"] = pops
                 if changed is not None and changed.any():
-                    field = dict(tsr_rms=float(np.sqrt(e2[changed].mean())), tsr_signed_mean=float(error[changed].mean()))
+                    field = dict(tsr_rms=float(np.sqrt(e2[changed].mean())), tsr_signed_mean=float(error[changed].mean()),
+                         tsr_rms_noise_subtracted=float(np.sqrt(max(0, float((e2 - v2)[changed].mean())))),
+                         tsr_se=float(error.mean(-1)[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
                     if old_e2 is not None:
-                        field.update(t1b_rms=float(np.sqrt(old_e2[changed].mean())), t1b_signed_mean=float(old_error[changed].mean()))
+                        field.update(t1b_rms=float(np.sqrt(old_e2[changed].mean())), t1b_signed_mean=float(old_error[changed].mean()),
+                            t1b_rms_noise_subtracted=float(np.sqrt(max(0, float((old_e2 - v2)[changed].mean())))),
+                            t1b_se=float(old_error.mean(-1)[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
                     result["changed"]["measures"][f"{prefix}{stops}"] = field
                 if previous is not None and previous[0] == i - 1:
                     d_reference = reference - codes(previous[2], stops)
@@ -1144,6 +1233,14 @@ def score(args):
                          tsr_rms=float(np.sqrt((residual[covered] ** 2).mean())) if covered.any() else None,
                          tsr_step_rms=float(np.sqrt((step[covered] ** 2).mean())) if covered.any() else None,
                          age_filter_available=age is not None)
+                    if meta.get("population_instances"):
+                        field["material_populations"] = {}
+                        for name in meta["population_instances"]:
+                            selected = covered & ref["pop_" + name]
+                            if selected.any():
+                                field["material_populations"][name] = dict(n=int(selected.sum()),
+                                    residual_rms=float(np.sqrt((residual[selected] ** 2).mean())),
+                                    step_rms=float(np.sqrt((step[selected] ** 2).mean())))
                     if old_hdr is not None and previous[5] is not None and covered.any():
                         old_step = codes(old_hdr, stops) - codes(previous[5], stops)
                         field.update(t1b_rms=float(np.sqrt(((old_step - d_reference)[covered] ** 2).mean())),
@@ -1157,13 +1254,19 @@ def score(args):
                 print("physical frames scored", len(rows), "through input", i, flush=True)
     for pool in transient.values():
         for name in ("tsr", "t1b"):
-            pool[name + "_rms"] = math.sqrt(pool[name + "_e2"] / pool["n"])
-            pool[name + "_rms_noise_subtracted"] = math.sqrt(max(0, (pool[name + "_e2"] - pool["reference_v2"]) / pool["n"]))
+            if name + "_e2" in pool:
+                pool[name + "_rms"] = math.sqrt(pool[name + "_e2"] / pool["n"])
+                pool[name + "_rms_noise_subtracted"] = math.sqrt(max(0, (pool[name + "_e2"] - pool["reference_v2"]) / pool["n"]))
     original_checkpoints = set(json.loads((historical / "data/motion.json").read_text())["scored"]) if historical else set()
     covered_checkpoints = original_checkpoints & {r["frame"] for r in rows}
-    save(out / "physical-scores.json", dict(rows=rows, missing_frames=missing, motion_residuals=residuals,
+    output_path = out / "physical-batches" / (args.output_tag + ".json") if args.output_tag else out / ("physical-witness-scores.json" if selected_frames else "physical-scores.json")
+    save(output_path, dict(
+         rows=rows, requested_frames=sorted(selected_frames) if selected_frames else "all", missing_frames=missing, motion_residuals=residuals,
          transient_pools=transient, historical_variant=args.history, program=program,
          script_sha256=SCRIPT_SHA, recipe_sha256=digest(out / "recipe.json"),
+         diagnostic_only=recipe.get("diagnostic_only", False),
+         registered_exposure_stops=recipe.get("registered_exposure_stops", recipe.get("exposure_stops", -14)),
+         age_protocol="reference_geometry_v1" if args.ages else "historical_t1b" if historical else "unavailable",
          original_checkpoints=dict(total=len(original_checkpoints), scored=len(covered_checkpoints),
                                    missing=sorted(original_checkpoints - covered_checkpoints)),
          compared_with="U0b physical, disk-integrated multi-bounce reference, zero shutter, no fitting",
@@ -1189,6 +1292,11 @@ def main():
     p.add_argument("--path", choices=("vsm", "vsm-nort", "hrt"), default="vsm")
     p.add_argument("--capture", action="store_true")
     p.add_argument("--program", choices=("full", "sun"), default="full")
+    p.add_argument("--aa", choices=("tsr", "none"), default="tsr")
+    p.add_argument("--static-frame", type=int)
+    p.add_argument("--settle-frames", type=int, default=0)
+    p.add_argument("--exposure-offset", type=float, default=0., help="Static diagnostic only; score unexposed HDR at the registered exposure")
+    p.add_argument("--dump-root", default="Tonemap*")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--minutes", type=int, default=6)
     p.add_argument("--wait-seconds", type=int, default=0)
@@ -1199,6 +1307,9 @@ def main():
     p.add_argument("label")
     p.add_argument("--reference", type=Path, required=True)
     p.add_argument("--history")
+    p.add_argument("--frames", type=int, nargs="+", help="Targeted CPU witness check; writes a separate output and preserves the full score")
+    p.add_argument("--ages", type=Path)
+    p.add_argument("--output-tag", type=str)
     p = commands.add_parser("history")
     p.add_argument("label")
     p.add_argument("--minutes", type=int, default=3)
