@@ -2,7 +2,9 @@
 
 Research date: 2026-11-06. Read-only: public web sources, GitHub license files read via the API or raw files, and the local docs [m6-motion-aa.md](../m6-motion-aa.md), [m6-motion-aa-gpu.md](../m6-motion-aa-gpu.md), [m6-temporal-primaries.md](../m6-temporal-primaries.md) and [m6-film-gap.md](../m6-film-gap.md). There were no builds, GPU runs or commits. This is not legal advice. Licence verdicts read the LICENSE file in each repository on the research date. Patent notes list only what was found and do not analyse claims.
 
-**Labels.** **V** means verified at the cited URL or file. **Inference** is my reasoning, not a published result. Author-reported numbers keep the authors' hardware and resolution. They are not Renderlab measurements.
+**Extended 2026-11-07 for M7.** See [2026-11-07 M7 extension](#2026-11-07-m7-extension) (§6–§11): TSR-class reconstruction as a shipping mode, denoisers for GI and reflections, lighting-change response, Unreal 5.7 settings, and both RT paths. Verdicts that change carry a dated note in the summary table.
+
+**Labels.** **V** means verified at the cited URL or file. **Inference** (**I**) is my reasoning, not a published result. **M** marks a Renderlab measurement from a local doc. Author-reported numbers keep the authors' hardware and resolution. They are not Renderlab measurements.
 
 **Target recap (from the local docs).** The film gap is 1x point-sample aliasing over the whole image. Interactive costs 0.82–0.87 ms, and the stop is 1.075 ms. T1 (a resampled radiance history) was rejected for structural leaks across shadow edges. T2 (world-anchored sample records) gives the best moving image. In motion it costs 3.55 ms at K = 4 and 5.76 ms at K = 8. The measured attribution, from m6-motion-aa-gpu §6, splits that cost as follows:
 
@@ -20,12 +22,15 @@ Research date: 2026-11-06. Read-only: public web sources, GitHub license files r
 | Bevy meshlet software raster (`crates/bevy_pbr/src/meshlet/visibility_buffer_software_raster.wesl`) | MIT OR Apache-2.0 | **COPY** (WGSL/WESL syntax precedent) | `textureAtomicMax` on an R64Uint storage texture under wgpu `TEXTURE_INT64_ATOMIC` and `SHADER_INT64` | Same stack: wgpu/naga 64-bit atomics |
 | A-SVGF forward projection (Schied et al. HPG 2018). Code in `NVIDIA/Q2RTX` | Paper. Q2RTX is **GPL-2.0** | **REIMPLEMENT-ONLY** | Forward-project old surface samples, merge them by atomics, and re-shade without interpolation | Prior art for T2 scatter. Its atomic conflict rule is first-come and *nondeterministic* |
 | **Area ReSTIR** (Zhang, Lin et al. SIGGRAPH 2024) `guiqi134/Area-ReSTIR` | Repo LICENSE.md is Falcor BSD-3, but module file headers are **NVIDIA proprietary** | **REIMPLEMENT-ONLY** (conflicting notices) | Sub-pixel area reservoirs. The translation-only backprojection reads only **2×2** prior pixels. Stored sub-pixel positions are reused with the identity shift | T2 gather window (a). Supports T2's principle |
-| AMD FSR 2 (`GPUOpen-Effects/FidelityFX-FSR2`) | MIT (LICENSE.txt, v2.2) | **COPY** selected pieces | `ffx_fsr2_reconstruct_dilated_velocity_and_previous_depth.h`: a forward scatter of depth with `InterlockedMax`. The reactive-mask *interface* idea | Forward depth splat. Programmable "reactivity" declaration |
-| AMD FSR 3 upscaler (FidelityFX SDK v1.1.4 is all MIT. In v2.x the `upscalers/fsr3/include/gpu/...` files are MIT and the rest is binary-only) | MIT for those files | COPY possible, but it is **AVOID as the core** | Same class as T1 (resampled history plus clamping and locks) | Reference only |
-| AMD FSR 4 (ML) | FidelityFX SDK 2.x default license: binary-only, no reverse engineering | **AVOID** | — | — |
-| Unreal TSR | Public docs only. UE source is under the Unreal EULA | **REIMPLEMENT-ONLY** (ideas from public docs) | Public statements that support (c). History resurrection idea | (c) |
-| Intel XeSS (`intel/xess`) | Intel Simplified Software License: binary only, no modification | **AVOID** | — | — |
-| Bevy TAA (`crates/bevy_anti_alias/src/taa/taa.wesl`) | MIT OR Apache-2.0 | COPY possible. **AVOID as the core** | Catmull-Rom plus YCoCg variance clip, which is the T1 class | Reference only |
+| AMD FSR 2 (`GPUOpen-Effects/FidelityFX-FSR2`) | MIT (LICENSE.txt, v2.2) | **COPY** selected pieces | `ffx_fsr2_reconstruct_dilated_velocity_and_previous_depth.h`: a forward scatter of depth with `InterlockedMax`. The reactive-mask *interface* idea | Forward depth splat. Programmable "reactivity" declaration. *2026-11-07:* also the published cost reference for a shipping reconstruction mode (§6.2) |
+| AMD FSR 3 upscaler (FidelityFX SDK v1.1.4 is all MIT. In v2.x the `upscalers/fsr3/include/gpu/...` files are MIT and the rest is binary-only; rechecked on v2.4.0, 2026-10-28) | MIT for those files | COPY possible, but it is **AVOID as the core**. *2026-11-07:* reading **reference** for a shipping TSR-class mode; the core stays Renderlab's T1b lineage (§6.7) | Same class as T1 (resampled history plus clamping and locks). Shading-change pyramid and 4-frame luma-instability ideas | Reference only |
+| AMD FSR 4 (ML) | FidelityFX SDK 2.x default license: binary-only, no reverse engineering. An SDK 2.0.0 drop briefly carried FSR 4 source under MIT and was withdrawn (press reports, not verified with AMD) | **AVOID** (unchanged 2026-11-07: provenance, RDNA 4-only ML) | — | — |
+| Unreal TSR | Public docs only. UE source is under the Unreal EULA | **REIMPLEMENT-ONLY** (ideas from public docs). *2026-11-07:* now the **acceptance comparator** for M7 reconstruction: TSR Epic at `r.ScreenPercentage=100` (§9) | Public statements that support (c). History resurrection idea | (c). The bar a shipping mode must beat |
+| Intel XeSS (`intel/xess`) | Intel Simplified Software License: binary only, no modification | **AVOID**. *2026-11-07:* informative comparator at most (§6.3) | — | — |
+| **NVIDIA DLSS SR / DLAA / Ray Reconstruction** (`NVIDIA/DLSS`); wrapper `bevyengine/dlss_wgpu` | DLSS: **NVIDIA RTX SDKs License** (object code only, no reverse engineering, §4(e) no open-source subjection). Wrapper: MIT OR Apache-2.0 | **AVOID** vendoring. Informative comparator only; an optional user-supplied plugin is a licence decision for Islam (§6.3) | — | Published per-GPU cost table (§6.3) |
+| Bevy TAA (`crates/bevy_anti_alias/src/taa/taa.wesl`) | MIT OR Apache-2.0 | COPY possible. **AVOID as the core**. *2026-11-07:* do not copy its variance clip: **NVIDIA US 10,116,916** claims it, active to 2037 (§6.4) | Catmull-Rom plus YCoCg variance clip, which is the T1 class | Reference only |
+| Karis 2014 TAA; Salvi 2016 variance clipping; Jimenez 2017 CoD dynamic TAA | Talks. Variance clipping patented (US 10,116,916 and continuation US 10,362,289, NVIDIA) | **REIMPLEMENT-ONLY**; variance clip **AVOID** without patent review | Packed depth-velocity `min` for nearest velocity (CoD). Responsive-AA flag idea | PS4 1080p cost points for the class (§6.4) |
+| Surface-ID history validation: SVGF mesh-ID taps, A-SVGF visibility-buffer forward projection, Yang et al. 2020 survey | Papers | **REIMPLEMENT-ONLY** (prior art) | Same-surface tests that TSR lacks; triangle identity alone is too strict on scans (M) | Silhouette trails and disocclusion (§6.6) |
 | Bevy SMAA (`crates/bevy_anti_alias/src/smaa/smaa.wesl`) and iryoku/smaa | Bevy MIT/Apache plus Jimenez et al. MIT-style notice | COPY possible. **AVOID as the core** | Morphological edge AA from 1 sample | Cannot integrate the footprint |
 | Intel CMAA2 (`GameTechDev/CMAA2`, `Projects/CMAA2/CMAA2/CMAA2.hlsl`) | Apache-2.0 | COPY possible. **AVOID as the core** | Same as SMAA | — |
 | Filmic SMAA T2x (Jimenez 2016) | Talk only | REIMPLEMENT-ONLY. Low value | Resampled 2-frame history | — |
@@ -36,16 +41,19 @@ Research date: 2026-11-06. Read-only: public web sources, GitHub license files r
 | Zeng et al. 2021 temporally reliable motion vectors | Paper | REIMPLEMENT-ONLY. Later | Shadow motion vectors from blocker and light motion | Light and mover caps (T1 §5) |
 | AGAA (Crassin et al. 2015), DCAA (Wang et al. 2015) | Papers | REIMPLEMENT-ONLY. Low value | Decoupling coverage and visibility from shading | Silhouette coverage only |
 | Texture-/object-space shading caches | Papers. NVIDIA patents US 9,747,718 and 9,754,407 listed | **AVOID** | — | Already rejected locally (no UVs, bakes program output) |
-| AMD FidelityFX Shadow Denoiser (`GPUOpen-Effects/FidelityFX-Denoiser/ffx-shadows-dnsr/*.h`) | MIT | COPY possible. **AVOID for the film path** | Tile classification over 8×4 bitmasks | Cross-pixel filter. Not the gap |
-| NVIDIA NRD (SIGMA, ReBLUR, ReLAX) | **NVIDIA RTX SDKs License**: object-code distribution only, no use that makes it open source | **REIMPLEMENT-ONLY** (papers/talks) | — | Not the gap |
-| SVGF (Schied 2017). A-SVGF (2018) | Papers. Falcor SVGF pass is BSD-3. Q2RTX is GPL-2 | Falcor: COPY possible. Low value | Temporal-gradient idea for fast history drop | Light-change reaction |
+| AMD FidelityFX Shadow Denoiser (`GPUOpen-Effects/FidelityFX-Denoiser/ffx-shadows-dnsr/*.h`). *2026-11-07:* plus the reflection denoiser `ffx-reflection-dnsr/ffx_denoiser_reflections_{reproject,prefilter,resolve_temporal,common,config}.h` | MIT (LICENSE.txt, 2021) | COPY possible. **AVOID for the film path**. *2026-11-07:* reflection denoiser is a **reference** for M7; its 9×9 statistical history clip needs the variance-clip patent check | Tile classification over 8×4 bitmasks; tile lists that skip non-reflective areas; variable-rate tracing | Cross-pixel filter. Not the AA gap. M7 reflections (§7.3) |
+| NVIDIA NRD (SIGMA, ReBLUR, ReLAX) | **NVIDIA RTX SDKs License**: object-code distribution only, no use that makes it open source | **REIMPLEMENT-ONLY** (papers/talks). *2026-11-07:* design **reference** for M7 denoising; RTX 4080 1440p costs 0.40–3.25 ms (§7.1). NVIDIA US 11,847,737 covers a fast-history reset pattern | Recurrent blur driven by history length and hit distance; history fix after resets; inputs contract | Not the AA gap. M7 GI/reflection denoise |
+| SVGF (Schied 2017). A-SVGF (2018) | Papers. Falcor SVGF pass is BSD-3 (file headers checked 2026-11-07). Q2RTX is GPL-2 | Falcor: COPY possible. *2026-11-07:* raised from "low value" to **the closest copyable M7 denoiser**; patents US 10,600,167 (to 2038) and US 12,437,371 (temporal gradients, to 2043) need review first | Temporal-gradient idea for fast history drop; mesh-ID tap validation; à-trous with variance-driven edge stops | Light-change reaction. M7 residual denoise (§7.2) |
+| kajiya denoisers (`EmbarkStudios/kajiya` `assets/shaders/{rtdgi,rtr,ircache,shadow_denoise,taa}/`), archived 2025-07 | MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE); the shadow denoiser keeps AMD's MIT file | COPY possible (reference). HW RT only | Validation rays that re-trace last frame's GI ray and turn the radiance change into an invalidity signal | M7 lighting-change detection (§7.4) |
+| Lumen and MegaLights denoisers (Unreal 5.7) | EULA; cvar names read from the installed binary | Comparator only | Settings to pin in matched runs (§9) | M7 comparator |
+| Open neural denoisers: NPPD (`balintio/nppd`), Neural Bilateral Grid (`xmeng525/...`), BMFR-DXR (`gtong-nv/...`, regression, not neural) | Apache-2.0; MIT; BSD-3 (repo licence API, checked 2026-11-07) | **REFERENCE** only. No wgpu runtime; WGSL tensor-core access is experimental | — | Later, if ever (§7.7) |
 | Heitz et al. 2018 ratio estimator | Paper | REIMPLEMENT-ONLY. Conflicts with programmability | — | — |
 | NVIDIA STBN (`NVIDIA-RTX/STBN`) | **Non-Commercial Use License** | **AVOID** | — | — |
 | **EA FAST noise** (`electronicarts/fastnoise`) | BSD-3-Clause | **COPY** (attribution) | Spatiotemporal blue-noise textures and generator | Stratifying the 8 shadow rays and jitter across frames |
-| Intel OIDN (`RenderKit/oidn`) | Apache-2.0 | COPY possible. **AVOID in real time** | Offline/reference denoising only. No Vulkan compute backend | Reference generation at most |
+| Intel OIDN (`RenderKit/oidn`) | Apache-2.0 | COPY possible. **AVOID in real time** (unchanged 2026-11-07, v2.5.1: single-frame, Vulkan only by external-memory interop, ~15 ms at 1080p reported) | Offline/reference denoising only. No Vulkan compute backend | Reference generation at most |
 | ReSTIR DI (Bitterli 2020). NVIDIA RTXDI (`NVIDIA-RTX/RTXDI`) | Paper. RTXDI is under the RTX SDKs License. NVIDIA holds ReSTIR-family patents | REIMPLEMENT-ONLY. Low value now | One sun, so little to gain | Patent risk noted |
 | AMD Capsaicin (`GPUOpen-LibrariesAndSDKs/Capsaicin`) | MIT | COPY possible. Later | GI-1.0 (`gi1/world_space_restir.hlsl`, `hash_grid_cache.hlsl`) | Future GI, not AA |
-| Bevy Solari (`crates/bevy_solari/src/realtime/restir.wesl`) | MIT OR Apache-2.0 | COPY possible. Later | WESL ReSTIR on wgpu ray queries | Future many-light/GI. RT only; relies on DLSS-RR |
+| Bevy Solari (`crates/bevy_solari/src/realtime/restir.wesl`) | MIT OR Apache-2.0 | COPY possible. Later | WESL ReSTIR on wgpu ray queries | Future many-light/GI. RT only; relies on DLSS-RR. *2026-11-07, verified for 0.20:* no built-in denoiser at all (none on macOS), ReSTIR off by default |
 
 ## 1. Temporal reconstruction and AA
 
@@ -293,6 +301,8 @@ See §1.3. It is the only published ReSTIR variant aimed at AA. Reported cost is
 
 Record this as a miss, not a reason to relax the bar.
 
+*2026-11-07 note.* The miss still stands against the film target. Islam has since set the shipping floor at Unreal 5.7 matched or beaten on every measure, at 2x its performance. A TSR-class mode that beats TSR in motion can therefore ship, labelled below film. §6.7 records the changed verdict and §11 the unit that tests it.
+
 ### (c) Is "TSR leaks across hard shadow edges like T1" supported or contradicted by public material?
 
 - **Supported in mechanism (V):**
@@ -331,8 +341,643 @@ Record this as a miss, not a reason to relax the bar.
 - If MIT, BSD or Apache code is adapted (Schütz, Bevy, FSR 2 files, FAST, CMAA2), keep its notice in the file header and in a third-party notices file once Renderlab's license is chosen.
 - ReSTIR-family work needs a patent review first.
 
+## 2026-11-07 M7 extension
+
+Research date 2026-11-07, base `cf001a5`. This covers [milestone-7.md](../milestone-7.md): GI, reflections and temporal reconstruction. It uses the same method as above: public sources, licence files read from each repository, no builds, no GPU runs. Two local reads were added:
+
+- the installed Unreal 5.7 `Engine/Config/BaseScalability.ini`;
+- console-variable names and help strings read as text from `Engine/Binaries/Win64/UnrealEditor-Renderer.dll`.
+
+Neither involved Unreal source.
+
+**The rule change behind this section.** On 2026-11-06/07 Islam set the shipping floor at Unreal 5.7 quality matched or beaten on every measure, at ≥ 2x Unreal's performance, with film quality as the long-term target. §1–§5 judged TSR-class methods only against the film bar. Here they are judged against the floor.
+
+### 6. Temporal reconstruction as a shipping mode
+
+**What Renderlab already has (M).** T1b ([m6-temporal-gpu §S2](../m6-temporal-gpu.md#s2-t1b-camera-motion), commit `b8fa1f3`, reverted) is a TSR-class camera-motion reconstruction:
+
+- It resamples history through the exact hit record, keeps no colour clamp, and uses a blur budget.
+- **Cost:** +0.20–0.22 ms over Interactive, or about 1.07 ms on the quiet base.
+- **Motion residual:** 3.1–3.8 codes against Exact's 7.0–7.2.
+- **Converged pixels:** all-covered pixels sit at 0.60–0.79 of the Exact bar while moving.
+- **Failures against the film bar:**
+  - silhouette ghost trails of 5–8 px;
+  - background-centre pixels at 1.37–2.21x the bar;
+  - Catmull-Rom undershoot specks;
+  - shadow-edge blur.
+
+**None of this has been compared to TSR.** Unreal's TSR-on image and cost at the registered cameras are still unmeasured ([film gap §3](../m6-film-gap.md#3-unreal-with-tsr-off)). Whether T1b already beats the floor is open, and it is the first thing to measure (§11).
+
+#### 6.1 Unreal TSR (UE 5.0–5.7, public material)
+
+**Technique (own words, V unless marked).**
+
+- **History.** TSR keeps its history at display resolution and reprojects it each frame.
+  - Epic and Cinematic keep that history at **200%** of output. Every lower group uses 100% (BaseScalability.ini 5.7, `AntiAliasingQuality@0–@Cine`). Cinematic also stores full-precision history (`r.TSR.History.R11G11B10=0`).
+  - The history holds up to 16 samples by default, configurable from 8 to 32 (`r.TSR.History.SampleCount`).
+- **Disocclusion** is inferred "solely" from the current frame's depth and velocity. TSR has no surface identity.
+- **Shading rejection** is a network of convolutions computed per 32×32 tile on chip (5.7 cvar help). Where it rejects, a spatial anti-aliaser fills in (`r.TSR.RejectionAntiAliasingQuality`, off at Low).
+- **Anti-flicker** (`r.TSR.ShadingRejection.Flickering`, on at High and above):
+  - Luminance that oscillates within a period counts as flicker. The cvar help gives the period as 3 frames; the docs say both 2 and 3.
+  - For flicker, TSR deliberately allows ghosting up to the flicker's amplitude.
+  - It tracks luminance only, and switches off per pixel for moving objects and large parallax.
+- **Thin-geometry detection** relaxes the clamp box up to `Coverage.MaxRelaxationWeight`. In 5.7 it is on by default only when Nanite Foliage is enabled in the project (cvar help).
+- **Resurrection** stores 2 persistent frames, one every 31 frames.
+- **Velocity weight clamping** defaults to 4 samples, described as "cinematic"; Fortnite uses 2.
+- **Reprojection field** (High and above) stores a per-pixel Jacobian.
+- **Convergence.** "TSR 1spp" is the time to one sample per output pixel, `(100/ScreenPercentage)^2` frames: 1 frame at 100%, 4 at 50%.
+  - (I) A full 16-sample history at native resolution takes about 16 frames.
+
+**Motion-vector requirements (V, TSR docs).**
+
+- **WPO:** animated World Position Offset needs the Previous Frame Switch. "Output velocities due to vertex deformation" is on by default.
+- **Instancing:** per-instance transform motion gets no automatic velocity.
+- **Translucency** draws "no or at most one" velocity.
+- **Pixel animation:** panning textures need the material's **Has Pixel Animation** flag.
+
+**Published cost (V).**
+
+| Case | Hardware and resolution | Cost |
+|---|---|---|
+| Valley of the Ancient | Not stated | ~0.79 ms at 100%, ~0.43 ms at 50% |
+| Fortnite | PS5/XSX, 4K output | 1.5 ms effective, 1.1 ms on the critical path, after async compute hides ~0.5 ms |
+| Forum ProfileGPU, sync mode | Steam Deck, 640×360 → 1280×720, `sg.AntiAliasingQuality=1` | 2.63 ms total, of which flicker analysis ~0.58 ms and resurrection ~0.1 ms |
+
+- The history update is the most expensive pass, and 200% history makes it about 4x dearer.
+- No 1080p-native or 40-series number was found, so it has to be measured locally (§9).
+
+**Failure modes Epic documents.**
+
+- reprojection blur, the "540p in motion" look;
+- 1-px-thick details that move half a pixel;
+- intentional ghosting within the flicker amplitude;
+- colour-only flicker that passes the luminance test;
+- translucency without velocity;
+- parallax-occlusion interiors with wrong motion vectors.
+
+**Licence and patents.** EULA, so **REIMPLEMENT-ONLY** from docs. No Epic-assigned patent on temporal reconstruction was found. That is not a clearance.
+
+#### 6.2 FSR 2 and FSR 3.1 (MIT)
+
+**Files (V).**
+
+- **FSR 2:** see §1.6.
+- **FSR 3.1:** FidelityFX SDK v2.4.0 (2026-10-28) `docs/license.md` still lists these as MIT, with the rest binary-only and "No reverse engineering":
+  - the GPU headers `Kits/FidelityFX/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_{accumulate,callbacks_hlsl,common,debug_view,luma_instability,luma_pyramid,prepare_inputs,prepare_reactivity,rcas,reproject,resources,sample,shading_change,shading_change_pyramid,upsample}.h`;
+  - the pass shaders `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_*_pass.hlsl`.
+
+**Technique (own words, V from the FSR 3.1.4 docs).**
+
+1. Reconstruct dilated motion and previous depth by max-scatter.
+2. Flag disocclusion from that depth.
+3. Resample the history with Lanczos.
+4. Measure shading change in a half-resolution luma pyramid: the minimum relative luma difference in each quad, times the consistency of its sign, maximised over mips.
+5. Compute luma instability by comparing current luma with the last 4 frames. Where luma flickers, colour clamping is reduced, as TSR does. This is ignored at high velocity, at disocclusion and under strong reactivity.
+
+Two engine masks steer it:
+
+- The **reactive mask** (0–1; write alpha; clamp to about 0.9) cuts history influence.
+- The **transparency-and-composition mask** only removes locks and clamping.
+
+**Motion vectors (V, FSR 2 README).**
+
+- All opaque, alpha-tested and alpha-blended objects should write motion.
+- Vertex-shader effects such as scrolling UVs should be included in the motion.
+- Vectors are unjittered. An inverted infinite depth buffer is recommended.
+
+**Cost (V, AMD README, FSR 2.2, DX12, Quality = 1.5x).**
+
+| Output | RX 7900 XTX | RX 6800 XT | RX 6700 XT | RX 590 |
+|---|---:|---:|---:|---:|
+| 1920×1080, Quality | 0.2 ms | 0.3 ms | 0.5 ms | 1.3 ms |
+| 3840×2160, Quality | 0.7 ms | 1.2 ms | 2.0 ms | 5.4 ms |
+
+- FSR 3.1 publishes no time table, only that it is "slightly lower" in performance than 3.0.
+- Its memory at 1080p Quality is a 61 MB working set (RX 6700 XT).
+- (I) The 4070 SUPER is roughly 6800 XT class: about 0.3 ms at 1080p from 720p input, and more at native input, since there are 2.25x the pixels. This is unmeasured.
+
+#### 6.3 FSR 4, DLSS/DLAA, XeSS: licences and use as comparators
+
+- **FSR 4:**
+  - Officially it ships as signed DLLs through `amd_fidelityfx_loader.dll` and needs RDNA 4 (press reports).
+  - The SDK 2.0.0 drop briefly contained its source under MIT, and AMD withdrew it ([VideoCardz](https://videocardz.com/newz/amd-releases-fidelityfx-sdk-2-0), [Guru3D](https://www.guru3d.com/story/amd-accidentally-opensources-fsr-4-code-on-github/)).
+  - **AVOID**: the provenance is contested, and it is vendor-specific ML.
+- **DLSS SR, DLAA and Ray Reconstruction:**
+  - **Licence (V).** [`NVIDIA/DLSS` LICENSE.txt](https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt) is the NVIDIA RTX SDKs License: distribution "as incorporated in object code format" (§2c), no reverse engineering (§4a), and no use that subjects it to an open-source licence (§4e).
+  - **Wrapper.** [`bevyengine/dlss_wgpu`](https://github.com/bevyengine/dlss_wgpu) is MIT OR Apache-2.0 (LICENSE-MIT, V). Its README says it builds against a user-supplied DLSS SDK on Vulkan, and that apps ship the DLL plus NVIDIA's licence text.
+  - **Cost (V, DLSS Programming Guide 310.6.0, 31 March 2026).** Performance mode (input 1/4 of output pixels), standalone utility:
+
+    | GPU | Output | E/F (CNN) | J/K (transformer) | L | M |
+    |---|---|---:|---:|---:|---:|
+    | RTX 4070 Ti | 1080p | 0.26 ms | 0.56 ms | 0.90 ms | 0.68 ms |
+    | RTX 4070 Ti | 4K | 1.02 ms | 1.97 ms | 3.18 ms | 2.74 ms |
+    | RTX 4080 | 1080p | 0.20 ms | 0.47 ms | 0.79 ms | 0.54 ms |
+
+    - Memory at 1080p is 85.77 MB for J/K.
+    - Preset K is the default for DLAA, Quality and Balanced. Preset J "might exhibit slightly less ghosting at the cost of extra flickering".
+    - DLAA at native input costs more than these figures. The guide has no DLAA row.
+- **XeSS:** binary-only, with no modification or reverse engineering (V, §1.6).
+- **Are they valid comparators? (I)**
+  - M7's acceptance names Unreal 5.7 and TSR, so the **gate is TSR Epic**.
+  - DLAA preset K, and XeSS where its plugin is installed, are worth one *informative* row in a matched Unreal run, because many shipping Unreal titles use them. They are never the pass bar: they are vendor-locked, closed, and not Unreal's own quality.
+  - An optional Renderlab DLSS plugin through `dlss_wgpu` is technically possible on wgpu 30 + Vulkan. It would be NVIDIA-only, never a default, and never presented as Renderlab's own quality. Whether the public repository may link it at all is **a licence decision for Islam**.
+
+#### 6.4 Classic TAA lineage
+
+- **Karis 2014**, "High Quality Temporal Supersampling", SIGGRAPH Advances ([slides](https://de45xmedrsdbp.cloudfront.net/Resources/files/TemporalAA_small-59732822.pdf), V):
+  - Jittered samples are spread over frames, with tonemap-weighted accumulation.
+  - "Need velocity (motion vectors) for everything", with the front-most velocity dilated.
+  - A depth compare is rejected because "all samples don't share same depth".
+  - A 3×3 neighbourhood clamp, shaped, in a YCoCg box, with *clip* toward the neighbourhood average rather than clamp.
+  - A "Responsive AA" material flag sets stencil for translucency and minimises feedback.
+  - Anti-flicker by biasing toward impulse frames.
+- **Salvi 2016**, variance clipping: a box of mean ± γσ over the neighbourhood, γ = 1 (V via [Yang et al. 2020](http://behindthepixels.io/assets/files/TemporalAA.pdf)).
+  - **Patent (V, [Google Patents](https://patents.google.com/patent/US10116916B2/en)):** US 10,116,916, NVIDIA (Salvi, Patney, Lefohn). Claim 1 covers TAA history adjusted by an AABB built from the per-component mean and standard deviation of the neighbourhood. Status active, expiring 2037-04-04. Continuation: US 10,362,289.
+  - Bevy TAA (§1.7) implements this kind of clip. Copying Bevy's code is licence-clean but not patent-clean.
+- **Jimenez**, "Dynamic Temporal Antialiasing in Call of Duty: Infinite Warfare", SIGGRAPH 2017 Advances ([slides v4](https://www.activision.com/cdn/research/Dynamic_Temporal_Antialiasing_and_Upsampling_in_Call_of_Duty_v4.pdf), V):
+  - temporal upsampling layered on dynamic resolution;
+  - a 1-sample spatio-temporal bicubic resample, which reduces the 5-sample bicubic to one tap across time;
+  - jitter scaled by velocity, with no jitter near 0.5 px/frame;
+  - a half-resolution nearest velocity, packed with depth in the high bits of a `uint` so that a single integer `min` picks it. That is the same trick as §1.1's key packing.
+  - **PS4 cost, 1080p output:**
+
+    | Mode | Input | Cost |
+    |---|---|---|
+    | T2x | 1920×1080 | 0.8–0.99 ms |
+    | TU2x | 1440×1080 | 0.75–0.94 ms |
+    | TU4x | 1440×1080 | 1.0–1.26 ms |
+
+  - Talk only, so **REIMPLEMENT-ONLY**.
+- **Survey.** Yang, Liu and Salvi, "A Survey of Temporal Antialiasing Techniques", CGF 39(2) 2020 (V). It lists depth, normal, **object ID** and motion as the geometry data for rejecting history, and Schied's forward-projected gradients for shading change.
+
+#### 6.5 Motion vectors, reactive masks and programmable shading
+
+Every engine above asks for the same three things: complete motion for everything, vertex-animation motion, and a per-pixel "trust history less" input. Renderlab's mapping (I, building on [T1 §6](../m6-temporal-primaries.md#6-programmable-shading)):
+
+- **Rigid motion is exact by construction.** Each hit record is taken back through the previous camera and its instance's previous transform. No velocity buffer, dilation or front-most-velocity trick is needed, and instancing gets motion automatically. TSR's per-instance caveat does not apply.
+- **Vertex deformation** is unsupported today (programmable shading C13). When it lands:
+  - The deformation must be a pure function of rest position, time and parameters, so the engine can evaluate it at t−1. This is TSR's Previous Frame Switch, done automatically.
+  - Otherwise the deforming instance's history weight is 1.
+  - Record this constraint with C13.
+- **Pixel animation and time.** The already-recorded rule is the reactive mask, declared rather than painted: programs that reference `time` get W = 1 unless they declare a temporal bandwidth. The same declaration covers panning UVs.
+- **Translucency** is out of M7 scope. When it arrives, each program declares its reactivity.
+- **No luminance-based reactivity.** FSR's auto-reactive mask and TSR's shading rejection read colour. Renderlab's T1 weights read none ([T1 decision 5](../m6-temporal-primaries.md#decisions)), so every style converges to its own integral. §6.6 gives the style-safe replacement.
+
+#### 6.6 Surface-ID validation: where Renderlab can beat TSR
+
+**Prior art (V).**
+
+- **Nehab et al. 2007:** depth test.
+- **SVGF 2017 §4.1:**
+  - each of 2×2 bilinear taps tests backprojected depth, object-space normal and **mesh ID**;
+  - inconsistent taps lose their weight to consistent ones;
+  - a 3×3 search follows "to help find thin geometry such as foliage".
+- **A-SVGF 2018 §3.3:** forward-projects **visibility-buffer** samples ("information about the triangle intersection"), so the current frame sees "the same point on the surface".
+- **Yang et al. 2020:** object ID in the survey's validation inputs.
+
+No paper was found that validates history with an exact (instance, primitive, barycentrics) record beyond A-SVGF's visibility-buffer forward projection.
+
+**Local evidence (M).** Triangle identity is too strict on these scans. T1 measured triangle-identity and micro-normal tests and dropped them: at the registered 1 cm step they reject 4.5–70% of pixels whose history is 2–3x better than Exact ([T1 decision 3](../m6-temporal-primaries.md#decisions)). Scan triangles of about 6 mm are close to the 8.2 mm footprint. The useful ID test is therefore **instance, then surface continuity (depth within 4 footprints), then reverse visibility** (the tap's own surface is still visible within 1.5 px). T1 already has exactly that.
+
+**Where identity beats TSR's depth and velocity (I).**
+
+1. **Disocclusion.** Reverse visibility asks whether this pixel's previous surface point is the one visible now. That catches disocclusion behind thin occluders, which current-frame depth and velocity cannot see.
+2. **Silhouette trails**, T1b's main failure:
+   - An **anchor bit** marks history that mixes surfaces, and only the anchored surface may accept it. Edge pixels then restart instead of trailing.
+   - The heavier fix is two-layer silhouette history.
+   - Both are identity tests that TSR cannot make.
+3. **Shading change without colour clamps.** Re-shade the anchored previous sample with the current program and inputs, using its old seed, as in A-SVGF. The difference is the program's *own* output change, so the test is style-correct.
+   - Run it only on pixels the engine flags: light angular rate, a moving caster, a parameter edit, exposure.
+   - Or run it on 1 of 9 strata, as A-SVGF does.
+4. **Engine-known causes.** Light rates and mover transforms already set T1's lag-bounded windows. The N8o surface cache has exact caster invalidation ([non-rt-n8o](../non-rt-n8o.md)). Together they give deterministic per-pixel W caps without reading colour.
+
+**Where identity does not help.** Sub-pixel resampling blur across hard shadow edges is structural (§4c; T1b's shadow-edge blur). TSR has the same class, halved by its 200% history (analytic, [m6-motion-aa §1](../m6-motion-aa.md#1-why-resampled-pixel-history-fails)). Whether TSR's clamp or flicker logic hides it, and what its error is at those pixels, is still unmeasured.
+
+#### 6.7 Verdict (changed 2026-11-07)
+
+- **The TSR class is allowed as a shipping mode** under the floor. It is labelled "temporal reconstruction, below film", and becomes the default only if it beats TSR Epic on every measured population, static and moving, with no trails or flicker beyond TSR's, at ≤ ½ of TSR's measured cost. T1a stays the converging static path. Film convergence in motion (T2-class) remains the target and stays recorded as a miss.
+- **Base it on T1b plus identity fixes, not on FSR or TSR copies.** FSR 3.1's MIT files and Bevy TAA are reading references only.
+  - Do not adopt variance clipping without patent review (US 10,116,916).
+  - Do not adopt colour or luma rejection: it is style-dependent.
+- **Native first.** Match TSR at `r.ScreenPercentage=100` (TSR acting as AA). Sub-native upscaling only enters if M7 GI and reflections cost so much per pixel that 2x is lost at native (I).
+
+### 7. Denoisers for M7 GI and reflections
+
+**Constraints from the project.**
+
+- **Incident quantities only** ([programmable shading §2.4](../programmable-shading.md#24-realistic-path-quality-bar-and-world-space-inputs)): the engine accumulates and denoises incident quantities, never program output.
+- **Clean inputs** ([milestone-7](../milestone-7.md)): GI and reflection inputs reach programs as clean values.
+- **No screen-space core lighting.**
+
+That ranks the denoiser classes (I):
+
+1. **World-space accumulation keyed by surface.** It keeps off-screen and disoccluded history, and fits the N8n/N8o surface cache's deterministic claim/resolve and exact invalidation.
+2. **Screen-space spatiotemporal filters over traced incident signals** (NRD, SVGF, FidelityFX). The lighting comes from world-space rays; only the filtering is screen-space. Disocclusion loses history, so these are acceptable only as residual cleanup that settles within the transient limit (§8).
+3. **Neural.**
+
+**Demodulation, restated for user programs (I).** NRD and SVGF divide radiance by albedo, or by a pre-integrated BRDF, before filtering. Renderlab can skip that division: the filtered signal *is* the incident quantity, irradiance for diffuse and lobe-prefiltered radiance for specular, and the program applies its own albedo or BRDF afterwards. Programs therefore never have to export albedo. They do have to export the **filter guides**:
+
+- **Normal:** geometric from the hit record, or the program's shading normal.
+- **Specular lobe:** roughness, or a lobe width.
+
+That is the open `scatter` / secondary-hit contract (programmable shading R4). A program that declares no lobe gets diffuse-only filtered inputs. **Record this constraint with R4.** Material and program identity come free from the hit record, as NRD's material ID or SVGF's mesh ID.
+
+#### 7.1 NVIDIA NRD v4.18.0 (ReBLUR, ReLAX, SIGMA)
+
+**Technique (own words).**
+
+- **ReBLUR** is a "recurrent blur":
+  - it accumulates temporally with a per-pixel history length;
+  - then it blurs with a radius that shrinks as history grows;
+  - hit distance drives the specular reprojection and the blur radius;
+  - a **history-fix** pass rebuilds the first frames after a reset, and a stabilization pass follows.
+- **ReLAX** is an à-trous filter in the SVGF lineage, "designed for RTXDI".
+- **SIGMA** is a shadow denoiser driven by penumbra size.
+
+**Inputs (V, [README](https://github.com/NVIDIA-RTX/NRD) and `Include/NRDDescs.h`).**
+
+- **Guides:**
+  - `IN_MV`: unjittered, with old = new + MV; 2.5D recommended;
+  - `IN_NORMAL_ROUGHNESS`: world normal plus *linear* roughness;
+  - `IN_VIEWZ`.
+- **Optional:** `IN_DIFF/SPEC_CONFIDENCE` ("highly recommended") and `IN_DISOCCLUSION_THRESHOLD_MIX`.
+- **Signals:**
+  - `IN_DIFF_RADIANCE_HITDIST`, `IN_SPEC_RADIANCE_HITDIST`, and SH variants;
+  - `IN_PENUMBRA` and `IN_TRANSLUCENCY` for SIGMA.
+- **Rules:**
+  - Materials must be demodulated by the app. NRD never reads base colour or metalness.
+  - Material IDs work only with R10G10B10A2 normals.
+  - `hitT` must be ≥ 0, must exclude the primary hit's distance, and must not be divided by the PDF.
+  - "A solid baseline is to use hit distance for the 1st bounce only."
+  - Under probabilistic lobe selection, the skipped lobe gets 0.
+
+**Defaults (V, `Include/NRDSettings.h`, master).**
+
+| Setting | ReBLUR | ReLAX | SIGMA |
+|---|---:|---:|---:|
+| Max accumulated frames | 30 | 30 (diffuse and specular) | — |
+| Max fast-history frames | 6 | 6 | — |
+| History-fix frames after a reset | 3 | 3 | — |
+| Max stabilized frames | — | — | 5 |
+
+- `disocclusionThreshold` is 0.01, and accumulation should be set "in seconds, not frames".
+- Anti-lag: "an application should not rely solely" on it, and initial integration should start with it disabled.
+
+**Cost (V, README).** RTX 4080, native 1440p, defaults:
+
+| Denoiser | Cost | SH mode |
+|---|---:|---:|
+| REBLUR_DIFFUSE_SPECULAR | 2.55 ms | 3.40 ms |
+| RELAX_DIFFUSE_SPECULAR | 3.25 ms | 4.80 ms |
+| SIGMA_SHADOW | 0.40 ms | — |
+| SIGMA_SHADOW_TRANSLUCENCY | 0.45 ms | — |
+
+- Anti-firefly adds 0–2% on ReBLUR and 7–10% on ReLAX.
+- No 30-series table was found.
+- (I) Scaling to the 4070 SUPER at 1080p (0.56x the pixels, about 0.75x a 4080's throughput) gives ReBLUR ≈ 1.9 ms, ReLAX ≈ 2.4 ms and SIGMA ≈ 0.3 ms.
+
+**Licence and patents.**
+
+- RTX SDKs licence (V), so **REIMPLEMENT-ONLY**.
+- **Patent (V, [Google Patents](https://patents.google.com/patent/US11847737)):** US 11,847,737, NVIDIA (Kozlowski), "Temporal denoiser quality in dynamic scenes", priority 2021, granted 2023-12-19. It covers a short moving average plus an exponential history, with the exponential part dropped when a dynamic event is detected: the "fast history" pattern. The history-clamping patents listed in §2 also apply.
+
+**Fit (I).**
+
+- A ReBLUR-like recurrent blur over *incident* diffuse and specular needs no demodulation.
+- Guides come exact from hit records: view Z, normal, motion, instance.
+- Hit distance exists wherever a ray was traced, on either backend.
+- Roughness needs the R4 lobe contract.
+
+#### 7.2 SVGF and A-SVGF; ReLAX against SVGF
+
+**SVGF** (Schied et al., HPG 2017, [preprint PDF](https://research.nvidia.com/sites/default/files/pubs/2017-07_Spatiotemporal-Variance-Guided-Filtering%3A//svgf_preprint.pdf), V).
+
+- **Method:**
+  - input is 1 spp, with direct and indirect light separated and albedo demodulated;
+  - an exponential moving average with fixed **α = 0.2** ("trading temporal stability for lag");
+  - the 2×2 and 3×3 ID-tested reprojection of §6.6;
+  - temporal luminance moments give variance;
+  - a 5-level à-trous wavelet with 5×5 cross-bilateral taps, using depth, normal and variance-scaled luminance edge stops;
+  - TAA afterwards.
+- **Cost:** 4.4 ms at 1280×720 and **10.2 ms at 1920×1080 on an NVIDIA TITAN X (Pascal)**, about 200 MP/s.
+  - Frames vary from 4.1 to 5.8 ms, driven by disocclusions.
+  - Worst frames, at cuts, run about 50% slower.
+- **Limitations stated by the authors:**
+  - over-blurred chrominance, because variance tracks luminance only;
+  - **detached shadows in motion**, because accumulation is unaware of illumination change;
+  - unstable noise in very low light;
+  - over-blurred specular;
+  - shadows over-blurred during camera motion.
+
+**A-SVGF** (Schied, Peters, Dachsbacher, HPG 2018, V).
+
+- **Method:**
+  - one sample per 3×3 stratum is forward-projected through the visibility buffer with its stored seed and re-shaded;
+  - the normalised temporal gradient sets a per-pixel α, from the global α up to full rejection (maximum over 3×3);
+  - a 5-level 3×3-box à-trous gives a 49×49 effective footprint;
+  - when history drops, variance comes from the spatial estimate, which "tends to introduce stronger spatial blur".
+- **Cost:** the temporal filter runs in < 2 ms and gradient sampling plus reconstruction in < 1 ms, on a **Titan Xp at 1920×1080**.
+- **Limitations stated by the authors:**
+  - it needs a temporally coherent primary sample space, so adding lights or changing importance sampling drops history;
+  - it cannot handle stochastic primary visibility such as motion blur or depth of field;
+  - it resolves stratum conflicts first-come (§1.2).
+
+**Code.**
+
+- **Falcor** `Source/RenderPasses/SVGFPass/` contains `SVGFReproject`, `SVGFFilterMoments`, `SVGFAtrous`, `SVGFFinalModulate` and `SVGFPackLinearZAndNormal` (`.ps.slang`), plus `SVGFPass.cpp/.h`. File headers are BSD-3 NVIDIA 2015-23 and the repo LICENSE.md is BSD-3 (V). **COPY with notice**, ported from Slang to WGSL.
+- **Q2RTX** `asvgf*.glsl/.comp` is GPL-2, so **REIMPLEMENT-ONLY**.
+
+**Patents (V, Google Patents).**
+
+- US 10,600,167, "Performing spatiotemporal filtering", NVIDIA, active to 2038-07-07.
+- US 12,437,371, "Illumination resampling using temporal gradients…", NVIDIA, active to 2043-07-21.
+
+Review both before shipping SVGF-style filtering or gradient-driven history.
+
+**ReLAX against SVGF.** On the same RTX 4080 at 1440p (V), ReLAX costs 3.25 ms against ReBLUR's 2.55 ms. Default lobe-angle fractions are 0.5 for ReLAX and 0.15 for ReBLUR (`NRDSettings.h`).
+
+- (I) ReLAX is SVGF's à-trous plus NRD's fast history, history fix and anti-lag. Those three are what SVGF lacks against the 8-frame limit (§8).
+
+#### 7.3 AMD FidelityFX Denoiser (MIT)
+
+- **Repository (V):** [GPUOpen-Effects/FidelityFX-Denoiser](https://github.com/GPUOpen-Effects/FidelityFX-Denoiser), LICENSE.txt MIT (AMD, 2021).
+  - Shadows: `ffx-shadows-dnsr/` (§2).
+  - Reflections: `ffx-reflection-dnsr/ffx_denoiser_reflections_{common,config,prefilter,reproject,resolve_temporal}.h`.
+  - The same denoisers are MIT in SDK v1.1.4.
+  - In SDK 2.x, the "FSR Ray Regeneration" denoiser is ML and binary-only (`signedbin/amd_fidelityfx_denoiser_dx12.dll`, V licence listing), and DX12-only (§1.6). **AVOID** that one.
+- **Reflections design (V, [v1.1.4 docs](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/docs/techniques/denoiser.md)).**
+  - **Inputs:** depth hierarchy, motion vectors, normals, extracted roughness, ping-pong radiance and variance, and a tile list with indirect arguments. There is **no hit-distance input**.
+  - **Reprojection:** finds disocclusions and estimates variance, with an 8×8 radiance mip.
+    - The fast path uses mirror parallax from neighbourhood similarity, or surface motion with neighbourhood distance checks.
+    - A slow path for edges builds a 2×2 interpolated sample.
+  - **Spatial:** variance-guided, 15 samples in 7×7, weighted by similarity to the 8×8 average.
+  - **Temporal:** 9×9 Gaussian-region statistics clip the history.
+  - It supports variable-rate tracing, from full rate for mirrors to quarter rate for glossy.
+  - No timings are published.
+- **Fit (I).**
+  - The tile lists and variable-rate tracing are directly useful.
+  - The temporal clip is statistical, mean ± σ style, so check it against US 10,116,916's claims before copying.
+
+#### 7.4 kajiya (MIT OR Apache-2.0; archived 2025-07)
+
+- **Files (V, repository tree):**
+  - `assets/shaders/rtdgi/`: ReSTIR GI with `restir_temporal`, `restir_spatial`, `restir_resolve`, `temporal_filter`, `spatial_filter`, `diffuse_validate.rgen`, `temporal_validity_integrate` and `fullres_reproject`;
+  - `rtr/`: reflections with `rtr_restir_temporal`, `temporal_filter`, `spatial_cleanup` and `reflection_validate.rgen`;
+  - `ircache/`: world-space irradiance cache;
+  - `shadow_denoise/`: based on FFX, keeping AMD's `ffx/LICENSE.txt`;
+  - `taa/`.
+- HLSL. The visual features need an NVIDIA RTX GPU, and "RTX Off" disables most of them. No timings are published, and the README says "denoising needs more work (always)".
+- **Notable technique (V, source read).** `diffuse_validate.rgen.hlsl` re-traces last frame's reservoir ray from its stored origin. When the hit radiance differs, it writes an invalidity value (a smoothstep of the relative difference). `temporal_validity_integrate.hlsl` blurs that value spatially, and the temporal filter uses it to shorten history. This is a ray-based temporal gradient on *secondary* rays: it catches indirect-light changes that are far from the pixel.
+- **COPY with notice is possible.** It is HW RT only, and the ReSTIR patent note (§3.1) applies.
+
+#### 7.5 Bevy Solari and DLSS Ray Reconstruction
+
+- **Bevy 0.20** (2026-10-08, [notes](https://bevy.org/news/bevy-0-20/), V):
+  - Solari's denoising is **DLSS-RR** through `dlss_wgpu`, now DLSS-RR 4.5;
+  - "there is currently no built-in denoiser" on macOS;
+  - ReSTIR is off by default because, with DLSS-RR, "ReSTIR costs a decent chunk of performance, and does not significantly improve image quality".
+
+  Solari has no open denoiser to take.
+- **DLSS-RR:** the RTX SDKs licence and NVIDIA-only (§6.3), so **AVOID** as a default. It is useful only as an informative comparator.
+
+#### 7.6 Intel OIDN 2.5.1
+
+- **Licence:** Apache-2.0 (LICENSE.txt, V).
+- **Modes:** high, balanced and fast. The README names balanced and fast "for interactive and real-time use cases". OIDN 2.3 added fast mode at about 1.5–2x the speed of balanced.
+- **Devices:** SYCL, CUDA, HIP and Metal. Vulkan is reached only through external-memory and semaphore interop (README §Interop, V).
+- **Speed:** one third-party report gives about 15 ms at 1080p in device memory, and 220 ms with the default managed memory on Windows (GPU unnamed, [blendity PR](https://github.com/EmilianoManaloIV/blendity/pull/85)).
+- It is a single-frame filter with no temporal input. **Unchanged:** reference cleanup only.
+
+#### 7.7 Open neural real-time denoisers
+
+- **NPPD**, Bálint et al., SIGGRAPH 2023 ([balintio/nppd](https://github.com/balintio/nppd)): LICENSE Apache-2.0 (V; the paper says MIT). PyTorch.
+- **Neural Bilateral Grid**, Meng et al., EGSR 2020 ([xmeng525/RealTimeDenoisingNeuralBilateralGrid](https://github.com/xmeng525/RealTimeDenoisingNeuralBilateralGrid)): MIT (V). TensorFlow. The authors claim "a few milliseconds per frame".
+- **BMFR**, as a DXR port ([gtong-nv/BMFR-DXR-Denoiser](https://github.com/gtong-nv/BMFR-DXR-Denoiser)): BSD-3 (V). Blockwise regression, not neural.
+
+None has a wgpu or WGSL runtime. wgpu 30's `EXPERIMENTAL_COOPERATIVE_MATRIX` supports only 8×8 f32 tiles, and its own docs warn that Vulkan support "may be limited" (local `features.rs`, V). Tensor-core inference from WGSL is therefore impractical now (I).
+
+A network trained on one look also risks the style dependence that programmable shading forbids, unless it filters incident quantities only. **REFERENCE, later.**
+
+### 8. Lighting-change responsiveness and latency
+
+The project caps the soft-shadow settle after cuts and disocclusion at **8 frames** (Islam, `M6-transient-limit`). T1's F2 gate is ≤ Interactive at every age and ≤ the bar by the 8th frame after any event.
+
+| Method | History | Reaction to light, emissive or material change | Disocclusion | Settle (published or derived) |
+|---|---|---|---|---|
+| TSR Epic | ≤ 16 samples | Same-frame shading rejection, then spatial AA. Anti-flicker ghosts on purpose within the flicker amplitude over a 3-frame period (V) | Inferred from depth and velocity; spatial AA fills | 1 frame to 1 spp at 100% (V); ~16 frames to a full history (I) |
+| FSR 3.1 | Lanczos history | Shading-change pyramid; 4-frame luma instability; reactive mask from the app (V) | Previous-depth test | Not published |
+| DLSS / DLAA | Closed | Preset J vs K trades ghosting against flicker (V) | Closed | Not published |
+| SVGF | EMA α = 0.2 | None: lag and detached shadows (V) | 2×2/3×3 ID-tested taps, then spatial variance | Stale share 0.8^n: 33% at frame 5, **17% at frame 8** (I, arithmetic) |
+| A-SVGF | Adaptive α | Gradient drops history in the same frame; spatial blur while recovering (V) | Forward projection | About 1 frame to react; recovery blur not quantified |
+| NRD ReBLUR / ReLAX | 30 frames | History fix 3 frames, fast history 6; anti-lag optional and not to be relied on (V) | Handled internally | Designed for ≤ 6-frame recovery (I) |
+| kajiya RTDGI | Temporal filter plus ReSTIR | Validation rays shorten history where hit radiance changed (V) | Reprojection map | Not published |
+| Lumen GI (UE 5.7) | Surface cache plus screen-probe temporal filter | Surface cache amortised: `DirectLighting.UpdateFactor=32`, `Radiosity.UpdateFactor=64` at Epic (V ini). Docs admit lighting can "fade rather than quickly turn on or off". A fast-update mode applies where traces hit moving objects (V, cvar help) | World-space `DistanceThreshold` history discard (V, cvar help) | Not published. `MaxFramesAccumulated` default unverified (community reports 10) |
+| MegaLights (UE 5.7) | `MaxFramesAccumulated` 12 | SVGF-style temporal variance ([Epic, SIGGRAPH 2025 Advances](https://advances.realtimerendering.com/s2025/content/MegaLights_Stochastic_Direct_Lighting_2025.pdf), via a search summary, not read in full) | — | 12-frame history ([Epic Games Japan, Tokyo DevDays 2026](https://www.docswell.com/s/EpicGamesJapan/Z27EW1-DayDays26-MegaLights), via a search summary) |
+
+**Implications (I).**
+
+- **Use engine-known events before detection.** The engine knows when a light moves (with its angular rate), when a caster moves (exactly, as in N8o), when parameters change, when exposure changes, and which time bandwidth a program declared. Each event caps W on the receivers it affects, at no detection cost and deterministically. Gradients, A-SVGF re-shade or kajiya-style validation rays then cover what events miss, mainly far-field indirect change.
+- **Moving sun.** Direct shadows are fresh every frame. Indirect light changes everywhere at once, so a fixed-α filter such as SVGF fails the 8-frame limit: 17% stale at frame 8 against a hard change. A rate-derived W, or a gradient, is required.
+- **Emissive changes.** Emitters are program output, so their changes are known events: parameter edits, `time`. Their effect on far receivers needs validation rays or gradients.
+- **Disocclusion.** This is where world-space caches beat screen-space denoisers. A surface the camera saw earlier keeps its cached incident light, while NRD-style filters must rebuild through history fix. Never-seen surfaces start cold, as T2's revealed pixels did, and need the same "supersample where reuse is missing" boost (§1.4) to settle within 8 frames.
+- **Proposed for Islam:** apply the 8-frame settle limit to GI and reflections as well, measured as ≤ Unreal at every age and ≤ the bar by frame 8.
+
+### 9. Unreal 5.7 settings to match
+
+UE **5.7.4 CL 51494982** is installed at `C:/Program Files/Epic Games/UE_5.7` ([comparison setup](../unreal-comparison-setup.md)).
+
+**Reconstruction.**
+
+- **`r.AntiAliasingMethod=4`** for TSR (V, TSR docs) and **0** for the existing 1x captures (V, [shadow comparison](../unreal-quarry-shadow-comparison.md)). Values 1–3 are FXAA, TAA and MSAA from general knowledge, not checked this session.
+- **`sg.AntiAliasingQuality=3` (Epic)** sets the following (V, BaseScalability.ini 5.7):
+
+  | Setting | Epic `@3` | Cinematic `@Cine` | High `@2` |
+  |---|---|---|---|
+  | `r.TSR.History.ScreenPercentage` | 200 | 200 | 100 |
+  | `r.TSR.History.R11G11B10` | 1 | **0** | 1 |
+  | `r.TSR.History.UpdateQuality` | 3 | 3 | 2 |
+  | `r.TSR.ShadingRejection.Flickering` | 1 | 1 | 1 |
+  | `r.TSR.RejectionAntiAliasingQuality` | 2 | 2 | 1 |
+  | `r.TSR.ReprojectionField` | 1 | 1 | 1 |
+  | `r.TSR.Resurrection` | 1 | 1 | 1 |
+  | `r.TemporalAA.Quality` | 2 | 2 | 1 |
+  | `r.FXAA.Quality` | 4 | 5 | 3 |
+
+  - Match **Epic** as the shipping comparator.
+  - Add **Cinematic** as the stronger still-frame row.
+- **`r.ScreenPercentage=100`** at 1920×1080. TSR then acts as AA, matching Renderlab's native 1x input.
+  - `sg.ResolutionQuality` maps directly to `r.ScreenPercentage`. Presets are Performance 50, Balanced 58.328, Quality 66.662 and Native 100 (V ini).
+  - Add a 66.662% row so TSR's cheaper upscaled mode is also on record (I).
+- **Record and pin, at defaults:**
+  - `r.TSR.History.SampleCount` (16);
+  - `r.TSR.ShadingRejection.Flickering.Period` (3);
+  - `r.TSR.Velocity.WeightClampingSampleCount` (4);
+  - `r.TSR.ThinGeometryDetection` (on only with Nanite Foliage);
+  - `r.TSR.AsyncCompute` (default 2).
+- **Motion vectors.** The quarry is static meshes under camera motion, so velocity is complete. For movers, check deformation velocity output and the per-instance caveat (§6.1).
+
+**GI and reflections (Lumen).**
+
+- **`sg.GlobalIlluminationQuality=3` and `sg.ReflectionQuality=3`** set the following (V ini):
+
+  | Setting | GI Epic `@3` | GI Cinematic `@Cine` |
+  |---|---:|---:|
+  | `r.Lumen.ScreenProbeGather.DownsampleFactor` | 16 | 8 |
+  | `TracingOctahedronResolution` | 8 | 16 |
+  | `NumAdaptiveProbes` | 8 | 4 |
+  | `RadianceCache.ProbeResolution` | 32 | 32 |
+  | `RadianceCache.NumProbesToTraceBudget` | 100 | 350 |
+  | `FullResolutionJitterWidth` | 1 | 0.5 |
+  | `r.LumenScene.DirectLighting.UpdateFactor` | 32 | 32 |
+  | `r.LumenScene.Radiosity.UpdateFactor` | 64 | 64 |
+
+  At reflection Epic:
+  - `r.Lumen.Reflections.DownsampleFactor=1`;
+  - `ScreenSpaceReconstruction.NumSamples=5`;
+  - `ScreenSpaceReconstruction.MinWeight=0`;
+  - `MaxRoughnessToTraceForFoliage=0.4`.
+- **Denoiser cvars present in 5.7** (names V from the renderer binary). Their defaults are not in the scalability ini, so dump them with `DumpCVars r.Lumen.` (or `<cvar> ?`) in the matched process and store them in the evidence JSON. Keep them at default; do not tune Unreal.
+  - `r.Lumen.ScreenProbeGather.Temporal`, with `.MaxFramesAccumulated`, `.DistanceThreshold`, `.NormalThreshold`, `.RejectBasedOnNormal`, `.MaxFastUpdateModeAmount`, `.FastUpdateModeUseNeighborhoodClamp`, `.FractionOfLightingMovingForFastUpdateMode` and `.RelativeSpeedDifferenceToConsiderLightingMoving`;
+  - `r.Lumen.ScreenProbeGather.TemporalFilterProbes`, with `.HistoryWeight` and `.HistoryDistanceThreshold`;
+  - `r.Lumen.Reflections.Temporal`, with `.MaxFramesAccumulated`, `.NeighborhoodClampScale`, `.DistanceThreshold` and `.MaxRayDirections`;
+  - `r.Lumen.Reflections.BilateralFilter`, with `.KernelRadius`, `.NumSamples` and `.DepthWeightScale`;
+  - `r.Lumen.Reflections.ScreenSpaceReconstruction`, with `.NumSamples`, `.KernelRadius`, `.MinWeight` and `.RoughnessScale`;
+  - `r.MegaLights.Temporal.*`.
+- **Hardware and software paths** (names V):
+  - `r.Lumen.HardwareRayTracing` 0 or 1;
+  - `r.Lumen.HardwareRayTracing.LightingMode`;
+  - `r.Lumen.Reflections.HardwareRayTracing.HitLighting`.
+
+  Software Lumen traces mesh SDFs and reads the surface cache. It has no hit lighting and does not support WPO. Hardware Lumen can light the hit for reflections (V, Lumen technical details).
+
+**How to time TSR and Lumen.**
+
+1. **End to end (the honest number).** Run paired, same-process A/B frames with `r.AntiAliasingMethod` 4 and 0, using the existing CSV harness (160 frames, measured rows 96–159). The `GPUTime` difference includes TSR's side costs: jitter, full velocity and mip bias. For Lumen, toggle GI and reflections the same way.
+2. **Attribution with ProfileGPU** at CSV frame 64 (existing harness).
+   - The TSR node is "Scene > PostProcessing > TemporalSuperResolution". The Lumen passes are "Lumen Scene Lighting", "Lumen Screen Probe Gather" and "Lumen Reflections" (V docs).
+   - In 5.6 and later, ProfileGPU prints per-queue tables. `r.ProfileGPU.Root`, `.ShowLeafEvents` and `.ThresholdPercent` exist in 5.7 (names V).
+   - Set `r.TSR.AsyncCompute=0` and `r.Lumen.AsyncCompute=0` for attribution runs only, because overlapping async work skews pass times (V, Lumen performance guide). Never sum overlapping queues (local practice).
+3. **`stat tsr`** gives "TSR feed" and "TSR 1spp" (V).
+4. **Visual diagnosis:**
+   - `r.TSR.Visualize`: 0 accumulated samples, 1 parallax disocclusion, 2 rejection, 3 clamp, 4/5 resurrection, 6 spatial AA, 7 flicker;
+   - the `VisualizeTSR` show flag;
+   - `DumpGPU` with `Root="*TemporalSuperResolution*"` for buffers. Put dumps on E: and delete them after summarising.
+
+### 10. With and without hardware RT
+
+| Aspect | Hardware RT | Non-RT |
+|---|---|---|
+| Reconstruction (T1/T1b) | Traced primaries with exact hit records | Raster or visibility buffer with exact surface identity and a jittered projection ([non-rt-path](../non-rt-path.md#motion-aa-and-film-convergence)). **Same code and cost**, except T2-class discontinuity rays at 2–5x (I) |
+| GI and reflection rays | Inline ray queries: hit distance, and an instance/primitive/barycentric record at the secondary hit, so the program's `surface` can run there | Software BVH. N0 measured 8-ray shadows at **9.43 ms, 21.9x hardware** (M, [non-rt-n0](../non-rt-n0.md)). Per-pixel secondary rays must be few or short. Most incident light comes from world-space caches (surface-cache cells, virtual clipmap, cluster-LOD proxies) |
+| Hit distance for the denoiser | Always available | Only for traced rays, not for cache lookups. The denoiser needs a no-hitT mode: normal, depth and roughness guides, or the cache cell's position as a virtual hit point for specular parallax (I) |
+| Confidence and age inputs | Ray-based validation (kajiya) or gradients | Cache cell age and consensus (N8o certifies solid cells by consensus) can serve as NRD-style confidence (I) |
+| Unreal comparator | Lumen hardware: hit lighting, far field, skinned meshes (V) | Lumen software: SDFs and surface cache, no hit lighting, no WPO, 200 m scene range extendable to 800 m (V). The non-RT path must beat this (AGENTS) |
+
+**Rule (I).** Reconstruction and denoising are one implementation with one set of gates, run on both backends. Any input that exists only with hardware RT (per-pixel `hitT`, secondary hit records) needs a named non-RT substitute before the feature counts as complete.
+
+### 11. Recommended direction for M7 (reconstruction + denoising)
+
+**Principles (I).**
+
+- One path-agnostic reconstruction, extending T1b.
+- Validity from identity and engine events, not colour statistics.
+- Denoise incident quantities: world-space surface-keyed accumulation first, then screen-space spatiotemporal cleanup only for the residual, validated by instance and reverse visibility.
+- No vendored NVIDIA, AMD 2.x-binary or Epic code.
+- A patent review before any variance clip, SVGF-style filter, temporal gradient or fast-history reset ships.
+
+**Reconstruction.** The variants for RT and non-RT are identical by construction (§10).
+
+- **R0, the first measurable unit.** Unreal capture plus CPU scoring; no Renderlab GPU change.
+  - **Capture:** Unreal TSR Epic, `r.AntiAliasingMethod=4`, `r.ScreenPercentage=100`, 1080p, offscreen. Run the registered Q-walk (161 frames), Q-disocclusion (`sequences/registered.json`) and Q-sun at the same cameras. Include a 1x row (`=0`) and a Cinematic row.
+  - **Score** with `scripts/m6-temporal-motion-score.py` (from `b8fa1f3`) against the existing Level F references, on T1b's populations:
+    - F1 converged and F2 by age;
+    - silhouette trail width and background-centre error;
+    - flicker in the hold.
+  - **Time** with §9's A/B and attribution.
+  - **Output:** TSR's error per population as a multiple of the bar, and TSR's end-to-end ms.
+  - **Payoff:** it also settles §4(c), whether TSR leaks at shadow edges.
+  - **Cost:** one offscreen Unreal batch plus a CPU score, with no Renderlab build.
+- **R1, T1b revived as a reconstruction mode.**
+  - **Build:** add the anchor bit (§6.6), event-driven W caps, and the Catmull-Rom undershoot fix (clamp the kernel's negative lobes at silhouettes, or switch to bilinear there). Use no colour clamp.
+  - **Gate:** at least as good as TSR (R0) on every population at every age, on Q-walk, Q-disocclusion and Q-sun.
+    - Trail width and hold flicker no worse than TSR's;
+    - F8 replay identical;
+    - non-RT run byte-identical to the paired software run;
+    - cost delta ≤ ½ of TSR's measured end-to-end delta, with Renderlab's total frame time ≤ ½ of Unreal's.
+  - **Stop rules:**
+    1. If a population remains worse than TSR after the anchor bit plus *one* named fix (two-layer silhouette history, or the ±1 px reverse search), stop and record the miss.
+    2. If the delta exceeds half of TSR's measured cost after one optimisation pass, stop.
+    3. If R0 shows TSR worse than T1b everywhere already, skip the extra fixes and gate T1b as is.
+- **R2, only if R1 fails on shading change.** A-SVGF-style re-shade of the anchored samples on event-flagged pixels, after the US 12,437,371 review.
+- **Upscaling:** deferred (§6.7).
+
+**Denoising.** The GI and reflection estimators themselves belong to gi.md and reflections.md. This is the denoising side.
+
+- **RT variant:**
+  1. Per-pixel traced incident signals with `hitT`: irradiance, and radiance per specular lobe.
+  2. Accumulate them into surface-keyed world cells where certified, using N8o's deterministic claim/resolve and exact invalidation.
+  3. Clean the residual in screen space with either a Falcor SVGF port (BSD-3, notice kept) or a ReBLUR-like reimplementation, with history fix ≤ 3 frames, fast history ≤ 6, and ID-tested taps.
+  4. Use kajiya-style validation rays on 1/9 of pixels for far-field change.
+- **Non-RT variant:**
+  1. The same caches as the primary source, with short software rays.
+  2. The same denoiser in its no-hitT mode, with the same guides and gates.
+  3. Validation by gradient re-shade instead of rays where rays are too dear.
+- **D0, the first measurable denoise unit.** CPU replay of saved buffers, per AGENTS.
+  - **Input:** a 1-spp cosine-weighted diffuse incident-irradiance sequence dumped from the RT path on Q-walk and Q-sun, plus Q-disocclusion. That is one ray per pixel against the BVH, with no GI integration. Pair it with a high-sample reference of the same quantity.
+  - **Compare** three filters on one process and one asset load:
+    - (a) world-cell accumulation with event-driven W;
+    - (b) SVGF semantics;
+    - (c) a recurrent blur with history fix.
+  - **Measure** error by age after a cut, a disocclusion and a 5° sun step, plus frames to ≤ the bar, temporal flicker and blur at contacts.
+  - **Price only the winner on the GPU.**
+  - **Stop rules:**
+    - drop a filter that cannot reach the bar by frame 8 after each event;
+    - drop a filter whose GPU estimate exceeds half of Lumen's measured denoise share (to be taken from ProfileGPU in the matched Unreal run);
+    - if none passes, record the miss and move effort to more samples or better caches, not to a blurrier filter.
+
+**Risks.**
+
+1. **Patents.** US 10,116,916 (variance clip), US 10,600,167 (SVGF), US 12,437,371 (temporal gradients), US 11,847,737 (fast history), plus the §2 history-clamp and ReSTIR filings. Each needs a review before shipping.
+2. **The R4 lobe contract.** Specular denoising needs a program-declared lobe. Programs without one lose glossy filtering.
+3. **Non-RT hitT.** Specular parallax without hit distance may ghost on moving glossy surfaces.
+4. **TSR measurement fairness.** Async overlap and the 200% history memory, which counts toward Unreal's VRAM total, must be reported as measured, not modelled.
+5. **Structural shadow-edge blur.** T1b may beat TSR on every population yet remain below film at hard shadow edges. That is allowed under the floor, but it must stay labelled.
+6. **Cold surfaces after disocclusion.** World caches help only with surfaces seen before. Never-seen ones need the revealed-pixel boost.
+7. **Time-dependent programs.** W = 1 forfeits reconstruction on animated materials until programs declare a bandwidth.
+8. **Determinism.** Any atomic-based cache insert must keep N8o's claim/resolve identity.
+
 ## Sources
 
 Primary repositories and license files read: [FidelityFX-FSR2 LICENSE.txt](https://github.com/GPUOpen-Effects/FidelityFX-FSR2/blob/master/LICENSE.txt), [FidelityFX-SDK docs/license.md](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/main/docs/license.md), [FidelityFX-SDK v1.1.4 LICENSE.txt](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/LICENSE.txt), [FidelityFX-Denoiser](https://github.com/GPUOpen-Effects/FidelityFX-Denoiser), [NRD LICENSE.txt](https://github.com/NVIDIA-RTX/NRD/blob/master/LICENSE.txt), [RTXDI LICENSE.txt](https://github.com/NVIDIA-RTX/RTXDI/blob/main/LICENSE.txt), [STBN License.txt](https://github.com/NVIDIA-RTX/STBN/blob/main/License.txt), [XeSS LICENSE.txt](https://github.com/intel/xess/blob/main/LICENSE.txt), [CMAA2](https://github.com/GameTechDev/CMAA2), [OIDN](https://github.com/RenderKit/oidn), [Q2RTX license.txt](https://github.com/NVIDIA/Q2RTX/blob/master/license.txt), [compute_rasterizer LICENSE.md](https://github.com/m-schuetz/compute_rasterizer/blob/master/LICENSE.md), [Falcor LICENSE.md](https://github.com/NVIDIAGameWorks/Falcor/blob/master/LICENSE.md), [Area-ReSTIR](https://github.com/guiqi134/Area-ReSTIR), [Capsaicin](https://github.com/GPUOpen-LibrariesAndSDKs/Capsaicin), [Bevy](https://github.com/bevyengine/bevy), [EA fastnoise](https://github.com/electronicarts/fastnoise), [iryoku/smaa](https://github.com/iryoku/smaa), and `wgpu-types-30.0.1/src/features.rs` (local cargo registry).
 
 Papers and talks: [Schütz 2021](https://arxiv.org/abs/2104.07526), [Schütz 2022](https://arxiv.org/abs/2204.01287), [A-SVGF](https://cg.ivd.kit.edu/publications/2018/adaptive_temporal_filtering/adaptive_temporal_filtering.pdf), [Area ReSTIR](https://graphics.cs.utah.edu/research/projects/area-restir/), [ATAA chapter](https://casual-effects.com/research/Marrs2019ATAAGem/Marrs2019ATAAGem.pdf), [ATAA HPG](https://research.nvidia.com/publication/2018-08_Adaptive-Temporal-Antialiasing), [Amortized supersampling](https://www.cse.ust.hk/~psander/docs/amss.pdf), [render cache](http://www-sop.inria.fr/reves/Basilic/1999/WDP99/), [TRMV](https://sites.cs.ucsb.edu/~lingqi/publications/paper_trmv.pdf), [AGAA](https://research.nvidia.com/sites/default/files/pubs/2015-02_Aggregate-G-Buffer-Anti-Aliasing/AGAA_I3D2015_authors.pdf), [DCAA](https://research.nvidia.com/sites/default/files/pubs/2015-08_Decoupled-Coverage-Anti-Aliasing/hpg15_DCAA.pdf), [Heitz 2018](https://eheitzresearch.wordpress.com/705-2/), [HRAA](https://michaldrobot.com/2014/08/13/hraa-siggraph-2014-slides-available/), [Filmic SMAA](https://advances.realtimerendering.com/s2016/), [Epic TSR docs](https://dev.epicgames.com/documentation/unreal-engine/temporal-super-resolution-in-unreal-engine?lang=en-US), [TSR thin geometry](https://dev.epicgames.com/documentation/unreal-engine/thin-geometry-detection-with-temporal-super-resolution?lang=en-US), [TSR forum thread](https://forums.unrealengine.com/t/tsr-feedback-thread/883977/20), [Solari 0.18 post](https://jms55.github.io/posts/2025-12-27-solari-bevy-0-18/), [Wyman patent list](https://cwyman.org/paperList.html), and [US 11,315,310](https://patents.justia.com/patent/11315310).
+
+**2026-11-07 additions.**
+
+- **Licence files and repositories read:**
+  - [NVIDIA/DLSS LICENSE.txt](https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt) and the [DLSS Programming Guide 310.6.0](https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf);
+  - [bevyengine/dlss_wgpu LICENSE-MIT](https://github.com/bevyengine/dlss_wgpu);
+  - [FidelityFX SDK docs/license.md](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/main/docs/license.md) at v2.4.0;
+  - [FSR 3.1.4 upscaler docs](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/) and the [FSR 2 README](https://github.com/GPUOpen-Effects/FidelityFX-FSR2);
+  - [FidelityFX-Denoiser LICENSE.txt](https://github.com/GPUOpen-Effects/FidelityFX-Denoiser/blob/master/LICENSE.txt) and the [v1.1.4 denoiser docs](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/docs/techniques/denoiser.md);
+  - the [NRD README](https://github.com/NVIDIA-RTX/NRD), `Include/NRDSettings.h` and `Include/NRDDescs.h`;
+  - [Falcor SVGFPass](https://github.com/NVIDIAGameWorks/Falcor/tree/master/Source/RenderPasses/SVGFPass) file headers;
+  - [kajiya](https://github.com/EmbarkStudios/kajiya): LICENSE-MIT, LICENSE-APACHE, the README and `assets/shaders/rtdgi/`;
+  - [OIDN LICENSE.txt and README](https://github.com/RenderKit/oidn);
+  - [intel/xess LICENSE.txt](https://github.com/intel/xess/blob/main/LICENSE.txt);
+  - [balintio/nppd](https://github.com/balintio/nppd), [xmeng525/RealTimeDenoisingNeuralBilateralGrid](https://github.com/xmeng525/RealTimeDenoisingNeuralBilateralGrid) and [gtong-nv/BMFR-DXR-Denoiser](https://github.com/gtong-nv/BMFR-DXR-Denoiser), via the GitHub licence API;
+  - `wgpu-types-30.0.1/src/features.rs` (`EXPERIMENTAL_COOPERATIVE_MATRIX`).
+- **Papers and talks:**
+  - [SVGF preprint](https://research.nvidia.com/sites/default/files/pubs/2017-07_Spatiotemporal-Variance-Guided-Filtering%3A//svgf_preprint.pdf) and [A-SVGF](https://cg.ivd.kit.edu/publications/2018/adaptive_temporal_filtering/adaptive_temporal_filtering.pdf);
+  - [Yang, Liu, Salvi 2020 TAA survey](http://behindthepixels.io/assets/files/TemporalAA.pdf);
+  - [Karis 2014 slides](https://de45xmedrsdbp.cloudfront.net/Resources/files/TemporalAA_small-59732822.pdf) and [Jimenez 2017 slides](https://www.activision.com/cdn/research/Dynamic_Temporal_Antialiasing_and_Upsampling_in_Call_of_Duty_v4.pdf);
+  - [ReBLUR, Ray Tracing Gems II ch. 49](https://link.springer.com/chapter/10.1007/978-1-4842-7185-8_49), cited but not read in full.
+- **Epic documentation:**
+  - [TSR](https://dev.epicgames.com/documentation/unreal-engine/temporal-super-resolution-in-unreal-engine?lang=en-US) (5.8 docs);
+  - [Lumen technical details](https://dev.epicgames.com/documentation/unreal-engine/lumen-technical-details-in-unreal-engine) and the [Lumen performance guide](https://dev.epicgames.com/documentation/unreal-engine/lumen-performance-guide-for-unreal-engine);
+  - [Anti-aliasing and upscaling](https://dev.epicgames.com/documentation/unreal-engine/anti-aliasing-and-upscaling-in-unreal-engine);
+  - [TSR RejectShading forum profile](https://forums.unrealengine.com/t/understanding-tsr-rejectshading-gpu-cost/2598124).
+- **Installed UE 5.7.4:** `Engine/Config/BaseScalability.ini`, and cvar names and help strings from `UnrealEditor-Renderer.dll`, read as text.
+- **Bevy:** [Bevy 0.20 notes](https://bevy.org/news/bevy-0-20/).
+- **Patents (Google Patents):** [US 10,116,916](https://patents.google.com/patent/US10116916B2/en), [US 10,600,167](https://patents.google.com/patent/US10600167B2/en), [US 12,437,371](https://patents.google.com/patent/US12437371B2/en), [US 11,847,737](https://patents.google.com/patent/US11847737) and [US 12,374,006](https://patents.google.com/patent/US12374006B2/en). The last is Intel's neural TAA history-validation patent, active to 2043. It was found but is not relevant unless a neural validator is considered.
+- **Press, secondary:** the FSR 4 source episode, via [VideoCardz](https://videocardz.com/newz/amd-releases-fidelityfx-sdk-2-0) and [Guru3D](https://www.guru3d.com/story/amd-accidentally-opensources-fsr-4-code-on-github/); the OIDN 1080p report in the [blendity PR](https://github.com/EmilianoManaloIV/blendity/pull/85).
