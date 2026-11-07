@@ -33,7 +33,12 @@ pub fn prepare_rgba8(
     reconstruction: Reconstruction,
 ) -> Result<Texture> {
     ensure(
-        width > 0 && height > 0 && u64::from(width) * u64::from(height) * 4 == rgba8.len() as u64,
+        width > 0
+            && height > 0
+            && u64::from(width)
+                .checked_mul(u64::from(height))
+                .and_then(|n| n.checked_mul(4))
+                == Some(rgba8.len() as u64),
         "invalid normal moment dimensions",
     )?;
     let mut normals = Vec::with_capacity(rgba8.len() / 4);
@@ -196,6 +201,16 @@ mod tests {
 
     #[test]
     fn correlated_slopes_keep_the_off_diagonal_moment() {
+        assert!(
+            prepare_rgba8(
+                u32::MAX,
+                u32::MAX,
+                &[],
+                Sampler::default(),
+                Reconstruction::Point
+            )
+            .is_err()
+        );
         let pixels = [140, 140, 255, 255, 116, 116, 255, 255];
         let t = prepare_rgba8(2, 1, &pixels, Sampler::default(), Reconstruction::Point).unwrap();
         let moments = last(&t);

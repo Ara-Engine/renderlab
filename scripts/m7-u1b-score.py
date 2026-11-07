@@ -38,11 +38,13 @@ def main():
     p.add_argument("--root", type=Path, default=Path("E:/renderlab-work/m7-u1b"))
     p.add_argument("--reference",default="reference")
     p.add_argument("--suffix",default="")
+    p.add_argument("--variants",default="0,1,4,5,6,7,8,9,10,11")
+    p.add_argument("--contact-variants",default="0,1,4,6,10")
     a = p.parse_args()
     manifest = json.loads((a.root / a.reference / "manifest.json").read_text())
     size = manifest["size"]
-    variants=[0,1,4,5,6,7,8,9,10,11]
-    labels=["before","covariance-point","reference","default","covariance-bilinear","mixture-9","mixture-25","footprint-mixture-9","footprint-mixture-25","gated-mixture","spatial-256","adaptive-tail"]
+    variants=[int(v) for v in a.variants.split(',')]
+    labels=json.loads(next(a.root.glob('software/manifest.json')).read_text())["variants"]
     names = [f"normal-r{r}" for r in (0.08, 0.15, 0.3)] + [f"geometry-r{r}" for r in (0.08, 0.15, 0.3)] + ["flat-control"]
     rows, summary = [], []
     for path in ("software", "hardware"):
@@ -104,7 +106,7 @@ def main():
     (a.root / f"per-frame{a.suffix}.json").write_text(json.dumps(rows, indent=2))
     (a.root / f"summary{a.suffix}.json").write_text(json.dumps(summary, indent=2))
     # Complete images, including silhouettes, and the two specific failure cases.
-    columns=[0,1,4,6,10,None]
+    columns=[int(v) for v in a.contact_variants.split(',') if int(v) in variants]+[None]
     cell_w,cell_h=size[0],size[1]+24
     combined=Image.new("RGB",(cell_w*len(columns),cell_h*6),(18,18,18))
     draw=ImageDraw.Draw(combined)

@@ -36,7 +36,7 @@ fn reference_source() -> String {
     )
 }
 
-const U1B_VARIANTS: [(&str, u32, usize); 12] = [
+const U1B_VARIANTS: [(&str, u32, usize); 24] = [
     ("before", 0, 1),
     ("covariance-point", 1, 2),
     ("reference", 0, 1),
@@ -49,6 +49,18 @@ const U1B_VARIANTS: [(&str, u32, usize); 12] = [
     ("gated-mixture", 6, 3),
     ("spatial-256", 7, 3),
     ("adaptive-tail", 8, 3),
+    ("spatial-256-v3", 7, 0),
+    ("adaptive-4-v3", 11, 0),
+    ("adaptive-8-v3", 12, 0),
+    ("variance-hybrid", 13, 3),
+    ("spatial-gl64-v3", 14, 0),
+    ("spatial-144-v3", 10, 0),
+    ("spatial-64-v3", 9, 0),
+    ("spatial-256-gl25-v3", 15, 0),
+    ("variance-hybrid-gl25", 16, 3),
+    ("separable-hybrid", 17, 3),
+    ("spatial-256-legacy", 7, 1),
+    ("spatial-256-gl25-legacy", 15, 1),
 ];
 fn u1b_program(method: u32) -> String {
     unfiltered().replace(
@@ -64,7 +76,11 @@ fn variants() -> Vec<usize> {
         std::env::var("RENDERLAB_U1_VARIANTS")
             .ok()
             .map(|s| s.split(',').map(|n| n.parse::<usize>().unwrap()).collect())
-            .unwrap_or_else(|| vec![0, 1, 4, 5, 6, 7, 8, 9, 10, 11])
+            .unwrap_or_else(|| {
+                vec![
+                    0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                ]
+            })
     } else {
         vec![0, 1]
     }
@@ -77,6 +93,9 @@ fn benchmark_programs_validate_before_taking_a_gpu_lease() {
         reference_source(),
         u1b_program(1),
         u1b_program(6),
+        u1b_program(12),
+        u1b_program(13),
+        u1b_program(16),
     ] {
         let composed =
             crate::program::compose(SOURCE, &program, crate::program::Stage::Raster, false);

@@ -164,8 +164,9 @@ bilinearly reconstructed normal field from layer 1 with explicit gradients;
 geometric normals/positions use the engine's differentials. The grid evaluates
 the view vector at each position. No synthetic tail is added, and no sample
 normal outside this measured spatial footprint is invented. A zero-distribution
-gate returns the original response; legacy mapped textures also retain their
-original response because their discarded distribution cannot be recovered.
+gate returns the original response where variance metadata exists. The later
+compatibility update below integrates legacy maps' fine field directly, using
+the full rule when no variance estimate exists.
 The accepted result therefore does not rely on a scalar variance-to-alpha fit.
 
 Against the refined reference, full-image results are:
@@ -318,7 +319,7 @@ not the runtime method. No vendor shader implementation was copied. The spatial
 variant passes, so the condition for considering a patented fallback was not
 reached; there is no evidence here that a temporal method is necessary.
 
-Validation on the final runtime sources:
+Validation at the initial `938a63f` checkpoint (current verification is below):
 
 - `cargo test -p renderlab --lib -j 2`: exit 0, 116 passed, 113 GPU tests ignored.
 - Cook and asset suites: exit 0, 86 passed, including v4 roundtrip, downgrade, byte budget,
@@ -344,7 +345,7 @@ Validation on the final runtime sources:
 
 The final source/executable identities, run times, RAM and foreign-build samples,
 gates and per-frame results are retained with the evidence. Final executable
-SHA-256 is `b714245e683221152a205d7cfe5d5a69bea04f8679032162a91804c9177daf74`.
+SHA-256 at that initial checkpoint is `b714245e683221152a205d7cfe5d5a69bea04f8679032162a91804c9177daf74`.
 `bilinear-diagnosis.json`
 contains the probe; `reference-origin.json` preserves the reused reference's
 identity; `verification-runs.json`, `native-cost.json`, `gates[-r2].json`,
@@ -369,3 +370,198 @@ lease. `RENDERLAB_REFERENCE_SIDE=64` and mode `reference-r2` produce the
 `--reference reference-r2 --suffix=-r2`. All configurations load one asset per
 process; eight repeated timing batches share the renderer. The CPU replay is
 diagnostic only, not substituted for GPU gate results.
+
+## Cost continuation after review
+
+Main `16ebd5b` was merged and the format/default reconciliation was pushed as
+`1296360`. RLA v4 remains R0c's BVH format, v5 is moments alone, and v6 combines
+moments and BVH. Historical U1b v4 moment payloads remain readable by their
+distinct role; new writes use v5/v6. Raster moment keys move to `normal-v5/keys`;
+the separate `cluster-bvh-v1/rla<S>-rvg<S>` namespace is unchanged and recognizes
+the new nested resources. Old/new cold/warm/corruption cache tests and combined
+RLA/RVG attachment round trips pass. An invalid-version fixture was advanced to
+7, since 5 is now valid. A library seam test caught CRLF in the edited standard
+WGSL; restoring LF fixed it without changing any shadow file.
+
+**`SPECULAR_AA=false` is the final standard setting.** Every current GPU capture
+checks exact default-versus-unfiltered equality for all 25 frames on each path.
+The complete unfiltered captures remain hash-identical to U1. The original
+256-stratum reference is reused and the same 4096-stratum reference was
+recaptured (fixed material gradients, zero shutter). Evidence is in
+`E:/renderlab-work/m7-u1b/cost-iteration-1/`.
+
+### Measured steps
+
+The original 776 comparisons/path, numerical tolerance, populations and both
+reference sets are unchanged. Counts are individual failed comparisons; `0/0`
+means no failure on SW or RT. All listed GPU variants also have native timings.
+The CPU replay rejected the smallest grids first; it is diagnostic, not the gate.
+
+| Variant (benchmark index) | Original-reference failures SW/RT | Refined-reference failures SW/RT | Native camera shade ms SW/RT |
+|---|---:|---:|---:|
+| Retained full-moment spatial 256 (10) | 0/0 | 0/0 | 1.779 / 4.041 |
+| Spatial 256 using v3 RGBA8 (12) | 0/0 | 0/0 | 1.773 / 4.041 |
+| Adaptive factor 4, v3 + geometric GL9 (13) | 72/72 | 72/72 | .943 / 1.829 |
+| Adaptive factor 8, v3 + geometric GL9 (14) | 0/0 | 0/0 | .905 / 1.984 |
+| Variance hybrid + geometric GL9 (15) | 0/0 | 0/0 | .810 / 1.471 |
+| Fixed spatial GL64 + geometric GL9 (16) | 43/42 | 42/34 | .315 / .705 |
+| Spatial 144 + geometric GL9 (17) | 19/19 | 19/19 | .635 / 1.294 |
+| Spatial 64 + geometric GL9 (18) | 8/19 | 23/28 | .315 / .696 |
+| Spatial 256 v3 + geometric GL25 (19) | 0/0 | 0/0 | 1.067 / 2.240 |
+| Variance hybrid + geometric GL25 (20) | 0/0 | 0/0 | .845 / 1.643 |
+| Separable hybrid + geometric GL25 (21) | 0/0 | 0/0 | .643 / 1.099 |
+| Spatial 256 using legacy RGBA8 (22) | 0/0 | 0/0 | 1.632 / 3.437 |
+| Legacy spatial 256 + geometric GL25 (23) | 0/0 | 0/0 | 1.008 / 2.165 |
+
+Adaptive count is the next power-of-two side length at least
+`factor * sqrt(map_variance / alpha^2)`, clamped to 1..16. Side 1 returns the
+original response. This uses cooked variance and the intrinsic lobe width,
+not a lighting-change detector. The conservative factor 8 passes the registered
+gate; factor 4 loses on the r=.30 mapped patch. Fixed Gauss-Legendre spatial
+locations avoid jitter, but their 64 samples still miss the mapped distribution.
+Uniform 144 and 64 samples also miss; fewer samples alone are not a solution.
+
+The hybrids spend 256 actual-field samples when map variance exceeds
+`4 * alpha^2`, otherwise 25 positive original-alpha Gaussian-mixture lobes.
+Unlike the rejected angular-tail hybrid, their branch does not depend on the
+moving light's half-vector. The first variants also integrate nine geometric
+positions. The separable variant evaluates the broad mixture at the centre,
+and integrates unmapped geometric normals with GL25. This removes redundant
+view-position evaluations on broad mapped lobes. Full covariance remains
+required for that mixture; the scalar v3 data is not presented as anisotropic.
+
+
+### Quality change versus the retained result
+
+Passing the original **before** gate is not equality to the achieved 256-sample
+result. A separate comparison against variant 10 is retained in
+`versus-spatial256.json`. No cheaper candidate is a lossless replacement on
+all 776 comparisons; it is therefore not silently substituted for the existing
+`specular_brdf` quality option. The smaller-count and mixture routes remain
+experimental `filtered_brdf` selectors. Static changes are explicit:
+
+| Variant | Static full RMS SW/RT | Camera full RMS SW/RT | Camera flicker SW/RT |
+|---|---:|---:|---:|
+| Original before | 4.617292 / 4.646099 | 5.758218 / 5.770448 | 6.221763 / 6.234204 |
+| Retained 256 (10) | .151831 / .153193 | .158041 / .159225 | .080453 / .080699 |
+| Adaptive factor 8 (14) | .244777 / .249019 | .325079 / .328344 | .224842 / .226641 |
+| Separable hybrid (21) | .171656 / .171414 | .174849 / .174881 | .138961 / .139071 |
+| Full legacy 256 (22) | .151833 / .153203 | .158066 / .159254 | .080472 / .080727 |
+| Legacy 256 + GL25 (23) | .152486 / .153513 | .158178 / .159334 | .080572 / .080751 |
+
+The separable hybrid preserves the r=.08 mapped result exactly, but static
+mapped r=.15 RMS rises .451229 -> .589086 (SW) and .455354 -> .588874 (RT)
+against retained 256; mapped r=.30 rises .031118 -> .090770 and
+.030956 -> .090750. Geometric r=.08 static RMS rises .015450 -> .090156
+(SW) and .030554 -> .068613 (RT) with GL25. These are still improvements on
+the original before image, but are real changes. Static r=.15/.30 geometric
+errors improve slightly. The flat control remains unchanged.
+
+Maximum absolute F3 bias across every population/time remains better than the
+original before: SW before 1.077110, retained 256 .039223, separable hybrid
+.034203, full legacy .039096; RT before 1.079686, retained 256 .041739,
+separable hybrid .041739, full legacy .041825. Every original per-frame bias
+gate passes for those modes; the small legacy RT increase versus retained is
+not hidden behind its original-before pass.
+
+### Native stages and resource limits
+
+Same RTX 4070 SUPER/617.14, 1920x1080, 14-triangle screen, development test
+build, active validation, two-second busy warmup and eight repeats. No shadow
+pass or environment is enabled. The final matched batch loads the asset once
+per path and measures every candidate with the same 256 control (1.779/4.041 ms
+camera shading). Earlier timing batches remain retained, rather than selecting
+an earlier cold outlier. These are isolated algorithm timings,
+not matched end-to-end Unreal results. Foreign CPU compilation was present;
+each GPU lease is exclusive. All stage p50/p95/p99 and ranges are retained.
+
+| Path / variant | Static shade / span | Camera shade / primary / tone / span | Light shade / span |
+|---|---:|---:|---:|
+| SW hybrid 21 | .672 / .690 | .643 / included / .012 / .662 | .648 / .667 |
+| RT hybrid 21 | 2.840 / 3.111 | 1.099 / .096 / .012 / 1.223 | 1.095 / 1.213 |
+| SW legacy 22 | 1.636 / 1.752 | 1.632 / included / .012 / 1.655 | 1.633 / 1.660 |
+| RT legacy 22 | 14.194 / 14.526 | 3.437 / .121 / .012 / 3.580 | 3.439 / 3.553 |
+| SW legacy + GL25 23 | 1.227 / 1.248 | 1.008 / included / .012 / 1.026 | 1.004 / 1.022 |
+| RT legacy + GL25 23 | 2.519 / 2.651 | 2.165 / .121 / .012 / 2.310 | 2.168 / 2.278 |
+
+The static RT idle/clock anomaly persists even after warmup (14.194 ms legacy
+static versus 3.437 ms moving). It is disclosed, not used as the speedup
+denominator. The separable hybrid saves about 2.77x/3.68x camera shading against
+its paired 256 control, with the quality changes above. That does **not** meet
+the combined quality/performance floor on the quarry; nothing is promoted to
+default. The closest lower-memory geometric variant is still expensive.
+
+### Normal-map memory and quarry accounting
+
+Fixed spatial quadrature does not require moments: it integrates the actual
+fine normal field already present in legacy maps. The helper now takes that
+conservative full-256 route on legacy data instead of returning unfiltered.
+Existing RGBA8 maps need **no recook, extra channel or companion texture**.
+V3 and legacy full-256 captures are byte-identical for all 25 frames on both
+paths. Storage per complete 512 chain is 1,398,100 bytes (1.3333 MiB) rather
+than 5,592,400 (5.3333 MiB); a 4096 chain is 85.3333 rather than 341.3333 MiB.
+This is ordinary map storage, not compressed full covariance. The full moment
+encoding remains 4x for users/experiments that need it. The one-load comparison
+fixture keeps all formats resident, so its total process VRAM does not measure
+the storage saving of a production asset that omits unused moment textures.
+
+`m7-u1b-texture-bytes.py` streams actual prepared headers without loading scan
+geometry/images. The current quarry is RLA v1, 1,548,588,300 bytes, twelve meshes
+and twelve materials. Its twelve 4096 base-color chains each occupy 89,478,484
+bytes; **normal-map bytes are zero**. It cannot validate a normal-mapped quarry
+VRAM budget. If twelve 4K normal maps were added, plain RGBA8 would add about
+1 GiB and full moments about 4 GiB, before allocator/streaming effects; those
+are projections, not measured residency. The recorded roughly 379 MiB M7
+headroom after R0c would not cover fully resident versions of either addition.
+Fine-field quadrature can also demand finer resident mips. A normal-mapped
+quarry budget/quality run remains a miss; the lower-memory route does not erase it.
+
+### TR1 handoff, constraints and checks
+
+**Likely cheap path:** TR1 can spread current-footprint samples across frames
+instead of evaluating 256 every frame. Use its identity/event-valid reconstruction,
+with explicit responses to cuts, revealed surfaces and lighting/material changes.
+It must pass every age and the motion/transient gates; steady-state convergence
+alone is insufficient. This unit builds no temporal method. Keep W5's auxiliary
+outputs internal, as required by [P0](m7-p0-claims.md) and the current M7 design;
+do not add variance clipping (US 10,116,916) or an SVGF-style pipeline here.
+
+The new spatial variants use fixed deterministic nodes and no tap jitter or
+pattern rotation. Their adaptive order uses normal-distribution data, not
+history counts. In P0's mapping, US 11,113,792 claims 1/11 require jittered tap
+selection, and claim 15 requires temporal/history-count filtering; those pieces
+are absent. US 12,423,782's jittered-location element is absent. No previous
+pixels, reprojected auxiliary values or neighbouring lighting are read.
+
+All earlier centre-light/visibility, environment, coverage, tangent-discontinuity
+and custom-perturbation constraints remain. The methods are optional GGX
+helpers, not receiver/hit-record constraints. Offline fitted mixtures and packed
+full covariance were **not built** in this continuation; they remain explicit
+next experiments, not claimed failures. A fitted mixture must preserve its
+actual tail distribution and interpolation across neighbouring texels/mips.
+
+Final checks: library **122 passed, 117 ignored**; cook/asset **91 passed,
+2 ignored**; fmt and diff checks pass. Cook/asset strict Clippy passes; renderer
+Clippy passes with the two previously documented baseline lint classes excluded.
+Unrestricted renderer Clippy still has the existing shadow/visibility failures;
+no suppression or shadow-file edit was added. Main remains an ancestor of the
+branch. No U1b edit touches `film_accumulation.rs` or the decisions TSV; the
+merge imports main's already-committed changes.
+
+Fifteen successful guarded GPU child runs took 344.77 s, including 103.94 s for
+the refined reference; all exit 0 with no validation error. One stale executable
+path was rejected before launching a child and corrected. Minimum observed
+free RAM was 7010 MiB; foreign compiler contention is recorded (up to fourteen
+rustc processes). This worker used two Cargo jobs and none in its GPU leases.
+Implementation/merge/CPU-probe time was not isolated from queue waits; it is not
+reported as GPU time. Cargo durations and each verification run are retained.
+
+Current executable SHA-256:
+`de6f847f200be0abdced96ae369166c13b81bf79980a43d6118a46f919a8b1b4`.
+The evidence retains `gates-r2.json`, `gates-original.json`, per-frame and
+summary JSON, `versus-spatial256.json`, native manifests/stage summaries,
+`quarry-textures.json`, CPU probes and inspected `contact-sheet-r2.png` and
+`contact-sheet-original.png`. Raw captures and this worker's target are removed
+at delivery. Reproduce this batch with variants `0,10,12,...,23`, then give the
+same explicit list to the scorer's `--variants` argument; `--contact-variants`
+chooses the inspected figure columns. The standard program remains opt-in.

@@ -118,14 +118,48 @@ fn filtered_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f
     let n=material_normal(input);let v=unit_normal(input.eye-input.world);
     // Legacy maps have lost their distribution. Do not replace their mapped
     // normals by the geometric frame or infer a false Gaussian from no data.
-    if input.material.normal_mapped!=0u && input.material.normal_variance!=2u {return brdf(n,v,l,base,metal,rough);}
+    let spatial_method=method==7u || method>=9u;
+    // Legacy mips lost their variance, but their fine normal field still exists.
+    // Without an error estimate, use the full current-footprint rule; do not
+    // fabricate moments or silently replace the material's mapped normal.
+    if input.material.normal_mapped!=0u && input.material.normal_variance==0u && spatial_method {
+        return spatial_brdf(input,l,base,metal,rough,16u,false);
+    }
+    if input.material.normal_mapped!=0u && input.material.normal_variance!=2u && !(spatial_method && input.material.normal_variance==1u) {return brdf(n,v,l,base,metal,rough);}
     if method==0u {return brdf(n,v,l,base,metal,rough);}
     let variance=stats.covariance+g;
-    if variance.x+variance.z<=1e-12 {return brdf(n,v,l,base,metal,rough);}
+    var map_variance=stats.covariance.x+stats.covariance.z;
+    if input.material.normal_variance==1u {map_variance=material_normal_variance(input);}
+    if map_variance+g.x+g.z<=1e-12 {return brdf(n,v,l,base,metal,rough);}
     if method==6u && variance.x+variance.z < rough*rough*rough*rough*0.05 {
         return brdf(n,v,l,base,metal,rough);
     }
-    if method==7u {return spatial_brdf(input,l,base,metal,rough);}
+    if method==7u {return spatial_brdf(input,l,base,metal,rough,16u,false);}
+    if method>=9u {
+        if input.material.normal_mapped==0u {
+            if method>=15u {return geometric_brdf_25(input,l,base,metal,rough);}
+            return footprint_mixture(input,l,base,metal,rough,3u);
+        }
+        if method==9u {return spatial_brdf(input,l,base,metal,rough,8u,false);}
+        if method==10u {return spatial_brdf(input,l,base,metal,rough,12u,false);}
+        if method==11u || method==12u {
+            let alpha=max(rough*rough,1e-4);
+            let desired=clamp(select(4.0,8.0,method==12u)*sqrt(map_variance/(alpha*alpha)),1.0,16.0);
+            let side=u32(exp2(ceil(log2(desired))));
+            if side==1u {return brdf(n,v,l,base,metal,rough);}
+            return spatial_brdf(input,l,base,metal,rough,side,false);
+        }
+        if method==15u {return spatial_brdf(input,l,base,metal,rough,16u,false);}
+        if method==13u || method==16u || method==17u {
+            let alpha=max(rough*rough,1e-4);
+            if input.material.normal_variance!=2u || map_variance>4.0*alpha*alpha {
+                return spatial_brdf(input,l,base,metal,rough,16u,false);
+            }
+            if method==17u {return normal_mixture(NormalStatistics(stats.frame,stats.mean,variance),v,l,base,metal,rough,5u);}
+            return footprint_mixture(input,l,base,metal,rough,5u);
+        }
+        return spatial_brdf(input,l,base,metal,rough,8u,true);
+    }
     if method==8u && input.material.normal_variance==2u {
         let h=unit_normal(l+v);
         let slope=vec2<f32>(dot(h,stats.frame[0]),dot(h,stats.frame[1]))/max(dot(h,stats.frame[2]),1e-6);
@@ -134,7 +168,7 @@ fn filtered_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f
         let distance=(c.z*delta.x*delta.x-2.0*c.y*delta.x*delta.y+c.x*delta.y*delta.y)/determinant;
         // A narrow intrinsic lobe outside the Gaussian quadrature's support needs
         // the actual current footprint's tail, not an invented wide-GGX tail.
-        if rough*rough*rough*rough<c.x+c.z && distance>9.0 {return spatial_brdf(input,l,base,metal,rough);}
+        if rough*rough*rough*rough<c.x+c.z && distance>9.0 {return spatial_brdf(input,l,base,metal,rough,16u,false);}
     }
     if method==1u {
         let mean_normal=unit_normal(stats.frame*vec3<f32>(stats.mean,1.0));
@@ -146,26 +180,49 @@ fn filtered_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f
     return normal_mixture(NormalStatistics(stats.frame,stats.mean,variance),v,l,base,metal,rough,select(3u,5u,method==3u));
 }
 
+// Higher-order geometric integration isolates the cost saved by replacing only
+// the smooth geometric footprint; mapped normals still use their measured field.
+fn geometric_brdf_25(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    let nodes=array<f32,5>(-0.453089923,-0.269234655,0.0,0.269234655,0.453089923);
+    let weights=array<f32,5>(0.118463443,0.239314335,0.284444444,0.239314335,0.118463443);
+    var sum=vec3<f32>(0.0);
+    for(var y=0u;y<5u;y+=1u) {for(var x=0u;x<5u;x+=1u) {
+        var sample=input;
+        sample.world+=input.world_dx*nodes[x]+input.world_dy*nodes[y];
+        sample.normal+=input.normal_dx*nodes[x]+input.normal_dy*nodes[y];
+        sum+=brdf(normal_frame(sample)[2],unit_normal(input.eye-sample.world),l,base,metal,rough)*(weights[x]*weights[y]);
+    }}
+    return sum;
+}
+
 // Direct spatial quadrature of the material/BRDF within one current pixel. No
 // history, colour statistics, visibility reuse or neighbours. Independent
 // centred strata, rather than the film reference's randomized subframe sequence.
-fn spatial_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+fn spatial_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,side:u32,gauss:bool)->vec3<f32> {
+    let nodes=array<f32,8>(-0.480144928,-0.398333239,-0.262766205,-0.0917173212,0.0917173212,0.262766205,0.398333239,0.480144928);
+    let weights=array<f32,8>(0.0506142681,0.111190517,0.156853323,0.181341892,0.181341892,0.156853323,0.111190517,0.0506142681);
     var sum=vec3<f32>(0.0);
-    for(var y=0u;y<16u;y+=1u) {for(var x=0u;x<16u;x+=1u) {
-        let offset=(vec2<f32>(f32(x),f32(y))+vec2<f32>(0.5))/16.0-vec2<f32>(0.5);
+    for(var y=0u;y<side;y+=1u) {for(var x=0u;x<side;x+=1u) {
+        var offset=(vec2<f32>(f32(x),f32(y))+vec2<f32>(0.5))/f32(side)-vec2<f32>(0.5);
+        var weight=1.0/f32(side*side);
+        if gauss {offset=vec2<f32>(nodes[x],nodes[y]);weight=weights[x]*weights[y];}
         var sample=input;
         sample.world+=input.world_dx*offset.x+input.world_dy*offset.y;
         sample.normal+=input.normal_dx*offset.x+input.normal_dy*offset.y;
         let frame=normal_frame(sample);
         var n=frame[2];
-        if input.material.normal_variance==2u {
+        if input.material.normal_mapped!=0u {
             let uv=input.uv+input.uv_dx*offset.x+input.uv_dy*offset.y;
-            let value=sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,1).yzw;
+            var value:vec3<f32>;
+            if input.material.normal_variance==2u {value=sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,1).yzw;}
+            else {value=sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,0).xyz*2.0-vec3<f32>(1.0);}
             let scale=max(abs(input.material.normal_scale),1.0);
-            let mapped=vec3<f32>(value.xy*(input.material.normal_scale/scale),value.z/scale);
-            n=unit_normal(frame*unit_normal(mapped));
+            let decoded=vec3<f32>(value.xy*(input.material.normal_scale/scale),value.z/scale);
+            var mapped=unit_normal(decoded);
+            if length(decoded)<=1e-6/scale || dot(mapped,mapped)<0.5 {mapped=vec3<f32>(0.0,0.0,1.0);}
+            n=unit_normal(frame*mapped);
         }
-        sum+=brdf(n,unit_normal(input.eye-sample.world),l,base,metal,rough)*(1.0/256.0);
+        sum+=brdf(n,unit_normal(input.eye-sample.world),l,base,metal,rough)*weight;
     }}
     return sum;
 }

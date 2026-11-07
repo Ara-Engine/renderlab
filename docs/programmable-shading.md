@@ -420,15 +420,21 @@ integrates 256 deterministic spatial samples in the current footprint; it reads
 no previous frame or neighbouring lighting. It filters the BRDF response, while
 light direction, attenuation and visibility remain evaluated at the centre.
 
-Normal-mapped materials need the cooker's `--normal-maps --normal-moments`
-encoding (RLA v5, two RGBA16Float layers, four times RGBA8 storage).
+The fixed spatial helper also works on existing RGBA8 normal maps, without
+recooking or a companion texture. Missing variance metadata conservatively
+selects the full 256-sample rule. Covariance/mixture experiments need the cooker's
+`--normal-maps --normal-moments` encoding (RLA v5, two RGBA16Float layers,
+four times RGBA8 storage). Adaptive-count experiments can use the v3
+`--normal-variance` encoding at ordinary RGBA8 storage cost.
 `normal_statistics(input)` exposes mean slope and full covariance after
 texture filtering, independent of any BRDF. `normal_variance=2` identifies this
 encoding; 0 and 1 keep their U1 meanings. `sample_normal_layer_grad` supplies
 explicit-footprint layer access; `sample_normal_map` keeps its decoded-normal
-contract. Legacy mapped materials bypass the new helper because their
-distribution was discarded. Unmapped curved normals use geometric differentials.
-Constant normal distributions bypass integration. Non-calling custom programs
+contract. Legacy mapped materials retain their fine normal field even though
+their mips discarded variance; fixed quadrature integrates that field directly.
+Unmapped curved normals use geometric differentials.
+Known zero-variance distributions bypass integration; legacy maps without an
+estimate use the conservative full rule. Non-calling custom programs
 keep their own shading. The material block, hit records and dispatch remain
 unchanged. Custom perturbed normals, tangent discontinuities, environment AA,
 coverage AA and spatially varying visibility are outside this helper's measured
