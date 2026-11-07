@@ -99,16 +99,16 @@ def inventory(directory):
             writer.writerows(rows)
 
 
-def run(binary, root, name, memory_only, memory_hints, poses, visits):
+def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="exact", cpu_timing=False):
     out = root / name
     out.mkdir(parents=True, exist_ok=True)
     m = json.loads(QUARRY.read_text())
     m.update(output=str(out), validate=False, timing=True, reference=False, hash_only=False,
              poses=poses[:1] if memory_only else poses, stage_repeats=0,
              turn_frames=0 if memory_only else 16, move_frames=0 if memory_only else 48,
-             no_rt=name == "nort", lod_pixels=[], virtual={"lookup": "exact"})
+             no_rt=name == "nort", lod_pixels=[], virtual={"lookup": lookup}, cpu_timing=cpu_timing)
     if visits > 1:
-        m.update(virtual_variants={f"visit{i}": {"lookup": "exact"} for i in range(visits)}, hash_only=True)
+        m.update(virtual_variants={f"visit{i}": {"lookup": lookup} for i in range(visits)}, hash_only=True)
     if name == "nort":
         m.update(lod_pixels=[0.35], software_extent=[32], lod_lift=[1],
                  virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
@@ -165,13 +165,15 @@ def main():
     parser.add_argument("--memory-hints", choices=("default", "performance", "memory_usage", "small"), default="default")
     parser.add_argument("--poses", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--visits", type=int, default=1, help="independent replays per pose in one asset load; >1 hashes counts/hits only")
+    parser.add_argument("--lookup", choices=("exact", "surface"), default="exact", help="explicit lookup; historical M1 baseline stays Exact")
+    parser.add_argument("--cpu-timing", action="store_true", help="record caller-thread admission wall and renderer CPU sections")
     args = parser.parse_args()
     for name in args.paths or PATHS:
         if name not in PATHS:
             parser.error(f"unknown path: {name}")
         if args.visits < 1:
             parser.error("visits must be positive")
-        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits)
+        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits, args.lookup, args.cpu_timing)
 
 
 if __name__ == "__main__":
