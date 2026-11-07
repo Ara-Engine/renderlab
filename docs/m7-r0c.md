@@ -39,6 +39,12 @@ The source package is SHA-256 verified in a 1 MiB streaming buffer, then only ge
 
 ## Validation and measurements
 
+U1b integration: RLA v4 BVH attachments remain unchanged. Moments without a
+BVH now write RLA v5; moments plus BVH write RLA v6. RVG v3 can carry the v5
+resource section and its existing BVH trailer. The geometry-only sidecar loader
+recognizes both sources, with separate `rla5-rvg2` keys when appropriate. The
+old/new source-cache and combined-attachment tests exercise coexistence.
+
 Measured on Windows, AMD Ryzen 7 7800X3D, 32 GB RAM, Rust/Cargo 1.96.0, source base `ab167bc` plus this unit's recorded source hashes. No resolution or GPU quality setting applies to this CPU unit. The cook binary uses dev dependencies and a cook-package opt-level of 1; this is not a release renderer measurement. Other desktop applications and U0's Unreal study remained open; launch preflight found no competing Cargo/rustc/cook/active shader compiler. These are observed cook timings, not a quiet-window comparative performance claim.
 
 Evidence stays in `E:/renderlab-work/m7-r0c/`, outside Git: `quarry-1.stdout` holds every mesh/level result, `summary.json` the aggregate, and `*.resource.json` the launch/peak-memory records. The Windows runner requires at least 8 GiB available at launch, rejects competing heavy CPU tools, and owns an atomic CPU slot. A Windows job object now hard-caps aggregate private memory at 1.4 GiB, with a sampled working-set stop at the same threshold. No window, desktop capture or GPU call is used.

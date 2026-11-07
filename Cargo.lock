@@ -1500,6 +1500,7 @@ name = "renderlab-cook"
 version = "0.1.0"
 dependencies = [
  "gltf",
+ "half",
  "image",
  "log",
  "meshopt",

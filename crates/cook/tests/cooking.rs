@@ -30,6 +30,36 @@ impl Drop for Sandbox {
 fn source() -> Vec<u8> {
     fixtures::sources().unwrap()[0].1.clone()
 }
+
+#[test]
+fn normal_moment_recipes_separate_sampler_boundaries_and_roundtrip_v4() {
+    let fixture = normal_fixture::prepare().unwrap();
+    let bytes = mutate(&fixture.glb, |root, _| {
+        root["samplers"] = json!([{"wrapS":10497,"wrapT":10497},{"wrapS":33071,"wrapT":33071}]);
+        root["textures"] = json!([{"source":0,"sampler":0},{"source":0,"sampler":1}]);
+        let mut second = root["materials"][0].clone();
+        second["normalTexture"]["index"] = json!(1);
+        root["materials"].as_array_mut().unwrap().push(second);
+    });
+    let settings = Settings {
+        normal_maps: true,
+        normal_moments: true,
+        ..Default::default()
+    };
+    let asset = prepare(&bytes, settings, CookLimits::default()).unwrap();
+    let normals: Vec<_> = asset
+        .textures
+        .iter()
+        .filter(|t| t.role == renderlab_asset::TextureRole::NormalSlopeMoments)
+        .collect();
+    assert_eq!(normals.len(), 2);
+    assert_ne!(normals[0].mips, normals[1].mips);
+    let encoded = renderlab_asset::encode(&asset, renderlab_asset::Limits::default()).unwrap();
+    assert_eq!(
+        renderlab_asset::decode(&encoded, renderlab_asset::Limits::default()).unwrap(),
+        asset
+    );
+}
 fn mutate(bytes: &[u8], change: impl FnOnce(&mut Value, &mut Vec<u8>)) -> Vec<u8> {
     let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let mut root: Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();

@@ -3,8 +3,12 @@ use crate::*;
 pub const SCHEMA_VERSION: u32 = 1;
 pub const NORMAL_SCHEMA_VERSION: u32 = 2;
 pub const NORMAL_VARIANCE_SCHEMA_VERSION: u32 = 3;
-/// Optional acceleration trailer. Legacy encodes retain their original versions.
+/// R0c's existing optional acceleration trailer, unchanged.
 pub const CLUSTER_BVH_SCHEMA_VERSION: u32 = 4;
+/// Slope moments without acceleration. Historical U1b v4 remains read-compatible.
+pub const NORMAL_MOMENTS_SCHEMA_VERSION: u32 = 5;
+/// Slope moments plus the same acceleration trailer as v4.
+pub const NORMAL_MOMENTS_BVH_SCHEMA_VERSION: u32 = 6;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -91,7 +95,17 @@ pub fn encode_with_bvh(
 ) -> Result<Vec<u8>> {
     let counts = asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
-    let version = if bvh.is_some() {
+    let version = if asset
+        .textures
+        .iter()
+        .any(|t| t.role == TextureRole::NormalSlopeMoments)
+    {
+        if bvh.is_some() {
+            NORMAL_MOMENTS_BVH_SCHEMA_VERSION
+        } else {
+            NORMAL_MOMENTS_SCHEMA_VERSION
+        }
+    } else if bvh.is_some() {
         CLUSTER_BVH_SCHEMA_VERSION
     } else if asset
         .textures
@@ -139,6 +153,7 @@ pub fn encode_with_bvh(
             TextureRole::MetallicRoughnessLinear => 1,
             TextureRole::NormalLinear => 2,
             TextureRole::NormalVarianceLinear => 3,
+            TextureRole::NormalSlopeMoments => 4,
         });
         w.count(t.mips.len())?;
         for m in &t.mips {
@@ -293,7 +308,7 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1..=4) {
+    if !matches!(version, 1..=6) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -431,6 +446,9 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
             1 => TextureRole::MetallicRoughnessLinear,
             2 if version >= 2 => TextureRole::NormalLinear,
             3 if version >= 3 => TextureRole::NormalVarianceLinear,
+            4 if version == 4 || version >= NORMAL_MOMENTS_SCHEMA_VERSION => {
+                TextureRole::NormalSlopeMoments
+            }
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;
@@ -458,7 +476,7 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
             if t.mips.len() + 1 == n && (w != 1 || h != 1) {
                 return Err(Error("incomplete mip chain"));
             }
-            let size = product(product(w as usize, h as usize)?, 4)?;
+            let size = product(product(w as usize, h as usize)?, role.texel_bytes())?;
             let length = r.count(size, 1, 1)?;
             if size != length {
                 return Err(Error("invalid mip byte count"));
@@ -473,7 +491,13 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
         a.textures.push(t);
     }
     let bvh =
-        if version == CLUSTER_BVH_SCHEMA_VERSION {
+        if version == NORMAL_MOMENTS_BVH_SCHEMA_VERSION
+            || (version == CLUSTER_BVH_SCHEMA_VERSION
+                && !a
+                    .textures
+                    .iter()
+                    .any(|t| t.role == TextureRole::NormalSlopeMoments))
+        {
             let length = r.u32()? as usize;
             let remaining = limits.max_decoded_bytes.saturating_sub(r.decoded);
             let bvh = cluster_bvh::decode(

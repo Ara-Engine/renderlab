@@ -1,6 +1,6 @@
 //! Redistributable S2-glossy screen normal distribution, prepared without a GPU.
 use renderlab_asset::{Asset, Limits, Mip, Texture, TextureRole, encode};
-use renderlab_cook::normal_map;
+use renderlab_cook::{normal_map, normal_moments};
 use std::{fs, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,11 +66,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vectors = step.mips()[1].vectors().to_vec();
         side /= 2;
     }
+    let point = normal_moments::prepare_rgba8(
+        size,
+        size,
+        &legacy.mips[0].rgba8,
+        renderlab_asset::Sampler::default(),
+        normal_moments::Reconstruction::Point,
+    )?;
+    let bilinear = normal_moments::prepare_rgba8(
+        size,
+        size,
+        &legacy.mips[0].rgba8,
+        renderlab_asset::Sampler::default(),
+        normal_moments::Reconstruction::Bilinear,
+    )?;
     fs::write(
         root.join("fixture.rla"),
         encode(
             &Asset {
-                textures: vec![texture, legacy],
+                textures: vec![texture, legacy, point, bilinear],
                 ..Default::default()
             },
             Limits::default(),

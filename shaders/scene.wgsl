@@ -10,7 +10,7 @@ struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_side
 @group(2) @binding(2) var base_sampler:sampler;
 @group(2) @binding(3) var metallic_roughness:texture_2d<f32>;
 @group(2) @binding(4) var mr_sampler:sampler;
-@group(2) @binding(5) var normal_map:texture_2d<f32>;
+@group(2) @binding(5) var normal_map:texture_2d_array<f32>;
 @group(2) @binding(6) var normal_sampler:sampler;
 // Frustum visibility assumes this camera * model * original bounded position.
 // Position-displacing reloads must use Visibility::Unculled. Layout checks cannot certify bounds.

@@ -77,6 +77,8 @@ pub struct Settings {
     /// Experimental variance-bearing normal mips (RLA v3). Requires normal_maps.
     /// Opt in only: the U1 isotropic roughness filter has not passed its quality gate.
     pub normal_variance: bool,
+    /// Full slope covariance, RLA v5; supersedes normal_variance when selected.
+    pub normal_moments: bool,
 }
 impl Settings {
     pub(crate) fn bytes(self) -> [u8; 1] {
@@ -344,7 +346,7 @@ struct Textures<'a> {
     decoded: usize,
     prepared: usize,
     records: Vec<Texture>,
-    roles: HashMap<(usize, TextureRole), u32>,
+    roles: HashMap<(usize, TextureRole, Option<usize>), u32>,
 }
 impl Textures<'_> {
     fn reference(
@@ -361,7 +363,18 @@ impl Textures<'_> {
     fn texture(&mut self, texture: gltf::Texture<'_>, role: TextureRole) -> Result<(u32, Sampler)> {
         let source = texture.source();
         let s = sampler(texture.sampler());
-        if let Some(&index) = self.roles.get(&(source.index(), role)) {
+        // Integrated moments depend on reconstruction and boundary extension.
+        // Other texture recipes remain sampler-independent and share their bytes.
+        let key = (
+            source.index(),
+            role,
+            if role == TextureRole::NormalSlopeMoments {
+                texture.sampler().index()
+            } else {
+                None
+            },
+        );
+        if let Some(&index) = self.roles.get(&key) {
             return Ok((index, s));
         }
         ensure(
@@ -425,7 +438,7 @@ impl Textures<'_> {
         loop {
             mip_bytes = u64::from(mw)
                 .checked_mul(u64::from(mh))
-                .and_then(|n| n.checked_mul(4))
+                .and_then(|n| n.checked_mul(role.texel_bytes() as u64))
                 .and_then(|n| mip_bytes.checked_add(n))
                 .ok_or_else(|| Error("mip size overflow".into()))?;
             if mw == 1 && mh == 1 {
@@ -446,7 +459,11 @@ impl Textures<'_> {
         if role.is_normal() {
             // All floating-point mip vectors remain live until export, along with decoded RGBA.
             let intermediate = mip_bytes
-                .checked_mul(4)
+                .checked_mul(if role == TextureRole::NormalSlopeMoments {
+                    10
+                } else {
+                    4
+                })
                 .and_then(|n| n.checked_add(rgba.checked_mul(3)?))
                 .ok_or_else(|| Error("normal mip intermediate byte overflow".into()))?;
             ensure(
@@ -464,8 +481,21 @@ impl Textures<'_> {
             .len()
             .try_into()
             .map_err(|_| Error("texture ID width".into()))?;
-        self.records.push(mip::build(w, h, rgba.into_raw(), role)?);
-        self.roles.insert((source.index(), role), index);
+        let pixels = rgba.into_raw();
+        self.records
+            .push(if role == TextureRole::NormalSlopeMoments {
+                let canonical = crate::normal_map::prepare_rgba8(w, h, &pixels)?.mips()[0].rgba8();
+                crate::normal_moments::prepare_rgba8(
+                    w,
+                    h,
+                    &canonical,
+                    s,
+                    crate::normal_moments::Reconstruction::Bilinear,
+                )?
+            } else {
+                mip::build(w, h, pixels, role)?
+            });
+        self.roles.insert(key, index);
         Ok((index, s))
     }
 }
@@ -521,7 +551,9 @@ fn materials(
                     info.scale().is_finite(),
                     "normal texture scale must be finite",
                 )?;
-                let role = if settings.normal_variance {
+                let role = if settings.normal_moments {
+                    TextureRole::NormalSlopeMoments
+                } else if settings.normal_variance {
                     TextureRole::NormalVarianceLinear
                 } else {
                     TextureRole::NormalLinear
@@ -922,7 +954,7 @@ fn placements(document: &gltf::Document, limits: CookLimits) -> Result<Vec<Place
 /// Prepare only the documented static embedded subset. No resource URI is resolved.
 pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<Asset> {
     ensure(
-        !settings.normal_variance || settings.normal_maps,
+        !(settings.normal_variance || settings.normal_moments) || settings.normal_maps,
         "normal variance requires normal maps",
     )?;
     let (json, blob) = chunks(source, limits)?;

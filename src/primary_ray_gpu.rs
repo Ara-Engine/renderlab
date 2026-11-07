@@ -473,7 +473,11 @@ fn texture(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGrou
         binding,
         wgpu::BindingType::Texture {
             sample_type,
-            view_dimension: wgpu::TextureViewDimension::D2,
+            view_dimension: if binding == 15 {
+                wgpu::TextureViewDimension::D2Array
+            } else {
+                wgpu::TextureViewDimension::D2
+            },
             multisampled: false,
         },
     )

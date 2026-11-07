@@ -11,6 +11,7 @@ use std::{
 
 /// The built-in photoreal program every material uses unless it names another.
 pub const STANDARD_PROGRAM: &str = include_str!("../shaders/programs/standard.wgsl");
+const SPECULAR_API: &str = include_str!("../shaders/specular_filter.wgsl");
 const COMMON_API: &str = include_str!("../shaders/program_api.wgsl");
 const RASTER_API: &str = include_str!("../shaders/program_raster.wgsl");
 const RASTER_ENTRY: &str = include_str!("../shaders/program_raster_entry.wgsl");
@@ -286,7 +287,8 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             TRACED_ENTRY,
         ),
     };
-    let mut source = format!("{head}\n{COMMON_API}{api}{binding}// ---- program ----\n");
+    let mut source =
+        format!("{head}\n{COMMON_API}{SPECULAR_API}{api}{binding}// ---- program ----\n");
     let start = source.len();
     source.push_str(program);
     let program = start..source.len();

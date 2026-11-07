@@ -1,7 +1,7 @@
 // Standard: the photoreal glTF metallic-roughness program, and the engine default. Its
-// roughness filtering is shared by direct and environment specular. Edit and reload
-// it like any program. Custom programs opt in through the same helpers.
-// U1 fails the static normal-map/F3 gate; enable only for explicit experimentation.
+// direct-light BRDF optionally uses single-frame footprint integration (U1b). Environment
+// filtering is unchanged. Custom programs opt in through the same helper.
+// Opt-in: the 256-sample filter passes quality, but misses the speed floor.
 const SPECULAR_AA:bool=false;
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
@@ -12,8 +12,7 @@ fn surface(input:SurfaceInput) -> Surface {
     let n=material_normal(input);
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
-    let rough=filtered_roughness(clamp(material.roughness*mr.g,0.0,1.0),
-        select(0.0,material_normal_variance(input)+geometric_normal_variance(input),SPECULAR_AA));
+    let rough=clamp(material.roughness*mr.g,0.0,1.0);
     return Surface(n,base,metal,rough);
 }
 
@@ -37,7 +36,9 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);
         let attenuation=light.attenuation*light_visibility(input,light);
-        exposed=min(exposed+exposed_product(light.intensity,brdf(n,v,light.direction,base,metal,rough)*attenuation),vec3<f32>(65504.0));
+        var response=brdf(n,v,light.direction,base,metal,rough);
+        if SPECULAR_AA {response=specular_brdf(input,light.direction,base,metal,rough);}
+        exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));
     }
     return exposed;
 }

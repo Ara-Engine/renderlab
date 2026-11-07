@@ -132,6 +132,48 @@ fn attachments_are_opt_in_and_old_rla_rvg_bytes_are_preserved() {
     let mut wrong = b.clone();
     wrong.leaves[0].page += 1;
     assert!(virtual_mesh::encode_with_bvh(&c.package, Some(&wrong), limits).is_err());
+
+    // R0c v4 stays byte-compatible. Moments use v5 alone and v6 with a BVH;
+    // virtual v3 can carry a v5 resource section and the existing BVH trailer.
+    let moment = asset::Texture {
+        role: asset::TextureRole::NormalSlopeMoments,
+        mips: vec![asset::Mip {
+            width: 1,
+            height: 1,
+            rgba8: [0u16, 0, 0, 0, 0, 0, 0, 0x3c00]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        }],
+    };
+    let mut mapped = a.clone();
+    mapped.textures.push(moment.clone());
+    let plain = asset::encode(&mapped, limits.prepared).unwrap();
+    assert_eq!(
+        &plain[4..8],
+        &asset::NORMAL_MOMENTS_SCHEMA_VERSION.to_le_bytes()
+    );
+    assert_eq!(
+        asset::decode_with_bvh(&plain, limits.prepared).unwrap(),
+        (mapped.clone(), None)
+    );
+    let combined = asset::encode_with_bvh(&mapped, Some(&b), limits.prepared).unwrap();
+    assert_eq!(
+        &combined[4..8],
+        &asset::NORMAL_MOMENTS_BVH_SCHEMA_VERSION.to_le_bytes()
+    );
+    assert_eq!(
+        asset::decode_with_bvh(&combined, limits.prepared).unwrap(),
+        (mapped.clone(), Some(b.clone()))
+    );
+    assert_eq!(asset::decode(&combined, limits.prepared).unwrap(), mapped);
+    let mut package = c.package.clone();
+    package.resources.textures.push(moment);
+    let combined = virtual_mesh::encode_with_bvh(&package, Some(&b), limits).unwrap();
+    assert_eq!(
+        virtual_mesh::decode_with_bvh(&combined, limits).unwrap(),
+        (package, Some(b))
+    );
 }
 #[test]
 fn malformed_bvhs_and_budgets_fail_before_publication() {
@@ -190,73 +232,90 @@ fn malformed_bvhs_and_budgets_fail_before_publication() {
 }
 #[test]
 fn opt_in_cache_reuses_repairs_and_separates_lod_settings() {
-    let (a, _) = fixture();
-    let d = std::env::temp_dir().join(format!("renderlab-r0c-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    let limits = VirtualLimits::default();
-    let source = d.join("source.rla");
-    std::fs::write(&source, asset::encode(&a, limits.prepared).unwrap()).unwrap();
-    let raster = d.join("raster.manifest");
-    virtual_cache::cook_file(
-        &source,
-        &d,
-        &raster,
-        virtual_cook::Settings::default(),
-        limits,
-    )
-    .unwrap();
-    let input = cluster_bvh_cache::load_geometry(&d, &raster, limits).unwrap();
-    let before = std::fs::read(&raster).unwrap();
-    let manifest = d.join("rays.manifest");
-    let settings = Settings {
-        errors: vec![0.02, 0.1],
-        limits: Limits::default(),
-    };
-    let cold = cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
-    assert!(!cold.cache_hit);
-    let warm = cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
-    assert!(warm.cache_hit);
-    assert_eq!(cold.digest, warm.digest);
-    let package = d.join(format!(
-        "cluster-bvh-v1/rla1-rvg1/packages/{}",
-        cold.digest
-            .iter()
-            .map(|v| format!("{v:02x}"))
-            .collect::<String>()
-    ));
-    std::fs::write(package, b"broken").unwrap();
-    let repaired = cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
-    assert!(!repaired.cache_hit);
-    assert_eq!(cold.digest, repaired.digest);
-    let changed = cluster_bvh_cache::cook(
-        &input,
-        &d,
-        &d,
-        &manifest,
-        &Settings {
-            errors: vec![0.05, 0.2],
-            ..settings
-        },
-        limits,
-    )
-    .unwrap();
-    assert_ne!(cold.key, changed.key);
-    let published = std::fs::read(&manifest).unwrap();
-    assert!(
-        cluster_bvh_cache::cook(
+    let (source_asset, _) = fixture();
+    for moments in [false, true] {
+        let mut a = source_asset.clone();
+        if moments {
+            a.textures.push(asset::Texture {
+                role: asset::TextureRole::NormalSlopeMoments,
+                mips: vec![asset::Mip {
+                    width: 1,
+                    height: 1,
+                    rgba8: vec![0; 16],
+                }],
+            });
+        }
+        let d =
+            std::env::temp_dir().join(format!("renderlab-r0c-{}-{moments}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let limits = VirtualLimits::default();
+        let source = d.join("source.rla");
+        std::fs::write(&source, asset::encode(&a, limits.prepared).unwrap()).unwrap();
+        let raster = d.join("raster.manifest");
+        virtual_cache::cook_file(
+            &source,
+            &d,
+            &raster,
+            virtual_cook::Settings::default(),
+            limits,
+        )
+        .unwrap();
+        let input = cluster_bvh_cache::load_geometry(&d, &raster, limits).unwrap();
+        let before = std::fs::read(&raster).unwrap();
+        let manifest = d.join("rays.manifest");
+        let settings = Settings {
+            errors: vec![0.02, 0.1],
+            limits: Limits::default(),
+        };
+        let cold = cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
+        assert!(!cold.cache_hit);
+        let warm = cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
+        assert!(warm.cache_hit);
+        assert_eq!(cold.digest, warm.digest);
+        let package = d.join(format!(
+            "cluster-bvh-v1/rla{}-rvg{}/packages/{}",
+            input.rla_version,
+            input.rvg_version,
+            cold.digest
+                .iter()
+                .map(|v| format!("{v:02x}"))
+                .collect::<String>()
+        ));
+        std::fs::write(package, b"broken").unwrap();
+        let repaired =
+            cluster_bvh_cache::cook(&input, &d, &d, &manifest, &settings, limits).unwrap();
+        assert!(!repaired.cache_hit);
+        assert_eq!(cold.digest, repaired.digest);
+        let changed = cluster_bvh_cache::cook(
             &input,
             &d,
             &d,
             &manifest,
             &Settings {
-                errors: vec![0.1, 0.1],
-                limits: Limits::default()
+                errors: vec![0.05, 0.2],
+                ..settings
             },
-            limits
+            limits,
         )
-        .is_err()
-    );
-    assert_eq!(published, std::fs::read(&manifest).unwrap());
-    assert_eq!(before, std::fs::read(raster).unwrap());
-    std::fs::remove_dir_all(d).unwrap();
+        .unwrap();
+        assert_ne!(cold.key, changed.key);
+        let published = std::fs::read(&manifest).unwrap();
+        assert!(
+            cluster_bvh_cache::cook(
+                &input,
+                &d,
+                &d,
+                &manifest,
+                &Settings {
+                    errors: vec![0.1, 0.1],
+                    limits: Limits::default()
+                },
+                limits
+            )
+            .is_err()
+        );
+        assert_eq!(published, std::fs::read(&manifest).unwrap());
+        assert_eq!(before, std::fs::read(raster).unwrap());
+        std::fs::remove_dir_all(d).unwrap();
+    }
 }

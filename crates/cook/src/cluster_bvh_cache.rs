@@ -78,7 +78,7 @@ pub fn load_geometry(
     ensure(
         resources >= 24
             && &rla[..4] == b"RLA\0"
-            && matches!(rla_version, 1..=3)
+            && matches!(rla_version, 1..=6)
             && rla[8..16] == [0; 8]
             && materials <= limits.prepared.max_materials
             && materials

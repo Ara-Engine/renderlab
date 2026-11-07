@@ -113,7 +113,7 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let source_geometric=select(-face,face,lit_front);
     let material=primary_materials[hit.batch].value;
     rl_load_parameters(hit.batch);
-    let surface_input=SurfaceInput(input.world,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
+    let surface_input=SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
         primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel));
     let surface_output=surface(surface_input);

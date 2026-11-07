@@ -5,8 +5,9 @@ pub mod environment;
 pub mod virtual_mesh;
 
 pub use binary::{
-    CLUSTER_BVH_SCHEMA_VERSION, NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION,
-    SCHEMA_VERSION, decode, decode_with_bvh, encode, encode_mesh, encode_with_bvh,
+    CLUSTER_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_SCHEMA_VERSION,
+    NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION, SCHEMA_VERSION, decode, decode_with_bvh,
+    encode, encode_mesh, encode_with_bvh,
 };
 use std::fmt;
 
@@ -156,10 +157,38 @@ pub enum TextureRole {
     /// Unit tangent-space XYZ in RGB; A = sqrt(clamp(2*(1-L)/L, 0, 1)),
     /// where L is the length of the mip's mean original unit normal (RLA v3).
     NormalVarianceLinear,
+    /// Two RGBA16Float layers: (mean X/Y, E[X²], E[Y²]) and (E[XY], normal XYZ).
+    /// Slopes are tangent-space normal.xy / normal.z; form covariance after filtering.
+    NormalSlopeMoments,
 }
 impl TextureRole {
     pub fn is_normal(self) -> bool {
-        matches!(self, Self::NormalLinear | Self::NormalVarianceLinear)
+        matches!(
+            self,
+            Self::NormalLinear | Self::NormalVarianceLinear | Self::NormalSlopeMoments
+        )
+    }
+    pub fn layers(self) -> u32 {
+        if self == Self::NormalSlopeMoments {
+            2
+        } else {
+            1
+        }
+    }
+    pub fn texel_bytes(self) -> usize {
+        if self == Self::NormalSlopeMoments {
+            16
+        } else {
+            4
+        }
+    }
+    /// Byte counts are checked separately. UNORM channels are always finite;
+    /// half-float payloads reject infinities and NaNs before GPU admission.
+    pub fn texels_finite(self, bytes: &[u8]) -> bool {
+        self != Self::NormalSlopeMoments
+            || bytes
+                .chunks_exact(2)
+                .all(|c| u16::from_le_bytes([c[0], c[1]]) & 0x7c00 != 0x7c00)
     }
 }
 
@@ -173,6 +202,8 @@ pub struct Texture {
 pub struct Mip {
     pub width: u32,
     pub height: u32,
+    /// Layer-major little-endian texels; format/stride are determined by TextureRole.
+    /// Historical name retained for compatibility with RGBA8 asset callers.
     pub rgba8: Vec<u8>,
 }
 
@@ -439,9 +470,13 @@ impl Asset {
                 }
                 if mip.width != w
                     || mip.height != h
-                    || mip.rgba8.len() != product(product(w as usize, h as usize)?, 4)?
+                    || mip.rgba8.len()
+                        != product(product(w as usize, h as usize)?, texture.role.texel_bytes())?
                 {
                     return Err(Error("invalid mip dimensions or bytes"));
+                }
+                if !texture.role.texels_finite(&mip.rgba8) {
+                    return Err(Error("nonfinite texture texel"));
                 }
                 add(&mut counts.mip_levels, 1)?;
                 add(&mut counts.texture_bytes, mip.rgba8.len())?;

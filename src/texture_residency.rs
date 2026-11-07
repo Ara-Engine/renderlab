@@ -442,7 +442,7 @@ impl Renderer {
                 size: wgpu::Extent3d {
                     width: base.width,
                     height: base.height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: data.role.layers(),
                 },
                 mip_level_count: data.mips.len() as u32 - top,
                 sample_count: 1,
@@ -465,13 +465,15 @@ impl Renderer {
                 &mip.rgba8,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(mip.width * 4),
+                    bytes_per_row: Some(
+                        mip.width * (data.role.texel_bytes() as u32 / data.role.layers()),
+                    ),
                     rows_per_image: Some(mip.height),
                 },
                 wgpu::Extent3d {
                     width: mip.width,
                     height: mip.height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: data.role.layers(),
                 },
             );
             self.uploads.textures += mip.rgba8.len() as u64;
@@ -479,7 +481,7 @@ impl Renderer {
             self.uploads.write_calls += 1;
         }
         let view = self.ledger.own(
-            texture.create_view(&Default::default()),
+            texture.create_view(&texture_view_descriptor(data.role)),
             ResourceKind::TextureView,
         );
         let bytes = data.mips[top as usize..]
@@ -549,7 +551,7 @@ impl Renderer {
                     wgpu::Extent3d {
                         width: m.width,
                         height: m.height,
-                        depth_or_array_layers: 1,
+                        depth_or_array_layers: source.role.layers(),
                     },
                 );
             }
@@ -783,9 +785,24 @@ pub(crate) fn read_words(readback: &wgpu::Buffer) -> Vec<u32> {
 pub(crate) fn texture_format(role: asset::TextureRole) -> wgpu::TextureFormat {
     match role {
         asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        asset::TextureRole::NormalSlopeMoments => wgpu::TextureFormat::Rgba16Float,
         asset::TextureRole::MetallicRoughnessLinear
         | asset::TextureRole::NormalLinear
         | asset::TextureRole::NormalVarianceLinear => wgpu::TextureFormat::Rgba8Unorm,
+    }
+}
+
+/// Normal maps use array views even for one layer, keeping one sampling ABI for all roles.
+pub(crate) fn texture_view_descriptor(
+    role: asset::TextureRole,
+) -> wgpu::TextureViewDescriptor<'static> {
+    wgpu::TextureViewDescriptor {
+        dimension: Some(if role.is_normal() {
+            wgpu::TextureViewDimension::D2Array
+        } else {
+            wgpu::TextureViewDimension::D2
+        }),
+        ..Default::default()
     }
 }
 
