@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import shutil
 import uuid
@@ -174,7 +175,8 @@ def trace(args):
         print("S2G batch", label, track, [c["frame"] for c in batch], flush=True)
         module.reference(argparse.Namespace(label=label, track=track, frames=[c["frame"] for c in batch],
              samples=2 if args.kind == "geometry" else 1024, binary=args.binary,
-             compact_tool=args.compact_tool, minutes=3, wait_seconds=args.wait_seconds))
+             compact_tool=args.compact_tool, minutes=max(3, math.ceil((args.timeout_seconds + 15) / 60)),
+             wait_seconds=args.wait_seconds, timeout_seconds=args.timeout_seconds))
         run = ROOT / "runs" / label
         removed = []
         for case in batch:
@@ -490,6 +492,7 @@ if __name__ == "__main__":
     p.add_argument("--limit", type=int, default=3)
     p.add_argument("--phase", choices=("all", "camera", "sun"), default="all")
     p.add_argument("--wait-seconds", type=int, default=120)
+    p.add_argument("--timeout-seconds", type=int, default=600, help="Functional-only per-state guard; does not supply timing claims")
     commands.add_parser("inputs").add_argument("label")
     commands.add_parser("colour-control").add_argument("label")
     args = parser.parse_args()

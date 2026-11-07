@@ -122,6 +122,25 @@ figure.suptitle("Q-walk hold — fixed current all-covered population, 33 native
 figure.supxlabel("The dotted +8 witness is an event time, not a pass threshold. No inferred original film-settle count.\nNative TSR has one preparation sample after reset; the physical target is independent of renderer jitter phase.", fontsize=8)
 save(figure, "quarry-hold-error-curves")
 
+figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), layout="constrained")
+for axis, population, title in zip(axes, ("all-covered", "background-centre"),
+                                    ("Revealed covered pixels", "Revealed black-background pixels"), strict=True):
+    for name, method, label, colour in methods:
+        pools = quarry[name]["transient_pools"]
+        selected = [(age, pools[f"revealed/{age}/{population}/L0"]) for age in range(8)
+                    if f"revealed/{age}/{population}/L0" in pools]
+        axis.plot([age for age, _ in selected], [v[method + "_rms_noise_subtracted"] for _, v in selected],
+                  color=colour, label=label, marker="o", markersize=3)
+    axis.set_xticks(range(8))
+    axis.set_xlabel("Shared geometry age")
+    axis.set_ylabel("L0 reference-noise-subtracted RMS codes")
+    axis.set_title(title)
+    axis.grid(alpha=.2)
+axes[0].legend(fontsize=8)
+figure.suptitle("Q-walk disocclusion — fixed age pools across all 60 original checkpoints", fontsize=11)
+figure.supxlabel("Different pixels contribute at each age; these pools are not one event's settle trajectory.\nNew black-primary physical target. At age 7: 729 covered and 3,738 background-centre pixels.", fontsize=8)
+save(figure, "quarry-revealed-age-curves")
+
 (OUT / "figure-provenance.json").write_text(json.dumps(dict(sources=sources,
     script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()), indent=2) + "\n")
 print("Scientific PNG/SVG figures retained", OUT)

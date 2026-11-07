@@ -9,6 +9,7 @@ import argparse
 import csv
 import copy
 import contextlib
+import ctypes
 import datetime as dt
 import hashlib
 import importlib.util
@@ -47,6 +48,55 @@ _preflight = U0.preflight
 # in U0's normal 180-second preflight wait and allow a late child launch.
 U0.preflight = lambda path, wait_seconds=0: _preflight(path, wait_seconds=0)
 NATIVE = load("bench-motion-score")
+_state = U0.E2E.state
+_powershell = U0.E2E.powershell
+_available_gib = U0.E2E.available_gib
+_compiler_checked_at = 0.
+
+
+def monitor_powershell(command):
+    # Memory must not depend on a WMI query completing while unrelated Rust
+    # builds saturate the CPU. Keep process/game inventory unchanged.
+    if command.startswith("Get-CimInstance Win32_OperatingSystem"):
+        class Memory(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong) for name in
+                ("total_physical", "available_physical", "total_page", "available_page",
+                 "total_virtual", "available_virtual", "extended_virtual")]
+        value = Memory()
+        value.length = ctypes.sizeof(value)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(value)):
+            raise ctypes.WinError()
+        return json.dumps(dict(FreePhysicalMemory=value.available_physical // 1024,
+                               TotalVisibleMemorySize=value.total_physical // 1024))
+    return _powershell(command)
+
+
+def monitored_state():
+    try:
+        result = _state()
+        result["monitor_memory_source"] = "GlobalMemoryStatusEx; launch/live floor uses PDH available memory"
+        return result
+    except Exception as error:
+        # The inherited monitor used to lose its thread on a query timeout.
+        # A synthetic conflict makes its existing guard stop only our child.
+        sentinel = dict(Name="tr0-monitor-error", ProcessId=-1, ParentProcessId=-1,
+                        ExecutablePath="", monitor_error=repr(error))
+        return dict(utc=U0.utc().isoformat(), games=[], foreign_renderers=[sentinel], builds=[],
+                    free_gib=0, available_gib=0, gpu="unavailable", monitor_error=repr(error))
+
+
+def monitored_available_gib():
+    try:
+        value = _available_gib()
+        return value if math.isfinite(value) and value >= 0 else 0.
+    except Exception:
+        return 0.  # The inherited low-memory guard stops only our child.
+
+
+U0.E2E.powershell = monitor_powershell
+U0.E2E.state = monitored_state
+U0.E2E.available_gib = monitored_available_gib
 
 
 def activity_policy():
@@ -76,6 +126,32 @@ def headless_policy(minutes):
     return policy
 
 
+def compiler_safety_valve():
+    """After a resource failure, wait outside the lock for 60 Cargo-free seconds."""
+    global _compiler_checked_at
+    path = ROOT / "resource-pause.json"
+    if not path.exists():
+        return True
+    if time.monotonic() - _compiler_checked_at < 5:
+        return False
+    _compiler_checked_at = time.monotonic()
+    value = json.loads(path.read_text())
+    try:
+        result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq cargo.exe", "/FO", "CSV", "/NH"],
+                                capture_output=True, text=True, creationflags=U0.FLAGS, timeout=15)
+        busy = result.returncode != 0 or '"cargo.exe"' in result.stdout.lower()
+    except subprocess.TimeoutExpired:
+        busy = True
+    since = None if busy else value.get("cargo_free_since") or time.time()
+    value["cargo_free_since"] = since
+    save(path, value)
+    if since is not None and time.time() - since >= 60:
+        save(ROOT / "resource-pause-released.json", dict(value, released_utc=U0.utc().isoformat()))
+        path.unlink()
+        return True
+    return False
+
+
 @contextlib.contextmanager
 def queued_lease(label, minutes, wait_seconds=0):
     """Retry atomic acquisition after preparation; never release a foreign lease."""
@@ -83,7 +159,8 @@ def queued_lease(label, minutes, wait_seconds=0):
     announced = False
     while True:
         headless_policy(minutes)
-        if not (ROOT / "gpu-defer.txt").exists() and not U0.LOCK.exists() and U0.E2E.available_gib() >= U0.START_GIB:
+        if (not (ROOT / "gpu-defer.txt").exists() and not U0.LOCK.exists()
+                and U0.E2E.available_gib() >= U0.START_GIB and compiler_safety_valve()):
             stack = contextlib.ExitStack()
             try:
                 owner = stack.enter_context(U0.lease(label, minutes))
@@ -970,6 +1047,8 @@ def reference(args):
     save(root / "reference-recipe.json", dict(cases=cases, source=str(source), source_sha256=digest(source),
          binary=str(args.binary), pinned_binary=str(pinned_binary), binary_sha256=binary_sha, compactor=str(args.compact_tool),
          compactor_sha256=digest(args.compact_tool), samples=args.samples, activity_policy=policy,
+         reserved_minutes=args.minutes, functional_timeout_seconds=getattr(args, "timeout_seconds", 120),
+         speed_claim_eligible=False,
          illumination="Original S2G constant sky and finite-disk sun; camera_background black before integration"))
     env = dict(os.environ, RENDERLAB_M7_BENCHES=";".join(entries), RENDERLAB_M7_REFERENCE_OUT=str(output),
                RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
@@ -978,9 +1057,22 @@ def reference(args):
     env.pop("VK_INSTANCE_LAYERS", None)
     test = "reference::tests::gpu_reference_benches"
     policy = headless_policy(args.minutes)
+    timeout = getattr(args, "timeout_seconds", 120)
+    if not 0 < timeout <= 600 or timeout > args.minutes * 60 - 15 or (policy["state"] == "relaxed" and timeout > 120):
+        raise ValueError("functional timeout exceeds the reserved/game-play allowance")
     with queued_lease(args.label, args.minutes, args.wait_seconds):
-        U0.guarded([pinned_binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
-                   root, timeout=min(120, args.minutes * 60 - 15), cwd=REPO, env=env)
+        try:
+            U0.guarded([pinned_binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
+                       root, timeout=timeout, cwd=REPO, env=env)
+        except (RuntimeError, SystemExit):
+            process_path, preflight_path = root / "process.json", root / "preflight.json"
+            record = json.loads(process_path.read_text()) if process_path.exists() else {}
+            preflight = json.loads(preflight_path.read_text()) if preflight_path.exists() else {}
+            minimum = record.get("minimum_available_gib", preflight.get("available_gib"))
+            if (minimum is not None and minimum < 4) or "monitor_error" in json.dumps([record, preflight]):
+                save(ROOT / "resource-pause.json", dict(reason="reference resource/monitor failure", run=args.label,
+                     utc=U0.utc().isoformat(), cargo_free_since=None, policy="Wait outside lease for 60 Cargo-free seconds; keep >=4GiB start/<2GiB abort"))
+            raise
     if digest(pinned_binary) != binary_sha:
         raise ValueError("pinned reference executable changed during the run")
     spec = importlib.util.spec_from_file_location("u0b_compact", args.compact_tool)
@@ -1473,6 +1565,7 @@ def main():
     p.add_argument("--compact-tool", type=Path, default=REPO / "scripts/m7-u0b-score.py")
     p.add_argument("--minutes", type=int, default=3)
     p.add_argument("--wait-seconds", type=int, default=0)
+    p.add_argument("--timeout-seconds", type=int, default=120, help="Functional reference guard; fit inside --minutes with 15 seconds to spare")
     p = commands.add_parser("quiet")
     p.add_argument("label")
     p.add_argument("--minutes", type=int, default=8)
