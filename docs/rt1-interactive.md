@@ -17,6 +17,11 @@ The library/viewer RT-device default remains raster primaries with
 explicit settings. Every RT speed claim below is **measured on the non-default
 fast setup (traced + Interactive)**. No speed for the default is inferred from it.
 
+[RT1b's footprint follow-up](rt1b-footprint.md) tests current-policy distributed
+origins and three direction patterns. Accurate subpixel primary receivers plus
+256 samples clear the static false-shadow count; the eight-sample variants still
+fail quality and cost. It does not change this default decision.
+
 ## Reproducer and cause
 
 `scripts/rt1-film-replay.py` reads the frozen F0 defect enumerations, film

@@ -949,6 +949,7 @@ impl Renderer {
                 primary: None,
                 cache: None,
                 modules: &program_cache.modules,
+                vertex_identity: Sha256::digest(wgsl.as_bytes()).into(),
             },
             &Preludes {
                 raster: wgsl,
@@ -1274,7 +1275,8 @@ impl Renderer {
             fresh: fresh_source.as_deref(),
             traced: primary_sources.as_ref().map(|(_, heads)| heads),
         };
-        let abi = self.program_abi();
+        let mut abi = self.program_abi();
+        abi.vertex_identity = Sha256::digest(wgsl.as_bytes()).into();
         // The engine pipelines compile on their own thread while every program's modules
         // and hot sets (the sets the last frame drew with) compile concurrently here.
         let (device, ledger, layout, lighting, shadows) = (
@@ -1364,6 +1366,7 @@ impl Renderer {
         for (slot, c) in self.programs.iter_mut().zip(compiled) {
             slot.install_parameters(c.layout, &self.queue, &mut self.uploads);
             slot.modules = c.modules;
+            slot.preview = false;
             slot.pipelines = Default::default();
         }
         for ((i, variant), pair) in keys.into_iter().zip(built) {

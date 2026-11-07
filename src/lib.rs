@@ -18,6 +18,8 @@ mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
 mod renderer;
+#[path = "program_vulkan.rs"]
+pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
 pub mod virtual_geometry;
