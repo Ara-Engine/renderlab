@@ -289,6 +289,29 @@ override VMAP_LONE_PARTIAL:bool=false;
 // itself (no slope or planarity allowance), so a sunlit surface across a light-space silhouette
 // above a receiver facing away is not taken for its own; every receiver, all directions.
 override VMAP_FACE_PLAUS:f32=0.5;
+// Ring hybrid (with virtual_shadow_hybrid.wgsl's VSM_QUEUED_RING): queue only near-field
+// ambiguous blocks (facing, an own surface near the receiver), with a far-field march of those
+// directions that skips own surfaces within VMAP_FAR_REACH texels of the receiver; the exact ring
+// then decides their near field.
+override VMAP_RING:bool=false;
+// Soft decisions (percentage-closer filtering at the crossing): coverage within VMAP_SOFT of the
+// blocking threshold blocks a direction by (coverage - threshold + VMAP_SOFT) / (2 VMAP_SOFT); it
+// keeps marching, and counts 1 minus its largest partial block (0: binary decisions).
+override VMAP_SOFT:f32=0.0;
+var<private> vmap_partial:f32;
+// Per direction its largest partial block, 8 bits each (directions 0-3, 4-7).
+var<private> vmap_soft0:u32;
+var<private> vmap_soft1:u32;
+fn vmap_soft_note(j:u32,w:f32) {
+    let q=u32(round(clamp(w,0.0,1.0)*255.0));
+    let shift=8u*(j&3u);
+    var word=select(vmap_soft0,vmap_soft1,j>=4u);
+    word=(word&~(255u<<shift))|(max((word>>shift)&255u,q)<<shift);
+    if j<4u {vmap_soft0=word;} else {vmap_soft1=word;}
+}
+fn vmap_soft_of(j:u32)->f32 {return f32((select(vmap_soft0,vmap_soft1,j>=4u)>>(8u*(j&3u)))&255u)/255.0;}
+override VMAP_FAR_REACH:f32=0.75;
+var<private> vmap_far_mode:bool;
 // VMAP_TRACE 3 marks a facing block as ambiguous when the direction lies within this cosine
 // below the receiver's facet plane.
 override VMAP_AMB_FACING:f32=0.05;
@@ -438,6 +461,7 @@ fn vmap_cover(level:u32,q:vec2<f32>,lo:f32,hi:f32,spread:f32)->VmapCover {
             let height=vsm_height(word)+dot(g,off);
             let s=grow*length(g)+cross;
             let mine=word.x>>bits==vmap_r.placement;
+            if vmap_far_mode && mine && distance(q,vmap_r.point.xy)<=VMAP_FAR_REACH*vmap_texel0 {continue;}
             let floor_q=select(floors.x,floors.y,mine);
             let uncertain=VMAP_ABS*texel+VMAP_CURVE*error*length(off)/texel+bias;
             if height<lo-s || height<=floor_q+uncertain {continue;}
@@ -461,6 +485,7 @@ fn vmap_cover(level:u32,q:vec2<f32>,lo:f32,hi:f32,spread:f32)->VmapCover {
 // another's; open after a candidate, 4: it passed beside or under it, 8: the rise left the
 // level's reach, 12: an own surface near the receiver stayed over it.
 fn vmap_blocked(level:u32,o:vec3<f32>,d:vec2<f32>,h:f32,first:VmapCover)->u32 {
+    vmap_partial=0.0;
     if first.covered<VMAP_COVER {return 0u;}
     let cap=vsm_cap(level);
     let drift=length(d);
@@ -478,7 +503,9 @@ fn vmap_blocked(level:u32,o:vec3<f32>,d:vec2<f32>,h:f32,first:VmapCover)->u32 {
         // Own surfaces close to the receiver (light xy) need VMAP_OWN_NEAR coverage there.
         near=own && distance(o.xy+d*at,vmap_r.point.xy)<=VMAP_OWN_REACH*vsm_texel(level);
         // Bits 4 and 5 (VMAP_TRACE 3): an own surface near the receiver, a partial coverage.
-        if c.at>=select(VMAP_COVER,select(VMAP_OWN_COVER,VMAP_OWN_NEAR,near),own) {return select(2u,1u,own)|select(0u,16u,near)|select(32u,0u,c.at>=0.999);}
+        let threshold=select(VMAP_COVER,select(VMAP_OWN_COVER,VMAP_OWN_NEAR,near),own);
+        if c.at>=threshold+VMAP_SOFT {return select(2u,1u,own)|select(0u,16u,near)|select(32u,0u,c.at>=0.999);}
+        if VMAP_SOFT>0.0 && c.at>threshold-VMAP_SOFT {vmap_partial=max(vmap_partial,(c.at-threshold+VMAP_SOFT)/(2.0*VMAP_SOFT));}
         rise=c.next-o.z;
     }
     // Still under a surface: it continues over the ray (N8b's continuity rule), except an own
@@ -807,6 +834,7 @@ fn vmap_march(px:VmapPixel,open0:u32)->vec3<u32> {
                 var first=contact_cover;
                 if !contact {first=vmap_cover(level,o.xy+d*h,o.z+start,-3.4e38,-1.0);}
                 let cause=vmap_blocked(level,o,d,h,first);
+                if VMAP_SOFT>0.0 && (cause&3u)==0u && vmap_partial>0.0 {vmap_soft_note(j,vmap_partial);}
                 if (cause&3u)!=0u {open&=~(1u<<j);}
                 if (cause&3u)==1u {own|=1u<<j;}
                 if (cause&3u)==0u && cause>=4u {why|=1u<<(j+8u*((cause>>2u)-1u));}
@@ -853,6 +881,9 @@ fn vmap_pixel(id:vec2<u32>)->u32 {
     if VMAP_SKIP==3u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return 0u;}
     vmap_covers=0u;
     vmap_mips=0u;
+    vmap_far_mode=false;
+    vmap_soft0=0u;
+    vmap_soft1=0u;
     let px=vmap_prepare(id);
     if !px.valid || VMAP_SKIP==1u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return 0u;}
     vmap_own_count=0u;
@@ -940,8 +971,18 @@ fn vmap_pixel(id:vec2<u32>)->u32 {
                 if (facing&(1u<<j))!=0u && dot(n,vmap_dirs[j])>-VMAP_AMB_FACING {face|=1u<<j;}
             }
         }
-        let flagged=face|(amb&0xffu)|((amb>>8u)&0xffu);
-        if flagged!=0u {queued=flagged|(blocked<<8u);}
+        if VMAP_RING {
+            let near=(face|(amb&0xffu))&vmap_active;
+            if near!=0u && px.level!=VSM_NONE {
+                vmap_far_mode=true;
+                let far=vmap_march(px,near);
+                vmap_far_mode=false;
+                queued=near|(blocked<<8u)|((near&~(far.x&0xffu))<<16u);
+            }
+        } else {
+            let flagged=face|(amb&0xffu)|((amb>>8u)&0xffu);
+            if flagged!=0u {queued=flagged|(blocked<<8u);}
+        }
     }
     if VMAP_COST {
         textureStore(vsm_output,vec2<i32>(id),vec4<u32>(min(vmap_covers,0xffffu)|min(vmap_mips,0xffffu)<<16u));
@@ -975,6 +1016,17 @@ fn vmap_pixel(id:vec2<u32>)->u32 {
         let open=vmap_active&~blocked;
         textureStore(vsm_output,vec2<i32>(id),vec4<u32>(visible|(why&open)<<4u|((why>>8u)&open)<<12u|((why>>16u)&open)<<20u|u32(vmap_clean)<<28u));
         return 0u;
+    }
+    if VMAP_SOFT>0.0 {
+        // Open directions count 1 minus their largest partial block.
+        let open=vmap_active&~blocked;
+        var sum=0.0;
+        for(var j=0u;j<8u;j+=1u) {
+            if (open&(1u<<j))!=0u {sum+=1.0-vmap_soft_of(j);}
+        }
+        let k=f32(vsm.n8e.x);
+        textureStore(vsm_output,vec2<i32>(id),vec4<u32>(u32(round(256.0*sum/k))));
+        return queued;
     }
     vmap_visible(id,visible);
     return queued;

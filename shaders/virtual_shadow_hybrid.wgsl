@@ -13,7 +13,9 @@ override VSM_QUEUED_ALL:bool=true;
 // confirms it, every other map decision stands. Its blocks are near-field ones (facing, an own
 // surface near the receiver), which the ring decides exactly; it skips the march's long walks.
 override VSM_QUEUED_RING:bool=false;
-@compute @workgroup_size(32) fn vsm_lookup_queued(@builtin(global_invocation_id) gid:vec3<u32>) {
+// N8l keeps per-lane direction tables in workgroup memory (vsm_lane); 32 lanes, as vsm_lookup.
+@compute @workgroup_size(32) fn vsm_lookup_queued(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    vsm_lane=li;
     let k=gid.x;
     if k>=vsm_debug[0].x {return;}
     let e=vsm_debug[1u+k/2u];
@@ -24,13 +26,15 @@ override VSM_QUEUED_RING:bool=false;
     let r=px.r;
     let frame=vsm_active;
     if VSM_QUEUED_RING {
+        // With the map's VMAP_RING, bits 16-23 hold its far-field blocks of those directions.
         let ambiguous=word.y&0xffu&frame;
         let mapped=(word.y>>8u)&0xffu&frame;
+        let far=(word.y>>16u)&0xffu;
         vsm_active=ambiguous;
         vsm_visits=0u;
         let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
         vsm_active=frame;
-        vsm_visible(id,countOneBits(frame&~((mapped&~ambiguous)|(ring.blocked&ambiguous))));
+        vsm_visible(id,countOneBits(frame&~((mapped&~ambiguous)|((ring.blocked|far)&ambiguous))));
         return;
     }
     let ambiguous=select(word.y&0xffu&frame,frame,VSM_QUEUED_ALL);
