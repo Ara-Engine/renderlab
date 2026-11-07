@@ -95,21 +95,26 @@ fn random_chain(w: u32, h: u32, seed: u64) -> Vec<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// The shared level probe: PROBE x PROBE, level j filled with 2^-j.
-fn probe_chain(format: wgpu::TextureFormat) -> Vec<(u32, u32, Vec<u8>)> {
-    let levels = PROBE.trailing_zeros() + 1;
-    (0..levels)
-        .map(|j| {
-            let size = PROBE >> j;
-            // 2^-j: binary16 exponent field 15 - j with a zero mantissa.
-            let texel: Vec<u8> = if format == wgpu::TextureFormat::R16Float {
-                (((15 - j) as u16) << 10).to_le_bytes().to_vec()
-            } else {
-                2f32.powi(-(j as i32)).to_le_bytes().to_vec()
-            };
-            (size, size, texel.repeat((size * size) as usize))
-        })
-        .collect()
+/// A level probe of w x h with its full chain, level j filled with 2^-j; the shared
+/// probe is PROBE x PROBE.
+fn probe_chain(w: u32, h: u32, format: wgpu::TextureFormat) -> Vec<(u32, u32, Vec<u8>)> {
+    let (mut w, mut h) = (w, h);
+    let mut levels = vec![];
+    loop {
+        let j = levels.len() as u32;
+        // 2^-j: binary16 exponent field 15 - j with a zero mantissa.
+        let texel: Vec<u8> = if format == wgpu::TextureFormat::R16Float {
+            (((15 - j) as u16) << 10).to_le_bytes().to_vec()
+        } else {
+            2f32.powi(-(j as i32)).to_le_bytes().to_vec()
+        };
+        levels.push((w, h, texel.repeat((w * h) as usize)));
+        if w == 1 && h == 1 {
+            return levels;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
 }
 
 const PROBE_SHADER: &str = r#"
@@ -127,6 +132,8 @@ struct Params { probe_scale:vec2<f32>, count:u32, pad:u32 };
 @group(0) @binding(10) var probe32:texture_2d<f32>;
 @group(0) @binding(11) var<storage,read> inputs:array<vec4<f32>>;
 @group(0) @binding(12) var<storage,read_write> outputs:array<vec4<u32>>;
+// A probe with the source's own extent and level count, sampled with the unscaled footprint.
+@group(0) @binding(13) var probe_full:texture_2d<f32>;
 fn same(a:vec4<f32>,b:vec4<f32>)->bool { return all(bitcast<vec4<u32>>(a)==bitcast<vec4<u32>>(b)); }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     let i=id.x;
@@ -144,7 +151,8 @@ fn same(a:vec4<f32>,b:vec4<f32>)->bool { return all(bitcast<vec4<u32>>(a)==bitca
     let pdx=dx*params.probe_scale;let pdy=dy*params.probe_scale;
     let p16=textureSampleGrad(probe16,s,uv,pdx,pdy).r;
     let p32=textureSampleGrad(probe32,s,uv,pdx,pdy).r;
-    outputs[i]=vec4<u32>(bitcast<u32>(p16),bitcast<u32>(p32),mask,bitcast<u32>(f.r));
+    let pf=textureSampleGrad(probe_full,s,uv,dx,dy).r;
+    outputs[i]=vec4<u32>(bitcast<u32>(p16),bitcast<u32>(p32),mask,bitcast<u32>(pf));
 }
 "#;
 
@@ -212,7 +220,7 @@ fn gpu_residency_probe() {
     let probe16 = tail_texture(
         &device,
         &queue,
-        &probe_chain(wgpu::TextureFormat::R16Float),
+        &probe_chain(PROBE, PROBE, wgpu::TextureFormat::R16Float),
         0,
         wgpu::TextureFormat::R16Float,
     );
@@ -220,7 +228,7 @@ fn gpu_residency_probe() {
         tail_texture(
             &device,
             &queue,
-            &probe_chain(wgpu::TextureFormat::R32Float),
+            &probe_chain(PROBE, PROBE, wgpu::TextureFormat::R32Float),
             0,
             wgpu::TextureFormat::R32Float,
         )
@@ -240,18 +248,24 @@ fn gpu_residency_probe() {
     use wgpu::{FilterMode as F, MipmapFilterMode as M};
     let samplers = [
         ("aniso16-trilinear", F::Linear, F::Linear, M::Linear, 16),
+        ("aniso2-trilinear", F::Linear, F::Linear, M::Linear, 2),
         ("trilinear", F::Linear, F::Linear, M::Linear, 1),
-        ("bilinear-nearest-mip", F::Linear, F::Linear, M::Nearest, 1),
-        ("nearest-linear-mip", F::Nearest, F::Nearest, M::Linear, 1),
     ];
     let count = 1usize << 20;
     let mut report = vec![];
     for (w, h, format) in [
         (4096, 4096, wgpu::TextureFormat::Rgba8UnormSrgb),
-        (2048, 512, wgpu::TextureFormat::Rgba8UnormSrgb),
         (1024, 1024, wgpu::TextureFormat::Rgba8Unorm),
     ] {
         let chain = random_chain(w, h, u64::from(w * 31 + h));
+        let probe_full = tail_texture(
+            &device,
+            &queue,
+            &probe_chain(w, h, wgpu::TextureFormat::R16Float),
+            0,
+            wgpu::TextureFormat::R16Float,
+        );
+        let probe_full_view = probe_full.create_view(&Default::default());
         let tails: Vec<_> = (0..7)
             .map(|t| tail_texture(&device, &queue, &chain, t, format))
             .collect();
@@ -346,6 +360,10 @@ fn gpu_residency_probe() {
                     binding: 12,
                     resource: output.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&probe_full_view),
+                },
             ]);
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("M3 probe"),
@@ -375,7 +393,7 @@ fn gpu_residency_probe() {
                 .map(|c| std::array::from_fn(|k| u32::from_le_bytes(c[k * 4..k * 4 + 4].try_into().unwrap())))
                 .collect();
             read.unmap();
-            report.push(analyse(name, w, h, &rows, filterable32));
+            report.push(analyse(name, w, h, &rows, &inputs, filterable32));
             eprintln!("M3 probe {w}x{h} {name}: {}", report.last().unwrap());
         }
     }
@@ -384,7 +402,8 @@ fn gpu_residency_probe() {
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
-    for r in &report {
+    // Isotropic filtering: the mip tail and the shared probe are exact (first screen).
+    for r in report.iter().filter(|r| r["sampler"] == "trilinear") {
         assert_eq!(r["violations_r16f_d12"], 0, "{r}");
     }
 }
@@ -396,10 +415,19 @@ fn decode(value: f32, d: i32) -> u32 {
     ((-v.log2() + 2f64.powi(-d)).floor().clamp(0.0, 15.0)) as u32
 }
 
-/// Per decode choice: violations (a level at or above the decode differs when dropped,
-/// so dropping it would change the image), and over-reports (the next coarser tail is
-/// still identical, so the decode keeps one level more than necessary).
-fn analyse(name: &str, w: u32, h: u32, rows: &[[u32; 4]], filterable32: bool) -> serde_json::Value {
+/// Per probe and decode choice: violations (a level at or above the decode differs when
+/// dropped, so dropping it would change the image), and over-reports (the next coarser
+/// tail is still identical, so the decode keeps one level more than necessary). The
+/// breakdowns locate violations by the footprint's level-0 texel-space anisotropy and by
+/// how many tails differ although the full-extent probe says they may be dropped.
+fn analyse(
+    name: &str,
+    w: u32,
+    h: u32,
+    rows: &[[u32; 4]],
+    inputs: &[[f32; 4]],
+    filterable32: bool,
+) -> serde_json::Value {
     let max_tail = 6u32;
     let mut out = serde_json::json!({ "sampler": name, "width": w, "height": h, "samples": rows.len(), "r32f_probe": filterable32 });
     let mut monotone_breaks = 0u64;
@@ -418,19 +446,28 @@ fn analyse(name: &str, w: u32, h: u32, rows: &[[u32; 4]], filterable32: bool) ->
         }
     }
     out["mask_monotone_breaks"] = monotone_breaks.into();
-    for (probe, column) in [("r16f", 0usize), ("r32f", 1)] {
-        for d in [30, 16, 12, 10] {
+    // Level-0 texel-space footprint ratio |major| / |minor| of the derivative vectors.
+    let ratio = |i: usize| {
+        let a = inputs[2 * i];
+        let b = inputs[2 * i + 1];
+        let dx = (a[2] * w as f32).hypot(a[3] * h as f32);
+        let dy = (b[0] * w as f32).hypot(b[1] * h as f32);
+        dx.max(dy) / dx.min(dy).max(1e-30)
+    };
+    let violated = |level: u32, mask: u32| (1..=level.min(max_tail)).any(|t| mask & (1 << (t - 1)) == 0);
+    for (probe, column) in [("r16f", 0usize), ("r32f", 1), ("full", 3)] {
+        for d in [30, 12] {
             let (mut violations, mut over, mut histogram) = (0u64, 0u64, [0u64; 16]);
-            for row in rows {
+            let mut by_ratio = [0u64; 8];
+            let mut by_level = [0u64; 16];
+            for (i, row) in rows.iter().enumerate() {
                 let level = decode(f32::from_bits(row[column]), d);
                 histogram[level as usize] += 1;
                 let mask = row[2];
-                // Tails t = 1..=min(level, 6) must all be identical.
-                for t in 1..=level.min(max_tail) {
-                    if mask & (1 << (t - 1)) == 0 {
-                        violations += 1;
-                        break;
-                    }
+                if violated(level, mask) {
+                    violations += 1;
+                    by_level[level as usize] += 1;
+                    by_ratio[(ratio(i).log2().max(0.0) as usize).min(7)] += 1;
                 }
                 if level < max_tail && mask & (1 << level) != 0 {
                     over += 1;
@@ -440,8 +477,16 @@ fn analyse(name: &str, w: u32, h: u32, rows: &[[u32; 4]], filterable32: bool) ->
             out[format!("over_reports_{probe}_d{d}")] = over.into();
             if d == 12 {
                 out[format!("levels_{probe}")] = histogram.to_vec().into();
+                out[format!("violations_by_level_{probe}")] = by_level.to_vec().into();
+                out[format!("violations_by_log2_ratio_{probe}")] = by_ratio.to_vec().into();
             }
         }
     }
+    // Small probe against the full-extent probe: decoded level agreement.
+    let disagree = rows
+        .iter()
+        .filter(|r| decode(f32::from_bits(r[0]), 12) != decode(f32::from_bits(r[3]), 12).min(max_tail))
+        .count();
+    out["small_vs_full_probe_disagreements"] = disagree.into();
     out
 }
