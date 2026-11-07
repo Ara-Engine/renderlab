@@ -10,6 +10,7 @@ Unknown labels fail the inventory so new resources cannot silently disappear.
 """
 import argparse
 import csv
+import datetime
 import hashlib
 import json
 import os
@@ -26,13 +27,15 @@ PATHS = ("nort", "rt", "traced-virtual")
 def resource(name):
     """Audited against the resource creation/retirement sites, not GPU address guesses."""
     if name == "mesh vertices":
-        return "vertex/storage/BLAS input (shared)", "Mesh; BLAS also retains the same buffer"
+        return "VERTEX/STORAGE/COPY_DST; BLAS_INPUT on RT devices (shared)", "Mesh; BLAS also retains the same buffer on RT devices"
     if name.startswith("mesh indices"):
-        return "index/storage/BLAS input, adjacency suffix", "Mesh; original buffer also retained by BLAS after LOD attachment"
+        return "INDEX/STORAGE/COPY_SRC/COPY_DST; BLAS_INPUT on RT devices; adjacency suffix", "Mesh; original buffer also retained by BLAS after LOD attachment on RT devices"
     if name == "mesh tangents":
         return "vertex/storage tangent stream", "Mesh"
     if name == "N1c cluster vertices, triangles and primitive tables":
-        return "read-only cluster geometry storage", "Mesh cluster hierarchy"
+        return "STORAGE/COPY_DST: exact positions, packed u8 local triangles, primitive IDs", "Mesh cluster hierarchy"
+    if name in ("N1c cluster instances", "N1c LOD groups"):
+        return "STORAGE/COPY_DST: cluster placements or hierarchy groups", "VisibilityBuffer or VirtualState caster generation; separate tables per consumer"
     if name.startswith("renderlab hardware"):
         return "acceleration structure", "Mesh BLAS or active/retired TLAS generation; retired after last submission"
     if name == "immutable material texture":
@@ -56,7 +59,7 @@ def resource(name):
     if name in ("primary hit records", "primary hard receiver epsilon", "primary tile coverage"):
         return "sampled/storage image; test COPY_SRC", "PrimaryState target-size generation; retired after last submission"
     if name.startswith("primary edge") or name == "primary sparse fallback and changed receivers":
-        return "storage/indirect deferred repair queues", "PrimaryState target-size generation; retired after last submission"
+        return "STORAGE/INDIRECT/COPY_DST (work queues also COPY_SRC); ABI-sized placeholders outside traced Interactive", "PrimaryState target-size/repair-capacity generation; retired after last submission"
     if name.startswith("primary"):
         return "uniform/storage camera/shading region", "PrimaryState"
     if name.startswith("fresh"):
@@ -88,14 +91,16 @@ def inventory(directory):
             writer.writerows(rows)
 
 
-def run(binary, root, name, memory_only):
+def run(binary, root, name, memory_only, memory_hints, poses, visits):
     out = root / name
     out.mkdir(parents=True, exist_ok=True)
     m = json.loads(QUARRY.read_text())
     m.update(output=str(out), validate=False, timing=True, reference=False, hash_only=False,
-             poses=[0] if memory_only else [0, 1], stage_repeats=0,
+             poses=poses[:1] if memory_only else poses, stage_repeats=0,
              turn_frames=0 if memory_only else 16, move_frames=0 if memory_only else 48,
              no_rt=name == "nort", lod_pixels=[])
+    if visits > 1:
+        m.update(virtual_variants={f"visit{i}": {} for i in range(visits)}, hash_only=True)
     if name == "nort":
         m.update(lod_pixels=[0.35], software_extent=[32], lod_lift=[1],
                  virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
@@ -112,7 +117,7 @@ def run(binary, root, name, memory_only):
                                 "-IntervalMs", "250", "-Seconds", "600"], creationflags=flags)
     started = time.monotonic()
     env = dict(os.environ, RENDERLAB_PRIMARY_MANIFEST=str(manifest), VK_INSTANCE_LAYERS="",
-               RENDERLAB_MEMORY_HINTS="memory_usage")
+               RENDERLAB_MEMORY_HINTS=memory_hints)
     try:
         with (out / "stdout.log").open("w", encoding="utf-8") as f:
             code = subprocess.run([str(binary), "gpu_visibility_quarry", "--ignored", "--nocapture", "--test-threads=1"],
@@ -130,9 +135,14 @@ def run(binary, root, name, memory_only):
             raw.unlink()
         counts.with_suffix(".hashes.json").write_text(json.dumps(hashes, indent=2))
     inventory(out)
-    record = dict(path=name, seconds=time.monotonic() - started, binary_sha256=hashlib.file_digest(binary.open("rb"), "sha256").hexdigest())
+    record = dict(path=name, memory_hints=memory_hints, seconds=time.monotonic() - started,
+                  binary_sha256=hashlib.file_digest(binary.open("rb"), "sha256").hexdigest())
     samples = [json.loads(line) for line in (out / "gpumem.jsonl").read_text(encoding="utf-8-sig").splitlines()]
     record["wddm_max_bytes"] = max((s["dedicated"] for s in samples), default=None)
+    warmed_at = min(p.stat().st_mtime for p in out.glob("memory-p*.json"))
+    warm_samples = [s for s in samples if datetime.datetime.fromisoformat(s["t"]).timestamp() >= warmed_at]
+    record["wddm_warm_max_bytes"] = max((s["dedicated"] for s in warm_samples), default=None)
+    record["wddm_warm_samples"] = len(warm_samples)
     record["wddm_samples"] = len(samples)
     (out / "run.json").write_text(json.dumps(record, indent=2))
     print(record, flush=True)
@@ -144,11 +154,16 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("paths", nargs="*", help="nort, rt, traced-virtual (default: all)")
     parser.add_argument("--memory-only", action="store_true", help="one warm pose, no motion/hash replay")
+    parser.add_argument("--memory-hints", choices=("default", "performance", "memory_usage", "small"), default="default")
+    parser.add_argument("--poses", nargs="+", type=int, default=[0, 1])
+    parser.add_argument("--visits", type=int, default=1, help="independent replays per pose in one asset load; >1 hashes counts/hits only")
     args = parser.parse_args()
     for name in args.paths or PATHS:
         if name not in PATHS:
             parser.error(f"unknown path: {name}")
-        run(args.binary, args.output, name, args.memory_only)
+        if args.visits < 1:
+            parser.error("visits must be positive")
+        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits)
 
 
 if __name__ == "__main__":

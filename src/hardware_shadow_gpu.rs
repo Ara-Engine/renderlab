@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_RENDERER_LABEL: AtomicU64 = AtomicU64::new(1);
@@ -6,18 +7,25 @@ static NEXT_RENDERER_LABEL: AtomicU64 = AtomicU64::new(1);
 /// Immutable source inputs are retained with the BLAS through builds and every TLAS
 /// generation. Safe wgpu owns submitted backend lifetimes.
 pub(crate) struct MeshAcceleration {
-    blas: Owned<wgpu::Blas>,
+    blas: Mutex<Arc<BlasAllocation>>,
+    label: String,
     size: wgpu::BlasTriangleGeometrySizeDescriptor,
     vertex: Arc<Owned<wgpu::Buffer>>,
     index: Arc<Owned<wgpu::Buffer>>,
     _receiver_adjacency: Option<Allocation>,
+}
+/// A TLAS retains the exact BLAS generation it was built against. Compaction may
+/// publish a replacement while earlier submissions still reference the original.
+struct BlasAllocation {
+    blas: Owned<wgpu::Blas>,
     _estimated: Allocation,
     _observed: Option<Allocation>,
 }
 impl MeshAcceleration {
     pub(super) fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
+        let blas = self.blas.lock().unwrap();
         let entry = wgpu::BlasBuildEntry {
-            blas: &self.blas,
+            blas: &blas.blas,
             geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
                 size: &self.size,
                 vertex_buffer: &self.vertex,
@@ -35,11 +43,14 @@ impl MeshAcceleration {
 
 struct Placement {
     mesh: Arc<MeshAcceleration>,
+    blas: Arc<BlasAllocation>,
     model: [u32; 16],
 }
 impl Placement {
     fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.mesh, &other.mesh) && self.model == other.model
+        Arc::ptr_eq(&self.mesh, &other.mesh)
+            && Arc::ptr_eq(&self.blas, &other.blas)
+            && self.model == other.model
     }
 }
 struct SceneAcceleration {
@@ -239,7 +250,7 @@ impl HardwareState {
             device.create_blas(
                 &wgpu::CreateBlasDescriptor {
                     label: Some(&label),
-                    flags: self.flags,
+                    flags: self.flags | wgpu::AccelerationStructureFlags::ALLOW_COMPACTION,
                     update_mode: wgpu::AccelerationStructureUpdateMode::Build,
                 },
                 wgpu::BlasGeometrySizeDescriptors::Triangles {
@@ -250,17 +261,20 @@ impl HardwareState {
         );
         let observed = self.observed(device, ledger, &label);
         Arc::new(MeshAcceleration {
-            blas,
+            blas: Mutex::new(Arc::new(BlasAllocation {
+                blas,
+                _estimated: ledger.allocate(
+                    AllocationKind::HardwareAsEstimate,
+                    mesh_estimate(u64::from(index_count) / 3).unwrap().0,
+                ),
+                _observed: observed,
+            })),
+            label,
             size,
             vertex: vertex.clone(),
             index: index.clone(),
             _receiver_adjacency: (adjacency_bytes != 0)
                 .then(|| ledger.allocate(AllocationKind::Shadow, adjacency_bytes)),
-            _estimated: ledger.allocate(
-                AllocationKind::HardwareAsEstimate,
-                mesh_estimate(u64::from(index_count) / 3).unwrap().0,
-            ),
-            _observed: observed,
         })
     }
     pub fn mesh_submitted(
@@ -270,6 +284,11 @@ impl HardwareState {
         mesh: Arc<MeshAcceleration>,
         submission: u64,
     ) {
+        mesh.blas
+            .lock()
+            .unwrap()
+            .blas
+            .prepare_compaction_async(|_| {});
         let scratch = mesh_estimate(u64::from(mesh.size.index_count.unwrap()) / 3)
             .unwrap()
             .1;
@@ -316,6 +335,7 @@ impl HardwareState {
             }
             for model in &draw.instances.state.models {
                 placements.push(Placement {
+                    blas: mesh.blas.lock().unwrap().clone(),
                     mesh: mesh.clone(),
                     model: model.to_cols_array().map(f32::to_bits),
                 });
@@ -323,18 +343,58 @@ impl HardwareState {
         }
         Ok(placements)
     }
-    /// Runs after flight admission, before any frame writes. TLAS is replaced only when
-    /// the submitted mesh/transform sequence changes. Camera/light edits reuse it.
+    /// Compaction queues a copy, flushed by the next ordinary submission. Existing
+    /// TLAS generations retain the original allocation until their flights retire.
+    fn compact_mesh(
+        &mut self,
+        mesh: &MeshAcceleration,
+        gpu: (&wgpu::Device, &wgpu::Queue),
+        ledger: &Ledger,
+        reserve: u64,
+    ) {
+        let mut current = mesh.blas.lock().unwrap();
+        if !current.blas.ready_for_compaction() {
+            return;
+        }
+        let estimate = mesh_estimate(u64::from(mesh.size.index_count.unwrap()) / 3)
+            .unwrap()
+            .0;
+        // Optional under a caller's peak-memory policy: skip instead of stalling
+        // or rejecting an otherwise valid upload/frame.
+        if self.admit(ledger, estimate + reserve).is_err() {
+            return;
+        }
+        let (device, queue) = gpu;
+        let blas = ledger.own(queue.compact_blas(&current.blas), ResourceKind::Blas);
+        let observed = self.observed(device, ledger, &format!("{} (compacted)", mesh.label));
+        *current = Arc::new(BlasAllocation {
+            blas,
+            _estimated: ledger.allocate(AllocationKind::HardwareAsEstimate, estimate),
+            _observed: observed,
+        });
+        self.stats.blas_compactions += 1;
+    }
+    /// Runs after flight admission, before frame writes. Completed BLAS builds compact
+    /// without waiting; a changed BLAS generation or placement replaces the TLAS.
     pub fn prepare_scene(
         &mut self,
-        device: &wgpu::Device,
+        gpu: (&wgpu::Device, &wgpu::Queue),
         ledger: &Ledger,
         camera: &wgpu::Buffer,
         draws: &[Draw<'_>],
         submission: u64,
         casters: bool,
     ) -> Result<bool, Error> {
-        let placements = Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
+        let (device, _) = gpu;
+        let mut placements =
+            Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
+        let (scene, scratch) = scene_estimate(placements.len())?;
+        for placement in &placements {
+            self.compact_mesh(&placement.mesh, gpu, ledger, scene + scratch);
+        }
+        for placement in &mut placements {
+            placement.blas = placement.mesh.blas.lock().unwrap().clone();
+        }
         if self.active.as_ref().is_some_and(|active| {
             active.placements.len() == placements.len()
                 && active
@@ -364,7 +424,7 @@ impl HardwareState {
         for (i, p) in placements.iter().enumerate() {
             let model = Mat4::from_cols_array(&p.model.map(f32::from_bits));
             tlas[i] = Some(wgpu::TlasInstance::new(
-                &p.mesh.blas,
+                &p.blas.blas,
                 row_transform(model),
                 i as u32,
                 255,
@@ -436,9 +496,20 @@ impl HardwareState {
     pub fn bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().bind
     }
-    pub fn collect(&mut self, completed: u64) {
+    pub fn collect(&mut self, completed: u64, gpu: (&wgpu::Device, &wgpu::Queue), ledger: &Ledger) {
+        let meshes: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(last, _)| *last <= completed)
+            .filter_map(|(_, p)| p._mesh.clone())
+            .collect();
         self.retired.retain(|(last, _)| *last > completed);
         self.pending.retain(|(last, _)| *last > completed);
+        // Compact completed uploads incrementally, rather than overlapping every
+        // original BLAS with every compacted copy at the first rendered frame.
+        for mesh in meshes {
+            self.compact_mesh(&mesh, gpu, ledger, 0);
+        }
     }
     pub fn release_scene(&mut self, last_submission: u64) {
         if let Some(active) = self.active.take() {

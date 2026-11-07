@@ -2293,7 +2293,7 @@ impl Renderer {
             if let Some(hardware) = &mut self.hardware_shadows {
                 let scopes = OperationScopes::new(&self.device);
                 let result = hardware.prepare_scene(
-                    &self.device,
+                    (&self.device, &self.queue),
                     &self.ledger,
                     &self.uniform,
                     draws,
@@ -3262,7 +3262,11 @@ impl Renderer {
             primary.collect(self.completed_submission);
         }
         if let Some(hardware) = &mut self.hardware_shadows {
-            hardware.collect(self.completed_submission);
+            hardware.collect(
+                self.completed_submission,
+                (&self.device, &self.queue),
+                &self.ledger,
+            );
         }
         self.check_fault()?;
         Ok(start.elapsed())

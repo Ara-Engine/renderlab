@@ -1494,13 +1494,21 @@ impl Renderer {
             }
             g.instances = instances;
         }
+        // Only traced Interactive visibility dispatches deferred edge repair. Other
+        // modes bind ABI-sized placeholders; switching back restores full capacity.
+        let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
+        let retry_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 4;
+        let defer_edges = self.primary_mode == PrimaryVisibility::Traced
+            && self.soft_mode == SoftShadows::Interactive
+            && repair_bytes <= self.device.limits().max_storage_buffer_binding_size
+            && repair_bytes <= self.device.limits().max_buffer_size;
         if self
             .primary
             .as_ref()
             .unwrap()
             .targets
             .as_ref()
-            .is_none_or(|t| t.hit.texture.size() != size)
+            .is_none_or(|t| t.hit.texture.size() != size || t.defer_edges != defer_edges)
         {
             let target = |label, size: wgpu::Extent3d, format: wgpu::TextureFormat| {
                 let texture = self.ledger.own(
@@ -1540,10 +1548,6 @@ impl Renderer {
                 height: size.height.div_ceil(TRACE_TILE[1]),
                 depth_or_array_layers: 1,
             };
-            let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
-            let retry_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 4;
-            let defer_edges = repair_bytes <= self.device.limits().max_storage_buffer_binding_size
-                && repair_bytes <= self.device.limits().max_buffer_size;
             let repairs = Buffer::new(
                 self,
                 "primary edge worklist",
