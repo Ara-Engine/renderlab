@@ -1,13 +1,17 @@
-//! N8n (docs/non-rt-n8n.md): `VirtualLookup::Surface`, the exact lookup's visibility kept
-//! per receiver surface cell across frames, so camera motion walks only the pixels beside
-//! shadow edges and the cells it has not seen. shaders/virtual_shadow_cache.wgsl describes the
-//! cells, which ones a pixel may show, and when a cell stays current; this module owns the
-//! table, the epochs its frame uniform carries, and the probe, queued-walk and insert passes.
+//! N8n/N8o (docs/non-rt-n8n.md, docs/non-rt-n8o.md): `VirtualLookup::Surface`, the exact
+//! lookup's visibility kept per receiver surface cell across frames, so camera motion walks only
+//! the pixels beside shadow edges and the cells it has not seen. shaders/virtual_shadow_cache.wgsl
+//! describes the cells, which ones a pixel may show, when a cell stays current, and why every
+//! write is order-independent; this module owns the table and its claim words, the epochs its
+//! frame uniform carries, and the probe, queued-walk and two insert passes.
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Hash-table buckets, four 8-byte slots each (32 MiB): about two cells per 1080p pixel.
 const BUCKETS: u32 = 1 << 20;
 const TABLE_BYTES: u64 = BUCKETS as u64 * 32;
+/// N8o: two claim words per slot (WGSL `vsc_claims`), zero between frames.
+const CLAIM_BYTES: u64 = BUCKETS as u64 * 4 * 8;
 /// WGSL `VscFrame`.
 const UNIFORM_BYTES: u64 = 32;
 /// Widths of the value's epoch fields (WGSL: sun 13 bits, casters 6); a wrap starts a new
@@ -30,13 +34,15 @@ pub(super) struct SurfacePipelines {
     probe: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
     missed: Owned<wgpu::ComputePipeline>,
-    insert: Owned<wgpu::ComputePipeline>,
+    claim: Owned<wgpu::ComputePipeline>,
+    resolve: Owned<wgpu::ComputePipeline>,
 }
 
 /// The table and the epochs that decide which of its cells are current. Lives as long as the
 /// virtual shadow state, across resource rebuilds; `flush` retires every cell at once.
 pub(super) struct SurfaceCache {
     table: Owned<wgpu::Buffer>,
+    claims: Owned<wgpu::Buffer>,
     uniform: Owned<wgpu::Buffer>,
     stats: Owned<wgpu::Buffer>,
     /// The queued walk's and the insert pass's indirect dispatches (vsc_args).
@@ -51,9 +57,10 @@ pub(super) struct SurfaceCache {
     module: Owned<wgpu::ShaderModule>,
     pipelines: Option<SurfacePipelines>,
     built: Option<Vec<(&'static str, f64)>>,
+    /// The next encode clears the table first (`flush`).
+    clear: AtomicBool,
     frame: u32,
     sun: u32,
-    epoch: u32,
     casters: u32,
     last_sun: Option<[u32; 3]>,
     producer: Vec<u64>,
@@ -118,18 +125,20 @@ impl SurfaceCache {
                 storage(48, false, S::COMPUTE),
             ],
         );
-        // The insert pass reads the finished counts, so it binds the target sampled, not written.
+        // The insert passes read the finished counts, so they bind the target sampled.
         let insert_layout = group(
             "N8n surface cache insert",
             &[
                 frame_uniform(S::COMPUTE),
                 sampled(7, uint, D::D2),
+                sampled(8, uint, D::D2),
                 sampled(9, float, D::D2),
                 sampled(10, float, D::D2),
                 storage(20, false, S::COMPUTE),
                 uniform(49, UNIFORM_BYTES),
                 storage(50, false, S::COMPUTE),
                 sampled(52, uint, D::D2),
+                storage(53, false, S::COMPUTE),
             ],
         );
         let pipeline_layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
@@ -173,10 +182,14 @@ impl SurfaceCache {
         use wgpu::BufferUsages as B;
         Self {
             table: buffer("N8n surface cells", TABLE_BYTES, B::STORAGE),
+            claims: buffer("N8o surface cell claims", CLAIM_BYTES, B::STORAGE),
             uniform: buffer("N8n surface cache frame", UNIFORM_BYTES, B::UNIFORM),
             stats: buffer("N8n surface cache counters", 32, B::STORAGE | B::COPY_SRC),
             dispatch: buffer("N8n surface cache dispatch", 32, B::STORAGE | B::INDIRECT),
-            _allocation: ledger.allocate(AllocationKind::Shadow, TABLE_BYTES + UNIFORM_BYTES + 64),
+            _allocation: ledger.allocate(
+                AllocationKind::Shadow,
+                TABLE_BYTES + CLAIM_BYTES + UNIFORM_BYTES + 64,
+            ),
             layout,
             args_layout,
             insert_layout,
@@ -186,9 +199,9 @@ impl SurfaceCache {
             module,
             pipelines: None,
             built: None,
+            clear: AtomicBool::new(false),
             frame: 0,
             sun: 0,
-            epoch: 0,
             casters: 0,
             last_sun: None,
             producer: vec![],
@@ -206,9 +219,10 @@ impl SurfaceCache {
             .map_or(default, |&(_, value)| value)
     }
 
-    /// Retires every cell (a new epoch is hashed into every key).
+    /// Retires every cell: the next encode clears the table, so what follows does not depend
+    /// on any earlier sequence (N8o: repeated runs and fresh processes give the same cells).
     pub(super) fn flush(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
+        *self.clear.get_mut() = true;
     }
     /// A restart (`VirtualState::reset`): every cell retired and the frame, sun and caster
     /// counters from zero, so a replayed sequence repeats its refresh schedule.
@@ -264,10 +278,10 @@ impl SurfaceCache {
         let words = [
             self.frame,
             self.sun,
-            self.epoch,
             self.casters,
             u32::from(moved) | u32::from(still) << 1,
             BUCKETS - 1,
+            0,
             0,
             0,
         ];
@@ -313,12 +327,13 @@ impl SurfaceCache {
             probe: compute("vsc_probe", &self.probe_layout),
             args: compute("vsc_args", &self.args_pipeline_layout),
             missed: compute("vsc_missed", lookup_layout),
-            insert: compute("vsc_insert", &self.insert_pipeline_layout),
+            claim: compute("vsc_claim", &self.insert_pipeline_layout),
+            resolve: compute("vsc_resolve", &self.insert_pipeline_layout),
         });
         self.built = Some(constants);
     }
 
-    /// The probe, dispatch and insert passes' group 0, over this frame's targets.
+    /// The probe, dispatch and insert passes' groups 0, over this frame's targets.
     pub(super) fn groups(
         &self,
         device: &wgpu::Device,
@@ -367,19 +382,21 @@ impl SurfaceCache {
                 &[
                     buffer(0, &r.frame),
                     texture(7, hit),
+                    texture(8, tiles),
                     texture(9, world),
                     texture(10, normal),
                     buffer(20, &r.queue),
                     buffer(49, &self.uniform),
                     buffer(50, &self.table),
                     texture(52, output),
+                    buffer(53, &self.claims),
                 ],
             ),
         ]
     }
 
-    /// Probe every covered pixel, size the queue's dispatches, walk the misses at their cells'
-    /// canonical points and store the results, in one compute pass.
+    /// Probe every covered pixel, size the queue's dispatches, walk the misses at their own
+    /// receiver points, and claim and resolve the results' slots, in one compute pass.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn encode(
         &self,
@@ -401,6 +418,9 @@ impl SurfaceCache {
                 timestamp_writes: timestamps,
             }));
             return;
+        }
+        if self.clear.swap(false, Ordering::Relaxed) {
+            encoder.clear_buffer(&self.table, 0, None);
         }
         encoder.clear_buffer(&r.queue, 0, Some(16));
         // The heavy walks' count and the walk's cursor (vsc_heavy_count, vsc_cursor).
@@ -427,14 +447,17 @@ impl SurfaceCache {
         pass.set_bind_group(2, records, &[]);
         pass.set_bind_group(3, lighting, &[]);
         pass.dispatch_workgroups_indirect(&self.dispatch, 0);
-        pass.set_pipeline(&p.insert);
+        pass.set_pipeline(&p.claim);
         pass.set_bind_group(0, &*groups[2], &[]);
         pass.set_bind_group(3, lighting, &[]);
         pass.dispatch_workgroups_indirect(&self.dispatch, 16);
+        pass.set_pipeline(&p.resolve);
+        pass.dispatch_workgroups_indirect(&self.dispatch, 16);
     }
 
-    /// Tests: the last frame's counters (probed receivers, hits, hits at the finer level, sun
-    /// refreshes, cells found but not shown; `VSC_STATS` only) and its queued walks (both ends).
+    /// Tests: the last frame's counters (probed receivers, hits, cells the caster test retired,
+    /// sun refreshes, cells found but not shown; `VSC_STATS` only) and its queued walks (both
+    /// ends).
     #[cfg(test)]
     pub(super) fn read_stats(
         &self,
@@ -515,12 +538,14 @@ mod tests {
             (2, None),
             (3, None),
         ];
-        let passes: [(&str, Layout); 4] = [
+        let insert: Layout = &[
+            (0, Some(&[0, 7, 8, 9, 10, 20, 49, 50, 52, 53])),
+            (3, None),
+        ];
+        let passes: [(&str, Layout); 5] = [
             ("vsc_probe", cache),
-            (
-                "vsc_insert",
-                &[(0, Some(&[0, 7, 9, 10, 20, 49, 50, 52])), (3, None)],
-            ),
+            ("vsc_claim", insert),
+            ("vsc_resolve", insert),
             ("vsc_args", &[(0, Some(&[20, 48]))]),
             ("vsc_missed", lookup),
         ];
