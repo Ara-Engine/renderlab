@@ -116,8 +116,9 @@ def build(args):
         path=ue().LOCK/"owner.json"
         try:owner=json.loads(path.read_text())
         except (FileNotFoundError,json.JSONDecodeError):return None
-        if owner.get("owner")!="m7-u0b" and ("quiet" in owner.get("label","").lower() or
-                owner.get("owner") in ("rt1c","m7-tr0","dl3-preview-default","dl4-env-helpers")):return owner
+        # Reservation labels do not reliably contain "quiet". Every foreign GPU
+        # lease excludes our build, including functional jobs with little RAM.
+        if owner.get("owner")!="m7-u0b":return owner
         return None
     if foreign_quiet():raise SystemExit("CPU build deferred for another worker's measurement lease")
     with (OUT/"build.jsonl").open("w") as log,(OUT/"build.stderr.log").open("w") as err:
@@ -163,6 +164,9 @@ def reference(args):
     if args.replay_loaded:
         if not args.benches:raise ValueError("loaded replay requires --benches")
         test="reference::tests::gpu_reference_replay_loaded"
+    if getattr(args,"s2g_regression",False):
+        if not args.benches:raise ValueError("S2G regression requires --benches")
+        test="reference::tests::gpu_reference_s2g_replay_regression"
     if args.manifest:
         env["RENDERLAB_M7_QUARRY_MANIFEST"]=str(args.manifest)
         env["RENDERLAB_M7_REFERENCE_BATCH"]=str(min(args.batch_frames,3) if game_state()=="relaxed" else args.batch_frames)
@@ -199,6 +203,8 @@ def s4(args):
             metadata.write_text(json.dumps(value,indent=2))
             subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"compact",str(root),"S4-interior"],
                            cwd=REPO,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
+            # Other workers poll every two seconds. Leave an explicit unlocked gap.
+            time.sleep(3)
         inputs.append(str(archive))
     subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"combine",
                     str(OUT/"reference"/args.label/"combined"),"S4-interior",*inputs],
@@ -433,12 +439,13 @@ def main():
     sub.add_parser("build");sub.add_parser("prepare")
     q=sub.add_parser("s4");q.add_argument("label",default="s4-64k",nargs="?")
     q=sub.add_parser("cook");q.add_argument("label")
-    q=sub.add_parser("reference");q.add_argument("label");q.add_argument("--minutes",type=int,default=15)
+    q=sub.add_parser("reference");q.add_argument("label");q.add_argument("--minutes",type=float,default=15)
     q.add_argument("--seed",type=int)
     q.add_argument("--dispatch-samples",type=int)
     q.add_argument("--benches",nargs="+");q.add_argument("--manifest",type=Path)
     q.add_argument("--batch-frames",type=int,default=16)
     q.add_argument("--geometry",action="store_true");q.add_argument("--replay-loaded",action="store_true")
+    q.add_argument("--s2g-regression",action="store_true")
     q=sub.add_parser("study");q.add_argument("label");q.add_argument("--minutes",type=int,default=30)
     q.add_argument("--configs",nargs="+");q.add_argument("--benches",nargs="+");q.add_argument("--repeats",type=int,default=1)
     q.add_argument("--bench-pose")

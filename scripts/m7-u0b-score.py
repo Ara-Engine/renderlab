@@ -230,6 +230,8 @@ def floor(args):
         native=json.loads((directory/"native.json").read_text())["frames"]
         if not camera["all_ok"] or not runtime["all_ok"] or len(native)!=len(recipe["frames"]):
             raise ValueError("capture coverage/readback failed: "+str(directory))
+        if selected is not None and not selected.issubset(range(len(native))):
+            raise ValueError("requested witness outside captured sequence")
         rows=[];residuals=[];missing=[];previous=None
         for index,(pose,capture) in enumerate(zip(recipe["frames"],native,strict=True)):
             if selected is not None and index not in selected:previous=None;continue
@@ -337,6 +339,9 @@ def decode(args):
              manual_exposure=manual,tonemap_color_scale=tint,
              proof="fixed manual FViewInfo::UpdatePreExposure factors: manual global exposure, unit scene tint, prior local exposure 1; captured EyeAdaptationBuffer and Tonemap parameters"))
     if not results:raise ValueError("no Tonemap captured")
+    frames=[r["engine_frame"] for r in results]
+    if len(frames)>1 and frames!=list(range(frames[0],frames[0]+len(frames))):
+        raise ValueError("native HDR sequence must contain ordered consecutive engine frames")
     save(args.out.with_suffix(".json"),dict(frames=results,dump=str(dump.root)))
     removed={}
     for path in (dump.root/"Resources").glob("*.bin"):

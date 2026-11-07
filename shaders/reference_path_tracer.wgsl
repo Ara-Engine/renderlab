@@ -195,7 +195,9 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     var n=normal_matrix*ns;
     if dot(n,n)<=1e-12 {n=ng;} else {n=normalize(n);}
     let uv=v0.b.zw*w.x+v1.b.zw*w.y+v2.b.zw*w.z;
-    let color=v0.color.rgb*w.x+v1.color.rgb*w.y+v2.color.rgb*w.z;
+    // Affine differences preserve a constant attribute exactly; summing three
+    // rounded barycentric weights can spuriously modulate even constant white.
+    let color=v0.color.rgb+(v1.color.rgb-v0.color.rgb)*w.y+(v2.color.rgb-v0.color.rgb)*w.z;
     let m=materials[inst.offsets.z];
     if m.normal_map.x!=0u {
         let tangent=v0.tangent*w.x+v1.tangent*w.y+v2.tangent*w.z;

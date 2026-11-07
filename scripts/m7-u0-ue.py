@@ -77,6 +77,14 @@ def lease(label, minutes):
     """Shared GPU lease for one bounded job. Never waits on, or removes, another owner's lock."""
     if not 1 <= minutes <= 45:
         raise ValueError("leases are 1-45 minutes")
+    defer = OUT / "gpu-defer.txt"
+    if defer.exists():
+        print("Waiting outside GPU lease:", defer.read_text(), flush=True)
+    deadline = time.monotonic() + 900
+    while defer.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("GPU acquisition deferred for 15 minutes")
+        time.sleep(.5)
     try:
         LOCK.mkdir()
     except FileExistsError:

@@ -879,6 +879,57 @@ fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
         "invalid_pixels":[a.invalid_pixels,b.invalid_pixels]})
 }
 
+/// The ordinary bench suite replays only its first pose. Keep the S2G camera-0.25px
+/// frame-zero regression explicit, including secondary transport and every D/V byte.
+#[test]
+#[ignore = "GPU; RENDERLAB_M7_BENCHES must name the registered S2G frame-zero fixture"]
+fn gpu_reference_s2g_replay_regression() {
+    let list = std::env::var("RENDERLAB_M7_BENCHES").unwrap();
+    let (path, spp) = list.split(';').next().unwrap().rsplit_once('@').unwrap();
+    let bench = load_bench(&Path::new(path).join("scene.json"));
+    let (name, view) = &bench.views[0];
+    assert_eq!(name, "camera-0.25px-000", "use the failing registered pose");
+    assert_eq!(view.open.eye, Vec3::new(0.0, 0.45, 0.75));
+    assert_eq!(bench.scene.camera_background, Some([0.0; 3]));
+    let settings = Settings {
+        samples: spp.parse().unwrap(),
+        smith: bench.smith,
+        capture_geometry: true,
+        ..Default::default()
+    };
+    let (device, queue) = gpu();
+    let dir = output();
+    let first = render(&device, &queue, &bench.scene, view, &settings).unwrap();
+    let mut reports = Vec::new();
+    for _ in 0..8 {
+        let replay = render(&device, &queue, &bench.scene, view, &settings).unwrap();
+        reports.push(replay_report(&first, &replay));
+    }
+    let identical = reports.iter().all(|r| r["bit_identical"] == true);
+    save(
+        &dir,
+        "s2g-frame-zero",
+        &first,
+        serde_json::json!({"scene_sha256":bench.sha256,"pose":name,
+            "camera_background":bench.scene.camera_background,"accepted_for_scoring":identical,
+            "seed":settings.seed,"samples_per_dispatch":settings.samples_per_dispatch,
+            "max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,
+            "frame":{"open":{"eye":view.open.eye.to_array(),"target":view.open.target.to_array()},
+                "close":{"eye":view.close.eye.to_array(),"target":view.close.target.to_array()},
+                "fov_y":view.fov_y,"width":view.width,"height":view.height}}),
+    );
+    std::fs::write(
+        dir.join("determinism.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"scene_sha256":bench.sha256,"pose":name,
+            "comparisons":reports,"bit_identical":identical,
+            "scope":"eight independent AS and pipeline rebuilds; full transport, actual halves and all geometry bytes"})).unwrap(),
+    ).unwrap();
+    assert!(
+        identical,
+        "S2G frame-zero independent rebuild replay differs"
+    );
+}
+
 #[test]
 #[ignore = "GPU; diagnostic replay with fixed AS/pipeline; RENDERLAB_M7_BENCHES"]
 fn gpu_reference_replay_loaded() {

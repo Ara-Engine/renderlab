@@ -38,7 +38,7 @@ private scan payloads and captures stay out of Git.
 
 ## Validation retained so far
 
-- Library tests: **125 passed, 119 ignored**, exit 0. The new CPU checks cover cube-CDF support
+- Library tests: **125 passed, 120 ignored**, exit 0. The new CPU checks cover cube-CDF support
   and RGB-correlated uncertainty; Naga validates the complete measurement shader.
 - GPU analytic run `reference/analytic-final`: all pass, zero invalid pixels. Delta-sun and
   constant-sky Lambert floors are 1.000000. The prepared-cube floor is
@@ -197,16 +197,22 @@ so the device-loss cause is not diagnosed.
 
 The retained production plan uses sixteen independent 4,096-spp processes with **one sample
 per dispatch**, the quarry's existing granularity, for the same total 65,536 spp at 1080p.
-Five batches have completed at this checkpoint, including the previously failing seed. Actual
+All **sixteen batches completed**, including the previously failing seed, with exit 0 and
+zero invalid pixels. Combined median/p95/p99 relative split-half noise is
+**1.329% / 3.966% / 5.308%**, about four times lower than the 4,096-spp batch. Minimum
+available RAM across the batch processes was **13.891 GiB**; their wall times sum to
+479.10 seconds, excluding shared-slot waits. Actual
 even/odd halves are sample-weighted in f64 and rounded once to f32; duplicate seeds and scene
-or settings mismatches fail closed. Final convergence evidence is pending, and the sample
-budget is not reduced. The first interior PNG was inspected and shows the expected indirect
-red cast with no direct sun patch.
+or settings mismatches fail closed. The final reference and first batch PNGs were inspected:
+the expected indirect red cast remains, with no direct sun patch and substantially lower noise.
+This is convergence evidence, not a complete-image quality pass for a renderer. The retained
+archive is `reference/s4-64k-d1/combined/S4-interior.npz`, SHA256
+`be7077e465398b568df56ca67b204d8802f619358e5727a6287f306f4dc8090a`.
 
-The test harness adds explicit seed/dispatch controls only. Its current executable is
+The S4 production harness adds explicit seed/dispatch controls only. Its executable is
 `40bbee1cc887aaee35c8ed368b781f4080f4a15962cbb670a9916ba0c087daf1`; the reference, input
 and shader source hashes are unchanged from the qualified `bf169ef7` binary retained for
-TR0. Library tests still pass **125/125**, with 119 ignored GPU tests. The two CPU scorer tests
+TR0. That build passed **125/125**, with 119 ignored GPU tests. The two CPU scorer tests
 verify zero error for matching physical images, correlated-noise cancellation on held cameras,
 exposure/background rejection and independent-half combination with duplicate-seed rejection.
 
@@ -250,6 +256,34 @@ repeats. Build recipes retain binary and source hashes. Final independent checks
 binary pass: textured X3 at 32,768 spp retains the figures above; finite-disk X2 at 16,384 spp
 has **+0.005112%** bias (1.212 sigma), **0.4026%** L1 against Mitsuba seed-to-seed **0.7731%**,
 block z RMS **0.8220**, and **0.0833%** of 3,600 blocks beyond 4 sigma. Both sheets were inspected.
+
+**S2G frame-zero regression and constant-colour fix.** TR0's later camera-0.25px frame-zero fixture
+fails strict same-seed replay on BF169: 2,072 mean pixels differ by at most two ULPs;
+all 80-byte geometry records, accepted counts and D/V records remain identical, with zero
+invalid pixels. Its raw data is unaccepted. A new loaded-resource run also fails with AS and
+pipeline held fixed, ruling out AS rebuild as the sole cause. The earlier eight-replay f64
+qualification remains specific to that pose. An explicit frame-zero eight-independent-rebuild
+regression is now added. Exit 101 was the intended strict replay assertion, not invalid radiance.
+
+The old weighted colour interpolation can turn constant white into 0.99999994: its separately
+rounded barycentric weights do not always sum to exactly one. Replacing only that expression
+with `c0 + (c1-c0)*u + (c2-c0)*v` preserves a constant attribute exactly, without quantization,
+model changes or a tolerance relaxation. The exact failed fixture now passes **8/8 independent
+AS/pipeline rebuilds**, including both HDR halves and every geometry byte. This is a causal
+shader-level control; the test did not record all secondary hits, so it does not identify which
+hardware-selected hit first exposed the rounding difference or guarantee every future pose.
+
+The first candidate run was interrupted by a foreign-process guard, with no shader verdict.
+G1 identified that process as a CPU library-suite invocation, not a competing GPU run. The
+exclusive retry passed and released at **18:45:53.245958Z**, within its 90-second reservation.
+Binary SHA256 is `d8bd9a8e1e1c7b5d39ee04d70c01ed4ee87bb654463db2b40daec1a96f35f139`.
+Its library checks pass **125 tests, 120 ignored**, and workspace fmt is clean. The reference
+model is unchanged; older archives retain their original shader identity and are not rewritten.
+`reference/s2g-f0-affine-colour-retry/s2g-frame-zero.npz` retains the qualified 1,024-spp
+state, with all original source identities, D/V/HDR halves, populations and the eight-replay
+report hash. Its full PNG was inspected; noise median/p95/p99 is **0.539% / 3.381% / 7.135%**.
+TR0 can reuse it and resume its other states with strict per-state acceptance. The older BF169
+f64 archive remains a separate, pose-specific qualification; no old archive is silently changed.
 
 TR0's first qualified S2G score against an older reflection/GI-off native capture shows a
 large highlight deficit. On its fixed top-5%-full-reference masks, physical D/full is
