@@ -86,7 +86,11 @@ fn random_chain(w: u32, h: u32, seed: u64) -> Vec<(u32, u32, Vec<u8>)> {
     let (mut w, mut h) = (w, h);
     let mut levels = vec![];
     loop {
-        levels.push((w, h, noise(seed + levels.len() as u64, (w * h * 4) as usize)));
+        levels.push((
+            w,
+            h,
+            noise(seed + levels.len() as u64, (w * h * 4) as usize),
+        ));
         if w == 1 && h == 1 {
             return levels;
         }
@@ -313,9 +317,10 @@ fn gpu_residency_probe() {
             .map(|t| t.create_view(&Default::default()))
             .collect();
         let probe16_view = probe16.create_view(&Default::default());
-        let probe32_view = probe32
-            .as_ref()
-            .map_or_else(|| probe16_view.clone(), |t| t.create_view(&Default::default()));
+        let probe32_view = probe32.as_ref().map_or_else(
+            || probe16_view.clone(),
+            |t| t.create_view(&Default::default()),
+        );
         for (name, mag, min, mip, anisotropy) in samplers {
             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: wgpu::AddressMode::Repeat,
@@ -390,7 +395,11 @@ fn gpu_residency_probe() {
                 .get_mapped_range(..)
                 .unwrap()
                 .chunks_exact(16)
-                .map(|c| std::array::from_fn(|k| u32::from_le_bytes(c[k * 4..k * 4 + 4].try_into().unwrap())))
+                .map(|c| {
+                    std::array::from_fn(|k| {
+                        u32::from_le_bytes(c[k * 4..k * 4 + 4].try_into().unwrap())
+                    })
+                })
                 .collect();
             read.unmap();
             report.push(analyse(name, w, h, &rows, &inputs, filterable32));
@@ -454,7 +463,8 @@ fn analyse(
         let dy = (b[0] * w as f32).hypot(b[1] * h as f32);
         dx.max(dy) / dx.min(dy).max(1e-30)
     };
-    let violated = |level: u32, mask: u32| (1..=level.min(max_tail)).any(|t| mask & (1 << (t - 1)) == 0);
+    let violated =
+        |level: u32, mask: u32| (1..=level.min(max_tail)).any(|t| mask & (1 << (t - 1)) == 0);
     for (probe, column) in [("r16f", 0usize), ("r32f", 1), ("full", 3)] {
         for d in [30, 12] {
             let (mut violations, mut over, mut histogram) = (0u64, 0u64, [0u64; 16]);
@@ -482,11 +492,303 @@ fn analyse(
             }
         }
     }
+    // Per finest level L (full-extent probe) and tail t: samples whose t-tail differs.
+    // Locates which dropped ranges anisotropic filtering is sensitive to.
+    let mut by_level_tail = vec![[0u64; 7]; 16];
+    for row in rows {
+        let counts = &mut by_level_tail[decode(f32::from_bits(row[3]), 12) as usize];
+        counts[0] += 1;
+        for (t, count) in counts.iter_mut().enumerate().skip(1) {
+            *count += u64::from(row[2] & (1 << (t - 1)) == 0);
+        }
+    }
+    out["samples_then_tail_differences_by_level"] = by_level_tail
+        .iter()
+        .map(|r| r.to_vec())
+        .collect::<Vec<_>>()
+        .into();
     // Small probe against the full-extent probe: decoded level agreement.
     let disagree = rows
         .iter()
-        .filter(|r| decode(f32::from_bits(r[0]), 12) != decode(f32::from_bits(r[3]), 12).min(max_tail))
+        .filter(|r| {
+            decode(f32::from_bits(r[0]), 12) != decode(f32::from_bits(r[3]), 12).min(max_tail)
+        })
         .count();
     out["small_vs_full_probe_disagreements"] = disagree.into();
     out
+}
+
+/// A device and renderer for one bench path: "nort" (visibility buffer + Virtual on a
+/// device without RT), "rt" (traced + Interactive) or "traced-virtual".
+fn residency_renderer(path: &str) -> Renderer {
+    if path != "nort" {
+        let mut r = renderer_with_features(
+            true,
+            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+        );
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        r.set_soft_shadows(if path == "rt" {
+            SoftShadows::Interactive
+        } else {
+            SoftShadows::Virtual
+        });
+        return r;
+    }
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::debugging().with_env(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: crate::RECEIVER_FEATURES
+            | crate::VISIBILITY_FEATURES
+            | crate::VISIBILITY_RASTER_FEATURES
+            | crate::VIRTUAL_FEATURES
+            | wgpu::Features::TIMESTAMP_QUERY,
+        required_limits: crate::visibility_limits(wgpu::Limits::default()),
+        memory_hints: super::test_memory_hints(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let r = Renderer::new_with_options(
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        Limits {
+            max_mesh_bytes: 134217728,
+            max_texture_bytes: 134217728,
+            ..Default::default()
+        },
+        RendererOptions {
+            samples: SampleCount::One,
+            anisotropy_clamp: 16,
+        },
+        SOURCE,
+    )
+    .unwrap();
+    assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
+    r
+}
+
+/// A two-triangle quad with uv (0,0), (1,0), (1,1), (0,1) at its corners.
+fn uv_quad(r: &mut Renderer, corners: [[f32; 3]; 4]) -> (Mesh, Instances) {
+    let [a, b, c, _] = corners.map(Vec3::from_array);
+    let normal = (c - a).cross(b - a).normalize().to_array();
+    let uv = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]];
+    let vertices: Vec<_> = corners
+        .iter()
+        .zip(uv)
+        .map(|(&position, uv)| Vertex {
+            position,
+            normal,
+            uv,
+            color: [1.; 4],
+        })
+        .collect();
+    let mesh = r
+        .try_upload_mesh(&MeshData {
+            vertices: &vertices,
+            indices: &[0, 2, 1, 0, 3, 2],
+        })
+        .unwrap()
+        .unwrap();
+    r.test_drain("M3 quad");
+    let instances = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
+    r.test_drain("M3 quad placement");
+    (mesh, instances)
+}
+
+fn streamed_texture(r: &mut Renderer, size: u32, seed: u64) -> Texture {
+    let mips = random_chain(size, size, seed)
+        .into_iter()
+        .map(|(width, height, rgba8)| asset::Mip {
+            width,
+            height,
+            rgba8,
+        })
+        .collect();
+    let data = Arc::new(asset::Texture {
+        role: asset::TextureRole::BaseColorSrgb,
+        mips,
+    });
+    let texture = loop {
+        if let Some(t) = r.try_upload_streamed_texture(data.clone()).unwrap() {
+            break t;
+        }
+        r.collect().unwrap();
+    };
+    r.test_drain("M3 streamed texture");
+    texture
+}
+
+/// One captured frame of a camera-cut sequence: label, HDR bytes, presented bytes and
+/// the two textures' resident tops when the frame was submitted.
+type CutFrame = (String, Vec<u8>, Vec<u8>, [u32; 2]);
+
+/// The camera-cut sequence on one path and residency mode. A ground quad samples an
+/// isotropic 1024^2 texture (trilinear, nearest mip), a wall a 512^2 one through the
+/// renderer 16x anisotropic sampler. Frames: 8 at a mid view; HOLD+8 looking away, so
+/// both textures drop to their tails; then a cut to a close view that needs the ground
+/// level 0 and finer wall levels, and 6 frames of small motion there.
+fn cut_run(path: &str, mode: TextureResidency) -> (Vec<CutFrame>, ResidencyStats) {
+    let mut r = residency_renderer(path);
+    r.set_texture_residency(mode);
+    light(&mut r);
+    let ground = streamed_texture(&mut r, 1024, 7);
+    let wall = streamed_texture(&mut r, 512, 9);
+    let material = |r: &mut Renderer, texture: &Texture, sampler: asset::Sampler| loop {
+        if let Some(m) = r
+            .try_create_material(&MaterialDescriptor {
+                base_color_texture: Some(TextureBinding { texture, sampler }),
+                double_sided: true,
+                ..Default::default()
+            })
+            .unwrap()
+        {
+            r.test_drain("M3 material");
+            break m;
+        }
+        r.collect().unwrap();
+    };
+    let isotropic = asset::Sampler {
+        mipmap: asset::MipmapFilter::Nearest,
+        ..Default::default()
+    };
+    let ground_material = material(&mut r, &ground, isotropic);
+    let wall_material = material(&mut r, &wall, asset::Sampler::default());
+    let (ground_mesh, mut ground_instances) = uv_quad(
+        &mut r,
+        [[-2., 0., -2.], [2., 0., -2.], [2., 0., 2.], [-2., 0., 2.]],
+    );
+    let (wall_mesh, mut wall_instances) = uv_quad(
+        &mut r,
+        [
+            [-1., 0., -1.5],
+            [1., 0., -1.5],
+            [1., 1.5, -1.5],
+            [-1., 1.5, -1.5],
+        ],
+    );
+    let color = target(&r, 640, 360);
+    let camera = |eye: [f32; 3], at: [f32; 3]| {
+        Camera::look_at(
+            Vec3::from_array(eye),
+            Vec3::from_array(at),
+            Vec3::Y,
+            45f32.to_radians(),
+            0.01,
+            // The scene spans a few metres; Virtual clipmap levels grow with the far plane.
+            12.,
+        )
+        .unwrap()
+    };
+    let mid = camera([0., 2.5, 5.], [0., 0., 0.]);
+    let away = camera([0., 1., 3.], [0., 1., 10.]);
+    let mut frames = vec![];
+    let mut frame = |r: &mut Renderer, camera: &Camera, label: Option<String>| {
+        let tops = [r.resident_top(&ground), r.resident_top(&wall)];
+        render(
+            r,
+            &color,
+            camera,
+            &mut [
+                Draw::new(&ground_mesh, &mut ground_instances).with_material(&ground_material),
+                Draw::new(&wall_mesh, &mut wall_instances).with_material(&wall_material),
+            ],
+        );
+        if let Some(label) = label {
+            r.test_drain("M3 cut capture");
+            let hdr = capture(r);
+            let presented = r.test_capture_color(&color);
+            frames.push((label, hdr, presented, tops));
+        }
+    };
+    for i in 0..8 {
+        frame(&mut r, &mid, (i == 7).then(|| "mid".to_owned()));
+    }
+    let hold = crate::renderer::texture_residency::HOLD_FRAMES as usize;
+    for i in 0..hold + 8 {
+        frame(&mut r, &away, (i == hold + 7).then(|| "away".to_owned()));
+    }
+    for i in 0..7 {
+        let x = 0.3 + 0.002 * i as f32;
+        // At most 2.6 mm pixels on 3.9 mm ground texels: level 0. Virtual shadows add a
+        // clipmap level per halving of the nearest bound (4 fit the default binding
+        // limit), so the eye stays 1 m up.
+        let close = camera([x, 1.0, 0.5], [x, 0., -0.8]);
+        frame(&mut r, &close, Some(format!("close{i}")));
+    }
+    r.test_drain("M3 cut tail");
+    let after = [r.resident_top(&ground), r.resident_top(&wall)];
+    frames.push(("after".into(), vec![], vec![], after));
+    (frames, r.residency_stats())
+}
+
+/// M3 acceptance: a camera cut to a view needing top mips that were not resident shows
+/// the same first frame (HDR and presented bytes) as full residency, on every bench path.
+#[test]
+#[ignore = "M3 owned GPU lease: camera cut onto non-resident top mips, three paths"]
+fn gpu_residency_camera_cut() {
+    let out = PathBuf::from(
+        std::env::var("RENDERLAB_RESIDENCY_OUT")
+            .unwrap_or_else(|_| "E:/renderlab-work/m3-texture/cut".into()),
+    );
+    fs::create_dir_all(&out).unwrap();
+    let mut report = vec![];
+    let mut failures = vec![];
+    for path in ["nort", "rt", "traced-virtual"] {
+        let (full, full_stats) = cut_run(path, TextureResidency::Full);
+        assert_eq!(
+            full_stats.verified_frames, 0,
+            "{path}: full residency never waits"
+        );
+        for mode in [TextureResidency::Exact, TextureResidency::Feedback] {
+            let (streamed, stats) = cut_run(path, mode);
+            let tops =
+                |frames: &[CutFrame], label: &str| frames.iter().find(|f| f.0 == label).unwrap().3;
+            // Both textures were down to their tails when the first close frame was
+            // submitted; verification serviced it before it was returned.
+            assert_eq!(tops(&streamed, "away"), [6, 6], "{path} {mode:?}");
+            assert_eq!(tops(&streamed, "close0"), [6, 6], "{path} {mode:?}");
+            // The ground needs its level 0; the wall at least one level more than before.
+            let after = tops(&streamed, "after");
+            assert!(after[0] == 0 && after[1] < 6, "{path} {mode:?}: {after:?}");
+            assert_eq!(tops(&full, "close0"), [0, 0], "{path}");
+            assert!(stats.reshaded_frames >= 2, "{path} {mode:?}: {stats:?}");
+            assert_eq!(stats.misses, 0, "{path} {mode:?}: {stats:?}");
+            let frames: Vec<_> = streamed
+                .iter()
+                .zip(&full)
+                .map(|(a, b)| {
+                    assert_eq!(a.0, b.0);
+                    if a.1 != b.1 || a.2 != b.2 {
+                        failures.push(format!("{path} {mode:?} {}", a.0));
+                    }
+                    serde_json::json!({
+                        "frame": a.0, "hdr_identical": a.1 == b.1, "presented_identical": a.2 == b.2,
+                        "streamed_tops": a.3, "full_tops": b.3,
+                    })
+                })
+                .collect();
+            let json = |s: ResidencyStats| {
+                serde_json::json!({
+                    "resident_bytes": s.resident_bytes, "full_bytes": s.full_bytes, "misses": s.misses,
+                    "missed_frames": s.missed_frames, "verified_frames": s.verified_frames,
+                    "reshaded_frames": s.reshaded_frames, "serviced_misses": s.serviced_misses,
+                    "transitions": s.transitions, "uploaded_bytes": s.uploaded_bytes,
+                })
+            };
+            report.push(serde_json::json!({
+                "path": path, "mode": format!("{mode:?}"), "frames": frames,
+                "streamed": json(stats), "full": json(full_stats),
+            }));
+        }
+    }
+    fs::write(
+        out.join("camera-cut.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    assert!(failures.is_empty(), "streamed frames differ: {failures:?}");
 }

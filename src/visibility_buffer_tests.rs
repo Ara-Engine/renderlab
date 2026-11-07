@@ -41,7 +41,7 @@ fn no_rt_renderer() -> Renderer {
         },
         RendererOptions {
             samples: SampleCount::One,
-            anisotropy_clamp: 16,
+            anisotropy_clamp: test_anisotropy(),
         },
         SOURCE,
     )
@@ -96,7 +96,8 @@ fn light(r: &mut Renderer) {
 fn timing(r: &mut Renderer, label: &str, rows: &mut Vec<serde_json::Value>) {
     for t in r.poll().unwrap().gpu {
         let ms = |v: Duration| v.as_secs_f64() * 1000.;
-        rows.push(serde_json::json!({"label":label,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms)}));
+        // shade_ms: traced frames time their deferred shading pass with the mesh-pass stamps.
+        rows.push(serde_json::json!({"label":label,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms),"shade_ms":ms(t.mesh_pass)}));
     }
 }
 /// N8h: the renderer's GPU memory by owner (ledger), wgpu's HAL counters and the
@@ -130,6 +131,7 @@ fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
             "blas_builds": h.blas_builds, "blas_compactions": h.blas_compactions,
             "pending_builds": h.pending_builds, "retained_generations": h.retained_generations,
         })),
+        "residency": residency_report(r),
         "ledger_live_bytes": {
             "environment": o.environment_bytes.live, "texture": o.texture_bytes.live,
             "material": o.material_bytes.live, "target": o.target_bytes.live,
@@ -148,9 +150,22 @@ fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
     )
     .unwrap();
 }
+/// M3: streamed-texture residency counters, and per texture its resident top and the
+/// finest surveyed level (when `survey` probes anisotropic samples).
+fn residency_report(r: &Renderer) -> serde_json::Value {
+    let s = r.residency_stats();
+    serde_json::json!({
+        "mode": format!("{:?}", r.texture_residency()), "survey": r.residency.survey,
+        "resident_bytes": s.resident_bytes, "full_bytes": s.full_bytes, "misses": s.misses,
+        "missed_frames": s.missed_frames, "verified_frames": s.verified_frames,
+        "reshaded_frames": s.reshaded_frames, "serviced_misses": s.serviced_misses,
+        "transitions": s.transitions, "uploaded_bytes": s.uploaded_bytes,
+        "textures": r.test_residency_entries(),
+    })
+}
 /// N8h: the triangles with walk records under this configuration.
 fn record_counters(r: &mut Renderer, label: &str) -> serde_json::Value {
-    serde_json::json!({"label": label, "recorded": r.test_walk_records()})
+    serde_json::json!({"label": label, "recorded": r.test_walk_records(), "residency": residency_report(r)})
 }
 fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
     r.test_drain("N1b snapshot");
@@ -738,6 +753,20 @@ fn gpu_visibility_quarry() {
             crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
         )
     };
+    // M3: `residency` full/exact/feedback (default exact) before the uploads, and
+    // `survey` to probe anisotropic samples for the sparse-residency projection.
+    let mode = m["residency"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| std::env::var("RENDERLAB_RESIDENCY").ok());
+    r.set_texture_residency(match mode.as_deref() {
+        Some("full") => TextureResidency::Full,
+        Some("feedback") => TextureResidency::Feedback,
+        _ => TextureResidency::Exact,
+    });
+    r.residency.survey = m["survey"].as_bool() == Some(true)
+        || std::env::var_os("RENDERLAB_RESIDENCY_SURVEY").is_some();
+    let first_hashes = m["first_hashes"].as_bool() == Some(true);
     let (mut asset, cameras, load) = load_quarry_lod(&m, &mut r);
     r.test_drain("M1 post-upload memory");
     memory_report(&r, &out, "uploaded");
@@ -812,6 +841,16 @@ fn gpu_visibility_quarry() {
     let mut stages = vec![];
     let mut changed = vec![];
     let mut rows = vec![];
+    // M3: wall-clock totals of the turn, camera and caster phases, frames through their
+    // tail drain: throughput, which per-frame GPU spans cannot show.
+    let mut walls = vec![];
+    let wall = |walls: &mut Vec<serde_json::Value>,
+                label: String,
+                frames: usize,
+                start: Instant| {
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        walls.push(serde_json::json!({"label": label, "frames": frames, "wall_ms": ms, "per_frame_ms": ms / frames.max(1) as f64}));
+    };
     // The 64-seed Exact reference needs traced fresh visibility (an RT device).
     let seeded = if !no_rt && m["reference"].as_bool() != Some(false) {
         let module = seeded_module(&r);
@@ -918,6 +957,19 @@ fn gpu_visibility_quarry() {
                     r.test_drain("N1c first changed frame");
                     first = Some(hit_record(&r));
                 }
+                // M3: the first frame after a pose or configuration change, as returned.
+                if i == 0 && first_hashes {
+                    r.test_drain("M3 first frame");
+                    use sha2::Digest;
+                    let hdr = capture(&mut r);
+                    let hits = hit_record(&r);
+                    changed.push(serde_json::json!({
+                        "label": label,
+                        "first_hdr_sha256": format!("{:x}", sha2::Sha256::digest(&hdr)),
+                        "first_hit_sha256": format!("{:x}", sha2::Sha256::digest(&hits)),
+                        "residency": residency_report(&r),
+                    }));
+                }
                 if warm == 4 || i + 1 == warm {
                     r.test_drain("N1c quarry frame");
                 }
@@ -936,6 +988,7 @@ fn gpu_visibility_quarry() {
                 let Light::Directional { travel, lux } = lighting.lights[0] else {
                     panic!("quarry sun");
                 };
+                let start = Instant::now();
                 for i in 0..turn_frames {
                     let mut lit = lighting.clone();
                     lit.lights[0] = Light::Directional {
@@ -953,6 +1006,7 @@ fn gpu_visibility_quarry() {
                     timing(&mut r, &format!("{label}-turn"), &mut rows);
                 }
                 r.test_drain("N8c quarry turning tail");
+                wall(&mut walls, format!("{label}-turn"), turn_frames, start);
                 timing(&mut r, &format!("{label}-turn"), &mut rows);
                 r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
                 render(
@@ -991,6 +1045,7 @@ fn gpu_visibility_quarry() {
                 // N8g: `move_wrap` > 0 walks the camera back and forth over that many steps, so
                 // long traced runs stay near the pose (every frame still moves).
                 let wrap = m["move_wrap"].as_u64().unwrap_or(0) as u32;
+                let start = Instant::now();
                 for i in 1..=move_frames {
                     let at = if wrap > 0 {
                         let k = i % (2 * wrap);
@@ -1017,9 +1072,16 @@ fn gpu_visibility_quarry() {
                     timing(&mut r, &format!("{label}-move"), &mut rows);
                 }
                 r.test_drain("N8f camera motion tail");
+                wall(
+                    &mut walls,
+                    format!("{label}-move"),
+                    move_frames as usize,
+                    start,
+                );
                 timing(&mut r, &format!("{label}-move"), &mut rows);
                 let batch = m["move_batch"].as_u64().unwrap_or(0) as usize;
                 let base = asset.model(batch, 0);
+                let start = Instant::now();
                 for i in 1..=move_frames {
                     let step = Mat4::from_translation(Vec3::X * (0.001 * i as f32));
                     asset.set_model(batch, 0, step * base).unwrap();
@@ -1032,6 +1094,12 @@ fn gpu_visibility_quarry() {
                     timing(&mut r, &format!("{label}-caster"), &mut rows);
                 }
                 r.test_drain("N8f caster motion tail");
+                wall(
+                    &mut walls,
+                    format!("{label}-caster"),
+                    move_frames as usize,
+                    start,
+                );
                 timing(&mut r, &format!("{label}-caster"), &mut rows);
                 eprintln!("N8f caster motion {label}: {:?}", r.virtual_shadow_stats());
                 // Kept counts must equal a full lookup of the final placement (N8f identity).
@@ -1089,6 +1157,11 @@ fn gpu_visibility_quarry() {
     fs::write(
         out.join("timing.json"),
         serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        out.join("wall.json"),
+        serde_json::to_vec_pretty(&walls).unwrap(),
     )
     .unwrap();
 }

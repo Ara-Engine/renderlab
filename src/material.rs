@@ -47,6 +47,16 @@ pub struct Texture(pub(crate) Arc<TextureInner>);
 pub(crate) struct TextureInner {
     pub renderer: Arc<()>,
     pub role: TextureRole,
+    pub storage: TextureStorage,
+}
+pub(crate) enum TextureStorage {
+    /// Every level, immutable after upload.
+    Full(Box<FullTexture>),
+    /// Resident levels live in the renderer's residency table under this id
+    /// (`texture_residency.rs`); the table drops them with the last handle.
+    Streamed(u64),
+}
+pub(crate) struct FullTexture {
     pub _texture: Owned<wgpu::Texture>,
     pub view: Owned<wgpu::TextureView>,
     pub _allocation: Allocation,
@@ -97,7 +107,15 @@ pub struct Material {
     pub(crate) normal_mapped: bool,
     pub(crate) double_sided: bool,
     pub(crate) thin: bool,
+    /// Raster group 2. Streamed textures bind the renderer's 1x1 defaults here, so this
+    /// group never retains their levels; passes that sample build a group of the current
+    /// levels instead (`Renderer::sampling_group`).
     pub(crate) bind: Owned<wgpu::BindGroup>,
+    /// Whether any of its textures streams (`texture_residency.rs`).
+    pub(crate) streamed: bool,
+    /// Per texture role, the levels a streamed texture keeps above the finest level its
+    /// samples touch: 0, or `ANISOTROPIC_MARGIN` for anisotropic samplers.
+    pub(crate) margins: [u32; 3],
     pub(crate) _uniform: Owned<wgpu::Buffer>,
     pub(crate) _samplers: [Owned<wgpu::Sampler>; 3],
     pub(crate) _textures: [Texture; 3],

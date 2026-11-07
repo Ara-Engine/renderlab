@@ -40,6 +40,7 @@ pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{LodPackage, LodStats, MeshLod};
+pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats, WalkRecords};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;

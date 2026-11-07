@@ -536,7 +536,22 @@ struct Geometry {
     /// Published model then normal-transform bytes, in placement order.
     instances: Vec<u8>,
     arrays: Owned<wgpu::BindGroup>,
-    materials: Owned<wgpu::BindGroup>,
+    /// Group 2, rebuilt alone when a streamed texture's resident range changes, so a
+    /// residency change never replaces the tables other passes key on.
+    materials: Option<Owned<wgpu::BindGroup>>,
+    /// Per slot and role, the bound texture's identity and residency generation.
+    material_key: Vec<(usize, u64)>,
+}
+/// Streamed-texture state of traced shading (`texture_residency.rs`): per slot and role
+/// the residency word, then the frame's request and miss counters; the shared level
+/// probe; and which residency id each slot word describes.
+pub(super) struct ResidencyGpu {
+    pub buffer: Buffer,
+    _probe: Owned<wgpu::Texture>,
+    probe: Owned<wgpu::TextureView>,
+    _probe_allocation: Allocation,
+    words: Vec<u32>,
+    pub ids: Vec<Option<u64>>,
 }
 pub(super) struct Targets {
     /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Traced frames write
@@ -651,6 +666,8 @@ pub(super) struct PrimaryState {
     film_layouts: FilmLayouts,
     /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
     pub film: Option<FilmState>,
+    /// Created by the first traced frame.
+    pub residency: Option<ResidencyGpu>,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -863,6 +880,13 @@ impl PrimaryState {
                 sampler(16),
                 // Each draw's program parameter block; read only by programs declaring one.
                 per_draw(read(17, crate::program::PARAMETER_BYTES as u64)),
+                // Texture residency words, requests and misses; the shared level probe.
+                buffer(
+                    18,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    (texture_residency::WORDS * 4) as u64,
+                ),
+                texture(19, filtered),
             ],
         );
         let layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
@@ -948,6 +972,7 @@ impl PrimaryState {
             geometry_generation: 0,
             bindings_generation: 0,
             film: None,
+            residency: None,
             retired: vec![],
         }
     }
@@ -1382,7 +1407,6 @@ impl Renderer {
             }
             let state = self.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
-            let slots = TRACED_DRAWS as usize;
             let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);
             let indices = padded(draws.iter().map(|d| &**d.mesh.index), absent);
             let tangents = padded(
@@ -1421,38 +1445,6 @@ impl Renderer {
                     (5, table.value.as_entire_binding()),
                 ],
             );
-            let used: Vec<&Material> = draws
-                .iter()
-                .map(|d| d.material.unwrap_or(default))
-                .chain(std::iter::repeat(default))
-                .take(slots)
-                .collect();
-            let factors: Vec<_> = used
-                .iter()
-                .map(|m| m._uniform.as_entire_buffer_binding())
-                .collect();
-            let views: [Vec<&wgpu::TextureView>; 3] =
-                std::array::from_fn(|i| used.iter().map(|m| &*m._textures[i].0.view).collect());
-            let samplers: [Vec<&wgpu::Sampler>; 3] =
-                std::array::from_fn(|i| used.iter().map(|m| &*m._samplers[i]).collect());
-            let parameters: Vec<_> = used
-                .iter()
-                .map(|m| m.parameters.buffer.as_entire_buffer_binding())
-                .collect();
-            let materials = bind(
-                "primary draw materials",
-                &state.material_bindings,
-                &[
-                    (10, R::BufferArray(&factors)),
-                    (11, R::TextureViewArray(&views[0])),
-                    (12, R::SamplerArray(&samplers[0])),
-                    (13, R::TextureViewArray(&views[1])),
-                    (14, R::SamplerArray(&samplers[1])),
-                    (15, R::TextureViewArray(&views[2])),
-                    (16, R::SamplerArray(&samplers[2])),
-                    (17, R::BufferArray(&parameters)),
-                ],
-            );
             let next = Geometry {
                 keys,
                 _placements: table,
@@ -1460,7 +1452,8 @@ impl Renderer {
                 normals,
                 instances: vec![],
                 arrays,
-                materials,
+                materials: None,
+                material_key: vec![],
             };
             let state = self.primary.as_mut().unwrap();
             state.geometry_generation += 1;
@@ -1494,6 +1487,7 @@ impl Renderer {
             }
             g.instances = instances;
         }
+        self.prepare_primary_materials(draws, uploads);
         // Only traced Interactive visibility dispatches deferred edge repair. Other
         // modes bind ABI-sized placeholders; switching back restores full capacity.
         let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
@@ -1968,6 +1962,133 @@ impl Renderer {
         );
     }
 
+    /// Group 2 of traced shading: every slot's material factors, current texture levels,
+    /// samplers and parameters, plus the residency words the sampling helpers decode.
+    /// Rebuilt only when a bound texture or its resident range changes.
+    pub(super) fn prepare_primary_materials(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        uploads: &mut UploadBytes,
+    ) {
+        use crate::material::TextureStorage;
+        use texture_residency::{SLOTS, WORDS};
+        if self.primary.as_ref().unwrap().residency.is_none() {
+            let buffer = Buffer::new(
+                self,
+                "texture residency words and requests",
+                (WORDS * 4) as u64,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            );
+            let (probe, view, allocation) = self.level_probe();
+            self.primary.as_mut().unwrap().residency = Some(ResidencyGpu {
+                buffer,
+                _probe: probe,
+                probe: view,
+                _probe_allocation: allocation,
+                // No word is ever all ones, so the first words are always written.
+                words: vec![u32::MAX; SLOTS],
+                ids: vec![None; SLOTS],
+            });
+        }
+        let default = self.default_material.as_ref().unwrap();
+        let used: Vec<&Material> = draws
+            .iter()
+            .map(|d| d.material.unwrap_or(default))
+            .chain(std::iter::repeat(default))
+            .take(TRACED_DRAWS as usize)
+            .collect();
+        let mut key = Vec::with_capacity(SLOTS);
+        let mut words = Vec::with_capacity(SLOTS);
+        let mut ids = Vec::with_capacity(SLOTS);
+        let survey = self.residency.survey;
+        for m in &used {
+            for (t, &margin) in m._textures.iter().zip(&m.margins) {
+                match t.0.storage {
+                    TextureStorage::Full(_) => {
+                        key.push((Arc::as_ptr(&t.0) as usize, 0));
+                        words.push(0);
+                        ids.push(None);
+                    }
+                    TextureStorage::Streamed(id) => {
+                        let e = self.residency.entry(id);
+                        key.push((Arc::as_ptr(&t.0) as usize, e.generation));
+                        words.push(e.word(margin, survey));
+                        ids.push(Some(id));
+                    }
+                }
+            }
+        }
+        let state = self.primary.as_ref().unwrap();
+        let residency = state.residency.as_ref().unwrap();
+        if residency.words != words {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+            self.queue.write_buffer(&residency.buffer.value, 0, &bytes);
+            uploads.materials += bytes.len() as u64;
+            uploads.write_calls += 1;
+        }
+        let g = state.geometry.as_ref().unwrap();
+        let materials = if g.materials.is_none() || g.material_key != key {
+            use wgpu::BindingResource as R;
+            let factors: Vec<_> = used
+                .iter()
+                .map(|m| m._uniform.as_entire_buffer_binding())
+                .collect();
+            let views: [Vec<&wgpu::TextureView>; 3] = std::array::from_fn(|i| {
+                used.iter()
+                    .map(|m| self.texture_view(&m._textures[i]))
+                    .collect()
+            });
+            let samplers: [Vec<&wgpu::Sampler>; 3] =
+                std::array::from_fn(|i| used.iter().map(|m| &*m._samplers[i]).collect());
+            let parameters: Vec<_> = used
+                .iter()
+                .map(|m| m.parameters.buffer.as_entire_buffer_binding())
+                .collect();
+            let entries = [
+                (10, R::BufferArray(&factors)),
+                (11, R::TextureViewArray(&views[0])),
+                (12, R::SamplerArray(&samplers[0])),
+                (13, R::TextureViewArray(&views[1])),
+                (14, R::SamplerArray(&samplers[1])),
+                (15, R::TextureViewArray(&views[2])),
+                (16, R::SamplerArray(&samplers[2])),
+                (17, R::BufferArray(&parameters)),
+                (18, residency.buffer.value.as_entire_binding()),
+                (19, R::TextureView(&residency.probe)),
+            ]
+            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
+            Some(self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("primary draw materials"),
+                    layout: &state.material_bindings,
+                    entries: &entries,
+                }),
+                ResourceKind::BindGroup,
+            ))
+        } else {
+            None
+        };
+        let state = self.primary.as_mut().unwrap();
+        let residency = state.residency.as_mut().unwrap();
+        residency.words = words;
+        residency.ids = ids;
+        let g = state.geometry.as_mut().unwrap();
+        if let Some(materials) = materials {
+            // Queued frames keep the group they recorded.
+            g.materials = Some(materials);
+            g.material_key = key;
+        }
+    }
+    /// Zeroes the frame's request and miss counters before its shading.
+    pub(super) fn encode_request_clear(&self, encoder: &mut wgpu::CommandEncoder) {
+        let residency = self.primary.as_ref().unwrap().residency.as_ref().unwrap();
+        encoder.clear_buffer(
+            &residency.buffer.value,
+            texture_residency::REQUEST_OFFSET,
+            Some(texture_residency::REQUEST_BYTES),
+        );
+    }
+
     /// Deferred shading of the scene region into the HDR target with the frame's program,
     /// and the clear colour everywhere else, in one dispatch.
     pub(super) fn encode_primary_shading(
@@ -2013,7 +2134,7 @@ impl Renderer {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &*g.arrays, &[]);
-        pass.set_bind_group(2, &*g.materials, &[]);
+        pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         // Rows of region shading groups, then rows of CLEAR_TILE clear blocks over the
         // image, as WGSL primary_shade_tiles decodes them.
