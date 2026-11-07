@@ -40,6 +40,30 @@ const PASS_STRIDE: u64 = 256;
 const PASS_ENTRIES: usize = 16;
 /// Per-level WGSL `VsmArgs`: the software dispatch and the hardware draw.
 const ARGS_BYTES: u64 = 32;
+/// The WGSL `VsmScratch` header (N8m): the persistent lookup's tile queue, three reserved words
+/// (the hybrid's queue keeps its spread in the first) and the tile order's bucket counts and
+/// cursors (`VSM_HEAD` words), zeroed before each persistent lookup.
+const SCRATCH_HEADER: u64 = 16 + 4 * 32;
+/// N8m: the lookup schedule's defaults, the module's `VSM_PERSIST` and `VSM_ORDER` declarations
+/// (shaders/virtual_shadow.wgsl). A module without them (a test variant file of main's lookup
+/// before N8m) launches one workgroup per tile, unordered.
+fn schedule_defaults(source: &str) -> (u32, bool) {
+    let groups = source
+        .split("override VSM_PERSIST:u32=")
+        .nth(1)
+        .and_then(|rest| rest.split('u').next()?.parse().ok())
+        .unwrap_or(0);
+    (groups, source.contains("override VSM_ORDER:bool=true;"))
+}
+/// Trace tiles (WGSL `VSM_TRACE_TILE`, 8x4 pixels) over a `size` image.
+fn trace_tiles(size: [u32; 2]) -> u64 {
+    u64::from(size[0].div_ceil(8)) * u64::from(size[1].div_ceil(4))
+}
+/// The scratch's bytes before the decision trace: the header, then per trace tile its place
+/// in the order and its recorded work.
+pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
+    SCRATCH_HEADER + 8 * trace_tiles(size)
+}
 /// Device features the page raster needs: 64-bit (height, id) max atomics. Casters are the
 /// meshes' visibility-buffer clusters, so the device must also support
 /// `visibility_buffer::supported` when meshes are uploaded.
@@ -222,6 +246,9 @@ struct Pipelines {
     record: Owned<wgpu::ComputePipeline>,
     /// The lookup with `VSM_DEBUG`, built on first use (tests only).
     debug: Option<Owned<wgpu::ComputePipeline>>,
+    /// N8m: the tile order's count and place passes, built when a persistent lookup first
+    /// orders its tiles.
+    order: Option<[Owned<wgpu::ComputePipeline>; 2]>,
     /// N8k (shaders/virtual_shadow_lookup.wgsl): per-texel planes of rasterized pages, and
     /// the map-only lookup.
     resolve: Owned<wgpu::ComputePipeline>,
@@ -339,8 +366,9 @@ struct Resources {
     area: Owned<wgpu::TextureView>,
     _level: Owned<wgpu::Texture>,
     level_view: Owned<wgpu::TextureView>,
-    /// Per-pixel decision trace (`VSM_DEBUG`), two uvec4s per pixel; 16 bytes unless
-    /// `VirtualState::debug`.
+    /// The lookup's scratch (`VsmScratch`, N8m): the header, the per-tile order and work
+    /// words (`scratch_trace_offset`), then the per-pixel decision trace (`VSM_DEBUG`), two
+    /// uvec4s per pixel, which is one placeholder uvec4 unless `VirtualState::debug`.
     debug: Owned<wgpu::Buffer>,
     debug_sized: bool,
     frame: Owned<wgpu::Buffer>,
@@ -424,10 +452,14 @@ pub(super) struct VirtualState {
     pub constants: Vec<(&'static str, f64)>,
     built: Vec<(&'static str, f64)>,
     module: Owned<wgpu::ShaderModule>,
+    /// N8m: the module's lookup schedule defaults (`schedule_defaults`).
+    lookup_defaults: (u32, bool),
     /// N8k: shaders/virtual_shadow_lookup.wgsl and the map lookup's layout (rebuilt with
     /// the screens' `VMAP_` constants).
     map_module: Owned<wgpu::ShaderModule>,
     map_layout: Owned<wgpu::PipelineLayout>,
+    /// N8m: the hybrid queue dispatch's layout (its pass is rebuilt with the `VMAP_` constants).
+    queue_layout: Owned<wgpu::PipelineLayout>,
     /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
     hybrid_module: Option<Owned<wgpu::ShaderModule>>,
 }
@@ -997,6 +1029,7 @@ impl VirtualState {
             horizon: compute("vsm_horizon", &horizon_layout, &[]),
             record,
             debug: None,
+            order: None,
             resolve,
             map,
             mip_dispatch,
@@ -1027,13 +1060,39 @@ impl VirtualState {
             constants: vec![],
             built: vec![],
             module,
+            lookup_defaults: schedule_defaults(&shader_source()),
             map_module,
             map_layout,
+            queue_layout,
             hybrid_module: None,
         }
     }
 
-    /// The last debug frame's trace buffer (`debug` must have been set for it).
+    /// A lookup override's compiled value (`built`), or `default`, the WGSL declaration's.
+    fn built_constant(&self, name: &str, default: f64) -> f64 {
+        self.built
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(default, |&(_, value)| value)
+    }
+
+    /// N8m: the lookup's persistent workgroups (WGSL `VSM_PERSIST`; 0 launches one per tile),
+    /// and whether they take tiles heaviest first (`VSM_ORDER`).
+    fn persistent_groups(&self) -> (u32, bool) {
+        let (groups, order) = self.lookup_defaults;
+        let groups = self.built_constant("VSM_PERSIST", f64::from(groups)) as u32;
+        let order = self.built_constant("VSM_ORDER", f64::from(u8::from(order))) != 0.0;
+        (groups, groups != 0 && order)
+    }
+
+    /// The lookup targets' size (tests: the scratch's trace offset).
+    #[cfg(test)]
+    pub fn size(&self) -> [u32; 2] {
+        self.resources.as_ref().map_or([0, 0], |r| r.size)
+    }
+
+    /// The last debug frame's scratch buffer (`debug` must have been set for it): the
+    /// `scratch_trace_offset` bytes, then the trace.
     #[cfg(test)]
     pub fn debug_buffer(&self) -> Option<&wgpu::Buffer> {
         self.resources
@@ -1150,11 +1209,12 @@ impl VirtualState {
         };
         let (level, level_view) = pixels("N8 receiver levels", size);
         let slots = levels as u64 * u64::from(pages * pages);
-        let debug_bytes = if self.debug {
-            u64::from(size[0]) * u64::from(size[1]) * 32
-        } else {
-            16
-        };
+        let debug_bytes = scratch_trace_offset(size)
+            + if self.debug {
+                u64::from(size[0]) * u64::from(size[1]) * 32
+            } else {
+                16
+            };
         let buffer = |label, size: u64, usage| {
             ledger.own(
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -1831,21 +1891,25 @@ impl Renderer {
             .copied()
             .partition(|(name, _)| name.starts_with(MAP_CONSTANTS));
         if rebuild {
-            state.pipelines.map = self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("vmap_lookup"),
-                        layout: Some(&state.map_layout),
-                        module: &state.map_module,
-                        entry_point: Some("vmap_lookup"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &map_constants,
-                            ..Default::default()
-                        },
-                        cache: None,
-                    }),
-                ResourceKind::ComputePipeline,
-            );
+            let map = |entry, layout: &wgpu::PipelineLayout| {
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(layout),
+                            module: &state.map_module,
+                            entry_point: Some(entry),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &map_constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
+            state.pipelines.map = map("vmap_lookup", &state.map_layout);
+            state.pipelines.queue_args = map("vmap_queue_args", &state.queue_layout);
         }
         if state.debug && state.pipelines.debug.is_none() || rebuild {
             let layout = &state.lookup_layout;
@@ -1880,6 +1944,23 @@ impl Renderer {
                 state.pipelines.queued = None;
             }
             state.pipelines.debug = debug;
+        }
+        if state.persistent_groups().1 && state.pipelines.order.is_none() {
+            let order = |entry| {
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(&state.lookup_layout),
+                            module: &state.module,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
+            state.pipelines.order = Some([order("vsm_order_count"), order("vsm_order_place")]);
         }
         // N8k hybrid: the exact lookup over the queue, with the exact lookup's constants.
         if state.settings.lookup == VirtualLookup::Hybrid && state.pipelines.queued.is_none() {
@@ -2205,8 +2286,11 @@ impl Renderer {
         let g = r.groups.as_ref().unwrap();
         let p = &state.pipelines;
         let [width, height] = r.size;
+        let (persist, order) = state.persistent_groups();
         if state.debug {
             encoder.clear_buffer(&r.debug, 0, None);
+        } else if persist != 0 {
+            encoder.clear_buffer(&r.debug, 0, Some(SCRATCH_HEADER));
         }
         if state.page_work {
             self.encode_virtual_pages(encoder, timestamps.as_ref());
@@ -2276,30 +2360,49 @@ impl Renderer {
             pass.set_pipeline(&p.map);
             pass.set_bind_group(0, &*g.map, &[]);
         } else {
-            match (&p.debug, state.debug) {
-                (Some(debug), true) => pass.set_pipeline(debug),
-                _ => pass.set_pipeline(&p.lookup),
-            }
             pass.set_bind_group(0, &*g.lookup, &[]);
             pass.set_bind_group(1, arrays, &[]);
             pass.set_bind_group(2, &*state.horizons.as_ref().unwrap().record_array, &[]);
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         // One workgroup per trace tile; a rolling frame only one tile of every block, unless
-        // it moved casters (N8f), which visits every tile for the pixels they reach.
+        // it moved casters (N8f), which visits every tile for the pixels they reach. N8m:
+        // persistent workgroups take those tiles from a queue instead, and the order passes
+        // first sort them heaviest first.
         let [a, b] = if state.schedule != 0 && !state.casters_only {
             refresh_block(state.settings.refresh)
         } else {
             [1, 1]
         };
-        pass.dispatch_workgroups(
+        let grid = [
             width.div_ceil(8).div_ceil(a),
             height.div_ceil(4).div_ceil(b),
-            1,
-        );
+        ];
+        let tiles = grid[0] * grid[1];
+        if map {
+            pass.dispatch_workgroups(grid[0], grid[1], 1);
+        } else {
+            // Casters-only frames keep the grid's order (vsm_lookup).
+            if let (true, Some([count, place])) = (order && !state.casters_only, &p.order) {
+                for pipeline in [count, place] {
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(tiles.div_ceil(256), 1, 1);
+                }
+            }
+            match (&p.debug, state.debug) {
+                (Some(debug), true) => pass.set_pipeline(debug),
+                _ => pass.set_pipeline(&p.lookup),
+            }
+            if persist != 0 {
+                pass.dispatch_workgroups(persist.min(tiles), 1, 1);
+            } else {
+                pass.dispatch_workgroups(grid[0], grid[1], 1);
+            }
+        }
         drop(pass);
         if hybrid {
-            // N8k: the exact walk over the queued receivers, 32 to a workgroup.
+            // N8k: the exact walk over the queued receivers, 32 lanes to a workgroup (N8m: a
+            // small queue spreads each receiver over several, vmap_queue_args).
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8k hybrid exact visibility"),
                 timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {
@@ -2461,6 +2564,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         }
         assert_eq!(FRAME_BYTES, 1680);
+        // The encoder reads the lookup schedule's defaults from the shader.
+        assert_eq!(schedule_defaults(&shader_source()), (4096, true));
+        assert_eq!(
+            schedule_defaults("override VSM_PERSIST:u32=0u;"),
+            (0, false)
+        );
+        assert_eq!(schedule_defaults(""), (0, false));
     }
     #[test]
     fn sun_basis_is_orthonormal_and_settings_validate() {

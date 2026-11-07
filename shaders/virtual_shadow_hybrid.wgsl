@@ -2,9 +2,10 @@
 // shaders/virtual_shadow.wgsl for the receivers the map lookup (virtual_shadow_lookup.wgsl)
 // queued because one of its blocks was ambiguous. virtual_shadow_gpu.rs appends this file to
 // virtual_shadow.wgsl, so it calls that module's per-pixel functions as vsm_lookup does.
-// The queue is the lookup's read-write scratch binding (vsm_debug, unused outside VSM_DEBUG):
-// word 0 the count, then from word 4 two words per receiver: x | y << 16, and the directions
-// whose map block was ambiguous (bits 0-7) | every direction the map blocked (bits 8-15).
+// The queue is the lookup's read-write scratch binding (vsm_scratch, N8m): word 0 (`queue`) the
+// count, word 1 (`spread`) the lanes per receiver (N8m; vmap_queue_args, which sizes the dispatch),
+// then from word 4 (`words`) two words per receiver: x | y << 16, and the directions whose map
+// block was ambiguous (bits 0-7) | every direction the map blocked (bits 8-15).
 // VSM_QUEUED_ALL (default) tests every direction again; off, only the ambiguous ones are, and
 // the map's other decisions stand, which was no cheaper and lost quality (docs/non-rt-n8k.md).
 override VSM_QUEUED_ALL:bool=true;
@@ -16,10 +17,11 @@ override VSM_QUEUED_RING:bool=false;
 // N8l keeps per-lane direction tables in workgroup memory (vsm_lane); 32 lanes, as vsm_lookup.
 @compute @workgroup_size(32) fn vsm_lookup_queued(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     vsm_lane=li;
-    let k=gid.x;
-    if k>=vsm_debug[0].x {return;}
-    let e=vsm_debug[1u+k/2u];
-    let word=select(vec2<u32>(e.x,e.y),vec2<u32>(e.z,e.w),(k&1u)!=0u);
+    let spread=max(vsm_scratch.spread,1u);
+    if gid.x%spread!=0u {return;}
+    let k=gid.x/spread;
+    if k>=atomicLoad(&vsm_scratch.queue) {return;}
+    let word=vec2<u32>(atomicLoad(&vsm_scratch.words[2u*k]),atomicLoad(&vsm_scratch.words[2u*k+1u]));
     let id=vec2<u32>(word.x&0xffffu,word.x>>16u);
     let px=vsm_prepare(id);
     if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}

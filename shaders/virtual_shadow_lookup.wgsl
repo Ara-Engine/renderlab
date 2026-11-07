@@ -199,10 +199,18 @@ struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
 // ambiguous blocked directions (bits 0-7) | every direction it blocked (8-15).
 @group(0) @binding(47) var<storage,read_write> vmap_queue:array<atomic<u32>>;
 @group(0) @binding(48) var<storage,read_write> vmap_queue_dispatch:array<u32,4>;
-// The exact pass's indirect dispatch over the queue, 32 receivers a workgroup.
+// The exact pass's indirect dispatch over the queue, 32 lanes a workgroup. N8m
+// (docs/non-rt-n8m.md): its lanes per queued receiver, chosen per frame. A queue as large as a camera-moving frame's runs one receiver per lane. A smaller one
+// (a rolling frame's) is spread over up to VMAP_QUEUE_SPREAD lanes each, up to VMAP_QUEUE_LANES
+// lanes in all, so fewer of its heavy, divergent walks share a warp. The spread goes in the
+// queue's word 1 for vsm_lookup_queued.
+override VMAP_QUEUE_SPREAD:u32=8u;
+override VMAP_QUEUE_LANES:u32=8192u;
 @compute @workgroup_size(1) fn vmap_queue_args() {
     let n=atomicLoad(&vmap_queue[0]);
-    vmap_queue_dispatch[0]=(n+31u)/32u;vmap_queue_dispatch[1]=1u;vmap_queue_dispatch[2]=1u;
+    let spread=clamp(VMAP_QUEUE_LANES/max(n,1u),1u,max(VMAP_QUEUE_SPREAD,1u));
+    atomicStore(&vmap_queue[1],spread);
+    vmap_queue_dispatch[0]=(n*spread+31u)/32u;vmap_queue_dispatch[1]=1u;vmap_queue_dispatch[2]=1u;
 }
 fn vmap_hybrid()->bool {return (vsm.misc.w&256u)!=0u;}
 
