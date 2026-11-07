@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -53,6 +54,21 @@ _state = U0.E2E.state
 _powershell = U0.E2E.powershell
 _available_gib = U0.E2E.available_gib
 _compiler_checked_at = 0.
+_monitor_context = threading.local()
+
+
+class MonitorCommands:
+    """Keep optional GPU telemetry out of the live process-conflict poll."""
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    def run(self, command, *args, **kwargs):
+        if getattr(_monitor_context, "active", False) and Path(str(command[0])).stem.lower() == "nvidia-smi":
+            return subprocess.CompletedProcess(command, 0, "not sampled by live conflict guard", "")
+        return subprocess.run(command, *args, **kwargs)
+
+
+U0.E2E.subprocess = MonitorCommands()
 
 
 def monitor_powershell(command):
@@ -74,9 +90,14 @@ def monitor_powershell(command):
 
 
 def monitored_state():
+    previous = getattr(_monitor_context, "active", False)
+    # This script calls preflight synchronously on its main thread. The
+    # inherited helper calls state from its watch_conflicts worker thread.
+    _monitor_context.active = threading.current_thread() is not threading.main_thread()
     try:
         result = _state()
         result["monitor_memory_source"] = "GlobalMemoryStatusEx; launch/live floor uses PDH available memory"
+        result["monitor_gpu_telemetry"] = "preflight only; live process/game checks remain mandatory"
         return result
     except Exception as error:
         # The inherited monitor used to lose its thread on a query timeout.
@@ -85,6 +106,8 @@ def monitored_state():
                         ExecutablePath="", monitor_error=repr(error))
         return dict(utc=U0.utc().isoformat(), games=[], foreign_renderers=[sentinel], builds=[],
                     free_gib=0, available_gib=0, gpu="unavailable", monitor_error=repr(error))
+    finally:
+        _monitor_context.active = previous
 
 
 def monitored_available_gib():
