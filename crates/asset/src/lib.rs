@@ -1,11 +1,13 @@
 //! Owned prepared assets. No GPU, window, importer, codecs or math crate.
 mod binary;
+pub mod cluster_bvh;
 pub mod environment;
 pub mod virtual_mesh;
 
 pub use binary::{
-    NORMAL_MOMENTS_SCHEMA_VERSION, NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION,
-    SCHEMA_VERSION, decode, encode, encode_mesh,
+    CLUSTER_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_SCHEMA_VERSION,
+    NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION, SCHEMA_VERSION, decode, decode_with_bvh,
+    encode, encode_mesh, encode_with_bvh,
 };
 use std::fmt;
 

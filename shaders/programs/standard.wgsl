@@ -1,7 +1,8 @@
 // Standard: the photoreal glTF metallic-roughness program, and the engine default. Its
-// direct-light BRDF uses single-frame footprint integration (U1b). Environment
+// direct-light BRDF optionally uses single-frame footprint integration (U1b). Environment
 // filtering is unchanged. Custom programs opt in through the same helper.
-const SPECULAR_AA:bool=true;
+// Opt-in: the 256-sample filter passes quality, but misses the speed floor.
+const SPECULAR_AA:bool=false;
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {

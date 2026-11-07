@@ -3,7 +3,12 @@ use crate::*;
 pub const SCHEMA_VERSION: u32 = 1;
 pub const NORMAL_SCHEMA_VERSION: u32 = 2;
 pub const NORMAL_VARIANCE_SCHEMA_VERSION: u32 = 3;
-pub const NORMAL_MOMENTS_SCHEMA_VERSION: u32 = 4;
+/// R0c's existing optional acceleration trailer, unchanged.
+pub const CLUSTER_BVH_SCHEMA_VERSION: u32 = 4;
+/// Slope moments without acceleration. Historical U1b v4 remains read-compatible.
+pub const NORMAL_MOMENTS_SCHEMA_VERSION: u32 = 5;
+/// Slope moments plus the same acceleration trailer as v4.
+pub const NORMAL_MOMENTS_BVH_SCHEMA_VERSION: u32 = 6;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -81,14 +86,27 @@ impl Writer {
 
 /// Deterministic little-endian format, independent of Rust's struct layout.
 pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
-    asset.validate(limits)?;
+    encode_with_bvh(asset, None, limits)
+}
+pub fn encode_with_bvh(
+    asset: &Asset,
+    bvh: Option<&cluster_bvh::Bvh>,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    let counts = asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
     let version = if asset
         .textures
         .iter()
         .any(|t| t.role == TextureRole::NormalSlopeMoments)
     {
-        NORMAL_MOMENTS_SCHEMA_VERSION
+        if bvh.is_some() {
+            NORMAL_MOMENTS_BVH_SCHEMA_VERSION
+        } else {
+            NORMAL_MOMENTS_SCHEMA_VERSION
+        }
+    } else if bvh.is_some() {
+        CLUSTER_BVH_SCHEMA_VERSION
     } else if asset
         .textures
         .iter()
@@ -144,6 +162,23 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
             w.count(m.rgba8.len())?;
             w.0.extend(&m.rgba8);
         }
+    }
+    if let Some(bvh) = bvh {
+        if bvh.leaves.iter().any(|l| {
+            l.mesh as usize >= asset.meshes.len() || l.material as usize >= asset.materials.len()
+        }) {
+            return Err(Error("prepared BVH mesh/material identity"));
+        }
+        let bytes = cluster_bvh::encode(
+            bvh,
+            cluster_bvh::Limits {
+                max_bytes: limits
+                    .max_decoded_bytes
+                    .saturating_sub(counts.decoded_bytes),
+            },
+        )?;
+        w.count(bytes.len())?;
+        w.0.extend(bytes);
     }
     cap(w.0.len(), limits.max_file_bytes, "prepared file byte limit")?;
     Ok(w.0)
@@ -254,6 +289,11 @@ impl<'a> Reader<'a> {
 
 /// Decode with checked spans and aggregate budgets before every allocation.
 pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
+    Ok(decode_with_bvh(bytes, limits)?.0)
+}
+/// Returns the optional acceleration attachment; ordinary decode validates it,
+/// then discards it. Consumers opt in explicitly rather than changing Asset ownership.
+pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cluster_bvh::Bvh>)> {
     cap(
         bytes.len(),
         limits.max_file_bytes,
@@ -268,7 +308,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1..=4) {
+    if !matches!(version, 1..=6) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -406,7 +446,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             1 => TextureRole::MetallicRoughnessLinear,
             2 if version >= 2 => TextureRole::NormalLinear,
             3 if version >= 3 => TextureRole::NormalVarianceLinear,
-            4 if version >= 4 => TextureRole::NormalSlopeMoments,
+            4 if version == 4 || version >= NORMAL_MOMENTS_SCHEMA_VERSION => {
+                TextureRole::NormalSlopeMoments
+            }
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;
@@ -448,9 +490,34 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         }
         a.textures.push(t);
     }
+    let bvh =
+        if version == NORMAL_MOMENTS_BVH_SCHEMA_VERSION
+            || (version == CLUSTER_BVH_SCHEMA_VERSION
+                && !a
+                    .textures
+                    .iter()
+                    .any(|t| t.role == TextureRole::NormalSlopeMoments))
+        {
+            let length = r.u32()? as usize;
+            let remaining = limits.max_decoded_bytes.saturating_sub(r.decoded);
+            let bvh = cluster_bvh::decode(
+                r.take(length)?,
+                cluster_bvh::Limits {
+                    max_bytes: remaining,
+                },
+            )?;
+            if bvh.leaves.iter().any(|l| {
+                l.mesh as usize >= a.meshes.len() || l.material as usize >= a.materials.len()
+            }) {
+                return Err(Error("prepared BVH mesh/material identity"));
+            }
+            Some(bvh)
+        } else {
+            None
+        };
     if !r.data.is_empty() {
         return Err(Error("trailing prepared bytes"));
     }
     a.validate(limits)?;
-    Ok(a)
+    Ok((a, bvh))
 }

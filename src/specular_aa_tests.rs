@@ -10,7 +10,7 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SOURCE: &str = include_str!("../shaders/scene.wgsl");
 
 fn unfiltered() -> String {
-    assert!(crate::STANDARD_PROGRAM.contains("const SPECULAR_AA:bool=true;"));
+    assert!(crate::STANDARD_PROGRAM.contains("const SPECULAR_AA:bool=false;"));
     crate::STANDARD_PROGRAM.replace(
         "const SPECULAR_AA:bool=true;",
         "const SPECULAR_AA:bool=false;",
@@ -40,7 +40,7 @@ const U1B_VARIANTS: [(&str, u32, usize); 12] = [
     ("before", 0, 1),
     ("covariance-point", 1, 2),
     ("reference", 0, 1),
-    ("default", 0, 3),
+    ("default", 0, 1),
     ("covariance-bilinear", 1, 3),
     ("mixture-9", 2, 3),
     ("mixture-25", 3, 3),
@@ -563,7 +563,7 @@ fn gpu_specular_aa_motion_screen() {
                 );
                 write_frame(&out.join(format!("{track}-{index}.f32")), &image);
             } else {
-                let expected_mode = if u1b() { 10 } else { 0 };
+                let expected_mode = 0;
                 let mut expected = None;
                 for variant in variants() {
                     frame(&mut r, &t, &c, &mut scene, variant);
@@ -584,7 +584,7 @@ fn gpu_specular_aa_motion_screen() {
                     assert_eq!(
                         actual,
                         expected.unwrap(),
-                        "default must equal the accepted spatial helper, every pixel"
+                        "opt-in default must equal the unfiltered non-caller, every pixel"
                     );
                 }
             }

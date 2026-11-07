@@ -49,7 +49,7 @@ Decided by root:
 - **Path tracer:** an in-process GPU path tracer is the quarry reference. It is cross-checked against pbrt or Mitsuba on small scenes.
 - **Temporal file ownership:** `src/film_accumulation.rs` and M7's temporal reconstruction belong to M7. The shadow hillclimb doesn't edit them.
 
-Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents.
+Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents. Superseded 2026-11-07 by the patent policy below: Islam accepts design-arounds, unclaimed parts and, as a last resort, patented methods. So P0's recorded claim mapping is enough for a design-around or unclaimed-part tier to become a default. No separate human review is needed first. P0's mapping is an engineering reading, not legal clearance; Islam can still commission a legal review at any time.
 
 Patent exposure flagged by the research notes (2026-11-07), each Islam's decision before adoption. No exposed technique goes into a default until he rules:
 
@@ -59,3 +59,50 @@ Patent exposure flagged by the research notes (2026-11-07), each Islam's decisio
 - US 9,754,407: world-space cache. Its review is still open, as noted above.
 
 Code licences: RTXGI 2.x, SHaRC, NRC, NRD and DLSS / DLSS RR are reimplement-only, so none of their code may be copied. DDGI papers are CC BY-ND, so write our own code from the text. Falcor's SVGF pass is BSD-3 and may be copied with attribution, but the SVGF patent question still applies.
+
+Islam's decisions on design draft 2 (2026-11-07):
+- **GI cache:** it may become a default on the same basis as the surface shadow cache while the US 9,754,407 review is pending. If the review finds a problem, both are revisited.
+- **Adshir/Snap:** record the non-RT, non-planar reflection miss for now. Ship planar and RT reflections, and review the patent later.
+- **Denoisers:** if the unflagged denoisers in D0 fail their gates, record the miss and spend on more samples and better caches first. Ask for a review of SVGF-type filters only if that also fails.
+- **`reflection_lobe()`:** the hook is GGX-shaped. A custom style that isn't GGX gets its nearest GGX lobe, or no traced reflections. This is accepted and recorded as a constraint on programmable shading.
+
+Root decisions:
+- **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
+- **RT memory baseline:** M7 starts from the RT default path, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410.
+- **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
+
+## Patent policy (Islam, 2026-11-07)
+
+"Design around them, and consider taking parts if needed and more, and if all fails then we can just use them." This replaces "hold until Islam rules" for the flags above. Apply it in this order:
+
+1. **Design around first.** Prefer methods with no patent exposure. Examples:
+   - GI without the ReSTIR-plus-world-space-cache combination of US 11,315,310;
+   - history rejection other than variance clipping (US 10,116,916);
+   - denoisers outside the SVGF and gradient patents;
+   - reflections outside Adshir/Snap and ReSTIR.
+2. **Unclaimed parts are allowed** where the claim needs the full combination. Examples: resampled reuse alone, or a world-space cache alone. The design doc notes which claim each part avoids, and why.
+3. **Fall back only on evidence.** Use a patented method only if every design-around candidate measurably fails the quality gates (the Unreal floor on every measure, static and in motion, on both paths), or is clearly worse in the final image. Record:
+   - the failed alternatives and their numbers;
+   - the patent number.
+
+   Keep the patented method behind a named setting where practical, so it can be swapped out later.
+
+The quality bar is unchanged. Avoiding a patent never justifies shipping below the floor. Record any design-around's measured cost in quality or speed.
+
+This updates the draft-2 rulings above. Non-RT non-planar reflections are no longer just a recorded miss. Design around Adshir/Snap first: the LOD-BVH and SDF-brick tiers may proceed where their parts avoid the claims, and the patented form remains the evidence-based fallback. Likewise for denoisers, try more samples and caches and unflagged filters first; SVGF-type filters are the evidence-based fallback.
+
+## Unreal comparison content on E: (cleanup record, 2026-11-07)
+
+`E:/renderlab-work/m7-u0/` holds the recooked Unreal 5.7.4 project, which has mesh distance fields. The following were deleted because they can be regenerated: the staged build under `Saved/StagedBuilds` (a byte-for-byte duplicate of `ue-package/`), `Saved/Shaders`, `Saved/ShaderDebugInfo`, `Saved/Temp`, `Saved/Logs`, `Intermediate/` and the package's crash-report configs. That freed 1.66 GB.
+
+The rest is kept, about 6.0 GB:
+
+| Kept | Size | Why | Needed by |
+|---|---:|---|---|
+| `ue-package/` | 1.45 GB | packaged build the runs use | TR0, M7-U0b, R0a, R0b, TR1, G1/G2 and R1 comparisons, integrated acceptance |
+| `ue-project/Content` | 0.98 GB | source content for importing benches | M7-U0b (bench import), R0a (reflection scenes) |
+| `ue-project/DerivedDataCache` | 1.08 GB | avoids a slow distance-field recook | M7-U0b, R0a recooks |
+| `ue-project/Saved/Cooked` | 1.81 GB | incremental cook base | M7-U0b, R0a recooks |
+| `study/`, `scenes/`, `reference/`, `fixture/`, `mitsuba*/`, `tools/` | about 0.7 GB | summaries, scenes, references, Mitsuba tooling | all M7 comparisons |
+
+Final delete: when the last Unreal-comparison unit (integrated M7 acceptance) finishes, remove `ue-package/` and `ue-project/`. Keep only the summaries, the inspected PNGs, and the scripts and configs that rebuild the project (`scripts/m7-u0-*.py`, plus the config deltas recorded in docs/m7-u0.md). The DDC and `Saved/Cooked` may be deleted earlier, once no more recooks are planned, after R0a.

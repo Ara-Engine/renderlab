@@ -4,11 +4,23 @@ Branch `t3/m7-u1b`, base main `6877ea4`. Continues [U1](m7-u1.md).
 Patent policy at `8d864c3` read before implementation: this unit uses no history,
 temporal variance clipping, SVGF filter or temporal gradient. It does not build
 any patented temporal fallback. **The spatial-distribution variant passes this
-fixture's quality gate on both paths; `SPECULAR_AA=true` is now the explicit
-standard-program default.** Its substantial cost and unmeasured cases below
+fixture's quality gate on both paths; `SPECULAR_AA=false` remains opt-in because
+the speed floor and quarry memory budget are not met.** Its substantial cost and unmeasured cases below
 remain misses; this is not an Unreal or whole-renderer acceptance claim.
 
 ## Diagnosis and registered variants
+
+Integration update after `938a63f`: main `16ebd5b` is merged. R0c keeps RLA v4
+for BVH attachments and RVG v3. New moment-only writes use RLA v5 and
+`normal-v5/keys`; combined moment/BVH writes use RLA v6. RLA v1-v3 and R0c v4
+remain compatible. Historical U1b v4 is read by its distinct moment texture
+role and absence of a trailer; new writers never emit that overlapping version.
+The sidecar cache remains `cluster-bvh-v1/rla<S>-rvg<S>` and now recognizes
+moment resources as well. Combined RLA/RVG round trips and old/new source-cache
+cold/warm/corruption tests pass. The figures below are the initial U1b screen;
+their original v4 moment bytes are historical evidence, not the new write format.
+The standard default is restored to false; current GPU tests require exact
+unfiltered default identity, rather than equality to the enabled helper.
 
 A 500,000-sample CPU probe of the exact quantized fixture base map found point
 slope variances .00122842/.00122585, but bilinear-field variances
@@ -76,8 +88,8 @@ Before remains the normalized RGB8 mip chain. Every saved before image on both
 paths is SHA-256 identical to U1's before image. The non-RT device has no ray
 query feature; the RT device uses the traced primary path. All runs are
 offscreen, with active Vulkan validation, zero validation errors, no window
-creation and the shared lock plus reservation/release lines. The final
-standard program matches the accepted helper **every pixel, all 25 frames,
+creation and the shared lock plus reservation/release lines. With filtering enabled, the initial
+standard program matched the accepted helper **every pixel, all 25 frames,
 both paths**, rather than merely matching a population average.
 
 ### Reference and unchanged gate
@@ -122,7 +134,7 @@ paths before selection.
 | 9-lobe mixture x geometric GL9 | 3 | 3 | 11 / 11 | Reject |
 | 25-lobe mixture x geometric GL9 | 1 | 1 | 6 / 6 | Reject |
 | Same, low-variance gate | 2 | 1 | 7 / 6 | Reject |
-| Actual spatial distribution, 256 samples | **0** | **0** | **0 / 0** | Retain, default |
+| Actual spatial distribution, 256 samples | **0** | **0** | **0 / 0** | Retain, opt-in |
 | Adaptive tail hybrid | 11 | 11 | 11 / 11 | Reject |
 
 The full covariance filter is `A = alpha^2 I + 2 C`, with anisotropic GGX D and
@@ -276,10 +288,10 @@ large maps may require explicit documented limits, never an unchecked allocation
 - Normal bindings are `texture_2d_array` on both stages. Legacy one-layer maps
   retain their old helper sampling and before image hashes. Arbitrary raw-binding
   access is engine-owned; user programs use the documented helpers.
-- The standard program explicitly changes `SPECULAR_AA` from false to true.
+- The standard program keeps `SPECULAR_AA=false` (restored after review).
   It calls `specular_brdf` for direct lights and keeps intrinsic roughness;
   it does **not** also apply U1's rejected scalar roughness widening. Editing
-  that constant disables the helper. Custom programs opt in by calling it,
+  that constant enables the helper. Custom programs opt in by calling it,
   consume `normal_statistics` for their own lobe, or leave their shading alone.
 - The filter requires geometric position/normal differentials (`world_dx/dy`,
   `normal_dx/dy`). They are engine inputs on raster and traced paths, including
@@ -321,7 +333,7 @@ Validation on the final runtime sources:
   items-after-test-module at `visibility_buffer.rs:1076`. These files belong to
   the shadow worker and were left untouched; no source suppression was added.
 - All thirteen owned offscreen runs exit 0, including final-source captures and
-  standard-default identity on both paths. Total child-run verification time
+  enabled-helper identity on both paths (historical true-default checkpoint). Total child-run verification time
   307.83 s; refined-reference run 109.07 s. Implementation time was not
   stopwatched across the interrupted session and is not inferred from GPU time.
   Final warm CPU verification took 21.90 s renderer Clippy and 8.55 s cook/asset

@@ -2,6 +2,12 @@
 
 2026-11-07 UTC, base `d798200`, branch `t3/m1-memory`.
 
+**RT scope:** all Interactive RT timings, speed claims and memory rows here are
+**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
+rows describe a separate explicit opt-in. Allocator-default decisions below do not
+change primary visibility or shadow sampling defaults.
+
 Retained: right-sized unused repair queues, asynchronous immutable BLAS compaction,
 and compaction during upload collection. All quarry image hashes and S1–S3
 non-timing fields remain identical. **The 8–64 MiB MemoryUsage policy stays the
@@ -120,6 +126,8 @@ Measured reserved memory after each step, MiB:
 
 ## Rejected: 4–8 MiB allocator blocks
 
+RT timings here are **measured on the non-default fast setup (traced + Interactive)**.
+
 Reports exposed an empty 32 MiB block and partly occupied 32/64 MiB blocks.
 Smaller blocks reduced reserved memory to 3,366.523 / 2,520.684 / 3,179.172 MiB,
 with identical images. The first screen requested 1–8 MiB, which wgpu 30 Vulkan
@@ -171,6 +179,8 @@ warnings remain. No viewer/window behavior was exercised. No window or input
 automation was used. `docs/milestones-5-6-decisions.tsv` is unchanged.
 
 ## Frame timing
+
+RT timings and ratios here are **measured on the non-default fast setup (traced + Interactive)**.
 
 RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu 30.0.1, rustc 1.96.0.
 Development/test profile (renderlab opt-level 1), not release-performance data.

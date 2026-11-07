@@ -67,7 +67,7 @@ fn v2_roundtrip_rejects_truncation_counts_basis_frames_and_nonfinite_scale() {
     }
     // First primitive header starts after the 24-byte asset and 4-byte mesh header.
     for (offset, word) in [
-        (4, 5),
+        (4, 7),
         (32, u32::MAX),
         (36, u32::MAX),
         (40, 3),
@@ -155,7 +155,7 @@ fn normal_variance_v3_is_explicit_and_legacy_v2_bytes_keep_their_meaning() {
 }
 
 #[test]
-fn slope_moments_v4_roundtrip_layers_finiteness_and_budget_are_checked() {
+fn slope_moments_v5_roundtrip_layers_finiteness_and_budget_are_checked() {
     let mut a = mapped();
     a.textures[0].role = TextureRole::NormalSlopeMoments;
     a.textures[0].mips[0].rgba8 = [0u16, 0, 0, 0, 0, 0, 0, 0x3c00]
@@ -163,7 +163,13 @@ fn slope_moments_v4_roundtrip_layers_finiteness_and_budget_are_checked() {
         .flat_map(u16::to_le_bytes)
         .collect();
     let b = encode(&a, Limits::default()).unwrap();
-    assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 4);
+    assert_eq!(
+        u32::from_le_bytes(b[4..8].try_into().unwrap()),
+        NORMAL_MOMENTS_SCHEMA_VERSION
+    );
+    let mut historical = b.clone();
+    historical[4..8].copy_from_slice(&4u32.to_le_bytes());
+    assert_eq!(decode(&historical, Limits::default()).unwrap(), a);
     assert_eq!(decode(&b, Limits::default()).unwrap(), a);
     let count = a.validate(Limits::default()).unwrap().decoded_bytes;
     assert!(

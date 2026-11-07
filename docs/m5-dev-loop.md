@@ -6,6 +6,11 @@ The requested development-loop and release-runtime observations are now recorded
 
 ## Host, profiles and workload
 
+**RT scope:** every RT runtime timing, speed ratio and memory row in this record is
+**measured on the non-default fast setup (traced + Interactive)**. The library and
+viewer's RT-device default remains raster + 256-ray Exact; [RT1](rt1-interactive.md)
+keeps the fast setup opt-in while its film false-shadow gate fails.
+
 - Ryzen 7 7800X3D, 8 cores/16 logical processors; RTX 4070 SUPER, 12,282 MiB; NVIDIA 617.14; Windows 11 Pro build 26300; Vulkan/wgpu 30.0.1. Rust 1.96.0 `ac68faa20`/LLVM 22.1.2, x86_64-pc-windows-msvc. Two Cargo jobs and an isolated target on E:.
 - **Development:** repository dev profile: viewer opt-0, renderlab opt-1, asset/wgpu crates opt-2, incremental, line-table debug information. The native viewer uses FIFO presentation. Its actual logs report active Khronos validation and zero errors, even without `--validate`: wgpu debug-build defaults enable it. This is the practical debug viewer, not a release throughput measurement.
 - **Optimized:** `cargo test -p renderlab --lib --release --no-run`, then the actual library inside the M1 test executable. Validation disabled explicitly, no swapchain/window, 1920x1080, 1x/native resolution, 16x anisotropy, full texture residency, original 4K color mip chains, RLE2 environment, GGX/Lambert and exposed HDR/Reinhard. No GI, dynamic local reflections or temporal reconstruction.
@@ -74,6 +79,8 @@ These are independent/partly nested boundaries and their medians must not be add
 The earlier [independent integration](m5-independent-integration.md) recorded one 1.985 s shader edit, 0.110 s restore, 6.311 s Rust-label build and 13.377 s including restart under contention. Those are historical observations with different source/workload boundaries, not paired baselines for a speedup claim.
 
 ## Release runtime: complete rendered-pass span and per-pass cost
+
+RT runtime figures are **measured on the non-default fast setup (traced + Interactive)**.
 
 `scripts/memory-m1.py --visits 8 --lookup surface --cpu-timing`, one asset load per device/path, two registered poses. Each pose/visit has 32 warm frames, 8 measured static frames, 16 turning-sun frames (0.5 mrad about Y each), 48 moving-camera frames (1 mm along source X each), and 48 moving-caster frames (placement 0, 1 mm each). Static/turn/camera/caster contribute **128/256/768/768 GPU samples per path**. Warm samples are excluded. GPU results join to CPU records by actual frame ID.
 
@@ -144,7 +151,7 @@ Reused native GPUTime and longest native critical-field proxy from the [matched 
 
 The Unreal camera workload alternates the registered 1 cm poses every frame; its sun alternates by 1 degree. This M1 motion sequence advances camera/caster by 1 mm and sun by 0.5 mrad each frame. Dynamic workloads are therefore **not exactly matched**; no numerical dynamic speedup certificate follows. The CPU proxies have different engine/thread/wait boundaries. Radiance, geometry/receiver representation, shadow estimator/filtering and quality parity also retain the cited report’s limits.
 
-As a descriptive ratio of GPU medians only, static VSM / no-RT is about **2.19x**, whereas camera VSM / no-RT is about **0.89x** and sun about **1.56x** (motion mismatch applies). Static HRT / clean RT is about **2.02x**, but only **1.97x** against the slowest qualifying static visit, and much less against excluded slow visits. The full-quality/robust 2x floor is **not demonstrated**. Caster comparison is missing. Surface’s carried quality evidence is in [N8p](non-rt-n8p.md); film/reference and complete Unreal acceptance are not newly certified here.
+As a descriptive ratio of GPU medians only, static VSM / no-RT is about **2.19x**, whereas camera VSM / no-RT is about **0.89x** and sun about **1.56x** (motion mismatch applies). Static HRT / clean RT is about **2.02x**, but only **1.97x** against the slowest qualifying static visit, and much less against excluded slow visits; these RT ratios are **measured on the non-default fast setup (traced + Interactive)**. The full-quality/robust 2x floor is **not demonstrated**. Caster comparison is missing. Surface’s carried quality evidence is in [N8p](non-rt-n8p.md); film/reference and complete Unreal acceptance are not newly certified here.
 
 ## Unreal development-loop equivalents: cited, not measured
 

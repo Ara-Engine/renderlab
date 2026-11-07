@@ -26,7 +26,7 @@ fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(ALGORITHM);
     if settings.normal_moments {
-        h.update(b"normal-moments-v4/bilinear-slope-integrals/half-layers/1");
+        h.update(b"normal-moments-v5/bilinear-slope-integrals/half-layers/1");
     } else if settings.normal_variance {
         h.update(b"normal-maps-v3/mikktspace-0.3.0/gltf-negated-mikk-w/ignore-tangent-without-normal/frame2e-4/area1e-6/linear+Y/mean-length-mips-v1/rms-spread-alpha/scale-xy");
     } else if settings.normal_maps {
@@ -344,7 +344,7 @@ pub fn cook_file(
     let identity = key(&source, settings, limits);
     let key_path = cache
         .join(if settings.normal_moments {
-            "normal-v4/keys"
+            "normal-v5/keys"
         } else if settings.normal_variance {
             "normal-v3/keys"
         } else if settings.normal_maps {

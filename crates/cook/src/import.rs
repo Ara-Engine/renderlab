@@ -77,7 +77,7 @@ pub struct Settings {
     /// Experimental variance-bearing normal mips (RLA v3). Requires normal_maps.
     /// Opt in only: the U1 isotropic roughness filter has not passed its quality gate.
     pub normal_variance: bool,
-    /// Full slope covariance, RLA v4; supersedes normal_variance when selected.
+    /// Full slope covariance, RLA v5; supersedes normal_variance when selected.
     pub normal_moments: bool,
 }
 impl Settings {

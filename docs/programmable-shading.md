@@ -412,15 +412,16 @@ are unchanged. Limits and measured acceptance are in [the U1 record](m7-u1.md).
 
 M7 U1b adds `SurfaceInput.world_dx/world_dy`, one-pixel world-position
 differentials on both paths, and the optional `specular_brdf(input, light_direction,
-base, metallic, roughness)` helper. The standard program now enables
-`SPECULAR_AA=true` and calls this helper for direct lights, retaining the original
+base, metallic, roughness)` helper. The standard program leaves
+`SPECULAR_AA=false` (opt-in because cost misses the floor). Enabling it calls
+this helper for direct lights, retaining the original
 roughness in each GGX summand. Environment sampling stays unchanged. The helper
 integrates 256 deterministic spatial samples in the current footprint; it reads
 no previous frame or neighbouring lighting. It filters the BRDF response, while
 light direction, attenuation and visibility remain evaluated at the centre.
 
 Normal-mapped materials need the cooker's `--normal-maps --normal-moments`
-encoding (RLA v4, two RGBA16Float layers, four times RGBA8 storage).
+encoding (RLA v5, two RGBA16Float layers, four times RGBA8 storage).
 `normal_statistics(input)` exposes mean slope and full covariance after
 texture filtering, independent of any BRDF. `normal_variance=2` identifies this
 encoding; 0 and 1 keep their U1 meanings. `sample_normal_layer_grad` supplies

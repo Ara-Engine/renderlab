@@ -32,6 +32,37 @@ and VSM's 3,912. This is a default decision within the measured shadow subset, n
 acceptance or film-quality parity. A planned refinement will reuse a cell only when
 it never scores worse than the pixel's own walk, bringing the default toward Exact's quality.
 
+## Acceptance status (2026-11-07)
+
+**M6 is not accepted.** The full record is [m6-acceptance.md](m6-acceptance.md).
+
+**Measured passes:**
+- **Unreal measured directly.** Unreal 5.7.4's shadow cost per frame was measured with the harness's own motions: VSM no-RT 0.495-0.500 ms with the camera moving (N8f's ~0.5 estimate holds), VSM RT on 0.501-0.505, HRT 0.627-0.635.
+- **Quality.** Shadow quality beats Unreal on every recorded measure on the non-RT path, and on the RT path except F0's film-reference false shadows.
+- **Memory** is below Unreal's on every path.
+- **RT shadows** (Traced + Interactive) cost 0.276 ms in every phase: 2x faster than HRT, and 1.8x faster than VSM RT on.
+
+**Misses:**
+- **Non-RT camera-moving shadows:** 1.05-1.07 ms (Surface), 2.1x slower than VSM.
+- **Non-RT caster-moving shadows:** 1.59-1.60 ms, 2.4x slower.
+- **Non-RT sun turning:** 1.5x faster than VSM, short of 2x.
+- **RT against VSM RT on:** 0.02-0.03 ms short of 2x on static and camera frames.
+
+**RT decision.** The surface cache is not ported to the RT path. Its fixed passes cost about half of what the eight fused rays cost, and Interactive already beats Unreal under motion.
+
+**Defaults and opt-ins:**
+- Surface is the non-RT default; Exact is the reference.
+- Map, Hybrid and texture streaming stay opt-in:
+  - Map is below Unreal on lit-darkened.
+  - Hybrid is slower than Surface.
+  - Texture streaming costs motion frame time (Exact) or misses samples (Feedback).
+- The RT comparisons use Traced + Interactive set explicitly. The library's RT-device default is still raster primaries with the Exact soft-shadow preference; that is Islam's call.
+
+**M5's open items stay open:**
+- **Matched Unreal acceptance.** Image fidelity and radiance parity are unproved; the speed and memory comparisons are now on matched motion.
+- **The development loop** ([M5-DL](m5-dev-loop.md)): shader edits take 1.1 s against the 100 ms target.
+- **Glossy motion and environment visibility** fold into [M7](milestone-7.md).
+
 ## Execution and verification
 
 1. Ground material/normal/texture, render-pass, virtual-geometry and viewer interfaces. Reuse the M4 evidence and scan artifacts. Read industry-rendering-costs.md; Ara designs are historical evidence, not constraints or inherited implementations.
