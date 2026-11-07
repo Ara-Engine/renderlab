@@ -15,6 +15,32 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_compiler_valve_is_timing_only_while_ram_floor_stays_mandatory(self):
+        scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True)
+        class Waiting(Exception):pass
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            root=Path(temporary);(root/"resource-pause.json").write_text('{}')
+            memory=SimpleNamespace(available_gib=lambda:8.)
+            module=SimpleNamespace(START_GIB=4.,FLAGS=0,E2E=memory,
+                save=lambda p,v:p.write_text(json.dumps(v)))
+            with patch.object(host,"OUT",root),\
+                 patch.object(host.subprocess,"run",return_value=subprocess.CompletedProcess([],0,'"cargo.exe"',"")),\
+                 patch.object(host.time,"sleep",side_effect=Waiting):
+                record=host.cpu_readiness(module,timing=False)
+                self.assertFalse(record["waiting"])
+                self.assertFalse(record["cargo_free_required"])
+                self.assertEqual(record["foreign_compilers"],["cargo.exe"])
+                with self.assertRaises(Waiting):host.cpu_readiness(module,timing=True)
+                memory.available_gib=lambda:3.99
+                with self.assertRaises(Waiting):host.cpu_readiness(module,timing=False)
+        module=host.load("m7-u0-ue")
+        with patch.object(host,"load",return_value=module),\
+             patch.object(module.E2E,"state",side_effect=lambda:dict(games=[],foreign_renderers=[],builds=[dict(Name="cargo.exe")])):
+            wrapped=host.ue(allow_game=True)
+            self.assertNotIn("monitor_error",wrapped.MONITOR_STATE())
+            wrapped.WAIT_FOR_FOREIGN_CPU_CLEAR=True
+            self.assertIn("quiet timing",wrapped.MONITOR_STATE()["monitor_error"])
+
     def test_short_static_lease_requeues_every_unfinished_configuration(self):
         scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True);calls=[]
         class CaptureComplete(Exception):pass

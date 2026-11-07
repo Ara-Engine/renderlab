@@ -118,7 +118,7 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **9 tests** after the telemetry-routing and
+are unchanged. The focused Python suite passes **10 tests** after the telemetry-routing and
 bounded static-matrix handoff checks.
 
 ## Retained quarry references
@@ -617,14 +617,25 @@ is gone for 60 seconds.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
-inventory and the PDH memory guard remain mandatory and fail closed. Six focused CPU
+inventory and the PDH memory guard remain mandatory and fail closed. Seven focused CPU
 guard tests cover this routing, native memory, failed inventory after a successful child
 exit, ordinary monitor failure, the atomic-acquisition race and requeuing every unfinished
 static configuration after a short lease. The floor scorer also rejects process failures
 when the recorded child exit code is zero. The rejected quarry run
 `process-a5f82d7e` reached a 30-second process-inventory timeout with 7.99 GiB minimum RAM;
 it is not a reference acceptance or timing result. Retrying waits outside the lease for
-60 compiler-free seconds. Optional telemetry is not a reason to weaken process checks.
+60 compiler-free seconds under the initial resource-valve policy. Optional telemetry is
+not a reason to weaken process checks.
+
+**Compiler-load policy update, 22:43Z.** Root authorizes correctness-only reference states
+under stillkit's continuing CPU load. They no longer require a Cargo-free interval, including
+after a failed monitor attempt. Every accepted state still requires strict independent replay,
+zero invalid pixels, the 600-second guard, fail-closed game/renderer/RAM monitoring and
+4/2-GiB RAM plus 5/2-GiB disk guards. Their elapsed times remain ineligible for performance
+claims. The 60-second compiler-free valve and an exclusive quiet window are retained for
+timing rows. Replacement SV timing rows pause the wallpaper through its supported setting,
+restore it in `finally`, and reject a run if a foreign build appears during live monitoring.
+CPU checks verify this distinction without disabling the RAM start floor.
 
 After their summaries and full-image inspection, **113 native HDR archives over 5 MB** were
 deleted. Their per-case cleanup ledgers preserve hashes; score JSON, readbacks and inspected

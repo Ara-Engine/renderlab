@@ -1,5 +1,6 @@
 """Native SV sky-visibility comparator for G1. All output lives on E:."""
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -43,7 +44,7 @@ def scenes(args):
 
 def capture(args):
     if args.async_off and not args.timing:raise ValueError("async attribution is a separate timing process")
-    u=host.ue(allow_game=True);root=OUT/"sv-sky"/args.label;root.mkdir(parents=True,exist_ok=True)
+    u=host.ue(allow_game=not args.timing);root=OUT/"sv-sky"/args.label;root.mkdir(parents=True,exist_ok=True)
     u.WAIT_FOR_FOREIGN_CPU_CLEAR=args.timing
     u.PACKAGE_DIR=OUT/"ue-svsky-package";u.PACKAGE=u.PACKAGE_DIR/"Windows/Engine/Binaries/Win64/UnrealGame.exe"
     u.UE_FLAGS += ["-UseFixedTimeStep","-FPS=60"]
@@ -94,15 +95,17 @@ def capture(args):
             events=[(f,u.macro(macros,"m"+str(f),lines)) for f,lines in commands.items()]
             expected=[named[start],named[other],named[other],*pan]
             expected=[dict(p,fov_y_radians=float(np.float32(math.pi/4))) for p in expected]
-            with u.lease("sv-sky-"+args.label+"-"+mode+"-"+start,3):
-                u.launch_ue(case,config,"static",extra=extra,events=events,frames=230,level="/Game/M7U0b/SVSky/Bench")
-                if not u.readback(case,config,u.scalability_expectations()):raise RuntimeError("SV sky readback failed")
-                camera=host.check_camera((case/"ue.log").read_text(encoding="utf-8-sig",errors="replace"),expected)
-                save(case/"camera-readback.json",dict(frames=camera,all_ok=True))
+            with u.lease("sv-sky-"+args.label+"-"+mode+"-"+start,3) as owner:
+                if args.timing:u.schedule_line(f"[m7-u0b QUIET window] SV {args.label}/{mode}/{start} token={owner['token']}; exclusive GPU, wallpaper paused, no compiler/heavy build until owned release.")
+                with (host.quiet_desktop(u,case) if args.timing else contextlib.nullcontext()) as quiet_window:
+                    u.launch_ue(case,config,"static",extra=extra,events=events,frames=230,level="/Game/M7U0b/SVSky/Bench")
+                    if not u.readback(case,config,u.scalability_expectations()):raise RuntimeError("SV sky readback failed")
+                    camera=host.check_camera((case/"ue.log").read_text(encoding="utf-8-sig",errors="replace"),expected)
+                    save(case/"camera-readback.json",dict(frames=camera,all_ok=True))
             save(case/"recipe.json",dict(config=config,poses=expected,start=start,cut_to=other,
                 capture_only=not args.timing,async_compute=not args.async_off,fixed_delta_seconds=1/60,primary_background=[4000]*3,
                 static_csv=96,cut_csv=97,pan_csv=list(range(196,205)),source_scene_sha256=u.sha(SOURCE),
-                package_sha256=u.sha(u.PACKAGE),settings=u.CONFIGS[config]))
+                package_sha256=u.sha(u.PACKAGE),settings=u.CONFIGS[config],quiet_window=str(quiet_window) if quiet_window else None))
             if not args.timing:
                 for stage in ("cut","pan"):
                     with (case/("decode-"+stage+".log")).open("w") as log:

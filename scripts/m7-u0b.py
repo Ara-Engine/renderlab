@@ -42,9 +42,9 @@ def game_state():
 
 
 def cpu_readiness(u,timing=False):
-    """TR0 b9760bc resource valve: tasklist, no WMI memory dependency or process control."""
+    """Compiler-free valve for timing only; correctness retains the RAM start guard."""
     pause=OUT/"resource-pause.json"
-    started=time.monotonic();clear_since=None;paused=pause.exists();next_notice=0
+    started=time.monotonic();clear_since=None;next_notice=0
     while True:
         processes=[]
         for name in ("cargo.exe","rustc.exe","clippy-driver.exe"):
@@ -56,11 +56,11 @@ def cpu_readiness(u,timing=False):
         ram=u.E2E.available_gib();now=time.monotonic()
         if processes:clear_since=None
         elif clear_since is None:clear_since=now
-        if ram<5:paused=True
-        waiting=ram<5 or ((timing or paused) and (processes or now-clear_since<60))
+        waiting=ram<u.START_GIB or (timing and (processes or now-clear_since<60))
         record=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),foreign_compilers=processes,
             available_gib=ram,timing_eligible_for_claim=False if processes else None,
-            timing_requested=timing,paused_for_memory=paused,waiting=bool(waiting),seconds=now-started)
+            timing_requested=timing,cargo_free_required=timing,paused_for_memory=ram<u.START_GIB,
+            waiting=bool(waiting),seconds=now-started)
         if not waiting:
             if pause.exists():
                 u.save(OUT/"resource-pause-released.json",dict(json.loads(pause.read_text()),released=record));pause.unlink()
@@ -128,7 +128,11 @@ def ue(allow_game=False):
     u.E2E.state=state
     def monitor_state():
         monitor_context.active=True
-        try:return state()
+        try:
+            snapshot=state()
+            if getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False) and snapshot.get("builds"):
+                snapshot["monitor_error"]="foreign compiler/build began during quiet timing"
+            return snapshot
         finally:monitor_context.active=False
     u.MONITOR_STATE=monitor_state
     original_preflight=u.preflight
