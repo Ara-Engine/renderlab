@@ -17,13 +17,27 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
-const SLOT_WORDS: u64 = 48;
+/// Hot (shading) plus cold (kernel) record words per slot; shaders/gi_cells.wgsl.
+const SLOT_WORDS: u64 = 16 + 24;
 const COUNTER_WORDS: u64 = 16;
 const MISS_WORDS: u64 = 6;
-/// WGSL GiFrame: region, counts, layout, then 64 vec4 box corners.
-const FRAME_BYTES: usize = 48 + 64 * 16;
+/// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
+const FRAME_BYTES: usize = 64 + 64 * 16;
 const MAX_BOXES: usize = 32;
-const PROFILE_STAMPS: u32 = 14;
+/// Claim and resolve repeat in rounds, so collisions retry within the frame.
+const CLAIM_ROUNDS: u32 = 3;
+/// Probe, three claim and resolve rounds, scan, arguments, trace, integrate.
+const PROFILE_STAMPS: u32 = 2 * (4 + 2 * CLAIM_ROUNDS + 1);
+/// Frames the profile ring holds, and its per-frame stride (resolve offsets are
+/// 256-byte aligned).
+const PROFILE_RING: u64 = 64;
+const PROFILE_STRIDE: u64 = 256;
+/// Consecutive identical frames after which a frame runs no cache pass.
+const IDLE_AFTER: u32 = 3;
+/// Entries of the frame's request table: twice the miss capacity (a power of two).
+fn requests(misses: u32) -> u32 {
+    misses * 2
+}
 /// Blocking readbacks for measurement helpers.
 const WAIT: wgpu::PollType = wgpu::PollType::Wait {
     submission_index: None,
@@ -50,7 +64,7 @@ pub struct IndirectSettings {
     /// Edge of level 0 in metres; each level doubles it.
     pub min_edge: f32,
     pub levels: u32,
-    /// log2 of the slot count (each slot is 176 bytes).
+    /// log2 of the slot count (each slot is 160 bytes).
     pub slots_log2: u32,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
@@ -68,6 +82,9 @@ pub struct IndirectSettings {
     pub invalidate_casters: bool,
     /// Fixed directions per cell: 64 or 128.
     pub directions: u32,
+    /// Half-width, in levels, of the band around each level switch where two levels
+    /// mix with a continuous fixed weight (no jitter, W3); 0 switches abruptly.
+    pub level_blend: f32,
     /// Rotate each cell's direction set about its normal by an angle its key fixes,
     /// which decorrelates quadrature error between cells (as noise); off, cells with
     /// the same normal share directions, and the error is smooth.
@@ -81,7 +98,7 @@ impl Default for IndirectSettings {
             cell_pixels: 4.0,
             min_edge: 1.0 / 512.0,
             levels: 14,
-            slots_log2: 18,
+            slots_log2: 19,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,
@@ -89,6 +106,7 @@ impl Default for IndirectSettings {
             invalidate_casters: true,
             directions: 64,
             rotate_directions: false,
+            level_blend: 0.0,
         }
     }
 }
@@ -102,7 +120,8 @@ impl IndirectSettings {
             && (10..=21).contains(&self.slots_log2)
             && self.evict_frames != 0
             && (1..=64).contains(&self.direction_phases)
-            && [64, 128].contains(&self.directions);
+            && [64, 128].contains(&self.directions)
+            && (0.0..=0.5).contains(&self.level_blend);
         if valid {
             Ok(())
         } else {
@@ -122,6 +141,8 @@ pub struct IndirectStats {
     pub frames: u64,
     /// The last such frame traced software rays.
     pub software: bool,
+    /// Frames whose unchanged inputs ran no cache pass.
+    pub idle_frames: u64,
 }
 
 /// GPU microseconds per cache pass of the last profiled frame.
@@ -210,12 +231,15 @@ struct Groups {
     main: Owned<wgpu::BindGroup>,
     args: Owned<wgpu::BindGroup>,
 }
+/// Pass timestamps of the last PROFILE_RING cache frames, resolved per frame into a
+/// ring and read back only on request, so measured frames never wait for the CPU.
 struct Profile {
     queries: Owned<wgpu::QuerySet>,
     resolve: Owned<wgpu::Buffer>,
     readback: Owned<wgpu::Buffer>,
     period: f32,
-    written: bool,
+    /// Cache frames profiled so far.
+    written: u64,
 }
 /// What `prepare_gi` decided for this frame.
 struct Plan {
@@ -249,6 +273,10 @@ pub(super) struct GiState {
     environment: Option<[u8; 32]>,
     frame: u32,
     pending_clear: bool,
+    /// The last frame's inputs (camera, transforms, environment, settings) and how many
+    /// frames in a row they have been unchanged; idle frames run no cache pass.
+    idle_key: Option<[u8; 32]>,
+    idle_frames: u32,
     plan: Option<Plan>,
     profile: Option<Profile>,
     groups: Option<Groups>,
@@ -282,6 +310,8 @@ impl GiState {
             environment: None,
             frame: 0,
             pending_clear: false,
+            idle_key: None,
+            idle_frames: 0,
             plan: None,
             profile: None,
             groups: None,
@@ -368,7 +398,8 @@ impl Renderer {
             let work_bytes = (COUNTER_WORDS
                 + u64::from(slots)
                 + u64::from(misses) * MISS_WORDS
-                + 2 * u64::from(slots))
+                + 2 * u64::from(slots)
+                + 2 * u64::from(requests(misses)))
                 * 4;
             let buffer = |label, size, usage| {
                 self.ledger.own(
@@ -454,6 +485,8 @@ impl Renderer {
     /// should not reuse earlier cells.
     pub fn reset_indirect(&mut self) {
         self.gi.pending_clear = true;
+        // Seen stamps restart too, so a reset sequence repeats bit for bit.
+        self.gi.frame = 0;
     }
     /// Software-ray geometry for `mesh` on the non-RT path: a full-detail BVH built now
     /// from the mesh's object-space triangles. Hardware renderers ignore it unless
@@ -508,11 +541,11 @@ impl Renderer {
             self.device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("indirect cache passes"),
                 ty: wgpu::QueryType::Timestamp,
-                count: PROFILE_STAMPS,
+                count: PROFILE_STAMPS * PROFILE_RING as u32,
             }),
             ResourceKind::QuerySet,
         );
-        let bytes = u64::from(PROFILE_STAMPS) * 8;
+        let bytes = PROFILE_STRIDE * PROFILE_RING;
         let buffer = |label, usage| {
             self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -535,18 +568,32 @@ impl Renderer {
                 wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             ),
             period: self.queue.get_timestamp_period(),
-            written: false,
+            written: 0,
         });
     }
     /// Blocks until the GPU is idle and reads the last profiled frame's pass times.
     pub fn indirect_profile(&mut self) -> Result<Option<IndirectProfile>, Error> {
-        let Some(profile) = self.gi.profile.as_mut().filter(|p| p.written) else {
-            return Ok(None);
+        Ok(self.indirect_profiles()?.pop())
+    }
+    /// Blocks until the GPU is idle and reads the pass times of up to the last 64
+    /// profiled cache frames, oldest first. Idle frames run no pass and add none.
+    pub fn indirect_profiles(&mut self) -> Result<Vec<IndirectProfile>, Error> {
+        let Some(profile) = self.gi.profile.as_ref().filter(|p| p.written > 0) else {
+            return Ok(vec![]);
         };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(
+            &profile.resolve,
+            0,
+            &profile.readback,
+            0,
+            PROFILE_STRIDE * PROFILE_RING,
+        );
+        self.queue.submit([encoder.finish()]);
         let slice = profile.readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(WAIT).map_err(Error::Poll)?;
-        let stamps: Vec<u64> = slice
+        let words: Vec<u64> = slice
             .get_mapped_range()
             .map_err(|_| Error::InvalidInput("indirect cache readback map"))?
             .chunks_exact(8)
@@ -554,16 +601,25 @@ impl Renderer {
             .collect();
         profile.readback.unmap();
         let period = f64::from(profile.period) / 1000.0;
-        let pass = |i: usize| stamps[2 * i + 1].saturating_sub(stamps[2 * i]) as f64 * period;
-        Ok(Some(IndirectProfile {
-            probe: pass(0),
-            claim: pass(1),
-            resolve: pass(2),
-            scan: pass(3),
-            args: pass(4),
-            trace: pass(5),
-            integrate: pass(6),
-        }))
+        let rounds = CLAIM_ROUNDS as usize;
+        let first = profile.written.saturating_sub(PROFILE_RING);
+        Ok((first..profile.written)
+            .map(|frame| {
+                let at = ((frame % PROFILE_RING) * PROFILE_STRIDE / 8) as usize;
+                let pass = |i: usize| {
+                    words[at + 2 * i + 1].saturating_sub(words[at + 2 * i]) as f64 * period
+                };
+                IndirectProfile {
+                    probe: pass(0),
+                    claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum(),
+                    resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum(),
+                    scan: pass(1 + 2 * rounds),
+                    args: pass(2 + 2 * rounds),
+                    trace: pass(3 + 2 * rounds),
+                    integrate: pass(4 + 2 * rounds),
+                }
+            })
+            .collect())
     }
     /// Blocks until the GPU is idle and reads the last cache frame's counters.
     pub fn indirect_counters(&mut self) -> Result<Option<IndirectCounters>, Error> {
@@ -671,15 +727,21 @@ impl Renderer {
                 vertex_return: true,
             },
         );
+        // Software rays bind their geometry at 35 on every device; the TLAS entry at 34
+        // exists only where ray queries do.
+        let software = [&common[..], &[storage(35, true)]].concat();
+        let rt = self
+            .device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let hardware = if rt {
+            [&common[..], &[tlas]].concat()
+        } else {
+            software.clone()
+        };
         let main = [
-            group(
-                "indirect cache, hardware rays",
-                &[&common[..], &[tlas]].concat(),
-            ),
-            group(
-                "indirect cache, software rays",
-                &[&common[..], &[storage(35, true)]].concat(),
-            ),
+            group("indirect cache, hardware rays", &hardware),
+            group("indirect cache, software rays", &software),
         ];
         let args = group(
             "indirect cache arguments",
@@ -1015,6 +1077,7 @@ impl Renderer {
             header[8 + i] = v.to_bits();
         }
         header[11] = s.direction_phases;
+        header[12] = s.level_blend.to_bits();
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -1111,10 +1174,12 @@ impl Renderer {
         put(9, misses);
         put(10, traces);
         put(11, traces + r.slots);
+        put(12, traces + 2 * r.slots);
+        put(13, requests(r.misses) - 1);
         for (i, b) in boxes.iter().enumerate() {
             for k in 0..3 {
-                put(12 + i * 8 + k, b[k].to_bits());
-                put(12 + i * 8 + 4 + k, b[k + 3].to_bits());
+                put(16 + i * 8 + k, b[k].to_bits());
+                put(16 + i * 8 + 4 + k, b[k + 3].to_bits());
             }
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
@@ -1123,6 +1188,28 @@ impl Renderer {
             (region[3] - region[1]).div_ceil(8),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
+        // A view whose every input is unchanged has nothing to trace once its cells
+        // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
+        // nothing). Rotation and partial cells keep working every frame.
+        let idle_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(&self.gi.arrays.as_ref().unwrap().instances);
+            h.update(environment);
+            h.update(format!("{s:?}").as_bytes());
+            h.update(region.map(u32::to_le_bytes).concat());
+            h.finalize().into()
+        };
+        if self.gi.idle_key == Some(idle_key) && !clear {
+            self.gi.idle_frames = self.gi.idle_frames.saturating_add(1);
+        } else {
+            self.gi.idle_frames = 0;
+        }
+        self.gi.idle_key = Some(idle_key);
+        if self.gi.idle_frames >= IDLE_AFTER && flags == 0 {
+            self.gi.stats.idle_frames += 1;
+            return Ok(());
+        }
         self.gi.plan = Some(Plan {
             groups,
             scan: flags != 0,
@@ -1241,12 +1328,20 @@ impl GiState {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
         }
         encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
+        // The request table, after the counters, claims, misses and both queues.
+        let requests_at =
+            (COUNTER_WORDS + u64::from(r.slots) * 3 + u64::from(r.misses) * MISS_WORDS) * 4;
+        encoder.clear_buffer(&r.work, requests_at, None);
         let queries = self.profile.as_ref().map(|p| &*p.queries);
+        let ring = self
+            .profile
+            .as_ref()
+            .map_or(0, |p| (p.written % PROFILE_RING) as u32 * PROFILE_STAMPS);
         let stamps = |i: u32| {
             queries.map(|q| wgpu::ComputePassTimestampWrites {
                 query_set: q,
-                beginning_of_pass_write_index: Some(2 * i),
-                end_of_pass_write_index: Some(2 * i + 1),
+                beginning_of_pass_write_index: Some(ring + 2 * i),
+                end_of_pass_write_index: Some(ring + 2 * i + 1),
             })
         };
         let main_pass = |encoder: &mut wgpu::CommandEncoder,
@@ -1279,27 +1374,30 @@ impl GiState {
             Some(plan.groups),
             None,
         );
-        main_pass(
-            encoder,
-            "indirect cache claim",
-            &p.claim,
-            1,
-            Some([rows, 1]),
-            None,
-        );
-        main_pass(
-            encoder,
-            "indirect cache resolve",
-            &p.resolve,
-            2,
-            Some([rows, 1]),
-            None,
-        );
+        for k in 0..CLAIM_ROUNDS {
+            main_pass(
+                encoder,
+                "indirect cache claim",
+                &p.claim,
+                1 + 2 * k,
+                Some([rows, 1]),
+                None,
+            );
+            main_pass(
+                encoder,
+                "indirect cache resolve",
+                &p.resolve,
+                2 + 2 * k,
+                Some([rows, 1]),
+                None,
+            );
+        }
+        let s = 1 + 2 * CLAIM_ROUNDS;
         main_pass(
             encoder,
             "indirect cache scan",
             &p.scan,
-            3,
+            s,
             Some(if plan.scan {
                 [r.slots.div_ceil(64), 1]
             } else {
@@ -1310,31 +1408,37 @@ impl GiState {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("indirect cache arguments"),
-                timestamp_writes: stamps(4),
+                timestamp_writes: stamps(s + 1),
             });
             pass.set_pipeline(&p.args);
             pass.set_bind_group(0, &*g.args, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        main_pass(encoder, "indirect cache trace", &p.trace, 5, None, Some(0));
+        main_pass(
+            encoder,
+            "indirect cache trace",
+            &p.trace,
+            s + 2,
+            None,
+            Some(0),
+        );
         main_pass(
             encoder,
             "indirect cache integrate",
             &p.integrate,
-            6,
+            s + 3,
             None,
             Some(16),
         );
         if let Some(profile) = self.profile.as_mut() {
-            encoder.resolve_query_set(&profile.queries, 0..PROFILE_STAMPS, &profile.resolve, 0);
-            encoder.copy_buffer_to_buffer(
+            let slot = profile.written % PROFILE_RING;
+            encoder.resolve_query_set(
+                &profile.queries,
+                ring..ring + PROFILE_STAMPS,
                 &profile.resolve,
-                0,
-                &profile.readback,
-                0,
-                u64::from(PROFILE_STAMPS) * 8,
+                slot * PROFILE_STRIDE,
             );
-            profile.written = true;
+            profile.written += 1;
         }
     }
 }

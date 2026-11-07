@@ -66,11 +66,24 @@ def window_open(u):
             return line
         # Our own request names its start time; never take the lock earlier.
         m = re.match(r"\[(\S+) request\] .* Starts at (\d\d:\d\d:\d\d)Z", line)
-        if m and m.group(1) == u.OWNER and i > last_release:
+        if m and m.group(1) == u.OWNER:
             start = dt.datetime.combine(now.date(), dt.time.fromisoformat(m.group(2)), tzinfo=dt.timezone.utc)
             if start > now:
                 return line
     return None
+
+
+def hold_state(u):
+    """The latest game-hold line: 'hold', 'relaxed', 'released' or None."""
+    state = None
+    for line in u.SCHEDULE.read_text(encoding="utf-8").splitlines():
+        if line.startswith("[GAME HOLD RELEASED]"):
+            state = "released"
+        elif line.startswith("[GAME HOLD RELAXED]"):
+            state = "relaxed"
+        elif line.startswith("[GAME HOLD]"):
+            state = "hold"
+    return state
 
 
 def gpu(args):
@@ -79,6 +92,26 @@ def gpu(args):
     if blocking and not args.force_schedule:
         print("DEFERRED: schedule:", blocking)
         raise SystemExit(3)
+    hold = hold_state(u)
+    if hold == "hold":
+        print("DEFERRED: game hold")
+        raise SystemExit(3)
+    contended_by_game = []
+    if args.allow_game:
+        # Only under a relaxed hold (headless runs allowed while Islam plays): the game is
+        # recorded as contention, never a reason to stop. Memory and foreign-renderer
+        # guards stay.
+        if hold != "relaxed":
+            raise SystemExit("--allow-game needs [GAME HOLD RELAXED] as the latest hold line")
+        state = u.E2E.state
+
+        def tolerant():
+            record = state()
+            contended_by_game.extend(p["Name"] for p in record["games"] if p["Name"] not in contended_by_game)
+            record["games"] = []
+            return record
+
+        u.E2E.state = tolerant
     out = OUT / "runs" / args.label
     if out.exists():
         raise SystemExit(f"label {args.label} already used")
@@ -88,10 +121,16 @@ def gpu(args):
     if not args.validate:
         env["VK_LOADER_LAYERS_DISABLE"] = "VK_LAYER_KHRONOS_validation"
         env.pop("VK_INSTANCE_LAYERS", None)
+    env["RENDERLAB_M7_G1_PATHS"] = args.paths
     with u.lease("g1-" + args.label, args.minutes) as owner:
         out.mkdir(parents=True)
-        u.guarded([BINARY, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"], out / "run",
-                  timeout=max(60, int(u.remaining_seconds(owner)) - 30), cwd=REPO, env=env)
+        try:
+            u.guarded([BINARY, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"], out / "run",
+                      timeout=max(60, int(u.remaining_seconds(owner)) - 30), cwd=REPO, env=env)
+        finally:
+            (out / "contention.json").write_text(json.dumps(dict(
+                game_running=contended_by_game, hold=hold,
+                timings="contended: not valid for speed claims" if contended_by_game or hold == "relaxed" else "unlabelled"), indent=2))
     print(json.dumps(sorted(p.name for p in out.iterdir()), indent=1))
 
 
@@ -106,6 +145,8 @@ def main():
     p.add_argument("--quick", action="store_true")
     p.add_argument("--validate", action="store_true", help="keep Vulkan validation layers on")
     p.add_argument("--force-schedule", action="store_true", help="ignore pending requests (root-assigned slot)")
+    p.add_argument("--allow-game", action="store_true", help="under [GAME HOLD RELAXED] only: run headless beside the game")
+    p.add_argument("--paths", default="rt,rtsoftware,nonrt", help="comma list of rt, rtsoftware, nonrt")
     args = parser.parse_args()
     dict(build=build, gpu=gpu)[args.command](args)
 

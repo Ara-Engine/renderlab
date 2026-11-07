@@ -333,16 +333,20 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
         sv.materials
             .iter()
             .map(|m| {
-                r.try_create_material(&MaterialDescriptor {
-                    base_color: [m[0], m[1], m[2], 1.0],
-                    metallic: m[3],
-                    roughness: m[4],
-                    double_sided: true,
-                    program,
-                    ..Default::default()
-                })
-                .unwrap()
-                .unwrap()
+                loop {
+                    let descriptor = MaterialDescriptor {
+                        base_color: [m[0], m[1], m[2], 1.0],
+                        metallic: m[3],
+                        roughness: m[4],
+                        double_sided: true,
+                        program,
+                        ..Default::default()
+                    };
+                    if let Some(material) = r.try_create_material(&descriptor).unwrap() {
+                        break material;
+                    }
+                    r.test_drain("G1 material admission");
+                }
             })
             .collect()
     });
@@ -420,8 +424,12 @@ impl Rig {
             .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
             .collect()
     }
-    /// Placement + 1 per pixel from the shared hit records (0 = miss).
-    fn placements(&mut self) -> Vec<u32> {
+    /// Placement + 1 per pixel from the shared hit records (0 = miss), with bit 31 set
+    /// on edge pixels: a 3x3 neighbour hits another placement or a triangle whose
+    /// normal differs. The reference integrates each pixel's footprint and this frame
+    /// samples its centre, so edges measure anti-aliasing, not lighting; they are
+    /// scored as their own population.
+    fn placements(&mut self, sv: &Sv) -> Vec<u32> {
         self.r.test_drain("G1 hit admission");
         let r = &self.r;
         let hit = &r
@@ -459,14 +467,42 @@ impl Rig {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         r.device.poll(WAIT).unwrap();
         let data = slice.get_mapped_range().unwrap();
-        let mut out = Vec::with_capacity((size.width * size.height) as usize);
-        for y in 0..size.height {
-            for x in 0..size.width {
-                let at = (y * row + x * 16) as usize;
-                out.push(u32::from_le_bytes(data[at..at + 4].try_into().unwrap()));
+        let (w, h) = (size.width as usize, size.height as usize);
+        let mut out = Vec::with_capacity(w * h);
+        let mut normals = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let at = y * row as usize + x * 16;
+                let word = |k: usize| {
+                    u32::from_le_bytes(data[at + 4 * k..at + 4 * k + 4].try_into().unwrap())
+                };
+                let p = word(0);
+                out.push(p);
+                normals.push(if p == 0 {
+                    Vec3::ZERO
+                } else {
+                    let m = &sv.meshes[p as usize - 1];
+                    let t = word(1) as usize * 3;
+                    let v = |k: usize| Vec3::from(m.positions[m.indices[t + k] as usize]);
+                    (v(1) - v(0)).cross(v(2) - v(0)).normalize_or_zero()
+                });
             }
         }
-        out
+        let flags: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                (y.saturating_sub(1)..(y + 2).min(h)).any(|ny| {
+                    (x.saturating_sub(1)..(x + 2).min(w)).any(|nx| {
+                        let j = ny * w + nx;
+                        out[j] != out[i] || normals[j].dot(normals[i]) < 0.999
+                    })
+                })
+            })
+            .collect();
+        out.iter()
+            .zip(flags)
+            .map(|(&p, e)| p | (u32::from(e && p != 0) << 31))
+            .collect()
     }
 }
 
@@ -488,7 +524,8 @@ fn open_luminance(sv: &Sv, sets: &[Vec<usize>], reference: &reference::Image) ->
 }
 fn labels(sv: &Sv, placements: &[u32], eye: Vec3, target: Vec3) -> Vec<Vec<usize>> {
     let names: Vec<String> = sv.populations.iter().map(|(n, _)| n.clone()).collect();
-    let mut sets = vec![vec![]; names.len() * 2 + 1];
+    // Populations, ground near each, edges, then the frame (edges excluded).
+    let mut sets = vec![vec![]; names.len() * 2 + 2];
     let camera = Camera::look_at(eye, target, Vec3::Y, sv.fov, 0.01, 100.0).unwrap();
     let inverse = camera.matrix(sv.size[0], sv.size[1]).inverse();
     let ground = sv.meshes.iter().position(|m| m.name == "ground");
@@ -509,12 +546,17 @@ fn labels(sv: &Sv, placements: &[u32], eye: Vec3, target: Vec3) -> Vec<Vec<usize
             lo[0].is_finite().then_some((lo, hi))
         })
         .collect();
-    for (i, &p) in placements.iter().enumerate() {
+    for (i, &word) in placements.iter().enumerate() {
+        let p = word & 0x7fff_ffff;
         if p == 0 {
             continue;
         }
+        if word >> 31 != 0 {
+            sets[names.len() * 2].push(i);
+            continue;
+        }
         let mesh = &sv.meshes[p as usize - 1];
-        sets[names.len() * 2].push(i);
+        sets[names.len() * 2 + 1].push(i);
         for (k, (_, list)) in sv.populations.iter().enumerate() {
             if list.contains(&mesh.name) {
                 sets[k].push(i);
@@ -561,6 +603,7 @@ fn population_names(sv: &Sv) -> Vec<String> {
             .iter()
             .map(|(n, _)| format!("ground-near-{n}")),
     );
+    n.push("edges".into());
     n.push("frame".into());
     n
 }
@@ -572,6 +615,8 @@ fn score(ours: &[[f32; 3]], reference: &reference::Image, open: f64, pixels: &[u
     let (mut n, mut sq, mut bias, mut crevice, mut crevice_sq, mut crevice_bias) =
         (0usize, 0.0, 0.0, 0usize, 0.0, 0.0);
     let (mut open_n, mut over) = (0usize, 0usize);
+    let mut noise = 0.0;
+    let mut plain_sq = 0.0;
     let mut errors = vec![];
     for &i in pixels {
         let r = luminance(reference.mean[i]);
@@ -579,7 +624,12 @@ fn score(ours: &[[f32; 3]], reference: &reference::Image, open: f64, pixels: &[u
         if r <= 1e-6 || se > 0.02 * r {
             continue;
         }
-        let e = (luminance(ours[i]) - r) / r;
+        // Relative to the reference, floored at 5% of the open sky: a nearly black
+        // reference pixel must not turn a small absolute error into a huge one.
+        let e = (luminance(ours[i]) - r) / r.max(0.05 * open);
+        let plain = (luminance(ours[i]) - r) / r;
+        plain_sq += plain * plain;
+        noise += (se / r) * (se / r);
         n += 1;
         sq += e * e;
         bias += e;
@@ -615,11 +665,17 @@ fn score(ours: &[[f32; 3]], reference: &reference::Image, open: f64, pixels: &[u
         "crevice_pixels": crevice, "crevice_rms": div(crevice_sq, crevice).as_f64().map(f64::sqrt),
         "crevice_bias": div(crevice_bias, crevice),
         "open_pixels": open_n, "over_occluded_open": over,
+        "reference_noise_rms": div(noise, n).as_f64().map(f64::sqrt),
+        "rms_unfloored": div(plain_sq, n).as_f64().map(f64::sqrt),
+        "p99": q(0.99),
     })
 }
 /// Frame-to-frame change of the residual against per-frame references (bench-motion's
 /// residual_change_rms), relative to the reference.
 fn flicker(ours: &[Vec<[f32; 3]>], refs: &[reference::Image], pixels: &[usize]) -> Json {
+    let mut lum: Vec<f64> = pixels.iter().map(|&i| luminance(refs[0].mean[i])).collect();
+    lum.sort_by(f64::total_cmp);
+    let floor = 0.05 * lum.get(lum.len() * 9 / 10).copied().unwrap_or(1.0);
     let mut changes = vec![];
     for t in 1..ours.len() {
         let (mut sq, mut n) = (0.0, 0usize);
@@ -628,8 +684,8 @@ fn flicker(ours: &[Vec<[f32; 3]>], refs: &[reference::Image], pixels: &[usize]) 
             if r0 <= 1e-6 || r1 <= 1e-6 {
                 continue;
             }
-            let e0 = (luminance(ours[t - 1][i]) - r0) / r0;
-            let e1 = (luminance(ours[t][i]) - r1) / r1;
+            let e0 = (luminance(ours[t - 1][i]) - r0) / r0.max(floor);
+            let e1 = (luminance(ours[t][i]) - r1) / r1.max(floor);
             sq += (e1 - e0) * (e1 - e0);
             n += 1;
         }
@@ -685,6 +741,52 @@ fn frame_gpu(r: &mut Renderer) -> Json {
     let events = r.poll().unwrap();
     events.gpu.last().map_or(Json::Null, |g| {
         json!({"shading_ms": g.mesh_pass.as_secs_f64() * 1e3, "span_ms": g.render_span.as_secs_f64() * 1e3})
+    })
+}
+
+fn quantiles(mut v: Vec<f64>) -> Json {
+    if v.is_empty() {
+        return Json::Null;
+    }
+    v.sort_by(f64::total_cmp);
+    let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
+    json!({"n": v.len(), "p50": q(0.5), "p95": q(0.95), "p99": q(0.99), "max": q(1.0)})
+}
+/// One continuous sequence: frames back to back with no readback between them, then
+/// the renderer's per-frame GPU spans and the cache's per-pass ring.
+fn sequence(
+    rig: &mut Rig,
+    sv: &Sv,
+    materials: &[Material],
+    frames: usize,
+    mut step: impl FnMut(&mut Rig, usize) -> (Vec3, Vec3),
+) -> Json {
+    let mut samples = vec![];
+    let idle = rig.r.indirect_stats().idle_frames;
+    let profiled = rig.r.indirect_stats().frames;
+    for t in 0..frames {
+        let (eye, target) = step(rig, t);
+        rig.frame(sv, eye, target, materials);
+        samples.extend(rig.r.poll().unwrap().gpu);
+    }
+    rig.r.test_drain("G1 sequence");
+    samples.extend(rig.r.poll().unwrap().gpu);
+    let cache_frames = (rig.r.indirect_stats().frames - profiled) as usize;
+    let profiles = rig.r.indirect_profiles().unwrap();
+    let profiles = &profiles[profiles.len().saturating_sub(cache_frames.min(64))..];
+    let pass = |f: fn(&IndirectProfile) -> f64| quantiles(profiles.iter().map(f).collect());
+    // The first frames after a setting change or reset are reported apart.
+    let tail = |v: Vec<f64>| quantiles(v.into_iter().skip(2).collect());
+    json!({
+        "frames": frames, "cache_frames": cache_frames,
+        "idle_frames": rig.r.indirect_stats().idle_frames - idle,
+        "span_ms": tail(samples.iter().map(|g| g.render_span.as_secs_f64() * 1e3).collect()),
+        "shading_ms": tail(samples.iter().map(|g| g.mesh_pass.as_secs_f64() * 1e3).collect()),
+        "cache_us": {
+            "total": pass(|p| p.total()), "probe": pass(|p| p.probe), "claim": pass(|p| p.claim),
+            "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "trace": pass(|p| p.trace),
+            "integrate": pass(|p| p.integrate),
+        },
     })
 }
 
@@ -754,7 +856,7 @@ fn gpu_gi_sky_visibility_sv() {
                 &rt.1,
                 &reference_scene(&sv, &[], 0.0),
                 &reference_view(&sv, motion_eye + pan(t), motion_target + pan(t)),
-                &settings(spp / 4),
+                &settings(spp),
             )
             .unwrap()
         })
@@ -781,11 +883,19 @@ fn gpu_gi_sky_visibility_sv() {
         "bench": "SV", "scene_sha256": sv.sha, "reference_spp": spp, "reference": "renderlab::reference, max_depth 2 (sky only)",
         "reference_seconds": reference_seconds, "populations": names, "paths": {},
     });
-    let paths = if quick {
-        vec![Path_::Rt, Path_::NonRt]
-    } else {
-        vec![Path_::Rt, Path_::RtSoftware, Path_::NonRt]
-    };
+    // RENDERLAB_M7_G1_PATHS: a comma list of rt, rtsoftware and nonrt (short leases
+    // run one path each).
+    let paths: Vec<Path_> = env("RENDERLAB_M7_G1_PATHS")
+        .unwrap_or_else(|| "rt,rtsoftware,nonrt".into())
+        .split(',')
+        .map(|p| match p.trim() {
+            "rt" => Path_::Rt,
+            "rtsoftware" => Path_::RtSoftware,
+            "nonrt" => Path_::NonRt,
+            other => panic!("unknown path {other}"),
+        })
+        .filter(|p| !quick || *p != Path_::RtSoftware)
+        .collect();
     let mut rt = Some(rt);
     for path in paths {
         let device = match path {
@@ -811,6 +921,22 @@ fn gpu_gi_sky_visibility_sv() {
         if !quick {
             configs.extend([
                 (
+                    "blend-4px",
+                    IndirectSettings {
+                        level_blend: 0.125,
+                        ..base
+                    },
+                ),
+                (
+                    "k128-rotated-blend-4px",
+                    IndirectSettings {
+                        level_blend: 0.125,
+                        directions: 128,
+                        rotate_directions: true,
+                        ..base
+                    },
+                ),
+                (
                     "rotated-4px",
                     IndirectSettings {
                         rotate_directions: true,
@@ -821,6 +947,14 @@ fn gpu_gi_sky_visibility_sv() {
                     "k128-4px",
                     IndirectSettings {
                         directions: 128,
+                        ..base
+                    },
+                ),
+                (
+                    "k128-rotated-4px",
+                    IndirectSettings {
+                        directions: 128,
+                        rotate_directions: true,
                         ..base
                     },
                 ),
@@ -873,8 +1007,19 @@ fn gpu_gi_sky_visibility_sv() {
                 rig.frame(&sv, *eye, *target, &materials);
                 let still = profile_json(&mut rig.r);
                 let still_gpu = frame_gpu(&mut rig.r);
+                let second = rig.radiance(&sv);
+                // Settled: three more frames (W1 form 2 needs its phases); then a still
+                // frame, which runs no cache pass once inputs repeat.
+                for _ in 0..3 {
+                    rig.frame(&sv, *eye, *target, &materials);
+                }
                 let image = rig.radiance(&sv);
-                let placements = rig.placements();
+                let idle_before = rig.r.indirect_stats().idle_frames;
+                rig.frame(&sv, *eye, *target, &materials);
+                let idle_gpu = frame_gpu(&mut rig.r);
+                let idle = json!({"ran_no_cache_pass": rig.r.indirect_stats().idle_frames > idle_before,
+                    "gpu": idle_gpu, "image_equal": hash_image(&rig.radiance(&sv)) == hash_image(&image)});
+                let placements = rig.placements(&sv);
                 let sets = labels(&sv, &placements, *eye, *target);
                 let open = open_luminance(&sv, &sets, reference);
                 let scores: Json = names
@@ -884,6 +1029,7 @@ fn gpu_gi_sky_visibility_sv() {
                     .collect::<serde_json::Map<_, _>>()
                     .into();
                 let first_scores = score(&first, reference, open, sets.last().unwrap());
+                let second_scores = score(&second, reference, open, sets.last().unwrap());
                 png(
                     &out.join(format!("{label}-{config}-{pose}.png")),
                     sv.size,
@@ -903,8 +1049,9 @@ fn gpu_gi_sky_visibility_sv() {
                     );
                 }
                 config_json[pose] = json!({
-                    "scores": scores, "first_frame": first_scores, "first_equals_second": hash_image(&first) == hash_image(&image),
-                    "image_hash": hash_image(&image), "cut": cut, "cut_gpu": cut_gpu, "static": still, "static_gpu": still_gpu,
+                    "scores": scores, "first_frame": first_scores, "second_frame": second_scores,
+                    "first_equals_settled": hash_image(&first) == hash_image(&image),
+                    "image_hash": hash_image(&image), "cut": cut, "cut_gpu": cut_gpu, "static": still, "static_gpu": still_gpu, "idle": idle,
                 });
                 if *config == "trilinear-4px" || *config == "off" {
                     // The standard program's full sky image: diffuse from the cache, sky
@@ -962,11 +1109,29 @@ fn gpu_gi_sky_visibility_sv() {
             rig.frame(&sv, *eye, *target, &materials);
             let table = rig.r.indirect_table().unwrap().unwrap();
             let b = (hash_words(&table), hash_image(&rig.radiance(&sv)));
-            path_json["determinism"] = json!({"table": a.0, "image": a.1, "repeat_equal": a == b});
+            path_json["determinism"] = json!({"table": a.0, "image": a.1,
+                "table_repeat_equal": a.0 == b.0, "image_repeat_equal": a.1 == b.1});
         }
         // Motion: per-frame cost and flicker against per-frame references.
         for (config, s) in [
+            ("off", IndirectSettings::default()),
             ("trilinear-4px", base),
+            (
+                "blend-4px",
+                IndirectSettings {
+                    level_blend: 0.125,
+                    ..base
+                },
+            ),
+            (
+                "k128-rotated-blend-4px",
+                IndirectSettings {
+                    level_blend: 0.125,
+                    directions: 128,
+                    rotate_directions: true,
+                    ..base
+                },
+            ),
             (
                 "nearest-4px",
                 IndirectSettings {
@@ -975,7 +1140,7 @@ fn gpu_gi_sky_visibility_sv() {
                 },
             ),
         ] {
-            if quick && config != "trilinear-4px" {
+            if quick && config == "nearest-4px" {
                 continue;
             }
             rig.settings(s);
@@ -988,11 +1153,11 @@ fn gpu_gi_sky_visibility_sv() {
                     .push(json!({"cache": profile_json(&mut rig.r), "gpu": frame_gpu(&mut rig.r)}));
                 frames.push(rig.radiance(&sv));
             }
-            let placements = rig.placements();
+            let placements = rig.placements(&sv);
             let all: Vec<usize> = placements
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| **p != 0)
+                .filter(|(_, p)| **p != 0 && **p >> 31 == 0)
                 .map(|(i, _)| i)
                 .collect();
             path_json[format!("motion-{config}")] =
@@ -1021,7 +1186,7 @@ fn gpu_gi_sky_visibility_sv() {
                 .zip(&fresh)
                 .map(|(a, b)| (0..3).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max))
                 .fold(0.0f32, f32::max);
-            let placements = rig.placements();
+            let placements = rig.placements(&sv);
             let sets = labels(&sv, &placements, *eye, *target);
             let open = open_luminance(&sv, &sets, &caster_ref);
             let all = sets.last().unwrap().clone();
@@ -1046,13 +1211,91 @@ fn gpu_gi_sky_visibility_sv() {
                     rig.frame(&sv, *eye, *target, &materials);
                     let image = rig.radiance(&sv);
                     let d = image.iter().zip(&fresh).filter(|(a, b)| a != b).count();
+                    let c = rig.r.indirect_counters().unwrap().unwrap_or_default();
                     stale.push(json!({"age": age, "pixels_differing_from_fresh": d,
+                        "traces": c.traces, "refreshed": c.refreshed, "invalidated": c.invalidated,
                         "score": score(&image, &caster_ref, open, &all)}));
                 }
                 path_json["rotation-staleness"] = json!(stale);
                 rig.settings(base);
             }
             rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
+        }
+        // Timing: continuous sequences, cache on and off (the pre-M7 frame).
+        {
+            let (_, eye, target) = poses[0].clone();
+            let mut timing = json!({});
+            for (label, s) in [("on", base), ("off", IndirectSettings::default())] {
+                rig.settings(s);
+                rig.r.reset_indirect();
+                let still = sequence(&mut rig, &sv, &materials, 24, |_, _| (eye, target));
+                let camera = sequence(&mut rig, &sv, &materials, 48, |_, t| {
+                    let d = Vec3::new(0.01 * t as f32, 0.0, 0.0);
+                    (eye + d, target + d)
+                });
+                let caster = sequence(&mut rig, &sv, &materials, 48, |rig, t| {
+                    rig.instances[sphere]
+                        .set(
+                            0,
+                            Mat4::from_translation(Vec3::new(0.002 * t as f32, 0.0, 0.0)),
+                        )
+                        .unwrap();
+                    (eye, target)
+                });
+                rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
+                let cut = sequence(&mut rig, &sv, &materials, 16, |rig, t| {
+                    if t % 2 == 0 {
+                        rig.r.reset_indirect();
+                    }
+                    (eye, target)
+                });
+                // Environment steps: a new sky radiance every frame (no rays: the
+                // cells re-integrate their stored bits).
+                let environment = sequence(&mut rig, &sv, &materials, 16, |rig, t| {
+                    let k = 1.0 + 0.05 * (t % 2) as f32;
+                    rig.r
+                        .set_lighting(&Lighting {
+                            lights: vec![],
+                            environment: sv.sky.map(|v| v * k),
+                            exposure_stops: sv.exposure,
+                        })
+                        .unwrap();
+                    (eye, target)
+                });
+                timing[label] = json!({"static": still, "camera": camera, "caster": caster,
+                    "cut": cut, "environment": environment});
+            }
+            // The environment step's lag: the stepped frame against a fresh cache.
+            rig.settings(base);
+            rig.r.reset_indirect();
+            let sky = |k: f32| Lighting {
+                lights: vec![],
+                environment: sv.sky.map(|v| v * k),
+                exposure_stops: sv.exposure,
+            };
+            rig.r.set_lighting(&sky(1.0)).unwrap();
+            rig.frame(&sv, eye, target, &materials);
+            rig.frame(&sv, eye, target, &materials);
+            rig.r.set_lighting(&sky(1.5)).unwrap();
+            rig.frame(&sv, eye, target, &materials);
+            let stepped = rig.radiance(&sv);
+            rig.r.reset_indirect();
+            for _ in 0..3 {
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let fresh = rig.radiance(&sv);
+            let differing = stepped.iter().zip(&fresh).filter(|(a, b)| a != b).count();
+            let max_relative = stepped
+                .iter()
+                .zip(&fresh)
+                .map(|(a, b)| (luminance(*a) - luminance(*b)).abs() / luminance(*b).max(1e-6))
+                .fold(0.0f64, f64::max);
+            rig.r.set_lighting(&sky(1.0)).unwrap();
+            timing["environment_step_next_frame"] = json!({
+                "equal_to_fresh": hash_image(&stepped) == hash_image(&fresh),
+                "max_relative_difference": max_relative, "pixels_differing": differing,
+            });
+            path_json["timing"] = timing;
         }
         let stats = rig.r.indirect_stats();
         path_json["memory"] = json!({"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes,
