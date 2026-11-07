@@ -58,6 +58,10 @@ struct VsmFrame {
     srects:array<vec4<f32>,VSM_MAX_RECTS>,
     // Per traced batch, the first word of its triangles in vsm_horizons (N8b).
     horizon:array<vec4<u32>,16>,
+    // N8h: per traced batch (two per vec4), its first walk record in the draw list's record
+    // numbering and its recorded triangles: primitives below the count have records, the
+    // others (appended LOD triangles under WalkRecords::Source) read the chains.
+    records:array<vec4<u32>,32>,
     // N8e: x directions evaluated (1-8, the first of the eight); y the rolling refresh (block
     // a in bits 0-3, b in 4-7, this frame's tile in the block in 8-11 and 12-15, bit 16 set on
     // a rolling frame); z the walk cap (0: none); w bit 0 on a rolling frame that moved casters
@@ -433,6 +437,37 @@ fn vsm_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
     if words%3u!=1u {return VSM_MISSING;}
     return primary_indices[batch].data[(words-1u)/2u+primitive*3u+edge];
 }
+// N8g walk records (virtual_shadow_records.wgsl, docs/non-rt-n8g.md), N8h's layout
+// (docs/non-rt-n8h.md): per recorded triangle its three positions' bits, 36 contiguous bytes,
+// in segments of 2^21 records (one binding each) packed across batches. Edge neighbours stay
+// in the index buffer's adjacency suffix: a neighbour's address depends only on the primitive,
+// so its load issues beside the record's. The lookup reads geometry only through vsm_tri and
+// vsm_nb; a primitive at or above its batch's recorded count, or VSM_RECORDS off (screens),
+// reads the chains.
+struct VsmRecords {data:array<u32>};
+@group(2) @binding(9) var<storage,read> vsm_records:binding_array<VsmRecords,PRIMARY_BATCHES>;
+override VSM_RECORDS:bool=true;
+const VSM_SEGMENT_BITS:u32=21u;
+// The record's segment and first word, or x PRIMARY_BATCHES when the triangle has none.
+fn vsm_record_at(batch:u32,primitive:u32)->vec2<u32> {
+    let pair=vsm.records[batch/2u];
+    let odd=(batch&1u)!=0u;
+    if !VSM_RECORDS || primitive>=select(pair.y,pair.w,odd) {return vec2<u32>(PRIMARY_BATCHES,0u);}
+    let at=select(pair.x,pair.z,odd)+primitive;
+    return vec2<u32>(at>>VSM_SEGMENT_BITS,(at&((1u<<VSM_SEGMENT_BITS)-1u))*9u);
+}
+fn vsm_tri(batch:u32,primitive:u32)->array<vec3<f32>,3> {
+    let at=vsm_record_at(batch,primitive);
+    if at.x>=PRIMARY_BATCHES {return vsm_triangle(batch,primitive);}
+    let s=at.x;let i=at.y;
+    return array<vec3<f32>,3>(
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i],vsm_records[s].data[i+1u],vsm_records[s].data[i+2u])),
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i+3u],vsm_records[s].data[i+4u],vsm_records[s].data[i+5u])),
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i+6u],vsm_records[s].data[i+7u],vsm_records[s].data[i+8u])));
+}
+fn vsm_nb(batch:u32,primitive:u32,edge:u32)->u32 {
+    return vsm_neighbour(batch,primitive,edge);
+}
 fn vsm_unit(n:vec3<f32>)->vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
     let scaled=n/max(scale,1e-30);
@@ -648,10 +683,10 @@ fn vsm_ring(r:VsmReceiver,walk:bool)->VsmRing {
             var q=vsm_own[(c+2u-side)%3u];
             var step=0u;
             for(;step<VSM_FAN_STEPS;step+=1u) {
-                let n=vsm_neighbour(r.batch,t,edge);
+                let n=vsm_nb(r.batch,t,edge);
                 if n==VSM_MISSING {vsm_dbg.w|=1u<<17u;break;}
                 if n==r.primitive {closed=true;break;}
-                var w=vsm_triangle(r.batch,n);
+                var w=vsm_tri(r.batch,n);
                 let cp=vsm_corner(w,p);let cq=vsm_corner(w,q);
                 if cp==3u || cq==3u || cp==cq {vsm_dbg.w|=1u<<18u;break;}
                 if vsm_corner(w,skip)==3u {ring=vsm_ring_triangle(r,w,ring);visited+=1u;}
@@ -815,7 +850,7 @@ fn vsm_in_ring(r:VsmReceiver,id:u32)->bool {
     if placement!=r.slot {return false;}
     let primitive=id&((1u<<vsm.misc.x)-1u);
     if primitive==r.primitive {return true;}
-    var w=vsm_triangle(r.batch,primitive);
+    var w=vsm_tri(r.batch,primitive);
     for(var i=0u;i<3u;i+=1u) {
         if vsm_same(w[i],vsm_own[0]) || vsm_same(w[i],vsm_own[1]) || vsm_same(w[i],vsm_own[2]) {return true;}
     }
@@ -858,7 +893,7 @@ fn vsm_hits_mask(r:VsmReceiver,a:vec3<f32>,b:vec3<f32>,c:vec3<f32>,mask:u32)->u3
     return hits;
 }
 fn vsm_triangle_mask(r:VsmReceiver,batch:u32,primitive:u32,m:mat4x4<f32>,mask:u32)->u32 {
-    let v=vsm_triangle(batch,primitive);
+    let v=vsm_tri(batch,primitive);
     return vsm_hits_mask(r,(m*vec4<f32>(v[0],1.0)).xyz,(m*vec4<f32>(v[1],1.0)).xyz,(m*vec4<f32>(v[2],1.0)).xyz,mask);
 }
 // The exact decision of the surface the texel's triangle `id` belongs to (N8b), for the rays
@@ -904,7 +939,7 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f
         for(var step=0u;step<reach;step+=1u) {
             if VSM_DEBUG {vsm_dbg.y+=select(1u,0x10000u,primary<8u);}
             vsm_visits+=1u;
-            let v=vsm_triangle(batch,t);
+            let v=vsm_tri(batch,t);
             let a=(m*vec4<f32>(v[0],1.0)).xyz;let b=(m*vec4<f32>(v[1],1.0)).xyz;let c=(m*vec4<f32>(v[2],1.0)).xyz;
             hits|=vsm_hits_mask(r,a,b,c,mask&~hits);
             if (hits&stop)==stop {return vec2<u32>(hits,t);}
@@ -928,11 +963,11 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f
             // edge leads back, the other outside edge.
             var edge=0u;
             if w.y<w.x && w.y<=w.z {edge=1u;} else if w.z<w.x && w.z<w.y {edge=2u;}
-            var n=vsm_neighbour(batch,t,edge);
+            var n=vsm_nb(batch,t,edge);
             if n==previous {
                 let e1=(edge+1u)%3u;let e2=(edge+2u)%3u;
                 let other=select(e2,e1,w[e1]<w[e2]);
-                n=select(VSM_MISSING,vsm_neighbour(batch,t,other),w[other]<0.0);
+                n=select(VSM_MISSING,vsm_nb(batch,t,other),w[other]<0.0);
                 if n==previous {stopped=true;break;}
             }
             if n==VSM_MISSING {stopped=true;break;}
@@ -940,7 +975,7 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f
         }
         var interior=true;
         for(var e=0u;e<3u;e+=1u) {
-            let n=vsm_neighbour(batch,t,e);
+            let n=vsm_nb(batch,t,e);
             interior=interior && n!=VSM_MISSING;
             if n!=VSM_MISSING && n!=previous {
                 hits|=vsm_triangle_mask(r,batch,n,m,mask&~hits);
@@ -1263,7 +1298,7 @@ fn vsm_prepare(id:vec2<u32>)->VsmPixel {
     vsm_dirs[2]=vsm_direction(2u,shift,l,u,v,slope);vsm_dirs[3]=vsm_direction(3u,shift,l,u,v,slope);
     vsm_dirs[4]=vsm_direction(4u,shift,l,u,v,slope);vsm_dirs[5]=vsm_direction(5u,shift,l,u,v,slope);
     vsm_dirs[6]=vsm_direction(6u,shift,l,u,v,slope);vsm_dirs[7]=vsm_direction(7u,shift,l,u,v,slope);
-    vsm_own=vsm_triangle(out.r.batch,out.r.primitive);
+    vsm_own=vsm_tri(out.r.batch,out.r.primitive);
     vsm_shared_origin=vsm_origin(out.r,l);
     vsm_prepare_rays(l);
     out.valid=true;
