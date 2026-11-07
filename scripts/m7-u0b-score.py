@@ -179,12 +179,12 @@ def score(args):
 def static_floor(args):
     """Score retained static native HDR only after camera and runtime readbacks pass."""
     rows=[]
-    for directory in sorted(args.root.iterdir()):
+    for directory in sorted(getattr(args,"cases",args.root.iterdir())):
         if not directory.is_dir() or not (directory/"camera-readback.json").exists():continue
         runtime=json.loads((directory/"readback.json").read_text())
         camera=json.loads((directory/"camera-readback.json").read_text())
         process=json.loads((directory/"process.json").read_text())
-        if not runtime["all_ok"] or not camera["all_ok"] or process["exit_code"]:
+        if not runtime["all_ok"] or not camera["all_ok"] or process["exit_code"] or process.get("failures"):
             raise ValueError("static capture readback failed: "+str(directory))
         output=directory/"native.npz"
         if not output.with_suffix(".json").exists():
@@ -241,8 +241,10 @@ def floor(args):
         if getattr(args,"configs",None) and recipe["config"] not in args.configs:continue
         camera=json.loads((directory/"camera-readback.json").read_text())
         runtime=json.loads((directory/"readback.json").read_text())
+        process=json.loads((directory/"process.json").read_text())
         native=json.loads((directory/"native.json").read_text())["frames"]
-        if not camera["all_ok"] or not runtime["all_ok"] or len(native)!=len(recipe["frames"]):
+        if (not camera["all_ok"] or not runtime["all_ok"] or process["exit_code"] or process.get("failures")
+                or len(native)!=len(recipe["frames"])):
             raise ValueError("capture coverage/readback failed: "+str(directory))
         if selected is not None and not selected.issubset(range(len(native))):
             raise ValueError("requested witness outside captured sequence")

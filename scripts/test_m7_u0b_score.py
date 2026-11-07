@@ -86,6 +86,7 @@ class PhysicalFloorTests(unittest.TestCase):
             score.save(capture/"native.json",dict(frames=native))
             score.save(capture/"camera-readback.json",dict(all_ok=True))
             score.save(capture/"readback.json",dict(all_ok=True,effective_mode={}))
+            score.save(capture/"process.json",dict(exit_code=0,failures=[]))
             args=argparse.Namespace(root=walk,reference=reference,stops=-14)
             score.floor(args)
             result=json.loads((capture/"physical-floor.json").read_text())
@@ -100,6 +101,10 @@ class PhysicalFloorTests(unittest.TestCase):
                 self.assertEqual(step["measures"]["all-covered"]["rms"],0)
                 if step["static_camera"]:
                     self.assertEqual(step["measures"]["all-covered"]["reference_noise_rms"],0)
+            score.save(capture/"process.json",dict(exit_code=0,failures=[dict(reason="late monitor failure")]))
+            with self.assertRaisesRegex(ValueError,"capture coverage/readback failed"):
+                score.floor(args)
+            score.save(capture/"process.json",dict(exit_code=0,failures=[]))
             # An image-domain gain is not a substitute for the measured exposure.
             native[0]["pre_exposure"]=2.**-12
             score.save(capture/"native.json",dict(frames=native))

@@ -103,9 +103,11 @@ controls above remain applicable. D8 stays pinned for TR0's S2G corpus.
 
 The five completed states from those failed batches subsequently regenerate with exact strict
 replay, zero invalid pixels and passing process guards. A further attempt is rejected on a
-10-second `nvidia-smi` inventory timeout; no archive is published from it. The live monitor's
-diagnostic allowance is now at most 60 seconds, bounded by the remaining reservation. The
-quarter-second memory/hold checks and fail-closed policy remain active. A monitor error that
+10-second `nvidia-smi` inventory timeout; no archive is published from it. That diagnostic
+allowance was first raised to at most 60 seconds, bounded by the remaining reservation;
+the subsequent TR0 `79bcfc5` change moves optional GPU telemetry entirely to preflight,
+as recorded below. The quarter-second memory/hold checks and fail-closed policy remain
+active. A monitor error that
 arrives after a child exits also rejects the run; exit 0 alone is insufficient.
 
 Canonical production defers only archival, after strict GPU validation. The compactor writes
@@ -116,7 +118,8 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **7 tests**.
+are unchanged. The focused Python suite passes **9 tests** after the telemetry-routing and
+bounded static-matrix handoff checks.
 
 ## Retained quarry references
 
@@ -466,8 +469,12 @@ all three renderers; no coloured-clear Unreal maps were launched.
 
 `scripts/m7-u0b-scenes.py` registers the exact Q-walk and Q-disocclusion sources. Zero shutter
 is the Unreal comparison default; finite one-frame box shutters are separate rows. The
-161-frame Q-walk includes every requested witness and adjacent frame. Identical cameras may
-alias a lossless reference archive; the source frame and alias remain explicit in JSON.
+161-frame Q-walk manifest registers every source camera. The retained zero-shutter selection
+has 70 witness rows, including the requested adjacent pairs, represented by 31 distinct
+cameras. The separate unit sequence registers 32 contiguous finite-shutter Q-walk frames,
+48 zero-shutter disocclusion cameras and four pan witnesses with both shutter conventions.
+This is not a claim of 161 individually rendered zero-shutter references. Identical cameras
+may alias a lossless archive; the source frame and alias remain explicit in JSON.
 
 The `.npz` interface retains actual full-radiance split halves, sun-only direct halves,
 centre world point, geometric normal, placement/primitive/material identity, accepted-sample
@@ -477,8 +484,9 @@ radiance integrates the disk; it is explicitly **not** the old delta-BRDF T1b es
 
 Reference units are unexposed cd/m^2. Native candidate HDR requires a measured pre-exposure
 value; the score CLI accepts it explicitly and applies the frozen F0 Reinhard/sRGB transform
-at -14 and -10 stops. TR0 identified the native Tonemap EyeAdaptationBuffer and colour-scale
-readbacks; per-capture proof is being added. No fitted exposure or gain is used.
+at -14 and -10 stops. The native decoder reads the versioned Tonemap EyeAdaptationBuffer
+and colour-scale parameters per capture and rejects exposure, local-exposure or tint drift.
+No fitted exposure or gain is used.
 
 Raw per-frame buffers are compacted immediately into lossless reference archives, then
 deleted with hashes retained in JSON. These archives are intentional retained references
@@ -547,7 +555,7 @@ normal world state. No reconstruction-only or integrated G1 acceptance claim is 
 
 | Static population | Global-DF SW | Mesh-SDF non-RT SW | HW |
 |---|---:|---:|---:|
-| contact | 22.851%/? | 32.931%/? | 14.397%/? |
+| contact | 22.851%/— | 32.931%/— | 14.397%/— |
 | crease-90 | 27.355%/41.492% | 33.891%/61.068% | 18.514%/5.401% |
 | edges | 52.964%/73.652% | 61.132%/91.938% | 26.853%/18.391% |
 | frame | 35.917%/68.312% | 38.911%/87.185% | 10.708%/11.164% |
@@ -559,7 +567,7 @@ normal world state. No reconstruction-only or integrated G1 acceptance claim is 
 | ground-near-wedge-30 | 89.845%/4.222% | 93.406%/6.931% | 17.142%/6.243% |
 | open | 33.638%/27.337% | 34.139%/30.424% | 7.953%/6.267% |
 | underside | 31.929%/77.596% | 34.377%/88.985% | 15.713%/11.065% |
-| wedge-30 | 33.575%/? | 45.768%/? | 24.829%/? |
+| wedge-30 | 33.575%/— | 45.768%/— | 24.829%/— |
 
 Population pairs are overview/gaps; a dash means no valid visible samples in that pose.
 Per-population counts, noise exclusions, p99, signed bias, crevice error and over-occluded
@@ -568,7 +576,7 @@ sheets for both paths were inspected. The especially large software errors occur
 gaps and undersides; they remain in the floor rather than being removed as outliers.
 
 The Lumen/DFAO-off calibration intentionally removes occlusion. Across 1,118,310 / 1,092,197
-nonedge ground pixels, the analytic Lambert value is 0.5 ? 4,000 = **2,000 cd/m?**. Native
+nonedge ground pixels, the analytic Lambert value is 0.5 × 4,000 = **2,000 cd/m²**. Native
 mean RGB is about **2,011/2,011/2,009**, with **0.706% RGB RMS** relative to that analytic
 value in both poses. This bounds the input-scale discrepancy; no fitted gain is applied to
 the scored Lumen images. Comparing this control to the physically occluded reference would
@@ -577,15 +585,15 @@ measure deliberately missing occlusion, not a calibration error.
 Separate uninstrumented cost processes retain **r.OneFrameThreadLag 1**, verified from
 their timed CVar dump. The following attribution processes disable both RDG and Lumen async
 compute, also read back at frame 95. Values are milliseconds. They are functional exclusive
-slots, not quiet-window speed evidence. The async-on CSV gather scope is only 0.015?0.142 ms
+slots, not quiet-window speed evidence. The async-on CSV gather scope is only 0.015–0.142 ms
 here and omits the concurrent gather work; it must not be used as the full Lumen cost.
 
 | Path / initial pose | Gather static | Gather first-cut | Gather pan mean/range | Warm GI tree total |
 |---|---:|---:|---:|---:|
-| sv-sky-hw / gaps | 1.0149 | 1.0138 | 1.0154 / 1.0086?1.0259 | 1.3930 |
-| sv-sky-hw / overview | 0.8971 | 0.8672 | 1.0188 / 1.0086?1.0332 | 1.4540 |
-| sv-sky-sw-mesh / gaps | 1.1838 | 1.4952 | 1.2571 / 1.1704?1.6086 | 2.4970 |
-| sv-sky-sw-mesh / overview | 1.0321 | 1.0261 | 1.2229 / 1.1785?1.4736 | 1.4180 |
+| sv-sky-hw / gaps | 1.0149 | 1.0138 | 1.0154 / 1.0086–1.0259 | 1.3930 |
+| sv-sky-hw / overview | 0.8971 | 0.8672 | 1.0188 / 1.0086–1.0332 | 1.4540 |
+| sv-sky-sw-mesh / gaps | 1.1838 | 1.4952 | 1.2571 / 1.1704–1.6086 | 2.4970 |
+| sv-sky-sw-mesh / overview | 1.0321 | 1.0261 | 1.2229 / 1.1785–1.4736 | 1.4180 |
 
 The warm GI total sums only outermost matched nodes in the separate frame-64 ProfileGPU
 tree. It is not the first-cut cost. Frame-96 static, frame-97 cut and all nine pan frames
@@ -609,9 +617,17 @@ is gone for 60 seconds.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
-inventory and the PDH memory guard remain mandatory and fail closed. Five focused CPU
+inventory and the PDH memory guard remain mandatory and fail closed. Six focused CPU
 guard tests cover this routing, native memory, failed inventory after a successful child
-exit, ordinary monitor failure and the atomic-acquisition race. The rejected quarry run
+exit, ordinary monitor failure, the atomic-acquisition race and requeuing every unfinished
+static configuration after a short lease. The floor scorer also rejects process failures
+when the recorded child exit code is zero. The rejected quarry run
 `process-a5f82d7e` reached a 30-second process-inventory timeout with 7.99 GiB minimum RAM;
 it is not a reference acceptance or timing result. Retrying waits outside the lease for
 60 compiler-free seconds. Optional telemetry is not a reason to weaken process checks.
+
+After their summaries and full-image inspection, **113 native HDR archives over 5 MB** were
+deleted. Their per-case cleanup ledgers preserve hashes; score JSON, readbacks and inspected
+PNGs remain. The five raw arrays from the rejected `a5f82d7e` state were likewise hashed and
+deleted (265,420,800 bytes). Intentional reference archives retain their actual split halves
+and geometric records for independent rescoring.

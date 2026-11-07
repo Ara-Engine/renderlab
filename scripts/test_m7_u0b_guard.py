@@ -7,6 +7,7 @@ import tempfile
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location("host",Path(__file__).with_name("m7-u0b.py"))
@@ -14,6 +15,29 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_short_static_lease_requeues_every_unfinished_configuration(self):
+        scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True);calls=[]
+        class CaptureComplete(Exception):pass
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            root=Path(temporary)
+            def capture(args):
+                calls.append(args.configs)
+                config=args.configs[0]
+                case=root/"study/floor-static"/config;case.mkdir(parents=True)
+                for name,record in (("native",{}),("camera-readback",dict(all_ok=True)),
+                        ("readback",dict(all_ok=True,config=config)),("process",dict(exit_code=0))):
+                    (case/(name+".json")).write_text(json.dumps(record))
+            def score(args):
+                self.assertEqual({p.name for p in args.cases},{"a","b","c"})
+                raise CaptureComplete()
+            with patch.object(host,"OUT",root),\
+                 patch.object(host,"ue",return_value=SimpleNamespace(CONFIGS=dict.fromkeys(("a","b","c")))),\
+                 patch.object(host,"study",side_effect=capture),\
+                 patch.object(host,"load",return_value=SimpleNamespace(static_floor=score)),\
+                 patch.object(host.time,"sleep"):
+                with self.assertRaises(CaptureComplete):host.floors(SimpleNamespace())
+        self.assertEqual(calls,[["a","b","c"],["b","c"],["c"]])
+
     def test_live_poll_omits_optional_gpu_telemetry_but_keeps_process_inventory(self):
         module=host.load("m7-u0-ue");inventory=[]
         def snapshot():

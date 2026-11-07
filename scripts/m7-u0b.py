@@ -465,10 +465,12 @@ def study(args):
                         bench_label=bench+("-"+args.bench_pose if args.bench_pose else "")
                         out=root/f"{bench_label}-{config}-{args.workload}-{visit}"
                         attempts=[out,*root.glob("retry*-"+out.name)]
-                        if any((p/"summary.json").exists() and (p/"readback.json").exists() and
+                        if any((p/"summary.json").exists() and (p/"readback.json").exists() and (p/"process.json").exists() and
+                               json.loads((p/"process.json").read_text())["exit_code"]==0 and
+                               not json.loads((p/"process.json").read_text()).get("failures") and
                                json.loads((p/"readback.json").read_text())["all_ok"] and
                                (not args.hdr or (p/"camera-readback.json").exists()) and
-                               (not args.hdr or bench=="quarry" or (p/"native.json").exists()) for p in attempts):continue
+                               (not args.hdr or args.workload!="static" or (p/"native.json").exists()) for p in attempts):continue
                         if out.exists() and any(out.iterdir()):
                             number=1
                             while (root/f"retry{number}-{out.name}").exists():number+=1
@@ -592,13 +594,33 @@ def cleanup_native(case):
 def floors(args):
     """Complete U0's static matrix and bounded, per-config native motion captures."""
     configs=list(ue().CONFIGS);static_root=OUT/"study/floor-static"
-    for i in range(0,len(configs),3):
-        study(argparse.Namespace(label="floor-static",configs=configs[i:i+3],benches=["quarry"],
+    def qualified():
+        result={}
+        if not static_root.exists():return result
+        for case in sorted(static_root.iterdir()):
+            if not case.is_dir() or any(not (case/f).exists() for f in
+                    ("native.json","camera-readback.json","readback.json","process.json")):continue
+            runtime=json.loads((case/"readback.json").read_text())
+            process=json.loads((case/"process.json").read_text())
+            if (runtime["all_ok"] and json.loads((case/"camera-readback.json").read_text())["all_ok"]
+                    and process["exit_code"]==0 and not process.get("failures")):
+                result[runtime["config"]]=case
+        return result
+    while True:
+        cases=qualified();missing=[c for c in configs if c not in cases]
+        if not missing:break
+        before=len(cases)
+        study(argparse.Namespace(label="floor-static",configs=missing[:3],benches=["quarry"],
             repeats=1,quiet=False,hdr=True,workload="static",bench_pose=None,minutes=3))
+        if len(qualified())<=before:raise RuntimeError("static floor chunk made no progress")
         time.sleep(3)
     score=load("m7-u0b-score")
-    if not (static_root/"physical-static-floor.json").exists():
-        score.static_floor(argparse.Namespace(root=static_root,reference=OUT/"reference/quarry-final/quarry-p0.npz",stops=-14))
+    summary=static_root/"physical-static-floor.json"
+    if not summary.exists() or {r["config"] for r in json.loads(summary.read_text())["frames"]}!=set(configs):
+        score.static_floor(argparse.Namespace(root=static_root,cases=list(qualified().values()),
+            reference=OUT/"reference/quarry-final/quarry-p0.npz",stops=-14))
+    if {r["config"] for r in json.loads(summary.read_text())["frames"]}!=set(configs):
+        raise RuntimeError("static physical floor does not cover every U0 configuration")
     for case in static_root.iterdir():
         if case.is_dir() and (case/"native.json").exists():cleanup_native(case)
     for sequence_name,label,selected in (("q-walk","lumen",["ue-sw-e","ue-hw-e","ue-sw-h","ue-hw-h"]),
