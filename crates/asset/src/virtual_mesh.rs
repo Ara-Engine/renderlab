@@ -4,7 +4,7 @@
 mod codec;
 mod selection;
 use crate::{Asset, Error, Limits, Placement, Result, Vertex, add, cap, product, valid_transform};
-pub use codec::{decode, decode_page, encode};
+pub use codec::{decode, decode_page, decode_with_bvh, encode, encode_with_bvh};
 #[cfg(feature = "selection-oracle")]
 pub use selection::oracle as selection_oracle;
 pub use selection::{
@@ -13,6 +13,8 @@ pub use selection::{
 };
 
 pub const VERSION: u32 = 1;
+/// Optional acceleration trailer; ordinary RVG/RLV encodes remain v1/v2.
+pub const CLUSTER_BVH_VERSION: u32 = 3;
 pub const PAGE_BYTES: usize = 64 << 10;
 
 macro_rules! id {

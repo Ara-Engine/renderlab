@@ -20,10 +20,21 @@ fn bounds(out: &mut Vec<u8>, b: Bounds) {
 
 /// Metadata only. Page files are immutable siblings addressed by SHA-256, never embedded geometry.
 pub fn encode(p: &Package, limits: VirtualLimits) -> Result<Vec<u8>> {
-    p.validate(limits)?;
+    encode_with_bvh(p, None, limits)
+}
+pub fn encode_with_bvh(
+    p: &Package,
+    bvh: Option<&crate::cluster_bvh::Bvh>,
+    limits: VirtualLimits,
+) -> Result<Vec<u8>> {
+    let counts = p.validate(limits)?;
     let resources = crate::encode(&p.resources, limits.prepared)?;
     let mut out = b"RLV\0".to_vec();
-    let version = p.version();
+    let version = if bvh.is_some() {
+        CLUSTER_BVH_VERSION
+    } else {
+        p.version()
+    };
     u32v(&mut out, version);
     for n in [
         p.meshes.len(),
@@ -63,7 +74,7 @@ pub fn encode(p: &Package, limits: VirtualLimits) -> Result<Vec<u8>> {
         for v in [p.vertices, p.indices, p.payload_bytes] {
             u32v(&mut out, v);
         }
-        if version == 2 {
+        if version >= 2 {
             u32v(
                 &mut out,
                 match p.tangents {
@@ -74,6 +85,19 @@ pub fn encode(p: &Package, limits: VirtualLimits) -> Result<Vec<u8>> {
             );
         }
         out.extend(p.sha256);
+    }
+    if let Some(bvh) = bvh {
+        bvh.validate_virtual(p)?;
+        let bytes = crate::cluster_bvh::encode(
+            bvh,
+            crate::cluster_bvh::Limits {
+                max_bytes: limits
+                    .max_metadata_bytes
+                    .saturating_sub(counts.metadata_host_bytes),
+            },
+        )?;
+        count(&mut out, bytes.len())?;
+        out.extend(bytes);
     }
     cap(
         out.len(),
@@ -143,6 +167,12 @@ impl<'a> Reader<'a> {
 
 /// Counts and byte budgets are charged before allocating. The full DAG is validated before return.
 pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
+    Ok(decode_with_bvh(bytes, limits)?.0)
+}
+pub fn decode_with_bvh(
+    bytes: &[u8],
+    limits: VirtualLimits,
+) -> Result<(Package, Option<crate::cluster_bvh::Bvh>)> {
     cap(
         bytes.len(),
         limits.prepared.max_file_bytes,
@@ -157,7 +187,7 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
         return Err(Error("unknown virtual schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return Err(Error("unknown virtual schema"));
     }
     let nm = r.n(
@@ -257,7 +287,7 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
         let vertices = r.u32()?;
         let indices = r.u32()?;
         let payload_bytes = r.u32()?;
-        let tangents = if version == 2 {
+        let tangents = if version >= 2 {
             match r.u32()? {
                 0 => None,
                 1 => Some(crate::TangentBasis::Authored),
@@ -275,6 +305,17 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
             sha256: r.take(32)?.try_into().unwrap(),
         });
     }
+    let bvh = if version == CLUSTER_BVH_VERSION {
+        let length = r.u32()? as usize;
+        Some(crate::cluster_bvh::decode(
+            r.take(length)?,
+            crate::cluster_bvh::Limits {
+                max_bytes: limits.max_metadata_bytes.saturating_sub(r.allocated),
+            },
+        )?)
+    } else {
+        None
+    };
     if !r.data.is_empty() {
         return Err(Error("trailing virtual bytes"));
     }
@@ -285,7 +326,10 @@ pub fn decode(bytes: &[u8], limits: VirtualLimits) -> Result<Package> {
         resources,
     };
     p.validate(limits)?;
-    Ok(p)
+    if let Some(bvh) = &bvh {
+        bvh.validate_virtual(&p)?;
+    }
+    Ok((p, bvh))
 }
 
 /// Caller supplies SHA-256 of the entire 64KiB file; the dependency-free codec checks it.
