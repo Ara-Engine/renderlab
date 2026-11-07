@@ -26,7 +26,7 @@ mod contact_fold_tests;
 mod motion_bench_tests;
 
 #[path = "virtual_shadow_tests.rs"]
-mod virtual_shadow_tests;
+pub(crate) mod virtual_shadow_tests;
 
 /// Optional `virtual` manifest object overriding `VirtualShadowSettings` fields.
 pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSettings> {

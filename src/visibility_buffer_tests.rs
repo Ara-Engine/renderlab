@@ -764,18 +764,25 @@ fn gpu_visibility_quarry() {
     let base = parse(&m).unwrap_or_default();
     // N8e: `virtual_variants` {name: settings} runs every configuration once per variant,
     // labelled `-v{name}`, in this one process.
-    let variants: Vec<(String, crate::VirtualShadowSettings)> =
-        m["virtual_variants"].as_object().map_or_else(
-            || vec![(String::new(), base)],
-            |o| {
-                o.iter()
-                    .map(|(name, v)| {
-                        let settings = parse(&serde_json::json!({ "virtual": v }));
-                        (format!("-v{name}"), settings.unwrap_or_default())
-                    })
-                    .collect()
-            },
-        );
+    // N8i: a variant's `constants` {name: number} are lookup override constants.
+    use super::film_reference_tests::film_accumulation_tests::virtual_shadow_tests as screens;
+    type Variant = (
+        String,
+        crate::VirtualShadowSettings,
+        Vec<(&'static str, f64)>,
+    );
+    let variants: Vec<Variant> = m["virtual_variants"].as_object().map_or_else(
+        || vec![(String::new(), base, vec![])],
+        |o| {
+            o.iter()
+                .map(|(name, v)| {
+                    let settings = parse(&serde_json::json!({ "virtual": v }));
+                    let constants = screens::screen_constants(v);
+                    (format!("-v{name}"), settings.unwrap_or_default(), constants)
+                })
+                .collect()
+        },
+    );
     let caster_errors = m["caster_error"]
         .as_array()
         .map(|v| v.iter().map(|x| Some(x.as_f64().unwrap() as f32)).collect())
@@ -851,7 +858,7 @@ fn gpu_visibility_quarry() {
         let configs = configs
             .into_iter()
             .flat_map(|c| variants.iter().map(move |v| (c, v)));
-        for ((mode, lod, extent, lift, caster), (variant, settings)) in configs {
+        for ((mode, lod, extent, lift, caster), (variant, settings, constants)) in configs {
             r.primary_mode = mode;
             r.set_lod_error_pixels(lod);
             r.set_software_raster_extent(extent);
@@ -882,6 +889,11 @@ fn gpu_visibility_quarry() {
             };
             let mut first = None;
             for i in 0..warm + 8 {
+                // N8i: the variant's constants, once the shadow state exists (an unchanged
+                // list rebuilds nothing).
+                if r.virtual_shadows.is_some() {
+                    screens::set_screen_constants(&mut r, constants.clone());
+                }
                 render(
                     &mut r,
                     &color,

@@ -2,6 +2,8 @@
 
 **Follow-up: [N8h](non-rt-n8h.md)** cut the records to 36 bytes for source triangles only (1,193 → 448 MiB on the no-RT quarry, byte-identical), keeping most of the gain, and measured total VRAM against Unreal. With MemoryUsage allocator blocks (now Renderlab's default), ours is below Unreal on the no-RT and RT paths.
 
+**Follow-up: [N8i](non-rt-n8i.md)** built the edge certificate below. It certifies 61% of the traced quarry's receivers, byte-identically, but camera-moving frames got slower (2.61-2.64 against 2.39-2.47 ms), as they did with uncertified receivers compacted into a second kernel. The certified receivers were already cheap, and the heavy ones diverge among themselves (5.9 of 32 lanes packed). Neither was kept.
+
 Follow-up unit to [N8f](non-rt-n8f.md), 2026-11-06 UTC, base `79e8ba2`, branch `t3/n8g-shadow-camera-motion`. Brief (Islam, 2026-11-06): make camera-moving frames of the non-RT virtual-shadow pass cheap with a structural change that takes the per-pixel work off dependent geometry fetches. Quarry camera-moving frames cost 2.53-2.58 ms against Unreal VSM's estimated 0.5 ms and a 1.61 ms no-RT frame target. Quality must stay at or above VSM on every measure. Labels: **M** measured here, **I** inference.
 
 ## Result
