@@ -18,7 +18,7 @@ import numpy as np
 ROOT = Path("E:/renderlab-work/m7-tr0")
 OUT = ROOT / "s2g"
 TRACKS = ("s2g-camera-0.25px", "s2g-camera-0.5px", "s2g-camera-1px", "s2g-sun-0.25deg")
-QUALIFIED = "bf169ef7f8599bbff53bc8edcdb1875e8c117b09630e1c912e0f0f5d73335dfb"
+QUALIFIED = "d8bd9a8e1e1c7b5d39ee04d70c01ed4ee87bb654463db2b40daec1a96f35f139"
 SOURCE = Path("E:/renderlab-work/m7-u0b/scenes/S2G/scene.json")
 SCRIPT_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -31,6 +31,11 @@ def save(path, value):
 def sha(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def physical_root():
+    # Preserve earlier BF-qualified scores and archives as a separate corpus.
+    return OUT / "physical" / QUALIFIED[:8]
 
 
 def key(pose, lighting=False):
@@ -87,7 +92,7 @@ def collect(case, archive, metadata, kind):
              note="Only deterministic primary-centre world/IDs/depth; low-spp radiance is never a film target."))
     if kind == "physical":
         name = f"{case['track']}-{case['frame']:03}"
-        target = OUT / "physical" / (name + ".npz")
+        target = physical_root() / (name + ".npz")
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and sha(target) != sha(archive):
             if not target.with_suffix(".json").exists() or json.loads(target.with_suffix(".json").read_text()).get("full_archive_sha256") != sha(archive):
@@ -124,6 +129,9 @@ def import_qualified(args):
         raise ValueError("provider archive is not qualified or its bytes changed")
     if meta["source_scene_sha256"] != registration["source_scene_sha256"]:
         raise ValueError("provider S2G source differs from registration")
+    binary = meta.get("binary_sha256", meta.get("reference_binary_sha256"))
+    if binary != QUALIFIED:
+        raise ValueError("import into the active corpus requires its qualified binary identity")
     frame = meta["frame"]
     pose = dict(frame["open"], to_light=frame["to_light"], fov_y_radians=frame["fov_y"])
     case = next(c for c in registration["physical"] if c["key"] == key(pose, True))
@@ -140,8 +148,15 @@ def trace(args):
         raise ValueError("registered S2G source changed")
     pending = []
     for case in registration[args.kind]:
+        if args.phase == "camera" and case["track"] == "s2g-sun-0.25deg":
+            continue
+        if args.phase == "sun" and case["track"] != "s2g-sun-0.25deg":
+            continue
+        if args.kind == "physical" and case["track"] == "s2g-camera-1px" and case["frame"] == 64:
+            # U0b owns the new-build f64 qualification archive; do not duplicate it.
+            continue
         target = (OUT / "geometry" / (case["key"] + ".npz") if args.kind == "geometry" else
-                  OUT / "physical" / f"{case['track']}-{case['frame']:03}.npz")
+                  physical_root() / f"{case['track']}-{case['frame']:03}.npz")
         if not target.exists():
             pending.append(case)
     module = core()
@@ -151,7 +166,9 @@ def trace(args):
             raise SystemExit("deferred before GPU lease: less than 5 GiB disk headroom")
         track = pending[0]["track"]
         batch = []
-        while pending and pending[0]["track"] == track and len(batch) < min(3, args.limit - completed):
+        # The generic bench checks replay only on its first case. Use one case
+        # per invocation so every accepted state has its own strict replay.
+        while pending and pending[0]["track"] == track and len(batch) < min(1, args.limit - completed):
             batch.append(pending.pop(0))
         label = f"sg-{'geo' if args.kind == 'geometry' else 'film'}-{uuid.uuid4().hex[:8]}"
         print("S2G batch", label, track, [c["frame"] for c in batch], flush=True)
@@ -165,7 +182,7 @@ def trace(args):
             archive = run / "data" / (name + ".npz")
             meta = json.loads(archive.with_suffix(".json").read_text())
             meta.update(accepted_for_scoring=args.kind == "physical", qualification=dict(binary_sha256=QUALIFIED,
-                        provider="U0b eight independent-AS/pipeline rebuilds plus analytic/Mitsuba controls",
+                        provider="U0b eight independent-AS/pipeline f0 rebuilds, affine-difference colour fix; further controls tracked separately",
                         batch_replay=str(run / "reference-readback.json")))
             collect(case, archive, meta, args.kind)
             removed.append(dict(path=str(archive), bytes=archive.stat().st_size, sha256=sha(archive)))
@@ -368,8 +385,10 @@ def ages(_):
         raise SystemExit(f"geometry stage incomplete: {len(missing)} distinct views missing; no ages generated")
     cached_key, cached = None, None
     records = []
+    static_updates = 0
     for name, frames in sequences().items():
         previous, old_pose, age = None, None, None
+        previous_key = None
         for i, pose in enumerate(frames):
             identity = key(pose)
             path = OUT / "geometry" / (identity + ".npz")
@@ -379,6 +398,11 @@ def ages(_):
                 cached_key = identity
             if i == 0:
                 age = np.zeros(cached["depth"].shape, "u1")
+            elif identity == previous_key:
+                # Exact f32 view identity shares the same deterministic centre
+                # geometry. Every fixed pixel, including infinity, keeps age.
+                age = np.minimum(age.astype("u2") + 1, 255).astype("u1")
+                static_updates += 1
             else:
                 age = advance_age(previous, cached, old_pose, pose, age)
             destination = OUT / "ages" / name / f"f{i:03}.npz"
@@ -386,9 +410,10 @@ def ages(_):
             np.savez_compressed(destination, age=age)
             records.append(dict(track=name, frame=i, geometry_key=identity, age_sha256=hashlib.sha256(age.tobytes()).hexdigest(),
                                 pixels=int(age.size), age0=int((age == 0).sum()), age32=int((age >= 32).sum())))
-            previous, old_pose = cached, pose
+            previous, old_pose, previous_key = cached, pose, identity
         print("geometry ages", name, len(frames), flush=True)
     save(OUT / "ages/protocol.json", dict(records=records, source_sequences=registration["source_sequences"], script_sha256=SCRIPT_SHA,
+        exact_static_view_updates=static_updates,
         definition="Fixed external benchmark ages: nearest previous centre, same instance, 2% forward depth; age0 on rejection, +1 on acceptance capped255. Black infinity is same-pixel for pure translation. Sun changes do not reset geometric age.",
         scope="S2G only; does not replace recovered original T1b age masks. Offline scoring only, no renderer consumes these ages."))
 
@@ -449,6 +474,7 @@ if __name__ == "__main__":
     p.add_argument("--binary", type=Path, default=ROOT / "binaries" / (QUALIFIED + ".exe"))
     p.add_argument("--compact-tool", type=Path, required=True)
     p.add_argument("--limit", type=int, default=3)
+    p.add_argument("--phase", choices=("all", "camera", "sun"), default="all")
     p.add_argument("--wait-seconds", type=int, default=120)
     commands.add_parser("inputs").add_argument("label")
     commands.add_parser("colour-control").add_argument("label")

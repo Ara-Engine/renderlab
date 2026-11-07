@@ -76,6 +76,33 @@ def headless_policy(minutes):
     return policy
 
 
+@contextlib.contextmanager
+def queued_lease(label, minutes, wait_seconds=0):
+    """Retry atomic acquisition after preparation; never release a foreign lease."""
+    deadline = time.monotonic() + wait_seconds
+    announced = False
+    while True:
+        headless_policy(minutes)
+        if not U0.LOCK.exists() and U0.E2E.available_gib() >= U0.START_GIB:
+            stack = contextlib.ExitStack()
+            try:
+                owner = stack.enter_context(U0.lease(label, minutes))
+            except SystemExit as error:
+                stack.close()
+                if error.code != 3:
+                    raise
+            else:
+                with stack:
+                    yield owner
+                return
+        if not wait_seconds or time.monotonic() >= deadline:
+            raise SystemExit("deferred: atomic GPU/memory acquisition expired; no owned lease")
+        if not announced:
+            print("Waiting outside lease for shared GPU/memory", flush=True)
+            announced = True
+        time.sleep(.25)
+
+
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -204,6 +231,11 @@ def readback(out, quality, path):
     log = (out / "ue.log").read_text(encoding="utf-8-sig", errors="replace")
     cameras = [line for line in log.splitlines() if "CameraCachePrivate =" in line]
     recipe = json.loads((out / "recipe.json").read_text())
+    if recipe.get("capture_render_thread_sync"):
+        expected_lag = "0"
+        actual_lag = rows.get("r.OneFrameThreadLag")
+        checks.append(dict(name="r.OneFrameThreadLag", expected=expected_lag, actual=actual_lag,
+                           ok=actual_lag is not None and U0.same(actual_lag["value"], expected_lag)))
     expected_offset = recipe.get("exposure_offset", 0)
     actual_offset = rows.get("r.ExposureOffset")
     checks.append(dict(name="r.ExposureOffset", expected=str(expected_offset), actual=actual_offset,
@@ -293,6 +325,7 @@ def run(args):
     out.mkdir(parents=True, exist_ok=False)
     (out / "capture-source.py").write_bytes(SCRIPT_BYTES)
     settle = getattr(args, "settle_frames", 0)
+    temporal_readback = getattr(args, "temporal_readback", False)
     start = 96 + settle
     events = [(40, f"DumpCVars -csv={(out / 'cvars.csv').as_posix()}")]
     # Each repeat starts with a reset, so repeats exercise the same cold input sequence.
@@ -303,14 +336,22 @@ def run(args):
         offset = start + repeat * (len(frames) + 16)
         if not args.capture:
             events.append((offset - 12, f"r.AntiAliasingMethod {0 if repeat % 2 == 0 else 4}"))
-        events.append((offset - 1 - settle, "r.ResetViewState"))
+        if not args.capture or settle:
+            events.append((offset - 1 - settle, "r.ResetViewState"))
         if args.capture:
-            events.append((offset - 1, macro(out, "arm", [f"r.DumpGPU.Root {getattr(args, 'dump_root', 'Tonemap*')}", f"r.DumpGPU.FrameCount {len(frames)}",
+            # Tuple sorting used to execute the arm macro before a separate
+            # same-tick reset. Reset releases RHI history buffers; keep the
+            # required cold reset before arming readback, on the same frame.
+            arm = (["r.ResetViewState"] if not settle else [])
+            initial_root = "PostProcessing*" if temporal_readback else getattr(args, "dump_root", "Tonemap*")
+            events.append((offset - 1, macro(out, "arm", arm + [f"r.DumpGPU.Root {initial_root}", f"r.DumpGPU.FrameCount {len(frames)}",
                           f"r.DumpGPU.Directory {(out / 'dump').as_posix()}", "DumpGPU"])))
         for i, p in enumerate(frames):
             lines = (["getall PlayerCameraManager CameraCachePrivate"] +
                      (["getall DirectionalLightComponent RelativeRotation"] if "to_light" in frames[i - 1] else [])
                      if args.capture and i > 0 else []) + pose_commands(p)
+            if temporal_readback and i == 2:
+                lines.insert(0, f"r.DumpGPU.Root {getattr(args, 'dump_root', 'Tonemap*')}")
             if args.capture:
                 # Ordinary Shot is the native main view. HighResShot can replace/reset temporal state.
                 if i in {0, 1, 2, 4, 8, 16, 32, 48, 60, 64, 65, 66, 68, 72, 80, 88, 92, 95, 96, 108, 120, 128, 160}:
@@ -321,6 +362,14 @@ def run(args):
                           (["getall DirectionalLightComponent RelativeRotation"] if "to_light" in frames[-1] else []))))
     count = start + repeats * (len(frames) + 16) + (96 if args.capture else 0)
     config = settings(args.quality, args.path)
+    synchronous = getattr(args, "synchronous_render", False)
+    temporal_readback = getattr(args, "temporal_readback", False)
+    if temporal_readback and (not args.capture or not synchronous):
+        raise ValueError("temporal readback requires a synchronized quality capture")
+    if synchronous:
+        if not args.capture:
+            raise ValueError("render-thread synchronization is capture-only; cost runs retain defaults")
+        config.append("r.OneFrameThreadLag 0")
     config.append(f"r.ExposureOffset {exposure_offset:g}")
     if getattr(args, "aa", "tsr") == "none":
         config.append("r.AntiAliasingMethod 0")
@@ -384,6 +433,8 @@ def run(args):
           package_exe_sha256=digest(U0.PACKAGE), exposure_stops=source.get("exposure_stops", -14) + exposure_offset,
           registered_exposure_stops=source.get("exposure_stops", -14), exposure_offset=exposure_offset,
           diagnostic_only=bool(exposure_offset),
+          capture_render_thread_sync=synchronous,
+          temporal_readback=temporal_readback,
           sun_diameter_degrees=sun_diameter,
           scene="S2G" if glossy else "quarry", shutter=0, program=args.program,
           aa=getattr(args, "aa", "tsr"), static_source_frame=static_frame, settle_frames=settle,
@@ -393,7 +444,7 @@ def run(args):
     try:
         policy = headless_policy(args.minutes)
         save(out / "activity-policy.json", policy)
-        with U0.lease(args.label, args.minutes):
+        with queued_lease(args.label, args.minutes, args.wait_seconds):
             save(out / "package-identity.json", dict(executable_sha256=digest(U0.PACKAGE),
                  paks={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.pak")},
                  utocs={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.utoc")}))
@@ -512,7 +563,18 @@ def summarize(args):
                                 manual_unit_local=bool(eye.size == 8 and eye[0] == 2 ** recipe.get("exposure_stops", -14) and eye[4] == 1
                                                       and tint is not None and np.array_equal(np.array(tint[:3]), [1, 1, 1])),
                                 source="Tonemap EyeAdaptationBuffer[0].x global exposure; [1].x average local exposure; ColorScale0 tint. Manual PreExposure follows these in FViewInfo::UpdatePreExposure; warm state, unit tint/local.")
-        identities.append(dict(frame=i, engine_frame=frame, hdr=identity, exposure=exposure,
+        temporal = []
+        for event in events:
+            if event["EventName"].startswith("TSR"):
+                parameters = dump.scalar_parameters(event)
+                temporal_values = {k: v for k, v in parameters.items() if k.endswith(("InputJitter", "bCameraCut", "PrevFrameIndex"))}
+                if temporal_values:
+                    temporal.append(dict(event=event["EventName"], values=temporal_values))
+        if recipe.get("temporal_readback") and i < min(2, n):
+            jitters = [v for entry in temporal for k, v in entry["values"].items() if k.endswith("InputJitter")]
+            if not jitters or not all(np.allclose(v, jitters[0], rtol=0, atol=1e-7) for v in jitters):
+                raise ValueError("missing or inconsistent initial TSR jitter readback")
+        identities.append(dict(frame=i, engine_frame=frame, hdr=identity, exposure=exposure, temporal=temporal,
                                min=float(values.min()), max=float(values.max()), mean=float(values[..., :3].mean())))
         if recipe["frames"][i].get("phase") == "hold":
             codes = codes_for(values)
@@ -792,7 +854,7 @@ def history(args):
     test = "renderer::fresh_shadow_tests::primary_ray_gpu_tests::film_reference_tests::film_accumulation_tests::gpu_film_t1_motion"
     policy = headless_policy(args.minutes)
     save(out / "activity-policy.json", policy)
-    with U0.lease(args.label, args.minutes):
+    with queued_lease(args.label, args.minutes, args.wait_seconds):
         U0.guarded([binary, test, "--ignored", "--exact", "--nocapture", "--test-threads=1"],
                    out, timeout=min(args.minutes * 60 - 15, 120) if policy["state"] == "relaxed" else args.minutes * 60 - 15, cwd=REPO, env=env)
     original_path = T1 / "walk-b15/motion.json"
@@ -916,7 +978,7 @@ def reference(args):
     env.pop("VK_INSTANCE_LAYERS", None)
     test = "reference::tests::gpu_reference_benches"
     policy = headless_policy(args.minutes)
-    with U0.lease(args.label, args.minutes):
+    with queued_lease(args.label, args.minutes, args.wait_seconds):
         U0.guarded([pinned_binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
                    root, timeout=min(120, args.minutes * 60 - 15), cwd=REPO, env=env)
     if digest(pinned_binary) != binary_sha:
@@ -1281,12 +1343,84 @@ def score(args):
     print("physical reference frames scored", len(rows), "missing", len(missing))
 
 
+def inspect(args):
+    """Retain full-frame physical-reference comparisons before deleting raw captures."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    codes = load("m6-temporal-gpu-score").codes
+    images, identities = [], []
+    archive_sha = None
+    for label in args.labels:
+        out = ROOT / "runs" / label
+        recipe = json.loads((out / "recipe.json").read_text())
+        score = json.loads((out / "physical-scores.json").read_text())
+        row = next(r for r in score["rows"] if r["frame"] == args.frame)
+        if archive_sha is None:
+            archive = Path(row["reference"])
+            archive_sha = digest(archive)
+            if archive_sha != row["reference_sha256"]:
+                raise ValueError("reference changed before image inspection")
+            with np.load(archive) as data:
+                scale = 2 ** recipe.get("registered_exposure_stops", recipe.get("exposure_stops", -14))
+                mean = (data["L0"] + data["L1"]) * .5 * scale
+                halves = [data[k] * scale for k in ("L0", "L1")]
+            images.append(("Physical reference", mean))
+            if args.history:
+                history = ROOT / "runs" / args.history
+                if not json.loads((history / "history-readback.json").read_text())["age_masks_compatible"]:
+                    raise ValueError("historical compatibility not verified")
+                path = history / "data" / f"full-f{args.frame:03}.rgba16f"
+                images.append(("T1b black replay", np.fromfile(path, "<f2").reshape(1080, 1920, 4)[..., :3].astype("f4")))
+                identities.append(dict(label=args.history, sha256=digest(path)))
+        if row["reference_sha256"] != archive_sha:
+            raise ValueError("image sheet candidates use different physical targets")
+        capture = json.loads((out / "capture-readback.json").read_text())
+        engine_frame = capture["identities"][args.frame]["engine_frame"]
+        dump = NATIVE.s1.native.Dump(out / "dump")
+        events = [p for p in dump.passes if any(re.match(rf"Frame {engine_frame}(?:\D|$)", s) for s in p["ParentEventScopes"])]
+        consumer, name = colour_input(dump, events, recipe)
+        rgb, identity = NATIVE.resource(dump, name, consumer)
+        if identity["sha256"] != row["hdr_sha256"]:
+            raise ValueError("candidate changed before image inspection")
+        pe = capture["identities"][args.frame]["exposure"]["values"][0]
+        images.append((label, rgb[..., :3] * (scale / pe)))
+        identities.append(dict(label=label, hdr=identity))
+    destination = ROOT / "inspect"
+    destination.mkdir(exist_ok=True)
+    for stops in (0, 4):
+        reference = codes(mean, stops)
+        noise = np.abs((codes(halves[0], stops) - codes(halves[1], stops)) * .5).mean(-1)
+        figure, axes = plt.subplots(2, len(images), figsize=(4 * len(images), 7), layout="constrained")
+        for column, (label, rgb) in enumerate(images):
+            encoded = codes(rgb, stops)
+            axes[0, column].imshow(np.clip(encoded / 255, 0, 1))
+            axes[0, column].set_title(label)
+            error = np.abs(encoded - reference).mean(-1) if column else noise
+            heat = axes[1, column].imshow(error, vmin=0, vmax=64, cmap="magma")
+            axes[1, column].set_title("Mean absolute RGB error" if column else "Reference half difference / 2")
+            for axis in axes[:, column]:
+                axis.axis("off")
+        figure.suptitle(f"Q-walk frame {args.frame}, F0 L{stops}; fixed error scale 0–64 codes, saturates above 64; black primary")
+        figure.colorbar(heat, ax=axes[1, :].tolist(), location="bottom", fraction=.05, pad=.02, label="F0 codes (64+ saturated)")
+        figure.savefig(destination / f"q-walk-f{args.frame:03}-L{stops}.png", dpi=160)
+        plt.close(figure)
+    save(destination / f"q-walk-f{args.frame:03}.json", dict(reference=str(archive), reference_sha256=archive_sha,
+         identities=identities, script_sha256=SCRIPT_SHA,
+         scope="Whole image and absolute-error heatmaps; same physical target/registered exposure, no fitted alignment or gain. Distinct from frozen original T1b reference."))
+    print("whole-frame inspection sheets retained", args.frame)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("plan")
     commands.add_parser("baseline")
     commands.add_parser("cost")
+    p = commands.add_parser("inspect")
+    p.add_argument("--labels", nargs="+", required=True)
+    p.add_argument("--frame", type=int, default=64)
+    p.add_argument("--history")
     p = commands.add_parser("run")
     p.add_argument("label")
     p.add_argument("--track", choices=("q-walk", "q-disocclusion", "q-zoom", "q-sun-slow", "q-sun-fast", "q-sun-jump",
@@ -1298,6 +1432,8 @@ def main():
     p.add_argument("--aa", choices=("tsr", "none"), default="tsr")
     p.add_argument("--static-frame", type=int)
     p.add_argument("--settle-frames", type=int, default=0)
+    p.add_argument("--synchronous-render", action="store_true", help="Capture diagnostic: r.OneFrameThreadLag=0 to isolate reset/render-thread races")
+    p.add_argument("--temporal-readback", action="store_true", help="Capture TSR parameters on the first two frames, then retain only the requested dump tree")
     p.add_argument("--exposure-offset", type=float, default=0., help="Static diagnostic only; score unexposed HDR at the registered exposure")
     p.add_argument("--dump-root", default="Tonemap*")
     p.add_argument("--smoke", action="store_true")
@@ -1340,7 +1476,7 @@ def main():
     args = parser.parse_args()
     {"plan": plan, "run": run, "summarize": summarize, "clean": clean, "prune": prune, "baseline": baseline,
      "score": score, "cost": cost, "history": history, "history-check": history_check, "black-check": black_check,
-     "reference": reference, "quiet": quiet, "quiet-check": quiet_check}[args.command](args)
+     "reference": reference, "quiet": quiet, "quiet-check": quiet_check, "inspect": inspect}[args.command](args)
 
 
 if __name__ == "__main__":
