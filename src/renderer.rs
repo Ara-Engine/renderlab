@@ -24,7 +24,7 @@ mod virtual_shadow_gpu;
 pub(crate) mod visibility_buffer;
 pub use mesh_lod::{LodPackage, LodStats, MeshLod};
 pub use virtual_shadow_gpu::{
-    VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
+    VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
 };
 #[path = "program_gpu.rs"]
 mod program_gpu;
