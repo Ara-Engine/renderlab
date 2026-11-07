@@ -336,3 +336,134 @@ witness scorer can run again. Original S1-S3 and native assets are untouched.
 - **RT1c performance evidence:** quality-only capture during explicitly relaxed
   game hold; timing contended and invalid for speed claims. No new quiet optimized
   cost/memory certificate or missing motion pass is inferred.
+
+## Quiet cost and memory follow-up (M, 2026-11-07)
+
+Branch `t3/rt1c-quiet`, main base `79a1966`. Measurement only: **no default switch**.
+This section supersedes the earlier "quiet rerun not performed" cost/memory status;
+it changes neither the S2 image miss nor any missing quality/flicker gate.
+The prior three raw dumps were deleted by Islam before this unit.
+
+**All fast RT results below are measured on the non-default fast setup
+(traced + Interactive).** The comparator is the actual RT-device default,
+**raster + Exact (256 directions)**, asserted and explicitly pinned in the test.
+Both use full-resident original quarry geometry, both registered poses, native
+1920x1080, 1x, full texture residency/16x anisotropy, identical lighting/environment,
+RTX 4070 SUPER, NVIDIA 617.14, Vulkan/wgpu 30.0.1, optimized release test binary,
+validation off. Production renderer and shader code are unchanged.
+
+The M1 harness starts a fresh process and uploads the asset once per configuration.
+Each pose has eight visits, each with 32 warm frames then 8 static, 16 sun,
+48 camera and 48 caster frames. Sun moves 0.5 mrad/frame; camera and placement 0
+move 1 mm/frame, as in the M1/M6-close tracks. Actual frame IDs join timestamps
+to phases. There are no image/readback hashes or diagnostic passes in the timed
+block. Each configuration retains **128 / 256 / 768 / 768** static/sun/camera/caster
+samples, plus all M1 allocation/block/usage/lifetime reports and WDDM observations.
+
+### Quiet render spans and visit ranges
+
+Values are medians of the **16 pose/visit medians**; brackets retain the full
+visit range. These spans run from first rendered pass through tone mapping,
+excluding presentation, CPU preparation and external uploads. Pass medians are
+not summed to obtain the span. HRT costs are the recorded M6-close whole-GPU-frame
+process-median ranges, not a new paired Unreal run. Their D3D12 boundary and
+sampled frame/pose intervals differ; the motion rates and scene are the registered
+comparison workload.
+
+Any uploads or AS preparation before the first rendered timestamp are outside
+these spans. The ratios are descriptive interval comparisons, not complete
+application-throughput measurements.
+
+| Phase | Traced Interactive span [range], ms | Raster Exact span [range], ms | Recorded HRT frame, ms | HRT / fast median |
+|---|---:|---:|---:|---:|
+| Static | .877056 [.862208, .924160] | 14.485248 [14.462368, 14.507920] | 1.743-1.753 | **1.987-1.999x** |
+| Camera | .870656 [.866304, .913408] | 14.454016 [14.431744, 19.151760] | 1.764-1.766 | 2.026-2.028x |
+| Sun | .878336 [.864768, .923136] | 14.486784 [14.465408, 14.505472] | 1.738-1.751 | **1.979-1.994x** |
+| Caster | .877312 [.868352, .921600] | 14.481408 [14.470144, 14.496768] | 1.776-1.778 | 2.024-2.027x |
+
+All **16/16 traced visits in every phase** meet the carried M5-DL RT clean screen:
+median primary <=.60 ms and shade <=.50 ms. Therefore its clean and unfiltered
+results are identical; no slow traced visit was excluded. The raster comparator
+also retains every visit. Its full triangle raster costs are intrinsically above
+the traced-only primary threshold, so that threshold is not misused to reject
+its observations as contamination. The raster camera outlier remains visible.
+
+The fast medians are 16.49-16.60x below the current default's spans on this workload.
+They **do not establish a robust 2x win against HRT**: static and sun medians
+slightly miss 2x, and the slowest retained fast visit in every phase is below 2x
+(HRT / fast visit bounds overall 1.883-2.048x). No threshold or sample was changed
+to turn these narrow misses into passes. This is cost evidence, not a new combined
+quality/performance acceptance or an engine-wide throughput certificate.
+
+| Phase | Fast fused primary + shadow, ms | Fast shade, ms | Default raster receiver, ms | Default Exact compute, ms | Default shade, ms |
+|---|---:|---:|---:|---:|---:|
+| Static | .500736 | .346224 | 2.646784 | 8.517336 | 3.286784 |
+| Camera | .498688 | .345464 | 2.647040 | 8.477720 | 3.292152 |
+| Sun | .500480 | .345680 | 2.647256 | 8.517144 | 3.286272 |
+| Caster | .501760 | .346000 | 2.648064 | 8.512088 | 3.287040 |
+
+Tone mapping is .013312 ms in both configurations. Interactive has no separate
+shadow pass; its fused interval is not the historical .276 ms shadow increment.
+This run does not remeasure that isolated increment.
+
+### M1 memory, both poses
+
+MiB = 2^20 bytes. Allocator values agree exactly across all 16 warmed reports
+per configuration. WDDM is sampled per-process Dedicated Usage, comparable to
+the recorded Unreal DXGI local usage, rather than allocator slack or total
+desktop VRAM. Warm and whole-process observed peaks agree.
+
+| Configuration | Allocated MiB | Reserved MiB | WDDM warm/process peak MiB | WDDM warm / total samples | Recorded HRT MiB |
+|---|---:|---:|---:|---:|---:|
+| Non-default traced + Interactive | 2,509.556 | 2,641.247 | 2,716.297 | 3 / 11 | 5,407-5,410 |
+| Default raster + Exact | 2,396.351 | 2,506.055 | 2,572.980 | 29 / 32 | 5,407-5,410 |
+
+The fast setup uses **143.316 MiB more WDDM memory** than the current default
+(135.191 MiB more allocator reservation). Both remain below recorded HRT usage.
+The short fast process supplies only three warm WDDM samples; these observations
+are not instantaneous peak bounds. Requested cadence was 250 ms, with the normal
+PowerShell/PDH sampling overhead retained.
+
+### Reservation, verification and handoff
+
+Explicit quiet reservation: 15:46:37-15:51:37Z. Actual shared-lock run:
+**15:46:53.409429-15:47:54.364870Z**, about **61 seconds**, released immediately
+after the two GPU processes. The line `rt1c quiet-cost-memory window released`
+handed the window to TR0; its `tq1` acquired the next lease at 15:47:56Z.
+There were **zero compiler, game or foreign-GPU-process samples** throughout;
+minimum free host RAM was 11,436.543 MiB. The 4 GiB start / 2 GiB abort guard and
+`--no-build-contention` were active. No owned Cargo ran inside the lease, and no
+window, viewer or desktop capture was opened. No further GPU work is required.
+
+Both GPU tests exit 0 (13.75 s traced, 40.26 s raster). The wrapper exits 1 because
+CPU inventory processing initially rejected the previously unlisted raster
+`depth` allocation **after both GPU processes had completed**. It is the renderer's
+Depth32Float target, now catalogued from its creation/retirement site. All CSVs
+and the raster WDDM summary were recovered from the saved reports, CPU-only;
+the original wrapper failure is retained. No renderer rerun or new quiet slot
+was used to repair this catalogue omission.
+
+Release library check: **123 passed, 0 failed, 121 ignored**, 149.429 s including
+the cold build, test execution .50 s. Formatting and release Clippy pass with
+the previously documented two baseline allowances (25.325 s combined). All
+measurement Rust was checked before the lease; later edits affect only Python
+cataloguing/scoring and this report. Binary SHA-256:
+`3d21dd4cf06de85881c8fd5e3a543f681a5a40e58f9fc8692bb4561d93649c42`.
+
+Evidence: `E:/renderlab-work/rt1c-quiet/summary.json`, `visits.csv`,
+`m1/{rt,rt-raster-exact}/` (all raw timestamp rows, allocation reports/CSVs,
+WDDM samples, manifests and stdout), and `runs/quiet-cost-memory.json`.
+`scripts/rt1c-quiet-score.py` recomputes the summary without GPU work. No large
+image/raw dump was produced; the prior deleted captures remain deleted.
+
+After measurement and CPU summary recovery, `cargo clean --target-dir
+E:/renderlab-work/rt1c-quiet/target` exits 0: **1,588 files / 674.8 MiB** removed,
+owned target absent. Cleanup ran after TR0's quiet release, during the published
+G1 functional gap; it did not run inside a quiet timing lease.
+
+Proposed decisions-row text (TSV unchanged): **RT1c quiet M1 measurement** —
+traced Interactive spans .871-.878 ms versus raster Exact 14.454-14.487 ms;
+all 16 traced visits qualify. Recorded HRT ratios are 1.987-1.999 static,
+1.979-1.994 sun, 2.026-2.028 camera and 2.024-2.027 caster; no robust all-phase 2x
+certificate. WDDM 2,716.3 versus default 2,573.0 and HRT 5,407-5,410 MiB.
+Measurement only; no default change and no quality miss waived.
