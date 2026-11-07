@@ -112,25 +112,33 @@ def ue(allow_game=False):
         mode=game_state()
         if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
         if mode=="relaxed":minutes=min(minutes,3)
-        cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
-        queued_at=time.monotonic();deadline=queued_at+900
         next_notice=0
-        while u.LOCK.exists():
+        while True:
+            cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
+            queued_at=time.monotonic()
+            while u.LOCK.exists():
+                mode=game_state()
+                if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
+                if time.monotonic()>=next_notice:
+                    print("Waiting for shared GPU slot; requesting",label,flush=True)
+                    next_notice=time.monotonic()+120
+                time.sleep(.5)
             mode=game_state()
             if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
-            if time.monotonic()>=deadline:raise RuntimeError("no shared GPU gap within 15 minutes")
-            if time.monotonic()>=next_notice:
-                print("Waiting for shared GPU slot; requesting",label,flush=True)
-                next_notice=time.monotonic()+120
-            time.sleep(.5)
-        mode=game_state()
-        if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
-        if time.monotonic()-queued_at>5:cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
-        with original_lease(label,minutes) as owner:
-            active_owner=owner
-            owner["foreign_cpu_readiness"]=cpu
-            try:yield owner
-            finally:active_owner=None
+            if time.monotonic()-queued_at>5:cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
+            acquired=False
+            try:
+                with original_lease(label,minutes) as owner:
+                    acquired=True;active_owner=owner
+                    owner["foreign_cpu_readiness"]=cpu
+                    try:yield owner
+                    finally:active_owner=None
+                return
+            except SystemExit as error:
+                # Readiness can take time: another worker may win mkdir after the
+                # unlocked observation. Retry only an unacquired lock conflict.
+                if acquired or error.code!=3:raise
+                time.sleep(.5)
     u.lease=queued_lease
     return u
 
