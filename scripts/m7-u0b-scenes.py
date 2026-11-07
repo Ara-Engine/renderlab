@@ -98,6 +98,22 @@ def quarry():
     (OUT/"quarry-t1b-witnesses.json").write_text(json.dumps(dict(manifest,frames=list(priority)),indent=2))
     for f in frames[12:]:add(f["name"])
     (OUT/"quarry-priority.json").write_text(json.dumps(dict(manifest,frames=priority),indent=2))
+    # Canonical-only production avoids rewriting qualified alias sidecars on each
+    # bounded GPU batch. Publish aliases once from the complete manifest afterward.
+    canonical=[f for f in frames if "alias_of" not in f]
+    def production_order(f):
+        name=f["name"]
+        if name.startswith("quarry-"):return 0
+        if name.startswith("q-walk-") and not name.endswith("-shutter"):return 1
+        if name.startswith("q-disocclusion-") and not name.endswith("-shutter"):return 2
+        return 3
+    canonical.sort(key=production_order)
+    (OUT/"quarry-production.json").write_text(json.dumps(dict(manifest,frames=canonical),indent=2))
+    unit_sequence=[f for f in canonical if
+        (f["name"].startswith("q-disocclusion-") and not f["name"].endswith("-shutter")) or
+        (f["name"].startswith("q-walk-") and f["name"].endswith("-shutter") and int(f["name"].split("-")[2])<32) or
+        f["name"].startswith("pan-")]
+    (OUT/"quarry-unit-sequence.json").write_text(json.dumps(dict(manifest,frames=unit_sequence),indent=2))
     smoke=dict(manifest,frames=[dict(frames[0],name="quarry-smoke",samples=16,width=480,height=270)])
     (OUT/"quarry-smoke.json").write_text(json.dumps(smoke,indent=2))
 

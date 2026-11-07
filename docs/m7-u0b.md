@@ -4,7 +4,7 @@ Implementation unit on main `708e87c`, branch `t3/m7-u0b`, 2026-11-07.
 Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses](m7-u0.md).
 
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
-the new packaged benches and three quiet static visits per configuration are retained.
+the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
 The full Unreal bench matrix, motion witnesses and physical floor table remain incomplete.
 The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
 or integrated quality-pass claim is made.
@@ -97,12 +97,13 @@ runtime readback: the implementation hard-coded `Some([0;3])`, and all L/D split
 the upper 64 wholly missed rows are exactly zero. No archive bytes were changed. No immutable
 per-run source snapshot was saved for those older runs; later recipes retain build/input hashes.
 
-Zero-shutter Q-walk frames 0, 1, 47, 48, 49, 56, 63 and 64 are retained at 1,024 spp, with
-32 independent visibility rays per accepted primary sample. Thirty-eight exact-camera aliases
-also have JSON controls, including hold frames 65-96, 80/81 and return 159/160. The rest of
-TR0's original 60 scored frames (26 distinct cameras) are prioritized ahead
-of the full sequence. The extra adjacent witnesses increase the prioritized distinct total
-to 31. The finite-shutter rows are separate; they are not substituted for Unreal's zero shutter.
+All 31 prioritized distinct zero-shutter Q-walk cameras are retained at 1,024 spp, with
+32 independent visibility rays per accepted primary sample. They cover TR0's original 60
+scored frames (26 distinct cameras) plus requested adjacent witnesses, including frame 56
+for the frame-72 changed mask. Sixty-two exact-camera aliases have JSON controls, including
+hold frames 65-96, 80/81 and return 159/160. `quarry-t1b-witnesses.json` records the selection;
+the full sequence remains a separate campaign. Finite-shutter rows are separate and never
+substituted for Unreal's zero shutter.
 
 The 15:13 UTC game-time batch completed frame 64, then stopped cleanly when its completed
 frame exceeded the 45-second contention threshold (52.41 seconds including compaction).
@@ -141,39 +142,73 @@ runner restores the bench angle after the HRT preset, refreshes shadow proxies a
 actual final light-component readback. Every glossy capture uses D3D12 SM6 and
 `r.EyeAdaptation.PreExposureOverride 0`.
 
-### Quiet static timing checkpoint
+### Quiet timing baseline
 
 RTX 4070 SUPER 12 GB, NVIDIA 617.14, Ryzen 7 7800X3D, native 1080p; original U0 quarry
-package and presets. These 24 completed processes precede the 14:39 UTC game hold. Each
-keeps all 64 CSV frames 96-159. The exclusive lease excludes other GPU jobs; the supported
+package and U0 presets. **80 completed processes**: four static and three each camera/Sun
+visits for all eight configurations. The first 24 static processes precede the game hold;
+the remainder follow the 15:36 UTC release. Each keeps all 64 CSV frames 96-159. The
+exclusive lease excludes other GPU jobs; the supported
 wallpaper pause setting is restored in `finally`. Start GPU utilization was 1%. No clock lock
 was applied. The registered clean-visit rule is p95/p50 <=1.15, with no game-hold overlap;
 all process ranges remain reported, including visits outside that rule. No pooled percentiles.
 
-| U0 configuration | Clean / total processes | Clean process p50 range ms | All process p50 range ms |
-|---|---:|---|---|
-| ue-0 | 3/3 | 1.667-1.718 | 1.667-1.718 |
-| ue-tsr | 3/3 | 3.108-3.507 | 3.108-3.507 |
-| ue-sw-h | 3/3 | 4.002-4.272 | 4.002-4.272 |
-| ue-sw-e | 3/3 | 4.003-4.052 | 4.003-4.052 |
-| ue-0-hrt | 2/3 | 1.764-1.764 | 1.764-1.879 |
-| ue-tsr-hrt | 3/3 | 3.156-3.172 | 3.156-3.172 |
-| ue-hw-h | 2/3 | 4.106-4.160 | 4.106-4.701 |
-| ue-hw-e | 3/3 | 4.461-4.526 | 4.461-4.526 |
+| U0 configuration | Static clean / total | Static clean p50 range ms | Camera clean p50 range ms (3/3) | Sun clean p50 range ms (3/3) |
+|---|---:|---|---|---|
+| ue-0 | 4/4 | 1.648-1.718 | 1.673-1.689 | 2.094-2.131 |
+| ue-tsr | 4/4 | 3.100-3.507 | 3.107-3.180 | 3.514-3.546 |
+| ue-sw-h | 4/4 | 3.758-4.272 | 3.726-3.793 | 4.180-4.204 |
+| ue-sw-e | 4/4 | 4.003-4.052 | 4.027-4.085 | 4.365-4.395 |
+| ue-0-hrt | 3/4 | 1.749-1.764 | 1.784-1.788 | 1.761-1.767 |
+| ue-tsr-hrt | 4/4 | 3.156-3.193 | 3.188-3.222 | 3.165-3.187 |
+| ue-hw-h | 3/4 | 4.106-4.160 | 4.159-4.216 | 4.131-4.170 |
+| ue-hw-e | 4/4 | 4.452-4.526 | 4.504-4.547 | 4.478-4.501 |
 
-`quiet-summary.json` retains exact medians, p95 ranges, every visit and tracing-mode readback.
-A fourth-process block stopped on a foreign CPU build helper misclassified as a renderer;
-completed visits are retained, and the narrow helper exception is corrected. Remaining quiet
-visits and moving workloads wait for the explicit game release. High/Epic differences should
-not be inferred from overlapping short-visit ranges. No timing during play counts toward speed.
+The two excluded static visits remain in the all-process ranges: ue-0-hrt extends to
+1.879 ms and ue-hw-h to 4.701 ms. `quiet-summary.json` retains every median, p95 range,
+paired Lumen increment and tracing-mode readback. Quiet snapshots live under each study's
+`windows/<UTC>` so retries preserve earlier proof. High here means **Lumen High with U0's
+TSR Epic / 200% history**, not TR0's separate TSR-High preset.
+
+Clean paired Lumen increments over the same-shadow TSR baseline range, static / camera / Sun:
+SW Epic **0.496-0.930 / 0.905-0.927 / 0.849-0.856 ms**; HW Epic
+**1.259-1.354 / 1.293-1.343 / 1.295-1.336 ms**. These are differences of process medians,
+not pooled percentile differences. The broad static software increment reflects baseline drift;
+the complete ranges should be used in later speed comparisons. No clocks were locked.
+
+A foreign CPU build helper initially stopped the fourth static block; the narrow helper
+classification was corrected. The first camera attempt later exceeded Unreal's internal
+16-KiB command line (16,687 characters), exited without a log/CSV and contributes no timing.
+Short macro paths plus a prelaunch length guard fixed it; all successful visits are retained.
+The final quiet release is **17:38:46.573113Z**, completion recorded at 17:39:03Z. No timing
+during play counts toward speed, and no new 2x claim is made here.
 
 ### S4 convergence and the S2G replay diagnostic
 
 S4's inherited 4,096-spp interior reference has 5.7% / 15% median/p95 noise. Its approximately
 64k run was deferred during the relaxed game hold because its estimated five-minute continuous
 GPU load exceeded the permitted short screens. After the 15:36 UTC game release it is queued
-behind the ordered quiet windows. It remains too noisy for a gate;
-the sample count is not lowered to obtain a pass.
+behind the ordered quiet windows. The monolithic 65,536-spp attempt then hit the RAM guard:
+**13.295 GiB initially, 1.831 GiB minimum**, stopped after **372.75 seconds**, lease released
+17:54:07Z. It produced no accepted S4 image. A bounded 4,096-spp batch completed in 30.24
+render-call seconds, zero invalid pixels and 14.456 GiB minimum RAM, but the following seed
+lost the GPU device; its replay control had passed. No Windows display-reset event was found,
+so the device-loss cause is not diagnosed.
+
+The retained production plan uses sixteen independent 4,096-spp processes with **one sample
+per dispatch**, the quarry's existing granularity, for the same total 65,536 spp at 1080p.
+Five batches have completed at this checkpoint, including the previously failing seed. Actual
+even/odd halves are sample-weighted in f64 and rounded once to f32; duplicate seeds and scene
+or settings mismatches fail closed. Final convergence evidence is pending, and the sample
+budget is not reduced. The first interior PNG was inspected and shows the expected indirect
+red cast with no direct sun patch.
+
+The test harness adds explicit seed/dispatch controls only. Its current executable is
+`40bbee1cc887aaee35c8ed368b781f4080f4a15962cbb670a9916ba0c087daf1`; the reference, input
+and shader source hashes are unchanged from the qualified `bf169ef7` binary retained for
+TR0. Library tests still pass **125/125**, with 119 ignored GPU tests. The two CPU scorer tests
+verify zero error for matching physical images, correlated-noise cancellation on held cameras,
+exposure/background rejection and independent-half combination with duplicate-seed rejection.
 
 TR0's `gr-1p-64-a` S2G probe used the unmodified registered geometry, sky and sun, black
 primary control and the 1-pixel camera track's frame 64. Its first 1,024-spp image was finite
@@ -220,8 +255,75 @@ TR0's first qualified S2G score against an older reflection/GI-off native captur
 large highlight deficit. On its fixed top-5%-full-reference masks, physical D/full is
 0.998963 for metal and 0.998458 for dielectric, so omitted interreflection does not explain
 native/full ratios 0.159/0.675. Those are combined material/lighting/reconstruction errors,
-not an isolated TSR defect. A fresh sun-only control with actual angle, camera, light,
-exposure and material/normal readbacks is planned before expanding that S2G comparison.
+not an isolated TSR defect. Fresh sun-only AA0/TSR controls verify the actual angle, camera,
+light and exposure. Source-interpolated authored normals agree with unjittered GBuffer normals
+to less than 0.090 degrees; metallic, roughness, specular and decoded base colours agree within
+their storage quantization. No gross material or normal import mismatch is found.
+
+In `gc-sun-tsr-a/rejection-readback.json`, resource versions and hashes identify the actual
+RejectShading SceneColor input and Tonemap's TSR.Output consumer. Metal/dielectric highlight
+energy ratios against physical D fall from **0.835607/0.910870** at that input to
+**0.117872/0.799582** at TSR output. Whole-material ratios also fall,
+**0.831121/0.914201** to **0.123069/0.836081**, excluding redistribution outside the highlight
+mask as the whole explanation. The AA0 control retains **0.90225/0.90883**. This localizes the
+large additional loss within the observed TSR interval; it does not identify its internal
+cause. TR0's four-stop-lower exposure control measures pre-exposure **2^-16** exactly and
+unexposes before scoring at the registered -12 stops. The RejectShading ratios remain
+**0.835607/0.910870**; TSR output improves to **0.286557/0.821605**, with whole-material ratios
+**0.289562/0.855207**. This demonstrates exposure dependence but leaves most metal energy
+missing. `gc-sun-tsr-m4-a/colour-control-readback.json` records the control. No gain is fitted,
+the registered -12 bar is unchanged, and no additional S2G reference campaign is duplicated here.
+The stronger `pre-input-identity.json` audit multiplies the lower-exposure RejectShading f16
+RGB by exactly 16, leaves alpha unchanged and reconstructs the entire original input byte
+for byte (SHA256 `2d5862f030696277a17ceb1910f5dba269b5d1f3fe2cd5e256903dae86cd759e`).
+The exposure control therefore preserves the physical input beyond agreement of masked means.
+
+## Physical quarry floor
+
+The eight final static captures retain the actual Tonemap HDR consumer, not a display PNG.
+Camera readback matches p0, manual pre-exposure is **2^-14** on every capture, local exposure
+is 1 and the colour scale is unit RGB. The native decoder follows resource versions and checks
+the archive hash. AA0 consumes `PostDOFTranslucency.SceneColor`; these U0 TSR presets consume
+`TSR.Output`. Formats and full resource/exposure proofs remain in each `native.json`.
+
+The following are raw RMS **F0 codes at -14 / -10 stops**, against the 4,096-spp full-radiance
+p0 reference. All registered geometric populations are retained; masks are defined from the
+reference, never selected from candidate error. Covered-reference split-half display noise is
+**0.209/0.302 codes**, edge noise **0.371/0.818**. Noise-subtracted RMS, p99, maximum, signed
+mean, population size, archive hashes and exact per-capture settings remain in
+`study/quiet-s/physical-static-floor.json` and `physical-floor-summary.json`.
+
+| Population | SW High | SW Epic | HW High | HW Epic |
+|---|---:|---:|---:|---:|
+| all-covered | 9.949/15.039 | 9.318/13.990 | 9.182/13.081 | 8.411/11.649 |
+| background-centre | 0.400/1.173 | 0.333/1.028 | 0.399/1.171 | 0.326/1.010 |
+| backlit | 13.670/24.908 | 11.401/20.620 | 12.362/22.061 | 9.931/17.075 |
+| contact | 15.626/26.854 | 14.018/23.592 | 15.146/25.712 | 13.425/22.178 |
+| edge | 14.281/27.020 | 13.835/25.549 | 12.144/22.740 | 11.285/20.201 |
+| faint | 11.028/14.918 | 10.400/13.661 | 10.723/13.923 | 9.902/12.278 |
+| image | 4.084/6.240 | 3.821/5.796 | 3.771/5.453 | 3.451/4.851 |
+| isolated | 8.713/10.406 | 8.123/9.419 | 8.636/10.215 | 8.076/9.356 |
+| lit | 8.063/10.595 | 7.487/9.780 | 7.948/10.191 | 7.385/9.395 |
+| multi-surface | 14.729/24.959 | 14.241/23.673 | 12.737/20.760 | 11.947/18.546 |
+| narrow | 13.527/21.324 | 12.664/18.878 | 13.107/20.218 | 12.086/17.386 |
+| occluded | 23.011/43.379 | 22.382/41.754 | 16.326/30.656 | 14.528/26.402 |
+| partial | 12.153/18.164 | 11.143/16.148 | 11.774/17.055 | 10.592/14.659 |
+| silhouette | 21.319/41.567 | 20.765/40.416 | 14.582/29.567 | 13.213/26.812 |
+| single-surface | 9.824/14.759 | 9.186/13.713 | 9.093/12.870 | 8.320/11.460 |
+| solid | 9.473/14.370 | 8.930/13.542 | 8.603/12.181 | 7.929/10.985 |
+| solid-lit | 8.006/10.469 | 7.432/9.661 | 7.909/10.108 | 7.351/9.328 |
+| solid-occluded | 22.828/42.991 | 22.190/41.369 | 16.070/30.098 | 14.246/25.842 |
+| wide | 11.902/17.566 | 10.861/15.633 | 11.530/16.453 | 10.315/14.140 |
+| wide6 | 11.351/16.467 | 10.247/14.608 | 11.140/15.707 | 9.926/13.639 |
+
+The corresponding covered-pixel AA0 and TSR-only VSM baselines are **11.986/16.504** and
+**10.615/15.205**; HRT baselines agree within 0.002 codes. These are physical combined
+foreground/material/lighting/reconstruction errors. They do not isolate a Lumen or TSR defect.
+Hardware Epic is best on these static populations, but no Renderlab quality pass is implied.
+Full-frame reference/native/8x-difference sheets for both Epic paths were inspected, including
+edges, contact shadows and the black background. Bright contact/occlusion discrepancies and
+fine texture differences remain visible. Black-centre error includes mixed-edge pixels;
+visible-sky silhouette behaviour is outside this protocol.
 
 ## Temporal reference interface
 

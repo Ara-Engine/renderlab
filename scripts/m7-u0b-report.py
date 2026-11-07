@@ -7,6 +7,8 @@ import re
 import statistics
 import hashlib
 import subprocess
+import math
+import importlib.util
 
 import numpy as np
 
@@ -110,6 +112,7 @@ def quiet(args):
             start,end=(dt.datetime.fromisoformat(process[k]) for k in ("start_utc","end_utc"))
             overlap=any(start<b and end>a for a,b in holds())
             summary=json.loads(path.read_text());gpu=summary["statistics"]["GPUTime"]
+            if gpu["n"]!=64:raise ValueError("quiet visit must retain all 64 timed frames: "+str(case))
             match=re.search(r"-(static|camera|sun|pan)-(\d+)$",case.name)
             if not match:continue
             clean=not overlap and gpu["p95"]/gpu["median"]<=1.15
@@ -125,11 +128,85 @@ def quiet(args):
         table[key]=dict(visits=len(values),clean_visits=len(clean),median_of_clean_process_medians_ms=statistics.median(r["gpu"]["median"] for r in clean) if clean else None,
             clean_process_median_range_ms=span(clean,"median"),all_process_median_range_ms=span(values,"median"),
             clean_process_p95_range_ms=span(clean,"p95"),game_overlap_visits=sum(r["game_overlap"] for r in values))
+    paired={}
+    for config,baseline in (("ue-sw-h","ue-tsr"),("ue-sw-e","ue-tsr"),
+                            ("ue-hw-h","ue-tsr-hrt"),("ue-hw-e","ue-tsr-hrt")):
+        for phase in ("static","camera","sun"):
+            a={r["visit"]:r for r in groups.get(config+"/"+phase,[])}
+            b={r["visit"]:r for r in groups.get(baseline+"/"+phase,[])}
+            delta=[dict(visit=i,delta_ms=r["gpu"]["median"]-b[i]["gpu"]["median"])
+                   for i,r in a.items() if i in b and r["clean"] and b[i]["clean"]]
+            paired[config+"/"+phase]=dict(baseline=baseline,pairs=delta,
+                range_ms=[min(r["delta_ms"] for r in delta),max(r["delta_ms"] for r in delta)] if delta else None)
     result=dict(clean_rule="preregistered p95/p50 <=1.15; no hold overlap; all64 native frames retained per visit",
                 scope="per-process medians and p95 ranges, not pooled percentiles; quiet-start, wallpaper paused, exclusive lease; clocks not locked",
-                table=table,visits=rows)
+                table=table,paired_lumen_increment=paired,visits=rows)
     save(args.out,result)
     print(json.dumps(table,indent=1))
+
+
+def floors(args):
+    """Pixel-weighted summaries; detailed per-frame tails remain in physical-floor.json."""
+    configs=("ue-sw-h","ue-sw-e","ue-hw-h","ue-hw-e")
+    statics={}
+    for path in sorted((OUT/"study").glob("*/physical-static-floor.json")):
+        for row in json.loads(path.read_text())["frames"]:statics[row["config"]]=row
+    walks={}
+    for path in args.walk.glob("*/physical-floor.json"):
+        value=json.loads(path.read_text());walks[value["config"]]=value
+    def aggregate(rows,offset):
+        populations={key for row in rows for key in row["measures"][offset]};result={}
+        for key in sorted(populations):
+            values=[row["measures"][offset][key] for row in rows if key in row["measures"][offset]]
+            n=sum(v["n"] for v in values)
+            result[key]=dict(n=n,observations=len(values),**{
+                metric:math.sqrt(sum(v["n"]*v[metric]**2 for v in values)/n)
+                for metric in ("rms","rms_noise_subtracted","reference_noise_rms")})
+        return result
+    motion={c:dict(frames=len(w["frames"]),missing=w["missing_frames"],complete=w["complete"],
+        error={o:aggregate(w["frames"],o) for o in ("0","4")},
+        residual={o:aggregate([dict(measures={o:r["measures"]}) for r in w["motion"] if str(r["offset"])==o],o) for o in ("0","4")})
+        for c,w in walks.items()}
+    result=dict(scope="physical combined error; registered F0 and +4 stops; pixel-weighted RMS across retained native frames; no gain fit",
+                static=statics,motion=motion)
+    save(args.out,result)
+    lines=[]
+    for title,source in (("Static",{c:r["measures"] for c,r in statics.items()}),
+                         ("Motion image",{c:r["error"] for c,r in motion.items()}),
+                         ("Motion residual",{c:r["residual"] for c,r in motion.items()})):
+        if not source:continue
+        lines += ["### "+title,"","RMS F0 codes at registered exposure / +4 stops.","",
+                  "| Population | SW High | SW Epic | HW High | HW Epic |","|---|---:|---:|---:|---:|"]
+        for key in sorted({k for r in source.values() for k in r["0"]}):
+            values=["/".join(f'{source[c][o][key]["rms"]:.3f}' for o in ("0","4"))
+                    if c in source and key in source[c]["0"] else "pending" for c in configs]
+            lines.append("| "+key+" | "+" | ".join(values)+" |")
+        lines.append("")
+    args.out.with_suffix(".md").write_text("\n".join(lines))
+    print(json.dumps(dict(static_configs=list(statics),motion={c:dict(frames=r["frames"],missing=len(r["missing"])) for c,r in motion.items()})))
+
+
+def benches(args):
+    path=Path(__file__).with_name("m7-u0-ue.py")
+    spec=importlib.util.spec_from_file_location("ue",path);ue=importlib.util.module_from_spec(spec);spec.loader.exec_module(ue)
+    expected={(b,c) for b in ("SV","S4","S5","S2G") for c in ue.CONFIGS};rows={}
+    for path in args.root.glob("*/native.json"):
+        case=path.parent
+        bench=next((b for b in ("SV","S4","S5","S2G") if re.match(r"(?:retry\d+-)?"+b+"-",case.name)),None)
+        runtime=json.loads((case/"readback.json").read_text());scene=json.loads((case/"scene-readback.json").read_text())
+        camera=json.loads((case/"camera-readback.json").read_text());process=json.loads((case/"process.json").read_text())
+        native=json.loads(path.read_text())["frames"]
+        if not (runtime["all_ok"] and scene["sun_angle_ok"] and camera["all_ok"] and process["exit_code"]==0 and len(native)==1):
+            raise ValueError("bench capture readback/coverage failed: "+str(case))
+        if sha(Path(native[0]["archive"]))!=native[0]["archive_sha256"]:raise ValueError("native archive changed")
+        row=dict(bench=bench,config=runtime["config"],case=str(case),scene=scene,camera=camera,
+            native=native[0],tracing=runtime["effective_mode"],process_exit=process["exit_code"],
+            minimum_available_gib=process["minimum_available_gib"],cost_eligible=False)
+        rows[(bench,runtime["config"])]=row
+    missing=sorted(expected-rows.keys())
+    save(OUT/"bench-captures.json",dict(complete=not missing,expected=len(expected),
+        captured=list(rows.values()),missing=missing,scope="content and quality captures; functional leases, no speed claim"))
+    print(json.dumps(dict(expected=len(expected),captured=len(rows),missing=len(missing))))
 
 
 def main():
@@ -137,6 +214,9 @@ def main():
     q=s.add_parser("quiet");q.add_argument("--out",type=Path,default=OUT/"quiet-summary.json")
     s.add_parser("annotate-black")
     q=s.add_parser("aliases");q.add_argument("manifest",type=Path)
+    q=s.add_parser("floors");q.add_argument("--walk",type=Path,default=OUT/"walk/lumen")
+    q.add_argument("--out",type=Path,default=OUT/"physical-floor-summary.json")
+    q=s.add_parser("benches");q.add_argument("--root",type=Path,default=OUT/"study/bench-matrix")
     a=p.parse_args();globals()[a.command.replace("-","_")](a)
 
 

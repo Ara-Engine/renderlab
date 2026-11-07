@@ -6,6 +6,7 @@ and uses U0's game/renderer and 4/2-GiB memory guards. Existing leases are never
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import math
@@ -72,6 +73,9 @@ def ue(allow_game=False):
     original_guarded=u.guarded
     active_owner=None
     def bounded_guarded(command,*a,**kw):
+        if Path(str(command[0])).name.lower()=="unrealgame.exe":
+            length=len(subprocess.list2cmdline([str(c) for c in command]))
+            if length>=16000:raise ValueError(f"UE's 16-KiB FCommandLine bound: {length}")
         if active_owner is not None:
             remaining=int(u.remaining_seconds(active_owner))-5
             if remaining<1:raise RuntimeError("owned GPU lease is ending")
@@ -113,7 +117,7 @@ def build(args):
         try:owner=json.loads(path.read_text())
         except (FileNotFoundError,json.JSONDecodeError):return None
         if owner.get("owner")!="m7-u0b" and ("quiet" in owner.get("label","").lower() or
-                owner.get("owner") in ("rt1c","m7-tr0","dl3-preview-default")):return owner
+                owner.get("owner") in ("rt1c","m7-tr0","dl3-preview-default","dl4-env-helpers")):return owner
         return None
     if foreign_quiet():raise SystemExit("CPU build deferred for another worker's measurement lease")
     with (OUT/"build.jsonl").open("w") as log,(OUT/"build.stderr.log").open("w") as err:
@@ -143,6 +147,14 @@ def reference(args):
     env=dict(os.environ,RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
              RENDERLAB_M7_REFERENCE_OUT=str(out),VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
     env.pop("VK_INSTANCE_LAYERS",None)
+    env.pop("RENDERLAB_M7_SEED",None)
+    if args.seed is not None:
+        if not 0<=args.seed<2**32:raise ValueError("reference seed must fit u32")
+        env["RENDERLAB_M7_SEED"]=str(args.seed)
+    env.pop("RENDERLAB_M7_SAMPLES_PER_DISPATCH",None)
+    if args.dispatch_samples is not None:
+        if args.dispatch_samples<1:raise ValueError("dispatch samples must be positive")
+        env["RENDERLAB_M7_SAMPLES_PER_DISPATCH"]=str(args.dispatch_samples)
     test="reference::tests::gpu_reference_analytic"
     if args.benches:
         env["RENDERLAB_M7_BENCHES"]=";".join(str((OUT if (OUT/"scenes"/x.split("@")[0]/"scene.json").exists() else BASE)/"scenes"/x.split("@")[0])+"@"+x.split("@")[1] for x in args.benches)
@@ -163,6 +175,34 @@ def reference(args):
             manifest_sha256=u.sha(args.manifest) if args.manifest else None,game_protocol=game_state()))
         u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],process,
                   timeout=max(30,int(u.remaining_seconds(owner))-10),cwd=REPO,env=env)
+
+
+def s4(args):
+    """Bound process lifetime while preserving the full 65,536-spp production budget."""
+    guard=OUT/"scenes/SV-seed-guard";guard.mkdir(parents=True,exist_ok=True)
+    scene=json.loads((OUT/"scenes/SV/scene.json").read_text());scene["size"]=[8,8]
+    (guard/"scene.json").write_text(json.dumps(scene,separators=(",",":")))
+    inputs=[]
+    for i in range(16):
+        label=args.label+f"/seed-{i:02}";root=OUT/"reference"/label;archive=root/"S4-interior.npz"
+        if not archive.exists():
+            reference(argparse.Namespace(label=label,benches=["SV-seed-guard@16","S4@4096"],
+                minutes=3,geometry=False,replay_loaded=False,manifest=None,batch_frames=1,
+                dispatch_samples=1,
+                seed=(0x4d375530+i*7919)%(2**32)))
+            processes=list(root.glob("process-*/process.json"))
+            process=max(processes,key=lambda p:p.stat().st_mtime)
+            proof=json.loads(process.read_text())
+            if proof["exit_code"] or proof["failures"]:raise RuntimeError("S4 batch process did not pass")
+            metadata=root/"S4-interior.json";value=json.loads(metadata.read_text())
+            value|=dict(production_process=str(process),production_exit_code=0)
+            metadata.write_text(json.dumps(value,indent=2))
+            subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"compact",str(root),"S4-interior"],
+                           cwd=REPO,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
+        inputs.append(str(archive))
+    subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"combine",
+                    str(OUT/"reference"/args.label/"combined"),"S4-interior",*inputs],
+                   cwd=REPO,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def prepare(args):
@@ -250,7 +290,9 @@ def study(args):
                         out=root/f"{bench_label}-{config}-{args.workload}-{visit}"
                         attempts=[out,*root.glob("retry*-"+out.name)]
                         if any((p/"summary.json").exists() and (p/"readback.json").exists() and
-                               json.loads((p/"readback.json").read_text())["all_ok"] for p in attempts):continue
+                               json.loads((p/"readback.json").read_text())["all_ok"] and
+                               (not args.hdr or (p/"camera-readback.json").exists()) and
+                               (not args.hdr or bench=="quarry" or (p/"native.json").exists()) for p in attempts):continue
                         if out.exists() and any(out.iterdir()):
                             number=1
                             while (root/f"retry{number}-{out.name}").exists():number+=1
@@ -263,7 +305,11 @@ def study(args):
                                    f"r.DumpGPU.Directory {(out/'hdr').as_posix()}"]
                             events=[(178,"getall PlayerCameraManager CameraCachePrivate"),(180,"DumpGPU")]
                         if args.workload!="static":
-                            events=[e for e in u.workload_events(out,args.workload) if not e[1].startswith("HighResShot")]
+                            # UE's own command line is limited to 16 KiB. Keep the 160
+                            # per-frame exec paths short even for long study labels.
+                            macros=OUT/"m"/hashlib.sha256(str(out).encode()).hexdigest()[:10]
+                            macros.mkdir(parents=True,exist_ok=True)
+                            events=[e for e in u.workload_events(macros,args.workload) if not e[1].startswith("HighResShot")]
                             if args.hdr and args.workload=="pan":
                                 for f in (97,112,128,159):
                                     events += [(f-2,f"r.DumpGPU.Directory {(out/f'hdr-{f:03}').as_posix()}"),(f-1,"DumpGPU"),(f+1,"getall PlayerCameraManager CameraCachePrivate")]
@@ -302,6 +348,13 @@ def study(args):
                         u.save(out/"summary.json",summary)
                         print(json.dumps(dict(case=out.name,readback_ok=ok,gpu=summary["statistics"]["GPUTime"])),flush=True)
                         if not ok:raise RuntimeError("readback failed "+str(out))
+                        if args.hdr and scene is not None:
+                            # Compact each bench immediately so a full matrix never
+                            # accumulates dozens of large regenerable GPU dumps.
+                            with (out/"decode.log").open("w") as log:
+                                subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"decode",
+                                    str(out/"hdr"),str(out/"native.npz"),"--stops",str(int(scene["exposure_stops"]))],
+                                    cwd=REPO,stdout=log,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def pose_commands(p):
@@ -333,12 +386,20 @@ def walk(args):
     """Contiguous native Lumen capture on the exact registered Q-walk. The GPU lease is
     released before CPU HDR decoding, so other workers can use that time."""
     u=ue(allow_game=True);root=OUT/"walk"/args.label;root.mkdir(parents=True,exist_ok=True)
-    source=Path("E:/renderlab-work/t1-gpu/sequences/q-walk.json")
-    frames=json.loads(source.read_text())["frames"]
+    source=Path("E:/renderlab-work/t1-gpu/sequences/q-walk.json") if args.sequence=="q-walk" else OUT/"quarry-static.json"
+    registered=json.loads(source.read_text())["frames"]
+    if args.sequence=="q-walk":frames=registered
+    else:
+        poses=[dict(f["open"],fov_y_radians=f["fov_y"],phase="camera-alternation")
+               for f in registered if not f["sky_only"]]
+        frames=[dict(poses[i%2],frame=i) for i in range(64)]
     macros=OUT/"m"/args.label;macros.mkdir(parents=True,exist_ok=True)
     events=[]
-    for i,p in enumerate(frames):
+    # Alternation has 96 moving warm-up frames, matching U0's cost workload.
+    for i in range(-96 if args.sequence=="alternation" else 0,len(frames)):
+        p=frames[i%2] if i<0 else frames[i]
         text=(["getall PlayerCameraManager CameraCachePrivate"] if i else [])+pose_commands(p)
+        if i<0:text=pose_commands(p)
         events.append((96+i,u.macro(macros,f"m{i}",text)))
     events += [(95,"DumpGPU"),(96+len(frames),"getall PlayerCameraManager CameraCachePrivate")]
     for config in args.configs:
@@ -359,7 +420,7 @@ def walk(args):
         log=(out/"ue.log").read_text(encoding="utf-8-sig",errors="replace")
         checks=check_camera(log,frames)
         u.save(out/"camera-readback.json",dict(sequence_sha256=u.sha(source),frames=checks,all_ok=True))
-        u.save(out/"recipe.json",dict(sequence=str(source),sequence_sha256=u.sha(source),frames=frames,
+        u.save(out/"recipe.json",dict(sequence=str(source),sequence_name=args.sequence,sequence_sha256=u.sha(source),frames=frames,
                 shutter="zero",capture_only=True,first_csv_frame=96,arm_csv_frame=95,
                 package_executable_sha256=u.sha(u.PACKAGE),config=config))
         subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"decode",str(out/"hdr"),str(out/"native.npz")],check=True,
@@ -370,8 +431,11 @@ def walk(args):
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest="cmd",required=True)
     sub.add_parser("build");sub.add_parser("prepare")
+    q=sub.add_parser("s4");q.add_argument("label",default="s4-64k",nargs="?")
     q=sub.add_parser("cook");q.add_argument("label")
     q=sub.add_parser("reference");q.add_argument("label");q.add_argument("--minutes",type=int,default=15)
+    q.add_argument("--seed",type=int)
+    q.add_argument("--dispatch-samples",type=int)
     q.add_argument("--benches",nargs="+");q.add_argument("--manifest",type=Path)
     q.add_argument("--batch-frames",type=int,default=16)
     q.add_argument("--geometry",action="store_true");q.add_argument("--replay-loaded",action="store_true")
@@ -381,6 +445,7 @@ def main():
     q.add_argument("--quiet",action="store_true");q.add_argument("--hdr",action="store_true")
     q.add_argument("--workload",choices=("static","camera","sun","pan"),default="static")
     q=sub.add_parser("walk");q.add_argument("label");q.add_argument("--configs",nargs="+",default=["ue-sw-e","ue-hw-e","ue-sw-h","ue-hw-h"])
+    q.add_argument("--sequence",choices=("q-walk","alternation"),default="q-walk")
     args=p.parse_args();globals()[args.cmd](args)
 
 

@@ -753,6 +753,12 @@ fn gpu_reference_benches() {
     let (device, queue) = gpu();
     let dir = output();
     let spp: u32 = std::env::var("RENDERLAB_M7_SPP").map_or(4096, |s| s.parse().unwrap());
+    let seed =
+        std::env::var("RENDERLAB_M7_SEED").map_or(Settings::default().seed, |s| s.parse().unwrap());
+    let samples_per_dispatch = std::env::var("RENDERLAB_M7_SAMPLES_PER_DISPATCH")
+        .map_or(Settings::default().samples_per_dispatch, |s| {
+            s.parse().unwrap()
+        });
     let list = std::env::var("RENDERLAB_M7_BENCHES").expect("RENDERLAB_M7_BENCHES");
     let mut first = true;
     for entry in list.split(';').filter(|s| !s.is_empty()) {
@@ -768,6 +774,8 @@ fn gpu_reference_benches() {
         for (pose, v) in &bench.views {
             let settings = Settings {
                 samples: spp,
+                seed,
+                samples_per_dispatch,
                 smith: bench.smith,
                 capture_geometry: std::env::var("RENDERLAB_M7_CAPTURE_GEOMETRY").as_deref()
                     == Ok("1"),
@@ -788,6 +796,7 @@ fn gpu_reference_benches() {
                 serde_json::json!({
                 "bench": name, "pose": pose, "scene_sha256": bench.sha256, "seconds": seconds,
                 "seed": settings.seed, "max_depth": settings.max_depth, "smith": format!("{:?}", settings.smith),
+                "samples_per_dispatch":settings.samples_per_dispatch,
                 "camera_background":bench.scene.camera_background,
                 "visibility_samples_per_primary":settings.visibility_samples}),
             );

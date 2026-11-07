@@ -97,6 +97,37 @@ def compact(args):
     print(json.dumps(dict(reference=name,samples=n,noise=meta["noise_relative_quantiles"],bytes=target.stat().st_size)),flush=True)
 
 
+def combine(args):
+    """Combine independent even-sample batches without averaging duplicate seeds."""
+    fields=("bench","pose","scene_sha256","smith","max_depth","camera_background","width","height")
+    recipe=None;seeds=set();total=0;halves=None;inputs=[]
+    for path in args.inputs:
+        meta=json.loads(path.with_suffix(".json").read_text());n=meta["samples"]
+        if (meta.get("accepted_for_scoring") is False or meta.get("camera_background")!=[0,0,0]
+            or meta.get("archive_sha256")!=sha(path) or n<2 or n%2):
+            raise ValueError("batch must have verified black-primary metadata, hash and even sample count")
+        identity={k:meta[k] for k in fields}
+        if recipe is None:recipe=identity
+        elif identity!=recipe:raise ValueError("batch scene/settings mismatch")
+        if meta["seed"] in seeds:raise ValueError("duplicate seed would not add samples")
+        seeds.add(meta["seed"])
+        with np.load(path) as arrays:
+            values=[arrays[k].astype("f8") for k in ("L0","L1")]
+            if any(v.shape!=(meta["height"],meta["width"],3) for v in values):raise ValueError("batch shape mismatch")
+            if any(not np.isfinite(v).all() for v in values):raise ValueError("nonfinite batch")
+            if halves is None:halves=[v*n for v in values]
+            else:
+                for i,v in enumerate(values):halves[i]+=v*n
+        total+=n;inputs.append(dict(path=str(path),archive_sha256=meta["archive_sha256"],seed=meta["seed"],samples=n))
+    if halves is None:raise ValueError("no batches")
+    args.root.mkdir(parents=True,exist_ok=True)
+    for i,values in enumerate(halves):(values/total).astype("<f4").tofile(args.root/f"{args.name}-half{i}.f32")
+    save(args.root/(args.name+".json"),dict(recipe,samples=total,independent_seed_batches=inputs,
+        accumulation="sample-weighted actual even/odd batch means, accumulated in f64 then rounded once to f32; no duplicate seeds",
+        accepted_for_scoring=True))
+    compact(argparse.Namespace(root=args.root,name=args.name))
+
+
 def score(args):
     metadata=json.loads(args.reference.with_suffix(".json").read_text())
     if metadata.get("accepted_for_scoring") is False or metadata.get("camera_background")!=[0,0,0] or metadata.get("archive_sha256")!=sha(args.reference):
@@ -124,16 +155,54 @@ def score(args):
                 values=e2[mask]
                 results[str(stops)][key[4:]]=dict(n=int(mask.sum()),rms=float(np.sqrt(values.mean())),
                     rms_noise_subtracted=float(np.sqrt(max(0,float(values.mean()-v2[mask].mean())))),
+                    reference_noise_rms=float(np.sqrt(v2[mask].mean())),
                     p99=float(np.sqrt(np.quantile(values,.99))),max=float(np.sqrt(values.max())),signed_mean=float(error[mask].mean()))
     save(args.out,dict(reference_sha256=sha(args.reference),candidate_sha256=sha(args.candidate),
          pre_exposure=args.pre_exposure,exposure_stops=args.stops,
+         statistics_definitions=dict(rms="RGB component RMS over the population",p99="p99 of per-pixel RGB RMS",max="maximum per-pixel RGB RMS"),
          scope="unexposed physical reference; F0 Reinhard+sRGB codes at registered exposure and +4 stops",measures=results))
+
+
+def static_floor(args):
+    """Score retained static native HDR only after camera and runtime readbacks pass."""
+    rows=[]
+    for directory in sorted(args.root.iterdir()):
+        if not directory.is_dir() or not (directory/"camera-readback.json").exists():continue
+        runtime=json.loads((directory/"readback.json").read_text())
+        camera=json.loads((directory/"camera-readback.json").read_text())
+        process=json.loads((directory/"process.json").read_text())
+        if not runtime["all_ok"] or not camera["all_ok"] or process["exit_code"]:
+            raise ValueError("static capture readback failed: "+str(directory))
+        output=directory/"native.npz"
+        if not output.with_suffix(".json").exists():
+            decode(argparse.Namespace(dump=directory/"hdr",out=output,stops=args.stops))
+        native=json.loads(output.with_suffix(".json").read_text())["frames"]
+        if len(native)!=1 or native[0]["archive_sha256"]!=sha(output):
+            raise ValueError("static native archive identity/coverage failed")
+        result=directory/"physical-score.json"
+        score(argparse.Namespace(reference=args.reference,candidate=output,
+              pre_exposure=native[0]["pre_exposure"],stops=args.stops,out=result))
+        with np.load(args.reference) as reference,np.load(output) as candidate:
+            ref=codes((reference["L0"]+reference["L1"])/2,args.stops)
+            estimate=codes(candidate["hdr"][...,:3]/native[0]["pre_exposure"],args.stops)
+            pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
+            Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/"physical.png")
+        rows.append(dict(config=runtime["config"],effective_mode=runtime["effective_mode"],
+                         case=str(directory),**json.loads(result.read_text())))
+        print("scored static",runtime["config"],flush=True)
+    save(args.root/"physical-static-floor.json",dict(
+        scope="physical combined material/lighting/reconstruction error; black primary; visible-sky silhouette behavior untested",
+        frames=rows))
 
 
 def floor(args):
     """Physical combined-error floors, with explicit missing cameras. Internal TSR ages
     are unavailable; this is not an isolated reconstruction or visibility comparison."""
     def key(p):return np.asarray(p["eye"]+p["target"]+[p.get("fov_y",p.get("fov_y_radians",.85))],"<f4").tobytes()
+    selection=getattr(args,"selection",None)
+    selected=None if selection is None else {
+        int(f["name"].removeprefix("q-walk-")) for f in json.loads(selection.read_text())["frames"]
+        if f["name"].startswith("q-walk-") and not f["name"].endswith("-shutter")}
     refs={}
     for path in args.reference.glob("*.json"):
         meta=json.loads(path.read_text());frame=meta.get("frame")
@@ -163,6 +232,7 @@ def floor(args):
             raise ValueError("capture coverage/readback failed: "+str(directory))
         rows=[];residuals=[];missing=[];previous=None
         for index,(pose,capture) in enumerate(zip(recipe["frames"],native,strict=True)):
+            if selected is not None and index not in selected:previous=None;continue
             source=refs.get(key(pose))
             if source is None:missing.append(index);previous=None;continue
             reference_path,meta=source
@@ -201,9 +271,12 @@ def floor(args):
                               [codes(h,args.stops+o) for h in halves]) for o in (0,4)})
             rows.append(row)
         result=dict(config=recipe["config"],effective_mode=runtime["effective_mode"],
+            statistics_definitions=dict(rms="RGB component RMS over the population",p99="p99 of per-pixel RGB RMS",maximum="maximum absolute RGB component"),
             scope="physical combined foreground/material/lighting/reconstruction error; black primary before accumulation; visible-sky silhouette behavior untested",
             motion_definition="consecutive F0 candidate step minus physical-reference step; common covered placement; no internal-age filter; split-half residual noise reported/subtracted",
-            age_filter_available=False,complete=not missing,missing_frames=missing,frames=rows,motion=residuals)
+            age_filter_available=False,sequence_frames=len(native),
+            selection=str(selection) if selection else "all sequence frames",selection_sha256=sha(selection) if selection else None,
+            complete=not missing,missing_frames=missing,frames=rows,motion=residuals)
         save(directory/"physical-floor.json",result)
         print(json.dumps(dict(config=recipe["config"],scored=len(rows),missing=len(missing),motion_rows=len(residuals))),flush=True)
 
@@ -231,7 +304,8 @@ def decode(args):
     for event in dump.passes:
         if "Tonemap" not in event["EventName"]:continue
         inputs=dump.inputs(event)
-        selected=[(key,name) for key,name in inputs.items() if key in ("TSR.Output","TSR.History.Color","SceneColor")]
+        selected=[(key,name) for key,name in inputs.items() if key in
+                  ("TSR.Output","TSR.History.Color","SceneColor","PostDOFTranslucency.SceneColor")]
         if len(selected)!=1:raise ValueError("ambiguous Tonemap colour input "+str(selected))
         key,name=selected[0];desc=dump.resources[name.split(".")[0]];path=version(name,event)
         h,w=desc["ExtentY"],desc["ExtentX"]
@@ -275,11 +349,14 @@ def decode(args):
 def main():
     p=argparse.ArgumentParser(description=__doc__);s=p.add_subparsers(dest="command",required=True)
     q=s.add_parser("compact");q.add_argument("root",type=Path);q.add_argument("name")
+    q=s.add_parser("combine");q.add_argument("root",type=Path);q.add_argument("name");q.add_argument("inputs",nargs="+",type=Path)
     q=s.add_parser("score");q.add_argument("reference",type=Path);q.add_argument("candidate",type=Path)
     q.add_argument("--pre-exposure",type=float,required=True);q.add_argument("--out",type=Path,required=True)
     q.add_argument("--stops",type=int,default=-14)
     q=s.add_parser("decode");q.add_argument("dump",type=Path);q.add_argument("out",type=Path);q.add_argument("--stops",type=int,default=-14)
     q=s.add_parser("floor");q.add_argument("root",type=Path);q.add_argument("reference",type=Path);q.add_argument("--stops",type=int,default=-14)
+    q.add_argument("--selection",type=Path)
+    q=s.add_parser("static_floor");q.add_argument("root",type=Path);q.add_argument("reference",type=Path);q.add_argument("--stops",type=int,default=-14)
     a=p.parse_args();globals()[a.command](a)
 
 
