@@ -4,6 +4,13 @@
 
 ## Verdict
 
+**RT1c update:** Islam's revised RT shadow floor is matched HRT, not VSM.
+The 27-versus-11 VSM false-shadow gap is recorded and non-blocking. The
+[RT1c audit](rt1c-rt-default.md) retains the defaults because S2's registered
++4-stop final-image display RMS loses to HRT1, confirmed on current optimized
+source. Retained principal shadow-mask and available visibility-flicker
+comparisons pass HRT1.
+
 **RT measurement scope:** every Renderlab RT timing, speed ratio and RT memory
 comparison below is **measured on the non-default fast setup (traced + Interactive)**,
 unless a row explicitly names Traced + Virtual. The RT-device default remains raster
@@ -152,7 +159,7 @@ Unchanged by this unit. Every row comes from [N8o](non-rt-n8o.md) / [N8p](non-rt
 - **S2 / S3** ([bench-motion.md](bench-motion.md)): partial RMS .0742-.0779 against VSM's .170-.186 and HRT1's .137-.254. Lost contacts 0 against VSM's 2,101-12,289; leaks 0 against Unreal's 62-126; flips 0 against 167-200.
 - **Flicker,** computed here from the recorded per-frame rows (`motion-benches/S*/per-frame.json`): below VSM and HRT1 in every phase. S2 disk camera .0132-.0191 against VSM's .0605-.0615; S3 rotate .0025-.0050 against VSM's .080-.082 and HRT1's .123-.124.
 - **Quarry film reference** ([m6-film-reference.md](m6-film-reference.md), F0): partial RMS .234 / .235 against VSM's .371 / .372 and HRT's .346 / .345. Missed film shadows 9,768 / 9,682 against 24,049 / 24,059.
-- **One miss:** false shadows (film-lit receivers shown ≤ 0.9).
+- **Recorded VSM gap (non-blocking for the revised RT HRT floor):** false shadows (film-lit receivers shown ≤ 0.9).
   - Policy reference: Interactive 9 / 11 against VSM's 9 / 10.
   - Minimal reference: 21 / 17 against 11 / 9.
   - Exact has the same miss (9 / 11, 20 / 17). HRT has 743-770.
@@ -193,7 +200,7 @@ N8o and N8p cite 4,138-4,202 MiB for the RT device. That figure came from the qu
   - On an RT device the library defaults to raster primaries with the `SoftShadows::Exact` preference (256 rays).
   - Every RT comparison (e2e, M5-DL, this record) sets `PrimaryVisibility::Traced` and `SoftShadows::Interactive` explicitly.
   - The viewer inherits the library defaults.
-  - [RT1](rt1-interactive.md) owns the conditional default decision. Promotion requires every static and motion measure to pass; the film false-shadow miss still prevents it.
+  - [RT1c](rt1c-rt-default.md) applies the HRT floor. The VSM false-shadow gap does not prevent promotion; the confirmed S2 +4-stop final-image RMS miss does. Missing motion and quiet cost/memory evidence is not counted as a pass.
 - The trail's N8p row says camera motion is "about 0.5, estimate". The measured 0.495-0.500 replaces it (rows below).
 
 ## 8. M5 status: the matched Unreal comparison (measurement only)
