@@ -115,9 +115,11 @@ fn surface_stats(
     if let Some([probes, hits, reached, sun, unshown, misses, overflow, fills]) =
         r.test_surface_stats()
     {
-        stats.push(serde_json::json!({"label": label, "frame": frame, "probes": probes,
+        stats.push(
+            serde_json::json!({"label": label, "frame": frame, "probes": probes,
             "hits": hits, "caster_reached": reached, "sun_refreshes": sun, "unshown": unshown,
-            "misses": misses, "margin_overflow": overflow, "fills": fills}));
+            "misses": misses, "margin_overflow": overflow, "fills": fills}),
+        );
     }
 }
 /// N8h: the renderer's GPU memory by owner (ledger), wgpu's HAL counters and the
@@ -1276,7 +1278,9 @@ fn gpu_visibility_quarry() {
                 let start = Instant::now();
                 // N8o: `caster_frames` (default `move_frames`) caster-moving frames; `caster_wrap`
                 // > 0 steps the placement back and forth over that many millimetres (traces).
-                let caster_frames = m["caster_frames"].as_u64().map_or(move_frames, |n| n as u32);
+                let caster_frames = m["caster_frames"]
+                    .as_u64()
+                    .map_or(move_frames, |n| n as u32);
                 let caster_wrap = m["caster_wrap"].as_u64().unwrap_or(0) as u32;
                 for i in 1..=caster_frames {
                     let at = if caster_wrap > 0 {

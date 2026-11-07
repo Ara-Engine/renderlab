@@ -1267,7 +1267,8 @@ impl VirtualState {
         // the entries (surface_cache::QUEUE_TAIL).
         let queue_bytes = if self.settings.lookup.queues() {
             16 + 8 * u64::from(size[0]) * u64::from(size[1])
-                + surface_cache::QUEUE_TAIL * u64::from(self.settings.lookup == VirtualLookup::Surface)
+                + surface_cache::QUEUE_TAIL
+                    * u64::from(self.settings.lookup == VirtualLookup::Surface)
         } else {
             32
         };
