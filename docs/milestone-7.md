@@ -106,3 +106,14 @@ The rest is kept, about 6.0 GB:
 | `study/`, `scenes/`, `reference/`, `fixture/`, `mitsuba*/`, `tools/` | about 0.7 GB | summaries, scenes, references, Mitsuba tooling | all M7 comparisons |
 
 Final delete: when the last Unreal-comparison unit (integrated M7 acceptance) finishes, remove `ue-package/` and `ue-project/`. Keep only the summaries, the inspected PNGs, and the scripts and configs that rebuild the project (`scripts/m7-u0-*.py`, plus the config deltas recorded in docs/m7-u0.md). The DDC and `Saved/Cooked` may be deleted earlier, once no more recooks are planned, after R0a.
+
+RT shadow floor (Islam, 2026-11-07): the RT path's shadow floor is Unreal's matched RT technique, hardware ray-traced shadows (HRT), not VSM. Measured against HRT, the fast RT setup (traced primaries plus Interactive, 8 rays) wins on every recorded measure:
+
+| Measure | Fast RT setup | Unreal HRT |
+|---|---:|---:|
+| False shadows | 27 | 743 |
+| Lit darkened | 0-2 | 724 |
+| Leaks | 0 | 2,718 |
+| Missed film shadows | 9,245 | 23,931 |
+
+So it becomes the RT-device default once its motion gates against HRT are confirmed. The fast setup's gap to VSM on false shadows (27 against 11) stays recorded, but it doesn't block. VSM's low count comes from blurring toward lit: it misses 27,071 film shadows and leaks 5,537.
