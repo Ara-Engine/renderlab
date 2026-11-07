@@ -958,6 +958,7 @@ def score(args):
     internal restart ages or an invented post-TSR visibility output.
     """
     from scipy.ndimage import distance_transform_edt
+    started = time.monotonic()
     if args.output_tag and not re.fullmatch(r"[A-Za-z0-9_-]+", args.output_tag):
         raise ValueError("batch output tag must be a plain filename label")
     out = ROOT / "runs" / args.label
@@ -1130,6 +1131,8 @@ def score(args):
                 e2, v2 = np.mean(error ** 2, -1), np.mean(noise ** 2, -1)
                 old_error = codes(old_hdr, stops) - reference if old_hdr is not None else None
                 old_e2 = np.mean(old_error ** 2, -1) if old_error is not None else None
+                signed_error = error.mean(-1)
+                old_signed_error = old_error.mean(-1) if old_error is not None else None
                 pops = {}
                 for key in ref:
                     if key.startswith("pop_"):
@@ -1139,14 +1142,14 @@ def score(args):
                                   rms_noise_subtracted=float(np.sqrt(max(0, float((e2 - v2)[mask].mean())))),
                                   signed_mean=float(error[mask].mean()), maximum=float(np.max(np.abs(error[mask]))),
                                   reference_noise_rms=float(np.sqrt(v2[mask].mean())))
-                            signed = error.mean(-1)[mask]
+                            signed = signed_error[mask]
                             pops[key[4:]]["se"] = float(signed.std(ddof=1) / math.sqrt(signed.size)) if signed.size > 1 else 0
                             if old_e2 is not None:
                                 pops[key[4:]]["t1b_replay_same_physical_reference"] = dict(
                                     rms=float(np.sqrt(old_e2[mask].mean())),
                                     rms_noise_subtracted=float(np.sqrt(max(0, float((old_e2 - v2)[mask].mean())))),
                                     signed_mean=float(old_error[mask].mean()),
-                                    se=float(old_error.mean(-1)[mask].std(ddof=1) / math.sqrt(int(mask.sum()))) if mask.sum() > 1 else 0)
+                                    se=float(old_signed_error[mask].std(ddof=1) / math.sqrt(int(mask.sum()))) if mask.sum() > 1 else 0)
                                 converged = mask & (age >= 32)
                                 if converged.any():
                                     pops[key[4:]]["same_t1b_age32_pixels"] = dict(n=int(converged.sum()),
@@ -1154,8 +1157,8 @@ def score(args):
                                         t1b=float(np.sqrt(max(0, float((old_e2 - v2)[converged].mean())))),
                                         tsr_signed_mean=float(error[converged].mean()),
                                         t1b_signed_mean=float(old_error[converged].mean()),
-                                        tsr_se=float(error.mean(-1)[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0,
-                                        t1b_se=float(old_error.mean(-1)[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0)
+                                        tsr_se=float(signed_error[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0,
+                                        t1b_se=float(old_signed_error[converged].std(ddof=1) / math.sqrt(int(converged.sum()))) if converged.sum() > 1 else 0)
                             if age is not None:
                                 converged = mask & (age >= 32)
                                 if converged.any():
@@ -1213,11 +1216,11 @@ def score(args):
                 if changed is not None and changed.any():
                     field = dict(tsr_rms=float(np.sqrt(e2[changed].mean())), tsr_signed_mean=float(error[changed].mean()),
                          tsr_rms_noise_subtracted=float(np.sqrt(max(0, float((e2 - v2)[changed].mean())))),
-                         tsr_se=float(error.mean(-1)[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
+                         tsr_se=float(signed_error[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
                     if old_e2 is not None:
                         field.update(t1b_rms=float(np.sqrt(old_e2[changed].mean())), t1b_signed_mean=float(old_error[changed].mean()),
                             t1b_rms_noise_subtracted=float(np.sqrt(max(0, float((old_e2 - v2)[changed].mean())))),
-                            t1b_se=float(old_error.mean(-1)[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
+                            t1b_se=float(old_signed_error[changed].std(ddof=1) / math.sqrt(int(changed.sum()))) if changed.sum() > 1 else 0)
                     result["changed"]["measures"][f"{prefix}{stops}"] = field
                 if previous is not None and previous[0] == i - 1:
                     d_reference = reference - codes(previous[2], stops)
@@ -1263,7 +1266,7 @@ def score(args):
     save(output_path, dict(
          rows=rows, requested_frames=sorted(selected_frames) if selected_frames else "all", missing_frames=missing, motion_residuals=residuals,
          transient_pools=transient, historical_variant=args.history, program=program,
-         script_sha256=SCRIPT_SHA, recipe_sha256=digest(out / "recipe.json"),
+         script_sha256=SCRIPT_SHA, recipe_sha256=digest(out / "recipe.json"), elapsed_seconds=time.monotonic() - started,
          diagnostic_only=recipe.get("diagnostic_only", False),
          registered_exposure_stops=recipe.get("registered_exposure_stops", recipe.get("exposure_stops", -14)),
          age_protocol="reference_geometry_v1" if args.ages else "historical_t1b" if historical else "unavailable",

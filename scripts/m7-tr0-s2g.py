@@ -20,6 +20,7 @@ OUT = ROOT / "s2g"
 TRACKS = ("s2g-camera-0.25px", "s2g-camera-0.5px", "s2g-camera-1px", "s2g-sun-0.25deg")
 QUALIFIED = "bf169ef7f8599bbff53bc8edcdb1875e8c117b09630e1c912e0f0f5d73335dfb"
 SOURCE = Path("E:/renderlab-work/m7-u0b/scenes/S2G/scene.json")
+SCRIPT_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def save(path, value):
@@ -387,9 +388,28 @@ def ages(_):
                                 pixels=int(age.size), age0=int((age == 0).sum()), age32=int((age >= 32).sum())))
             previous, old_pose = cached, pose
         print("geometry ages", name, len(frames), flush=True)
-    save(OUT / "ages/protocol.json", dict(records=records, source_sequences=registration["source_sequences"],
+    save(OUT / "ages/protocol.json", dict(records=records, source_sequences=registration["source_sequences"], script_sha256=SCRIPT_SHA,
         definition="Fixed external benchmark ages: nearest previous centre, same instance, 2% forward depth; age0 on rejection, +1 on acceptance capped255. Black infinity is same-pixel for pure translation. Sun changes do not reset geometric age.",
         scope="S2G only; does not replace recovered original T1b age masks. Offline scoring only, no renderer consumes these ages."))
+
+
+def prune_geometry(_):
+    protocol = json.loads((OUT / "ages/protocol.json").read_text())
+    if len(protocol["records"]) != 640:
+        raise ValueError("retain geometry until every registered frame has an age mask")
+    removed = []
+    for path in (OUT / "geometry").glob("*.npz"):
+        if path.stat().st_size <= 5_000_000:
+            continue
+        metadata = json.loads(path.with_suffix(".json").read_text())
+        identity = sha(path)
+        if identity != metadata["geometry_sha256"]:
+            raise ValueError("geometry bytes changed before retention cleanup")
+        removed.append(dict(path=str(path), bytes=path.stat().st_size, sha256=identity))
+        path.unlink()
+    ledger = OUT / "geometry/deleted-raw.json"
+    save(ledger, (json.loads(ledger.read_text()) if ledger.exists() else []) + removed)
+    print("summarized geometry bytes removed", sum(row["bytes"] for row in removed))
 
 
 def check(_):
@@ -420,7 +440,7 @@ def check(_):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "ages", "check"):
+    for name in ("plan", "ages", "check", "prune-geometry"):
         commands.add_parser(name)
     p = commands.add_parser("import")
     p.add_argument("metadata", type=Path)
@@ -434,4 +454,4 @@ if __name__ == "__main__":
     commands.add_parser("colour-control").add_argument("label")
     args = parser.parse_args()
     {"plan": plan, "ages": ages, "check": check, "import": import_qualified, "trace": trace, "inputs": inputs,
-     "colour-control": colour_control}[args.command](args)
+     "colour-control": colour_control, "prune-geometry": prune_geometry}[args.command](args)
