@@ -469,3 +469,46 @@ The prepare commandlet saved the level and assets successfully, then exited 1 on
 CachedAssetRegistryDiscovery temporary-file rename. Its failed process record is retained.
 The subsequent cook/package and actual native content, camera and material readbacks pass;
 the prepare process itself is not relabelled a clean pass.
+
+Matched SV results (G1 metric; values are relative-luminance RMS, not F0 codes):
+
+| Mode | Static overview/gaps | First-cut incoming overview/gaps | Mean pan residual |
+|---|---:|---:|---:|
+| SW Epic, inherited global DF | 35.917%/68.312% | 44.510%/81.895% | 140.460% |
+| SW Epic, mesh SDF, runtime RT off | 38.911%/87.185% | 49.558%/101.047% | 166.166% |
+| HW Epic | 10.708%/11.164% | 10.595%/9.506% | 20.182% |
+
+The mean pan residual uses the overview-start process, which warms at the gaps pose before
+the registered nine-frame pan. G1 resets its cache before its pan; these are the native
+shipping Lumen/TSR histories after the stated warm-up, not a forced reset of Lumen world
+state. The cut clears TSR history via the observed camera-cut flag while retaining Lumen's
+normal world state. No reconstruction-only or integrated G1 acceptance claim is implied.
+
+| Static population | Global-DF SW | Mesh-SDF non-RT SW | HW |
+|---|---:|---:|---:|
+| contact | 22.851%/? | 32.931%/? | 14.397%/? |
+| crease-90 | 27.355%/41.492% | 33.891%/61.068% | 18.514%/5.401% |
+| edges | 52.964%/73.652% | 61.132%/91.938% | 26.853%/18.391% |
+| frame | 35.917%/68.312% | 38.911%/87.185% | 10.708%/11.164% |
+| gaps | 84.660%/135.646% | 111.140%/175.938% | 30.524%/20.806% |
+| ground-near-contact | 4.854%/3.128% | 5.077%/6.017% | 4.660%/4.840% |
+| ground-near-crease-90 | 8.426%/22.461% | 10.001%/29.633% | 6.084%/7.425% |
+| ground-near-gaps | 22.175%/23.551% | 25.132%/29.739% | 6.189%/5.669% |
+| ground-near-underside | 63.010%/78.017% | 50.475%/69.622% | 10.776%/9.805% |
+| ground-near-wedge-30 | 89.845%/4.222% | 93.406%/6.931% | 17.142%/6.243% |
+| open | 33.638%/27.337% | 34.139%/30.424% | 7.953%/6.267% |
+| underside | 31.929%/77.596% | 34.377%/88.985% | 15.713%/11.065% |
+| wedge-30 | 33.575%/? | 45.768%/? | 24.829%/? |
+
+Population pairs are overview/gaps; a dash means no valid visible samples in that pose.
+Per-population counts, noise exclusions, p99, signed bias, crevice error and over-occluded
+open counts are retained in `sv-sky/{a,b}/*/g1-scores.json`. Full native/reference/difference
+sheets for both paths were inspected. The especially large software errors occur in narrow
+gaps and undersides; they remain in the floor rather than being removed as outliers.
+
+The Lumen/DFAO-off calibration intentionally removes occlusion. Across 1,118,310 / 1,092,197
+nonedge ground pixels, the analytic Lambert value is 0.5 ? 4,000 = **2,000 cd/m?**. Native
+mean RGB is about **2,011/2,011/2,009**, with **0.706% RGB RMS** relative to that analytic
+value in both poses. This bounds the input-scale discrepancy; no fitted gain is applied to
+the scored Lumen images. Comparing this control to the physically occluded reference would
+measure deliberately missing occlusion, not a calibration error.

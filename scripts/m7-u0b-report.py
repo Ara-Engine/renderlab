@@ -149,7 +149,10 @@ def floors(args):
     """Pixel-weighted summaries; detailed per-frame tails remain in physical-floor.json."""
     configs=("ue-sw-h","ue-sw-e","ue-hw-h","ue-hw-e")
     statics={}
-    for path in sorted((OUT/"study").glob("*/physical-static-floor.json")):
+    paths=list(sorted((OUT/"study").glob("*/physical-static-floor.json")))
+    # The later synchronized quality campaign wins over earlier timing snapshots.
+    paths.sort(key=lambda p:p.parent.name=="floor-static")
+    for path in paths:
         for row in json.loads(path.read_text())["frames"]:statics[row["config"]]=row
     walks={}
     for path in args.walk.glob("*/physical-floor.json"):
@@ -187,6 +190,7 @@ def floors(args):
 
 
 def benches(args):
+    from PIL import Image,ImageDraw
     path=Path(__file__).with_name("m7-u0-ue.py")
     spec=importlib.util.spec_from_file_location("ue",path);ue=importlib.util.module_from_spec(spec);spec.loader.exec_module(ue)
     expected={(b,c) for b in ("SV","S4","S5","S2G") for c in ue.CONFIGS};rows={}
@@ -196,16 +200,43 @@ def benches(args):
         runtime=json.loads((case/"readback.json").read_text());scene=json.loads((case/"scene-readback.json").read_text())
         camera=json.loads((case/"camera-readback.json").read_text());process=json.loads((case/"process.json").read_text())
         native=json.loads(path.read_text())["frames"]
+        log=(case/"ue.log").read_text(encoding="utf-8-sig",errors="replace")
+        platform=dict(requested_d3d12="-dx12" in process["command"],requested_sm6="-sm6" in process["command"],
+            actual_pcd3d_sm6='shaderplatform="PCD3D_SM6"' in log)
         if not (runtime["all_ok"] and scene["sun_angle_ok"] and camera["all_ok"] and process["exit_code"]==0 and len(native)==1):
             raise ValueError("bench capture readback/coverage failed: "+str(case))
-        if sha(Path(native[0]["archive"]))!=native[0]["archive_sha256"]:raise ValueError("native archive changed")
+        if not all(platform.values()):raise ValueError("D3D12 SM6 platform proof failed")
+        payload=Path(native[0]["archive"]);preview=case/"native-F0.png"
+        if payload.exists():
+            if sha(payload)!=native[0]["archive_sha256"]:raise ValueError("native archive changed")
+            if not preview.exists():
+                with np.load(payload) as a:
+                    x=np.maximum(a["hdr"][...,:3],0);x=x/(1+x)
+                    display=255*np.where(x<=.0031308,12.92*x,1.055*x**(1/2.4)-.055)
+                Image.fromarray(np.clip(np.rint(display),0,255).astype("u1")).save(preview)
+            retention="lossless native archive retained"
+        else:
+            ledger=json.loads((case/"native-cleanup.json").read_text())
+            if ledger[payload.name]["sha256"]!=native[0]["archive_sha256"] or not preview.exists():
+                raise ValueError("deleted native payload lacks verified summary/preview provenance")
+            retention="large raw HDR deleted after summary; hash and full F0 PNG retained"
         row=dict(bench=bench,config=runtime["config"],case=str(case),scene=scene,camera=camera,
-            native=native[0],tracing=runtime["effective_mode"],process_exit=process["exit_code"],
-            minimum_available_gib=process["minimum_available_gib"],cost_eligible=False)
+            native=native[0],tracing=runtime["effective_mode"],platform=platform,process_exit=process["exit_code"],
+            minimum_available_gib=process["minimum_available_gib"],cost_eligible=False,
+            retention=retention,full_F0_png=str(preview),full_F0_png_sha256=sha(preview))
         rows[(bench,runtime["config"])]=row
     missing=sorted(expected-rows.keys())
     save(OUT/"bench-captures.json",dict(complete=not missing,expected=len(expected),
         captured=list(rows.values()),missing=missing,scope="content and quality captures; functional leases, no speed claim"))
+    for bench in ("SV","S4","S5","S2G"):
+        sheet=Image.new("RGB",(480*5,300*4));draw=ImageDraw.Draw(sheet)
+        for index,config in enumerate(ue.CONFIGS):
+            row=rows.get((bench,config))
+            if row is None:continue
+            x,y=(index%5)*480,(index//5)*300
+            with Image.open(row["full_F0_png"]) as image:sheet.paste(image.resize((480,270)),(x,y+30))
+            draw.text((x+8,y+8),config,fill="white")
+        sheet.save(args.root/(bench+"-matrix.png"))
     print(json.dumps(dict(expected=len(expected),captured=len(rows),missing=len(missing))))
 
 

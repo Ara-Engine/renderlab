@@ -458,7 +458,9 @@ def finish(args):
     """One sequential controller; no competing U0b acquisitions or hidden GPU children."""
     sv=load("m7-u0b-sv")
     sv.capture(argparse.Namespace(label="b",configs=["sw-mesh","off"],timing=False,async_off=False))
-    sv.audit(argparse.Namespace(label="b"));sv.score(argparse.Namespace(label="b"));sv.costs(argparse.Namespace(label="b"))
+    sv.audit(argparse.Namespace(label="b"))
+    if not (OUT/"sv-sky/b/g1-comparator.json").exists():sv.score(argparse.Namespace(label="b"))
+    sv.costs(argparse.Namespace(label="b"))
     for label,async_off in (("timing",False),("timing-async-off",True)):
         sv.capture(argparse.Namespace(label=label,configs=["sw-mesh","hw"],timing=True,async_off=async_off))
         sv.costs(argparse.Namespace(label=label))

@@ -166,16 +166,18 @@ def score(args):
     if len(refs)!=10:raise ValueError("need both poses and all nine registered pan references")
     refs["pan-000"]=refs["gaps"]
     result=[]
+    def p90(values):
+        values=np.sort(values);return float(values[len(values)*9//10])
     def metrics(native,ref):
         lum=(native*np.array([.2126,.7152,.0722])).sum(-1);r=ref["lum"];se=ref["se"];masks=ref["masks"]
-        opened=float(np.quantile(r[masks["open"]],.9));keep=(r>1e-6)&(se<=.02*r);e=(lum-r)/np.maximum(r,.05*opened)
+        opened=p90(r[masks["open"]]);keep=(r>1e-6)&(se<=.02*r);e=(lum-r)/np.maximum(r,.05*opened)
         rows={}
         for name,mask in masks.items():
             good=mask&keep;n=int(good.sum())
             if not n:continue
             crevice=good&(r<.7*opened);op=good&(r>=.95*opened)
             rows[name]=dict(n=n,excluded_dark_or_noisy=int((mask&~keep).sum()),rms=float(np.sqrt((e[good]**2).mean())),
-                bias=float(e[good].mean()),p99=float(np.quantile(abs(e[good]),.99)),
+                bias=float(e[good].mean()),p99=float(np.quantile(abs(e[good]),.99,method="lower")),
                 reference_noise_rms=float(np.sqrt(((se[good]/r[good])**2).mean())),
                 crevice_n=int(crevice.sum()),crevice_rms=float(np.sqrt((e[crevice]**2).mean())) if crevice.any() else None,
                 open_n=int(op.sum()),over_occluded_open=int((op&(lum<.95*r)).sum()))
@@ -184,6 +186,9 @@ def score(args):
         if not (case/"complete.json").exists():continue
         recipe=json.loads((case/"recipe.json").read_text());runtime=json.loads((case/"readback.json").read_text())
         if not runtime["all_ok"]:raise ValueError("runtime settings failed")
+        if 'shaderplatform="PCD3D_SM6"' not in (case/"ue.log").read_text(encoding="utf-8-sig",errors="replace"):
+            raise ValueError("actual D3D12 SM6 platform proof failed")
+        if not (case/"material-audit.json").exists():raise ValueError("diffuse-only material audit missing")
         cut=json.loads((case/"native-cut.json").read_text())["frames"];motion=json.loads((case/"native-pan.json").read_text())["frames"]
         if len(cut)!=3 or len(motion)!=9:raise ValueError("capture coverage mismatch")
         def hdr(record):
@@ -198,11 +203,11 @@ def score(args):
             proof.append(dict(camera_cut=params.get("CommonParameters.bCameraCut"),input_jitter=params.get("CommonParameters.InputJitter")))
         if [p["camera_cut"] for p in proof]!=[0,1,0]:raise ValueError("first-cut shader proof failed")
         record=dict(case=str(case),config=recipe["config"],start=recipe["start"],cut_to=recipe["cut_to"],
-            runtime=runtime["effective_mode"],tsr_cut_proof=proof,
+            runtime=runtime["effective_mode"],platform="D3D12 PCD3D_SM6",tsr_cut_proof=proof,
             static=metrics(static,refs[recipe["start"]]),first_cut=metrics(first,refs[recipe["cut_to"]]))
         # G1 uses the final pan frame's non-edge placement mask for every frame.
         mask=refs["pan-008"]["masks"]["frame"];r0=refs["pan-000"]["lum"]
-        floor=.05*float(np.quantile(r0[mask],.9));changes=[]
+        floor=.05*p90(r0[mask]);changes=[]
         for i in range(1,9):
             a,b=refs[f"pan-{i-1:03}"]["lum"],refs[f"pan-{i:03}"]["lum"]
             good=mask&(a>1e-6)&(b>1e-6)
@@ -261,25 +266,55 @@ def costs(args):
     """CSV GPU groups at the exact static, first-cut and pan frames, without rebinning."""
     root=OUT/"sv-sky"/args.label;result=[]
     fields=("GPUTime","GPU/UpdateLumenSceneBuffers","GPU/LumenSceneUpdate",
-            "GPU/LumenSceneLighting","GPU/LumenScreenProbeGather","GPU/TemporalSuperResolution")
+            "GPU/LumenSceneLighting","GPU/LumenScreenProbeGather","GPU/TemporalSuperResolution",
+            "View/PosX","View/PosY","View/PosZ")
     for case in sorted(root.iterdir()):
         if not (case/"complete.json").exists():continue
         recipe=json.loads((case/"recipe.json").read_text());rows=[]
         with (case/"profile.csv").open(newline="",encoding="utf-8-sig") as stream:
-            for row in csv.DictReader(stream):
-                try:row={key:float(row[key]) for key in fields}
+            reader=csv.DictReader(stream);absent=[key for key in fields if key not in reader.fieldnames]
+            if any(not key.startswith("GPU/") for key in absent):raise ValueError("missing GPU CSV frame/camera columns")
+            for row in reader:
+                try:row={key:float(row.get(key,0)) for key in fields}
                 except (ValueError,KeyError,TypeError):continue
                 rows.append(row)
         # CSV profiling drains several GPU query frames after the requested 230.
         if len(rows)<230:raise ValueError("CSV frame coverage")
+        selected=[96,97,*range(196,205)]
+        expected=[recipe["poses"][0],recipe["poses"][1],*recipe["poses"][3:]]
+        for frame,pose in zip(selected,expected,strict=True):
+            x,y,z=pose["eye"];target=[-100*z,100*x,100*y]
+            actual=[rows[frame]["View/Pos"+axis] for axis in "XYZ"]
+            if max(abs(a-b) for a,b in zip(actual,target))>1e-3:
+                raise ValueError(f"GPU CSV camera/frame identity failed at {frame}")
         value=dict(config=recipe["config"],start=recipe["start"],capture_instrumented=recipe["capture_only"],async_compute=recipe.get("async_compute",True),
             timing_scope="functional exclusive slot, not a quiet-window speed claim; group values separately, no inclusive summation",
             static=rows[96],first_cut=rows[97],pan=[rows[i] for i in range(196,205)],
-            captured_csv_rows=len(rows),source_csv_sha256=host.ue().sha(case/"profile.csv"),
+            camera_csv_proof="all selected GPU rows match registered source eye within 0.001 cm",
+            absent_csv_groups_reported_as_zero=absent,captured_csv_rows=len(rows),source_csv_sha256=host.ue().sha(case/"profile.csv"),
             warm_profile_async_off=host.ue().pass_costs(case))
         save(case/"g1-costs.json",value);result.append(value)
     save(root/"g1-costs.json",result)
     print("SV frame costs",len(result),flush=True)
+
+
+def calibration(args):
+    """Lumen/DFAO-off constant sky must give Lambert .5 * 4000 on every ground pixel.
+    Compare to the analytic unoccluded value, not the physically occluded reference."""
+    scene=json.loads(SOURCE.read_text());ground=next(i+1 for i,m in enumerate(scene["meshes"]) if m["name"]=="ground")
+    root=OUT/"sv-sky"/args.label;result={}
+    for pose in ("overview","gaps"):
+        case=root/("off-"+pose);record=json.loads((case/"native-cut.json").read_text())["frames"][0]
+        with np.load(record["archive"]) as a:rgb=a["hdr"][...,:3]/record["pre_exposure"]
+        with np.load(OUT/"reference/sv-sky"/("SVSky-"+pose+".npz")) as a:
+            mask=populations(scene,a,{})["frame"]&(a["hit"][...,0]==ground)
+        values=rgb[mask];expected=2000.
+        result[pose]=dict(n=int(mask.sum()),analytic_unoccluded_cd_m2=expected,
+            RGB_quantiles=np.quantile(values,[0,.01,.5,.99,1],axis=0).tolist(),mean=values.mean(0).tolist(),
+            relative_rgb_rms=float(np.sqrt(((values/expected-1)**2).mean())),
+            native_archive_sha256=record["archive_sha256"],gain_fitted=False,
+            population="all covered nonedge ground; lighting control deliberately has no occlusion")
+    save(root/"unoccluded-calibration.json",result);print("SV analytic calibration",result,flush=True)
 
 
 def main():
@@ -289,6 +324,7 @@ def main():
     q=s.add_parser("score");q.add_argument("label")
     q=s.add_parser("audit");q.add_argument("label")
     q=s.add_parser("costs");q.add_argument("label")
+    q=s.add_parser("calibration");q.add_argument("label")
     q=s.add_parser("capture");q.add_argument("label");q.add_argument("--configs",nargs="+",choices=("sw","hw","sw-mesh","off"),default=["sw","hw"])
     q.add_argument("--timing",action="store_true");q.add_argument("--async-off",action="store_true")
     a=p.parse_args();globals()[a.command](a)
