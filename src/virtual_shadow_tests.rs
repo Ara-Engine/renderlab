@@ -179,7 +179,9 @@ pub(super) fn diagnose(
     assert!(hit_n8 == hit, "N8 diagnosis traces the same camera hits");
     let state = r.virtual_shadows.as_ref().unwrap();
     let buffer = state.debug_buffer().unwrap().clone();
-    let mut trace = read_buffer(r, &buffer, buffer.size());
+    // The trace follows the scratch's header and per-tile words.
+    let offset = crate::renderer::virtual_shadow_gpu::scratch_trace_offset(state.size()) as usize;
+    let mut trace = read_buffer(r, &buffer, buffer.size())[offset..].to_vec();
     let width = r
         .fresh
         .as_ref()
@@ -203,7 +205,7 @@ pub(super) fn diagnose(
     fs::write(out.join(format!("{label}-trace.u32x4")), trace).unwrap();
 }
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl).
-const SCREEN_CONSTANTS: [&str; 18] = [
+const SCREEN_CONSTANTS: [&str; 21] = [
     "VSM_SKIP",
     "VSM_RECORDS",
     "VSM_CAP_RULE",
@@ -222,6 +224,10 @@ const SCREEN_CONSTANTS: [&str; 18] = [
     "VSM_REFINE",
     "VSM_WALK_STEPS",
     "VSM_EXTRA_SAMPLES",
+    "VSM_PERSIST",
+    "VSM_ORDER",
+    // Variant screens only: a spare override a screened shader file may declare.
+    "VSM_EXPERIMENT",
 ];
 /// `{"constants": {name: number}}` as the state's override list.
 pub(crate) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)> {
