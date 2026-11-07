@@ -50,3 +50,12 @@ Decided by root:
 - **Temporal file ownership:** `src/film_accumulation.rs` and M7's temporal reconstruction belong to M7. The shadow hillclimb doesn't edit them.
 
 Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents.
+
+Patent exposure flagged by the research notes (2026-11-07), each Islam's decision before adoption. No exposed technique goes into a default until he rules:
+
+- NVIDIA US 11,315,310: ReSTIR combined with a world-space cache. This is the Solari / GI-1.x shape and close to our surface-cache GI sketch. Don't commit to that exact combination.
+- NVIDIA US 10,116,916: variance clipping for temporal reuse, in force to 2037. Also the SVGF / gradient-estimation patents.
+- Adshir/Snap and NVIDIA ReSTIR patents, for reflections.
+- US 9,754,407: world-space cache. Its review is still open, as noted above.
+
+Code licences: RTXGI 2.x, SHaRC, NRC, NRD and DLSS / DLSS RR are reimplement-only, so none of their code may be copied. DDGI papers are CC BY-ND, so write our own code from the text. Falcor's SVGF pass is BSD-3 and may be copied with attribution, but the SVGF patent question still applies.
