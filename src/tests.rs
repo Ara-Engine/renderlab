@@ -1,6 +1,6 @@
 use super::*;
 #[path = "../support/validation.rs"]
-mod validation;
+pub(super) mod validation;
 use std::{
     fs,
     io::Write,
@@ -29,7 +29,7 @@ fn camera(x: f32) -> Camera {
     )
     .unwrap()
 }
-fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
+pub(super) fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
     assert!(
         !std::path::Path::new("D:/AraBuild/render-v3/quiet-window.lock").exists(),
         "quiet-window lock present"
@@ -54,7 +54,7 @@ fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
 }
 /// `RENDERLAB_TEST_PRIMARY=traced` reruns the lit suites on traced primary visibility:
 /// 1x renderers become hardware renderers with it selected; 4x renderers stay raster.
-fn traced_suite() -> bool {
+pub(super) fn traced_suite() -> bool {
     std::env::var("RENDERLAB_TEST_PRIMARY").as_deref() == Ok("traced")
 }
 /// The suite device: `features`, plus ray queries and traced binding arrays when
@@ -90,7 +90,7 @@ fn request(adapter: &wgpu::Adapter, features: wgpu::Features) -> (wgpu::Device, 
 }
 /// Raster renderer, or under `traced_suite` at 1x a hardware renderer with traced
 /// primary visibility selected.
-fn suite_renderer(
+pub(super) fn suite_renderer(
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
@@ -116,7 +116,7 @@ fn renderer(timing: bool) -> Renderer {
     let (device, queue) = device(timing);
     Renderer::new(device, queue, FORMAT, Limits::default(), SOURCE).unwrap()
 }
-fn target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+pub(super) fn target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen test color"),
         size: wgpu::Extent3d {

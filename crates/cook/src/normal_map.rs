@@ -10,6 +10,7 @@ pub struct NormalMip {
     width: u32,
     height: u32,
     vectors: Vec<[f32; 3]>,
+    mean_lengths: Vec<f32>,
 }
 impl NormalMip {
     pub fn width(&self) -> u32 {
@@ -21,11 +22,26 @@ impl NormalMip {
     pub fn vectors(&self) -> &[[f32; 3]] {
         &self.vectors
     }
-    /// Linear UNORM encoding. Alpha is unused and set to 255.
+    /// Length of the unnormalized mean of the original unit normals, before quantization.
+    pub fn mean_lengths(&self) -> &[f32] {
+        &self.mean_lengths
+    }
+    /// Linear unit XYZ; alpha encodes sqrt(min(2 * (1 - length) / length, 1)).
+    /// Encoding the RMS spread retains small variances much better than UNORM length.
+    /// This requires the asset's NormalVarianceLinear role, never legacy NormalLinear.
     pub fn rgba8(&self) -> Vec<u8> {
         self.vectors
             .iter()
-            .flat_map(|v| [encode(v[0]), encode(v[1]), encode(v[2]), 255])
+            .zip(&self.mean_lengths)
+            .flat_map(|(v, &l)| {
+                let spread = (2.0 * (1.0 - l) / l.max(1e-6)).clamp(0.0, 1.0).sqrt();
+                [
+                    encode(v[0]),
+                    encode(v[1]),
+                    encode(v[2]),
+                    (spread * 255.0).round() as u8,
+                ]
+            })
             .collect()
     }
 }
@@ -68,6 +84,23 @@ pub fn apply_scale(vector: [f32; 3], scale: f32) -> Result<[f32; 3]> {
 
 /// Decode RGB as linear XYZ in [-1,1]. Alpha has no meaning for a normal texture.
 pub fn prepare_rgba8(width: u32, height: u32, rgba8: &[u8]) -> Result<PreparedNormalMap> {
+    prepare_rgba8_impl(width, height, rgba8, true)
+}
+
+pub(crate) fn prepare_rgba8_legacy(
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+) -> Result<PreparedNormalMap> {
+    prepare_rgba8_impl(width, height, rgba8, false)
+}
+
+fn prepare_rgba8_impl(
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+    preserve_variance: bool,
+) -> Result<PreparedNormalMap> {
     ensure(
         u64::from(width)
             .checked_mul(u64::from(height))
@@ -79,15 +112,25 @@ pub fn prepare_rgba8(width: u32, height: u32, rgba8: &[u8]) -> Result<PreparedNo
         .chunks_exact(4)
         .map(|p| [p[0], p[1], p[2]].map(|v| (f64::from(v) * (2.0 / 255.0) - 1.0) as f32))
         .collect();
-    prepare_vectors(width, height, vectors)
+    prepare_vectors_impl(width, height, vectors, preserve_variance)
 }
 
-/// Area box filtering includes odd edges. Each level averages unit decoded vectors,
-/// then renormalizes. Mean length/variance is discarded; there is no roughness compensation.
+/// Area box filtering includes odd edges. Each level averages the unnormalized means
+/// of the preceding level, preserving first moments through the entire mip chain.
+/// Direction and length stay separate until export, including a cancelled mean.
 pub fn prepare_vectors(
     width: u32,
     height: u32,
     vectors: Vec<[f32; 3]>,
+) -> Result<PreparedNormalMap> {
+    prepare_vectors_impl(width, height, vectors, true)
+}
+
+fn prepare_vectors_impl(
+    width: u32,
+    height: u32,
+    vectors: Vec<[f32; 3]>,
+    preserve_variance: bool,
 ) -> Result<PreparedNormalMap> {
     ensure(
         width > 0 && height > 0 && u64::from(width) * u64::from(height) == vectors.len() as u64,
@@ -101,6 +144,7 @@ pub fn prepare_vectors(
         mips: vec![NormalMip {
             width,
             height,
+            mean_lengths: vec![1.0; vectors.len()],
             vectors: vectors
                 .into_iter()
                 .map(|v| normalized(v.map(f64::from)))
@@ -118,6 +162,7 @@ pub fn prepare_vectors(
             .checked_mul(h as usize)
             .ok_or_else(|| Error("normal mip size overflow".into()))?;
         let mut output = Vec::with_capacity(count);
+        let mut mean_lengths = Vec::with_capacity(count);
         for y in 0..h {
             let y0 = f64::from(y) * f64::from(input.height) / f64::from(h);
             let y1 = f64::from(y + 1) * f64::from(input.height) / f64::from(h);
@@ -131,6 +176,14 @@ pub fn prepare_vectors(
                             * (y1.min(f64::from(sy + 1)) - y0.max(f64::from(sy)));
                         for (c, value) in sum.iter_mut().enumerate() {
                             *value += weight
+                                * if preserve_variance {
+                                    f64::from(
+                                        input.mean_lengths
+                                            [sy as usize * input.width as usize + sx as usize],
+                                    )
+                                } else {
+                                    1.0
+                                }
                                 * f64::from(
                                     input.vectors[sy as usize * input.width as usize + sx as usize]
                                         [c],
@@ -139,13 +192,16 @@ pub fn prepare_vectors(
                     }
                 }
                 let area = (x1 - x0) * (y1 - y0);
-                output.push(normalized(sum.map(|v| v / area)));
+                let mean = sum.map(|v| v / area);
+                mean_lengths.push(mean[0].hypot(mean[1]).hypot(mean[2]).min(1.0) as f32);
+                output.push(normalized(mean));
             }
         }
         map.mips.push(NormalMip {
             width: w,
             height: h,
             vectors: output,
+            mean_lengths,
         });
     }
     Ok(map)

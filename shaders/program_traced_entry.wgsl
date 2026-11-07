@@ -101,6 +101,9 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let m=models[hit.placement];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
     let e1=linear*(tb.position-ta.position);let e2=linear*(tc.position-ta.position);
     let gradients=primary_gradients(primary_ray(id,size),input.world,geometric,e1,e2,tb.uv-ta.uv,tc.uv-ta.uv);
+    let bary_gradients=primary_gradients(primary_ray(id,size),input.world,geometric,e1,e2,vec2<f32>(1.0,0.0),vec2<f32>(0.0,1.0));
+    let normal_dx=(b.normal-a.normal)*bary_gradients[0].x+(c.normal-a.normal)*bary_gradients[0].y;
+    let normal_dy=(b.normal-a.normal)*bary_gradients[1].x+(c.normal-a.normal)*bary_gradients[1].y;
     // Raster's front_facing and derivative normal, which points away from the camera;
     // from here the receiver frame is built exactly as the raster entry builds it.
     let front=source_front==(input.winding>0.0);
@@ -110,7 +113,7 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let source_geometric=select(-face,face,lit_front);
     let material=primary_materials[hit.batch].value;
     rl_load_parameters(hit.batch);
-    let surface_input=SurfaceInput(input.world,source_geometric,input.normal,input.tangent,input.handedness,
+    let surface_input=SurfaceInput(input.world,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
         primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel));
     let surface_output=surface(surface_input);

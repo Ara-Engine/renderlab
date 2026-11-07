@@ -674,6 +674,14 @@ mod tests {
     }
 
     #[test]
+    fn specular_filter_helpers_and_custom_geometric_inputs_compose() {
+        analyse("specular AA", STANDARD_PROGRAM, &raster(STANDARD_PROGRAM)).unwrap();
+        // A program can consume the geometric inputs without adopting GGX.
+        let custom = "struct Surface { variance:f32 }; fn surface(input:SurfaceInput)->Surface { return Surface(geometric_normal_variance(input)); } fn shade(s:Surface,input:SurfaceInput)->vec3<f32> { return vec3<f32>(s.variance); }";
+        analyse("custom variance", custom, &raster(custom)).unwrap();
+    }
+
+    #[test]
     fn parameters_are_reflected_checked_and_packed() {
         let layout = analyse("toon", TOON, &raster(TOON))
             .unwrap()

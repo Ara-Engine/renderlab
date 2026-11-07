@@ -4,8 +4,8 @@
 // declarations, may declare `struct Parameters` (read as `params`), and declares no
 // bindings. The engine composes prelude, this API, the stage API, the program and the
 // generated entry point into one module per stage and visibility variant
-// (src/program.rs). Programs see only their own receiver: no derivatives, neighbours or
-// screen buffers.
+// (src/program.rs). Programs see only their own receiver and footprint differentials,
+// with no neighbouring lighting or screen buffers.
 
 // Everything a program may read about its receiver. Raster frames fill it from
 // interpolants and quad derivatives, traced frames from the exact pixel-centre hit.
@@ -16,6 +16,11 @@ struct SurfaceInput {
     geometric:vec3<f32>,
     // Interpolated vertex normal and tangent, world space, not normalized.
     normal:vec3<f32>,
+    // One-pixel derivatives of the interpolated vertex shading normal. Raster uses
+    // quad derivatives; compute uses analytic differentials on this hit's triangle.
+    // These contain no neighbouring lighting or visibility, and do not cross triangles.
+    normal_dx:vec3<f32>,
+    normal_dy:vec3<f32>,
     tangent:vec3<f32>,
     handedness:f32,
     uv:vec2<f32>,
@@ -129,6 +134,40 @@ fn material_normal(input:SurfaceInput) -> vec3<f32> {
     // A source-back surface reverses the entire perturbed frame.
     if material.double_sided!=0u && !input.source_front { n=-n; }
     return n;
+}
+
+// Isotropic GGX lobe filtering. roughness is perceptual (alpha = roughness^2),
+// variance is an additive squared-alpha spread. Zero is an exact identity.
+// Custom programs may use their own lobe, scaling, anisotropy or no filtering.
+fn filtered_roughness(roughness:f32, variance:f32) -> f32 {
+    if variance<=0.0 { return roughness; }
+    let alpha=roughness*roughness;
+    return sqrt(sqrt(min(alpha*alpha+variance,1.0)));
+}
+
+// First-order normal-map spread. V3 alpha stores RMS Toksvig spread; legacy maps
+// have no stored variance. RGB length also captures bilinear/trilinear direction
+// cancellation. A small UNORM quantization dead zone keeps constant maps unchanged.
+// Scale^2 is a small-slope approximation; zero scale eliminates map variance.
+fn material_normal_variance(input:SurfaceInput) -> f32 {
+    let sample=sample_normal_map(input);
+    let mean_length=clamp(length(sample.xyz*2.0-vec3<f32>(1.0)),1e-6,1.0);
+    var spread=max(2.0*(1.0-mean_length)/mean_length-0.008,0.0);
+    if input.material.normal_variance!=0u { spread+=sample.a*sample.a; }
+    let scale=min(abs(input.material.normal_scale),1e10);
+    return select(0.0,min(spread*scale*scale,1.0),input.material.normal_mapped!=0u);
+}
+
+// Box-footprint geometric normal spread (Kaplanyan/Tokuyoshi-style NDF filtering).
+// Differentiate the normalized interpolant analytically, on both raster and compute.
+// Does not detect subpixel face discontinuities: multi-triangle moments need U1 S-AA2.
+fn geometric_normal_variance(input:SurfaceInput) -> f32 {
+    let length2=dot(input.normal,input.normal);
+    if length2<=1e-12 { return 0.0; }
+    let n=unit_normal(input.normal);
+    let dx=input.normal_dx-n*dot(n,input.normal_dx);
+    let dy=input.normal_dy-n*dot(n,input.normal_dy);
+    return min((dot(dx,dx)+dot(dy,dy))/(12.0*length2),1.0);
 }
 
 // ---- end of the shared program API ----

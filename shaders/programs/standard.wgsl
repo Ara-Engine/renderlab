@@ -1,6 +1,8 @@
 // Standard: the photoreal glTF metallic-roughness program, and the engine default. Its
-// body is the former fixed lit shader split at the surface/lighting boundary, with
-// every expression in its original order. Edit and reload it like any program.
+// roughness filtering is shared by direct and environment specular. Edit and reload
+// it like any program. Custom programs opt in through the same helpers.
+// U1 fails the static normal-map/F3 gate; enable only for explicit experimentation.
+const SPECULAR_AA:bool=false;
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {
@@ -10,7 +12,8 @@ fn surface(input:SurfaceInput) -> Surface {
     let n=material_normal(input);
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
-    let rough=clamp(material.roughness*mr.g,0.0,1.0);
+    let rough=filtered_roughness(clamp(material.roughness*mr.g,0.0,1.0),
+        select(0.0,material_normal_variance(input)+geometric_normal_variance(input),SPECULAR_AA));
     return Surface(n,base,metal,rough);
 }
 

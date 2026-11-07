@@ -3448,3 +3448,7 @@ pub use virtual_gpu::{Capture, CaptureInfo};
 #[cfg(test)]
 #[path = "fresh_shadow_tests.rs"]
 mod fresh_shadow_tests;
+
+#[cfg(test)]
+#[path = "specular_aa_tests.rs"]
+mod specular_aa_tests;

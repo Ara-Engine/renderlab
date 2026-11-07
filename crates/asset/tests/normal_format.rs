@@ -67,7 +67,7 @@ fn v2_roundtrip_rejects_truncation_counts_basis_frames_and_nonfinite_scale() {
     }
     // First primitive header starts after the 24-byte asset and 4-byte mesh header.
     for (offset, word) in [
-        (4, 3),
+        (4, 4),
         (32, u32::MAX),
         (36, u32::MAX),
         (40, 3),
@@ -128,5 +128,28 @@ fn normal_references_frames_and_tangent_bytes_are_admission_boundaries() {
         a.validate(Limits::default()).unwrap().decoded_bytes
             - basic.validate(Limits::default()).unwrap().decoded_bytes,
         3 * 16 + 4
+    );
+}
+
+#[test]
+fn normal_variance_v3_is_explicit_and_legacy_v2_bytes_keep_their_meaning() {
+    let legacy = mapped();
+    let v2 = encode(&legacy, Limits::default()).unwrap();
+    assert_eq!(u32::from_le_bytes(v2[4..8].try_into().unwrap()), 2);
+    let mut a = legacy.clone();
+    a.textures[0].role = TextureRole::NormalVarianceLinear;
+    a.textures[0].mips[0].rgba8[3] = 47;
+    let v3 = encode(&a, Limits::default()).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(v3[4..8].try_into().unwrap()),
+        NORMAL_VARIANCE_SCHEMA_VERSION
+    );
+    assert_eq!(decode(&v3, Limits::default()).unwrap(), a);
+    let mut downgraded = v3.clone();
+    downgraded[4..8].copy_from_slice(&2u32.to_le_bytes());
+    assert!(decode(&downgraded, Limits::default()).is_err());
+    assert_eq!(
+        encode(&decode(&v2, Limits::default()).unwrap(), Limits::default()).unwrap(),
+        v2
     );
 }

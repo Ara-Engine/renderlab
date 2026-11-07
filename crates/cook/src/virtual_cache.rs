@@ -57,11 +57,14 @@ fn path(cache: &Path, version: u32, kind: &str, digest: &[u8; 32]) -> PathBuf {
 }
 fn key(source: &[u8], settings: Settings, limits: VirtualLimits) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(if source.get(4..8) == Some(&2u32.to_le_bytes()) {
-        virtual_cook::NORMAL_ALGORITHM
-    } else {
-        virtual_cook::ALGORITHM
-    });
+    h.update(
+        if matches!(source.get(4..8), Some(v) if v == 2u32.to_le_bytes() || v == 3u32.to_le_bytes())
+        {
+            virtual_cook::NORMAL_ALGORITHM
+        } else {
+            virtual_cook::ALGORITHM
+        },
+    );
     h.update(settings.bytes());
     h.update(virtual_mesh::VERSION.to_le_bytes());
     let p = limits.prepared;
@@ -177,7 +180,8 @@ pub fn cook_file(
     settings.validate()?;
     let source = read_bounded(source, limits.prepared.max_file_bytes)?;
     let key = key(&source, settings, limits);
-    let version = if source.get(4..8) == Some(&2u32.to_le_bytes()) {
+    let version = if matches!(source.get(4..8), Some(v) if v == 2u32.to_le_bytes() || v == 3u32.to_le_bytes())
+    {
         2
     } else {
         1

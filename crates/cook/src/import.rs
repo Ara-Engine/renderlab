@@ -74,6 +74,9 @@ pub struct Settings {
     pub missing_normals: MissingNormals,
     /// Opt into the versioned tangent/normal-map recipe. Legacy defaults still reject it.
     pub normal_maps: bool,
+    /// Experimental variance-bearing normal mips (RLA v3). Requires normal_maps.
+    /// Opt in only: the U1 isotropic roughness filter has not passed its quality gate.
+    pub normal_variance: bool,
 }
 impl Settings {
     pub(crate) fn bytes(self) -> [u8; 1] {
@@ -440,10 +443,10 @@ impl Textures<'_> {
                     .saturating_sub(self.prepared) as u64,
             "prepared mip byte limit",
         )?;
-        if role == TextureRole::NormalLinear {
+        if role.is_normal() {
             // All floating-point mip vectors remain live until export, along with decoded RGBA.
             let intermediate = mip_bytes
-                .checked_mul(3)
+                .checked_mul(4)
                 .and_then(|n| n.checked_add(rgba.checked_mul(3)?))
                 .ok_or_else(|| Error("normal mip intermediate byte overflow".into()))?;
             ensure(
@@ -518,8 +521,12 @@ fn materials(
                     info.scale().is_finite(),
                     "normal texture scale must be finite",
                 )?;
-                let (texture, sampler) =
-                    textures.texture(info.texture(), TextureRole::NormalLinear)?;
+                let role = if settings.normal_variance {
+                    TextureRole::NormalVarianceLinear
+                } else {
+                    TextureRole::NormalLinear
+                };
+                let (texture, sampler) = textures.texture(info.texture(), role)?;
                 Ok(NormalTexture {
                     texture,
                     sampler,
@@ -914,6 +921,10 @@ fn placements(document: &gltf::Document, limits: CookLimits) -> Result<Vec<Place
 
 /// Prepare only the documented static embedded subset. No resource URI is resolved.
 pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<Asset> {
+    ensure(
+        !settings.normal_variance || settings.normal_maps,
+        "normal variance requires normal maps",
+    )?;
     let (json, blob) = chunks(source, limits)?;
     preflight(json, limits)?;
     let gltf =
