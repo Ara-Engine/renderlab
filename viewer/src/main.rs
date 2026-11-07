@@ -357,6 +357,8 @@ impl View {
         options: &Options,
         start: Instant,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let latency_probe = std::env::var_os("RENDERLAB_LATENCY_PROBE").is_some();
+        let setup_start = Instant::now();
         let asset = options
             .asset
             .as_deref()
@@ -387,6 +389,13 @@ impl View {
         if virtual_asset.is_some() {
             eprintln!("virtual_metadata_ready_us={}", start.elapsed().as_micros());
         }
+        if latency_probe {
+            eprintln!(
+                "latency_stage=asset_and_camera_load ms={:.3}",
+                setup_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let device_start = Instant::now();
         let window = Arc::new(
             events.create_window(
                 Window::default_attributes()
@@ -471,6 +480,13 @@ impl View {
             "effective_limits {}",
             runtime_policy::json(&options.policy, options.stream, renderer_limits)
         );
+        if latency_probe {
+            eprintln!(
+                "latency_stage=window_device_surface ms={:.3}",
+                device_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let renderer_start = Instant::now();
         let mut renderer = Renderer::new_with_options(
             device,
             queue,
@@ -482,6 +498,12 @@ impl View {
             },
             &source,
         )?;
+        if latency_probe {
+            eprintln!(
+                "latency_stage=renderer_pipeline_setup ms={:.3}",
+                renderer_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         renderer.set_lighting(&lighting_settings::default_lighting())?;
         let mut environment_file = environment_settings::EnvironmentFile::load(
             options.environment.as_deref(),
@@ -632,6 +654,15 @@ impl View {
             }
         }
         self.markers.retain(|m| !m.completed || !m.presented);
+        // An external probe can request another renderer-owned capture after a timed
+        // completion, without including image encoding/readback in edit latency.
+        if options.capture_hdr.is_some()
+            && let Some(path) = std::env::var_os("RENDERLAB_LATENCY_CAPTURE")
+            && std::path::Path::new(&path).is_file()
+        {
+            std::fs::remove_file(path)?;
+            self.hdr_written = false;
+        }
         if let Some(capture) = &mut self.hdr_capture {
             let info = capture.info();
             if let Some(bytes) = capture.try_read()? {

@@ -93,11 +93,34 @@ fn light(r: &mut Renderer) {
     )
     .unwrap();
 }
+/// Opt-in caller-thread wall timing, including motion updates and busy admission.
+/// GPU spans remain separate; serialization happens after the measured interval.
+fn latency_cpu(
+    rows: &mut Vec<serde_json::Value>,
+    enabled: bool,
+    label: &str,
+    start: Instant,
+    report: &FrameReport,
+) {
+    if !enabled {
+        return;
+    }
+    let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let ms = |v: Duration| v.as_secs_f64() * 1000.0;
+    let c = &report.cpu;
+    rows.push(
+        serde_json::json!({"label":label,"frame":report.frame.0,"caller_wall_ms":wall_ms,
+        "preparation_ms":ms(c.preparation+c.visibility+c.packing),
+        "shadow_preparation_ms":ms(c.shadow_preparation),"upload_ms":ms(c.upload+c.shadow_upload),
+        "encode_ms":ms(c.encode+c.shadow_encode),"submit_ms":ms(c.submit),"poll_ms":ms(c.poll)}),
+    );
+}
+
 fn timing(r: &mut Renderer, label: &str, rows: &mut Vec<serde_json::Value>) {
     for t in r.poll().unwrap().gpu {
         let ms = |v: Duration| v.as_secs_f64() * 1000.;
         // shade_ms: traced frames time their deferred shading pass with the mesh-pass stamps.
-        rows.push(serde_json::json!({"label":label,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms),"shade_ms":ms(t.mesh_pass)}));
+        rows.push(serde_json::json!({"label":label,"frame":t.frame.0,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms),"shade_ms":ms(t.mesh_pass),"tone_ms":t.present_pass.map(ms)}));
     }
 }
 /// N8n: with `VSC_STATS` among a variant's constants, the surface cache's counters after each
@@ -987,6 +1010,8 @@ fn gpu_visibility_quarry() {
     let mut stages = vec![];
     let mut changed = vec![];
     let mut rows = vec![];
+    let mut cpu_rows = vec![];
+    let cpu_probe = m["cpu_timing"].as_bool() == Some(true);
     // M3: wall-clock totals of the turn, camera and caster phases, frames through their
     // tail drain: throughput, which per-frame GPU spans cannot show.
     let mut walls = vec![];
@@ -1115,17 +1140,19 @@ fn gpu_visibility_quarry() {
                 .any(|&(name, v)| name == "VSC_STATS" && v != 0.0);
             let mut first = None;
             for i in 0..warm + 8 {
+                let cpu_start = Instant::now();
                 // N8i: the variant's constants, once the shadow state exists (an unchanged
                 // list rebuilds nothing).
                 if r.virtual_shadows.is_some() {
                     screens::set_screen_constants(&mut r, constants.clone());
                 }
-                render(
+                let cpu_report = render(
                     &mut r,
                     &color,
                     &camera,
                     &mut asset.draws(Visibility::Frustum),
                 );
+
                 // The first frame after a camera or cut change culls pass 1 with the
                 // previous frame's HZB; its final hits must equal the settled frame's.
                 if i == 0 && mode == PrimaryVisibility::VisibilityBuffer {
@@ -1160,6 +1187,7 @@ fn gpu_visibility_quarry() {
                     i,
                     &mut cache_rows,
                 );
+                latency_cpu(&mut cpu_rows, cpu_probe, &label, cpu_start, &cpu_report);
             }
             r.test_drain("N1c quarry timing tail");
             timing(&mut r, &label, &mut rows);
@@ -1175,6 +1203,7 @@ fn gpu_visibility_quarry() {
                 // (traces of long turning runs inside the map's hysteresis).
                 let turn_wrap = m["turn_wrap"].as_u64().unwrap_or(0) as usize;
                 for i in 0..turn_frames {
+                    let cpu_start = Instant::now();
                     let at = if turn_wrap > 0 {
                         let k = (i + 1) % (2 * turn_wrap);
                         k.min(2 * turn_wrap - k)
@@ -1187,14 +1216,22 @@ fn gpu_visibility_quarry() {
                         lux,
                     };
                     r.set_lighting_and_shadows(&lit, &shadows).unwrap();
-                    render(
+                    let cpu_report = render(
                         &mut r,
                         &color,
                         &camera,
                         &mut asset.draws(Visibility::Frustum),
                     );
+
                     timing(&mut r, &format!("{label}-turn"), &mut rows);
                     surface_stats(&mut r, stats, &format!("{label}-turn"), i, &mut cache_rows);
+                    latency_cpu(
+                        &mut cpu_rows,
+                        cpu_probe,
+                        &format!("{label}-turn"),
+                        cpu_start,
+                        &cpu_report,
+                    );
                 }
                 r.test_drain("N8c quarry turning tail");
                 wall(&mut walls, format!("{label}-turn"), turn_frames, start);
@@ -1242,6 +1279,7 @@ fn gpu_visibility_quarry() {
                 let step_metres = m["move_step"].as_f64().unwrap_or(0.001) as f32;
                 let yaw = m["move_yaw"].as_f64().unwrap_or(0.0) as f32;
                 for i in 1..=move_frames {
+                    let cpu_start = Instant::now();
                     let at = if wrap > 0 {
                         let k = i % (2 * wrap);
                         k.min(2 * wrap - k)
@@ -1261,15 +1299,23 @@ fn gpu_visibility_quarry() {
                         pose.far,
                     )
                     .unwrap();
-                    render(
+                    let cpu_report = render(
                         &mut r,
                         &color,
                         &moved,
                         &mut asset.draws(Visibility::Frustum),
                     );
+
                     timing(&mut r, &format!("{label}-move"), &mut rows);
                     let i = i as usize;
                     surface_stats(&mut r, stats, &format!("{label}-move"), i, &mut cache_rows);
+                    latency_cpu(
+                        &mut cpu_rows,
+                        cpu_probe,
+                        &format!("{label}-move"),
+                        cpu_start,
+                        &cpu_report,
+                    );
                 }
                 r.test_drain("N8f camera motion tail");
                 let [_, moved_counts] = interactive_outputs(&r);
@@ -1295,6 +1341,7 @@ fn gpu_visibility_quarry() {
                     .map_or(move_frames, |n| n as u32);
                 let caster_wrap = m["caster_wrap"].as_u64().unwrap_or(0) as u32;
                 for i in 1..=caster_frames {
+                    let cpu_start = Instant::now();
                     let at = if caster_wrap > 0 {
                         let k = i % (2 * caster_wrap);
                         k.min(2 * caster_wrap - k)
@@ -1303,12 +1350,13 @@ fn gpu_visibility_quarry() {
                     };
                     let step = Mat4::from_translation(Vec3::X * (0.001 * at as f32));
                     asset.set_model(batch, 0, step * base).unwrap();
-                    render(
+                    let cpu_report = render(
                         &mut r,
                         &color,
                         &camera,
                         &mut asset.draws(Visibility::Frustum),
                     );
+
                     timing(&mut r, &format!("{label}-caster"), &mut rows);
                     let i = i as usize;
                     surface_stats(
@@ -1317,6 +1365,13 @@ fn gpu_visibility_quarry() {
                         &format!("{label}-caster"),
                         i,
                         &mut cache_rows,
+                    );
+                    latency_cpu(
+                        &mut cpu_rows,
+                        cpu_probe,
+                        &format!("{label}-caster"),
+                        cpu_start,
+                        &cpu_report,
                     );
                 }
                 r.test_drain("N8f caster motion tail");
@@ -1415,6 +1470,13 @@ fn gpu_visibility_quarry() {
         serde_json::to_vec_pretty(&walls).unwrap(),
     )
     .unwrap();
+    if cpu_probe {
+        fs::write(
+            out.join("cpu.json"),
+            serde_json::to_vec_pretty(&cpu_rows).unwrap(),
+        )
+        .unwrap();
+    }
     if !cache_rows.is_empty() {
         fs::write(
             out.join("surface-stats.json"),
