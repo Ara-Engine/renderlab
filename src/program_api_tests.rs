@@ -198,6 +198,81 @@ fn gpu_registered_program_files_defaults_arrays() {
         assert_eq!(centre(&accepted), [0.25, 0.375, 0.5]);
         let overridden = frame(&mut r, &explicit);
         assert_eq!(centre(&overridden), [0.375, 0.625, 0.875]);
+        // Compile every active ABI on owned worker recipes, while the old image is
+        // still submitted. The replacement must be byte-identical to sync creation.
+        let sets = [
+            Variant::Lit,
+            Variant::Hardware,
+            Variant::Fresh,
+            Variant::Traced,
+            Variant::Temporal,
+        ]
+        .into_iter()
+        .filter(|v| r.program_slot(program.id()).modules.has(*v))
+        .map(|v| (program.id(), v))
+        .collect();
+        r.ensure_pipelines(sets).unwrap();
+        let job = r.start_program_reload(&program, SOURCE).unwrap();
+        assert_eq!(frame(&mut r, &defaults), accepted);
+        while !job.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(job.current(&r));
+        r.finish_program_reload(job).unwrap();
+        assert_eq!(frame(&mut r, &defaults), accepted);
+        assert_eq!(frame(&mut r, &explicit), overridden);
+
+        // A completed stale snapshot cannot replace a more recent transaction.
+        let stale = r
+            .start_program_reload(
+                &program,
+                &SOURCE.replace("return s.color;", "return s.color*0.25;"),
+            )
+            .unwrap();
+        r.reload_program(&program, SOURCE).unwrap();
+        while !stale.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(!stale.current(&r));
+        stale.discard();
+        assert_eq!(frame(&mut r, &defaults), accepted);
+
+        // Rapid saves coalesce while a worker runs; syntax errors preserve the image,
+        // and correction restores it. The first queued result must never install.
+        let mut asynchronous = ShaderWatch::programs_only();
+        asynchronous.watch_program(&program, &path, SOURCE);
+        fs::write(
+            &path,
+            SOURCE.replace("return s.color;", "return s.color*0.25;"),
+        )
+        .unwrap();
+        assert!(asynchronous.poll_async(&mut r).is_empty());
+        fs::write(&path, "invalid WGSL").unwrap();
+        let start = Instant::now();
+        let rejected = loop {
+            let mut events = asynchronous.poll_async(&mut r);
+            if !events.is_empty() {
+                break events.remove(0);
+            }
+            assert!(start.elapsed() < Duration::from_secs(20));
+            assert_eq!(frame(&mut r, &defaults), accepted);
+        };
+        assert!(matches!(rejected.result, Err(ReloadError::Rejected { .. })));
+        assert!(asynchronous.rejected());
+        assert_eq!(frame(&mut r, &defaults), accepted);
+        fs::write(&path, SOURCE).unwrap();
+        let start = Instant::now();
+        loop {
+            let events = asynchronous.poll_async(&mut r);
+            if let Some(event) = events.into_iter().next() {
+                event.result.unwrap();
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20));
+            assert_eq!(frame(&mut r, &defaults), accepted);
+        }
+        assert!(!asynchronous.rejected());
+        assert_eq!(frame(&mut r, &defaults), accepted);
         let created = r.stats().pipelines.created;
         let writes = r.stats().uploads.write_calls;
         assert!(

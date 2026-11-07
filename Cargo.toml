@@ -53,3 +53,7 @@ opt-level = 2
 
 [profile.dev.package.wgpu-hal]
 opt-level = 2
+
+# The editable shader frontend is runtime work in the development viewer.
+[profile.dev.package.naga]
+opt-level = 2

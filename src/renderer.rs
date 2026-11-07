@@ -28,6 +28,7 @@ pub use virtual_shadow_gpu::{
 };
 #[path = "program_gpu.rs"]
 mod program_gpu;
+pub(crate) use program_gpu::ProgramReload;
 use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 #[path = "texture_residency.rs"]
 mod texture_residency;
@@ -943,6 +944,7 @@ impl Renderer {
                 fresh: fresh.as_ref(),
                 primary: None,
                 cache: None,
+                modules: &program_cache.modules,
             },
             &Preludes {
                 raster: wgsl,
