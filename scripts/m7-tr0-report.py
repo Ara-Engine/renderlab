@@ -100,6 +100,31 @@ figure.suptitle("Q-walk frame 64 — identical T1b age ≥32 pixels, new physica
 figure.supxlabel("Combined final-colour error includes material, lighting and reconstruction differences.\nThis is not the historical frozen Exact bar. High VSM keeps the RT-capable device configuration.", fontsize=8)
 save(figure, "quarry-population-comparison")
 
+checkpoint_frames = [r["frame"] for r in quarry["w-e-n-c2"]["rows"]
+                     if "t1b_replay_same_physical_reference" in r["measures"]["L0"]["all-covered"]]
+assert len(set(checkpoint_frames)) == 60
+figure, axes = plt.subplots(1, 2, figsize=(11, 4.7), layout="constrained")
+for axis, channel in zip(axes, ("L0", "L4"), strict=True):
+    for name, method, label, colour in methods:
+        indexed = {r["frame"]: r for r in quarry[name]["rows"]}
+        values = []
+        for frame in checkpoint_frames:
+            value = indexed[frame]["measures"][channel]["all-covered"]
+            if method == "t1b":
+                value = value["t1b_replay_same_physical_reference"]
+            values.append(value["rms_noise_subtracted"])
+        axis.plot(checkpoint_frames, values, color=colour, label=label, marker=".", markersize=4, linewidth=.8)
+    axis.axvspan(64, 96, color="#888888", alpha=.12)
+    axis.set_xticks((0, 32, 64, 96, 128, 160))
+    axis.set_title(channel)
+    axis.set_xlabel("Registered Q-walk frame")
+    axis.set_ylabel("All-covered reference-noise-subtracted RMS codes")
+    axis.grid(alpha=.2)
+axes[0].legend(fontsize=8)
+figure.suptitle("Q-walk: all 60 original T1b checkpoints on the new physical target", fontsize=11)
+figure.supxlabel("Each marker is a measured checkpoint; joining lines do not fill unscored frames. Grey: camera hold.\nCurrent covered population, no age restriction, shared between methods at each frame. Combined final-colour error; not the frozen Exact bar.", fontsize=8)
+save(figure, "quarry-checkpoint-error-curves")
+
 figure, axes = plt.subplots(1, 2, figsize=(11, 4.5), layout="constrained")
 for axis, channel in zip(axes, ("L0", "L4"), strict=True):
     for name, method, label, colour in methods:

@@ -177,13 +177,13 @@ def compiler_safety_valve():
 
 
 @contextlib.contextmanager
-def queued_lease(label, minutes, wait_seconds=0):
+def queued_lease(label, minutes, wait_seconds=0, *, correctness_only=False):
     """Retry atomic acquisition after preparation; never release a foreign lease."""
     deadline = time.monotonic() + wait_seconds
     announced = False
     while True:
         headless_policy(minutes)
-        resources_ready = compiler_safety_valve()
+        resources_ready = correctness_only or compiler_safety_valve()
         if (not (ROOT / "gpu-defer.txt").exists() and not U0.LOCK.exists()
                 and U0.E2E.available_gib() >= U0.START_GIB and resources_ready):
             stack = contextlib.ExitStack()
@@ -1085,7 +1085,7 @@ def reference(args):
     timeout = getattr(args, "timeout_seconds", 120)
     if not 0 < timeout <= 600 or timeout > args.minutes * 60 - 15 or (policy["state"] == "relaxed" and timeout > 120):
         raise ValueError("functional timeout exceeds the reserved/game-play allowance")
-    with queued_lease(args.label, args.minutes, args.wait_seconds):
+    with queued_lease(args.label, args.minutes, args.wait_seconds, correctness_only=True):
         try:
             U0.guarded([pinned_binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
                        root, timeout=timeout, cwd=REPO, env=env)
