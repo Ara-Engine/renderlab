@@ -1193,7 +1193,11 @@ def score(args):
             continue
         archive, meta = source
         frame = meta["frame"]
-        if (frame["width"], frame["height"]) != (1920, 1080) or abs(frame["fov_y"] - p["fov_y_radians"]) > 1e-9:
+        # View consumes f32. Qualified external metadata may serialize that
+        # rounded value while our recipe retains its original f64 literal.
+        reference_fov = np.asarray(frame["fov_y"], dtype="<f4").tobytes()
+        requested_fov = np.asarray(p["fov_y_radians"], dtype="<f4").tobytes()
+        if (frame["width"], frame["height"]) != (1920, 1080) or reference_fov != requested_fov:
             raise ValueError("reference projection mismatch")
         consumer, name = colour_input(dump, events, recipe)
         hdr, identity = NATIVE.resource(dump, name, consumer)
@@ -1232,7 +1236,11 @@ def score(args):
             mean = (ref[prefix + "0"] + ref[prefix + "1"]) * .5 * scale
             halves = [ref[k] * scale for k in (prefix + "0", prefix + "1")]
             result = dict(frame=i, reference=str(archive), reference_sha256=cached_sha,
-                          samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={}, transient_pools={})
+                          samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={}, transient_pools={},
+                          projection=dict(width=frame["width"], height=frame["height"],
+                               reference_fov_y_literal=frame["fov_y"], registered_fov_y_literal=p["fov_y_radians"],
+                               effective_fov_y_f32=float(np.float32(p["fov_y_radians"])),
+                               effective_fov_bits=int.from_bytes(reference_fov, "little")))
             if recipe.get("scene") == "S2G":
                 reference_luma = mean @ np.array([.2126, .7152, .0722])
                 candidate_luma = hdr[..., :3] @ np.array([.2126, .7152, .0722])
