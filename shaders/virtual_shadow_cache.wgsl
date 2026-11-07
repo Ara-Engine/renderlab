@@ -57,13 +57,14 @@ struct VscFrame {frame:u32,sun:u32,casters:u32,flags:u32,buckets:u32,pad0:u32,pa
 @group(0) @binding(49) var<uniform> vsc:VscFrame;
 // Four 8-byte slots per bucket: (fingerprint, value). Fingerprint 0 is an empty slot. Value:
 //   bits 0-3: a shown cell's solid count (bit 0: fully lit, else fully blocked) and its margin
-//     exponent (bits 1-3, vsc_margin); an unshown cell's last walk work, as its bit length (bits
-//     0-2, at most 7; N8m's measure, the walk order's estimate);
+//     exponent (bits 1-3, vsc_margin);
 //   bits 4-7: the march's absolute start level & 15;
 //   bits 8-11: a check nibble of the bucket hash;
 //   bits 12-17: the caster epoch & 63;
 //   bit 18: shown;
-//   bits 19-31: the sun epoch & 8191.
+//   bits 19-21: its last walk's work as a bit length (at most 7; N8m's measure, the walk order's
+//     estimate when the cell must walk again);
+//   bits 22-31: the sun epoch & 1023.
 @group(0) @binding(50) var<storage,read_write> vsc_table:array<vec2<u32>>;
 // VSC_STATS screens: probed receivers, hits, cells the caster test retired, refreshes due to the
 // sun, cells found but not shown, certified walks whose neighbourhood exceeded the largest
@@ -179,14 +180,14 @@ fn vsc_shadowed(record:vec4<u32>,world:vec4<f32>,normal:vec4<f32>)->bool {
 
 // vsc_find's results that are not a shown count: absent; present but due (stale for the sun or
 // the casters) with its last work; current but not shown, with its last work. Work is the low
-// three bits (0 for a shown cell).
+// three bits.
 const VSC_MISS:u32=0xffffffffu;
 const VSC_STALE:u32=0xfffffff0u;
 const VSC_UNSHOWN:u32=0xffffffe0u;
-fn vsc_work(e:vec2<u32>)->u32 {return select(e.y&7u,0u,(e.y&VSC_SHOWN)!=0u);}
+fn vsc_work(e:vec2<u32>)->u32 {return (e.y>>19u)&7u;}
 // A slot's value is current: computed at this sun epoch and caster epoch.
 fn vsc_current(e:vec2<u32>)->bool {
-    return e.x!=0u && ((e.y>>12u)&63u)==(vsc.casters&63u) && (e.y>>19u)==(vsc.sun&8191u);
+    return e.x!=0u && ((e.y>>12u)&63u)==(vsc.casters&63u) && (e.y>>22u)==(vsc.sun&1023u);
 }
 // A cell's cached visible count, VSC_UNSHOWN | its work, VSC_STALE | its work or VSC_MISS. On a
 // caster-moving frame a kept hit is marked current (its caster epoch rewritten). Where the moved
@@ -200,7 +201,7 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
     for(var s=0u;s<VSC_SLOTS;s+=1u) {
         let e=vsc_table[base+s];
         if e.x!=key.fingerprint || ((e.y>>8u)&15u)!=key.check {continue;}
-        let lag=((vsc.sun&8191u)-(e.y>>19u))&8191u;
+        let lag=((vsc.sun&1023u)-(e.y>>22u))&1023u;
         if lag!=0u && (lag>=VSC_LAG || ((vsc.frame+key.phase)&(VSC_LAG-1u))==0u) {
             if VSC_STATS {atomicAdd(&vsc_stats[3],1u);}
             return VSC_STALE|vsc_work(e);
@@ -223,7 +224,7 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
         }
         if (value&VSC_SHOWN)==0u {
             if VSC_STATS {atomicAdd(&vsc_stats[4],1u);}
-            return VSC_UNSHOWN|(value&7u);
+            return VSC_UNSHOWN|((value>>19u)&7u);
         }
         return select(0u,vsm.n8e.x,(value&1u)!=0u);
     }
@@ -549,12 +550,12 @@ fn vsc_won(key:VscKey,priority:u32)->vec2<u32> {
     if !x.valid {return;}
     let grade=(result>>12u)&3u;
     let margin=(result>>14u)&7u;
-    let epochs=((vsc.casters&63u)<<12u)|((vsc.sun&8191u)<<19u)|(result&0xf0u);
+    let epochs=((vsc.casters&63u)<<12u)|(((result>>8u)&7u)<<19u)|((vsc.sun&1023u)<<22u)|(result&0xf0u);
     if !kept {
         let won=vsc_won(x.key,vsc_priority(true,grade,margin,x.p));
         if won.x!=VSC_SLOTS {
             let shown=grade!=0u && won.y==grade;
-            let field=select((result>>8u)&7u,u32(grade==2u)|(margin<<1u),shown);
+            let field=select(0u,u32(grade==2u)|(margin<<1u),shown);
             vsc_table[won.x]=vec2<u32>(x.key.fingerprint,field|(x.key.check<<8u)|epochs|select(0u,VSC_SHOWN,shown));
         }
     }
@@ -563,7 +564,7 @@ fn vsc_won(key:VscKey,priority:u32)->vec2<u32> {
         let f=vsc_fill_at(x,textureLoad(vsm_world,vsc_neighbour(x,n),0).xyz,(result>>17u)&63u);
         let fill=vsc_won(f.key,vsc_priority(false,grade,f.margin,x.p));
         if fill.x==VSC_SLOTS {continue;}
-        // Fills that disagree leave the cell unshown, with no work estimate.
+        // Fills that disagree leave the cell unshown. A fill's work estimate is its source's.
         let shown=fill.y==grade;
         let field=select(0u,u32(grade==2u)|(f.margin<<1u)|VSC_SHOWN,shown);
         vsc_table[fill.x]=vec2<u32>(f.key.fingerprint,field|(f.key.check<<8u)|epochs);

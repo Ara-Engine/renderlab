@@ -14,9 +14,9 @@ const TABLE_BYTES: u64 = BUCKETS as u64 * 32;
 const CLAIM_BYTES: u64 = BUCKETS as u64 * 4 * 8;
 /// WGSL `VscFrame`.
 const UNIFORM_BYTES: u64 = 32;
-/// Widths of the value's epoch fields (WGSL: sun 13 bits, casters 6); a wrap starts a new
-/// cache epoch, so an old value can never look current.
-const SUN_MASK: u32 = (1 << 13) - 1;
+/// Widths of the value's epoch fields (WGSL: sun 10 bits, casters 6); a wrap clears the table,
+/// so an old value can never look current.
+const SUN_MASK: u32 = (1 << 10) - 1;
 const CASTER_MASK: u32 = (1 << 6) - 1;
 /// Screen constants of this module (WGSL `override VSC_*`).
 pub(super) const CONSTANTS: &str = "VSC_";

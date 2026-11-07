@@ -1157,11 +1157,19 @@ fn gpu_visibility_quarry() {
                     panic!("quarry sun");
                 };
                 let start = Instant::now();
+                // N8o: `turn_wrap` > 0 turns the sun back and forth over that many 0.5 mrad steps
+                // (traces of long turning runs inside the map's hysteresis).
+                let turn_wrap = m["turn_wrap"].as_u64().unwrap_or(0) as usize;
                 for i in 0..turn_frames {
+                    let at = if turn_wrap > 0 {
+                        let k = (i + 1) % (2 * turn_wrap);
+                        k.min(2 * turn_wrap - k)
+                    } else {
+                        i + 1
+                    };
                     let mut lit = lighting.clone();
                     lit.lights[0] = Light::Directional {
-                        travel: Mat4::from_rotation_y(0.0005 * (i + 1) as f32)
-                            .transform_vector3(travel),
+                        travel: Mat4::from_rotation_y(0.0005 * at as f32).transform_vector3(travel),
                         lux,
                     };
                     r.set_lighting_and_shadows(&lit, &shadows).unwrap();
