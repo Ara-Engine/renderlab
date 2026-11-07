@@ -59,3 +59,14 @@ Patent exposure flagged by the research notes (2026-11-07), each Islam's decisio
 - US 9,754,407: world-space cache. Its review is still open, as noted above.
 
 Code licences: RTXGI 2.x, SHaRC, NRC, NRD and DLSS / DLSS RR are reimplement-only, so none of their code may be copied. DDGI papers are CC BY-ND, so write our own code from the text. Falcor's SVGF pass is BSD-3 and may be copied with attribution, but the SVGF patent question still applies.
+
+Islam's decisions on design draft 2 (2026-11-07):
+- **GI cache:** it may become a default on the same basis as the surface shadow cache while the US 9,754,407 review is pending. If the review finds a problem, both are revisited.
+- **Adshir/Snap:** record the non-RT, non-planar reflection miss for now. Ship planar and RT reflections, and review the patent later.
+- **Denoisers:** if the unflagged denoisers in D0 fail their gates, record the miss and spend on more samples and better caches first. Ask for a review of SVGF-type filters only if that also fails.
+- **`reflection_lobe()`:** the hook is GGX-shaped. A custom style that isn't GGX gets its nearest GGX lobe, or no traced reflections. This is accepted and recorded as a constraint on programmable shading.
+
+Root decisions:
+- **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
+- **RT memory baseline:** M7 starts from the RT default path, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410.
+- **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
