@@ -99,6 +99,67 @@ that whole module/reflection portion at roughly 8–9 ms. Even perfect removal o
 cannot close the remaining >100-ms driver gap. More complex multi-module scheduling
 would add verification and failure-path cost without solving this measured workload.
 
+## Edit-to-image result
+
+The final quiet window is **17:11:35.171–17:13:40.010 UTC** (`window-retry-0`).
+All **five standard and five user repeats are clean**, with forty successful actions.
+The 100-ms process observer records **0/1,007 build samples**; the independent lease
+guard records **0/29 foreign-build samples**, and its 1,064 fast resource samples
+record zero rustc processes. Minimum available RAM is **10,108.2 MiB**. No game or
+foreign renderer is detected. Normal OS/desktop activity remains; this is not a
+fixed-clock laboratory claim. The foreground window handle/PID is unchanged at the
+lease endpoints. The viewer closes and the lock is released before the quiet handoff.
+
+Milliseconds, median (min–max), five repeats per row. Completion means the first
+image's GPU completion observed by the viewer; present means its present-call proxy,
+not scanout. The optimized endpoint includes background replacement work after the
+preview. Image readback/PNG encoding is outside these endpoints.
+
+| Program / action | Save to preview completion | Save to preview present call | Save to optimized completion |
+|---|---:|---:|---:|
+| Standard / fresh edit | **293.791 (289.977–358.675)** | 277.153 (275.479–341.161) | 1,379.408 (1,346.169–1,462.057) |
+| Standard / restore | 93.414 (84.253–104.142) | 44.445 (34.883–47.781) | 135.113 (118.058–139.383) |
+| Standard / recovery | 100.764 (69.364–117.708) | 45.247 (34.054–61.924) | 152.011 (106.528–161.828) |
+| User / fresh edit | **319.932 (300.011–350.928)** | 289.712 (287.452–334.533) | 1,426.534 (1,388.601–1,543.836) |
+| User / restore | 110.543 (93.414–126.117) | 52.696 (32.524–65.756) | 139.423 (128.557–143.639) |
+| User / recovery | 100.498 (87.786–111.837) | 40.245 (34.556–48.155) | 143.119 (126.242–162.461) |
+
+Every fresh edit changes the full HDR hash. All ten invalid saves retain the last
+working image, and every restore/recovery returns exactly to its baseline hash.
+Restores/recoveries reuse previously compiled sources; their timings do not establish
+fresh-edit latency. Rejection worker time is recorded separately from save-to-image.
+
+Before/after fresh-edit medians, standard / user, in ms:
+
+| Component | M5-DL | DL2 helpers | DL3 default helpers |
+|---|---:|---:|---:|
+| Save to detection | 34.305 / 37.120 | 11.710 / 12.851 | 11.989 / 12.325 |
+| Module + hot pipelines | 1,038.546 / 1,051.737 | 317.119 / 321.652 | 262.192 / 269.959 |
+| Module/reflection portion | Not isolated | 7.614 / 8.791 | 7.262 / 7.686 |
+| Two hot pipelines, concurrent wall | Not isolated | 310.559 / 314.550 | 254.930 / 263.351 |
+| Save to completed first image | ~1,083 / ~1,095 | 356.959 / 364.356 | **293.791 / 319.932** |
+
+Component medians are not additive. M5/DL2 are reused historical evidence, with their
+documented contention/endpoint limits; they are not paired causal speedup samples.
+The same-session quiet paired screen above establishes the compiler-policy effect.
+No timing taken during the game hold is used in these result tables.
+
+The **100-ms target remains missed by 193.791 ms standard and 219.932 ms user** at
+the median completed-image endpoint. In the isolated quiet Lit-pair screen, the
+retained policy's slowest native call per pair has median **219.194 ms** and range
+**198.611–251.265 ms**; the shortest individual fresh `vkCreateGraphicsPipelines`
+call is **192.166 ms**. These are observed compiler floors for this screen, not a
+universal lower bound. In the actual viewer, hot-pair creation still dominates at
+255–263 ms. Optimized replacement pipeline creation remains **1,037.096 / 1,080.706
+ms** in the background, with modules **3.779 / 4.394 ms**.
+
+The next material option is M7's smaller equivalent environment helper graph, tested
+against the same full-image and motion gates. More extensive `DontInline` and GPL
+subsets did not remove this floor. Parameter updates and source caches can avoid
+compiling repeated values/sources; they do not solve unseen shader bodies. Separate
+backend mechanisms require a measured fresh compiler result before adoption. No
+helper body or rendered quality is reduced to claim 100 ms.
+
 ## Verification protocol
 
 The final window run uses [M5-DL](m5-dev-loop.md): full-resident quarry, static camera
@@ -114,11 +175,41 @@ compares it to the optimized replacement and exact-source ordinary reference. Th
 ordinary CLI option gets a separate inactive fixture check without the interop
 measurement environment. Library default behavior remains covered by existing tests.
 
-The CPU-verified checkpoint is **92df01d**. Its library suite reports **123 passed,
-121 ignored, exit 0**; formatting passes. Library/viewer all-target Clippy passes
-with the same two pre-existing, out-of-ownership exceptions documented by DL1/DL2
-(`nonminimal_bool` and `items_after_test_module`). Window/default image verification
-and final edit-to-image numbers are pending the game release, not claimed complete.
+The host is the DL2 Windows/Vulkan configuration: RTX 4070 SUPER, NVIDIA 617.14,
+Ryzen 7 7800X3D, Rust 1.96, wgpu 30.0.1, development profile and Vulkan validation.
+The full-resident quarry has 13,034,903 triangles. This measures the existing raster
+development viewer; traced compilation and API correctness have separate fixtures.
+No startup, Rust-edit latency or frame-time speedup is inferred from shader timings.
+
+The retained implementation checkpoint is **eb12ed6**. The library suite reports
+**123 passed, 121 ignored, exit 0**. Final formatting and library/viewer all-target
+Clippy pass with the same two pre-existing, out-of-ownership exceptions documented
+by DL1/DL2 (`nonminimal_bool` in `virtual_shadow_gpu.rs` and
+`items_after_test_module` in `visibility_buffer.rs`). Strict repository-wide Clippy
+therefore remains a baseline miss. Those files are unchanged.
+
+The actual first-preview quality run (`quality-b`, 16:42:08–16:42:45 UTC) asserts the
+captured revision is the preview revision before allowing optimized promotion. Both
+standard and custom user previews, and both optimized replacements, differ from the
+exact-source ordinary monolithic reference by **0/2,073,600 HDR pixels**, maximum
+and mean absolute error **0**. Complete quarry PNGs, including silhouettes, were
+inspected. An earlier quality attempt captured the optimized revision instead; its
+assertion failed and it is excluded. The opt-in untimed probe now waits for a flight
+slot and queues the exact preview copy before further rendering/promotion. That pause
+is absent from normal development and all timed runs.
+
+The registered-program GPU fixture passes raster and traced compute, all four preview
+policies, optimized promotion, invalid/stale saves, recovery, parameters/defaults and
+in-flight old-frame use. All eight preview/replacement cases differ from the ordinary
+reference by **0/4,096 HDR pixels**, with no validation errors. A separate fixture
+launch verifies `--shader-preview optimized` uses no interop device, emits no preview
+stage, and still reloads a visible edit. These functional checks are contended and
+provide no speed claim.
+
+Zero difference on these sources is output preservation, not a guarantee for arbitrary
+user programs or other drivers. Helper-boundary preview remains a transient dev-only
+state and is replaced with the original optimized pipeline in the background. Release
+callers and library defaults do not opt into it.
 
 ## Game hold and queued work
 
@@ -129,15 +220,58 @@ directory was removed before rebuilding, without deleting shared dependency arti
 The later preparation of the final comparison was also stopped when the configured
 four-GiB relaxed-hold RAM floor was crossed (minimum 4,089 MiB). Its legacy failure
 string says two GiB; the evidence record explicitly corrects the threshold to four.
-No further builds are started while that headroom is in doubt.
+The later post-game preparation and final checks complete successfully.
 
 Under the explicitly relaxed hold, only short, headless compilation screens run at
 below-normal CPU priority. They use the shared atomic GPU lease, the reservation and
 release log, six-GiB launch/four-GiB runtime memory floors, and no Cargo inside a lease.
-All timings during play are labelled contended and excluded from speed claims. Viewer,
-image comparisons/captures and windowed M5-DL measurements remain queued until the
-`[GAME HOLD RELEASED]` line and user release. No windows, focus/input automation or
-desktop/game captures are used during play.
+All timings during play are labelled contended and excluded from speed claims. After
+the explicit release at 15:36Z, viewer runs use inactive windows, renderer-owned image
+copies and WM_CLOSE for the owned viewer. No focus/input automation or desktop/game
+captures are used. Every GPU run uses the shared atomic lock and reservation/release
+lines, at least 4 GiB available RAM at launch and a 2 GiB runtime abort floor, with no
+Cargo inside an owned GPU lease.
+
+Foreign `mypaper_wallpaper` compilation repeatedly interrupted the final quiet window.
+Only owned jobs were stopped. The foreign processes were never paused or terminated.
+The requested protocol waits for 60 seconds without Cargo/rustc/link activity before
+reserving another quiet window; after roughly 30 minutes of restarts it permits clean
+gaps, with each repeat's contention recorded and only clean repeats retained. Rejected
+attempts and their partial results remain in the evidence root.
+
+The final uninterrupted quiet run succeeds after the 60-second wait, so clean-gap
+fallback is **not needed**. All ten retained repeats are clean; no contended repeat
+is used in the edit-to-image table. The earlier aborted standard-only prefix is also
+excluded. U0b receives the explicit quiet completion/handoff after the final viewer
+closes. DL3 has no further GPU job queued.
+
+## Evidence and development cost
+
+Evidence is outside Git at **E:/renderlab-work/dl3/**: `final-summary.json`,
+`window-retry-0/results.json`, its `runs/` lease/resource records, `paired-final-b/`,
+`quality-b/quality.json`, `api-final/preview-images.json`, `ordinary-option/`, the
+measurement scripts, source identities and build/check logs. These preserve every
+sample, action/source hash, compiler breakdown and contention label. Failed attempts
+remain labelled and are excluded from claims.
+
+The measured viewer SHA-256 is
+`03ac2fa11e21a29a168959dae38cc8f7a0ed7a26a139f20c93b940ff5e045075`.
+Its unchanged standard baseline HDR hash is
+`1c4462b43466188d58f0e6e47ef03060e8adb64a1c0e8f3aff88e470172c12f1`;
+the custom baseline remains
+`10ee30f19e0f50ecde34c3cca32c3bc806e539aa9eba73f2d0cd1c259ae33690`.
+
+Implementation/analysis time was not independently stopwatched and interleaves with
+game, queue and foreign-build waits. Recorded CPU preparation/checks total
+**718.014 s**, including first dependency compilation and aborted preparations; the
+final fmt/Clippy/viewer-build batch is **8.776 s**. Owned GPU lease holds total
+**401.308 s**, including CPU driver compilation, loading, readback, failed attempts
+and the contended diagnostic screens. These are verification wall intervals, not GPU
+execution time or shader edit-to-image time. The retained final window alone takes
+**124.838 s**; the quiet paired compiler screen takes **12.711 s**. Foreign-build
+waiting is separate from those holds. Large raw dumps, uninspected PNGs and this
+worker's Cargo target are removed after summarization; compact evidence and inspected
+images remain on E:.
 
 The M7 helper-graph proposal remains with M7. This unit does not edit environment,
 lighting, shading, GI/temporal or shadow bodies, or the M5/M6 decision TSV.
