@@ -109,6 +109,30 @@ pub struct VirtualShadowSettings {
     /// and its march and page requests widen their cone by this angle. 0 rasterizes again
     /// whenever the sun turns.
     pub sun_hysteresis: f32,
+    /// N8k: which lookup decides visibility from the shared clipmap (docs/non-rt-n8k.md).
+    pub lookup: VirtualLookup,
+}
+
+/// The per-pixel decision of `SoftShadows::Virtual` (`VirtualShadowSettings::lookup`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VirtualLookup {
+    /// Exact watertight tests of the receiver's 1-ring and of every map candidate's triangles
+    /// (shaders/virtual_shadow.wgsl): the reference.
+    #[default]
+    Exact,
+    /// N8k: light-space map data only (shaders/virtual_shadow_lookup.wgsl): per-texel height
+    /// planes and planarity errors written at page-draw time, rebuilt between texel centres.
+    /// No triangle is read per pixel, and no walk records or ring horizons are kept.
+    Map,
+    /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
+    /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
+    Hybrid,
+}
+impl VirtualLookup {
+    /// Whether the map lookup and its per-texel data run.
+    fn map(self) -> bool {
+        self != Self::Exact
+    }
 }
 impl Default for VirtualShadowSettings {
     fn default() -> Self {
@@ -128,6 +152,7 @@ impl Default for VirtualShadowSettings {
             refresh: 16,
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
+            lookup: VirtualLookup::Exact,
         }
     }
 }
@@ -197,6 +222,18 @@ struct Pipelines {
     record: Owned<wgpu::ComputePipeline>,
     /// The lookup with `VSM_DEBUG`, built on first use (tests only).
     debug: Option<Owned<wgpu::ComputePipeline>>,
+    /// N8k (shaders/virtual_shadow_lookup.wgsl): per-texel planes of rasterized pages, and
+    /// the map-only lookup.
+    resolve: Owned<wgpu::ComputePipeline>,
+    map: Owned<wgpu::ComputePipeline>,
+    /// N8k: this frame's mip dispatch arguments (zero without a rendered page), and the top
+    /// layer's min-mips.
+    mip_dispatch: Owned<wgpu::ComputePipeline>,
+    minmip: Owned<wgpu::ComputePipeline>,
+    /// N8k hybrid: the queue's indirect dispatch, and the exact lookup over the queue (built
+    /// on first use with the exact lookup's constants).
+    queue_args: Owned<wgpu::ComputePipeline>,
+    queued: Option<Owned<wgpu::ComputePipeline>>,
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -210,6 +247,12 @@ struct Layouts {
     horizon: Owned<wgpu::BindGroupLayout>,
     /// The lookup's group 2: every batch's walk records.
     records: Owned<wgpu::BindGroupLayout>,
+    /// N8k: the plane resolve's and the map-only lookup's group 0.
+    resolve: Owned<wgpu::BindGroupLayout>,
+    map: Owned<wgpu::BindGroupLayout>,
+    mip_dispatch: Owned<wgpu::BindGroupLayout>,
+    minmip: Owned<wgpu::BindGroupLayout>,
+    queue: Owned<wgpu::BindGroupLayout>,
 }
 /// Ring horizons (N8b lever 1): 4 bytes per triangle of every traced draw, computed once
 /// per draw list by `vsm_horizon`. Elevations do not change under the similarity transforms
@@ -279,6 +322,18 @@ struct Resources {
     peel: Owned<wgpu::Buffer>,
     /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
     mips: Owned<wgpu::Buffer>,
+    /// N8k: per texel per level, the top and peel planes (8 bytes) and their planarity
+    /// errors (4 bytes); 16 bytes each unless the lookup is `VirtualLookup::Map`.
+    planes: Owned<wgpu::Buffer>,
+    errors: Owned<wgpu::Buffer>,
+    /// N8k: min-mips of the top layer (as `mips`; 16 bytes unless `VirtualLookup::Map`), and
+    /// the max- and min-mip passes' indirect arguments, three words per mip.
+    minmips: Owned<wgpu::Buffer>,
+    mip_args: Owned<wgpu::Buffer>,
+    /// N8k hybrid: the queue of ambiguous receivers (count, three reserved words, then two
+    /// words per receiver; 32 bytes unless `VirtualLookup::Hybrid`) and its dispatch.
+    queue: Owned<wgpu::Buffer>,
+    queue_dispatch: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -312,6 +367,13 @@ struct Groups {
     mip: Owned<wgpu::BindGroup>,
     pass: Owned<wgpu::BindGroup>,
     lookup: Owned<wgpu::BindGroup>,
+    resolve: Owned<wgpu::BindGroup>,
+    map: Owned<wgpu::BindGroup>,
+    mip_dispatch: Owned<wgpu::BindGroup>,
+    minmip: Owned<wgpu::BindGroup>,
+    queue: Owned<wgpu::BindGroup>,
+    /// The exact lookup's group with the queue in its scratch binding.
+    queued: Owned<wgpu::BindGroup>,
 }
 /// What the cache remembers between frames to decide which pages are still valid.
 #[derive(Default)]
@@ -362,7 +424,16 @@ pub(super) struct VirtualState {
     pub constants: Vec<(&'static str, f64)>,
     built: Vec<(&'static str, f64)>,
     module: Owned<wgpu::ShaderModule>,
+    /// N8k: shaders/virtual_shadow_lookup.wgsl and the map lookup's layout (rebuilt with
+    /// the screens' `VMAP_` constants).
+    map_module: Owned<wgpu::ShaderModule>,
+    map_layout: Owned<wgpu::PipelineLayout>,
+    /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
+    hybrid_module: Option<Owned<wgpu::ShaderModule>>,
 }
+/// Screen constants with this prefix belong to the map lookup's module, the others to the
+/// exact one.
+const MAP_CONSTANTS: &str = "VMAP_";
 
 fn layout_entry(
     binding: u32,
@@ -455,6 +526,35 @@ fn records_source() -> String {
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
         include_str!("../shaders/virtual_shadow_records.wgsl")
+    )
+}
+
+/// The N8k hybrid's exact module: shader_source() with shaders/virtual_shadow_hybrid.wgsl
+/// appended, whose entry calls the exact lookup's per-pixel functions.
+pub(super) fn hybrid_source() -> String {
+    format!(
+        "{}\n{}",
+        shader_source(),
+        include_str!("../shaders/virtual_shadow_hybrid.wgsl")
+    )
+}
+
+/// The N8k map-only lookup module: the shared draw-slot count, then
+/// shaders/virtual_shadow_lookup.wgsl. Tests may substitute a variant file through
+/// `RENDERLAB_VMAP_SHADER`, as `RENDERLAB_VSM_SHADER` does for the exact lookup.
+pub(super) fn map_source() -> String {
+    #[cfg(test)]
+    let variant = std::env::var("RENDERLAB_VMAP_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    #[cfg(not(test))]
+    let variant: Option<String> = None;
+    format!(
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        crate::TRACED_DRAWS,
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_lookup.wgsl"))
     )
 }
 
@@ -660,6 +760,60 @@ impl VirtualState {
                     ..storage(9, true, S::COMPUTE)
                 }],
             ),
+            resolve: group(
+                "N8k texel planes",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    storage(16, true, S::COMPUTE),
+                    storage(19, true, S::COMPUTE),
+                    storage(29, true, S::COMPUTE),
+                    storage(41, false, S::COMPUTE),
+                    storage(43, false, S::COMPUTE),
+                ],
+            ),
+            map: group(
+                "N8k map visibility",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    sampled(7, uint, D::D2),
+                    sampled(8, uint, D::D2),
+                    sampled(9, float, D::D2),
+                    sampled(10, float, D::D2),
+                    written(15),
+                    storage(16, true, S::COMPUTE),
+                    sampled(18, uint, D::D2),
+                    storage(19, true, S::COMPUTE),
+                    storage(35, true, S::COMPUTE),
+                    storage(40, true, S::COMPUTE),
+                    storage(42, true, S::COMPUTE),
+                    storage(45, true, S::COMPUTE),
+                    storage(47, false, S::COMPUTE),
+                ],
+            ),
+            queue: group(
+                "N8k hybrid queue dispatch",
+                &[
+                    storage(47, false, S::COMPUTE),
+                    storage(48, false, S::COMPUTE),
+                ],
+            ),
+            mip_dispatch: group(
+                "N8k mip dispatch arguments",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    storage(37, true, S::COMPUTE),
+                    storage(46, false, S::COMPUTE),
+                ],
+            ),
+            minmip: group(
+                "N8k min-mips",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    storage(16, true, S::COMPUTE),
+                    storage(29, true, S::COMPUTE),
+                    storage(44, false, S::COMPUTE),
+                ],
+            ),
         };
         let pipeline_layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
             ledger.own(
@@ -702,6 +856,49 @@ impl VirtualState {
                 Some(lighting),
             ],
         );
+        let resolve_layout = pipeline_layout(
+            "N8k texel plane ABI",
+            &[Some(&layouts.resolve), Some(arrays)],
+        );
+        let map_layout = pipeline_layout(
+            "N8k map visibility ABI",
+            &[Some(&layouts.map), None, None, Some(lighting)],
+        );
+        let map_module = ledger.own(
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N8k map-only sun visibility"),
+                source: wgpu::ShaderSource::Wgsl(map_source().into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let map_compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module: &map_module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        let resolve = map_compute("vmap_resolve", &resolve_layout, &[]);
+        let mip_dispatch_layout =
+            pipeline_layout("N8k mip dispatch ABI", &[Some(&layouts.mip_dispatch)]);
+        let minmip_layout = pipeline_layout(
+            "N8k min-mip ABI",
+            &[Some(&layouts.minmip), None, None, Some(&layouts.pass)],
+        );
+        let mip_dispatch = map_compute("vmap_mip_dispatch", &mip_dispatch_layout, &[]);
+        let minmip = map_compute("vmap_minmip", &minmip_layout, &[]);
+        let queue_layout = pipeline_layout("N8k hybrid queue ABI", &[Some(&layouts.queue)]);
+        let queue_args = map_compute("vmap_queue_args", &queue_layout, &[]);
+        let map = map_compute("vmap_lookup", &map_layout, &[]);
         let record_module = ledger.own(
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -800,6 +997,12 @@ impl VirtualState {
             horizon: compute("vsm_horizon", &horizon_layout, &[]),
             record,
             debug: None,
+            resolve,
+            map,
+            mip_dispatch,
+            minmip,
+            queue_args,
+            queued: None,
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -824,6 +1027,9 @@ impl VirtualState {
             constants: vec![],
             built: vec![],
             module,
+            map_module,
+            map_layout,
+            hybrid_module: None,
         }
     }
 
@@ -962,7 +1168,27 @@ impl VirtualState {
         };
         use wgpu::BufferUsages as B;
         let mip_bytes = (u64::from(side) * u64::from(side) - 1) / 3 * 4 * levels as u64;
+        // N8k planes are as large as a layer, and their errors half of one.
+        let (plane_bytes, error_bytes) = if self.settings.lookup.map() {
+            (map_bytes, map_bytes / 2)
+        } else {
+            (16, 16)
+        };
+        let minmip_bytes = if self.settings.lookup.map() {
+            mip_bytes.max(4)
+        } else {
+            16
+        };
+        let queue_bytes = if self.settings.lookup == VirtualLookup::Hybrid {
+            16 + 8 * u64::from(size[0]) * u64::from(size[1])
+        } else {
+            32
+        };
         let bytes = 2 * map_bytes
+            + plane_bytes
+            + error_bytes
+            + minmip_bytes
+            + queue_bytes
             + mip_bytes
             + u64::from(side) * u64::from(side) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
@@ -975,6 +1201,16 @@ impl VirtualState {
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
+            planes: buffer("N8k clipmap texel planes", plane_bytes, B::STORAGE),
+            errors: buffer("N8k clipmap planarity errors", error_bytes, B::STORAGE),
+            minmips: buffer("N8k clipmap min-mips", minmip_bytes, B::STORAGE),
+            mip_args: buffer(
+                "N8k mip dispatch arguments",
+                16 * 12,
+                B::STORAGE | B::INDIRECT,
+            ),
+            queue: buffer("N8k hybrid queue", queue_bytes, B::STORAGE),
+            queue_dispatch: buffer("N8k hybrid queue dispatch", 16, B::STORAGE | B::INDIRECT),
             _area: area,
             area: area_view,
             _level: level,
@@ -1327,7 +1563,11 @@ impl Renderer {
             primitive_bits,
             s.march_samples,
             s.bias_ulps,
-            u32::from(s.ring) | u32::from(s.peel_own) << 1 | s.first_block << 2,
+            // N8k: bit 8, the hybrid's queue (virtual_shadow_lookup.wgsl vmap_hybrid).
+            u32::from(s.ring)
+                | u32::from(s.peel_own) << 1
+                | s.first_block << 2
+                | u32::from(s.lookup == VirtualLookup::Hybrid) << 8,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
@@ -1342,12 +1582,19 @@ impl Renderer {
         }
         // Ring horizons: (re)built when the draw list's geometry changes.
         // Every addressed triangle, appended LOD triangles included (LOD receivers).
+        // N8k: the map lookup reads neither, so it keeps none.
+        let map = state.settings.lookup == VirtualLookup::Map;
         let coverage = state.settings.walk_records;
         let horizon_key: Vec<(usize, u32, u32)> = draws
             .iter()
             .map(|d| {
-                let addressed = addressed_triangles(d.mesh) as u32;
+                let addressed = if map {
+                    0
+                } else {
+                    addressed_triangles(d.mesh) as u32
+                };
                 let recorded = match coverage {
+                    _ if map => 0,
                     WalkRecords::Off => 0,
                     WalkRecords::Source => d.mesh.index_count / 3,
                     WalkRecords::All => addressed,
@@ -1578,10 +1825,37 @@ impl Renderer {
         )?;
         let constants = state.constants.clone();
         let rebuild = constants != state.built;
+        // N8k: `VMAP_` constants are the map lookup's, the others the exact lookup's.
+        let (map_constants, exact): (Vec<_>, Vec<_>) = constants
+            .iter()
+            .copied()
+            .partition(|(name, _)| name.starts_with(MAP_CONSTANTS));
+        if rebuild {
+            state.pipelines.map = self.ledger.own(
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("vmap_lookup"),
+                        layout: Some(&state.map_layout),
+                        module: &state.map_module,
+                        entry_point: Some("vmap_lookup"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &map_constants,
+                            ..Default::default()
+                        },
+                        cache: None,
+                    }),
+                ResourceKind::ComputePipeline,
+            );
+        }
         if state.debug && state.pipelines.debug.is_none() || rebuild {
             let layout = &state.lookup_layout;
             let lookup = |label, debug: bool| {
-                let mut constants = constants.clone();
+                // The hybrid's own constant exists only in its module.
+                let mut constants: Vec<_> = exact
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| !name.starts_with("VSM_QUEUED"))
+                    .collect();
                 constants.push(("VSM_DEBUG", f64::from(u8::from(debug))));
                 self.ledger.own(
                     self.device
@@ -1603,8 +1877,41 @@ impl Renderer {
             if rebuild {
                 state.pipelines.lookup = lookup("vsm_lookup", false);
                 state.built = constants.clone();
+                state.pipelines.queued = None;
             }
             state.pipelines.debug = debug;
+        }
+        // N8k hybrid: the exact lookup over the queue, with the exact lookup's constants.
+        if state.settings.lookup == VirtualLookup::Hybrid && state.pipelines.queued.is_none() {
+            let module = state.hybrid_module.get_or_insert_with(|| {
+                self.ledger.own(
+                    self.device
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("N8k hybrid exact lookup"),
+                            source: wgpu::ShaderSource::Wgsl(hybrid_source().into()),
+                        }),
+                    ResourceKind::ShaderModule,
+                )
+            });
+            let mut constants = exact.clone();
+            constants.push(("VSM_DEBUG", 0.0));
+            state.pipelines.queued = Some(
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("vsm_lookup_queued"),
+                            layout: Some(&state.lookup_layout),
+                            module,
+                            entry_point: Some("vsm_lookup_queued"),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                ),
+            );
         }
         let casters = state.casters.as_ref().unwrap();
         let mut key: Vec<u64> = camera
@@ -1806,6 +2113,80 @@ impl Renderer {
                         buffer(35, &r.mips),
                     ],
                 ),
+                resolve: group(
+                    "N8k texel planes",
+                    &l.resolve,
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(16, &r.top),
+                        buffer(19, &r.peel),
+                        buffer(29, &r.render),
+                        buffer(41, &r.planes),
+                        buffer(43, &r.errors),
+                    ],
+                ),
+                map: group(
+                    "N8k map visibility",
+                    &l.map,
+                    &[
+                        buffer(0, &r.frame),
+                        texture(7, &hit),
+                        texture(8, &tiles),
+                        texture(9, &fresh.world.view),
+                        texture(10, &fresh.normal.view),
+                        texture(15, &fresh.visibility.view),
+                        buffer(16, &r.top),
+                        texture(18, &r.level_view),
+                        buffer(19, &r.peel),
+                        buffer(35, &r.mips),
+                        buffer(40, &r.planes),
+                        buffer(42, &r.errors),
+                        buffer(45, &r.minmips),
+                        buffer(47, &r.queue),
+                    ],
+                ),
+                queue: group(
+                    "N8k hybrid queue dispatch",
+                    &l.queue,
+                    &[buffer(47, &r.queue), buffer(48, &r.queue_dispatch)],
+                ),
+                queued: group(
+                    "N8k hybrid exact lookup",
+                    &l.lookup,
+                    &[
+                        buffer(0, &r.frame),
+                        texture(7, &hit),
+                        texture(8, &tiles),
+                        texture(9, &fresh.world.view),
+                        texture(10, &fresh.normal.view),
+                        texture(15, &fresh.visibility.view),
+                        buffer(16, &r.top),
+                        texture(18, &r.level_view),
+                        buffer(19, &r.peel),
+                        buffer(20, &r.queue),
+                        buffer(24, &horizons),
+                        buffer(35, &r.mips),
+                    ],
+                ),
+                mip_dispatch: group(
+                    "N8k mip dispatch arguments",
+                    &l.mip_dispatch,
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(37, &r.cull_args),
+                        buffer(46, &r.mip_args),
+                    ],
+                ),
+                minmip: group(
+                    "N8k min-mips",
+                    &l.minmip,
+                    &[
+                        buffer(0, &r.frame),
+                        buffer(16, &r.top),
+                        buffer(29, &r.render),
+                        buffer(44, &r.minmips),
+                    ],
+                ),
             };
             r.groups = Some(groups);
         }
@@ -1832,7 +2213,21 @@ impl Renderer {
         }
         let primary = self.primary.as_ref().unwrap();
         let (_, arrays) = primary.virtual_geometry().unwrap();
-        if let Some(h) = state.horizons.as_ref().filter(|h| h.dispatch) {
+        let map = state.settings.lookup.map();
+        let hybrid = state.settings.lookup == VirtualLookup::Hybrid;
+        if map && state.page_work {
+            // N8k: the planes of the pages rasterized this frame, one workgroup per page slot.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("N8k texel planes"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.resolve);
+            pass.set_bind_group(0, &*g.resolve, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.dispatch_workgroups(state.levels as u32 * r.pages * r.pages, 1, 1);
+        }
+        let exact_walk = state.settings.lookup != VirtualLookup::Map;
+        if let Some(h) = state.horizons.as_ref().filter(|h| h.dispatch && exact_walk) {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8 ring horizons"),
                 timestamp_writes: None,
@@ -1851,25 +2246,44 @@ impl Renderer {
             }
             let _ = (&h.params, &h.record_params, &h.segments);
         }
+        if hybrid {
+            encoder.clear_buffer(&r.queue, 0, Some(16));
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8 ring and map visibility"),
-            timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {
-                query_set: t.query_set,
-                beginning_of_pass_write_index: if state.page_work {
-                    None
-                } else {
-                    t.beginning_of_pass_write_index
-                },
-                end_of_pass_write_index: t.end_of_pass_write_index,
-            }),
+            timestamp_writes: timestamps
+                .as_ref()
+                .map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set,
+                    beginning_of_pass_write_index: if state.page_work {
+                        None
+                    } else {
+                        t.beginning_of_pass_write_index
+                    },
+                    // The hybrid's exact pass ends the span instead.
+                    end_of_pass_write_index: if hybrid {
+                        None
+                    } else {
+                        t.end_of_pass_write_index
+                    },
+                })
+                // A pass needs one of its timestamps (page work began the span).
+                .filter(|t| {
+                    t.beginning_of_pass_write_index.is_some() || t.end_of_pass_write_index.is_some()
+                }),
         });
-        match (&p.debug, state.debug) {
-            (Some(debug), true) => pass.set_pipeline(debug),
-            _ => pass.set_pipeline(&p.lookup),
+        if map {
+            pass.set_pipeline(&p.map);
+            pass.set_bind_group(0, &*g.map, &[]);
+        } else {
+            match (&p.debug, state.debug) {
+                (Some(debug), true) => pass.set_pipeline(debug),
+                _ => pass.set_pipeline(&p.lookup),
+            }
+            pass.set_bind_group(0, &*g.lookup, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &*state.horizons.as_ref().unwrap().record_array, &[]);
         }
-        pass.set_bind_group(0, &*g.lookup, &[]);
-        pass.set_bind_group(1, arrays, &[]);
-        pass.set_bind_group(2, &*state.horizons.as_ref().unwrap().record_array, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         // One workgroup per trace tile; a rolling frame only one tile of every block, unless
         // it moved casters (N8f), which visits every tile for the pixels they reach.
@@ -1883,6 +2297,27 @@ impl Renderer {
             height.div_ceil(4).div_ceil(b),
             1,
         );
+        drop(pass);
+        if hybrid {
+            // N8k: the exact walk over the queued receivers, 32 to a workgroup.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("N8k hybrid exact visibility"),
+                timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: t.end_of_pass_write_index,
+                }),
+            });
+            pass.set_pipeline(&p.queue_args);
+            pass.set_bind_group(0, &*g.queue, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(p.queued.as_ref().unwrap());
+            pass.set_bind_group(0, &*g.queued, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &*state.horizons.as_ref().unwrap().record_array, &[]);
+            pass.set_bind_group(3, self.lighting.bind(), &[]);
+            pass.dispatch_workgroups_indirect(&r.queue_dispatch, 0);
+        }
         let _ = &state.lookup_layout;
     }
 
@@ -1981,13 +2416,25 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        // N8k: the mips' dispatches are zero when no page was flagged (vsm_compact's cull
+        // arguments), as camera motion inside the windows changes no top word.
+        pass.set_pipeline(&p.mip_dispatch);
+        pass.set_bind_group(0, &*g.mip_dispatch, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(&p.mip);
         pass.set_bind_group(0, &*g.mip, &[]);
         let side = r.pages * PAGE;
         for mip in 1..=side.trailing_zeros() {
-            let s = side >> mip;
             pass.set_bind_group(3, &*g.pass, &[mip * PASS_STRIDE as u32]);
-            pass.dispatch_workgroups(s.div_ceil(8), s.div_ceil(8), state.levels as u32);
+            pass.dispatch_workgroups_indirect(&r.mip_args, u64::from(mip - 1) * 12);
+        }
+        if state.settings.lookup.map() {
+            pass.set_pipeline(&p.minmip);
+            pass.set_bind_group(0, &*g.minmip, &[]);
+            for mip in 1..=side.trailing_zeros() {
+                pass.set_bind_group(3, &*g.pass, &[mip * PASS_STRIDE as u32]);
+                pass.dispatch_workgroups_indirect(&r.mip_args, u64::from(mip - 1) * 12);
+            }
         }
     }
 }
@@ -1997,7 +2444,12 @@ mod tests {
     use super::*;
     #[test]
     fn virtual_shadow_module_validates_without_ray_queries() {
-        for source in [shader_source(), records_source()] {
+        for source in [
+            shader_source(),
+            records_source(),
+            map_source(),
+            hybrid_source(),
+        ] {
             assert!(!source.contains("ray_query") && !source.contains("acceleration_structure"));
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
