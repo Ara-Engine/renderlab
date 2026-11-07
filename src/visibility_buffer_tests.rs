@@ -118,6 +118,12 @@ fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
         "allocator_allocated_bytes": report.as_ref().map(|r| r.total_allocated_bytes),
         "allocator_reserved_bytes": report.as_ref().map(|r| r.total_reserved_bytes),
         "allocator_blocks": report.as_ref().map(|r| r.blocks.len()),
+        "allocations": report.as_ref().map(|r| r.allocations.iter().map(|a| {
+            serde_json::json!({"name": a.name, "bytes": a.size, "offset": a.offset})
+        }).collect::<Vec<_>>()),
+        "blocks": report.as_ref().map(|r| r.blocks.iter().map(|b| {
+            serde_json::json!({"bytes": b.size, "allocations": [b.allocations.start, b.allocations.end]})
+        }).collect::<Vec<_>>()),
         "hal_buffer_bytes": stats.hal.buffer_bytes,
         "hal_texture_bytes": stats.hal.texture_bytes,
         "ledger_live_bytes": {
@@ -729,6 +735,8 @@ fn gpu_visibility_quarry() {
         )
     };
     let (mut asset, cameras, load) = load_quarry_lod(&m, &mut r);
+    r.test_drain("M1 post-upload memory");
+    memory_report(&r, &out, "uploaded");
     fs::write(
         out.join("load.json"),
         serde_json::to_vec_pretty(&load).unwrap(),
