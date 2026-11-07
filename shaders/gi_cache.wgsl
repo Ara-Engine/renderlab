@@ -551,18 +551,24 @@ fn gi_point(cold:u32) -> vec3<f32> {
 }
 // Eight lanes per queued cell, eight cells per workgroup: the canonical query point
 // when the cell has none, then one ray item per direction to trace (gi_rays),
-// contiguous per cell in direction order. The five candidates' down rays run in
-// parallel lanes; the cell's lane 0 then takes the first that qualifies and is not
-// inside a solid, in fixed order (the same point as trying them in turn), and the lanes
-// write the items. Past the item capacity lane 0 traces the cell's directions itself:
-// the same rays and bits either way, only slower.
+// contiguous per cell in direction order. Lane 0 tries candidate 0; only when it does not
+// qualify do lanes 1-4 trace candidates 1-4 together, and lane 0 takes the first that
+// qualifies, in fixed order (the same point as trying them in turn). The lanes then write
+// the items, or past the item capacity trace the cell's directions themselves: the same
+// rays and bits either way.
 const GI_SETUP_LANES:u32=8u;
 const GI_SETUP_CELLS:u32=8u;
 var<workgroup> gi_wg_candidates:array<GiCandidate,64>;
-// Per cell: the first item (or GI_SETUP_NONE), then its pending words.
-const GI_SETUP_NONE:u32=0xffffffffu;
+// Per cell: the setup state (GI_SETUP_*), the first item, the pending words and the bits
+// traced past the capacity.
+const GI_SETUP_NONE:u32=0u;
+const GI_SETUP_PROBE:u32=1u;
+const GI_SETUP_ITEMS:u32=2u;
+const GI_SETUP_TRACE:u32=3u;
+var<workgroup> gi_wg_state:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_base:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_pending:array<u32,GI_SETUP_CELLS*GI_MAX_WORDS>;
+var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
 @compute @workgroup_size(64) fn gi_setup(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) index:u32) {
     let cell=index/GI_SETUP_LANES;
     let lane=index%GI_SETUP_LANES;
@@ -570,60 +576,101 @@ var<workgroup> gi_wg_pending:array<u32,GI_SETUP_CELLS*GI_MAX_WORDS>;
     for(var first=group.x*GI_SETUP_CELLS;first<count;first+=groups.x*GI_SETUP_CELLS) {
         let live=first+cell<count;
         var slot=0u;
-        var fresh=false;
-        if live {
-            slot=atomicLoad(&gi_work[gi_frame.offsets.z+first+cell]);
-            fresh=true;
-            for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[gi_cold(slot)+GI_C_KNOWN+w]==0u; }
+        if live { slot=atomicLoad(&gi_work[gi_frame.offsets.z+first+cell]); }
+        let c=gi_cell(slot);
+        let cold=gi_cold(slot);
+        // Lane 0: a fresh cell's candidate 0, then (if it has a point) its directions.
+        if live && lane==0u {
+            var fresh=true;
+            for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[cold+GI_C_KNOWN+w]==0u; }
+            var state=GI_SETUP_ITEMS;
+            if fresh {
+                let r=gi_probe_down(c,0u);
+                if r.q.w!=0.0 && !gi_probe_inside(r,c.edge) { gi_setup_point(slot,r); } else { state=GI_SETUP_PROBE; }
+            }
+            gi_wg_state[cell]=state;
         }
-        var candidate=GiCandidate(vec4<f32>(0.0),vec4<f32>(0.0));
-        if fresh && lane<GI_PROBES { candidate=gi_probe_down(gi_cell(slot),lane); }
-        gi_wg_candidates[index]=candidate;
         workgroupBarrier();
-        if live && lane==0u { gi_wg_base[cell]=gi_setup_cell(slot,fresh,index); }
+        // Candidates 1-4 together, only for cells whose candidate 0 failed.
+        let probing=live && gi_wg_state[cell]==GI_SETUP_PROBE;
+        if probing && lane>=1u && lane<GI_PROBES { gi_wg_candidates[index]=gi_probe_down(c,lane); }
         workgroupBarrier();
-        let base=gi_wg_base[cell];
-        if live && base!=GI_SETUP_NONE {
-            // This lane's directions k = lane, lane+8, ...: item base + (pending before k).
+        if live && lane==0u {
+            var state=gi_wg_state[cell];
+            if state==GI_SETUP_PROBE {
+                state=GI_SETUP_NONE;
+                for(var j=1u;j<GI_PROBES;j+=1u) {
+                    let r=gi_wg_candidates[index+j];
+                    if r.q.w==0.0 || gi_probe_inside(r,c.edge) { continue; }
+                    gi_setup_point(slot,r);
+                    state=GI_SETUP_ITEMS;
+                    break;
+                }
+                if state==GI_SETUP_NONE {
+                    gi_table[gi_hot(slot)]=c.key.x;
+                    gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN;
+                    atomicAdd(&gi_work[GI_W_ORPHANS],1u);
+                }
+            }
+            if state==GI_SETUP_ITEMS {
+                let base=gi_setup_directions(slot,cell);
+                gi_wg_base[cell]=base;
+                if base==0xffffffffu { state=GI_SETUP_TRACE; }
+            }
+            gi_wg_state[cell]=state;
+            for(var w=0u;w<GI_MAX_WORDS;w+=1u) { atomicStore(&gi_wg_traced[cell*GI_MAX_WORDS+w],0u); }
+        }
+        workgroupBarrier();
+        let state=gi_wg_state[cell];
+        if live && (state==GI_SETUP_ITEMS || state==GI_SETUP_TRACE) {
+            let base=gi_wg_base[cell];
+            let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+            let q=gi_point(cold);
+            let frame=gi_basis(n);
+            let origin=q+n*gi_origin_offset(q,c.edge);
+            // This lane's directions k = lane, lane+8, ...
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_SETUP_LANES) {
                 let w=k/32u;
                 let bit=1u<<(k%32u);
                 let pending=gi_wg_pending[cell*GI_MAX_WORDS+w];
                 if (pending&bit)==0u { continue; }
-                var rank=countOneBits(pending&(bit-1u));
-                for(var v=0u;v<w;v+=1u) { rank+=countOneBits(gi_wg_pending[cell*GI_MAX_WORDS+v]); }
-                atomicStore(&gi_work[gi_frame.requests.z+base+rank],(slot<<7u)|k);
+                if state==GI_SETUP_ITEMS {
+                    // Item base + (pending directions before k).
+                    var rank=countOneBits(pending&(bit-1u));
+                    for(var v=0u;v<w;v+=1u) { rank+=countOneBits(gi_wg_pending[cell*GI_MAX_WORDS+v]); }
+                    atomicStore(&gi_work[gi_frame.requests.z+base+rank],(slot<<7u)|k);
+                } else if gi_visible(origin,gi_direction(frame,c.key,k)) {
+                    atomicOr(&gi_wg_traced[cell*GI_MAX_WORDS+w],bit);
+                }
             }
         }
-        // The next cells overwrite the candidates and bases only after every lane is done.
+        workgroupBarrier();
+        // Past the capacity: the traced bits into the slots; nothing pending.
+        if live && lane==0u && state==GI_SETUP_TRACE {
+            for(var w=0u;w<GI_WORDS;w+=1u) {
+                let m=gi_wg_pending[cell*GI_MAX_WORDS+w];
+                let bits=gi_table[cold+GI_C_BITS+w];
+                gi_table[cold+GI_C_BITS+w]=(bits&~m)|(atomicLoad(&gi_wg_traced[cell*GI_MAX_WORDS+w])&m);
+                gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]|m;
+                gi_table[cold+GI_C_PENDING+w]=0u;
+            }
+        }
+        // The next cells overwrite the workgroup state only after every lane is done.
         workgroupBarrier();
     }
 }
-// Lane 0's part of setup for one cell: the query point from the candidates at `at` (fresh
-// cells), the pending directions, and the item allocation. Returns the first item for the
-// lanes to fill, or GI_SETUP_NONE (an orphan, or traced here past the capacity).
-fn gi_setup_cell(slot:u32, fresh:bool, at:u32) -> u32 {
-    let c=gi_cell(slot);
+// A fresh cell's canonical query point and normal.
+fn gi_setup_point(slot:u32, r:GiCandidate) {
     let cold=gi_cold(slot);
-    if fresh {
-        // The first valid start in fixed order: the key alone decides the point.
-        var found=false;
-        for(var j=0u;j<GI_PROBES;j+=1u) {
-            let r=gi_wg_candidates[at+j];
-            if r.q.w==0.0 || gi_probe_inside(r,c.edge) { continue; }
-            for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
-            gi_table[cold+GI_C_NORMAL]=gi_pack_normal(r.n.xyz);
-            found=true;
-            break;
-        }
-        if !found {
-            gi_table[gi_hot(slot)]=c.key.x;
-            gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN;
-            atomicAdd(&gi_work[GI_W_ORPHANS],1u);
-            return GI_SETUP_NONE;
-        }
-        gi_table[cold+GI_C_STATE]=GI_QUEUED;
-    }
+    for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
+    gi_table[cold+GI_C_NORMAL]=gi_pack_normal(r.n.xyz);
+    gi_table[cold+GI_C_STATE]=GI_QUEUED;
+}
+// Lane 0's part of setup for a cell with a query point: the pending directions (into the
+// workgroup's copy too) and the item allocation. Returns the first item, or 0xffffffff
+// past the item capacity (the lanes then trace the directions themselves).
+fn gi_setup_directions(slot:u32, cell:u32) -> u32 {
+    let cold=gi_cold(slot);
     let phases=max(gi_word(GI_H_PHASES),1u);
     let phase=gi_word(GI_H_FRAME)%phases;
     // Cut refill: the first direction group with untraced directions, one a frame.
@@ -636,7 +683,6 @@ fn gi_setup_cell(slot:u32, fresh:bool, at:u32) -> u32 {
             }
         }
     }
-    let cell=at/GI_SETUP_LANES;
     var rays=0u;
     for(var w=0u;w<GI_MAX_WORDS;w+=1u) {
         var m=0u;
@@ -658,25 +704,7 @@ fn gi_setup_cell(slot:u32, fresh:bool, at:u32) -> u32 {
         gi_table[cold+GI_C_BASE]=base;
         return base;
     }
-    // Past the capacity: trace here, in direction order; nothing pending.
-    let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
-    let q=gi_point(cold);
-    let frame=gi_basis(n);
-    let origin=q+n*gi_origin_offset(q,c.edge);
-    for(var w=0u;w<GI_WORDS;w+=1u) {
-        let m=gi_table[cold+GI_C_PENDING+w];
-        var bits=gi_table[cold+GI_C_BITS+w];
-        for(var b=0u;b<32u;b+=1u) {
-            let bit=1u<<b;
-            if (m&bit)==0u { continue; }
-            let visible=gi_visible(origin,gi_direction(frame,c.key,w*32u+b));
-            bits=select(bits&~bit,bits|bit,visible);
-        }
-        gi_table[cold+GI_C_BITS+w]=bits;
-        gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]|m;
-        gi_table[cold+GI_C_PENDING+w]=0u;
-    }
-    return GI_SETUP_NONE;
+    return 0xffffffffu;
 }
 // One thread per ray item: one direction's visibility from its cell's query point,
 // kept as the bit at the item's index (atomicOr: the same bits in any order).

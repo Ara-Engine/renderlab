@@ -27,7 +27,7 @@ const MAX_BOXES: usize = 32;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
 const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
-/// traced in parallel. A frame wanting more traces the rest in setup, per cell.
+/// traced in parallel. A frame wanting more traces the rest in setup, eight lanes a cell.
 const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate.
 const PROFILE_STAMPS: u32 = 2 * (6 + 2 * CLAIM_ROUNDS);
@@ -37,10 +37,10 @@ const PROBE_TILE: u32 = 16;
 /// each kernel reads its count and loops over it. Direct dispatches need no argument
 /// passes, and skip the per-dispatch validation pass wgpu adds to indirect dispatches
 /// (`InstanceFlags::VALIDATION_INDIRECT_CALL`, on by default); an idle workgroup exits
-/// at once. Claims and resolves, setup (one cell per thread), rays (one item per
-/// thread), then finish and integrate (four cells per workgroup).
+/// at once. Claims and resolves, setup (eight cells per workgroup), rays (one item per
+/// thread), then finish and integrate (sixteen cells per workgroup).
 const CLAIM_GROUPS: u32 = 512;
-const SETUP_GROUPS: u32 = 2048;
+const SETUP_GROUPS: u32 = 4096;
 const RAY_GROUPS: u32 = 4096;
 const CELL_GROUPS: u32 = 2048;
 /// Frames the profile ring holds, and its per-frame stride (resolve offsets are

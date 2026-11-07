@@ -424,34 +424,20 @@ impl Rig {
             .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
             .collect()
     }
-    /// Placement + 1 per pixel from the shared hit records (0 = miss), with bit 31 set
-    /// on edge pixels: a 3x3 neighbour hits another placement or a triangle whose
-    /// normal differs. The reference integrates each pixel's footprint and this frame
-    /// samples its centre, so edges measure anti-aliasing, not lighting; they are
-    /// scored as their own population.
-    fn placements(&mut self, sv: &Sv) -> Vec<u32> {
-        self.r.test_drain("G1 hit admission");
+    /// A texture's bytes, rows packed to `texel` bytes per pixel.
+    fn read_texture(&self, texture: &wgpu::Texture, texel: u32) -> Vec<u8> {
         let r = &self.r;
-        let hit = &r
-            .primary
-            .as_ref()
-            .unwrap()
-            .targets
-            .as_ref()
-            .unwrap()
-            .hit
-            .texture;
-        let size = hit.size();
-        let row = (size.width * 16).next_multiple_of(256);
+        let size = texture.size();
+        let row = (size.width * texel).next_multiple_of(256);
         let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("G1 hits"),
+            label: Some("G1 texture readback"),
             size: u64::from(row * size.height),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut encoder = r.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            hit.as_image_copy(),
+            texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -467,16 +453,47 @@ impl Rig {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         r.device.poll(WAIT).unwrap();
         let data = slice.get_mapped_range().unwrap();
+        let width = (size.width * texel) as usize;
+        data.chunks_exact(row as usize)
+            .flat_map(|line| line[..width].to_vec())
+            .collect()
+    }
+    /// Placement + 1 per pixel from the shared hit records (0 = miss), with bit 31 set
+    /// on edge pixels: a 3x3 neighbour hits another placement or a triangle whose
+    /// normal differs. The reference integrates each pixel's footprint and this frame
+    /// samples its centre, so edges measure anti-aliasing, not lighting; they are
+    /// scored as their own population. A pixel is covered only inside the traced region,
+    /// in a tile whose coverage flag is set: the trace leaves uncovered tiles' records
+    /// stale, which once counted another pose's records as surface pixels (G1's overview
+    /// populations included about 323,000 sky pixels; docs/m7-g1b.md).
+    fn placements(&mut self, sv: &Sv) -> Vec<u32> {
+        self.r.test_drain("G1 hit admission");
+        let primary = self.r.primary.as_ref().unwrap();
+        let targets = primary.targets.as_ref().unwrap();
+        let region = primary.scene;
+        let (hit, tiles) = (targets.hit.texture.clone(), targets.tiles.texture.clone());
+        let size = hit.size();
+        let tiles_width = tiles.size().width as usize;
+        let data = self.read_texture(&hit, 16);
+        let tile_flags = self.read_texture(&tiles, 4);
+        let [tile_w, tile_h] = crate::renderer::primary_ray_gpu::TRACE_TILE.map(|t| t as usize);
+        let covered = |x: usize, y: usize| {
+            let inside = (region[0] as usize..region[2] as usize).contains(&x)
+                && (region[1] as usize..region[3] as usize).contains(&y);
+            let t = ((y / tile_h) * tiles_width + x / tile_w) * 4;
+            inside && u32::from_le_bytes(tile_flags[t..t + 4].try_into().unwrap()) != 0
+        };
+        let row = (size.width * 16) as usize;
         let (w, h) = (size.width as usize, size.height as usize);
         let mut out = Vec::with_capacity(w * h);
         let mut normals = Vec::with_capacity(w * h);
         for y in 0..h {
             for x in 0..w {
-                let at = y * row as usize + x * 16;
+                let at = y * row + x * 16;
                 let word = |k: usize| {
                     u32::from_le_bytes(data[at + 4 * k..at + 4 * k + 4].try_into().unwrap())
                 };
-                let p = word(0);
+                let p = if covered(x, y) { word(0) } else { 0 };
                 out.push(p);
                 normals.push(if p == 0 {
                     Vec3::ZERO
@@ -1115,15 +1132,6 @@ fn gpu_gi_sky_visibility_sv() {
                     .as_deref()
                     .is_none_or(|w| w.split(',').any(|x| x.trim() == *c))
         });
-        // A discarded frame and hit readback per pose first: the first scored pose of a
-        // process otherwise counted ~20% fewer pixels (an unexplained harness artifact,
-        // seen on the first configuration only; docs/m7-g1b.md).
-        if !configs.is_empty() {
-            for (_, eye, target) in &poses {
-                rig.frame(&sv, *eye, *target, &materials);
-                let _ = rig.placements(&sv);
-            }
-        }
         for (config, s) in &configs {
             let mut config_json = json!({});
             for (((pose, eye, target), reference), standard_ref) in
@@ -1270,8 +1278,21 @@ fn gpu_gi_sky_visibility_sv() {
                 "table_repeat_equal": a.0 == b.0, "image_repeat_equal": a.1 == b.1,
                 "serial_table_equal": a.0 == serial.0, "serial_image_equal": a.1 == serial.1});
         }
-        // Motion: per-frame cost and flicker against per-frame references.
+        // Motion: per-frame cost and flicker against per-frame references. Each pan starts
+        // from an emptied cache (cold); "-warm" rows first settle five frames at the first
+        // pan camera, as Unreal's comparator pans from warm histories (M7-U0b).
+        let rotated = IndirectSettings {
+            rotate_directions: true,
+            ..base
+        };
+        let spread = IndirectSettings {
+            cut_phases: 4,
+            ..rotated
+        };
         for (config, s) in [
+            ("spread-4px", spread),
+            ("rotated-4px-warm", rotated),
+            ("spread-4px-warm", spread),
             ("off", IndirectSettings::default()),
             ("trilinear-4px", base),
             (
@@ -1310,6 +1331,11 @@ fn gpu_gi_sky_visibility_sv() {
             }
             rig.settings(s);
             rig.r.reset_indirect();
+            if config.ends_with("-warm") {
+                for _ in 0..5 {
+                    rig.frame(&sv, motion_eye, motion_target, &materials);
+                }
+            }
             let mut frames = vec![];
             let mut costs = vec![];
             for t in 0..motion_frames {
