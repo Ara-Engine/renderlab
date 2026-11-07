@@ -653,11 +653,11 @@ def finish(args):
         load("m7-u0b-report").benches(argparse.Namespace(root=OUT/"study/bench-matrix"))
     sequence(argparse.Namespace(label="quarry-final",manifest=OUT/"quarry-unit-sequence.json"))
     load("m7-u0b-report").aliases(argparse.Namespace(manifest=OUT/"quarry.json"))
-    floors(args)
     # These two original attribution processes overlapped stillkit's foreign build.
     # Timing readiness waits for 60 observed seconds without its Cargo/rustc jobs.
     sv.capture(argparse.Namespace(label="timing-async-off-retry",configs=["hw"],timing=True,async_off=True))
     sv.costs(argparse.Namespace(label="timing-async-off-retry"))
+    floors(args)
 
 
 def pose_commands(p):
