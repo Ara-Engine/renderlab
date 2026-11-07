@@ -508,6 +508,7 @@ pub struct Renderer {
     primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
     visibility_buffer: Option<visibility_buffer::VisibilityBuffer>,
+    cluster_instances: visibility_buffer::ClusterInstanceCache,
     /// N1c cut error bound and software-raster cluster extent, in pixels.
     lod_pixels: f32,
     software_extent: f32,
@@ -977,6 +978,7 @@ impl Renderer {
             primary,
             primary_mode: PrimaryVisibility::Raster,
             visibility_buffer: None,
+            cluster_instances: Default::default(),
             lod_pixels: visibility_buffer::DEFAULT_LOD_PIXELS,
             software_extent: visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
