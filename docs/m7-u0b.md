@@ -606,3 +606,12 @@ quarry quiet campaign ended before this load and is unaffected. Functional refer
 captures retain strict validation, longer process guards and the normal memory abort guard;
 near the start threshold the controller waits outside the GPU lock until the foreign build
 is gone for 60 seconds.
+
+The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
+synchronous preflight and omitted from the live conflict poll. Game/renderer process
+inventory and the PDH memory guard remain mandatory and fail closed. Five focused CPU
+guard tests cover this routing, native memory, failed inventory after a successful child
+exit, ordinary monitor failure and the atomic-acquisition race. The rejected quarry run
+`process-a5f82d7e` reached a 30-second process-inventory timeout with 7.99 GiB minimum RAM;
+it is not a reference acceptance or timing result. Retrying waits outside the lease for
+60 compiler-free seconds. Optional telemetry is not a reason to weaken process checks.

@@ -79,10 +79,11 @@ def ue(allow_game=False):
     original_available=u.E2E.available_gib
     monitor_context=threading.local()
     class MonitorCommands:
+        """TR0 79bcfc5: GPU telemetry is preflight-only; process checks stay live."""
         def __getattr__(self,name):return getattr(subprocess,name)
         def run(self,command,*a,**kw):
             if getattr(monitor_context,"active",False) and Path(str(command[0])).stem.lower()=="nvidia-smi":
-                kw["timeout"]=min(60,max(1,u.remaining_seconds(active_owner)-5)) if active_owner else 60
+                return subprocess.CompletedProcess(command,0,"not sampled by live conflict guard","")
             return subprocess.run(command,*a,**kw)
     u.E2E.subprocess=MonitorCommands()
     # Reuse TR0 b9760bc's native-memory and fail-closed monitor controls.
@@ -117,6 +118,7 @@ def ue(allow_game=False):
         try:
             snapshot=original_state()
             snapshot["monitor_memory_source"]="TR0 b9760bc GlobalMemoryStatusEx; launch/live floor uses PDH"
+            snapshot["monitor_gpu_telemetry"]="TR0 79bcfc5: preflight only; live process/game checks remain mandatory"
         except Exception as error:
             sentinel=dict(Name="u0b-monitor-error",ProcessId=-1,ParentProcessId=-1,
                 ExecutablePath="",monitor_error=repr(error))

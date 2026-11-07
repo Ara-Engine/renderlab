@@ -14,6 +14,26 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_live_poll_omits_optional_gpu_telemetry_but_keeps_process_inventory(self):
+        module=host.load("m7-u0-ue");inventory=[]
+        def snapshot():
+            gpu=module.E2E.subprocess.run(["nvidia-smi","--query-gpu=name"],timeout=10)
+            inventory.append(module.E2E.powershell("Get-CimInstance Win32_Process"))
+            return dict(games=[],foreign_renderers=[],gpu=gpu.stdout)
+        with patch.object(host,"load",return_value=module),\
+             patch.object(module.E2E,"state",side_effect=snapshot),\
+             patch.object(module.E2E,"powershell",return_value="live process inventory"),\
+             patch.object(host.subprocess,"run",return_value=subprocess.CompletedProcess([],0,"actual GPU inventory","")) as command:
+            wrapped=host.ue(allow_game=True)
+            self.assertEqual(wrapped.E2E.state()["gpu"],"actual GPU inventory")
+            self.assertEqual(wrapped.MONITOR_STATE()["gpu"],"not sampled by live conflict guard")
+            self.assertEqual(command.call_count,1)
+            self.assertEqual(inventory,["live process inventory"]*2)
+        with patch.object(module.E2E,"powershell",side_effect=OSError("injected process inventory failure")):
+            failed=wrapped.MONITOR_STATE()
+        self.assertEqual(failed["available_gib"],0)
+        self.assertEqual(failed["foreign_renderers"][0]["Name"],"u0b-monitor-error")
+
     def test_late_monitor_error_rejects_even_a_successful_child(self):
         module=host.load("m7-u0-ue")
         scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True)
