@@ -137,8 +137,9 @@ def preflight(path, wait_seconds=180):
         if games or not foreign or time.monotonic() > deadline:
             break
         time.sleep(5)
+    record["output_free_gib"] = shutil.disk_usage(OUT).free / 2**30
     save(path, record)
-    if games or foreign or record["available_gib"] < START_GIB:
+    if games or foreign or record["available_gib"] < START_GIB or record["output_free_gib"] < 5:
         print("DEFERRED", json.dumps({k: record[k] for k in ("games", "foreign_renderers", "available_gib")}), flush=True)
         raise SystemExit(3)
     return record
@@ -151,7 +152,7 @@ def guarded(command, out, timeout, cwd=None, env=None):
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 0
-    stop, samples, failures = threading.Event(), [], []
+    stop, samples, disk_samples, failures = threading.Event(), [], [], []
     record = dict(start_utc=utc().isoformat(), command=[str(c) for c in command], timeout_seconds=timeout)
     begin = time.perf_counter()
     with (out / "stdout.log").open("w", encoding="utf-8") as log:
@@ -166,6 +167,11 @@ def guarded(command, out, timeout, cwd=None, env=None):
             while not stop.wait(0.25):
                 value = E2E.available_gib()
                 samples.append(round(value, 3))
+                disk = shutil.disk_usage(OUT).free / 2**30
+                disk_samples.append(round(disk, 3))
+                if disk < 2 and proc.poll() is None:
+                    kill(dict(reason="output disk below 2 GiB", output_free_gib=disk))
+                    return
                 if value < ABORT_GIB and proc.poll() is None:
                     kill(dict(reason="available memory below 2 GiB", available_gib=value))
                     return
@@ -195,6 +201,7 @@ def guarded(command, out, timeout, cwd=None, env=None):
                 thread.join()
     record.update(end_utc=utc().isoformat(), elapsed_seconds=time.perf_counter() - begin, exit_code=proc.returncode,
                   failures=failures, minimum_available_gib=min(samples) if samples else None,
+                  minimum_output_free_gib=min(disk_samples) if disk_samples else None,
                   scope="whole process wall; not GPU frame time")
     save(out / "process.json", record)
     if failures or proc.returncode:

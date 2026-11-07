@@ -759,6 +759,8 @@ fn gpu_reference_benches() {
         .map_or(Settings::default().samples_per_dispatch, |s| {
             s.parse().unwrap()
         });
+    let max_depth = std::env::var("RENDERLAB_M7_MAX_DEPTH")
+        .map_or(Settings::default().max_depth, |s| s.parse().unwrap());
     let list = std::env::var("RENDERLAB_M7_BENCHES").expect("RENDERLAB_M7_BENCHES");
     let mut first = true;
     for entry in list.split(';').filter(|s| !s.is_empty()) {
@@ -776,6 +778,7 @@ fn gpu_reference_benches() {
                 samples: spp,
                 seed,
                 samples_per_dispatch,
+                max_depth,
                 smith: bench.smith,
                 capture_geometry: std::env::var("RENDERLAB_M7_CAPTURE_GEOMETRY").as_deref()
                     == Ok("1"),

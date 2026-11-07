@@ -81,6 +81,7 @@ def compact(args):
     if "bench" in meta:
         source=Path("E:/renderlab-work/m7-u0/scenes")/meta["bench"]/"scene.json"
         if source.exists():stops=json.loads(source.read_text()).get("exposure_stops",stops)
+    stops=meta.get("exposure_stops",stops)
     Image.fromarray(np.rint(np.clip(codes(L,stops),0,255)).astype("u1")).save(root/(name+".png"))
     lum=(L*np.array([.2126,.7152,.0722])).sum(-1)
     noise=np.abs((se*np.array([.2126,.7152,.0722])).sum(-1))
@@ -225,6 +226,7 @@ def floor(args):
     for directory in sorted(args.root.iterdir()):
         if not directory.is_dir() or not (directory/"native.json").exists():continue
         recipe=json.loads((directory/"recipe.json").read_text())
+        if getattr(args,"configs",None) and recipe["config"] not in args.configs:continue
         camera=json.loads((directory/"camera-readback.json").read_text())
         runtime=json.loads((directory/"readback.json").read_text())
         native=json.loads((directory/"native.json").read_text())["frames"]
@@ -277,6 +279,7 @@ def floor(args):
             scope="physical combined foreground/material/lighting/reconstruction error; black primary before accumulation; visible-sky silhouette behavior untested",
             motion_definition="consecutive F0 candidate step minus physical-reference step; common covered placement; no internal-age filter; split-half residual noise reported/subtracted",
             age_filter_available=False,sequence_frames=len(native),
+            native_manifest_sha256=sha(directory/"native.json"),recipe_sha256=sha(directory/"recipe.json"),
             selection=str(selection) if selection else "all sequence frames",selection_sha256=sha(selection) if selection else None,
             complete=not missing,missing_frames=missing,frames=rows,motion=residuals)
         save(directory/"physical-floor.json",result)
@@ -361,6 +364,7 @@ def main():
     q=s.add_parser("decode");q.add_argument("dump",type=Path);q.add_argument("out",type=Path);q.add_argument("--stops",type=int,default=-14)
     q=s.add_parser("floor");q.add_argument("root",type=Path);q.add_argument("reference",type=Path);q.add_argument("--stops",type=int,default=-14)
     q.add_argument("--selection",type=Path)
+    q.add_argument("--configs",nargs="+")
     q=s.add_parser("static_floor");q.add_argument("root",type=Path);q.add_argument("reference",type=Path);q.add_argument("--stops",type=int,default=-14)
     a=p.parse_args();globals()[a.command](a)
 

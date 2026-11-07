@@ -285,6 +285,31 @@ report hash. Its full PNG was inspected; noise median/p95/p99 is **0.539% / 3.38
 TR0 can reuse it and resume its other states with strict per-state acceptance. The older BF169
 f64 archive remains a separate, pose-specific qualification; no old archive is silently changed.
 
+The D8 frame-64 qualification is also retained at
+`reference/colour-controls/S2G-f64-control-camera-1px-064.npz`: 1,024 spp, actual D/V/HDR
+halves and geometry, **8/8** strict independent AS/pipeline replays. Its relative noise
+median/p95/p99 is **0.384% / 2.475% / 6.200%**. The deleted scratch input was reconstructed
+byte for byte from the registered scene and retained pose; its SHA256 matches the old input,
+`4ae9076712f54637c7346e9485dfc0c4bf2570019d29730d7436d036cf0f1097`.
+The archive metadata retains open/close cameras, light direction, FOV, primary background,
+original/generated source hashes, binary identity and the eight-replay proof hash. Relative
+to the BF169 f64 archive, the registered -12 display RMS change is **1.22e-6 F0 codes**,
+maximum **0.00003052 codes**. TR0 owns the remaining D8 physical camera campaign.
+
+Post-fix independent controls pass against the registered Mitsuba arrays. X3 at 32,768 spp
+has bias **+0.0004431% (0.1074 sigma)**, L1 **0.32794%**, block z RMS **0.95952**, and
+**0/900** blocks beyond 4 sigma. X2 at 16,384 spp has bias **+0.005099% (1.2058 sigma)**,
+L1 **0.40243%**, block z RMS **0.83087**, and **0.1667%** of 3,600 blocks beyond 4 sigma.
+Both full comparison sheets were inspected. A mistaken comparison against the rejected
+V-flipped diagnostic X3 exporter failed and was excluded; `comparison-identities.json` and
+`x3-registered-compare.log` pin the accepted independent inputs. Geometry export consumes
+visibility RNG draws, so the new geometry-enabled X2 and older image-only control use different
+sample streams; their bit difference is not attributed solely to colour interpolation.
+
+The later harness binary `a7e168af334cb70be176d8d6f0ad909d874dbb877580383ad7928f1fee4b47f2`
+adds only the `RENDERLAB_M7_MAX_DEPTH` test option. Its renderer and shader hashes match D8.
+It reruns `cargo test -p renderlab --lib` successfully: **125 passed, 120 ignored**.
+
 TR0's first qualified S2G score against an older reflection/GI-off native capture shows a
 large highlight deficit. On its fixed top-5%-full-reference masks, physical D/full is
 0.998963 for metal and 0.998458 for dielectric, so omitted interreflection does not explain
@@ -397,3 +422,50 @@ readbacks; per-capture proof is being added. No fitted exposure or gain is used.
 Raw per-frame buffers are compacted immediately into lossless reference archives, then
 deleted with hashes retained in JSON. These archives are intentional retained references
 for TR0, not disposable GPU dumps. Output is exclusively under E:/renderlab-work.
+
+## G1's SV sky-visibility comparator
+
+The request in main's [G1 report](m7-g1.md) is a separate diffuse-only sky-visibility
+estimand. `/Game/M7U0b/SVSky/Bench` reuses SV's registered source meshes with component material
+overrides: base colour 0.5, roughness 0.8, metallic/specular 0. It leaves the original SV and
+S2G materials and `m7-u0b/ue-package` intact. Its separate package is
+`E:/renderlab-work/m7-u0b/ue-svsky-package`; executable SHA256 remains
+`69d6f88a9a51809d1454e3c99f4f1d56c039e5eaeb3f4399b2f4988c57d5a6e5`, with new content
+identities in `cook/sv-sky/identity.json`.
+
+An unlit, nonshadowing primary sky sphere displays constant 4,000 cd/m² before TSR, matching
+G1's visible-sky reference. It is excluded from ray tracing, distance fields, collision and
+dynamic indirect lighting; illumination comes from the specified constant sky cube. This
+explicit SV control does not change the shared black-primary quarry/S2G protocol. No sky
+mask or post-compositing is used. A native background sample reads 4,000/4,000/3,968 cd/m²,
+consistent with its R11G11B10 storage.
+
+All runs use D3D12 SM6, `r.EyeAdaptation.PreExposureOverride 0`, actual manual pre-exposure
+**2^-11**, `r.LumenScene.Radiosity 0`, reflection method 0, motion blur off and TSR Epic.
+Screen traces retain Epic defaults. Quality captures fix the timestep at 1/60 s and set
+`r.OneFrameThreadLag 0`; cost processes retain the default render-thread lag. The separate
+async-off attribution processes are labelled. No SV speed claim is made from these functional
+slots. CSV values for each GPU group are reported separately rather than summing inclusive
+groups or treating async gather's CSV scope as the complete Lumen cost.
+
+The original G1 reference caches were deleted at G1 close. Ten references regenerate its
+registered estimator: both poses plus nine gaps-pan cameras, **2,048 spp, max depth 2,
+specular 0, constant sky 4,000**. They are not claimed byte-identical to those deleted caches.
+The pan uses the same float32 2 cm source-X translations. Static and first-cut captures retain
+all geometric feature/near-ground populations, with 3×3 placement/face-normal edges separate.
+The metric is G1's linear-luminance relative error, floored at 5% of open-ground p90; pixels
+below 1e-6 or above 2% reference SE are excluded. Motion uses the final pan's covered nonedge
+mask and frame-to-frame residual changes. Reference/candidate hashes and noise remain in JSON.
+
+`sv-sky/a` validates both initial poses on the inherited software and hardware presets.
+Actual RejectShading parameters prove the three captured cut frames have `bCameraCut`
+**0/1/0**; all twelve camera readbacks and exposure records pass per process. GBufferB material
+audits verify metallic/specular **0/0** and median roughness **0.8** on more than 1.3 million
+interior covered pixels per pose. The inherited software preset reads `r.Lumen.TraceMeshSDFs 0`
+and traces global distance-field voxels. A separate mesh-SDF, runtime-RT-disabled row is
+required for the non-RT comparator; inherited global-DF results remain supplementary.
+
+The prepare commandlet saved the level and assets successfully, then exited 1 on a
+CachedAssetRegistryDiscovery temporary-file rename. Its failed process record is retained.
+The subsequent cook/package and actual native content, camera and material readbacks pass;
+the prepare process itself is not relabelled a clean pass.
