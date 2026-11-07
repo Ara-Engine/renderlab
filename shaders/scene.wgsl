@@ -277,13 +277,16 @@ fn environment_remap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32,
 fn environment_tap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32, mip:i32, bank:i32) -> vec3<f32> {
     let outside_x=p.x<0 || p.x>=size;
     let outside_y=p.y<0 || p.y>=size;
-    if outside_x && outside_y {
-        let q=clamp(p,vec2<i32>(0),vec2<i32>(size-1));
-        return (environment_remap(tex,face,q,size,mip,bank)
-            +environment_remap(tex,face,vec2<i32>(p.x,q.y),size,mip,bank)
-            +environment_remap(tex,face,vec2<i32>(q.x,p.y),size,mip,bank))/3.0;
+    if !(outside_x && outside_y) { return environment_remap(tex,face,p,size,mip,bank); }
+    let q=clamp(p,vec2<i32>(0),vec2<i32>(size-1));
+    var sum=vec3<f32>(0.0);
+    // Share corner remapping without putting ordinary taps through a sample loop.
+    for (var i=0; i<3; i++) {
+        let point=vec2<i32>(select(q.x,p.x,i==1),select(q.y,p.y,i==2));
+        let value=environment_remap(tex,face,point,size,mip,bank);
+        if i==0 { sum=value; } else { sum+=value; }
     }
-    return environment_remap(tex,face,p,size,mip,bank);
+    return sum/3.0;
 }
 fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i32) -> vec3<f32> {
     let size=i32(textureDimensions(tex,mip).x);
@@ -298,21 +301,25 @@ fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i3
     return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
 }
 fn environment_level(d:vec3<f32>, level:i32) -> vec3<f32> {
-    if lighting.map.w>0.0 { return environment_bilinear(environment_specular,d,level,0); }
-    if level<42 { return environment_bilinear(environment_specular,d,0,level*6); }
-    return environment_bilinear(environment_specular_second,d,0,(level-42)*6);
+    let legacy=lighting.map.w>0.0;
+    let second=!legacy && level>=42;
+    let mip=select(0,level,legacy);
+    let bank=select((level-select(0,42,second))*6,0,legacy);
+    if second { return environment_bilinear(environment_specular_second,d,mip,bank); }
+    return environment_bilinear(environment_specular,d,mip,bank);
 }
 fn environment_legacy_lod(d:vec3<f32>, lod:f32) -> vec3<f32> {
     let x=clamp(lod,0.0,lighting.map.w-1.0);
     let lo=i32(floor(x));
     let hi=min(lo+1,i32(lighting.map.w)-1);
-    return environment_level(d,lo)*(1.0-fract(x))+environment_level(d,hi)*fract(x);
+    var values:array<vec3<f32>,2>;
+    for (var i=0; i<2; i++) { values[i]=environment_level(d,select(lo,hi,i==1)); }
+    return values[0]*(1.0-fract(x))+values[1]*fract(x);
 }
 fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
     let r=clamp(roughness,0.0,1.0);
-    // Choose levels before filtering: the driver then inlines the large lookup twice,
-    // rather than five times across the legacy, fully rough and blended paths. Keep
-    // each path's arithmetic order, including the unblended fully rough return.
+    // Choose levels before filtering and share the lookup site. Keep each path's
+    // arithmetic order, including the unblended fully rough return.
     var lo=64;
     var hi=64;
     var t=0.0;
@@ -335,9 +342,12 @@ fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
         let r2=r*r;
         t=clamp((r2*r2-a8)/(b8-a8),0.0,1.0);
     }
-    let first=environment_level(d,lo);
-    if single { return first; }
-    return first*(1.0-t)+environment_level(d,hi)*t;
+    var values:array<vec3<f32>,2>;
+    for (var i=0; i<select(2,1,single); i++) {
+        values[i]=environment_level(d,select(lo,hi,i==1));
+    }
+    if single { return values[0]; }
+    return values[0]*(1.0-t)+values[1]*t;
 }
 fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
     let a=frexp(energy);
