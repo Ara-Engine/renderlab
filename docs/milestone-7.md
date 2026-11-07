@@ -32,3 +32,21 @@ Two M5 items fold in here, because GI and reflections replace the mechanisms the
 
 - **Main checkout (M7):** lighting, environment, shading, and the new GI, reflection and temporal files.
 - **Hillclimb worktree:** shadow files only. It doesn't edit M7's files.
+
+## Decisions (2026-11-07)
+
+Answered by Islam:
+
+- **Resolution:** compare at native 1920x1080 with Unreal TSR at 100%. 4K upscaled output comes later, in its own unit, once our temporal reconstruction exists.
+- **Lumen floor:** Lumen Epic is the floor on both paths. Lumen High is measured for the cost curve.
+- **Bounce light from user shaders:** user programs may supply an optional `scatter()`/`emission()`. A program that omits them still blocks light but reflects none.
+- **Cook-time occlusion:** short-range occlusion for static geometry may be precomputed at cook time for the non-RT path. Budget about 50-150 MB, which counts toward the VRAM-below-Unreal gate.
+- **If non-RT GI misses 2x speed:** record the measured miss, and make non-RT GI the default anyway if it beats Unreal's quality on every measure. Quality is never lowered to reach 2x.
+
+Decided by root:
+
+- **Settle limit:** the 8-frame limit for soft shadows also applies to GI and reflections.
+- **Path tracer:** an in-process GPU path tracer is the quarry reference. It is cross-checked against pbrt or Mitsuba on small scenes.
+- **Temporal file ownership:** `src/film_accumulation.rs` and M7's temporal reconstruction belong to M7. The shadow hillclimb doesn't edit them.
+
+Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents.
