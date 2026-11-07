@@ -53,8 +53,8 @@ pub use wgpu;
 pub const RECEIVER_FEATURES: wgpu::Features = wgpu::Features::SHADER_PER_VERTEX;
 
 /// Device memory hints Renderlab recommends for `wgpu::DeviceDescriptor::memory_hints`:
-/// wgpu's 8-64 MiB allocator blocks. Its default 128-256 MiB blocks left about 570 MiB
-/// unused on the scan quarry, with no measured frame-time difference (docs/non-rt-n8h.md).
+/// wgpu's 8-64 MiB blocks. Smaller blocks saved more space but regressed quarry
+/// frame times; retain this policy (docs/memory-m1.md, docs/non-rt-n8h.md).
 pub const MEMORY_HINTS: wgpu::MemoryHints = wgpu::MemoryHints::MemoryUsage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

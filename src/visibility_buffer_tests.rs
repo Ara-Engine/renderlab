@@ -118,8 +118,18 @@ fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
         "allocator_allocated_bytes": report.as_ref().map(|r| r.total_allocated_bytes),
         "allocator_reserved_bytes": report.as_ref().map(|r| r.total_reserved_bytes),
         "allocator_blocks": report.as_ref().map(|r| r.blocks.len()),
+        "allocations": report.as_ref().map(|r| r.allocations.iter().map(|a| {
+            serde_json::json!({"name": a.name, "bytes": a.size, "offset": a.offset})
+        }).collect::<Vec<_>>()),
+        "blocks": report.as_ref().map(|r| r.blocks.iter().map(|b| {
+            serde_json::json!({"bytes": b.size, "allocations": [b.allocations.start, b.allocations.end]})
+        }).collect::<Vec<_>>()),
         "hal_buffer_bytes": stats.hal.buffer_bytes,
         "hal_texture_bytes": stats.hal.texture_bytes,
+        "hardware": r.hardware_shadow_stats().map(|h| serde_json::json!({
+            "blas_builds": h.blas_builds, "blas_compactions": h.blas_compactions,
+            "pending_builds": h.pending_builds, "retained_generations": h.retained_generations,
+        })),
         "ledger_live_bytes": {
             "environment": o.environment_bytes.live, "texture": o.texture_bytes.live,
             "material": o.material_bytes.live, "target": o.target_bytes.live,
@@ -729,6 +739,8 @@ fn gpu_visibility_quarry() {
         )
     };
     let (mut asset, cameras, load) = load_quarry_lod(&m, &mut r);
+    r.test_drain("M1 post-upload memory");
+    memory_report(&r, &out, "uploaded");
     fs::write(
         out.join("load.json"),
         serde_json::to_vec_pretty(&load).unwrap(),
@@ -1079,6 +1091,157 @@ fn gpu_visibility_quarry() {
         serde_json::to_vec_pretty(&rows).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+#[ignore = "M1 owned GPU lease: repair capacity, mode round trips and compacted BLAS"]
+fn gpu_primary_memory_modes() {
+    let mut r = renderer_with_features(
+        true,
+        crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+    );
+    // Three triangles: permit their initial build and scratch, but no compacted copy.
+    r.hardware_shadows
+        .as_mut()
+        .unwrap()
+        .options
+        .max_estimated_bytes = Some(3 * (256 + 128));
+    light(&mut r);
+    r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
+        pages: 4,
+        refresh: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let (mesh, mut instances) = geometry(
+        &mut r,
+        &[
+            [-2., 0., -2.],
+            [2., 0., -2.],
+            [2., 0., 2.],
+            [-2., 0., 2.],
+            [-0.4, 0., 0.],
+            [0.4, 0., 0.],
+            [0., 0.8, 0.],
+        ],
+        &[0, 2, 1, 0, 3, 2, 4, 5, 6],
+    );
+    let color = target(&r, 320, 192);
+    let camera = Camera::look_at(
+        Vec3::new(0.2, 1.2, 2.5),
+        Vec3::ZERO,
+        Vec3::Y,
+        45f32.to_radians(),
+        0.01,
+        100.,
+    )
+    .unwrap();
+    let modes = [
+        (PrimaryVisibility::Traced, SoftShadows::Interactive),
+        (PrimaryVisibility::Traced, SoftShadows::Virtual),
+        (PrimaryVisibility::VisibilityBuffer, SoftShadows::Virtual),
+    ];
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    r.set_soft_shadows(SoftShadows::Interactive);
+    // Admit this one-instance TLAS and its scratch, but no second BLAS generation.
+    let mesh_estimate = r.stats().ownership.hardware_as_estimated_bytes.live;
+    r.hardware_shadows
+        .as_mut()
+        .unwrap()
+        .options
+        .max_estimated_bytes = Some(mesh_estimate + 2 * (4096 + 256));
+    render(
+        &mut r,
+        &color,
+        &camera,
+        &mut [Draw::new(&mesh, &mut instances)],
+    );
+    r.test_drain("M1 compaction policy fallback");
+    assert_eq!(r.hardware_shadow_stats().unwrap().blas_compactions, 0);
+    let original = (interactive_outputs(&r), capture(&mut r));
+    r.hardware_shadows
+        .as_mut()
+        .unwrap()
+        .options
+        .max_estimated_bytes = None;
+    let mut expected = vec![];
+    for visit in 0..2 {
+        for (i, &(primary, shadows)) in modes.iter().enumerate() {
+            r.set_primary_visibility(primary).unwrap();
+            r.set_soft_shadows(shadows);
+            r.reset_virtual_shadow_cache();
+            for _ in 0..2 {
+                render(
+                    &mut r,
+                    &color,
+                    &camera,
+                    &mut [Draw::new(&mesh, &mut instances)],
+                );
+            }
+            r.test_drain("M1 memory mode round trip");
+            let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+            let interactive = shadows == SoftShadows::Interactive;
+            assert_eq!(
+                t.repairs.value.size(),
+                if interactive { 16 + 320 * 192 * 36 } else { 52 }
+            );
+            assert_eq!(
+                t.retries.value.size(),
+                if interactive { 16 + 320 * 192 * 4 } else { 20 }
+            );
+            let image = (interactive_outputs(&r), capture(&mut r));
+            if i == 0 {
+                assert!(image == original, "compaction changed receivers or HDR");
+            }
+            if visit == 0 {
+                expected.push(image);
+            } else {
+                assert!(
+                    image == expected[i],
+                    "mode round trip {primary:?}/{shadows:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(r.hardware_shadow_stats().unwrap().blas_compactions, 1);
+}
+
+#[test]
+#[ignore = "M2 owned GPU lease: immutable table sharing and generation release"]
+fn gpu_shared_cluster_tables() {
+    use crate::renderer::{PreparedDraw, visibility_buffer::ClusterInstances};
+    fn draws<'a>(mesh: &'a Mesh, instances: &'a Instances) -> [PreparedDraw<'a>; 1] {
+        [PreparedDraw {
+            mesh,
+            instances,
+            material: None,
+            indices: 0..mesh.index_count,
+            slots: 0..instances.len() as u32,
+            reference_ids: None,
+        }]
+    }
+    let mut r = no_rt_renderer();
+    let positions = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+    let (mesh, mut instances) = geometry(&mut r, &positions, &[0, 1, 2]);
+    let first = ClusterInstances::new(&r, &draws(&mesh, &instances)).unwrap();
+    instances.set(0, Mat4::from_translation(Vec3::Y)).unwrap();
+    let second = ClusterInstances::new(&r, &draws(&mesh, &instances)).unwrap();
+    assert!(Arc::ptr_eq(&first.clusters, &second.clusters));
+    assert!(Arc::ptr_eq(&first.groups, &second.groups));
+    let doubled = r
+        .try_upload_instances(&[Mat4::IDENTITY; 2])
+        .unwrap()
+        .unwrap();
+    r.test_drain("M2 table instances");
+    let changed = ClusterInstances::new(&r, &draws(&mesh, &doubled)).unwrap();
+    assert_eq!(changed.count, first.count * 2);
+    assert!(!Arc::ptr_eq(&first.clusters, &changed.clusters));
+    let weak = Arc::downgrade(&changed.clusters);
+    let (replacement, _) = geometry(&mut r, &positions, &[0, 1, 2]);
+    let replaced = ClusterInstances::new(&r, &draws(&replacement, &doubled)).unwrap();
+    assert!(!Arc::ptr_eq(&changed.clusters, &replaced.clusters));
+    drop(changed);
+    assert!(weak.upgrade().is_none(), "cache must not retain GPU tables");
 }
 
 #[test]

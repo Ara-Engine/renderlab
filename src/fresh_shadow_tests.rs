@@ -154,6 +154,10 @@ fn renderer(validate: bool) -> Renderer {
 pub(crate) fn test_memory_hints() -> wgpu::MemoryHints {
     match std::env::var("RENDERLAB_MEMORY_HINTS").as_deref() {
         Ok("performance") => wgpu::MemoryHints::Performance,
+        Ok("memory_usage") => wgpu::MemoryHints::MemoryUsage,
+        Ok("small") => wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: (4 * 1024 * 1024)..(8 * 1024 * 1024),
+        },
         _ => crate::MEMORY_HINTS,
     }
 }
