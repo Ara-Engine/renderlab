@@ -74,6 +74,8 @@ def resource(name):
         return "receiver/normal/count images (headless check: output attachment)", "FreshState target-size generation (headless check: harness)"
     if name == "exposed linear HDR":
         return "render/storage/sampled RGBA16F HDR target", "Lighting target-size generation; retired after last submission"
+    if name == "depth":
+        return "Depth32Float raster depth attachment; test COPY_SRC at 1x", "Renderer target-size generation; retired after last submission"
     if name in ("camera", "light records", "lighting eye/count/environment/exposure"):
         return "uniform/storage frame lighting", "Renderer/LightingState"
     if name in ("shadow sampling records", "disjoint shadow raster matrices", "redrawn hard shadow depth array"):
@@ -99,7 +101,7 @@ def inventory(directory):
             writer.writerows(rows)
 
 
-def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="exact", cpu_timing=False):
+def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="exact", cpu_timing=False, rt1c=False):
     out = root / name
     out.mkdir(parents=True, exist_ok=True)
     m = json.loads(QUARRY.read_text())
@@ -114,6 +116,8 @@ def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="ex
                  virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
     if name == "rt":
         m["soft_shadows"] = "interactive"
+    if rt1c:
+        m.update(rt1c_path=name, visits=visits)
     manifest = out / "manifest.json"
     manifest.write_text(json.dumps(m, indent=2))
     stop = out / "stop"
@@ -128,7 +132,8 @@ def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="ex
                RENDERLAB_MEMORY_HINTS=memory_hints)
     try:
         with (out / "stdout.log").open("w", encoding="utf-8") as f:
-            code = subprocess.run([str(binary), "gpu_visibility_quarry", "--ignored", "--nocapture", "--test-threads=1"],
+            test = "gpu_rt1c_m1_cost" if rt1c else "gpu_visibility_quarry"
+            code = subprocess.run([str(binary), test, "--ignored", "--nocapture", "--test-threads=1"],
                                   stdout=f, stderr=subprocess.STDOUT, env=env, creationflags=flags).returncode
     finally:
         stop.write_text("stop")
@@ -167,13 +172,18 @@ def main():
     parser.add_argument("--visits", type=int, default=1, help="independent replays per pose in one asset load; >1 hashes counts/hits only")
     parser.add_argument("--lookup", choices=("exact", "surface"), default="exact", help="explicit lookup; historical M1 baseline stays Exact")
     parser.add_argument("--cpu-timing", action="store_true", help="record caller-thread admission wall and renderer CPU sections")
+    parser.add_argument("--rt1c", action="store_true", help="quiet four-phase M1 comparison: explicit rt and rt-raster-exact paths")
     args = parser.parse_args()
+    if args.rt1c and (args.memory_only or args.cpu_timing or args.poses != [0, 1]):
+        parser.error("--rt1c requires both poses and all four GPU phases; memory-only and CPU timing are unsupported")
     for name in args.paths or PATHS:
-        if name not in PATHS:
+        if (name not in (*PATHS, "rt-raster-exact") or
+                (name == "rt-raster-exact" and not args.rt1c) or
+                (args.rt1c and name not in ("rt", "rt-raster-exact"))):
             parser.error(f"unknown path: {name}")
         if args.visits < 1:
             parser.error("visits must be positive")
-        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits, args.lookup, args.cpu_timing)
+        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits, args.lookup, args.cpu_timing, args.rt1c)
 
 
 if __name__ == "__main__":

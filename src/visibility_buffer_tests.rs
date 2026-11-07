@@ -1486,6 +1486,150 @@ fn gpu_visibility_quarry() {
     }
 }
 
+/// Measurement-only RT1c: the M1 upload/allocation/WDDM harness, without image
+/// readbacks. Fresh processes keep each configuration's memory independent.
+#[test]
+#[ignore = "RT1c quiet GPU lease; optimized binary; no Cargo during the lease"]
+fn gpu_rt1c_m1_cost() {
+    let m = manifest();
+    let out = PathBuf::from(m["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let mut r = renderer_with_features(
+        false,
+        crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+    );
+    assert_eq!(r.primary_mode, PrimaryVisibility::Raster);
+    assert_eq!(r.soft_shadows(), SoftShadows::Exact);
+    let (mut asset, cameras, load) = load_quarry_lod(&m, &mut r);
+    r.test_drain("RT1c M1 upload");
+    memory_report(&r, &out, "uploaded");
+    fs::write(
+        out.join("load.json"),
+        serde_json::to_vec_pretty(&load).unwrap(),
+    )
+    .unwrap();
+    let raster = m["rt1c_path"].as_str() == Some("rt-raster-exact");
+    let (primary, soft) = if raster {
+        (PrimaryVisibility::Raster, SoftShadows::Exact)
+    } else {
+        assert_eq!(m["rt1c_path"].as_str(), Some("rt"));
+        (PrimaryVisibility::Traced, SoftShadows::Interactive)
+    };
+    r.set_primary_visibility(primary).unwrap();
+    r.set_soft_shadows(soft);
+    let color = target(&r, 1920, 1080);
+    let lighting =
+        lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let shadows = r.shadows.settings.clone();
+    let Light::Directional { travel, lux } = lighting.lights[0] else {
+        panic!("quarry sun");
+    };
+    let original = asset.model(0, 0);
+    let visits = m["visits"].as_u64().unwrap_or(8) as usize;
+    let mut pending = std::collections::HashMap::new();
+    let mut rows = vec![];
+    let ms = |d: Duration| d.as_secs_f64() * 1000.;
+    let mut collect = |r: &mut Renderer,
+                       pending: &mut std::collections::HashMap<
+        u64,
+        (usize, usize, &'static str),
+    >| {
+        for g in r.poll().unwrap().gpu {
+            if let Some((pose, visit, phase)) = pending.remove(&g.frame.0) {
+                rows.push(serde_json::json!({"pose":pose,"visit":visit,"phase":phase,"frame":g.frame.0,
+                    "primary_ms":g.receiver_pass.map(ms),"shadow_ms":g.visibility_compute.map(ms),
+                    "shade_ms":ms(g.mesh_pass),"tone_ms":g.present_pass.map(ms),"span_ms":ms(g.render_span)}));
+            }
+        }
+    };
+    for pose in [0, 1] {
+        let p = &cameras.frames[pose];
+        let camera = p.camera().unwrap();
+        for visit in 0..visits {
+            asset.set_model(0, 0, original).unwrap();
+            r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+            for _ in 0..32 {
+                render(
+                    &mut r,
+                    &color,
+                    &camera,
+                    &mut asset.draws(Visibility::Frustum),
+                );
+                collect(&mut r, &mut pending);
+            }
+            r.test_drain("RT1c M1 warmup");
+            collect(&mut r, &mut pending);
+            memory_report(&r, &out, &format!("p{pose}-visit{visit}"));
+            for (phase, frames) in [("static", 8), ("sun", 16), ("camera", 48), ("caster", 48)] {
+                if phase == "camera" {
+                    r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+                }
+                for frame in 1..=frames {
+                    let mut moved = None;
+                    match phase {
+                        "sun" => {
+                            let mut lit = lighting.clone();
+                            lit.lights[0] = Light::Directional {
+                                travel: Mat4::from_rotation_y(0.0005 * frame as f32)
+                                    .transform_vector3(travel),
+                                lux,
+                            };
+                            r.set_lighting_and_shadows(&lit, &shadows).unwrap();
+                        }
+                        "camera" => {
+                            let step = Vec3::X * (0.001 * frame as f32);
+                            moved = Some(
+                                Camera::look_at(
+                                    Vec3::from_array(p.eye) + step,
+                                    Vec3::from_array(p.target) + step,
+                                    Vec3::from_array(p.up),
+                                    p.fov_y_radians,
+                                    p.near,
+                                    p.far,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        "caster" => {
+                            asset
+                                .set_model(
+                                    0,
+                                    0,
+                                    Mat4::from_translation(Vec3::X * (0.001 * frame as f32))
+                                        * original,
+                                )
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                    let report = render(
+                        &mut r,
+                        &color,
+                        moved.as_ref().unwrap_or(&camera),
+                        &mut asset.draws(Visibility::Frustum),
+                    );
+                    assert_eq!(report.soft_shadows, soft);
+                    pending.insert(report.frame.0, (pose, visit, phase));
+                    collect(&mut r, &mut pending);
+                }
+                r.test_drain("RT1c phase tail");
+                collect(&mut r, &mut pending);
+                assert!(pending.is_empty());
+            }
+        }
+    }
+    fs::write(
+        out.join("m1-cost.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "primary":format!("{primary:?}"),"shadows":format!("{soft:?}"),"visits_per_pose":visits,
+            "warm_frames":32,"samples":rows,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 #[ignore = "M1 owned GPU lease: repair capacity, mode round trips and compacted BLAS"]
 fn gpu_primary_memory_modes() {
