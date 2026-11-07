@@ -206,8 +206,7 @@ pub(super) fn diagnose(
 }
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl, and the
 /// N8k map lookup's `VMAP_` ones in shaders/virtual_shadow_lookup.wgsl).
-const SCREEN_CONSTANTS: [&str; 63] = [
-    "VSM_SPLIT",
+const SCREEN_CONSTANTS: [&str; 61] = [
     "VMAP_QUEUE_SPREAD",
     "VMAP_QUEUE_LANES",
     "VMAP_SOFT",
@@ -269,8 +268,6 @@ const SCREEN_CONSTANTS: [&str; 63] = [
     "VSM_EXTRA_SAMPLES",
     "VSM_PERSIST",
     "VSM_ORDER",
-    // Variant screens only: a spare override a screened shader file may declare.
-    "VSM_EXPERIMENT",
 ];
 /// `{"constants": {name: number}}` as the state's override list.
 pub(crate) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)> {

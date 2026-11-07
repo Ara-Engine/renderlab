@@ -41,8 +41,8 @@ const PASS_ENTRIES: usize = 16;
 /// Per-level WGSL `VsmArgs`: the software dispatch and the hardware draw.
 const ARGS_BYTES: u64 = 32;
 /// The WGSL `VsmScratch` header (N8m): the persistent lookup's tile queue, three reserved words
-/// and the tile order's bucket counts and cursors (`VSM_HEAD` words), zeroed before each
-/// persistent lookup.
+/// (the hybrid's queue keeps its spread in the first) and the tile order's bucket counts and
+/// cursors (`VSM_HEAD` words), zeroed before each persistent lookup.
 const SCRATCH_HEADER: u64 = 16 + 4 * 32;
 /// N8m: the lookup schedule's defaults, the module's `VSM_PERSIST` and `VSM_ORDER` declarations
 /// (shaders/virtual_shadow.wgsl). A module without them (a test variant file of main's lookup
@@ -59,10 +59,10 @@ fn schedule_defaults(source: &str) -> (u32, bool) {
 fn trace_tiles(size: [u32; 2]) -> u64 {
     u64::from(size[0].div_ceil(8)) * u64::from(size[1].div_ceil(4))
 }
-/// The scratch's bytes before the decision trace: the header, then per trace tile four order
-/// entries (WGSL `VSM_ORDER_SLOTS`) and its recorded work.
+/// The scratch's bytes before the decision trace: the header, then per trace tile its place
+/// in the order and its recorded work.
 pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
-    SCRATCH_HEADER + 20 * trace_tiles(size)
+    SCRATCH_HEADER + 8 * trace_tiles(size)
 }
 /// Device features the page raster needs: 64-bit (height, id) max atomics. Casters are the
 /// meshes' visibility-buffer clusters, so the device must also support
@@ -2401,7 +2401,8 @@ impl Renderer {
         }
         drop(pass);
         if hybrid {
-            // N8k: the exact walk over the queued receivers, 32 to a workgroup.
+            // N8k: the exact walk over the queued receivers, 32 lanes to a workgroup (N8m: a
+            // small queue spreads each receiver over several, vmap_queue_args).
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8k hybrid exact visibility"),
                 timestamp_writes: timestamps.map(|t| wgpu::ComputePassTimestampWrites {

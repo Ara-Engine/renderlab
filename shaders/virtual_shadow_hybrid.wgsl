@@ -3,7 +3,7 @@
 // queued because one of its blocks was ambiguous. virtual_shadow_gpu.rs appends this file to
 // virtual_shadow.wgsl, so it calls that module's per-pixel functions as vsm_lookup does.
 // The queue is the lookup's read-write scratch binding (vsm_scratch, N8m): word 0 (`queue`) the
-// count, word 1 (`pad0`) the lanes per receiver (N8m; vmap_queue_args, which sizes the dispatch),
+// count, word 1 (`spread`) the lanes per receiver (N8m; vmap_queue_args, which sizes the dispatch),
 // then from word 4 (`words`) two words per receiver: x | y << 16, and the directions whose map
 // block was ambiguous (bits 0-7) | every direction the map blocked (bits 8-15).
 // VSM_QUEUED_ALL (default) tests every direction again; off, only the ambiguous ones are, and
@@ -17,7 +17,7 @@ override VSM_QUEUED_RING:bool=false;
 // N8l keeps per-lane direction tables in workgroup memory (vsm_lane); 32 lanes, as vsm_lookup.
 @compute @workgroup_size(32) fn vsm_lookup_queued(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     vsm_lane=li;
-    let spread=max(vsm_scratch.pad0,1u);
+    let spread=max(vsm_scratch.spread,1u);
     if gid.x%spread!=0u {return;}
     let k=gid.x/spread;
     if k>=atomicLoad(&vsm_scratch.queue) {return;}

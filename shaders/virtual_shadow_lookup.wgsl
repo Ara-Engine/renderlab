@@ -199,9 +199,8 @@ struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
 // ambiguous blocked directions (bits 0-7) | every direction it blocked (8-15).
 @group(0) @binding(47) var<storage,read_write> vmap_queue:array<atomic<u32>>;
 @group(0) @binding(48) var<storage,read_write> vmap_queue_dispatch:array<u32,4>;
-// The exact pass's indirect dispatch over the queue, 32 receivers a workgroup.
-// N8m (docs/non-rt-n8m.md): lanes per queued receiver in the hybrid's exact pass, chosen per
-// frame. A queue as large as a camera-moving frame's runs one receiver per lane. A smaller one
+// The exact pass's indirect dispatch over the queue, 32 lanes a workgroup. N8m
+// (docs/non-rt-n8m.md): its lanes per queued receiver, chosen per frame. A queue as large as a camera-moving frame's runs one receiver per lane. A smaller one
 // (a rolling frame's) is spread over up to VMAP_QUEUE_SPREAD lanes each, up to VMAP_QUEUE_LANES
 // lanes in all, so fewer of its heavy, divergent walks share a warp. The spread goes in the
 // queue's word 1 for vsm_lookup_queued.
