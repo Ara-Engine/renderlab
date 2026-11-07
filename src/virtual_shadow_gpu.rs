@@ -154,10 +154,13 @@ pub enum VirtualLookup {
     /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
     /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
     Hybrid,
-    /// N8n: `Exact`'s walk per receiver surface cell instead of per pixel, kept across frames
-    /// in a hash table (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md). Camera motion
-    /// walks only cells no earlier frame computed; each cell is evaluated at one canonical point,
-    /// so it does not shimmer. Adds the table (32 MiB) and the miss queue (8 bytes per pixel).
+    /// N8n/N8o: `Exact`'s walks kept per receiver surface cell across frames in a hash table
+    /// (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md, docs/non-rt-n8o.md). A pixel
+    /// shows its cell's count only where the cell is solid and every pixel that computed it agreed
+    /// with its neighbourhood; every other pixel walks as `Exact` does. Static frames run nothing,
+    /// and camera motion walks only shadow-boundary pixels and cells not seen yet. Deterministic;
+    /// caster motion retires exactly the cells it can reach. Adds the table and its claim words
+    /// (64 MiB) and the miss queue (8 bytes per pixel).
     Surface,
 }
 impl VirtualLookup {
@@ -1260,10 +1263,12 @@ impl VirtualState {
         } else {
             16
         };
-        // N8n: the surface cache's queued walk keeps its chunk cursor after the queue.
+        // N8n/N8o: the surface cache's queue keeps its sort counters and chunk cursor after
+        // the entries (surface_cache::QUEUE_TAIL).
         let queue_bytes = if self.settings.lookup.queues() {
             16 + 8 * u64::from(size[0]) * u64::from(size[1])
-                + 16 * u64::from(self.settings.lookup == VirtualLookup::Surface)
+                + surface_cache::QUEUE_TAIL
+                    * u64::from(self.settings.lookup == VirtualLookup::Surface)
         } else {
             32
         };
@@ -1532,6 +1537,10 @@ impl Renderer {
                 [zlo - pad, zhi + pad]
             }
         };
+        // N8o: the surface cache's cells hold walks against these heights and levels; a new
+        // height encoding or level ladder retires them (a moved window only re-rasterizes the
+        // same texels).
+        let mut ladder_changed = cache.heights != Some(heights);
         cache.heights = Some(heights);
         let footprint = 2.0 * (f64::from(camera.fov_y()) * 0.5).tan() / f64::from(size.height);
         let level_of = |d: f64| {
@@ -1545,6 +1554,7 @@ impl Renderer {
             cache.finest = Some(finest);
             cache.levels = levels;
             invalidated = [true; MAX_LEVELS];
+            ladder_changed = true;
         }
         // Moved casters invalidate the pages under their old and new light-space bounds.
         let mut rects = vec![];
@@ -2123,7 +2133,7 @@ impl Renderer {
                 &self.queue,
                 sun,
                 !rects.is_empty(),
-                surface_flush || sun_rebased,
+                surface_flush || sun_rebased || ladder_changed,
                 producer,
                 still,
             );

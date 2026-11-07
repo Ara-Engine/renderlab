@@ -112,10 +112,13 @@ fn surface_stats(
     if !on {
         return;
     }
-    if let Some([probes, hits, finer, sun, unshown, misses]) = r.test_surface_stats() {
+    if let Some([probes, hits, reached, sun, unshown, misses, overflow, fills]) =
+        r.test_surface_stats()
+    {
         stats.push(
-            serde_json::json!({"label": label, "frame": frame, "probes": probes, "hits": hits,
-            "finer_hits": finer, "sun_refreshes": sun, "unshown": unshown, "misses": misses}),
+            serde_json::json!({"label": label, "frame": frame, "probes": probes,
+            "hits": hits, "caster_reached": reached, "sun_refreshes": sun, "unshown": unshown,
+            "misses": misses, "margin_overflow": overflow, "fills": fills}),
         );
     }
 }
@@ -756,6 +759,117 @@ fn gpu_visibility_fixture() {
     .unwrap();
 }
 
+/// Pixels whose 4-byte counts differ.
+fn differing(a: &[u8], b: &[u8]) -> usize {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .filter(|(x, y)| x != y)
+        .count()
+}
+/// N8o caster gates (docs/non-rt-n8o.md) at one pose, for the configuration's lookup. Every
+/// sequence starts from a reset and ends with `frames` frames at the pose in which placement 0 of
+/// `batch` steps 1 mm a frame along x (`caster`) or holds still. `at(x)` is the pose's camera
+/// moved x metres along x.
+/// - Static: `frames` frames at the pose first. The rolled counts must equal a fresh lookup's (a
+///   reset, then one frame: every pixel walks) and the counts of the same frames with the
+///   placement final throughout.
+/// - History: N8n's approach (16 frames of 2 mm), 8 frames at the pose, then `frames` camera
+///   frames 1 mm apart, away and back. A pixel may differ from a fresh lookup only where the twin
+///   whose caster holds still differs too, with the same count: it shows a cell computed at
+///   another camera position, which no moved caster reached.
+/// - Determinism: the moving history runs twice, and both counts' hashes are recorded.
+fn caster_gates(
+    r: &mut Renderer,
+    asset: &mut prepared::Prepared,
+    color: &wgpu::Texture,
+    at: &dyn Fn(f32) -> Camera,
+    batch: usize,
+    frames: u32,
+) -> serde_json::Value {
+    use sha2::Digest;
+    let sha256 = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let base = asset.model(batch, 0);
+    let place = |asset: &mut prepared::Prepared, i: u32| {
+        let step = Mat4::from_translation(Vec3::X * (0.001 * i as f32));
+        asset.set_model(batch, 0, step * base).unwrap();
+    };
+    let frame = |r: &mut Renderer, asset: &mut prepared::Prepared, camera: &Camera| {
+        render(r, color, camera, &mut asset.draws(Visibility::Frustum));
+        let _ = r.poll().unwrap();
+    };
+    let counts = |r: &mut Renderer| {
+        r.test_drain("N8o caster gate");
+        let [_, counts] = interactive_outputs(r);
+        counts
+    };
+    let pose = at(0.0);
+    let fresh = |r: &mut Renderer, asset: &mut prepared::Prepared| {
+        r.reset_virtual_shadow_cache();
+        frame(r, asset, &pose);
+        counts(r)
+    };
+    // The last `frames` frames, with the caster stepping from its base or holding.
+    let tail = |r: &mut Renderer, asset: &mut prepared::Prepared, caster: bool| {
+        for i in 1..=frames {
+            if caster {
+                place(asset, i);
+            }
+            frame(r, asset, &pose);
+        }
+        counts(r)
+    };
+    let still = |r: &mut Renderer, asset: &mut prepared::Prepared, caster: bool| {
+        r.reset_virtual_shadow_cache();
+        place(asset, if caster { 0 } else { frames });
+        for _ in 0..frames {
+            frame(r, asset, &pose);
+        }
+        tail(r, asset, caster)
+    };
+    let history = |r: &mut Renderer, asset: &mut prepared::Prepared, caster: bool| {
+        r.reset_virtual_shadow_cache();
+        place(asset, 0);
+        for i in (1..=16).rev() {
+            frame(r, asset, &at(0.002 * i as f32));
+        }
+        for _ in 0..8 {
+            frame(r, asset, &pose);
+        }
+        for i in 1..=frames {
+            frame(r, asset, &at(0.001 * i.min(frames - i) as f32));
+        }
+        tail(r, asset, caster)
+    };
+    let rolled = still(r, asset, true);
+    let rolled_fresh = fresh(r, asset);
+    let twin = still(r, asset, false);
+    let moving = history(r, asset, true);
+    let moving_fresh = fresh(r, asset);
+    let again = history(r, asset, true);
+    let held = history(r, asset, false);
+    let held_fresh = fresh(r, asset);
+    place(asset, 0);
+    let mut unexplained = 0;
+    let pixels = moving.chunks_exact(4).zip(moving_fresh.chunks_exact(4));
+    let twins = held.chunks_exact(4).zip(held_fresh.chunks_exact(4));
+    for ((m, f), (h, g)) in pixels.zip(twins) {
+        if m != f && (h == g || m != h) {
+            unexplained += 1;
+        }
+    }
+    serde_json::json!({
+        "static_differs_from_fresh": differing(&rolled, &rolled_fresh),
+        "static_differs_from_twin": differing(&rolled, &twin),
+        "history_differs_from_fresh": differing(&moving, &moving_fresh),
+        "history_twin_differs_from_fresh": differing(&held, &held_fresh),
+        "history_unexplained": unexplained,
+        "history_sha256": sha256(&moving),
+        "history_again_sha256": sha256(&again),
+        "history_repeat_differs": differing(&moving, &again),
+        "static_sha256": sha256(&rolled),
+    })
+}
+
 #[test]
 #[ignore = "N1c owned GPU lease: quarry LOD cuts, agreement and paired cost, asset loaded once"]
 fn gpu_visibility_quarry() {
@@ -1045,11 +1159,19 @@ fn gpu_visibility_quarry() {
                     panic!("quarry sun");
                 };
                 let start = Instant::now();
+                // N8o: `turn_wrap` > 0 turns the sun back and forth over that many 0.5 mrad steps
+                // (traces of long turning runs inside the map's hysteresis).
+                let turn_wrap = m["turn_wrap"].as_u64().unwrap_or(0) as usize;
                 for i in 0..turn_frames {
+                    let at = if turn_wrap > 0 {
+                        let k = (i + 1) % (2 * turn_wrap);
+                        k.min(2 * turn_wrap - k)
+                    } else {
+                        i + 1
+                    };
                     let mut lit = lighting.clone();
                     lit.lights[0] = Light::Directional {
-                        travel: Mat4::from_rotation_y(0.0005 * (i + 1) as f32)
-                            .transform_vector3(travel),
+                        travel: Mat4::from_rotation_y(0.0005 * at as f32).transform_vector3(travel),
                         lux,
                     };
                     r.set_lighting_and_shadows(&lit, &shadows).unwrap();
@@ -1138,6 +1260,12 @@ fn gpu_visibility_quarry() {
                     surface_stats(&mut r, stats, &format!("{label}-move"), i, &mut cache_rows);
                 }
                 r.test_drain("N8f camera motion tail");
+                let [_, moved_counts] = interactive_outputs(&r);
+                {
+                    use sha2::Digest;
+                    let sha = format!("{:x}", sha2::Sha256::digest(&moved_counts));
+                    changed.push(serde_json::json!({"label": label, "move_counts_sha256": sha}));
+                }
                 wall(
                     &mut walls,
                     format!("{label}-move"),
@@ -1148,8 +1276,20 @@ fn gpu_visibility_quarry() {
                 let batch = m["move_batch"].as_u64().unwrap_or(0) as usize;
                 let base = asset.model(batch, 0);
                 let start = Instant::now();
-                for i in 1..=move_frames {
-                    let step = Mat4::from_translation(Vec3::X * (0.001 * i as f32));
+                // N8o: `caster_frames` (default `move_frames`) caster-moving frames; `caster_wrap`
+                // > 0 steps the placement back and forth over that many millimetres (traces).
+                let caster_frames = m["caster_frames"]
+                    .as_u64()
+                    .map_or(move_frames, |n| n as u32);
+                let caster_wrap = m["caster_wrap"].as_u64().unwrap_or(0) as u32;
+                for i in 1..=caster_frames {
+                    let at = if caster_wrap > 0 {
+                        let k = i % (2 * caster_wrap);
+                        k.min(2 * caster_wrap - k)
+                    } else {
+                        i
+                    };
+                    let step = Mat4::from_translation(Vec3::X * (0.001 * at as f32));
                     asset.set_model(batch, 0, step * base).unwrap();
                     render(
                         &mut r,
@@ -1171,7 +1311,7 @@ fn gpu_visibility_quarry() {
                 wall(
                     &mut walls,
                     format!("{label}-caster"),
-                    move_frames as usize,
+                    caster_frames as usize,
                     start,
                 );
                 timing(&mut r, &format!("{label}-caster"), &mut rows);
@@ -1199,7 +1339,11 @@ fn gpu_visibility_quarry() {
                     .zip(dense.chunks_exact(4))
                     .filter(|(a, b)| a != b)
                     .count();
-                changed.push(serde_json::json!({"label": label, "caster_rolled_differs": differ}));
+                {
+                    use sha2::Digest;
+                    let sha = format!("{:x}", sha2::Sha256::digest(&rolled));
+                    changed.push(serde_json::json!({"label": label, "caster_rolled_differs": differ, "caster_counts_sha256": sha}));
+                }
                 eprintln!("N8f caster identity {label}: {differ} pixels differ");
                 asset.set_model(batch, 0, base).unwrap();
                 render(
@@ -1210,6 +1354,27 @@ fn gpu_visibility_quarry() {
                 );
                 r.test_drain("N8f motion restored");
                 let _ = r.poll().unwrap();
+            }
+            // N8o: `caster_gates` runs the caster gates at this pose (`move_frames`, default 48).
+            if m["caster_gates"].as_bool() == Some(true) {
+                let pose = &cameras.frames[index];
+                let at = |x: f32| {
+                    let step = Vec3::X * x;
+                    Camera::look_at(
+                        Vec3::from_array(pose.eye) + step,
+                        Vec3::from_array(pose.target) + step,
+                        Vec3::from_array(pose.up),
+                        pose.fov_y_radians,
+                        pose.near,
+                        pose.far,
+                    )
+                    .unwrap()
+                };
+                let batch = m["move_batch"].as_u64().unwrap_or(0) as usize;
+                let frames = m["move_frames"].as_u64().filter(|&n| n > 0).unwrap_or(48) as u32;
+                let gates = caster_gates(&mut r, &mut asset, &color, &at, batch, frames);
+                eprintln!("N8o caster gates {label}: {gates}");
+                changed.push(serde_json::json!({"label": label, "caster_gates": gates}));
             }
         }
     }

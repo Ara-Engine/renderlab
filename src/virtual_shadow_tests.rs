@@ -207,19 +207,18 @@ pub(super) fn diagnose(
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl, the
 /// N8k map lookup's `VMAP_` ones in shaders/virtual_shadow_lookup.wgsl, and the N8n surface
 /// cache's `VSC_` ones in shaders/virtual_shadow_cache.wgsl).
-const SCREEN_CONSTANTS: [&str; 76] = [
-    "VSC_JITTER",
+const SCREEN_CONSTANTS: [&str; 75] = [
+    "VSC_SORT_MIN",
+    "VSC_PHASE_BLOCK",
+    "VSC_SORT",
+    "VSC_UNKNOWN",
     "VSC_PROBE_X",
     "VSC_PROBE_Y",
     "VSC_HEAVY",
-    "VSC_TRIANGLE",
-    "VSC_SPLAT",
-    "VSC_REUSE",
     "VSC_CONSENSUS",
-    "VSC_CANONICAL",
     "VSC_PERSIST",
     "VSC_CELL",
-    "VSC_FINER",
+    "VSC_SPLAT",
     "VSC_STATS",
     "VSC_SPREAD",
     "VSC_LANES",

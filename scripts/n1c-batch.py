@@ -39,6 +39,8 @@ def main():
     p.add_argument("--move-yaw", type=float, default=0.0, help="N8n camera pan, radians a moving frame")
     p.add_argument("--approach", type=int, default=0, help="N8n camera frames stepping into each pose first")
     p.add_argument("--approach-step", type=float, default=0.002, help="N8n metres an approach frame along x")
+    p.add_argument("--caster-gates", action="store_true", help="N8o caster gates at each pose (move-frames, default 48)")
+    p.add_argument("--move-wrap", type=int, default=0, help="N8g camera back and forth over this many moving frames")
     a = p.parse_args()
     a.root.mkdir(parents=True, exist_ok=True)
     record = []
@@ -55,7 +57,8 @@ def main():
                      reference=not (a.timing or a.no_reference), lod_pixels=a.lod, software_extent=a.extent, lod_lift=a.lift,
                      poses=a.poses, stage_repeats=a.stage_repeats, turn_frames=a.turn,
                      move_frames=a.move_frames, move_batch=a.move_batch, move_step=a.move_step, move_yaw=a.move_yaw,
-                     approach_frames=a.approach, approach_step=a.approach_step)
+                     approach_frames=a.approach, approach_step=a.approach_step, caster_gates=a.caster_gates,
+                     move_wrap=a.move_wrap)
             if a.caster_error:
                 m["caster_error"] = a.caster_error
             if os.environ.get("N8_VIRTUAL"):
