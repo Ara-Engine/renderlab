@@ -7,6 +7,7 @@ use std::{
     fs::File,
     io::Read,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -24,6 +25,9 @@ struct Batch {
 }
 pub struct Prepared {
     source: asset::Asset,
+    /// The decoded chains, moved out of `source`: streamed textures retain them for
+    /// later level uploads, so they are shared rather than copied.
+    texture_data: Vec<Arc<asset::Texture>>,
     textures: Vec<Texture>,
     materials: Vec<Material>,
     meshes: Vec<Mesh>,
@@ -158,8 +162,14 @@ impl Prepared {
         {
             return Err("asset framing extent exceeds supported numerical range".into());
         }
+        let mut source = source;
+        let texture_data = std::mem::take(&mut source.textures)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
         Ok(Self {
             source,
+            texture_data,
             textures: Vec::new(),
             materials: Vec::new(),
             meshes: Vec::new(),
@@ -195,8 +205,9 @@ impl Prepared {
         let start = Instant::now();
         match self.progress {
             UploadProgress::Textures(i) => {
-                if let Some(data) = self.source.textures.get(i) {
-                    if let Some(t) = r.try_upload_texture(data)? {
+                if let Some(data) = self.texture_data.get(i) {
+                    // Levels stay resident while frames sample them (TextureResidency).
+                    if let Some(t) = r.try_upload_streamed_texture(data.clone())? {
                         self.textures.push(t);
                         self.progress = UploadProgress::Textures(i + 1);
                     }

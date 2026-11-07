@@ -161,6 +161,14 @@ pub(crate) fn test_memory_hints() -> wgpu::MemoryHints {
         _ => crate::MEMORY_HINTS,
     }
 }
+/// The bench sampler anisotropy: 16, or RENDERLAB_TEST_ANISOTROPY (M3's isotropic
+/// residency screens use 1).
+fn test_anisotropy() -> u16 {
+    std::env::var("RENDERLAB_TEST_ANISOTROPY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16)
+}
 fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     let startup = Instant::now();
     assert_eq!(
@@ -212,7 +220,7 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
         },
         RendererOptions {
             samples: SampleCount::One,
-            anisotropy_clamp: 16,
+            anisotropy_clamp: test_anisotropy(),
         },
         HardwareShadowOptions {
             max_estimated_bytes: Some(8 * 1024 * 1024 * 1024),

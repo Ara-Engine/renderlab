@@ -29,6 +29,9 @@ pub use virtual_shadow_gpu::{
 #[path = "program_gpu.rs"]
 mod program_gpu;
 use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
+#[path = "texture_residency.rs"]
+mod texture_residency;
+pub use texture_residency::{ResidencyStats, TextureResidency};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -459,6 +462,10 @@ struct FramePaths {
 }
 struct Slot {
     readback: Option<Owned<wgpu::Buffer>>,
+    /// Streamed frames' request and miss counters (`texture_residency.rs`), and for the
+    /// frame in flight their mapping and the residency id of each slot word.
+    residency_readback: Option<Owned<wgpu::Buffer>>,
+    residency: Option<(MapResult, Vec<Option<u64>>)>,
     flight: Option<Flight>,
     /// The frame in flight timed traced receivers without a visibility compute pass.
     traced_receivers: bool,
@@ -559,6 +566,8 @@ pub struct Renderer {
     busy_uploads: u64,
     busy_frames: u64,
     upload_cpu: CpuFrame,
+    /// Streamed textures' resident levels and requests (`texture_residency.rs`).
+    residency: texture_residency::Residency,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -895,6 +904,8 @@ impl Renderer {
                     ResourceKind::Buffer,
                 )
             }),
+            residency_readback: None,
+            residency: None,
             flight: None,
             traced_receivers: false,
         });
@@ -1031,6 +1042,7 @@ impl Renderer {
             busy_uploads: 0,
             busy_frames: 0,
             upload_cpu: CpuFrame::default(),
+            residency: Default::default(),
         };
         renderer.update_hashes();
         // The initial defaults share one immediately submitted flight.
@@ -1946,11 +1958,7 @@ impl Renderer {
                 mip_level_count: data.mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: match data.role {
-                    asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-                    asset::TextureRole::MetallicRoughnessLinear
-                    | asset::TextureRole::NormalLinear => wgpu::TextureFormat::Rgba8Unorm,
-                },
+                format: texture_residency::texture_format(data.role),
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             }),
@@ -1985,9 +1993,13 @@ impl Renderer {
         Texture(Arc::new(crate::material::TextureInner {
             renderer: self.identity.clone(),
             role: data.role,
-            _texture: texture,
-            view,
-            _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+            storage: crate::material::TextureStorage::Full(Box::new(
+                crate::material::FullTexture {
+                    _texture: texture,
+                    view,
+                    _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+                },
+            )),
         }))
     }
     pub fn try_create_material(
@@ -2038,7 +2050,7 @@ impl Renderer {
                 .map_or(&defaults[2], |t| t.texture)
                 .clone(),
         ];
-        let samplers = [
+        let descriptors = [
             data.base_color_texture
                 .map_or(asset::Sampler::default(), |t| t.sampler),
             data.metallic_roughness_texture
@@ -2046,15 +2058,17 @@ impl Renderer {
             data.normal_texture
                 .map_or(asset::Sampler::default(), |t| t.sampler),
         ]
-        .map(|s| {
-            self.ledger.own(
-                self.device
-                    .create_sampler(&crate::material::sampler_descriptor(
-                        s,
-                        self.options.anisotropy_clamp,
-                    )),
-                ResourceKind::Sampler,
-            )
+        .map(|s| crate::material::sampler_descriptor(s, self.options.anisotropy_clamp));
+        let margins = descriptors.each_ref().map(|d| {
+            if d.anisotropy_clamp > 1 {
+                texture_residency::ANISOTROPIC_MARGIN
+            } else {
+                0
+            }
+        });
+        let samplers = descriptors.map(|d| {
+            self.ledger
+                .own(self.device.create_sampler(&d), ResourceKind::Sampler)
         });
         let uniform = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2074,47 +2088,17 @@ impl Renderer {
         );
         let program = data.program.unwrap_or(&self.standard).clone();
         let parameters = self.material_parameters(&program, data.parameters);
-        let bind = self.ledger.own(
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("material"),
-                layout: &self.material_bindings,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&textures[0].0.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&samplers[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&textures[1].0.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&samplers[1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&textures[2].0.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&samplers[2]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: parameters.buffer.as_entire_binding(),
-                    },
-                ],
-            }),
-            ResourceKind::BindGroup,
-        );
+        // Streamed slots bind the 1x1 defaults: this group never retains their levels.
+        let streamed =
+            |t: &Texture| matches!(t.0.storage, crate::material::TextureStorage::Streamed(_));
+        let views = std::array::from_fn(|i| {
+            self.texture_view(if streamed(&textures[i]) {
+                &defaults[i]
+            } else {
+                &textures[i]
+            })
+        });
+        let bind = self.material_group(&uniform, views, &samplers, &parameters.buffer);
         self.queue.write_buffer(&uniform, 0, &data.bytes());
         self.uploads.materials += 48;
         self.uploads.write_calls += 1;
@@ -2123,6 +2107,8 @@ impl Renderer {
             renderer: self.identity.clone(),
             double_sided: data.double_sided,
             thin: data.thin,
+            streamed: textures.iter().any(streamed),
+            margins,
             bind,
             _uniform: uniform,
             _samplers: samplers,
@@ -2134,6 +2120,81 @@ impl Renderer {
                 48 + crate::program::PARAMETER_BYTES as u64,
             ),
         }
+    }
+
+    /// Raster group 2 of one material over the given texture views.
+    fn material_group(
+        &self,
+        uniform: &wgpu::Buffer,
+        views: [&wgpu::TextureView; 3],
+        samplers: &[Owned<wgpu::Sampler>; 3],
+        parameters: &wgpu::Buffer,
+    ) -> Owned<wgpu::BindGroup> {
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        }];
+        for (i, (view, sampler)) in views.into_iter().zip(samplers).enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1 + 2 * i as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2 + 2 * i as u32,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: parameters.as_entire_binding(),
+        });
+        self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("material"),
+                layout: &self.material_bindings,
+                entries: &entries,
+            }),
+            ResourceKind::BindGroup,
+        )
+    }
+    /// A streamed material's group over its current levels, for raster passes that
+    /// sample; the frame made its textures fully resident first. None for other
+    /// materials, whose own group already binds their textures.
+    fn sampling_group(&self, material: Option<&Material>) -> Option<Owned<wgpu::BindGroup>> {
+        let m = material.filter(|m| m.streamed)?;
+        Some(self.material_group(
+            &m._uniform,
+            std::array::from_fn(|i| self.texture_view(&m._textures[i])),
+            &m._samplers,
+            &m.parameters.buffer,
+        ))
+    }
+
+    /// Tone maps the HDR target into the frame's color view.
+    fn encode_hdr_present(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let hdr = self.lighting.hdr.as_ref().unwrap();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("HDR present pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            timestamp_writes,
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline.present);
+        pass.set_bind_group(0, &*hdr.bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     pub(crate) fn validate_color(&self, color: &wgpu::Texture) -> Result<(), Error> {
@@ -2635,6 +2696,31 @@ impl Renderer {
             temporal,
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
+        // Streamed textures (texture_residency.rs): traced and visibility-buffer frames
+        // that bind any outside Full mode shade with pipelines that request their levels.
+        // Raster and temporal passes sample without requests, so the textures they bind
+        // become fully resident first. Default frames bind none and do none of this.
+        let streamed = self.streamed_ids(draws.iter().map(|d| d.material));
+        let streaming = traced
+            && !temporal
+            && !streamed.is_empty()
+            && self.residency.mode != TextureResidency::Full;
+        if streaming {
+            // Admission guarantees one program per traced frame: the first draw's.
+            let program = draws
+                .first()
+                .and_then(|d| d.material)
+                .map_or(self.standard.id(), |m| m.program.id());
+            self.ensure_streamed(program)?;
+        }
+        // Feedback growth is spread over frames; raster and temporal frames need theirs now.
+        if streaming {
+            self.apply_residency(&[], texture_residency::STEP_BYTES);
+        } else {
+            self.apply_residency(&streamed, u64::MAX);
+        }
+        let verify =
+            streaming && self.residency_verify(&streamed, camera, [color.width(), color.height()]);
         // N8e: another pass writing the soft visibility target ends Virtual's rolling refresh,
         // whose untouched tiles keep the counts it wrote last.
         let virtual_frame = traced
@@ -2741,6 +2827,7 @@ impl Renderer {
             }
         }
         if traced {
+            self.primary.as_mut().unwrap().requests = streaming;
             let scopes = OperationScopes::new(&self.device);
             let scene_generation = self
                 .hardware_shadows
@@ -2838,9 +2925,13 @@ impl Renderer {
                 } else {
                     primary_ray_gpu::Shading::Hard
                 };
+                if streaming {
+                    self.encode_request_clear(&mut encoder);
+                }
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
         }
+        let residency = streaming.then(|| self.encode_residency_readback(&mut encoder, slot));
         let timestamps =
             self.timing
                 .as_ref()
@@ -2859,6 +2950,11 @@ impl Renderer {
         let resolved = hdr.map_or(&*view, |h| &*h.resolved.view);
         let clear = if lit { self.lit_clear() } else { CLEAR_COLOR };
         if !traced {
+            // The mesh pass samples: streamed materials bind their current, full levels.
+            let sampling: Vec<_> = draws
+                .iter()
+                .map(|d| self.sampling_group(d.material))
+                .collect();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2926,7 +3022,7 @@ impl Renderer {
             // Pass state persists across draws, so unchanged state is never re-encoded.
             let mut pipeline = None;
             let (mut instances, mut material, mut ids, mut mesh) = (None, None, None, None);
-            for draw in draws {
+            for (draw, sampling) in draws.iter().zip(&sampling) {
                 if draw.slots.is_empty() {
                     continue;
                 }
@@ -2941,7 +3037,10 @@ impl Renderer {
                 if changed(&mut instances, bind) {
                     pass.set_bind_group(1, bind, &[]);
                 }
-                let bind: &wgpu::BindGroup = &draw.material.unwrap_or(default).bind;
+                let bind: &wgpu::BindGroup = match sampling {
+                    Some(group) => group,
+                    None => &draw.material.unwrap_or(default).bind,
+                };
                 if changed(&mut material, bind) {
                     pass.set_bind_group(2, bind, &[]);
                 }
@@ -2963,30 +3062,19 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
-        if let Some(hdr) = hdr {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("HDR present pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                timestamp_writes: self.timing.as_ref().filter(|_| timed).map(|t| {
-                    wgpu::RenderPassTimestampWrites {
+        if hdr.is_some() {
+            self.encode_hdr_present(
+                &mut encoder,
+                &view,
+                self.timing
+                    .as_ref()
+                    .filter(|_| timed)
+                    .map(|t| wgpu::RenderPassTimestampWrites {
                         query_set: &t.queries,
                         beginning_of_pass_write_index: Some(slot as u32 * 10 + 2),
                         end_of_pass_write_index: Some(slot as u32 * 10 + 3),
-                    }
-                }),
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.pipeline.present);
-            pass.set_bind_group(0, &*hdr.bind, &[]);
-            pass.draw(0..3, 0..1);
+                    }),
+            );
         }
         let mapped = if timed {
             let timing = self.timing.as_ref().unwrap();
@@ -3054,7 +3142,7 @@ impl Renderer {
         self.check_fault()?;
         let encode = encode_start.elapsed() - cpu.shadow_encode;
         let submitted_at = Instant::now();
-        self.queue.submit([commands]);
+        let index = self.queue.submit([commands]);
         let submit = submitted_at.elapsed();
         self.submissions += 1;
         if hardware_build {
@@ -3082,6 +3170,7 @@ impl Renderer {
             },
         );
         self.slots[slot].traced_receivers = traced && (!soft || interactive || temporal);
+        self.slots[slot].residency = residency;
         self.check_fault()?;
         if let Some(frame) = shadow_frame {
             self.stamp_shadows(frame, shadow_draws);
@@ -3098,6 +3187,9 @@ impl Renderer {
         }
         self.camera_shadow = Some(camera_bytes);
         self.view_mode = view_mode;
+        if verify {
+            self.verify_frame(slot, index, draws, soft, &view)?;
+        }
         Ok(Some(FrameReport {
             frame,
             revision: self.revision,
@@ -3130,17 +3222,28 @@ impl Renderer {
             .poll(wgpu::PollType::Poll)
             .map_err(Error::Poll)?;
         self.check_fault()?;
+        let mut observed = vec![];
         for slot in &mut self.slots {
             let Some(flight) = &slot.flight else {
                 continue;
             };
             if flight.done.get().is_none()
                 || flight.mapped.as_ref().is_some_and(|m| m.get().is_none())
+                || slot
+                    .residency
+                    .as_ref()
+                    .is_some_and(|(m, _)| m.get().is_none())
             {
                 continue;
             }
             let flight = slot.flight.take().unwrap();
             let traced_receivers = std::mem::take(&mut slot.traced_receivers);
+            if let Some((mapped, ids)) = slot.residency.take()
+                && let Some(Ok(())) = mapped.get()
+            {
+                let readback = slot.residency_readback.as_ref().unwrap();
+                observed.push((texture_residency::read_words(readback), ids, flight.frame));
+            }
             // Completion of N proves completion of every earlier queue submission.
             self.completed_submission = self.completed_submission.max(flight.submission);
             let mut gpu = None;
@@ -3249,6 +3352,12 @@ impl Renderer {
                 gpu,
             });
         }
+        for (words, ids, frame) in observed {
+            let misses = self.observe_residency(&words, &ids, frame.map_or(0, |f| f.0));
+            self.residency.stats.misses += misses;
+            self.residency.stats.missed_frames += u64::from(misses > 0);
+        }
+        self.residency.prune();
         self.lighting.collect(self.completed_submission);
         self.environment
             .uploading

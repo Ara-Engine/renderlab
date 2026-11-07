@@ -40,6 +40,14 @@ def resource(name):
         return "acceleration structure", "Mesh BLAS or active/retired TLAS generation; retired after last submission"
     if name == "immutable material texture":
         return "sampled RGBA8 texture with all source mips; COPY_DST", "Texture/Material handle (three renderer fallback textures persist)"
+    if name == "streamed material texture levels":
+        return "sampled RGBA8 texture holding resident source levels top..; COPY_SRC/COPY_DST", "Streamed Texture handle (M3); replaced at each residency change, the old copy retires after its last submission"
+    if name == "texture residency level probe":
+        return "sampled R16F 64x64 level probe, level j = 2^-j", "PrimaryState, from the first traced frame (M3)"
+    if name == "texture residency words and requests":
+        return "STORAGE/COPY_SRC/COPY_DST residency words and per-frame request/miss/survey counters", "PrimaryState, from the first traced frame (M3)"
+    if name == "texture residency readback":
+        return "MAP_READ/COPY_DST request counters", "Renderer flight ring slot or one verification (M3)"
     if name == "immutable environment cube":
         return "sampled environment array; COPY_DST", "EnvironmentMap handle (two renderer fallback cubes persist)"
     if name == "prepared DFG RG16F":

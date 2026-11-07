@@ -51,6 +51,9 @@ pub(crate) struct ProgramPipelines {
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub traced: Option<[Owned<wgpu::ComputePipeline>; 2]>,
     pub temporal: Option<Owned<wgpu::ComputePipeline>>,
+    /// Traced shading whose sampling helpers record texture residency requests
+    /// (`Renderer::ensure_streamed`): built only when a frame streams textures.
+    pub streamed: Option<[Owned<wgpu::ComputePipeline>; 2]>,
 }
 impl ProgramPipelines {
     pub fn has(&self, variant: Variant) -> bool {
@@ -148,6 +151,8 @@ pub(super) struct ProgramModules {
     pub traced: Option<[Owned<wgpu::ShaderModule>; 2]>,
     /// Temporal film shading, present with `traced`; its pipeline compiles on first use.
     pub temporal: Option<Owned<wgpu::ShaderModule>>,
+    /// `Stage::TracedStreamed` Hard and Soft shading, built with `ProgramPipelines::streamed`.
+    pub streamed: Option<[Owned<wgpu::ShaderModule>; 2]>,
 }
 impl ProgramModules {
     pub fn has(&self, variant: Variant) -> bool {
@@ -335,6 +340,7 @@ pub(super) fn compile_program(
         traced: (!traced_sources.is_empty())
             .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i]))),
         temporal: traced_sources.get(2).map(|c| module(abi, label, c)),
+        streamed: None,
     };
     if let Some(error) = scopes.finish() {
         return Err(scope_error(label, error, &traced_sources));
@@ -727,6 +733,43 @@ impl Renderer {
 
     pub(super) fn program_slot(&self, id: u64) -> &ProgramSlot {
         self.programs.iter().find(|s| s.id == id).unwrap()
+    }
+
+    /// Program `id`'s streamed traced shading (`Stage::TracedStreamed`), built the first
+    /// time a frame streams textures with it. Reloads and visibility changes drop it, so
+    /// default frames never compile or bind it.
+    pub(super) fn ensure_streamed(&mut self, id: u64) -> Result<(), Error> {
+        if self.program_slot(id).pipelines.streamed.is_some() {
+            return Ok(());
+        }
+        let heads = &self.primary_sources.as_ref().unwrap().1;
+        let slot = self.program_slot(id);
+        let parameters = program::declares_parameters(&slot.source);
+        let sources = [0, 1]
+            .map(|i| program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters));
+        let abi = self.program_abi();
+        let scopes = OperationScopes::new(&self.device);
+        let modules = sources.each_ref().map(|c| module(&abi, &slot.label, c));
+        let pipelines = [0, 1].map(|i| {
+            abi.primary.unwrap().streamed_pipeline(
+                abi.device,
+                abi.ledger,
+                &modules[i],
+                i,
+                abi.cache,
+            )
+        });
+        if let Some(error) = scopes.finish() {
+            return Err(match scope_error(&slot.label, error, &sources) {
+                Error::Fault(Fault(message)) => self.fail(message),
+                other => other,
+            });
+        }
+        self.pipelines.created += 2;
+        let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
+        slot.modules.streamed = Some(modules);
+        slot.pipelines.streamed = Some(pipelines);
+        Ok(())
     }
 
     /// Every program's traced Hard and Soft shading modules on `heads`, and its temporal
