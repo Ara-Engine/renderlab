@@ -238,11 +238,15 @@ var<workgroup> vsc_wg_misses:atomic<u32>;
 var<workgroup> vsc_wg_base:u32;
 var<workgroup> vsc_wg_buckets:array<atomic<u32>,8>;
 // The walk order (N8m's heaviest first, applied to the queue): the probe queues each walking
-// pixel with its cell's last work estimate as a bucket, and vsc_sort copies the queue after
-// itself in bucket order, heaviest first, so the slowest walks start first and a warp's walks
-// are of similar length. VSC_SORT buckets: 8, the estimate's bit length; 2, whether it reaches
-// VSC_HEAVY (N8n's order); 1, none. Pixels with no estimate (absent cells) take VSC_UNKNOWN.
-override VSC_SORT:u32=8u;
+// pixel with its cell's last work estimate as a bucket, and a queue of at least VSC_SORT_MIN
+// entries (more than a wave of resident lanes) is copied after itself in bucket order, heaviest
+// first, so the slowest walks start first. VSC_SORT buckets: 2, whether the estimate reaches
+// VSC_HEAVY; 8, its bit length; 1, none. Pixels with no estimate (absent cells) take
+// VSC_UNKNOWN. Measured (docs/non-rt-n8o.md): 2 buckets beat 8 on camera and caster frames, and
+// a turning sun's queue, about one wave, walks fastest in the probe's order (its spatial
+// coherence): ordered, it took 0.66-0.79 ms against 0.57-0.60.
+override VSC_SORT:u32=2u;
+override VSC_SORT_MIN:u32=32768u;
 override VSC_HEAVY:u32=5u;
 override VSC_UNKNOWN:u32=3u;
 fn vsc_bucket(visible:u32)->u32 {
@@ -333,7 +337,7 @@ fn vsc_cursor()->u32 {return arrayLength(&vsm_scratch.words)-1u;}
 @compute @workgroup_size(1) fn vsc_args() {
     let n=atomicLoad(&vsm_scratch.queue);
     var first=0u;
-    if VSC_SORT>1u && 2u*n<=vsc_capacity() {
+    if VSC_SORT>1u && n>=VSC_SORT_MIN && 2u*n<=vsc_capacity() {
         first=n;
         var at=0u;
         for(var b=8u;b>0u;b-=1u) {
@@ -349,14 +353,33 @@ fn vsc_cursor()->u32 {return arrayLength(&vsm_scratch.words)-1u;}
     vsc_dispatch[4]=(n+63u)/64u;vsc_dispatch[5]=1u;vsc_dispatch[6]=1u;
 }
 
-// Copies queue entry i to its bucket's next place in the sorted copy (pad0 != 0).
-@compute @workgroup_size(64) fn vsc_sort(@builtin(global_invocation_id) gid:vec3<u32>) {
+var<workgroup> vsc_wg_sort:array<atomic<u32>,8>;
+var<workgroup> vsc_wg_sort_base:array<u32,8>;
+// Copies queue entry i to its bucket's place in the sorted copy (pad0 != 0). Each workgroup takes
+// its places per bucket at once (same-address atomics serialize), so a bucket keeps the probe's
+// order of workgroups.
+@compute @workgroup_size(64) fn vsc_sort(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    if li<8u {atomicStore(&vsc_wg_sort[li],0u);}
+    workgroupBarrier();
     let first=vsm_scratch.pad0;
-    if first==0u || gid.x>=atomicLoad(&vsm_scratch.queue) {return;}
-    let b=atomicLoad(&vsm_scratch.words[2u*gid.x+1u])&7u;
-    let k=first+atomicLoad(&vsm_scratch.words[vsc_tail()+8u+b])+atomicAdd(&vsm_scratch.words[vsc_tail()+16u+b],1u);
-    atomicStore(&vsm_scratch.words[2u*k],atomicLoad(&vsm_scratch.words[2u*gid.x]));
-    atomicStore(&vsm_scratch.words[2u*k+1u],0u);
+    let inside=first!=0u && gid.x<atomicLoad(&vsm_scratch.queue);
+    var b=0u;
+    var at=0u;
+    if inside {
+        b=atomicLoad(&vsm_scratch.words[2u*gid.x+1u])&7u;
+        at=atomicAdd(&vsc_wg_sort[b],1u);
+    }
+    workgroupBarrier();
+    if li<8u {
+        let n=atomicLoad(&vsc_wg_sort[li]);
+        if n!=0u {vsc_wg_sort_base[li]=atomicAdd(&vsm_scratch.words[vsc_tail()+16u+li],n);}
+    }
+    workgroupBarrier();
+    if inside {
+        let k=first+atomicLoad(&vsm_scratch.words[vsc_tail()+8u+b])+vsc_wg_sort_base[b]+at;
+        atomicStore(&vsm_scratch.words[2u*k],atomicLoad(&vsm_scratch.words[2u*gid.x]));
+        atomicStore(&vsm_scratch.words[2u*k+1u],0u);
+    }
 }
 // The exact walk for queue lane g (each queued pixel on `spread` lanes), with Exact's setup
 // (vsm_prepare: the pixel's receiver point, directions and per-pixel jitter). Word 2k+1 gets bit
