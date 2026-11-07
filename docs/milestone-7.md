@@ -49,7 +49,7 @@ Decided by root:
 - **Path tracer:** an in-process GPU path tracer is the quarry reference. It is cross-checked against pbrt or Mitsuba on small scenes.
 - **Temporal file ownership:** `src/film_accumulation.rs` and M7's temporal reconstruction belong to M7. The shadow hillclimb doesn't edit them.
 
-Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents.
+Open, needs a human: a patent review of the world-space cache against US 9,754,407, and of any ReSTIR- or SVGF-family method, before such code ships. Agents won't treat a design as cleared on patents. Superseded 2026-11-07 by the patent policy below: Islam accepts design-arounds, unclaimed parts and, as a last resort, patented methods. So P0's recorded claim mapping is enough for a design-around or unclaimed-part tier to become a default. No separate human review is needed first. P0's mapping is an engineering reading, not legal clearance; Islam can still commission a legal review at any time.
 
 Patent exposure flagged by the research notes (2026-11-07), each Islam's decision before adoption. No exposed technique goes into a default until he rules:
 
