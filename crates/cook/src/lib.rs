@@ -1,5 +1,8 @@
 //! Bounded static GLB preparation and content-addressed publication.
 mod cache;
+pub mod cluster_bvh;
+pub mod cluster_bvh_cache;
+pub mod cluster_bvh_validation;
 pub mod environment;
 pub mod environment_fixture;
 pub mod environment_hdr;

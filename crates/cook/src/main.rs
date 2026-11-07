@@ -43,6 +43,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     },"prepared":policy::prepared_json(limits.prepared),"virtual":policy::virtual_json(virtual_limits)});
     eprintln!("effective_limits {effective}");
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["m7-bvh",source_cache,source_manifest,cache,manifest,errors,flags @ ..] if flags.iter().all(|f|*f=="--validate") => {
+            use renderlab_cook::{cluster_bvh,cluster_bvh_cache,cluster_bvh_validation,virtual_cache};
+            use renderlab_asset::cluster_bvh as format;
+            let start = std::time::Instant::now();
+            let source_cache = Path::new(source_cache);
+            let source = cluster_bvh_cache::load_geometry(source_cache,Path::new(source_manifest),virtual_limits)?;
+            let source_us = start.elapsed().as_micros();
+            let settings = cluster_bvh::Settings{errors:errors.split(',').map(str::parse).collect::<Result<Vec<f32>,_>>()?,limits:format::Limits::default()};
+            let cooked = cluster_bvh_cache::cook(&source,source_cache,Path::new(cache),Path::new(manifest),&settings,virtual_limits)?;
+            let b = &cooked.bvh;
+            let mut deterministic = None;
+            let mut validation = None;
+            let verify = std::time::Instant::now();
+            if flags.contains(&"--validate") {
+                let again = cluster_bvh::prepare(&source.package,&settings,virtual_limits,|p|virtual_cache::load_page(source_cache,&source.package.pages[p]))?;
+                deterministic = Some(renderlab_cook::hash_hex(&format::encode(&again,settings.limits)?)==cooked.digest.iter().map(|v|format!("{v:02x}")).collect::<String>());
+                if deterministic != Some(true) {return Err("BVH rebuild is not byte-identical".into());}
+                drop(again);
+                validation = Some(cluster_bvh_validation::validate(b,&source.package,virtual_limits,|p|virtual_cache::load_page(source_cache,&source.package.pages[p]),10_000,8)?);
+            }
+            let levels:Vec<_> = b.levels.iter().map(|l|json!({"mesh":l.mesh,"requested_error":l.requested_error,"max_error":l.max_error,"clusters":l.leaves.count,"triangles":b.level_leaves[l.leaves.range(b.level_leaves.len()).unwrap()].iter().map(|&id|u64::from(b.leaves[id as usize].indices.count/3)).sum::<u64>()})).collect();
+            println!("{}",json!({"algorithm":String::from_utf8_lossy(cluster_bvh::ALGORITHM),"source_digest":source.digest.iter().map(|v|format!("{v:02x}")).collect::<String>(),"source_rla_version":source.rla_version,"source_rvg_version":source.rvg_version,"bvh_version":format::VERSION,"digest":cooked.digest.iter().map(|v|format!("{v:02x}")).collect::<String>(),"cache_hit":cooked.cache_hit,"gpu_bytes":b.gpu_bytes(),"encoded_bytes":b.gpu_bytes()+32,"nodes":b.nodes.len(),"leaves":b.leaves.len(),"positions":b.positions.len(),"indices":b.indices.len(),"levels":levels,"deterministic_rebuild":deterministic,"timings_us":{"load_source":source_us,"build":cooked.build_us,"cook_including_publication":cooked.total_us,"verification":verify.elapsed().as_micros(),"total":start.elapsed().as_micros()},"validation":validation}));
+        },
         ["m4-register", directory] => renderlab_cook::virtual_fixtures::register(Path::new(directory))?,
         ["m4-cook", source, cache, manifest] | ["m4-cook", source, cache, manifest, "--triangles64"] => {
             use renderlab_cook::{virtual_cache,virtual_cook};
