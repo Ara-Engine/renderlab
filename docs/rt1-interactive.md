@@ -2,6 +2,11 @@
 
 2026-11-07 UTC. Base `bce1e39`, branch `t3/rt1-interactive-default`.
 
+**Later ruling:** [RT1c](rt1c-rt-default.md) applies Islam's HRT floor to the RT
+path. The VSM false-shadow gap below is now informative and non-blocking. Defaults
+remain unchanged because RT1c confirms an S2 +4-stop final-image RMS miss against
+HRT1. The original diagnosis and numbers below remain historical evidence.
+
 **RT1 is incomplete. No production rendering change or default promotion is
 retained.** F0's recorded miss mixes an obsolete receiver origin with
 pixel-footprint integration error. Two of the frozen Interactive witnesses

@@ -2,6 +2,11 @@
 
 2026-11-07 UTC. Branch `t3/rt1b-footprint`, from main `554a662`.
 
+**Later ruling:** [RT1c](rt1c-rt-default.md) uses HRT as the RT shadow floor; the
+VSM gap is no longer a blocker. This document preserves the earlier experiment's
+scores and screening decision. RT1c's current-source S2 final-image witness is
+the reason defaults remain unchanged after the ruling.
+
 **The first footprint implementations fail the static quarry gate.** They reduce
 partial-shadow RMS while introducing false shadows on previously lit receivers.
 The bounded adjacency walk also costs much more than the previous fast setup.
