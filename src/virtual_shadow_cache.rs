@@ -24,12 +24,22 @@ pub(super) const QUEUE_TAIL: u64 = 128;
 /// Screen constants of this module (WGSL `override VSC_*`).
 pub(super) const CONSTANTS: &str = "VSC_";
 
-/// The exact module with shaders/virtual_shadow_cache.wgsl appended.
+/// The exact module with shaders/virtual_shadow_cache.wgsl appended. Tests may substitute a
+/// variant of the cache file through `RENDERLAB_VSC_SHADER`, as `RENDERLAB_VSM_SHADER` does for
+/// the exact lookup.
 pub(super) fn surface_source() -> String {
+    #[cfg(test)]
+    let variant = std::env::var("RENDERLAB_VSC_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    #[cfg(not(test))]
+    let variant: Option<String> = None;
     format!(
         "{}\n{}",
         shader_source(),
-        include_str!("../shaders/virtual_shadow_cache.wgsl")
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_cache.wgsl"))
     )
 }
 
