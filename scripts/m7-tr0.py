@@ -13,6 +13,7 @@ import ctypes
 import datetime as dt
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -1150,8 +1151,6 @@ def score(args):
             if key is not None:
                 if meta.get("camera_background") != [0., 0., 0.]:
                     raise ValueError("reference must apply black to primary misses before integration")
-                if meta.get("archive_sha256") and digest(archive) != meta["archive_sha256"]:
-                    raise ValueError("reference archive differs from its provenance")
                 references[key] = (archive, meta)
     if not references:
         raise ValueError("no lossless zero-shutter references available; no quality score can be published")
@@ -1222,15 +1221,23 @@ def score(args):
             if age.shape != (1080, 1920) or age.dtype != np.uint8:
                 raise ValueError("invalid external geometry-age buffer")
         if archive != cached_archive:
-            with np.load(archive) as loaded:
+            # Validate exactly the bytes decoded, once per loaded snapshot.
+            # Unused archives need no bulk read, and hashing does not cause a
+            # separate second disk pass over every selected reference.
+            payload = archive.read_bytes()
+            archive_sha = hashlib.sha256(payload).hexdigest()
+            if meta.get("archive_sha256") and archive_sha != meta["archive_sha256"]:
+                raise ValueError("reference archive differs from its provenance")
+            with np.load(io.BytesIO(payload)) as loaded:
                 cached_arrays = {k: loaded[k] for k in loaded.files
                                  if k in ("L0", "L1", "D0", "D1", "visibility", "hit") or k.startswith("pop_")}
+            del payload
             if recipe.get("scene") == "S2G":
                 if "hit" not in cached_arrays or not meta.get("population_instances"):
                     raise ValueError("S2G scoring requires reference geometry and registered material populations")
                 for name, instances in meta["population_instances"].items():
                     cached_arrays["pop_" + name] = np.isin(cached_arrays["hit"][..., 0], instances)
-            cached_archive, cached_sha = archive, digest(archive)
+            cached_archive, cached_sha = archive, archive_sha
         with contextlib.nullcontext(cached_arrays) as ref:
             scale = registered_scale
             mean = (ref[prefix + "0"] + ref[prefix + "1"]) * .5 * scale

@@ -2,7 +2,7 @@
 
 2026-11-07, base `708e87c`, branch `t3/m7-tr0`. Measurement tooling only; no renderer or default changes. Contract: [M7](milestone-7.md), [design §6–8](m7-design.md), [U0](m7-u0.md) and [the recorded T1b experiment](m6-temporal-gpu.md#s2-t1b-camera-motion).
 
-**Status: Q-walk scoring and quiet costs complete; S2G reference scoring in progress.** All 60 original T1b checkpoints have new black-primary physical-target comparisons, and all eight paired S2G native captures are complete. The full S2G physical-reference campaign remains in progress. Missing scores are unknown, not zero or passes. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. A cheap temporal pass or a good hold image alone cannot establish this.
+**Status: Q-walk scoring and quiet costs complete; S2G reference scoring in progress.** All 60 original T1b checkpoints have new black-primary physical-target comparisons, and all eight paired S2G native captures are complete. The 0.25-pixel S2G track is fully scored on both paths (320 native frames); the other tracks' reference campaign remains in progress. Missing scores are unknown, not zero or passes. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. A cheap temporal pass or a good hold image alone cannot establish this.
 
 ## What is actually registered
 
@@ -162,6 +162,32 @@ The targeted check also records thresholded **background error extent**: centre 
 
 Full-frame physical reference, T1b black replay, Epic on both paths and High comparison/error sheets are retained and inspected at frames **64 and 128**, at L0 and L4, under `E:/renderlab-work/m7-tr0/inspect/`. They use one fixed 0–64-code absolute-error scale, with saturation explicitly labelled and split-half reference differences shown separately. Per-sheet JSON pins every input hash. These support the silhouette and whole-image audit; they do not turn sparse checkpoint scoring into a complete movie certification.
 
+## S2G quarter-pixel track: complete physical-target scores
+
+`g25-e-n-s1` and `g25-e-r-s1` each score **160/160 frames**, with no missing reference, against D8-qualified zero-shutter targets. These use current reference-centre populations at all ages; only the explicitly named F2/F6 rows apply the shared offline geometry ages. T1b was not run on this scene. Values below are F0 codes unless labelled otherwise.
+
+| Measure | TSR Epic, no RT | TSR Epic, HRT |
+|---|---:|---:|
+| All-frame covered L0 RMS, p50 / p95 | 6.0192 / 6.3036 | 12.2724 / 12.6189 |
+| Frame 64 covered L0 / L4 RMS | 5.9036 / 5.9474 | 12.1110 / 7.7598 |
+| Frame 64 metal L0 / L4 RMS | 11.3447 / 3.6634 | 26.0397 / 9.0205 |
+| Frame 64 dielectric L0 / L4 RMS | 2.9944 / 0.4063 | 4.3814 / 0.5842 |
+| Frame 64 edge L0 / L4 RMS | 16.4307 / 31.4413 | 19.1317 / 31.5886 |
+| Frame 64 background-centre L0 / L4 RMS | 1.3202 / 3.7130 | 1.3185 / 3.7091 |
+| Revealed covered L0, age 3 / 7 | 11.1681 / 8.5865 | 19.7145 / 16.2605 |
+| Revealed background-centre L0, age 7 | 38.8100 | 38.7895 |
+| +8 changed-mask L0 / L4 RMS, frame 72 | 12.2912 / 6.7295 | 23.9935 / 11.0446 |
+| +8 changed-mask L0 signed mean / SE | -6.5529 / 0.04016 | -12.9202 / 0.07790 |
+| Moving F6 L0 residual, p50 / p95 | 0.6987 / 0.7804 | 1.1332 / 1.2177 |
+| Hold 80→81 covered/same-instance, age ≥8 L0 / L4 step | 0.19470 / 0.09368 | 0.34653 / 0.14718 |
+| Frame 64 metal / dielectric highlight energy ratio | 0.09408 / 0.77545 | 0.41280 / 0.77634 |
+| Frame 95 metal / dielectric highlight energy ratio | 0.09034 / 0.79880 | 0.43647 / 0.79268 |
+| Full-image self-final settle proxy, frames | 0 | 0 |
+
+RMS rows subtract split-half reference noise; F6 subtracts consecutive physical-reference changes. F2 age-3 / age-7 covered pools contain **47,959 / 46,438 pixels**, and age-7 background contains **7,656**. The fixed 56→64 changed mask contains **66,727** pixels. Hold 80→81 uses **1,341,774** shared covered pixels. Highlight ratios use the current reference's top-5% material masks with no gain fit. All per-frame populations, raw errors, uncertainty, centroid/peak drift, background bands/extents and age pools remain in the JSON/CSV bar.
+
+The self-final proxy is the earlier full-image diagnostic (mean <0.5 and p99 <4 relative to the last held frame), not a film-settle result or an equivalent of the original Exact gate. A stable image can retain a large physical error. Whole-frame/error sheets at 64 and 95, L0 and L4, have been inspected. These combined final-colour errors include lighting/material/shadow differences as well as reconstruction; the two paths' difference is retained without attributing it solely to TSR. After scoring and inspection, both native raw inputs were hash-recorded and deleted (**2,654,208,000 bytes**). Regeneration recipes, runtime/camera/exposure/jitter checks and all summaries remain.
+
 ## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
@@ -235,6 +261,8 @@ TR0 pins D8 and reuses U0b's accepted `s2g-frame-zero` archive. The new physical
 States 1 and 2 also pass their own strict replay. Every subsequent production state runs in its own test invocation so the first-case replay guard covers **every state**, with separate short leases. The camera campaign is running outside quiet windows, alternating with U0b's bounded work. A cooperative `gpu-defer.txt` gate can stop the next acquisition without interrupting or releasing an active state.
 
 The imported f0 metadata serializes its f32 FOV (`0.7853981852531433` radians), while the registered recipe retains the original f64 literal (`0.7853981633974483`). Both are exactly **f32 bits 1061752795**. Scoring now checks those effective bits, consistent with the tracer's `View` input and the registration/deduplication keys. A two-frame CPU control passes and the adjacent representable f32 angle is rejected; no tolerance is widened or angle fitted. Per-frame score rows retain both literals and the effective bits. The inherited Unreal/T1b near-clip discrepancy remains separately disclosed.
+
+The scorer checks SHA256 on the exact in-memory archive snapshot it decodes, rather than eagerly reading every unused reference and then reading selected files again. A full-resolution two-frame CPU replay preserves **all per-frame rows, F2 pools and flicker fields exactly** (`s2g/archive-snapshot-readback.json`). Its wall timings are explicitly ineligible for a speed claim; the retained change reduces bulk reads without changing score arithmetic or weakening input identity.
 
 A three-state saved-replay batching experiment timed out at 120 seconds after its first image and was discarded. The validated single-state invocation then timed out at the same pose (camera-0.25px frame 55). Their first mean, both halves, SE and all geometry bytes are hash-identical; neither completed strict replay or is accepted. Concurrent foreign `stillkit` compilation is recorded, but no cause is assigned to the replay stall. Root authorized **600-second functional per-state guards**, with 11-minute shared reservations to fit the guard and setup. These are correctness runs, with timing ineligible; production stays one state per process. No foreign compiler is paused or killed.
 
