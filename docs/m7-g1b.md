@@ -276,12 +276,16 @@ A dash means no valid visible samples at that pose.
 |---|---:|---:|---:|---:|
 | First frame after a cut | 1.95 / 2.75 (cold, no refill) | 6.82 / 9.98 (cold, refill S = 4) | 10.59 / 9.51 (incoming cut, warm world) | 49.56 / 101.05 |
 | Pan residual change, mean / max, cold start | **8.55 / 10.43** | **8.55 / 10.44** | — | — |
-| Pan residual change, mean / max, non-RT default refill, cold start | — | ⟨Q2 motion2⟩ | — | — |
-| Pan residual change, mean / max, warm (U0b's protocol) | ⟨Q2⟩ | ⟨Q2⟩ | 20.18 / 45.84 | 166.17 / 191.52 |
+| Pan residual change, mean / max, non-RT default refill, cold start | — | **10.26 / 17.84** | — | — |
+| Pan residual change, mean / max, warm (U0b's protocol) | **8.55 / 10.43** | **8.55 / 10.44** | 20.18 / 45.84 | 166.17 / 191.52 |
 
 **Pan definition.** The 9-frame pan at the gaps pose moves 2 cm a frame. The value is the frame-to-frame change of the floored relative residual over covered non-edge pixels, as in bench-motion.
 - **Cache-off control:** 244.26 / 285.91 here, 245.58 / 287.43 in U0b's control, so the two metrics agree.
 - **Warm against cold:** U0b's pan starts from warm Lumen and TSR histories. G1b's original pan empties the cache first, a harder start.
+- **Results (M, Q2 `motion2`, deterministic).**
+  - Without the refill, the warm and cold pans are identical, because a reset's first frame already holds settled values.
+  - The non-RT default's refill raises the cold pan's first transitions (max 17.8%). It is still under Lumen HW's warm pan and nine times under Lumen SW's.
+  - The 128-direction, rotated, blended variant reads 6.77 / 9.69.
 
 ### 4.3 Correction to G1's scores (M)
 
