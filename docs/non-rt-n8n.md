@@ -1,5 +1,7 @@
 # N8n: a surface-keyed visibility cache for the non-RT virtual-shadow pass
 
+**Follow-up: [N8o](non-rt-n8o.md)** makes Surface deterministic (every phase hash-equal across visits and processes) and its caster invalidation exact (a rolled frame equals a fresh lookup byte for byte at a static camera; with camera history every difference is reuse), and caster-moving frames cheaper than Exact's (1.56-1.65 against 1.68-1.71 ms). It stays opt-in: on the quarry it is below Exact on four of five film-reference measures (above VSM on all), and camera motion still costs about 1.04 ms.
+
 Follow-up unit to [N8m](non-rt-n8m.md), 2026-11-07 UTC, base main `f40cc5b`, branch `t3/n8n-surface-cache`. Brief (Islam, 2026-11-07): the camera moves, but the sun and the casters do not, so a receiver point's shadow does not change. Key the exact walk's results by the receiver's surface point instead of its pixel, walk only the misses, and invalidate on sun changes (N8e's hysteresis) and caster motion (N8f's reach test). It need not be byte-identical, but it must beat Unreal VSM on every measure, including temporal stability under camera motion, within the memory budget. Make it the default only if it beats VSM everywhere. Labels: **M** measured here, **I** inference.
 
 ## Result
