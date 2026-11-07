@@ -353,8 +353,10 @@ impl Renderer {
                 for slot in &mut self.programs {
                     slot.modules.traced = None;
                     slot.modules.temporal = None;
+                    slot.modules.streamed = None;
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
+                    slot.pipelines.streamed = None;
                 }
                 self.primary_sources = None;
                 if let Some(primary) = &mut self.primary {
@@ -398,8 +400,10 @@ impl Renderer {
                 for (slot, (modules, temporal)) in self.programs.iter_mut().zip(traced) {
                     slot.modules.traced = Some(modules);
                     slot.modules.temporal = Some(temporal);
+                    slot.modules.streamed = None;
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
+                    slot.pipelines.streamed = None;
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -641,6 +645,9 @@ pub(super) struct PrimaryState {
     check_layout: Owned<wgpu::PipelineLayout>,
     array_bindings: Owned<wgpu::BindGroupLayout>,
     material_bindings: Owned<wgpu::BindGroupLayout>,
+    /// `material_bindings` plus the texture residency bindings 18 and 19.
+    streamed_bindings: Owned<wgpu::BindGroupLayout>,
+    streamed_layouts: [Owned<wgpu::PipelineLayout>; 2],
     trace_layouts: [Owned<wgpu::PipelineLayout>; 2],
     shade_layouts: [Owned<wgpu::PipelineLayout>; 2],
     frame: Option<(Buffer, [u8; FRAME_BYTES])>,
@@ -666,8 +673,11 @@ pub(super) struct PrimaryState {
     film_layouts: FilmLayouts,
     /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
     pub film: Option<FilmState>,
-    /// Created by the first traced frame.
+    /// Created by the first frame that streams textures.
     pub residency: Option<ResidencyGpu>,
+    /// This frame streams textures: it shades with the program's streamed pipelines,
+    /// whose helpers record residency requests, and binds the residency state.
+    pub requests: bool,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -868,26 +878,34 @@ impl PrimaryState {
                 wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             ))
         };
-        let material_bindings = group(
-            "primary draw materials",
+        let material_entries = [
+            per_draw(read(10, 48)),
+            per_draw(texture(11, filtered)),
+            sampler(12),
+            per_draw(texture(13, filtered)),
+            sampler(14),
+            per_draw(texture(15, filtered)),
+            sampler(16),
+            // Each draw's program parameter block; read only by programs declaring one.
+            per_draw(read(17, crate::program::PARAMETER_BYTES as u64)),
+        ];
+        let material_bindings = group("primary draw materials", &material_entries);
+        // Frames that stream textures add the residency words and counters and the
+        // shared level probe (texture_residency.rs); default frames never bind them.
+        let streamed_bindings = group(
+            "primary draw materials, texture residency",
             &[
-                per_draw(read(10, 48)),
-                per_draw(texture(11, filtered)),
-                sampler(12),
-                per_draw(texture(13, filtered)),
-                sampler(14),
-                per_draw(texture(15, filtered)),
-                sampler(16),
-                // Each draw's program parameter block; read only by programs declaring one.
-                per_draw(read(17, crate::program::PARAMETER_BYTES as u64)),
-                // Texture residency words, requests and misses; the shared level probe.
-                buffer(
-                    18,
-                    wgpu::BufferBindingType::Storage { read_only: false },
-                    (texture_residency::WORDS * 4) as u64,
-                ),
-                texture(19, filtered),
-            ],
+                &material_entries[..],
+                &[
+                    buffer(
+                        18,
+                        wgpu::BufferBindingType::Storage { read_only: false },
+                        (texture_residency::WORDS * 4) as u64,
+                    ),
+                    texture(19, filtered),
+                ],
+            ]
+            .concat(),
         );
         let layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
             ledger.own(
@@ -919,6 +937,18 @@ impl PrimaryState {
                     ],
                 )
             }),
+            streamed_layouts: shade_bindings.each_ref().map(|g| {
+                layout(
+                    "primary streamed shading ABI",
+                    &[
+                        Some(g),
+                        Some(&array_bindings),
+                        Some(&streamed_bindings),
+                        Some(lighting),
+                    ],
+                )
+            }),
+            streamed_bindings,
             fresh_layout: layout(
                 "primary fresh visibility ABI",
                 &[Some(&fresh_bindings), None, None, Some(lighting)],
@@ -973,6 +1003,7 @@ impl PrimaryState {
             bindings_generation: 0,
             film: None,
             residency: None,
+            requests: false,
             retired: vec![],
         }
     }
@@ -1147,10 +1178,37 @@ impl PrimaryState {
         shading: usize,
         cache: Option<&wgpu::PipelineCache>,
     ) -> Owned<wgpu::ComputePipeline> {
+        self.shading_pipeline(device, ledger, module, &self.shade_layouts[shading], cache)
+    }
+    /// `shade_pipeline` of a streamed (`Stage::TracedStreamed`) module.
+    pub fn streamed_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        shading: usize,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::ComputePipeline> {
+        self.shading_pipeline(
+            device,
+            ledger,
+            module,
+            &self.streamed_layouts[shading],
+            cache,
+        )
+    }
+    fn shading_pipeline(
+        &self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        layout: &wgpu::PipelineLayout,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Owned<wgpu::ComputePipeline> {
         ledger.own(
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("traced program shading"),
-                layout: Some(&self.shade_layouts[shading]),
+                layout: Some(layout),
                 module,
                 entry_point: Some("primary_shade_tiles"),
                 compilation_options: Default::default(),
@@ -1972,7 +2030,8 @@ impl Renderer {
     ) {
         use crate::material::TextureStorage;
         use texture_residency::{SLOTS, WORDS};
-        if self.primary.as_ref().unwrap().residency.is_none() {
+        let requests = self.primary.as_ref().unwrap().requests;
+        if requests && self.primary.as_ref().unwrap().residency.is_none() {
             let buffer = Buffer::new(
                 self,
                 "texture residency words and requests",
@@ -1997,7 +2056,8 @@ impl Renderer {
             .chain(std::iter::repeat(default))
             .take(TRACED_DRAWS as usize)
             .collect();
-        let mut key = Vec::with_capacity(SLOTS);
+        // Whether group 2 binds the residency state or its stand-ins.
+        let mut key = vec![(usize::MAX, u64::from(requests))];
         let mut words = Vec::with_capacity(SLOTS);
         let mut ids = Vec::with_capacity(SLOTS);
         let survey = self.residency.survey;
@@ -2019,13 +2079,16 @@ impl Renderer {
             }
         }
         let state = self.primary.as_ref().unwrap();
-        let residency = state.residency.as_ref().unwrap();
-        if residency.words != words {
+        let residency = state.residency.as_ref().filter(|_| requests);
+        if let Some(residency) = residency
+            && residency.words != words
+        {
             let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
             self.queue.write_buffer(&residency.buffer.value, 0, &bytes);
             uploads.materials += bytes.len() as u64;
             uploads.write_calls += 1;
         }
+
         let g = state.geometry.as_ref().unwrap();
         let materials = if g.materials.is_none() || g.material_key != key {
             use wgpu::BindingResource as R;
@@ -2044,7 +2107,7 @@ impl Renderer {
                 .iter()
                 .map(|m| m.parameters.buffer.as_entire_buffer_binding())
                 .collect();
-            let entries = [
+            let mut entries: Vec<_> = [
                 (10, R::BufferArray(&factors)),
                 (11, R::TextureViewArray(&views[0])),
                 (12, R::SamplerArray(&samplers[0])),
@@ -2053,14 +2116,30 @@ impl Renderer {
                 (15, R::TextureViewArray(&views[2])),
                 (16, R::SamplerArray(&samplers[2])),
                 (17, R::BufferArray(&parameters)),
-                (18, residency.buffer.value.as_entire_binding()),
-                (19, R::TextureView(&residency.probe)),
             ]
-            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
+            .into_iter()
+            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+            .collect();
+            if let Some(r) = residency {
+                entries.extend([
+                    wgpu::BindGroupEntry {
+                        binding: 18,
+                        resource: r.buffer.value.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 19,
+                        resource: R::TextureView(&r.probe),
+                    },
+                ]);
+            }
             Some(self.ledger.own(
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("primary draw materials"),
-                    layout: &state.material_bindings,
+                    layout: if residency.is_some() {
+                        &state.streamed_bindings
+                    } else {
+                        &state.material_bindings
+                    },
                     entries: &entries,
                 }),
                 ResourceKind::BindGroup,
@@ -2069,9 +2148,10 @@ impl Renderer {
             None
         };
         let state = self.primary.as_mut().unwrap();
-        let residency = state.residency.as_mut().unwrap();
-        residency.words = words;
-        residency.ids = ids;
+        if let Some(residency) = state.residency.as_mut().filter(|_| requests) {
+            residency.words = words;
+            residency.ids = ids;
+        }
         let g = state.geometry.as_mut().unwrap();
         if let Some(materials) = materials {
             // Queued frames keep the group they recorded.
@@ -2097,8 +2177,14 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let program = self.program_slot(self.primary.as_ref().unwrap().program);
-        let pipeline = &program.pipelines.traced.as_ref().unwrap()[shading as usize];
+        let state = self.primary.as_ref().unwrap();
+        let program = self.program_slot(state.program);
+        let set = if state.requests {
+            &program.pipelines.streamed
+        } else {
+            &program.pipelines.traced
+        };
+        let pipeline = &set.as_ref().unwrap()[shading as usize];
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
     /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks

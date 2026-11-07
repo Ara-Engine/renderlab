@@ -753,7 +753,7 @@ fn gpu_visibility_quarry() {
             crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
         )
     };
-    // M3: `residency` full/exact/feedback (default exact) before the uploads, and
+    // M3: `residency` full/exact/feedback (default full) before the uploads, and
     // `survey` to probe anisotropic samples for the sparse-residency projection.
     let mode = m["residency"]
         .as_str()
@@ -762,7 +762,8 @@ fn gpu_visibility_quarry() {
     r.set_texture_residency(match mode.as_deref() {
         Some("full") => TextureResidency::Full,
         Some("feedback") => TextureResidency::Feedback,
-        _ => TextureResidency::Exact,
+        Some("exact") => TextureResidency::Exact,
+        _ => TextureResidency::Full,
     });
     r.residency.survey = m["survey"].as_bool() == Some(true)
         || std::env::var_os("RENDERLAB_RESIDENCY_SURVEY").is_some();

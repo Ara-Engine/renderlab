@@ -2696,11 +2696,23 @@ impl Renderer {
             temporal,
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
-        // Streamed textures (texture_residency.rs): traced and visibility-buffer shading
-        // requests their levels. Raster and temporal passes sample without requests, so
-        // the textures they bind become fully resident first.
-        let streaming = traced && !temporal;
+        // Streamed textures (texture_residency.rs): traced and visibility-buffer frames
+        // that bind any outside Full mode shade with pipelines that request their levels.
+        // Raster and temporal passes sample without requests, so the textures they bind
+        // become fully resident first. Default frames bind none and do none of this.
         let streamed = self.streamed_ids(draws.iter().map(|d| d.material));
+        let streaming = traced
+            && !temporal
+            && !streamed.is_empty()
+            && self.residency.mode != TextureResidency::Full;
+        if streaming {
+            // Admission guarantees one program per traced frame: the first draw's.
+            let program = draws
+                .first()
+                .and_then(|d| d.material)
+                .map_or(self.standard.id(), |m| m.program.id());
+            self.ensure_streamed(program)?;
+        }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {
             self.apply_residency(&[], texture_residency::STEP_BYTES);
@@ -2815,6 +2827,7 @@ impl Renderer {
             }
         }
         if traced {
+            self.primary.as_mut().unwrap().requests = streaming;
             let scopes = OperationScopes::new(&self.device);
             let scene_generation = self
                 .hardware_shadows
@@ -2912,7 +2925,9 @@ impl Renderer {
                 } else {
                     primary_ray_gpu::Shading::Hard
                 };
-                self.encode_request_clear(&mut encoder);
+                if streaming {
+                    self.encode_request_clear(&mut encoder);
+                }
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
         }

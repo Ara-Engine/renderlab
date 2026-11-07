@@ -64,21 +64,24 @@ pub(crate) const STEP_BYTES: u64 = 256 << 20;
 /// fully resident.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextureResidency {
-    /// Every level of every streamed texture.
+    /// The default: streaming off. `try_upload_streamed_texture` uploads every level, as
+    /// `try_upload_texture` does, and shading is exactly the non-streaming path's; streamed
+    /// textures uploaded under another mode become fully resident.
+    #[default]
     Full,
     /// Every streamed frame is verified before it is returned: the renderer waits for the
     /// frame, and if any sample requested a level that was not resident, uploads it and
     /// shades and presents again. No returned frame samples a missing level; the cost is
     /// that the CPU waits for each streamed frame, so its next frame's CPU work no longer
-    /// overlaps this frame's GPU work.
-    #[default]
+    /// overlaps this frame's GPU work (docs/memory-m3.md).
     Exact,
     /// Requests from completed frames decide which levels stay, without waiting. Only
     /// frames the renderer cannot vouch for are verified: a texture's first use, a
     /// target-size change, `mark_camera_cut`, and view changes beyond 5 degrees, 0.25 m
     /// or 1% zoom. Elsewhere a sample may need a level that feedback has not made
-    /// resident yet (on the quarry's motion phases, 6-15 samples in about 300 frames):
-    /// it filters from the finest resident level and is counted as a miss.
+    /// resident yet (on the quarry's motion phases, 15-18 samples in 1,125 frames): it
+    /// filters from the finest resident level, a quality reduction counted as a miss.
+    /// Never a default.
     Feedback,
 }
 
@@ -241,7 +244,8 @@ pub(crate) fn camera_cut(last: Option<ViewKey>, next: ViewKey) -> bool {
 impl Renderer {
     /// Uploads a prepared chain whose levels then stay resident only while the
     /// renderer's `TextureResidency` needs them; the CPU levels are retained for later
-    /// uploads. Extents that are not powers of two upload fully resident.
+    /// uploads. Under `Full` (the default), and for extents that are not powers of two,
+    /// this is `try_upload_texture`: choose a streaming mode before uploading.
     pub fn try_upload_streamed_texture(
         &mut self,
         data: Arc<asset::Texture>,
@@ -255,7 +259,9 @@ impl Renderer {
         )?;
         let preparation = started.elapsed();
         let first = &data.mips[0];
-        let Some(max_top) = max_top(first.width, first.height, data.mips.len() as u32) else {
+        let droppable = max_top(first.width, first.height, data.mips.len() as u32);
+        let Some(max_top) = droppable.filter(|_| self.residency.mode != TextureResidency::Full)
+        else {
             return self.try_upload_texture(&data);
         };
         let poll = self.collect()?;
@@ -266,11 +272,7 @@ impl Renderer {
         let slot = self.free_slot().unwrap();
         let started = Instant::now();
         let scopes = OperationScopes::new(&self.device);
-        let top = if self.residency.mode == TextureResidency::Full {
-            0
-        } else {
-            max_top
-        };
+        let top = max_top;
         let format = texture_format(data.role);
         let resident = self.create_resident(&data, format, top, top..data.mips.len() as u32);
         let id = self.residency.next_id;
@@ -312,7 +314,8 @@ impl Renderer {
         Ok(Some(texture))
     }
 
-    /// Selects how streamed textures stay resident; takes effect at the next frame.
+    /// Selects how streamed textures stay resident. It applies to textures uploaded
+    /// afterwards; streamed textures already uploaded follow it from the next frame.
     pub fn set_texture_residency(&mut self, mode: TextureResidency) {
         self.residency.mode = mode;
     }
@@ -599,15 +602,12 @@ impl Renderer {
         };
         let cut = std::mem::take(&mut self.residency.cut) | camera_cut(self.residency.view, next);
         self.residency.view = Some(next);
-        !ids.is_empty()
-            && match self.residency.mode {
-                // Full residency cannot miss.
-                TextureResidency::Full => false,
-                TextureResidency::Exact => true,
-                TextureResidency::Feedback => {
-                    cut || ids.iter().any(|&id| !self.residency.observed(id))
-                }
-            }
+        match self.residency.mode {
+            // Full residency cannot miss.
+            TextureResidency::Full => false,
+            TextureResidency::Exact => true,
+            TextureResidency::Feedback => cut || ids.iter().any(|&id| !self.residency.observed(id)),
+        }
     }
 
     /// Copies the frame's counters into the slot's readback, mapped with the submission;

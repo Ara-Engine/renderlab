@@ -3,34 +3,51 @@
 2026-11-07 UTC. Base `f09d2d0`, merged with main `311075c` (N8l, N8k) before the
 final checks. Branch `t3/m3-texture-residency`.
 
-Streamed textures now keep only the source mip levels their own samples touch. Requests
-are recorded inside the programmable sampling helpers, so user programs are covered.
-Final images are **byte-identical** to main on every bench, and **no returned frame
-samples a missing level**. Results:
+**Merged opt-in, streaming off by default (Islam, 2026-11-07).** `TextureResidency::Full`
+is the default in the renderer, the viewer and every test and bench. The default frame
+is main's frame: the same textures, the same shading module source, group-2 layout and
+bind group. No residency buffer, probe, readback or wait. Residency code is compiled
+only into a separate streamed pipeline pair, built the first time a frame streams
+textures. `Feedback` is never a default: its rare blurrier samples in motion are a
+quality reduction.
 
-- **Memory.** At the quarry's static wide pose, textures fall from 1,024 to 816 MiB.
-  Reserved memory falls by **192.0 / 256.0 / 192.0 MiB** (no-RT / RT / traced Virtual),
-  to 3,247.7 / 2,385.2 / 3,066.1 MiB, against Unreal's recorded 3,912 / 5,410 / 3,946.
-  The motion phases request level 0 sporadically; the three reduced scans then grow
-  back to their full chains and keep them for the 120-frame hold window. After
-  the motion phases, residency equals main's. Peaks are not above main's. Close and
-  reverse quarry views need every level of all twelve scans at 16x anisotropy.
+Opt in with `Renderer::set_texture_residency(TextureResidency::Exact)` before uploading
+through `try_upload_streamed_texture`. Then streamed textures keep only the source mip
+levels their own samples touch. Requests are recorded inside the programmable sampling
+helpers, so user programs are covered. Images stay **byte-identical** and **no returned
+frame samples a missing level**. Results:
+
+- **Default proof** (one batched lease, same harness, main and candidate interleaved
+  A B A B):
+  - All 12 quarry SHA-256 fields match main's (hit/count/HDR/world, both poses, three
+    paths).
+  - Allocated and reserved memory are byte-equal to main's: 3,344.297 / 2,509.556 /
+    3,164.990 MiB allocated. The same allocations by name and size; their report order
+    varies between runs of main itself.
+  - Shading-pass time, frame spans and motion wall-clock are within noise of main's on
+    every path and phase ([below](#default-full-against-main)).
+- **Opt-in memory.** At the quarry's static wide pose, textures fall from 1,024 to
+  816 MiB.
+  - Reserved memory falls by **192.0 / 256.0 / 192.0 MiB** (no-RT / RT / traced
+    Virtual), to 3,247.7 / 2,385.2 / 3,066.1 MiB, against Unreal's recorded 3,912 /
+    5,410 / 3,946.
+  - The motion phases request level 0 sporadically. The three reduced scans then grow
+    back to their full chains and keep them for the 120-frame hold window, so after the
+    motion phases residency equals main's.
+  - Peaks are not above main's. Close and reverse quarry views need every level of all
+    twelve scans at 16x anisotropy.
 - **Anisotropy.** On NVIDIA 617.14, an anisotropically filtered mip tail differs from the
   full chain at its own base level, so anisotropic textures keep one more level than
-  they touch. With anisotropy 1 (the viewer's default), the quarry's close views keep
-  704 instead of 1,024 MiB, also byte-identical.
-- **Startup.** Loads upload only each scan's 64x64-and-smaller tail. Post-upload reserved
-  memory falls by 1,024 MiB, and the upload phase takes 8.7-9.2 s instead of
-  9.6-9.9 s. The first frame uploads what it samples before it is returned.
-- **Cost, a measured miss.** The sampling helpers cost **1.3-5.7%** of the traced
-  shading pass (resolved, 0.004-0.020 ms). Frame-span ranges overlap main's on no-RT;
-  RT and traced-Virtual medians rose 2-9% with overlapping ranges.
-  - The default `TextureResidency::Exact` waits for each streamed frame before
-    returning it, which costs wall-clock throughput in motion: **+45% to +240% per
-    frame**.
-  - `TextureResidency::Feedback` avoids the wait but shows 15-18 missed samples per
-    1,125 frames. `Full` saves nothing.
-  - Choosing the default is Islam's decision; see [Cost](#cost-per-stage).
+  they touch. At anisotropy 1, the quarry's close views keep 704 instead of 1,024 MiB,
+  also byte-identical.
+- **Opt-in startup.** Loads upload only each scan's 64x64-and-smaller tail, so
+  post-upload reserved memory falls by 1,024 MiB. The upload phase takes 8.7-9.2 s
+  instead of 9.6-9.9 s. The first frame uploads what it samples before it is returned.
+- **Opt-in cost (measured, why it is not the default):**
+  - The recording helpers cost 1.3-5.7% of the traced shading pass (0.004-0.020 ms).
+  - `Exact` waits for each streamed frame before returning it: +45% to +240%
+    wall-clock per frame in motion.
+  - `Feedback` avoids the wait but shows 15-18 missed samples per 1,125 frames.
 
 The probe measurements behind the anisotropic rule, the first design's misses, and a
 rejected follow-up are below.
@@ -91,7 +108,10 @@ per-(L, t) breakdown above found the one-level margin.
 
 `Renderer::try_upload_streamed_texture(Arc<asset::Texture>)` keeps the prepared chain on
 the CPU, shared with the caller rather than copied. `Prepared` (viewer and test loader)
-now moves its decoded chains into `Arc`s and uses it.
+now moves its decoded chains into `Arc`s and uses it. Under `Full` (the default) it is
+`try_upload_texture`: the same immutable full texture as main, with no CPU copy kept. A
+mode is therefore chosen before uploading. Switching a renderer back to `Full` makes
+its streamed textures fully resident from the next frame.
 
 A streamed texture is a GPU texture holding source levels `top..`. A residency change
 creates the new texture and queues the levels it lacks from the CPU. It also copies the
@@ -105,9 +125,16 @@ fully resident, because the probe scale and the tail's level-0 extent must be ex
 ### Requests at the programmable sampling boundary
 
 Programs reach textures only through the engine's helpers; they declare no bindings.
-Each `sample_*_grad` helper of the traced/visibility-buffer API
-(`shaders/program_traced.wgsl`) records a request for its own sample. The mesh-uv
-`sample_*` forms call them, so user-chosen coordinates and footprints are covered:
+Default frames compose the traced API (`shaders/program_traced.wgsl`) exactly as main
+does.
+
+A frame that binds streamed textures outside `Full` shades with the program's
+*streamed* pipelines instead (`Renderer::ensure_streamed`, built lazily, dropped on
+reload). Their composition (`Stage::TracedStreamed`) replaces only the traced
+`sample_*_grad` helpers with `shaders/program_traced_residency.wgsl`, on a group-2
+layout with two extra bindings. Each of those helpers records a request for its own
+sample. The mesh-uv `sample_*` forms call them, so user-chosen coordinates and
+footprints are covered:
 
 1. Load the slot's residency word: zero for untextured slots and textures from
    `try_upload_texture`.
@@ -151,8 +178,12 @@ level 1 or 2. Those pixels filtered from the finest resident level: a byte diffe
 in frames no hash covers. They are isolated pixels whose footprints select
 magnification, consistent with near-degenerate ray-differential gradients.
 
-**Default: `TextureResidency::Exact`.** Each streamed frame is encoded and submitted
-unchanged, including presentation, timestamps and its counter copy. Then:
+**Default: `TextureResidency::Full`.** It keeps every level, never waits, and runs
+no residency code.
+
+**Opt-in `TextureResidency::Exact`**, for applications that want the memory and accept
+the throughput cost. Each streamed frame is encoded and submitted unchanged, including
+presentation, timestamps and its counter copy. Then:
 
 1. The renderer waits for the frame and reads its counters.
 2. If any sample requested a level that was not resident, it uploads the requested
@@ -165,16 +196,15 @@ Shading reads only hit records, visibility counts and materials, and presentatio
 the HDR target, so repeating them is exact. No other pass runs twice, and timestamps
 are the frame's own. The cost is that the CPU waits for each streamed frame (below).
 
-**Opt-in `TextureResidency::Feedback`.** It waits only on frames the renderer cannot
-vouch for:
+**Opt-in `TextureResidency::Feedback`, never a default.** It waits only on frames the
+renderer cannot vouch for:
 
 - the first frame binding a never-sampled texture;
 - target-size changes and `Renderer::mark_camera_cut`;
 - view changes beyond 5 degrees, 0.25 m or a 1% zoom.
 
-Its other misses are counted in `ResidencyStats`.
-
-**`TextureResidency::Full`** keeps every level and never waits.
+Its other misses filter from the finest resident level, a quality reduction, and are
+counted in `ResidencyStats`.
 
 ### Full-resident fallback
 
@@ -196,19 +226,24 @@ records or dispatch, and the program API is unchanged. It does constrain:
 
 1. **Textures are sampled only through the engine helpers.** This was already the
    program contract; residency relies on it.
-2. **Each helper call costs extra work.** Every call loads its slot word and branches.
-   For streamed textures it also takes one probe sample with the material's sampler
-   from a cache-resident 64x64 texture, plus an atomic load (and rarely an atomic max).
-   This cost is per call, so programs that sample many times pay it per sample.
-3. **Data-dependent sampling verifies in several rounds.** A program that derives
+2. **Streaming frames' helper calls cost extra work; default frames' cost nothing.** In
+   streamed pipelines, every call loads its slot word and branches. For streamed
+   textures it also takes one probe sample with the material's sampler from a
+   cache-resident 64x64 texture, plus an atomic load (and rarely an atomic max). The
+   cost is per call, so programs that sample many times pay it per sample.
+3. **Helper names `rl_*`, `RL_*`, `primary_residency`, `primary_level_probe` and
+   `PrimaryResidency` are reserved.** A program defining one composes in default frames
+   but is rejected (`Error::Shader`) by the first streaming frame. That frame builds
+   the streamed pipelines lazily, outside the program's reload transaction.
+4. **Data-dependent sampling verifies in several rounds.** A program that derives
    coordinates from another sample (parallax, flow maps) can request a different level
    once its first sample is exact. Verification repeats, at most 8 rounds.
-4. **Raster and temporal frames are full-resident.** Their helpers record nothing, so
+5. **Raster and temporal frames are full-resident.** Their helpers record nothing, so
    the textures they sample are made fully resident first. They save no memory there.
-5. **Anisotropic samplers keep one extra level.** The margin is measured on NVIDIA
+6. **Anisotropic samplers keep one extra level.** The margin is measured on NVIDIA
    617.14. On other hardware, rerun `gpu_residency_probe` before relying on byte
    identity; a startup calibration would make this automatic (next steps).
-6. **The counter copy is chosen by `input.pixel`.** Programs cannot observe this. A future
+7. **The counter copy is chosen by `input.pixel`.** Programs cannot observe this. A future
    helper evaluated at secondary ray hits (R4 in [programmable-shading.md](programmable-shading.md))
    needs another stable hash there.
 
@@ -224,8 +259,9 @@ Unreal's recorded DXGI totals are N8h's, not rerun.
 | 0. Main `311075c` (= M2 exactly) | 3,439.7 / 3,512.2 | 2,641.2 / 2,716.4 | 3,258.1 / 3,383.0 |
 | 1. Anisotropic textures full while sampled (first policy) | 3,439.7 (derived) | 2,641.2 (derived) | 3,258.1 (derived) |
 | 2. One-level margin, Feedback (first quarry run) | 3,247.7, but 15 motion misses | 2,385.2, 6 misses | 3,066.1, 6 misses |
-| **3. Margin + Exact (final), p0** | **3,247.7 / 3,484.9** | **2,385.2 / 2,716.3** | **3,066.1 / 3,333.1** |
-| 3. Final, pose 1 after motion | 3,439.7 | 2,641.2 | 3,258.1 |
+| **3. Margin + Exact (opt-in), p0** | **3,247.7 / 3,484.9** | **2,385.2 / 2,716.3** | **3,066.1 / 3,333.1** |
+| 3. Opt-in, pose 1 after motion | 3,439.7 | 2,641.2 | 3,258.1 |
+| **4. Default `Full` (merged), both poses** | **3,439.7 / 3,512.3** (= main) | **2,641.2 / 2,716.3** (= main) | **3,258.1 / 3,333.1** (= main) |
 | Unreal 5.7.4 recorded DXGI | VSM no-RT: 3,912 | HRT: 5,410 | VSM RT enabled: 3,946 |
 
 - Step 1 is derived, not separately run: the survey shows all twelve scans sampled at
@@ -247,12 +283,18 @@ Unreal's recorded DXGI totals are N8h's, not rerun.
 
 Complete buffers were compared, not region averages:
 
-- **Quarry:** all **12 SHA-256 fields** (hit/count/HDR/world, both poses, three paths)
-  of the final binary match main `311075c`. Main's own match M2's.
+- **Quarry, default `Full`:** all **12 SHA-256 fields** (hit/count/HDR/world, both
+  poses, three paths) match main `311075c`, on the merged binary (`ea2bbeb3cdfd`).
+  Main's own match M2's.
+- **Quarry, opt-in `Exact`:** all 12 fields also match main on the opt-in binary
+  (`8a13bea1d4d1`). The pipeline split that followed changed only which composition
+  default frames use. Its opt-in side is rechecked by the camera-cut fixture on the
+  merged binary (below).
 - **S1-S3:** S1's **904** non-timing fields and S2/S3's **72 each** match M1's retained
   scores. These benches are untextured, so this also shows the helper code changes no
   arithmetic.
-- **Camera cut (fixture, `gpu_residency_camera_cut`, all three paths):**
+- **Camera cut (fixture, `gpu_residency_camera_cut`, all three paths, rerun on the merged
+  binary):**
   - The scene is a ground (isotropic 1024²) and a wall (16x anisotropic 512²).
   - Sequence: a mid view (resident from levels 2 and 1), then 128 frames looking away
     (both textures drop to their tails), then a cut to a close view needing ground
@@ -273,6 +315,32 @@ Complete buffers were compared, not region averages:
   isotropic configurations.
 
 ## Cost per stage
+
+### Default `Full` against main
+
+One batched lease ran main and candidate alternately, A B A B, through the same harness
+binary build. That is two processes each, eight visits per path, sixteen visits pooled
+per side. Values are medians of clean visit medians [min-max], in ms.
+
+| Path | Phase | Span: main | Span: default | Shading: main | Shading: default |
+|---|---|---:|---:|---:|---:|
+| no-RT | static | 1.286 [1.270-1.423] | 1.296 [1.277-1.331] | 0.320 [0.318-0.329] | 0.319 [0.318-0.321] |
+| no-RT | move | 2.695 [2.655-3.147] | 2.683 [2.652-2.742] | 0.298 [0.295-0.309] | 0.297 [0.297-0.298] |
+| no-RT | caster | 2.682 [2.639-2.860] | 2.677 [2.641-2.708] | 0.300 [0.296-0.311] | 0.299 [0.299-0.301] |
+| RT | static | 0.878 [0.870-1.078] | 0.874 [0.859-0.929] | 0.357 [0.348-0.422] | 0.349 [0.348-0.355] |
+| RT | move | 0.869 [0.852-0.958] | 0.867 [0.852-0.917] | 0.361 [0.348-0.421] | 0.348 [0.347-0.354] |
+| traced Virtual | static | 1.199 [1.180-1.523] | 1.196 [1.181-1.255] | 0.360 [0.358-0.683] | 0.360 [0.357-0.368] |
+| traced Virtual | move | 2.644 [2.605-3.127] | 2.619 [2.605-3.108] | 0.354 [0.348-0.415] | 0.349 [0.346-0.350] |
+
+Every range overlaps. Frame-span medians shift by under 1%, in both directions. Shading
+medians are equal or lower: up to 3.6% lower on RT, where main's pooled visits include
+contended outliers up to 0.42 ms. The default composes main's shading source, so these
+differences are noise. The turn phase matches static. Motion wall-clock per frame is equal: for example, no-RT camera
+2.76 / 2.86 ms for main against 2.74 / 2.74 for the default, RT 0.93 / 0.96 against
+0.92 / 1.02. The default costs nothing measurable. All rows are in
+`timing-summary-t3.json`.
+
+### Opt-in modes against main
 
 Same harness as M1/M2: RTX 4070 SUPER, NVIDIA 617.14, Vulkan, wgpu 30.0.1, test profile
 (not release-performance data), anisotropy 16. Eight visits per process at pose 0, one
@@ -317,15 +385,10 @@ What these show:
   and regrow on sporadic level-0 requests: 15-34 transitions and 1.0-1.5 GiB of
   uploads per run in both modes.
 
-This misses the brief's "no regression beyond noise" for the shading stage, and badly
-for Exact's throughput. It is recorded, not hidden. The trade-off on this scene:
-
-- **Exact** is byte-exact and never shows a missing level, but halves motion
-  throughput.
-- **Feedback** is nearly free in steady state but shows rare missed samples.
-- **Full** has neither cost nor saving.
-
-The memory gain is 192-256 MiB, and only in static wide views.
+These opt-in costs are why streaming is off by default. `Exact` is byte-exact and
+never shows a missing level, but halves motion throughput. `Feedback` is nearly free
+in steady state but shows rare blurrier samples, a quality reduction, so it is never a
+default. On this scene the memory gain is 192-256 MiB, and only in static wide views.
 
 ### Rejected: sentinel-only reporting
 
@@ -337,6 +400,8 @@ To cut the helper cost, fully resident textures reported only one pixel per 4x4 
 patch is `rejected-sentinel.diff`.
 
 ## Next steps
+
+Lower priority than the moving-camera shadow work; not started.
 
 1. **Extent-preserving sparse residency through Vulkan interop.** A sparse `VkImage` of
    the full extent, wrapped with `create_texture_from_hal` and bound with
@@ -359,11 +424,13 @@ patch is `rejected-sentinel.diff`.
 
 ## Checks
 
-- `cargo test -p renderlab --lib -j 2`: **exit 0, 111 passed, 112 ignored**. This
-  includes five new CPU tests: word packing, hold policy, transition levels,
-  power-of-two admission and cut thresholds.
+- `cargo test -p renderlab --lib -j 2`: **exit 0, 112 passed, 112 ignored**. This
+  includes six new CPU tests: word packing, hold policy, transition levels,
+  power-of-two admission, cut thresholds, and that default traced shading composes
+  without residency code.
 - Fmt passes. All-targets Renderlab Clippy passes with `-D warnings` and M1/M2's
   allowances, on the merged tree.
+- `shaders/program_traced.wgsl` has no diff against main.
 - `gpu_primary_memory_modes`, `gpu_shared_cluster_tables` and `gpu_virtual_fixture` exit
   0. Validation layers stay on, as in M2.
 - No `shaders/virtual_shadow*.wgsl`, `src/virtual_shadow_gpu.rs` or
@@ -383,8 +450,11 @@ Evidence root: `E:/renderlab-work/m3-texture/`.
   `identity.json`.
 - `timing-t1-{before,exact,feedback}/` and `timing-summary-t1.json` hold the timing;
   `timing-t2-*` holds the rejected sentinel screen.
-- `build-identities-cand6.json`: final binary SHA-256 `8a13bea1d4d1`, baseline
-  `8ffc6922a811`.
+- `build-identities-cand6.json` holds the opt-in binary SHA-256 `8a13bea1d4d1` and the
+  baseline `8ffc6922a811`. `build-identities-cand9.json` holds the merged default-`Full`
+  binary, `ea2bbeb3cdfd`.
+- `after-default/`, `timing-t3-{main,cand}-{a,b}/`, `timing-summary-t3.json` and
+  `cut-opt-in/` hold the default proof lease (`proof-step.py`).
 
 ```powershell
 $env:N8_OWNER='m3-texture'; $env:N8_OUT='E:/renderlab-work/m3-texture'
@@ -401,6 +471,10 @@ owned GPU/build job or lease remains.
 `gpu-step.py` runs, in order: the probe, the cut fixture, M2's GPU tests, the quarry
 (`memory-m1.py`, survey on), main's quarry, the quarry cut, S1-S3 and the anisotropy-1
 screen. `score.py`, `quarry-check.py` and `analyze.py` summarize them.
+
+The opt-in follow-up (default `Full`, split pipelines, proof) took 4 more leases,
+735.5 s, including a 28 s proof attempt that a shared stand-in buffer failed. That
+failure is why default frames now keep main's layout.
 
 Time: roughly 2 h 20 min wall-clock from the first probe to the last timing run,
 interleaved with shared-slot waits; implementation and analysis is an estimate within

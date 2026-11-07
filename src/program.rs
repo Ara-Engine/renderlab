@@ -16,6 +16,9 @@ const RASTER_API: &str = include_str!("../shaders/program_raster.wgsl");
 const RASTER_ENTRY: &str = include_str!("../shaders/program_raster_entry.wgsl");
 const TRACED_API: &str = include_str!("../shaders/program_traced.wgsl");
 const TRACED_ENTRY: &str = include_str!("../shaders/program_traced_entry.wgsl");
+/// The traced `sample_*_grad` helpers of frames that stream textures, which also record
+/// residency requests (texture_residency.rs). They replace the traced API's own.
+const TRACED_RESIDENCY: &str = include_str!("../shaders/program_traced_residency.wgsl");
 /// Raster materials bind their block as a uniform beside the fixed material ABI.
 const RASTER_PARAMETERS: &str = "@group(2) @binding(7) var<uniform> params:Parameters;\n";
 /// Traced shading reads each draw's block from a binding array and copies the hit's.
@@ -234,6 +237,21 @@ pub(crate) struct MaterialParameters {
 pub(crate) enum Stage {
     Raster,
     Traced,
+    /// Traced, with the residency-recording sampling helpers (`TRACED_RESIDENCY`).
+    TracedStreamed,
+}
+
+/// The traced API with its `sample_*_grad` helpers, from the base-colour one to the DFG
+/// helper that follows them, replaced by `TRACED_RESIDENCY`. `Stage::Traced` composes
+/// the traced API unchanged, so default shading contains no residency code.
+fn traced_streamed_api() -> String {
+    let start = TRACED_API.find("fn sample_base_color_grad(").unwrap();
+    let end = TRACED_API.find("// The DFG table has one level").unwrap();
+    format!(
+        "{}{TRACED_RESIDENCY}{}",
+        &TRACED_API[..start],
+        &TRACED_API[end..]
+    )
 }
 
 /// A composed module and the bytes its program occupies.
@@ -246,14 +264,20 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    let streamed;
     let (api, binding, entry) = match stage {
         Stage::Raster => (
             RASTER_API,
             if parameters { RASTER_PARAMETERS } else { "" },
             RASTER_ENTRY,
         ),
-        Stage::Traced => (
-            TRACED_API,
+        Stage::Traced | Stage::TracedStreamed => (
+            if stage == Stage::Traced {
+                TRACED_API
+            } else {
+                streamed = traced_streamed_api();
+                &streamed
+            },
             if parameters {
                 TRACED_PARAMETERS
             } else {
@@ -614,6 +638,26 @@ mod tests {
             Err(Error::Shader(message)) => message,
             other => panic!("expected a shader rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_traced_shading_has_no_residency_code() {
+        let head = format!("const PRIMARY_BATCHES:u32=64u;\n{PRELUDE}");
+        let plain = compose(&head, STANDARD_PROGRAM, Stage::Traced, false).source;
+        let streamed = compose(&head, STANDARD_PROGRAM, Stage::TracedStreamed, false).source;
+        assert!(plain.contains(TRACED_API));
+        for name in ["primary_residency", "primary_level_probe", "rl_record"] {
+            assert!(!plain.contains(name) && streamed.contains(name), "{name}");
+        }
+        // Exactly the three `_grad` helpers are replaced, once each.
+        for helper in ["base_color", "metallic_roughness", "normal_map"] {
+            let definition = format!("fn sample_{helper}_grad(");
+            assert_eq!(plain.matches(&definition).count(), 1);
+            assert_eq!(streamed.matches(&definition).count(), 1);
+        }
+        assert!(
+            streamed.contains("fn environment_dfg(") && streamed.contains("fn sample_base_color(")
+        );
     }
 
     #[test]
