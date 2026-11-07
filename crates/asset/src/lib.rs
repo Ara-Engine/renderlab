@@ -3,7 +3,10 @@ mod binary;
 pub mod environment;
 pub mod virtual_mesh;
 
-pub use binary::{NORMAL_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode, encode_mesh};
+pub use binary::{
+    NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION, SCHEMA_VERSION, decode, encode,
+    encode_mesh,
+};
 use std::fmt;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -149,6 +152,14 @@ pub enum TextureRole {
     BaseColorSrgb,
     MetallicRoughnessLinear,
     NormalLinear,
+    /// Unit tangent-space XYZ in RGB; A = sqrt(clamp(2*(1-L)/L, 0, 1)),
+    /// where L is the length of the mip's mean original unit normal (RLA v3).
+    NormalVarianceLinear,
+}
+impl TextureRole {
+    pub fn is_normal(self) -> bool {
+        matches!(self, Self::NormalLinear | Self::NormalVarianceLinear)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,10 +329,7 @@ impl Asset {
             .flat_map(|m| &m.primitives)
             .any(|p| p.tangents.is_some())
             || self.materials.iter().any(|m| m.normal_texture.is_some())
-            || self
-                .textures
-                .iter()
-                .any(|t| t.role == TextureRole::NormalLinear)
+            || self.textures.iter().any(|t| t.role.is_normal())
     }
     /// Check all references and scalar domains before encoding or GPU integration.
     pub fn validate(&self, limits: Limits) -> Result<Counts> {
@@ -408,7 +416,9 @@ impl Asset {
                     .textures
                     .get(index as usize)
                     .ok_or(Error("invalid texture index"))?;
-                if texture.role != role {
+                if texture.role != role
+                    && !(role == TextureRole::NormalLinear && texture.role.is_normal())
+                {
                     return Err(Error("texture role mismatch"));
                 }
             }

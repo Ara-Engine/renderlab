@@ -151,7 +151,9 @@ impl MaterialDescriptor<'_> {
                 if !Arc::ptr_eq(renderer, &binding.texture.0.renderer) {
                     return Err(Error::InvalidInput("texture belongs to another renderer"));
                 }
-                if binding.texture.0.role != role {
+                if binding.texture.0.role != role
+                    && !(role == TextureRole::NormalLinear && binding.texture.0.role.is_normal())
+                {
                     return Err(Error::InvalidInput("material texture role mismatch"));
                 }
             }
@@ -171,6 +173,10 @@ impl MaterialDescriptor<'_> {
         bytes[28..32].copy_from_slice(&u32::from(self.thin).to_ne_bytes());
         bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
         bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
+        let variance = self
+            .normal_texture
+            .is_some_and(|t| t.texture.0.role == TextureRole::NormalVarianceLinear);
+        bytes[40..44].copy_from_slice(&u32::from(variance).to_ne_bytes());
         bytes
     }
 }

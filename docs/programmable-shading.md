@@ -395,6 +395,21 @@ Four phases. Each is retained only if its gate passes, and later phases do not s
 
 ## Evidence and time
 
+Specular-filter API update (M7 U1): `SurfaceInput.normal_dx/normal_dy` are
+one-pixel differentials of the interpolated world-space vertex shading normal.
+Raster supplies quad derivatives and compute supplies hit-plane ray
+differentials. They are geometric inputs, with no neighbouring lighting.
+`geometric_normal_variance(input)` normalizes/differentiates that normal;
+`material_normal_variance(input)` reads the variance-bearing normal map and
+normal scale. Custom GGX programs may opt in with
+`filtered_roughness(rough, material_normal_variance(input) + geometric_normal_variance(input))`
+and use the result for both direct and environment lobes. Programs with their
+own perturbed normals must supply matching variance themselves. Non-callers
+adopt no filtering. The material `normal_mapped` flag remains 0/1; the new
+`normal_variance` flag identifies the versioned texture encoding. Both flags
+are supplied by the engine. The 48-byte material block and 16-byte hit record
+are unchanged. Limits and measured acceptance are in [the U1 record](m7-u1.md).
+
 The probe is at `D:/Coding/renderlab-work/programmable-shading-probe/`:
 
 - `src/main.rs` (sha256 prefix `f3371700d76f2e19`) and `wgsl/` with `api_common`, `api_raster`, `api_traced`, `api_screen`, `standard`, `toon` and `outline`;

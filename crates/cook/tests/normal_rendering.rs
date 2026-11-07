@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 fn settings() -> Settings {
     Settings {
         normal_maps: true,
+        normal_variance: true,
         ..Default::default()
     }
 }
@@ -67,7 +68,7 @@ fn actual_owned_glb_imports_authored_and_mikk_frames_linear_mips_and_scale() {
     assert_eq!(m.scale, 0.5);
     assert_eq!(m.sampler, asset::Sampler::default());
     let texture = &a.textures[m.texture as usize];
-    assert_eq!(texture.role, asset::TextureRole::NormalLinear);
+    assert_eq!(texture.role, asset::TextureRole::NormalVarianceLinear);
     for (m, expected) in texture.mips.iter().zip(source.normal_map.mips()) {
         assert_eq!(m.rgba8, expected.rgba8());
     }
@@ -382,7 +383,33 @@ fn normal_cache_namespaces_roundtrip_warm_and_repair_without_rewriting_legacy_ke
     assert!(warm.report.cache_hit);
     assert_eq!(cold.loaded.asset, warm.loaded.asset);
     assert_eq!(&std::fs::read(&current).unwrap()[..8], b"RLM\0\x02\0\0\0");
+    assert!(directory.join("normal-v3/keys").is_dir());
+    let legacy = cook::cook_file(
+        &source,
+        &directory,
+        &directory.join("legacy-current"),
+        Settings {
+            normal_variance: false,
+            ..settings()
+        },
+        CookLimits::default(),
+    )
+    .unwrap();
+    assert_ne!(legacy.loaded.key, cold.loaded.key);
     assert!(directory.join("normal-v2/keys").is_dir());
+    for texture in &legacy.loaded.asset.textures {
+        assert_eq!(texture.role, asset::TextureRole::NormalLinear);
+        assert!(
+            texture
+                .mips
+                .iter()
+                .all(|m| m.rgba8.chunks_exact(4).all(|p| p[3] == 255))
+        );
+    }
+    assert_eq!(
+        &asset::encode(&legacy.loaded.asset, CookLimits::default().prepared).unwrap()[..8],
+        b"RLA\0\x02\0\0\0"
+    );
     let rla = directory.join("normal.rla");
     std::fs::write(
         &rla,

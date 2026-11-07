@@ -2,6 +2,7 @@ use crate::*;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const NORMAL_SCHEMA_VERSION: u32 = 2;
+pub const NORMAL_VARIANCE_SCHEMA_VERSION: u32 = 3;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -24,7 +25,7 @@ impl Writer {
             self.u32(p.material);
             self.count(p.vertices.len())?;
             self.count(p.indices.len())?;
-            if version == 2 {
+            if version >= 2 {
                 self.u32(match p.tangents.as_ref().map(|t| t.basis) {
                     None => 0,
                     Some(TangentBasis::Authored) => 1,
@@ -81,7 +82,13 @@ impl Writer {
 pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
     asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
-    let version = if asset.extended() {
+    let version = if asset
+        .textures
+        .iter()
+        .any(|t| t.role == TextureRole::NormalVarianceLinear)
+    {
+        NORMAL_VARIANCE_SCHEMA_VERSION
+    } else if asset.extended() {
         NORMAL_SCHEMA_VERSION
     } else {
         SCHEMA_VERSION
@@ -110,7 +117,7 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
         w.u32(u32::from(m.double_sided));
         w.reference(m.base_color_texture.map(|t| (t.texture, t.sampler)));
         w.reference(m.metallic_roughness_texture.map(|t| (t.texture, t.sampler)));
-        if version == 2 {
+        if version >= 2 {
             w.reference(m.normal_texture.map(|t| (t.texture, t.sampler)));
             w.floats(&[m.normal_texture.map_or(1., |t| t.scale)]);
         }
@@ -120,6 +127,7 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
             TextureRole::BaseColorSrgb => 0,
             TextureRole::MetallicRoughnessLinear => 1,
             TextureRole::NormalLinear => 2,
+            TextureRole::NormalVarianceLinear => 3,
         });
         w.count(t.mips.len())?;
         for m in &t.mips {
@@ -252,7 +260,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -280,7 +288,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             let material = r.u32()?;
             let nv = r.count(limits.max_vertices.saturating_sub(vertices), 48, 48)?;
             let ni = r.count(limits.max_indices.saturating_sub(indices), 4, 4)?;
-            let tangents = if version == 2 {
+            let tangents = if version >= 2 {
                 let basis = match r.u32()? {
                     0 => None,
                     1 => Some(TangentBasis::Authored),
@@ -360,7 +368,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let metallic_roughness_texture = r
             .reference()?
             .map(|(texture, sampler)| MetallicRoughnessTexture { texture, sampler });
-        let normal_texture = if version == 2 {
+        let normal_texture = if version >= 2 {
             let reference = r.reference()?;
             let [scale] = r.floats()?;
             if reference.is_none() && scale != 1. {
@@ -388,7 +396,8 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         let role = match r.u32()? {
             0 => TextureRole::BaseColorSrgb,
             1 => TextureRole::MetallicRoughnessLinear,
-            2 if version == 2 => TextureRole::NormalLinear,
+            2 if version >= 2 => TextureRole::NormalLinear,
+            3 if version == 3 => TextureRole::NormalVarianceLinear,
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;

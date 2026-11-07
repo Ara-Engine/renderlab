@@ -4,7 +4,7 @@ struct Camera { view_projection: mat4x4<f32>, view_mode: vec4<u32> };
 @group(1) @binding(0) var<storage, read> models: array<mat4x4<f32>>;
 struct NormalTransform { x:vec4<f32>, y:vec4<f32>, z:vec4<f32>, info:vec4<f32> };
 @group(1) @binding(1) var<storage, read> normals: array<NormalTransform>;
-struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, thin:u32, normal_scale:f32, normal_mapped:u32, pad2:vec2<u32> };
+struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, thin:u32, normal_scale:f32, normal_mapped:u32, normal_variance:u32, pad:u32 };
 @group(2) @binding(0) var<uniform> material:Material;
 @group(2) @binding(1) var base_color:texture_2d<f32>;
 @group(2) @binding(2) var base_sampler:sampler;

@@ -783,9 +783,9 @@ pub(crate) fn read_words(readback: &wgpu::Buffer) -> Vec<u32> {
 pub(crate) fn texture_format(role: asset::TextureRole) -> wgpu::TextureFormat {
     match role {
         asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        asset::TextureRole::MetallicRoughnessLinear | asset::TextureRole::NormalLinear => {
-            wgpu::TextureFormat::Rgba8Unorm
-        }
+        asset::TextureRole::MetallicRoughnessLinear
+        | asset::TextureRole::NormalLinear
+        | asset::TextureRole::NormalVarianceLinear => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
 

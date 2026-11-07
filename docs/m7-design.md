@@ -1,407 +1,433 @@
 # M7 design: global illumination, reflections and temporal reconstruction
 
-Design worker record, 2026-11-07, base main `281e29f`. Contract: [milestone-7.md](milestone-7.md). This is CPU-only design: no implementation, build, GPU run or Unreal launch.
+Design worker record, 2026-11-07, base main `476cdfe`. Contract and decisions: [milestone-7.md](milestone-7.md). This is CPU-only design: no implementation, build, GPU run or Unreal launch.
 
-**Status: draft 1.** The sketches are provisional until the research thread's `docs/research/gi.md`, `docs/research/reflections.md` and the extended `docs/research/reuse-temporal-denoise.md` land. Their plug-in points are marked **[R-gi]**, **[R-refl]** and **[R-temporal]** and listed in [section 11](#11-research-plug-ins). No citation below comes from those notes yet.
+**Status: draft 2.** It is grounded in the research notes [gi.md](research/gi.md), [reflections.md](research/reflections.md) and [reuse-temporal-denoise.md](research/reuse-temporal-denoise.md) §6-§11. No research placeholders remain. Islam's and root's answers in milestone-7.md are applied.
+
+**Patent rule (Islam).** Every technique the research flags stays out of defaults and out of the unit plan until Islam rules on it. Where a flagged technique would otherwise fit, this draft gives a variant that avoids it and states the dependency. "Not flagged" means the research found no patent, which is not a clearance ([section 9](#9-patents-and-licences)).
 
 Labels: **M** is measured in the cited record, **A** is author-reported, **I** is an inference or estimate.
 
 ## Summary
 
-1. **One world radiance cache (WRC) on both paths.** It is engine-owned and built on the N8n/N8o surface-cell pattern. It serves sky visibility, bounce GI and rough reflections. Only the ray producer differs between the paths:
+1. **One world radiance cache (WRC) on both paths.** It is a second payload table on N8o-style surface-cell keys. Lighting-invariant directional sky visibility comes first, then cached incident irradiance.
+   - The cache is filled by deterministic direction sets and cache-terminated rays. **There is no ReSTIR anywhere, in screen or world space**, which avoids US 11,315,310's ReSTIR-plus-cache combination.
    - **RT:** hardware rays.
-   - **Non-RT:** near-field visibility precomputed at cook time, plus software rays that start beyond the near field and run against a coarse cluster-LOD BVH.
-
-   Full-detail software rays are ruled out: N0 measured them at 12-22x the cost of hardware rays (M, [N0](non-rt-n0.md)).
-2. **Programs receive incident quantities.**
-   - `indirect_irradiance(input, n)` and `indirect_radiance(input, direction, roughness)` are the occluded, local counterparts of today's `environment_irradiance` and `environment_reflection`.
-   - There is no bent normal or cone in the ABI ([M5-EV handover](m5-environment-visibility.md)).
-   - Secondary hits see a program through an optional `scatter()`/`emission()` pair, evaluated per cache cell. This settles programmable-shading risk R4.
-3. **Lighting accumulates in world space, not screen history.** Final-image temporal reconstruction is a separate, style-independent stage. It is held to the TSR floor first and the film target second.
-4. **Specular AA comes first.** It keeps normal variance at cook time and filters roughness. It is a small unit that serves both reflections and temporal work, and it folds in [M5 glossy motion](m5-glossy-motion.md).
-5. **Largest risk: the non-RT 2x floor.**
-   - Today's no-RT quarry frame is 1.55-2.26 ms, against Unreal VSM's 1.61 ms (M).
-   - Whether 2x is reachable depends on what Lumen software actually costs on this GPU. So Unreal is measured before any GI design is finalized.
-6. **Recommended start: U0 and U1 in parallel.**
-   - U0: the Unreal Lumen/TSR configuration study and measurements, the references, the benches, and localizing the glossy disagreement.
-   - U1: specular AA.
-   - Then U2: sky visibility.
+   - **Non-RT:** cook-time near-field occlusion (approved), plus far-field software rays against a coarse cluster-LOD BVH. Brixelizer SDF bricks are the fallback far field.
+2. **Reflections shade every hit with that surface's own program.** Programs opt in to traced reflections through an optional `reflection_lobe()`.
+   - Lumen's lit-surface-cache shortcut is rejected, because it caches program output.
+   - **RT:** mirror, glossy and rough bands.
+   - **Non-RT:** planar views are the default-eligible tier. The cone-sized LOD-BVH and SDF-brick tiers are designed, but held from the plan until Islam rules on the Adshir/Snap hybrid-reflection patents.
+3. **Temporal reconstruction revives T1b** with identity fixes and no colour statistics. It becomes the default only if it beats TSR Epic on every measure at no more than half TSR's cost.
+   - T1b has never been compared with TSR, so TSR is measured first (TR0).
+   - Variance clipping, SVGF-style filtering, temporal gradients and dual fast/slow history are excluded as patent-flagged.
+   - 4K upscaling is its own later unit, and ships only if it beats TSR Epic on every measure.
+4. **The programmable-shading ABI grows by five optional pieces.**
+   - Three engine inputs: `indirect_irradiance(input, n)`, `indirect_radiance(input, direction, roughness)` and `specular_incident(input)`.
+   - Two program hooks: `reflection_lobe(s, input)`, and `scatter()`/`emission()` for bounce light.
+   - Every recorded constraint is in [section 3.4](#34-recorded-programmability-constraints).
+5. **Unit order.** G0 (= M7-U0, running) and M7-U1 (specular AA, running) first. Then TR0, then R0c (CPU only, can run now), then G1, then R0b, TR1, D0, G2, R1 and integrated acceptance. Upscaling comes last. See [section 7](#7-units-and-order).
 
 ## 1. Scope
 
 **In scope.**
-- Sky/environment visibility (M5-EV folds in) and indirect diffuse bounce.
-- Glossy and specular scene reflections, and specular anti-aliasing (M5-GM folds in).
-- Temporal reconstruction of the final image under camera motion, cuts, disocclusion and lighting changes.
+- Sky visibility and indirect diffuse bounce (M5-EV folds in).
+- Glossy and mirror reflections, and specular anti-aliasing (M5-GM folds in).
+- Temporal reconstruction of the final image under motion, cuts, disocclusion and lighting changes.
 
-Light injection uses every `Lighting` light, with whatever visibility the engine provides for it. Local-light soft visibility (R5) stays with the shadow hillclimb.
+The comparison is at native 1920x1080, against Unreal TSR at 100% (Islam).
 
 **Out of scope.**
-- Transparency, volumes and fog, and the atmosphere/sky model (constant and prepared environments only).
+- Transparency, volumes and fog, and atmosphere.
 - Larger-than-memory streaming.
-- Mid-range and other-vendor GPUs: no other device is available ([decision Non-RT-test-target](milestones-5-6-decisions.tsv)).
-- Temporal upscaling, unless Q1 asks for it.
+- Other GPUs.
+- 4K upscaling, which comes later in its own unit.
+
+Local-light soft visibility stays with the shadow hillclimb.
 
 ## 2. Starting point
 
 | Item | RT path | Non-RT path | Source |
 |---|---|---|---|
-| Quarry frame: direct light, environment, shadows | 0.82-0.87 ms (Interactive) | 1.55-1.71 ms static (N8e); camera moving 1.76-1.80 ms (Surface lookup), 2.21-2.26 ms (Exact) | M: [non-rt-path](non-rt-path.md), [N8n](non-rt-n8n.md) |
-| Unreal, same subset (Lumen and TSR off) | HRT 1.75 ms | VSM 1.61 ms | M: [end-to-end](quarry-end-to-end-comparison.md) |
-| VRAM, reserved against Unreal DXGI | 2,641 against 5,410 MiB | 3,440 against 3,912 MiB | M: [memory M1](memory-m1.md) |
-| Primary visibility | traced, 0.30 ms | cluster-LOD raster at 0.35 px, 0.39-0.40 ms | M: [N1c](non-rt-n1c.md) |
-| Sky and environment | prepared RLE2 fields, unoccluded (`shaders/programs/standard.wgsl:27-33`) | same | M |
-| Reflections | environment field only (split-sum) | same | M |
-| Specular AA | none: normal mips are renormalized at cook, and `alpha = max(rough², 1e-4)` is unfiltered | none | M: [M5-GM](m5-glossy-motion.md) |
-| Temporal | T1a converges static frames only and resets on every moving frame. T2 costs 3.55-5.76 ms and is stopped | none: the visibility buffer rejects Interactive and Temporal; the M5 raster path has 1x/4x MSAA only | M: [T2a](m6-motion-aa-gpu.md), [N1b](non-rt-n1b.md) |
-| Glossy parity with Unreal | 84.75% relative L1 disagreement on a roughness-0.1 metal; UE peaks are 11.5-16.8x weaker; cause unproven | — | M: [setup](unreal-comparison-setup.md) |
-| TSR evidence so far | S2 crop at 0.25 px/frame: Renderlab Interactive 1x final HDR RMS .01045, against UE VSM + TSR Epic .01508 | — | M: [bench-motion](bench-motion.md). Shadow-dominated, untextured, BRDF parity not certified |
+| Release frame (direct light, environment, shadows), static / camera / caster | ~0.87 ms in every phase | 0.73 / 1.79 / 2.37 ms, with the Surface lookup as default | M: [M5-DL](m5-dev-loop.md), [N8p](non-rt-n8p.md) |
+| Against recorded Unreal GPU (same subset, Lumen and TSR off) | HRT: 2.02x | VSM: static 2.19x; camera 0.89x (a miss) | M: M5-DL |
+| VRAM, allocator reserved, against Unreal DXGI | 2,641 MiB (traced + Interactive) against HRT 5,410. The RT device with Virtual lookups reads 4,138-4,202 MiB, so G0 settles which configuration M7 uses | 3,503.7 against VSM 3,912 (408 MiB headroom) | M: [memory M1](memory-m1.md), N8p |
+| Sky and environment | Prepared RLE2 fields, unoccluded (`shaders/programs/standard.wgsl:27-33`) | same | M: [M5-EV](m5-environment-visibility.md) |
+| Specular AA | none: normal mips renormalized; `alpha = max(rough², 1e-4)` unfiltered. M7-U1 is running | same | M: [M5-GM](m5-glossy-motion.md) |
+| Temporal | T1a converges static frames only and resets on motion. T1b (`b8fa1f3`, reverted): +0.20-0.22 ms, 5-8 px silhouette trails, **never compared with TSR**. T2: 3.55-5.76 ms, stopped | No temporal mode: the visibility buffer rejects Interactive and Temporal | M: [m6-temporal-gpu](m6-temporal-gpu.md), [N1b](non-rt-n1b.md) |
+| Software rays | — | N0: 11.9-21.9x hardware; full-detail BVH 412.5 MB, more than the memory headroom | M: [N0](non-rt-n0.md) |
+| Glossy parity with Unreal | 84.75% relative L1 on a roughness-0.1 metal; UE peaks 11.5-16.8x weaker; cause unproven | — | M: [setup](unreal-comparison-setup.md) |
 
-**Reusable machinery.**
-- **Surface cells (N8n/N8o)** are the main reusable piece. They provide:
-  - world-space cubes keyed by placement, viewed side and a power-of-two edge, in a 2^20 x 4-slot hash table (32 MiB);
-  - deterministic claim/resolve inserts and a flush on reset;
-  - exact caster invalidation over a region;
-  - sun hysteresis with a lag-bounded refresh (N8e).
+**Machinery M7 reuses:**
+- **N8o surface cells.** Keys are placement, viewed side and a power-of-two cube. They have claim/resolve inserts, flush by clear, per-cell epochs, exact caster invalidation and heaviest-first queues.
+- **The cluster-LOD DAG.** 214,062 quarry clusters, with every DAG triangle indexing source vertices.
+- **The N1c raster visibility buffer** (0.39 ms).
+- **The virtual clipmap**, for sun visibility at hits on non-RT.
+- **RLE2 environment fields.**
+- **Interactive's deterministic direction sets.**
+- **T1a/T1b's lattice and hit-record validation.**
+- **Level F gates F1-F10.**
 
-  Today the cells hold visibility counts only.
-- **Cluster-LOD DAG (N1c).** 214,062 quarry clusters. Every DAG triangle indexes source vertices, and one flat GPU pass (0.044 ms) selects a cut. Per-level caster cuts already exist ([N8c](non-rt-n8c.md)).
-- **Virtual clipmap (N8).** Sun-basis pages with two depth layers and triangle ids, requested by receivers. It covers one direction only, so it is not a hemisphere structure.
-- **Estimators and gates.** Interactive's deterministic direction sets with per-pixel rotation; T1a's centre-first lattice and hit-record validation; the R_L, R_D and R_F references; Level F gates F1-F10 ([temporal primaries §7](m6-temporal-primaries.md)).
-- **Program API.**
-  - `light_visibility` is the precedent for engine-computed inputs that are identical for every program.
-  - Programs compile into compute modules, without derivatives, and get their footprints from ray differentials.
+## 3. Shared architecture and ABI
 
-## 3. Shared architecture and the program ABI
+### 3.1 World radiance cache (WRC)
 
-### 3.1 World radiance cache
+**Keys and levels.**
+- N8o's key, plus coarser parent levels by distance, following Solari's `log2(1 + distance / lod_scale)` cell sizing.
+- The geometric normal is in the key (Solari). Capsaicin's ray direction in the descriptor is a fix for thin-occluder leaks.
+- Kajiya-style voting and bounce-rank choose each cell's query point (gi.md §3-§6).
 
-**Cells.**
-- Each cell uses N8n's key, plus a level chosen from distance: the edge is the receiver footprint x 2^k, with a GI resolution bias. Cells are fine at contacts and coarse in the far field.
-- The hash layout and claim/resolve are copied as a pattern into new M7 files, not shared with the shadow code ([section 12](#12-ownership-licences-and-patents)).
+**Payload, about 40 B per cell (gi.md).**
+- Directional sky visibility: L1 SH, 4 x f16 = 8 B.
+- Incident irradiance: L1 SH RGB, 12 x f16 = 24 B.
+- Count and epochs: 8 B.
 
-**Payload (I).**
-- Incident radiance: L1 SH in RGB fp16 (24 B), or a 4x4 octahedral fp16 tile (about 128 B) if rough reflections need it **[R-gi]**.
-- Geometric normal, age and epochs.
-- One ray record per fixed direction (K = 8-16): the hit cell, or "escaped" to the environment, plus the hit distance. That is about 6-8 B per record.
+**Sizing.** 2^21 cells = 80 MiB, 2^22 = 160 MiB. **Memory stop: 160 MiB.**
 
-**Transport is cached separately from light (I).**
-- Ray records depend only on geometry.
-- When the sun turns, a light is edited or a program reloads, hits are relit from their records without re-tracing.
-- When a caster moves, only records whose segment crosses its swept bounds are invalidated. This is N8o's exact region test, applied to ray segments.
-- This is the cache's main lever against Lumen under moving light. Lumen also amortizes surface-cache relighting, on a budget (A, [industry costs](research/industry-rendering-costs.md)).
+**Fill and update.**
+- **Direction sets.** Each cell traces K deterministic, cosine-stratified directions, rotated per cell. There are no reservoirs and no resampling.
+- **Budget.** A fixed per-frame ray budget, starting at about 0.25 rays per pixel (I). Priority runs: new cells, then epoch-changed cells, then aged cells, using N8m/N8o's heaviest-first queues.
+- **Cache-terminated paths.** A ray hitting a surface reads the hit cell, which carries multi-bounce from previous frames (Solari, SHaRC idea, reimplemented). An escaped ray reads RLE2 at a ray-cone mip.
+- **Off-screen cells.** Ray hits create cells. That is the off-screen half the screen-spawned systems (GIBS, GI-1.x) lack.
 
-**Fill.**
-- Visible receivers request cells, as in N8n.
-- So do the hits of GI and reflection rays, which gives off-screen surfaces cells of their own. That is the off-screen half of the no-screen-space rule.
-- The per-frame refresh budget and age caps are tied to a settle limit (Q5).
+**Epochs.**
 
-**Determinism.** Claim/resolve inserts, fixed direction sets and no reservoir resampling. Replays must be bit-identical (F8).
-
-**Memory (I).** 2^20 cells cost about 135 MiB with K = 12; 2^21 cost about 270 MiB. The total must stay under Unreal's on the matched Lumen configuration (section 7).
-
-### 3.2 Program inputs
-
-| Function | Returns | Replaces in the standard program |
+| Epoch | Invalidates | Leaves alone |
 |---|---|---|
-| `indirect_irradiance(input, n) -> vec3<f32>` | Incident irradiance in lux, unexposed, around `n` at the engine receiver: occluded environment plus bounce | `environment_irradiance(n)` |
-| `indirect_radiance(input, direction, roughness) -> vec3<f32>` | Incident radiance prefiltered over the engine's roughness lobe about `direction`, with RLE2's roughness convention. On the quarry this mainly supplies specular occlusion of the sky | `environment_reflection(direction, roughness)` |
+| Caster | Visibility and radiance, by N8o's exact region test | — |
+| Sun | Radiance | Visibility |
+| Environment yaw / intensity | Nothing: yaw is an SH rotation and intensity a scale, so the response lags 0 frames | — |
+| Program | Radiance cached from that program's `scatter`/`emission` | Other programs' cells |
 
-- **Same values for every program.** Both are computed by the engine at its own receiver, so every program sees the same values, as with `light_visibility`. The `environment_*` functions stay for programs that want the raw sky.
-- **Programs that call neither pay nothing.** Naga reflection of each visible program's module decides whether the M7 passes run (I). This is a gate (8.4).
-- **Rejected inputs:**
-  - a bent normal or cone, which bakes in one occlusion model;
-  - a scalar sky visibility, for the same reason;
-  - screen inputs, which the core rule forbids.
-- **Open within the ABI: when `indirect_radiance` traces.**
-  - **Inline:** it traces inside the shading pass. This is fully programmable, but divergent.
-  - **Declared lobe:** the program declares an optional `fn lobe(s, input) -> Lobe`, which the engine traces in a prior pass. This is cheaper per ray, but it runs `surface()` twice or stores a request.
+**Temporal behaviour.**
+- Per-cell blending is driven by engine-known events: light rate, moved casters, parameter edits.
+- Disoccluded cells are seeded from parent levels.
+- Spatial filtering runs in cell space, after Lumen's probe-space idea.
+- There is no screen reprojection, no SVGF-family filter, no gradient estimator and no dual history (section 9).
 
-  Start inline, and move only on a measured cost. Record whichever constraint lands.
+**Determinism.** Claim/resolve inserts, fixed directions, and an F8 hash identity across processes.
 
-### 3.3 Secondary-hit contract (R4)
+**Optional transport records (G2 variant).** A cell stores each ray's hit cell, about 6-8 B x K.
+- A sun turn relights the stored hits instead of re-tracing them.
+- A moved caster invalidates only the records whose segment crosses its swept bounds.
 
-| Option | Mechanism | Verdict |
+This competes with plain priority re-tracing (Lumen and Solari style) on cost and memory in G2.
+
+**Ownership.**
+- The surface cache's files belong to the shadow hillclimb. gi.md proposes extracting their key/claim/resolve code.
+- Until root and the hillclimb agree on a shared module, M7 copies the pattern into `src/gi_cache.rs` and `shaders/gi_cache.wgsl`. This is a recorded, temporary duplication.
+
+### 3.2 Engine inputs to programs
+
+| Function | Meaning | Path and band |
 |---|---|---|
-| (a) Optional `fn scatter(s, input, wi, wo) -> vec3<f32>` and `fn emission(s, input) -> vec3<f32>` | The engine evaluates `surface()` at a cell centre, with a ray-cone footprint. It integrates `scatter` against the cell's incident radiance into one view-independent outgoing radiance | **Recommended for bounces.** Exact for Lambert. Glossy interreflection at secondary hits is approximated: a recorded constraint |
-| (b) Engine-fixed Lambert from `MaterialDescriptor` base colour | No program code runs at hits | Rejected: a lighting-model shortcut that ignores program textures |
-| (c) Full program evaluation at each ray hit | `surface()` plus a view-dependent response per ray | **Used only at the first reflection hit of low-roughness lobes** (hit lighting). Too costly for GI |
+| `indirect_irradiance(input, n) -> vec3<f32>` | Incident irradiance in lux, unexposed, around `n` at the engine receiver: occluded sky (G1), then bounce (G2). Replaces `environment_irradiance(n)` in the standard program | Both |
+| `indirect_radiance(input, direction, roughness) -> vec3<f32>` | Occluded incident radiance in a lobe about any direction, from cells and RLE2, with no per-pixel ray. It gives specular occlusion where nothing is traced. Replaces `environment_reflection` | Both, rough band |
+| `specular_incident(input) -> vec3<f32>` | Traced incident radiance integrated over the program's declared `reflection_lobe`. Zero when no lobe is declared | Traced bands |
 
-- **Programs without `scatter`.** Their surfaces still occlude but reflect nothing into GI, and a diagnostic reports it. The engine never assumes Lambert silently. A one-line helper, `rl_lambert(albedo)`, makes opting in trivial.
-- **Program reload.** A reload bumps that program's epoch and relights its cells without re-tracing.
+- **Computed by the engine.** All three are computed at the engine's receiver, identically for every program, as `light_visibility` already is.
+- **No cost for non-callers.** Programs that call none of them run no M7 pass. Naga reflection of the visible modules decides this, and it is gated.
+- **Rejected inputs:** a bent normal or cone, a scalar sky visibility, and screen inputs.
 
-## 4. GI sketches
+### 3.3 Program hooks
 
-| Sketch | Path | Mechanism | Reuses | Main risk | Quarry cost (I) |
+- **`fn reflection_lobe(s: Surface, input: SurfaceInput) -> SpecularLobe { normal, alpha, weight }`**, optional.
+  - The engine runs `surface()` in the reflection trace pass to obtain the lobe. This settles draft 1's question of inline versus declared lobes.
+- **`fn scatter(s, input, wi, wo) -> vec3<f32>` and `fn emission(s, input) -> vec3<f32>`**, optional (Islam).
+  - The engine evaluates them at cell centres, with a ray-cone footprint. It integrates `scatter` against the cell's incident SH to get one view-independent outgoing radiance for bounce.
+  - A program without them blocks light but reflects none.
+- **Reflection hits run the hit surface's own `surface()` and `shade()`.**
+  - The view vector is −d. The footprint comes from ray cones (Falcor `TexLODHelpers`, BSD-3), since programs have no derivatives.
+  - Hits are compacted per program and use the existing per-program tile worklists (sorted-deferred).
+  - At a hit, `indirect_irradiance` reads the hit's cell, and `specular_incident` returns the untraced rough-band value. Reflection bounces start at 1.
+  - **Sun visibility at a hit.** RT: one hardware shadow ray. Non-RT: an exact walk at the hit, with page marking at hit positions. That marking is shadow-file work, requested from the hillclimb owner.
+
+### 3.4 Recorded programmability constraints
+
+1. `SpecularLobe` is GGX-shaped. A non-GGX style (anisotropic, toon-banded) gets its nearest GGX lobe, or none. **Needs Islam's acceptance (Q4).**
+2. Bounce light sees a program only through `scatter`/`emission`, evaluated per cell and view-independent. That is exact for Lambert. Glossy interreflection at secondary hits is approximated. Programs without `scatter` reflect no bounce.
+3. Programs without `reflection_lobe` get no traced reflections, only `indirect_radiance`.
+4. Hit shading runs `shade()` with ray-cone footprints and no screen access, as traced primaries already do.
+5. A filter guide for glossy denoising, if one is ever adopted, comes from `reflection_lobe`. No albedo export is ever required.
+6. The WRC caches incident quantities: sky visibility and irradiance. The only program-output-derived value is the `scatter`-integrated outgoing radiance at secondary cells, keyed by program epoch.
+
+## 4. GI design
+
+### 4.1 Sketches, revised from gi.md
+
+| Sketch | Path | Mechanism | Patent status | Risk | Cost (I) |
 |---|---|---|---|---|---|
-| **G-R1** Cached gather, hardware rays | RT | Cells trace K rotated deterministic rays. A hit reads the hit cell's outgoing radiance, so multi-bounce comes from feedback; an escaped ray reads the environment. Receivers combine 8 short hardware rays at the receiver (r ≤ R_near ≈ 0.25-1 m, Interactive-style directions) with cell irradiance beyond R_near | Surface-cell pattern, Interactive directions, RLE2, BLAS/TLAS | Near-ray grain in motion; leaks through cells that straddle thin walls (the viewed-side key helps); lag after light changes | Near rays 0.10-0.25 ms, fill 0.05-0.15, gather 0.05-0.10: **0.2-0.5 ms** |
-| **G-R2** Per-pixel path tracing, ReSTIR GI and a spatiotemporal denoiser | RT | Reservoir reuse plus a denoiser | kajiya / Solari code (MIT/Apache) | **Patents** (ReSTIR family, e.g. US 11,315,310; SVGF US 10,600,167). Noise and ghosting in motion. kajiya's GI alone is 2.3 ms at 1080p on an RX 6800 XT (A) | **Held:** only after patent review, and only if G-R1 misses quality |
-| **G-N1** Precomputed near field plus coarse far-field rays | Non-RT | **Near field:** at cook, per source vertex (or a per-triangle lattice on large triangles), visibility of K = 32-64 fixed directions within R_near, from exact rays against static geometry, plus a mean occluder distance. **Movers:** runtime short software rays against the movers' own small BLASes only; per-direction masks combine by AND. **Far field:** software rays (obvhs builder, tray_racing kernel ported to WGSL) against a BVH over a static coarse DAG cut (0.5-2 cm error), starting at R_near, filling cells | Cluster DAG, cell cache, N8o reach test | Near-field bounce inside crevices is approximated. Cook time, and 50-150 MB of VRAM (about 6.5 M vertices x 8-16 B). Self-hits at the LOD/source boundary at R_near. Software throughput on coarse BVHs is unmeasured. N0's limiter was dense near-surface traversal, which this avoids (I) | Near lookup 0.03-0.08 ms, far fill 0.2-0.6: **0.3-0.8 ms** |
-| **G-N2** Lumen-software-style distance fields | Non-RT | Per-mesh SDFs at cook plus a global SDF clipmap, sphere-traced from cells; hit radiance from cells. Brixelizer v1.1.4 (MIT) is the copyable far-field form, with its screen-fed cache replaced by world injection | — | Unreal's own docs say walls under 10 cm and thin features leak (A). Millimetre contacts still need a near field. SDF memory for 13 M scan triangles is unknown | **Fallback far field** if G-N1's coarse rays miss their budget |
-| **G-N3** Raster probe captures (DDGI-style) | Non-RT | Low-resolution cube captures per probe with cluster LOD; irradiance plus depth moments | N1c raster | Low frequency and probe leaks; DDGI alone won't meet contacts ([reuse-non-rt L2](research/reuse-non-rt.md)) | Rejected as core; possible far-field irradiance |
+| **G-R1** Cell cache, hardware rays | RT | WRC filled by hardware rays at ~0.25 rays per pixel. Pixels read their cell (parent on a miss) with sub-cell jitter. Crevice cells never share across depth or normal breaks: N8o's reuse lesson | WRC: US 9,754,407 review open. No ReSTIR | Cell reuse error in crevices (N8o's Surface lost to Exact on 4 of 5 shadow measures, M) | 0.25-0.5 ms + 0.05-0.1 ms of cache passes, against an estimated L_hw/2 ≈ 0.5-1.2 |
+| **G-R1n** Per-pixel near rays in addition | RT | Up to 8 short hardware rays per receiver below R_near (draft 1) | Same | Grain in motion | +0.10-0.25 ms. Kept only if G-R1 loses on contacts |
+| **G-N1** Cook-time near field plus coarse far field | Non-RT | **Near field (Islam-approved, 50-150 MB):** per-vertex visibility of K fixed directions within R_near, against static geometry, from exact rays at cook. Movers use short software rays against their own small BLASes; masks combine by AND. **Far field:** software rays from cells against a coarse cluster-LOD BVH (R0c cook) | Same as G-R1 | Crevice bounce approximated; cook time; self-hits at the LOD/source boundary | Near lookup 0.03-0.08 ms; far fill 0.2-0.6 ms |
+| **G-N1r** Runtime near field instead | Non-RT | Software rays against a CWBVH-compressed full-detail BVH at 1/16 rays per pixel, accumulating into cells (gi.md N-GI) | Same | 412.5 MB uncompressed is above the headroom; slow convergence in motion | 0.07-0.15 ms (I, scaled from N0) |
+| **G-N2** SDF bricks for the far field | Non-RT | Brixelizer v1.1.4 (MIT) sparse SDF, used **for tracing only**; its screen-fed radiance cache is replaced by the WRC | Not flagged | Detail loss (far only); about 200 MB | Fallback if G-N1's far-field rays miss budget |
+| G-DDGI | Both | Probe irradiance with depth moments, own code from the CC BY-ND papers or Wicked (MIT) | Not flagged | Low frequency, lag, leaks below probe spacing | Out as core; at most a cache-miss far fallback |
+| ~~ReSTIR GI/PT + world cache~~ | — | — | **US 11,315,310** | — | **Excluded from the plan** |
+| ~~Lumen-style screen probes, screen traces, GIBS surfels, GI-1.x screen probes, SDFGI, VCT~~ | — | Screen-fed, static or leaky | — | — | Rejected (standing rule) |
 
-**Sky visibility (GI-0) comes first.** It is the same pipeline with bounce off: cells and the near field return occluded environment radiance.
-- On the outdoor quarry it is likely the dominant indirect term (I).
-- It is verifiable against an environment-only path-traced reference.
-- It exercises the cache, the ABI, both producers and invalidation before the R4 contract lands.
-- The [M5-EV handover](m5-environment-visibility.md)'s candidates map onto it: its precomputed visibility is G-N1's near field, its surface-cache idea is the WRC, and the single-direction grid and clipmap are excluded.
+**ReSTIR dependency (stated explicitly).** No GI unit uses reservoir resampling in any form. That includes gi.md's "world-space RIS to pick which cells to update"; cell priority is a deterministic queue. Adding ReSTIR to anything that reads the WRC would form US 11,315,310's combination. That needs Islam's ruling before it is designed further.
 
-**Recommendation.**
-- G-R1 and G-N1 share everything except the producer.
-- If G-N1's near field passes the gates, the RT path may adopt it too. That would remove one estimator difference between the paths.
-- G-N2 is the documented far-field fallback, and G-R2 is held.
+### 4.2 Sky first (G1)
 
-**[R-gi]** Finalize these items from gi.md:
-- the cache layout (kajiya ircache, GI-1.0 hash grid, Solari world cache);
-- prior art on invalidation and precomputed visibility;
-- any published non-RT GI without screen-space inputs;
-- Lumen software and hardware per-pass cost on PC GPUs;
-- software ray throughput on coarse BVHs.
+- Occluded sky is likely the largest missing outdoor term (I, gi.md).
+- It is lighting-invariant, so the sky term should beat Lumen's "multiple seconds" lighting lag outright: yaw and intensity steps must equal a fresh run on the next frame.
+- It exercises the cache, the ABI and both producers without the `scatter` contract.
+- The [M5-EV handover](m5-environment-visibility.md)'s candidates map onto it: its precomputed visibility is G-N1's near field, its surface-cache idea is the WRC, and the single-direction clipmap and grid are excluded.
 
-## 5. Reflection sketches
+### 4.3 Bounce (G2)
 
-**Prerequisites, from [M5-GM](m5-glossy-motion.md).**
-- Localize the 84.75% roughness-0.1 disagreement with Unreal (U0c) before any glossy or TSR comparison is scored.
-- Land specular AA (U1) before scoring glossy motion.
+- **Sun one-bounce plus cache-terminated multi-bounce**, with `scatter`/`emission`.
+- **Sun visibility at hits.** RT: one hardware shadow ray. Non-RT: requested page marking at hits, or a coarser page level at hits if it passes the gate (gi.md risk 5).
+- **Variant comparison.** Priority re-trace against transport records (3.1), on moving-sun cost and memory.
 
-| Sketch | Path | Mechanism | Main risk |
+## 5. Reflection design
+
+### 5.1 Bands (thresholds set by measurement, not copied from Unreal's 0.4)
+
+| Band | Roughness | RT path | Non-RT path |
 |---|---|---|---|
-| **R-R1** Lobe sub-cone rays plus hit lighting | RT | **Below r_trace** (≈ 0.3-0.4, to be set from **[R-refl]**): split the GGX lobe into K fixed sub-cones (K = 1 at a mirror, up to 8). Trace one hardware ray per sub-cone axis, rotated per pixel like Interactive. **At the hit:** the lowest roughness band gets full program evaluation (3.3c) with a hardware shadow ray plus cell irradiance; other bands read the hit cell's radiance, filtered to the sub-cone footprint. **Above r_trace:** cells only, cone-filtered. Deterministic and history-free | Structured error at mid roughness; a seam at r_trace; divergent shading cost |
-| **R-R2** Stochastic GGX at 1 spp plus a temporal/spatial denoiser (Lumen-like) | RT | One sampled ray, then denoise | Ghosting and disocclusion failures of screen-reprojected denoising; SVGF-family patents. **Rejected as core** |
-| **R-N1** Segmented-LOD software rays | Non-RT | The same lobes and directions. Each ray traverses a fine cut near its origin, then coarser cuts, switching where the ray-cone width exceeds the cut's error; hit radiance from cells | Mirrors need the fine segment, where N0's near-surface cost applies; cracks and self-hits between segments; 2-3 BVHs of memory |
-| **R-N2** SDF/card tracing (Lumen software reflections) | Non-RT | As G-N2 | Mirrors are blurry. Rejected for mirrors; possible for rough far field |
-| **R-N3** Planar raster reflections for declared flat mirrors | Non-RT | N1c raster from the mirrored camera | Exact and cheap on planes, but not general. An optional accelerator, never the only answer |
+| **B0 mirror** | below ~0.05 | 1 ray at the pixel centre, deterministic, undenoised; hit shaded by its own program | **Planar raster view** for declared planes (N1c from the mirrored camera). Non-planar mirrors use the held LOD-BVH tier |
+| **B1 glossy** | to ~0.4-0.5 | k lobe rays from `reflection_lobe`: either stochastic VNDF, or K fixed sub-cones rotated per pixel (draft 1's R-R1). Each hit shaded by its own program | Planar view, prefiltered by the lobe, where planar. Otherwise the held LOD-BVH tier |
+| **B2 rough** | above the cutoff | RLE2 prefiltered lobe x the traced-lobe ratio estimator (k = 1-2 visibility rays; reflections.md §8). Occluded rays add their hit radiance | `indirect_radiance` from WRC sky visibility and irradiance, with no per-pixel ray: default-eligible. The SDF-brick visibility-ray variant is held |
 
-Screen-space reflections are excluded. **Recommendation:** R-R1 plus R-N1, sharing lobes, sub-cone directions and the WRC. Non-RT mirror cost is the open risk; mirrors are rare on the quarry but central on S5.
+**Glossy temporal integration (patent-safe variant).**
+- reflections.md's B1 denoiser used a variance clamp, which is flagged under US 10,116,916. It also used FidelityFX's mean ± σ temporal clip, which needs a claims check. Both are out of the plan.
+- **Instead:**
+  - B1 spends deterministic sub-cone rays, with no screen denoiser.
+  - Temporal integration comes only from the final-image reconstruction (TR1). It validates history by identity: the reflected hit's instance, primitive and reverse visibility, with no colour statistics.
+- If B1 still fails the motion gates, it stays opt-in and is labelled below the bar. Any SVGF- or clamp-class filter waits for Islam's ruling.
 
-### Specular AA (U1, both paths)
+### 5.2 Tiers and patent status
 
-- **S-AA1: Toksvig/LEAN at cook.**
-  - Keep each normal mip's mean length, or its second moments, in `crates/cook/src/normal_map.rs`. This is a versioned format change.
-  - The standard program widens alpha through a helper, `filtered_roughness`.
-- **S-AA2: geometric variance.**
-  - Store a per-vertex, multi-scale normal variance from the cluster DAG, and look it up at the receiver's footprint.
-  - This targets sub-pixel triangle relief: 74% of covered quarry pixels have at least 20° of normal spread (M, [film gap](m6-film-gap.md)).
-  - Per-triangle curvature filtering (Kaplanyan/Tokuyoshi, Filament's `normalFiltering`) cannot see that spread, because a hit sees only one triangle.
-- **Both are offered to programs as geometric data** (`input.normal_variance`), not lighting-model data.
-- **Acceptance:** keep either only if Level F film error falls on every population, static and moving. A filter that merely dims highlights fails F3 (bias).
-
-## 6. Temporal reconstruction sketches
-
-**Framing.**
-- Lighting accumulates in world-space cells, so screen history only has to reconstruct the final image: coverage, texture and shading aliasing.
-- The floor is TSR in motion, on every measure; the target is film (F1-F10).
-
-**Prior results.**
-- **T1:** resampled history leaks 0.16-0.24 into solids beside hard shadow edges for 2-4 px (M).
-- **T1b:** failed on silhouette trails, shadow-edge blur and R_D F4 (M).
-- **T2b:** scatter costs 4.25 ms at K = 8 (M).
-
-Those failures were judged against the film gate; against TSR they are unmeasured. On S2's shadow crop, 1x Interactive already has lower final HDR RMS than UE + TSR (M). That crop does not test textured or glossy aliasing.
-
-| Sketch | Mechanism | Non-RT | Main risk |
+| Tier | Path | Patent status | Plan status |
 |---|---|---|---|
-| **T-A** History-free | Specular AA (U1) plus extra primary samples only at listed discontinuities: silhouettes, shadow partials, high normal variance. The list is compacted (ATAA's idea; reimplement from the paper). No history, so no trails, lag or disocclusion failures by construction | Extra samples from a jittered re-raster of the listed clusters only (I) | Interior aliasing above TSR where nothing is flagged; non-RT sample cost |
-| **T-B** Hit-validated resampled history (T1 class), reopened against the TSR floor | Exact hit-record tap validation, centre-first lattice, Catmull-Rom, blur budget. No colour clamping (cf. US 11,783,455) | Needs a jittered visibility buffer, which the current one rejects | Known leaks across shadow edges, and trails |
-| **T-C** T2 world-anchored records with stratum scatter | As T2b | Same | 4.25 ms measured. **Held** as the film-target reference, not a floor candidate |
-| **T-D** Temporal upsampling | T-B, rendered at a lower internal resolution | Same | Only if Q1 sets an upscaled output |
+| R-RT: traced primaries plus lobe rays plus own-program hit shading | RT | Adshir/Snap is worded as raster primaries plus reflection rays; RT primaries are traced, which is outside that wording (I, claims unread). No ReSTIR | **In plan** (R0b, R1) |
+| Planar raster mirror views | Non-RT | No rays; outside the flagged combination as worded (I) | **In plan, default-eligible** |
+| B2 from the WRC (no per-pixel ray) | Both | WRC review open (US 9,754,407) | In plan |
+| Cone-sized cluster-LOD BVH for B0/B1 rays | Non-RT | **Adshir/Snap family** (US 10,950,030 B2 and members): raster primaries plus reflection rays | **Designed, held.** R0c's CPU LOD-BVH cook proceeds, because the same BVH serves G-N1's GI far field (rays from cells, not reflections) |
+| SDF-brick visibility rays for B2 and far glossy | Non-RT | Adshir/Snap (same combination) | **Designed, held** |
+| ReSTIR for glossy | Both | NVIDIA ReSTIR family | **Excluded** |
+| Lumen-style lit surface cache at hits | Both | — | **Rejected:** caches program output (breaks programmability) |
+| SSR, or SSR verified in world space | Both | — | Rejected as core. The verified-hint cost lever is not planned |
 
-**Recommendation.**
-1. U0 measures TSR on S2-glossy and the quarry first: final post-TSR HDR, sharpness, trails, flicker and revealed-pixel recovery. It reuses bench-motion's replay and dump decoder.
-2. Then try T-A on RT first: lowest ghosting risk, lowest cost.
-3. Try T-B only where T-A leaves interior aliasing above TSR.
-4. Non-RT needs a jittered visibility buffer for either; it belongs to U5.
+**Consequence.** Until Islam rules on Adshir/Snap:
+- non-RT non-planar sharp reflections have no in-plan producer;
+- the non-RT reflection default is planar views plus WRC-based B2.
 
-**Measures added from M5-GM.**
-- Glossy flicker: the RMS of `(c_t − c_{t−1}) − (r_t − r_{t−1})`.
-- Reference-masked highlight energy and peak-position drift.
-- A shutter choice per gate. Zero shutter matches Unreal with motion blur off.
+Lumen software's mirrors are weak ("HWRT is the only way to high-quality mirrors", V). Whether the non-RT floor holds on RF2-RF4 without the held tiers is G0's measurement to make. This is Q2.
 
-**[R-temporal]** Finalize from the extended survey: its TSR findings, any new history-free or adaptive AA results, and its patent notes.
+### 5.3 Specular AA (M7-U1, running)
 
-## 7. Measured plan against Unreal 5.7
+- **Toksvig/LEAN** variance kept at cook (`crates/cook/src/normal_map.rs`).
+- **Kaplanyan/Tokuyoshi** widening from ray-differential normal variance (Filament `normalFiltering`, Apache-2.0).
+- **Geometric multi-scale vertex variance** from the DAG, for sub-pixel triangle relief.
+- **Acceptance:** keep only on a Level F film-error gain on every population, static and moving.
+- It also reduces how many pixels need B0/B1 rays (reflections.md §8).
 
-### Method (reused)
+## 6. Temporal reconstruction design
 
-**Unreal.**
+| Sketch | Mechanism | Patent status | Plan |
+|---|---|---|---|
+| **T1b revived (TR1)** | Resampled history through the exact hit record, plus an **anchor bit** against silhouette trails, **engine-event W caps** (light rate, moved casters, parameter edits, exposure, declared program bandwidth), a fix for Catmull-Rom undershoot at silhouettes, and **no colour clamp**. Reverse-visibility validation, as T1 already has | Single history with capped windows; no variance clip, no gradient, no dual history (I, no clearance) | **In plan, first** |
+| **History-free boost (T-A)** | Extra primary samples only where history is missing or rejected: revealed pixels, listed discontinuities (ATAA idea, reimplemented from the paper). The settle mechanism for never-seen surfaces inside TR1, and a standalone fallback if TR1 fails | Not flagged | In plan, within TR1 |
+| Two-layer silhouette history | Heavier trail fix | Not flagged | One named fix allowed by TR1's stop rule |
+| A-SVGF re-shade of anchored samples | Re-shade with the old seed to detect shading change | **US 12,437,371** | **Excluded** |
+| Variance clip / TAA box clip | Neighbourhood mean ± γσ | **US 10,116,916** (to 2037); US 10,362,289 | **Excluded** |
+| Colour or luma rejection (TSR, FSR) | Reads output colour | Style-dependent (programmability) | Rejected |
+| Fast/slow dual history | Short average plus exponential history, dropped on events | **US 11,847,737** | **Excluded** |
+| T2 world-anchored records with scatter | As T2b | Not flagged | Held as the film-target reference (4.25 ms, M) |
+| 4K temporal upsampling | T1b at sub-native input | Same as T1b | **Later, its own unit.** Ships only if it beats TSR Epic on every measure at the same screen percentage |
+
+**Rules.**
+- **Default rule (research §6.7).** TR1 becomes the default only if it beats TSR Epic on every measured population, static and moving, with no trails or flicker beyond TSR's, at ≤ ½ of TSR's measured end-to-end cost. Otherwise it is opt-in, labelled "temporal reconstruction, below film".
+- **Both paths.** Non-RT needs a jittered N1c visibility buffer that accepts Temporal. Rigid motion is exact through hit records and previous transforms on both paths. No velocity buffer is needed.
+
+### 6.1 Denoising GI and reflections
+
+- **The WRC is the denoiser:** world-space accumulation of incident quantities, filtered in cell space.
+- **Screen-space cleanup of a residual** is allowed only if it settles within 8 frames. Its non-exposed candidates are decided in D0.
+- **Held: Falcor's SVGF (BSD-3).** It is copyable with notice, but **US 10,600,167** is open, so it is out of the plan.
+- **Held: ReBLUR-like recurrent blur with history fix and fast history.** It is close to **US 11,847,737**, so it is also out of the plan.
+- **Held: kajiya-style validation rays.** They are a secondary-ray temporal gradient, possibly within US 12,437,371. The replacement is engine-known events plus G2's record relight.
+
+## 7. Units and order
+
+Sizes are rough agent estimates (I), given as implementation / GPU verification.
+
+| # | Unit | Content | Depends on | Size | Gates and stop rules |
+|---|---|---|---|---|---|
+| 1 | **G0 = M7-U0** (running) | Unreal denominators (section 8): GI HW/SW x High/Epic/Cinematic, hit lighting, mesh SDFs on and off. Sun-step and yaw-step settle curves. Memory with Lumen on. **R_GI** references from the in-process GPU path tracer, environment-only and full, at quarry poses 0/1 and S1-S3, cross-checked with pbrt or Mitsuba on two crops. The glossy 84.75% disagreement is localized by roughness and source-angle sweeps | — | running | Every Unreal configuration's effective settings read back, or it is not scored. R_GI agrees with pbrt/Mitsuba within a registered tolerance |
+| 2 | **M7-U1** (running) | Specular AA (5.3) | G0's glossy item, for the Unreal comparison only | running | Level F gain on every population |
+| 3 | **TR0** | TSR Epic and Cinematic, `r.AntiAliasingMethod=4`, `r.ScreenPercentage=100`, plus a 1x row and an informative 66.662% row, on Q-walk, Q-disocclusion and Q-sun. Scored with `scripts/m6-temporal-motion-score.py` (from `b8fa1f3`) on T1b's populations: F1, F2 by age, trail width, background-centre error, hold flicker. End-to-end A/B timing in one process. Also settles whether TSR leaks at shadow edges | Unreal harness; batch with G0 if its session is still open | 3-6 h / 1-2 h | Output: TSR's error per population as a multiple of the bar, and its end-to-end ms |
+| 4 | **R0c** (CPU only, can run now) | Cook the cone-sized cluster-LOD BVH for the quarry at two error bounds: bytes and build time. CPU-trace 10,000 RF1 reflection rays and 10,000 GI cell rays against the N0 full-detail oracle: hit differences against footprint | — | 4-8 h / 0 | Feeds G-N1's far field. The reflection use stays held |
+| 5 | **R0a** | Reflection fixtures RF1-RF10 (8.2) in both engines. UE-HW-Hit, UE-HW-SC and UE-SW at Epic and Cinematic: ProfileGPU nodes, images, memory. Roughness histogram of the plain quarry | G0 harness (same batch where possible) | 4-8 h / 2-3 h | Effective readback, as G0 |
+| 6 | **G1** | WRC v1, `indirect_irradiance` for sky only, G-R1 and G-N1 (near precompute + far LOD BVH), both paths | G0 (R_GI, L), R0c | 16-30 h / 3-5 h | gi.md's G1 gates and stop rules (8.3) |
+| 7 | **R0b** (test-only) | R-RT B0 and B1 at 1 ray per pixel on RF1/RF2, no denoiser, static accumulation. Trace and hit-shading cost; error against the glossy film reference. **Mirror-camera identity gate** on the standard and toon programs | R0a, U1 | 8-12 h / 2 h | Any identity failure is a contract bug and blocks everything else |
+| 8 | **TR1** | T1b revived (section 6) on both paths, including the jittered visibility buffer and the revealed-pixel boost | TR0, U1 | 12-20 h / 3-4 h | Section 8.3. If a population is still worse than TSR after the anchor bit plus one named fix, record the miss. Stop if the cost delta is more than ½ of TSR's after one optimisation pass. If TSR is worse than T1b everywhere, gate T1b as is |
+| 9 | **D0** (CPU replay) | 1-spp incident-irradiance dumps on Q-walk, Q-sun and Q-disocclusion. Compare only non-exposed filters: (a) world-cell accumulation with event W; (a′) (a) plus cell-space spatial filtering; (c) a sample-count control | G1 dumps | 4-8 h / 1 h | Drop a filter that cannot reach the bar by frame 8 after each event, or whose GPU estimate is above ½ of Lumen's measured denoise share. If none passes, spend on samples or caches, not blur |
+| 10 | **G2** | Bounce: `scatter`/`emission`, sun one-bounce, cache-terminated multi-bounce. Records against priority re-trace | G1, D0 | 12-24 h / 3-5 h | All GI measures, including S4 events and off-screen bounce |
+| 11 | **R1** | Reflections: R-RT B0-B2, `reflection_lobe`, `specular_incident`, hit shading by program; non-RT planar tier and WRC B2. Held tiers only after the Adshir/Snap ruling | R0b, G1, U1 | 16-30 h / 3-5 h | 8.3. If RT cost is above 0.5x UE-HW-Hit's "Lumen Reflections" after three hillclimb mechanisms, record the miss |
+| 12 | **Integrated acceptance** | Every gate on the integrated build, both paths, against the Epic floor; 2x end to end; memory; quiet window; independent Opus review | all | 6-10 h / 4 h | 8.3 |
+| 13 | **Upscaling** (later) | 4K output | TR1 | — | Ships only if it beats TSR Epic on every measure |
+
+**Why this order.**
+- G0 and U1 are already running.
+- TR0 and R0c are cheap. TR0 decides whether T1b already beats TSR; R0c sizes the non-RT far field.
+- G1 is the first Renderlab unit. It is lighting-invariant, runs on both paths, needs no `scatter` contract, and its lag gate is clear.
+- R0b proves the hit contract before R1 builds on it.
+- D0 picks the GI accumulation before G2 commits to one.
+
+**Parallel ownership.**
+- G1 and R0c are CPU-heavy and separable. G1 owns `gi_cache*` and the cook visibility module; R0c owns the LOD-BVH cook.
+- TR1 owns `film_accumulation.rs` and the new `temporal*` files, which root assigned to M7.
+- None of them edits the shadow files.
+
+## 8. Plan against Unreal 5.7 and gates
+
+### 8.1 Unreal method
+
+**Reused harness.**
 - Packaged Development UE 5.7.4 CL51494982, D3D12 SM6, `-RenderOffscreen`, hidden start.
-- No focus changes, input automation or desktop capture.
-- Native CSV frames 96-159 after warmup; ProfileGPU outside that block.
-- DumpGPU replays for images and pass attribution, run separately from timing replays.
+- No focus changes, input automation or captures.
+- CSV `GPUTime` frames 96-159, ProfileGPU at frame 64, DumpGPU replays separate from timing, DXGI `LocalUsedMB` memory.
 
-**Shared rules.**
-- Effective-CVar readback with `SetBy`.
-- DXGI memory sampling.
-- The same manifests and camera/light tracks for both engines.
+**Scalability.**
+- Read the installed `C:/Program Files/Epic Games/UE_5.7/Engine/Config/BaseScalability.ini` and record its SHA-256 per run.
+- Record the `sg.GlobalIlluminationQuality`, `sg.ReflectionQuality` and `sg.AntiAliasingQuality` group values in effect, then read back every derived cvar in the process. The ini sets values; readback proves them.
+- The floor is **Epic (3)** and High (2) is the cost curve (Islam). **Cinematic** is recorded as the quality ceiling.
 
-**Renderlab.** One process per asset runs every variant with 8 paired repeats. Every speed claim gets a final quiet-window run.
+**Effective Lumen tracing mode, logged in every run.**
+- Unreal's own documentation contradicts itself on the default, so each run logs `r.Lumen.HardwareRayTracing`, `r.Lumen.HardwareRayTracing.LightingMode`, `r.Lumen.Reflections.HardwareRayTracing.HitLighting`, `r.Lumen.TraceMeshSDFs` and `r.RayTracing.Nanite.Mode`.
+- It also logs `DumpCVars r.Lumen.`, `r.TSR.` and `r.LumenScene.` into the evidence JSON.
+- A run whose logged mode differs from its label is discarded.
+- LightingMode is set through the device profile or the command line, not saved config (5.7 editor-crash report).
 
-**Content preparation.**
-- Software Lumen needs mesh distance fields, and the packaged project has not been recooked since the [full-detail comparison](unreal-quarry-full-detail-comparison.md).
-- U0a recooks with distance fields as a new, recorded content identity, and reads back the distance-field resolution of the Nanite scans.
-- Hardware Lumen reuses the ray-tracing support the HRT package already has.
+**Content.**
+- Software Lumen needs a recook with mesh distance fields, recorded as a new content identity.
+- Log `r.DistanceFields.LogAtlasStats 1` and each scan's distance-field resolution scale.
+- Hardware Lumen sets `r.DistanceFields.SupportEvenIfHardwareRayTracingSupported=0` so Unreal doesn't hold both SDFs and BVHs.
 
-**Configuration study first (U0a).**
-- Dump the installed build's CVar list and help text, for configuration only. No engine source is copied.
-- Map each configuration below to its effective settings, and confirm every one by readback.
-- No CVar name is assumed from documentation. Whether 5.7.4 still has standalone RT AO or sky-light controls is unchecked.
+**Configurations.**
 
-### Configurations
-
-| ID | GI and reflections | Shadows | AA | Role |
-|---|---|---|---|---|
-| UE-0 | Off (the existing subset) | VSM / HRT | Off | Baseline. Lumen's increment is UE-x minus UE-0 |
-| UE-TSR | Off | VSM / HRT | TSR, native 100%, Epic, 200% history | Prices TSR alone; U5's floor |
-| UE-SW-H, UE-SW-E | Lumen software (distance fields), High and Epic scalability | VSM | TSR as above | **Non-RT comparator** |
-| UE-HW-E | Lumen hardware with surface-cache hit lighting, Epic | VSM, and an HRT variant | TSR | **RT comparator** |
-| UE-HW-HL | Lumen hardware with hit lighting for reflections | As UE-HW-E | TSR | Strongest RT reflection comparator |
-| UE-PT | Path tracer, high spp | — | — | Diagnostic cross-check of our references only, never the sole reference |
-| UE-up | As UE-SW / UE-HW | | TSR upscaling at the agreed screen percentage | Only if Q1 asks for it |
-
-**Which configuration is the floor.** The floor is the best-quality configuration per path that runs at game rates. That is probably Epic; High is kept for the cost curve. "Matched quality" means Renderlab's image beats that configuration on every registered measure, and the 2x floor is then measured against that configuration's end-to-end time.
-
-**Workloads.**
-- Quarry poses 0 and 1: static, camera, sun turning, sun jump, cut.
-- S2-glossy, S4, S5 and SV (section 8).
-
-Per workload: native timing, final post-TSR pre-tonemap HDR, native Lumen pass attribution (diagnostic) and memory.
-
-**Checks before scoring.**
-- Light-proxy readback (the stale-proxy lesson), exposure and material readback.
-- U0c localizes the glossy disagreement. It sweeps roughness (0.05-0.5) and source angle on the fixture, and compares against our reference and an independent pbrt-v4 or Mitsuba 3 image.
-
-**Targets (I, to be replaced by measurement).**
-- **RT path:** if UE-HW-E adds about 2-4 ms, Renderlab's GI, reflections and AA together get about 1-1.5 ms.
-- **Non-RT path:** the budget is half of UE-SW-E's total, minus our current frame. If Lumen software adds about 2.5 ms, that leaves about 0.3-0.5 ms, which is likely a miss. A miss is recorded, never closed by lowering quality.
-
-## 8. Gates
-
-### 8.1 References and benches
-
-**Quarry reference.**
-- An in-process GPU path tracer on the RT device: hardware rays, full-detail geometry, program materials through `scatter`, pixel-integrated, with motion-integrated sequences.
-- A CPU quarry reference would break the 1.5 GiB CPU-run memory rule (13 M triangles plus 1.07 GB of textures).
-- **Independence check:** on the small benches, pbrt-v4 or Mitsuba 3 (Apache/BSD) must agree with the GPU path tracer within a registered tolerance before the quarry reference is trusted (Q7).
-
-**New benches.** All are generated, redistributable and authored once for both engines.
-
-| Bench | Content | Tests |
+| ID | Settings | Role |
 |---|---|---|
-| **SV** | S1-like concavity fixture: creases, overhangs, undersides, 1-100 mm gaps; sky only | Sky visibility (U2) |
-| **S4** | Thin room ([competitor note](research/competitor-weaknesses.md)): 1/5/100 mm walls, sliding door, red panel off-screen. v1 is lit by sun through an opening plus the environment; a hard point-light variant follows once its visibility runs on both paths | Leaks, moving occluders, off-screen bounce |
-| **S5** | Mirror corner: 1 m mirror, roughness-0.15 surface, off-screen moving cube | Mirrors, off-screen reflection, mover in mirror |
-| **S2-glossy** | The M5-GM plan: a normal-mapped low-roughness scan crop, small grazing-sun highlights, 0.25-1 px/frame tracks, a moving light | Glossy stability, specular AA, TSR floor |
+| UE-0 | Lumen and TSR off (existing subset) | Baseline for increments |
+| UE-SW-{H,E,C} | Lumen GI and reflections, `HardwareRayTracing 0`, with `TraceMeshSDFs` 0 (the 5.7 default) and 1, VSM, TSR Epic | **Non-RT floor at E** |
+| UE-HW-SC-{H,E,C} | `HardwareRayTracing 1`, LightingMode 0, HRT shadows, TSR | RT cost curve |
+| UE-HW-Hit-{E,C} | LightingMode 2 (hit lighting for reflections) | **RT reflection floor** and RT quality ceiling |
+| UE-GI-only | As above, with reflection method none or sky | Matches G1/G2 scope |
+| UE-sky | As UE-GI-only, with the sun's Indirect Lighting Intensity 0 (to verify) | G1's sky-only comparator |
+| UE-TSR | `AntiAliasingMethod=4`, `ScreenPercentage=100`, `sg.AntiAliasingQuality` 3 and Cinematic; plus 1x (`=0`) and 66.662% rows | TR0 |
+| UE-DLAA (optional) | DLAA preset K, if installed | Informative only, never a bar (Q5) |
 
-Populations and thresholds are registered before capture.
+**Timing.**
+- End to end: same-process A/B toggles, measured in CSV `GPUTime` with async at its defaults.
+- Attribution: ProfileGPU with `r.Lumen.AsyncCompute=0` and `r.TSR.AsyncCompute=0`, for these nodes:
+  - Lumen Scene Update and Lumen Scene Lighting;
+  - Screen Probe Gather (traces, filter, integrate, temporal, ShortRangeAO);
+  - Lumen Reflections;
+  - TemporalSuperResolution.
+- Overlapping queues are never summed.
 
-### 8.2 Quality measures
+**Lag.** A 10° sun step and an environment yaw step, captured at frames 1, 2, 4, …, 128 after the step: frames-to-settle against the settled image.
 
-Each must beat the Unreal floor configuration. The film reference is tracked as the target.
+**Floor arithmetic (gi.md, I until G0).**
+- RT: Renderlab's M7 budget is ≈ L_hw/2.
+- Non-RT static: ≈ L_sw/2 + 0.08 ms on the Surface default.
+- Non-RT camera-moving already misses 2x without GI (0.89x, M). Per Islam, non-RT GI still becomes the default if it beats Unreal's quality on every measure; the miss is recorded.
 
-| Topic | Measures |
-|---|---|
-| GI | Indirect HDR error per population (contact/crevice, open, underside, dark side of thin walls); leak energy behind 1/5/100 mm walls; indirect contact error; off-screen bounce (S4 panel); response after light and door events (t90, overshoot, frames to within the bar); cut and disocclusion recovery; flicker residual |
-| Reflections | Error per roughness band; mirror edge spread; off-screen object energy and position in the mirror (S5); energy bias; highlight energy and peak drift; seam at r_trace; flicker |
-| Final image | F1-F10 on S2-glossy, S5 and the quarry; sharpness (band-pass energy ratio against film and TSR); trail energy; revealed-pixel age curve |
-| Inspection | Full-frame images and flipbooks of every sequence (F10). Numbers never override it |
+### 8.2 References and fixtures
 
-### 8.3 Cost and memory
+**References.**
+- **R_GI:** in-process GPU path tracer (root decision), with the same geometry, programs, sun disk, environment and ε policy. Converged by spp doubling. Bevy's `pathtracer.wesl` and Capsaicin's reference tracer are copy-licensed models.
+- **Independent oracle:** pbrt-v4 or Mitsuba 3, on crops.
+- **UE path tracer:** a sanity image only.
+- **Glossy film reference:** the same tracer at high spp per pixel footprint.
 
-- **Per stage:** p50, p95 and p99 for static, camera, sun turn, sun jump, caster/door and cut.
-- **Spikes:** no frame above 1.5x steady (F9), except registered cold starts.
-- **2x:** end to end against the floor configuration, on both paths, with a quiet-window final run.
-- **VRAM:** the total stays below Unreal's in the matched Lumen configuration. Allocator-reserved, WDDM and DXGI figures are measured as in [M1](memory-m1.md).
+**Fixtures.**
 
-### 8.4 Programmability and robustness
+| Set | Fixtures | Tests |
+|---|---|---|
+| GI | Quarry poses 0/1; S1-S3; **SV** (concavities, overhangs, 1-100 mm gaps, sky only); **S4** (thin room, door, off-screen panel) | Occlusion, leaks, off-screen bounce, events |
+| Reflections (RF prefix to avoid clashing with Level F) | **RF1** puddle at roughness 0/0.05/0.1, camera pitched 20-40°; **RF2** roughness sweep 0-1 on dielectric and metal; **RF3** moving occluder and reveal; **RF4** rails and poles; **RF5** moving sun and reflected object; **RF6** grazing view; **RF7** facing panels; **RF8** wet quarry rock at 0.3-0.5; **RF9** shells seen from behind; **RF10** toon object in RF1 | Bands, off-screen reflections, thin features, lag, programmability |
+| Temporal | Registered Q-walk, Q-disocclusion, Q-sun; S2-glossy (M5-GM plan) | TR0/TR1, glossy stability |
 
-- **Same inputs for every program.** Standard, toon and flat programs at the same pixels receive byte-equal `indirect_*` values.
-- **No cost for non-callers.** A scene whose programs call no `indirect_*` runs no M7 pass and is byte-identical to pre-M7, at equal cost.
-- **Programs drive bounce.** A toon `scatter` visibly changes bounce colour.
-- **No lighting-model data in receivers.** The hit record stays 16 B. Cells hold only incident radiance, transport records and geometric data.
-- **Reload.** A program reload relights only that program's cells and keeps the last working pipelines.
-- **Determinism (F8).** Replays are bit-identical across processes.
+### 8.3 Gates
+
+**Common to every unit.**
 - **Both paths.** Every gate runs on RT and non-RT. Non-RT is proved on a device created without ray-query features.
+- **Unreal floor.** Beat Epic on every registered measure, static and moving. Cinematic is tracked as the ceiling, film as the target.
+- **Settle.** ≤ Unreal at every age, and ≤ the bar by frame 8 after every cut, disocclusion and lighting event (root: the 8-frame limit extends to GI and reflections).
+- **Cost.** p50/p95/p99 per stage for static, camera, sun turn, sun step, caster/door and cut. No frame above 1.5x steady except registered cold starts. 2x end to end against the Epic configuration, with a quiet-window final run.
+- **Memory.** Renderlab total < Unreal's total with Lumen on, per path. That includes the cook-time near field and the WRC. WRC ≤ 160 MiB.
+- **Programmability (3.4).**
+  - Standard, toon and flat programs at the same pixels get byte-equal engine inputs.
+  - Non-callers run no M7 pass and are byte-identical to pre-M7.
+  - A toon `scatter` changes bounce colour.
+  - The mirror-camera identity gate passes.
+  - The hit record stays 16 B.
+  - A program reload relights only that program's cells.
+- **Determinism (F8).** Replays are hash-equal across processes. Any unexplained difference is fixed in the implementation, never in the comparison.
+- **Inspection (F10).** Full frames and flipbooks. Numbers never override them.
 
-### 8.5 Gates per unit
+**Per unit.**
 
-| Unit | Must pass to be kept |
+| Unit | Must pass |
 |---|---|
-| U0 | Effective readback of every configuration; GPU path tracer agrees with pbrt/Mitsuba on the benches; glossy disagreement explained or bounded; floor values recorded per measure |
-| U1 | Level F film error lower on every population, static and moving; F3 bias; both paths; no change for programs that don't call the helper |
-| U2 | Sky-only error and SV/quarry measures beat UE-SW-E (non-RT) and UE-HW-E (RT); 8.4 in full; cost and memory gates |
-| U3 | All GI measures, including S4 events and off-screen bounce; relight-without-retrace equals a full re-trace on a static camera (byte or registered tolerance) |
-| U4 | All reflection measures on S5, S2-glossy and the quarry; hit lighting identical across programs except through their `scatter`/`shade` |
-| U5 | F1-F10 against TSR on S2-glossy and the quarry, on both paths; no ghost weight from surfaces invisible in the previous frame (F5) |
-| U6 | Every gate together on the integrated build, 2x end to end, memory, quiet window, independent Opus review |
+| G1 | **Error against R_GI(env):** RMS, crevice pixels, over-occlusion of open pixels, flicker in motion. **Against Unreal:** UE-sky at Epic, HW for RT and SW for non-RT. **Determinism and settle:** hash-equal across processes; a caster move settles byte-identical to fresh; yaw and intensity steps equal fresh on the next frame (0 frames lag). **Stop rules:** after 3 retained mechanisms still losing a measure; RT camera-moving cost above 0.3 x L_hw; non-RT above L_sw/2 continues only as quality-first and is recorded. Disoccluded first-frame error ≤ UE's first frame |
+| R0b | Mirror-camera identity on standard and toon; converged static error per band ≤ Unreal's |
+| TR1 | ≥ TSR on every population at every age (Q-walk, Q-disocclusion, Q-sun); trail width and hold flicker ≤ TSR; F8; non-RT run byte-identical to its paired software run; cost delta ≤ ½ TSR's, total frame ≤ ½ Unreal's |
+| D0 | Bar by frame 8 after each event; GPU estimate ≤ ½ Lumen's denoise share |
+| G2 | All GI measures, including S4 leaks behind 1/5/100 mm walls, off-screen bounce, and door/light response (t90, overshoot) |
+| R1 | All RF measures per band, both paths. Non-RT reported against UE-SW with the held tiers named as absent. B1 motion (RF3, RF5) ≤ Unreal, or opt-in and labelled |
+| Integrated | Everything above together, on the quarry and fixtures, against the Epic floor |
 
-## 9. Units
+## 9. Patents and licences
 
-Sizes are rough agent estimates (I). They are implementation time plus GPU verification time, kept separate.
+**Patents.** "Not flagged" is not a clearance. A human review is open for the starred rows (milestone-7.md).
 
-| Unit | Content | Depends on | Size | Stop rule |
-|---|---|---|---|---|
-| **U0** | (a) Unreal configuration study, recook, readback; (b) GPU path-tracer reference mode and pbrt/Mitsuba cross-check; (c) glossy disagreement; (d) SV, S4, S5 and S2-glossy scenes and scorers; (e) UE-0, UE-TSR, UE-SW and UE-HW timing, images and memory | — | 10-16 h / 3-5 h of GPU and Unreal | A configuration whose effective settings can't be read back is recorded and not scored |
-| **U1** | S-AA1, then S-AA2 | U0c, for the Unreal comparison only | 4-8 h / 1 h | Keep only on a film-error gain on every population |
-| **U2** | WRC v1, `indirect_irradiance`, G-R1 and G-N1 for sky only | U0b, U0d | 16-30 h / 3-5 h | If coarse software rays exceed budget, probe G-N2's far field |
-| **U3** | Bounce: `scatter`/`emission`, relight from records, caster and door invalidation of records, sun relight | U2 | 12-24 h / 3 h | If cell leaks on S4 exceed UE-SW-E, the cell key is redesigned before more tuning |
-| **U4** | Reflections: R-R1 and R-N1, `indirect_radiance`, hit lighting | U2 cells, U1 | 16-30 h / 3-5 h | If non-RT mirrors exceed budget, R-N3 is tried only for declared planes |
-| **U5** | T-A, then T-B; non-RT jittered visibility buffer | U0e's TSR floor, U1 | 12-24 h / 3-5 h | Each candidate stops at its first floor miss |
-| **U6** | Integrated acceptance | All | 6-10 h / 4 h | — |
-
-**Start with U0 and U1 in parallel.** U1 is mostly CPU and cook work, so it can proceed while the lease serves U0 or the hillclimb. U2's CPU parts can also start alongside: the cook-time near-field visibility, the coarse BVH build and the cache layout tests. Record decisions and misses in a new `docs/milestone-7-decisions.tsv`.
-
-## 10. Open questions for Islam
-
-1. **Output and upscaling.** Compare at 1080p native with TSR at 100%, as all comparisons so far? Or also at 4K output with Unreal's default screen percentage? The latter needs our own upscaler (T-D), or concedes the time ratio.
-2. **Floor scalability.** Is Lumen Epic the floor on both paths, with High recorded for the cost curve? Lumen High and Epic differ by about 1.7-2x in Epic's own tables (A).
-3. **Secondary-hit contract.** Accept an optional `scatter()`/`emission()`, view-independent per cell for bounces, with full program evaluation only at first low-roughness reflection hits? Programs without `scatter` would occlude but not reflect.
-4. **Cook-time near field.** Accept the prepared visibility data for static geometry (about 50-150 MB, extra cook time) and the static/mover split it implies?
-5. **Settle limit.** Extend the 8-frame soft-shadow settle limit to GI and reflections after cuts, disocclusion and lighting changes?
-6. **Patent review.** Who does it, and when? First item: the surface-keyed radiance cache against US 9,754,407, a dynamic object-space shading grid. It must be checked before U2 ships beyond opt-in. The ReSTIR family stays held.
-7. **Reference independence.** Accept an in-process GPU path tracer for the quarry, validated by pbrt/Mitsuba on the benches? Or allow one CPU quarry reference above the 1.5 GiB rule while nothing else runs?
-8. **The non-RT 2x miss.** If Lumen software proves cheap and non-RT 2x is out of reach at matched quality, the miss is recorded and quality is not reduced. Confirm that this is the reporting, and say whether non-RT GI may meanwhile ship opt-in.
-
-## 11. Research plug-ins
-
-| Note | Section here | Decides |
+| Technique | Exposure | In this design |
 |---|---|---|
-| `docs/research/gi.md` | 3.1, 4 | Cache layout and payload; invalidation prior art; precomputed visibility prior art and patents; Lumen per-pass cost on PC; coarse-BVH software throughput; any non-screen-space non-RT GI |
-| `docs/research/reflections.md` | 5 | r_trace and sub-cone count; Lumen reflection cost and quality by roughness and hit lighting; ray-cone LOD traversal; reflecting LOD geometry |
-| extended `reuse-temporal-denoise.md` | 6 | TSR behaviour; history-free and adaptive AA results; patent notes on history methods |
-
-When they land, the sketch tables are finalized, the I-labelled costs are replaced where the notes give evidence, and the status line changes to draft 2.
-
-## 12. Ownership, licences and patents
-
-**M7 owns.**
-- New files: `src/world_cache*.rs`, `shaders/world_cache*.wgsl`, `src/gi*.rs`, `src/reflection*.rs`, `src/temporal*.rs`.
-- Existing files: `shaders/program_api.wgsl`, `shaders/programs/*`, `src/lighting*.rs`, `src/environment*.rs` and `crates/cook/src/normal_map.rs`.
-- A new cook visibility module, plus the bench, reference and scorer files.
-
-**The shadow hillclimb owns.** `shadows*`, `vsm*`, `virtual_shadow*` and the surface cache (`src/virtual_shadow_cache.rs`, `shaders/virtual_shadow_cache.wgsl`). The WRC copies that pattern into new files and does not edit them. M7 reads shadow outputs, such as receiver sun visibility for visible cells, through existing bindings. Any new shadow-side API is requested from the hillclimb owner.
-
-**To settle with root.** `SoftShadows::Temporal` lives in `src/shadows.rs`, and T1a lives in `src/film_accumulation.rs`. M7's reconstruction should be a separate engine setting in new files. Whether `film_accumulation.rs` moves to M7 is root's decision.
+| World-space surface cells (WRC; also the N8n/o shadow default) | **US 9,754,407\*** | WRC is built opt-in. Default awaits the review (Q1) |
+| ReSTIR (screen or world space), with any cache | **US 11,315,310\*** and family | **Excluded.** No unit depends on it (4.1) |
+| Hash-grid path-space filtering, projective hash maps | NVIDIA authorship; **US 11,925,860** | Our 3D key is not a projection (I); include in the review |
+| Variance clipping | **US 10,116,916** (to 2037), US 10,362,289 | Excluded |
+| SVGF / à-trous variance-guided filtering | **US 10,600,167\*** | Excluded (Falcor code licence-clean, patent open) |
+| Temporal gradients, A-SVGF re-shade, validation-ray gradients | **US 12,437,371** | Excluded; engine events and record relight instead |
+| Fast/slow history | **US 11,847,737** | Excluded |
+| History clamping | US 11,783,455, US 11,113,792 | Excluded (no clamp anywhere) |
+| Raster primaries plus reflection rays | **Adshir/Snap** US 10,950,030 B2, 10,699,468, 11,302,058, 12,051,145, 12,573,127, pending 2025/0363721 | Non-RT LOD-BVH and SDF reflection tiers held. RT traced-primary reflections are outside the wording (I, claims unread) |
+| Object-space shading | US 9,747,718 | Not used |
+| DDGI, ratio estimator, ATAA, ray cones, Toksvig/LEAN, Kaplanyan-Tokuyoshi, planar reflections | Not flagged | Used as described |
 
 **Licences.**
-- Copy only MIT, Apache or BSD code, with its notices: kajiya's ircache, Solari's world cache, Capsaicin's hash grid, obvhs, tray_racing, Filament, and Brixelizer pinned at v1.1.4.
-- pbrt-v4 and Mitsuba 3 are used as tools.
-- Never copy Epic, Unity, NVIDIA RTX SDK or FidelityFX 2.x main-branch code.
 
-**Patents: review before shipping.**
-- The ReSTIR family: held.
-- SVGF and history clamping: none planned.
-- US 9,754,407, against the surface-keyed radiance cache.
-- Occlusion-field prior art, if used.
-- Lumen-specific patents have not been checked.
+| Rule | Items |
+|---|---|
+| **Reimplement only: read docs, copy no code** | Epic, Unity, RTXGI 2.x, SHaRC, NRC, NRD, RTXDI, DLSS / DLSS-RR, XeSS, FSR 4, FidelityFX 2.x binaries |
+| **Own code from the text** | DDGI papers (CC BY-ND); RTG ch. 25 (CC BY-NC-ND) |
+| **Copy with notice** | Bevy Solari's world-cache files only (`world_cache_{query,update,compact}.wesl`, MIT/Apache; never its ReSTIR files); kajiya ircache (MIT); Capsaicin hash cells and leak fix (MIT; not `world_space_restir.hlsl`); Falcor `TexLODHelpers` (BSD-3); Filament `normalFiltering` (Apache-2.0); obvhs and tray_racing (MIT/Apache); Brixelizer, FidelityFX SDK pinned at v1.1.4 (MIT); Wicked DDGI (MIT) |
+| **Tools** | pbrt-v4, Mitsuba 3 |
+| **Copyable but held on patents** | Falcor SVGF (BSD-3); FidelityFX reflection denoiser (MIT; temporal clip under review) |
+
+## 10. Questions for Islam
+
+1. **US 9,754,407.** The N8n/o surface cache is already the non-RT shadow default (N8p) while its review is open. May the WRC, which has the same structure, become a GI default on the same basis? Or must both wait for the review?
+2. **Adshir/Snap ruling for non-RT reflections.** Until you rule, non-RT non-planar sharp and glossy reflections have no in-plan producer (5.2). The non-RT reflection floor may then fail against Lumen software on RF2-RF4. Do you want this review prioritized, or the miss recorded meanwhile?
+3. **Held denoisers.** SVGF-class and recurrent-blur filters are out of the plan (9). If D0's non-exposed filters miss the 8-frame and quality gates, do you want a patent review to unlock them? Or record the miss and spend on samples and caches?
+4. **`reflection_lobe` is GGX-shaped.** Non-GGX styles get their nearest GGX lobe, or no traced reflections. Accept this recorded constraint?
+5. **DLAA.** Add an informative DLAA preset K row to the Unreal runs, never a bar? Linking `dlss_wgpu` into Renderlab is not proposed.
+
+**For root, not Islam:**
+- Extracting the surface cache's key/claim/resolve code into a module shared with the shadow hillclimb, against the M7 copy recorded in 3.1.
+- Which RT configuration's VRAM (2,641 or 4,138-4,202 MiB) is M7's baseline.
 
 ## Evidence and time
 
 Reading and design only:
-- the contract;
-- the brief, handoff and M5-M6 contract;
-- the research notes;
-- the N8, N8n, N8o, N1b, N1c and N0 records;
-- programmable-shading, the memory record, bench-motion, the Unreal setup and end-to-end records;
-- both M5 handovers.
+- the three research notes and milestone-7.md's decisions;
+- the M5-DL, N8p and memory records;
+- draft 1 and its inputs.
 
-No implementation, verification, GPU, Unreal or E: work was done, and nothing was deleted.
+Of the running M7-U0 and M7-U1 worktrees, only their branch names and changed-file lists were seen. None of their uncommitted work was read or used. No implementation, verification, GPU or Unreal time was spent.
