@@ -2,6 +2,11 @@
 
 2026-11-07 UTC. Base `b183023`, branch `t3/m2-memory`.
 
+**RT scope:** all Interactive RT timings, speed claims and memory rows here are
+**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
+rows describe a separate explicit opt-in. Storage changes do not change those defaults.
+
 Shared immutable cluster-instance/group tables remove **13.466 MiB of live no-RT
 allocations**. **Reserved memory does not fall**: the space becomes allocator
 slack. RT and traced Virtual have only one consumer and save nothing. The larger
@@ -197,6 +202,8 @@ capture is used. The shared runner owns the atomic GPU lock and reservation/
 release lines, checks games, requires 4 GiB free at start and aborts below 2 GiB.
 
 ## Frame timing and verification cost
+
+RT timings and ratios here are **measured on the non-default fast setup (traced + Interactive)**.
 
 RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu 30.0.1, rustc 1.96.0.
 Development/test profile (Renderlab opt-level 1), not release-performance data.

@@ -4,6 +4,12 @@
 
 ## Verdict
 
+**RT measurement scope:** every Renderlab RT timing, speed ratio and RT memory
+comparison below is **measured on the non-default fast setup (traced + Interactive)**,
+unless a row explicitly names Traced + Virtual. The RT-device default remains raster
+primaries with 256-ray Exact shadows. [RT1](rt1-interactive.md) diagnoses the false-shadow
+miss; it does not promote the fast setup or certify the default's speed.
+
 **M6 is not accepted.** Shadow quality beats Unreal 5.7 on almost every recorded measure, on both paths. Static shadows are free on the non-RT path, and memory is below Unreal's on every path. Speed fails where the work changes every frame on the non-RT path:
 
 | Shadow pass per frame, quarry 1080p | Non-RT: Surface (default) | Non-RT: Exact (option) | RT: Traced + Interactive | Unreal VSM no-RT | Unreal VSM, RT on | Unreal HRT |
@@ -63,7 +69,7 @@ N8f's ~0.5 ms camera-moving figure was an estimate. It now holds as a measuremen
 
 **Non-RT, Surface (the default): miss.** 1.049-1.065 ms against VSM no-RT's 0.495-0.500: 2.1x slower. Exact, the option, costs 1.497-1.544 (3x slower).
 
-**RT, Traced + Interactive: pass against HRT; parity against VSM RT on.**
+**RT, measured on the non-default fast setup (traced + Interactive): pass against HRT; parity against VSM RT on.**
 - The eight rays cost **0.276 ms** a frame, in the paired median of 32 frames (range 0.237-0.327).
 - That is 2.3x below HRT's 0.627-0.635: a 2x pass.
 - It is 1.8x below VSM RT on's 0.501-0.505: faster, but 0.02-0.03 ms over that 2x floor (0.250-0.253).
@@ -71,7 +77,7 @@ N8f's ~0.5 ms camera-moving figure was an estimate. It now holds as a measuremen
 
 **RT device with non-RT shadows** (traced primaries + Virtual Surface): 1.023-1.203 ms (R, N8o). That is a miss against VSM RT on's 0.50.
 
-**Frame totals on matched motion.** Our GPU spans are M5-DL's release runs, against Unreal's whole-frame `GPUTime` from §1. The boundaries differ: ours runs from the first rendered pass through tone mapping, D3D12 against Vulkan.
+**Frame totals on matched motion.** RT totals are **measured on the non-default fast setup (traced + Interactive)**. Our GPU spans are M5-DL's release runs, against Unreal's whole-frame `GPUTime` from §1. The boundaries differ: ours runs from the first rendered pass through tone mapping, D3D12 against Vulkan.
 
 | Phase | No-RT span | VSM no-RT | Ratio | RT span | HRT | Ratio | VSM RT on | Ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -102,6 +108,8 @@ The no-RT quarry, both poses, interleaved A/B in one process, 48 camera frames o
 - **Identity.** The final binary reproduces N8o's Surface and Exact counts in every phase and pose: 12 hashes, including camera-moving `3e0786a5…` / `03fe73d4…` and caster-moving `95d7350c…` / `4c9b1ac3…`.
 
 ## 4. RT path: the surface cache stays non-RT (decision (b), M)
+
+All RT speed claims in this section are **measured on the non-default fast setup (traced + Interactive)**.
 
 Porting the surface cache to hardware-ray visibility cannot buy what it costs.
 
@@ -149,6 +157,11 @@ Unchanged by this unit. Every row comes from [N8o](non-rt-n8o.md) / [N8p](non-rt
   - Minimal reference: 21 / 17 against 11 / 9.
   - Exact has the same miss (9 / 11, 20 / 17). HRT has 743-770.
   - These are F0-era scores, not re-measured here.
+  - [RT1](rt1-interactive.md) reproduces those witnesses and distinguishes the
+    later receiver policy. Its current-source capture measures **27 / 26** false
+    shadows against that policy's own film reference, versus rescored VSM's
+    **11 / 9**. A targeted 1,048,576-direction point replay leaves 15 / 16 of the
+    selected failures. The miss persists; most F0-era coordinates have cleared.
 
 Neither path meets the film-quality target. Neither is presented as doing so.
 
@@ -180,12 +193,14 @@ N8o and N8p cite 4,138-4,202 MiB for the RT device. That figure came from the qu
   - On an RT device the library defaults to raster primaries with the `SoftShadows::Exact` preference (256 rays).
   - Every RT comparison (e2e, M5-DL, this record) sets `PrimaryVisibility::Traced` and `SoftShadows::Interactive` explicitly.
   - The viewer inherits the library defaults.
-  - Making Traced + Interactive the RT default is a primary-visibility decision, outside this unit's files.
+  - [RT1](rt1-interactive.md) owns the conditional default decision. Promotion requires every static and motion measure to pass; the film false-shadow miss still prevents it.
 - The trail's N8p row says camera motion is "about 0.5, estimate". The measured 0.495-0.500 replaces it (rows below).
 
 ## 8. M5 status: the matched Unreal comparison (measurement only)
 
 **Measured on matched motion:**
+The RT speed claims are **measured on the non-default fast setup (traced + Interactive)**.
+
 - **Speed:** §2's frame table. No-RT static passes 2x (2.12x). The no-RT sun misses 2x (1.45-1.55x). No-RT camera and caster are slower than Unreal (0.87x and 0.73-0.76x). RT passes 2x against HRT in all four phases, thinly (2.00-2.06x), and reaches 1.79-2.09x against VSM RT on.
 - **Memory:** §6, below Unreal on every path.
 - **Development loop** (M5-DL):
@@ -205,8 +220,8 @@ N8o and N8p cite 4,138-4,202 MiB for the RT device. That figure came from the qu
 1. **Non-RT camera-moving shadows: 1.049-1.065 ms against VSM's 0.495-0.500 (2.1x slower).** The frame is slower than Unreal's (0.87x). §3 measured why.
 2. **Non-RT caster-moving shadows: 1.591-1.604 ms against 0.670-0.686 (2.4x slower).** The frame is 0.73-0.76x Unreal's.
 3. **Non-RT sun turning beats VSM, but not by 2x:** 0.574-0.598 against 0.881-0.906 ms, and 1.45-1.55x for the frame.
-4. **The RT path against VSM RT on:** 0.276 ms against 0.497-0.505 on static and camera frames, 0.02-0.03 ms over the 2x floor. Its frame is 1.79-1.83x faster on static and camera frames. Against HRT every phase passes, thinly (2.00-2.06x), and unfiltered RT visits reached 1.4-2.8 ms.
-5. **The RT path's film-reference false shadows:** 9-21 against VSM's 9-11 (R, F0).
+4. **RT, measured on the non-default fast setup (traced + Interactive), against VSM RT on:** 0.276 ms against 0.497-0.505 on static and camera frames, 0.02-0.03 ms over the 2x floor. Its frame is 1.79-1.83x faster on static and camera frames. Against HRT every phase passes, thinly (2.00-2.06x), and unfiltered RT visits reached 1.4-2.8 ms.
+5. **The RT path's film-reference false shadows:** **27 / 26 against VSM's 11 / 9** on the adopted viewed-side reference (M, [RT1](rt1-interactive.md)); the older 9-21 against 9-11 remains F0-era evidence, not a current score.
 6. **Surface is below Exact** on four quarry measures (+3-12%), S3 rotate 1's leaks (2 against 1) and two S3 flicker phases (+0.3%, +1.0%). It is above Unreal on all of them.
 7. **The compared RT configuration is not the library's RT-device default** (§7).
 8. **Not film quality** on either path, in any mode.
@@ -217,7 +232,7 @@ N8o and N8p cite 4,138-4,202 MiB for the RT device. That figure came from the qu
 ```
 2026-11-07	M6-close	Measure Unreal 5.7.4 shadow cost per frame directly, with our quarry harness's motions (camera 1 mm/frame, sun 0.5 mrad/frame, caster 1 mm/frame), stages priced from ProfileGPU	N8f's camera-moving ~0.5 ms was an estimate; M5-DL's frame comparison had an alternating-pose caveat	VSM no-RT static 0.497-0.498, camera 0.495-0.500, sun 0.881-0.906, caster 0.670-0.686 ms; VSM RT on camera 0.501-0.505; HRT 0.627-0.635 in every phase; scripts/ue-shadow-motion.py; docs/m6-acceptance.md	recorded
 2026-11-07	M6-close	Non-RT camera-moving shadow cost: a miss; no hillclimb step retained	The queued walk is floor-bound: halving it saved 4%; bounding long lit walks (N8e cap rule 2) gave -27% but costs about 3,500 umbra leaks and stays 1.5x VSM	Surface 1.049-1.065 ms vs VSM 0.495-0.500; steps L1-L7 in docs/m6-acceptance.md §3; final binary reproduces N8o hashes	recorded miss
-2026-11-07	M6-close	Do not port the surface cache to the RT shadow path (option b)	Interactive's eight fused rays cost 0.276 ms in every phase; the cache's fixed passes cost 0.127 ms and would need the rays moved out of the fused trace, with Surface's reuse quality cost	RT camera 0.276 ms vs HRT 0.627-0.635 (2.3x, pass) and VSM RT on 0.501-0.505 (1.8x, 2x miss by 0.02-0.03); docs/m6-acceptance.md §4	recorded
+2026-11-07	M6-close	Do not port the surface cache to the RT shadow path (option b)	Measured on the non-default fast setup (traced + Interactive): eight fused rays cost 0.276 ms in every phase; the cache's fixed passes cost 0.127 ms and would need the rays moved out of the fused trace, with Surface's reuse quality cost	RT camera 0.276 ms vs HRT 0.627-0.635 (2.3x, pass) and VSM RT on 0.501-0.505 (1.8x, 2x miss by 0.02-0.03); docs/m6-acceptance.md §4	recorded
 2026-11-07	M6	M6 not accepted: quality and memory beat Unreal on both paths; non-RT camera, caster and sun motion and the RT 2x floor vs VSM RT on miss; the compared RT configuration is not the RT-device default	Acceptance needs speed and quality together on both paths	docs/m6-acceptance.md	open
 ```
 
