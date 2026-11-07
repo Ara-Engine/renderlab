@@ -16,6 +16,8 @@ mod program;
 pub mod program_watch;
 mod receiver_adjacency;
 mod renderer;
+#[path = "program_vulkan.rs"]
+pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
 pub mod virtual_geometry;

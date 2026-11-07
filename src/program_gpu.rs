@@ -309,6 +309,8 @@ pub(super) struct ProgramSlot {
     pub layout: Option<ParameterLayout>,
     pub modules: ProgramModules,
     pub pipelines: ProgramPipelines,
+    /// Development preview pipelines must never seed temporal accumulation.
+    pub preview: bool,
     /// Live materials' parameter blocks, repacked when a reload changes the layout.
     pub materials: Vec<Weak<MaterialParameters>>,
 }
@@ -360,6 +362,7 @@ pub(super) struct ProgramAbi<'a> {
     pub primary: Option<&'a PrimaryState>,
     pub cache: Option<&'a wgpu::PipelineCache>,
     pub modules: &'a ModuleCache,
+    pub vertex_identity: [u8; 32],
 }
 
 pub(super) struct Compiled {
@@ -499,7 +502,15 @@ pub(super) fn create_sets(
     sets: &[(&ProgramModules, &str, Variant)],
 ) -> Result<Vec<Vec<Built>>, Error> {
     let jobs = sets.iter().flat_map(|&(modules, _, variant)| {
-        (0..variant.len()).map(move |index| move || modules.pipeline(abi, variant, index))
+        (0..variant.len()).map(move |index| {
+            move || {
+                crate::shader_compiler::with_program_policy(
+                    crate::shader_compiler::CompilePolicy::WarmLibraries,
+                    abi.vertex_identity,
+                    || modules.pipeline(abi, variant, index),
+                )
+            }
+        })
     });
     let mut built = in_parallel(abi.device, jobs).into_iter();
     let mut out = Vec::with_capacity(sets.len());
@@ -546,6 +557,7 @@ pub(super) fn standard_slot(
         layout: compiled.layout,
         modules: compiled.modules,
         pipelines: ProgramPipelines::default(),
+        preview: false,
         materials: vec![],
     };
     (handle, slot)
@@ -633,6 +645,7 @@ impl Renderer {
             layout: compiled.layout,
             modules: compiled.modules,
             pipelines: ProgramPipelines::default(),
+            preview: false,
             materials: vec![],
         });
         self.update_hashes();
@@ -706,6 +719,7 @@ impl Renderer {
         let slot = self.programs.iter_mut().find(|s| s.id == p.id()).unwrap();
         let zeroed = ParameterLayout::changed(slot.layout.as_ref(), compiled.layout.as_ref());
         slot.modules = compiled.modules;
+        slot.preview = false;
         slot.pipelines = ProgramPipelines::default();
         for (variant, pair) in variants.into_iter().zip(built) {
             slot.pipelines.install(variant, pair);
@@ -770,10 +784,17 @@ impl Renderer {
     /// the hot sets reloads recreate. A failure rejects the frame with `Error::Shader`
     /// (or faults).
     pub(super) fn ensure_pipelines(&mut self, sets: Vec<(u64, Variant)>) -> Result<(), Error> {
+        let temporal: Vec<_> = sets
+            .iter()
+            .filter(|&&(id, variant)| variant == Variant::Temporal && self.program_slot(id).preview)
+            .map(|&(id, _)| id)
+            .collect();
         let missing: Vec<_> = sets
             .iter()
             .copied()
-            .filter(|&(id, variant)| !self.program_slot(id).pipelines.has(variant))
+            .filter(|&(id, variant)| {
+                temporal.contains(&id) || !self.program_slot(id).pipelines.has(variant)
+            })
             .collect();
         if !missing.is_empty() {
             self.program_cache.refresh(&self.device);
@@ -791,6 +812,13 @@ impl Renderer {
             };
             self.pipelines.created += pipeline_count(&built);
             self.program_cache.count(pipeline_count(&built));
+            // Only after successful native compilation: discard other preview sets
+            // before admitting a temporal frame, so reset/history never sees them.
+            for id in temporal {
+                let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
+                slot.pipelines = ProgramPipelines::default();
+                slot.preview = false;
+            }
             for (&(id, variant), pair) in missing.iter().zip(built) {
                 let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
                 slot.pipelines.install(variant, pair);
@@ -992,6 +1020,7 @@ impl Renderer {
                 .filter(|_| self.pipeline.primary.is_some()),
             cache: self.program_cache.get(),
             modules: &self.program_cache.modules,
+            vertex_identity: Sha256::digest(self.source.as_bytes()).into(),
         }
     }
     pub(super) fn preludes(&self) -> Preludes<'_> {

@@ -23,6 +23,8 @@ sha2 = "=0.10.9"
 rayon = "1.11"
 # Program composition checks and Parameters reflection; wgpu already validates with it.
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
+# Matches wgpu-hal's existing Vulkan binding; no second Vulkan loader/backend.
+ash = { version = "=0.38.0", default-features = false, features = ["std", "debug"] }
 
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in", "spv-out"] }
