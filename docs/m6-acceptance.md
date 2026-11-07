@@ -232,6 +232,7 @@ N8o and N8p cite 4,138-4,202 MiB for the RT device. That figure came from the qu
 - **Gate** (CPU, after the last lease):
   - `cargo test -p renderlab --lib -j 2`: exit 0, 114 passed, 0 failed, 112 ignored.
   - Clippy `--all-targets -D warnings` (with N8o's two allowances) and `cargo fmt --check`: exit 0.
+  - Again after merging main `ab167bc` (M7's later commits), on the pushed head: 116 passed, 0 failed, 113 ignored; Clippy and fmt exit 0. The GPU measurements above ran on `24980a2`'s binary, without M7's later commits.
 - **Leases:** ten under the shared lock with the 4/2 GiB guard, at least 12.1 GiB available at every start, about 15 minutes in all.
   - ue-motion 154 s; l1 102; l2 51 (rejected at start: a screen constant missing from the whitelist); l2b 113; l3 28; l4 105; l5 101; l6 51; l7 67; final 124.
   - l4 started after m7-u0's request for the slot. That was an error, recorded in the schedule; the unit then waited for m7-u0's release.
