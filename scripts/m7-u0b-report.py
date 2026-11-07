@@ -240,6 +240,37 @@ def benches(args):
     print(json.dumps(dict(expected=len(expected),captured=len(rows),missing=len(missing))))
 
 
+def references(args):
+    root=OUT/"reference/quarry-final";full=json.loads((OUT/"quarry.json").read_text())
+    registered={f["name"]:f for f in full["frames"]};verified={};groups={}
+    for group in ("quarry-static","quarry-t1b-witnesses","quarry-unit-sequence"):
+        manifest=json.loads((OUT/(group+".json")).read_text());rows=[];missing=[]
+        for frame in manifest["frames"]:
+            name=frame["name"];source=frame.get("alias_of",name);path=root/(source+".npz")
+            if not path.exists():missing.append(name);continue
+            if source not in verified:
+                meta=json.loads(path.with_suffix(".json").read_text())
+                if meta.get("camera_background")!=[0,0,0] or sha(path)!=meta["archive_sha256"]:
+                    raise ValueError("reference hash/background mismatch")
+                verified[source]=meta
+            meta=verified[source]
+            for key in ("open","close","fov_y","samples","width","height","sky_only"):
+                if frame[key]!=registered[source][key]:raise ValueError("nonidentical reference alias")
+            if meta["samples"]!=frame["samples"]:raise ValueError("reference sample budget mismatch")
+            rows.append(dict(frame=name,canonical=source,samples=meta["samples"],
+                archive_sha256=meta["archive_sha256"],relative_noise_quantiles=meta["noise_relative_quantiles"],
+                luminance_noise_rms=meta["noise_luminance_rms"]))
+        ranges={}
+        for samples in sorted({r["samples"] for r in rows}):
+            noise=np.array([r["relative_noise_quantiles"] for r in rows if r["samples"]==samples])
+            ranges[str(samples)]=dict(per_frame_median_p95_p99_relative_SE_range=[noise.min(0).tolist(),noise.max(0).tolist()])
+        groups[group]=dict(expected=len(manifest["frames"]),ready=len(rows),missing=missing,
+            canonical_ready=len({r["canonical"] for r in rows}),noise_ranges_by_spp=ranges,frames=rows)
+    save(OUT/"reference-coverage.json",dict(primary_background=[0,0,0],groups=groups,
+        noise_definition="absolute split-half luminance difference / 2 divided by mean luminance; quantiles where mean exceeds 1e-4 of image peak; not a confidence interval"))
+    print(json.dumps({k:{f:v[f] for f in ("expected","ready","canonical_ready","missing")} for k,v in groups.items()}))
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);s=p.add_subparsers(dest="command",required=True)
     q=s.add_parser("quiet");q.add_argument("--out",type=Path,default=OUT/"quiet-summary.json")
@@ -248,6 +279,7 @@ def main():
     q=s.add_parser("floors");q.add_argument("--walk",type=Path,default=OUT/"walk/lumen")
     q.add_argument("--out",type=Path,default=OUT/"physical-floor-summary.json")
     q=s.add_parser("benches");q.add_argument("--root",type=Path,default=OUT/"study/bench-matrix")
+    s.add_parser("references")
     a=p.parse_args();globals()[a.command.replace("-","_")](a)
 
 

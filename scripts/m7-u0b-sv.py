@@ -44,6 +44,7 @@ def scenes(args):
 def capture(args):
     if args.async_off and not args.timing:raise ValueError("async attribution is a separate timing process")
     u=host.ue(allow_game=True);root=OUT/"sv-sky"/args.label;root.mkdir(parents=True,exist_ok=True)
+    u.WAIT_FOR_FOREIGN_CPU_CLEAR=args.timing
     u.PACKAGE_DIR=OUT/"ue-svsky-package";u.PACKAGE=u.PACKAGE_DIR/"Windows/Engine/Binaries/Win64/UnrealGame.exe"
     u.UE_FLAGS += ["-UseFixedTimeStep","-FPS=60"]
     named,pan=poses()
@@ -271,6 +272,12 @@ def costs(args):
     for case in sorted(root.iterdir()):
         if not (case/"complete.json").exists():continue
         recipe=json.loads((case/"recipe.json").read_text());rows=[]
+        cvars=host.ue().cvar_rows(case/"cvars-timed.csv")
+        lag=int(cvars["r.OneFrameThreadLag"]["value"])
+        if lag!=(0 if recipe["capture_only"] else 1):raise ValueError("capture-only render-thread synchronization leaked into cost process")
+        if any(int(cvars[k]["value"])!=int(recipe.get("async_compute",True))
+               for k in ("r.RDG.AsyncCompute","r.Lumen.AsyncCompute")):
+            raise ValueError("async attribution state mismatch")
         with (case/"profile.csv").open(newline="",encoding="utf-8-sig") as stream:
             reader=csv.DictReader(stream);absent=[key for key in fields if key not in reader.fieldnames]
             if any(not key.startswith("GPU/") for key in absent):raise ValueError("missing GPU CSV frame/camera columns")
@@ -287,7 +294,8 @@ def costs(args):
             actual=[rows[frame]["View/Pos"+axis] for axis in "XYZ"]
             if max(abs(a-b) for a,b in zip(actual,target))>1e-3:
                 raise ValueError(f"GPU CSV camera/frame identity failed at {frame}")
-        value=dict(config=recipe["config"],start=recipe["start"],capture_instrumented=recipe["capture_only"],async_compute=recipe.get("async_compute",True),
+        value=dict(config=recipe["config"],start=recipe["start"],capture_instrumented=recipe["capture_only"],one_frame_thread_lag=lag,async_compute=recipe.get("async_compute",True),
+            timing_eligible_for_claim=False,
             timing_scope="functional exclusive slot, not a quiet-window speed claim; group values separately, no inclusive summation",
             static=rows[96],first_cut=rows[97],pan=[rows[i] for i in range(196,205)],
             camera_csv_proof="all selected GPU rows match registered source eye within 0.001 cm",

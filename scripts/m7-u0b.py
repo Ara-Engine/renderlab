@@ -39,6 +39,30 @@ def game_state():
     return state
 
 
+def cpu_readiness(u,timing=False):
+    """Observe foreign builds without controlling them. Low headroom waits outside
+    the GPU lock until stillkit has been gone for 60 seconds; timing always waits."""
+    started=time.monotonic();clear_since=None;paused=False;next_notice=0
+    while True:
+        raw=u.E2E.powershell("@(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(cargo|rustc|clippy-driver)\\.exe$' -and $_.CommandLine -match 'stillkit' } | Select-Object Name,ProcessId) | ConvertTo-Json -Compress")
+        processes=json.loads(raw) if raw.strip() else []
+        if isinstance(processes,dict):processes=[processes]
+        ram=u.E2E.available_gib();now=time.monotonic()
+        if processes:clear_since=None
+        elif clear_since is None:clear_since=now
+        if ram<5:paused=True
+        waiting=ram<5 or ((timing or paused) and (processes or now-clear_since<60))
+        record=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),foreign_stillkit=processes,
+            available_gib=ram,timing_eligible_for_claim=False if processes else None,
+            timing_requested=timing,paused_for_memory=paused,waiting=bool(waiting),seconds=now-started)
+        if not waiting:
+            with (OUT/"cpu-readiness.jsonl").open("a") as log:log.write(json.dumps(record)+"\n")
+            return record
+        if now>=next_notice:
+            print("Waiting outside GPU lease for CPU/memory readiness",json.dumps(record),flush=True);next_notice=now+30
+        time.sleep(5)
+
+
 def ue(allow_game=False):
     u=load("m7-u0-ue")
     u.OUT=OUT;u.OWNER="m7-u0b"
@@ -88,7 +112,8 @@ def ue(allow_game=False):
         mode=game_state()
         if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
         if mode=="relaxed":minutes=min(minutes,3)
-        deadline=time.monotonic()+900
+        cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
+        queued_at=time.monotonic();deadline=queued_at+900
         next_notice=0
         while u.LOCK.exists():
             mode=game_state()
@@ -96,10 +121,14 @@ def ue(allow_game=False):
             if time.monotonic()>=deadline:raise RuntimeError("no shared GPU gap within 15 minutes")
             if time.monotonic()>=next_notice:
                 print("Waiting for shared GPU slot; requesting",label,flush=True)
-                next_notice=time.monotonic()+30
+                next_notice=time.monotonic()+120
             time.sleep(.5)
+        mode=game_state()
+        if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
+        if time.monotonic()-queued_at>5:cpu=cpu_readiness(u,timing=getattr(u,"WAIT_FOR_FOREIGN_CPU_CLEAR",False))
         with original_lease(label,minutes) as owner:
             active_owner=owner
+            owner["foreign_cpu_readiness"]=cpu
             try:yield owner
             finally:active_owner=None
     u.lease=queued_lease
@@ -180,7 +209,8 @@ def reference(args):
         process=out/("process-"+owner["token"][:8]);process.mkdir(exist_ok=True)
         u.save(process/"reference-recipe.json",dict(binary_sha256=u.sha(BINARY),build=json.loads((OUT/"build.json").read_text()),
             environment={k:v for k,v in env.items() if k.startswith("RENDERLAB_M7_")},
-            manifest_sha256=u.sha(args.manifest) if args.manifest else None,game_protocol=game_state()))
+            manifest_sha256=u.sha(args.manifest) if args.manifest else None,game_protocol=game_state(),
+            foreign_cpu_at_acquire=owner.get("foreign_cpu_readiness"),timing_eligible_for_claim=False))
         u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],process,
                   timeout=max(30,int(u.remaining_seconds(owner))-10),cwd=REPO,env=env)
 
@@ -298,6 +328,7 @@ def quiet_desktop(u,root):
 
 def study(args):
     u=ue(allow_game=not args.quiet);root=OUT/"study"/args.label;root.mkdir(parents=True,exist_ok=True)
+    u.WAIT_FOR_FOREIGN_CPU_CLEAR=args.quiet
     capture_sync=args.hdr and not args.quiet
     if capture_sync:
         u.UE_FLAGS += ["-UseFixedTimeStep","-FPS=60"]
@@ -377,6 +408,7 @@ def study(args):
                         summary["game_protocol"]=game_state()
                         summary["quiet_window"]=str(quiet_window) if quiet_window else None
                         summary["capture_only_synchronization"]=capture_sync
+                        summary["foreign_cpu_at_acquire"]=owner.get("foreign_cpu_readiness")
                         u.save(out/"summary.json",summary)
                         print(json.dumps(dict(case=out.name,readback_ok=ok,gpu=summary["statistics"]["GPUTime"])),flush=True)
                         if not ok:raise RuntimeError("readback failed "+str(out))
@@ -393,9 +425,19 @@ def matrix(args):
     configs=list(ue().CONFIGS)
     for bench in ("SV","S4","S5","S2G"):
         for i in range(0,len(configs),3):
-            study(argparse.Namespace(label=args.label,configs=configs[i:i+3],benches=[bench],
-                repeats=1,quiet=False,hdr=True,workload="static",bench_pose=None,minutes=3))
-            time.sleep(3)
+            root=OUT/"study"/args.label
+            def complete(config):
+                name=f"{bench}-{config}-static-0"
+                return any((p/"summary.json").exists() and (p/"native.json").exists() and
+                    (p/"camera-readback.json").exists() and (p/"readback.json").exists() and
+                    json.loads((p/"readback.json").read_text())["all_ok"]
+                    for p in [root/name,*root.glob("retry*-"+name)])
+            while not all(complete(c) for c in configs[i:i+3]):
+                before=sum(complete(c) for c in configs[i:i+3])
+                study(argparse.Namespace(label=args.label,configs=configs[i:i+3],benches=[bench],
+                    repeats=1,quiet=False,hdr=True,workload="static",bench_pose=None,minutes=5))
+                if sum(complete(c) for c in configs[i:i+3])==before:raise RuntimeError("bench chunk made no progress")
+                time.sleep(3)
 
 
 def sequence(args):
@@ -406,7 +448,7 @@ def sequence(args):
         before={name for name in names if (root/(name+".npz")).exists()}
         if len(before)==len(names):break
         reference(argparse.Namespace(label=args.label,manifest=args.manifest,batch_frames=3,
-            minutes=2,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None))
+            minutes=5,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None))
         for name in names:
             if name in before or not (root/(name+".json")).exists():continue
             if not (root/(name+".npz")).exists():
@@ -468,6 +510,10 @@ def finish(args):
     sequence(argparse.Namespace(label="quarry-final",manifest=OUT/"quarry-unit-sequence.json"))
     load("m7-u0b-report").aliases(argparse.Namespace(manifest=OUT/"quarry.json"))
     floors(args)
+    # These two original attribution processes overlapped stillkit's foreign build.
+    # Timing readiness waits for 60 observed seconds without its Cargo/rustc jobs.
+    sv.capture(argparse.Namespace(label="timing-async-off-retry",configs=["hw"],timing=True,async_off=True))
+    sv.costs(argparse.Namespace(label="timing-async-off-retry"))
 
 
 def pose_commands(p):

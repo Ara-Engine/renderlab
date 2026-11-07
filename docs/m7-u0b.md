@@ -512,3 +512,36 @@ mean RGB is about **2,011/2,011/2,009**, with **0.706% RGB RMS** relative to tha
 value in both poses. This bounds the input-scale discrepancy; no fitted gain is applied to
 the scored Lumen images. Comparing this control to the physically occluded reference would
 measure deliberately missing occlusion, not a calibration error.
+
+Separate uninstrumented cost processes retain **r.OneFrameThreadLag 1**, verified from
+their timed CVar dump. The following attribution processes disable both RDG and Lumen async
+compute, also read back at frame 95. Values are milliseconds. They are functional exclusive
+slots, not quiet-window speed evidence. The async-on CSV gather scope is only 0.015?0.142 ms
+here and omits the concurrent gather work; it must not be used as the full Lumen cost.
+
+| Path / initial pose | Gather static | Gather first-cut | Gather pan mean/range | Warm GI tree total |
+|---|---:|---:|---:|---:|
+| sv-sky-hw / gaps | 1.0149 | 1.0138 | 1.0154 / 1.0086?1.0259 | 1.3930 |
+| sv-sky-hw / overview | 0.8971 | 0.8672 | 1.0188 / 1.0086?1.0332 | 1.4540 |
+| sv-sky-sw-mesh / gaps | 1.1838 | 1.4952 | 1.2571 / 1.1704?1.6086 | 2.4970 |
+| sv-sky-sw-mesh / overview | 1.0321 | 1.0261 | 1.2229 / 1.1785?1.4736 | 1.4180 |
+
+The warm GI total sums only outermost matched nodes in the separate frame-64 ProfileGPU
+tree. It is not the first-cut cost. Frame-96 static, frame-97 cut and all nine pan frames
+retain individual scene-buffer/update/lighting/gather/TSR CSV scopes in
+`sv-sky/timing-async-off/*/g1-costs.json`; no inclusive groups are blindly added. Every selected
+GPU CSV row has the registered camera position within **0.001 cm**. The ordinary `GPUTime`
+counter can lag/repeat across adjacent frames and is not used as an exact cut-frame duration.
+Default async-on totals and component fields remain separately in `sv-sky/timing`; the
+instrumented quality-process costs remain under `sv-sky/{a,b}`.
+
+**Foreign CPU-load exclusion.** Root identified stillkit's independent nightly builds. The
+oldest still-running Cargo in the read-only snapshot began **20:31:39.041Z**. Both hardware
+async-off attribution process intervals overlap it (the overview process spans the onset),
+so those two rows above are **contended and ineligible for cost gates or timing claims**.
+`foreign-cpu-control.json` records the intervals; replacements are queued after 60 observed
+seconds without stillkit Cargo/rustc. No foreign process is paused or killed. The earlier
+quarry quiet campaign ended before this load and is unaffected. Functional references and
+captures retain strict validation, longer process guards and the normal memory abort guard;
+near the start threshold the controller waits outside the GPU lock until the foreign build
+is gone for 60 seconds.
