@@ -193,9 +193,11 @@ unsafe fn key(
     info: &vk::GraphicsPipelineCreateInfo<'_>,
     stages: &Stages<'_>,
     part: Part,
+    retain: bool,
 ) -> Option<[u8; 32]> {
     let mut hash = Fingerprint::default();
     part.hash(&mut hash);
+    retain.hash(&mut hash);
     if part != Part::Input {
         (info.render_pass.as_raw(), info.subpass).hash(&mut hash);
     }
@@ -445,16 +447,16 @@ unsafe fn part(
     stages: &Stages<'_>,
     part: Part,
     key: [u8; 32],
-    policy: CompilePolicy,
+    scope: Scope,
 ) -> Result<Arc<Library>, vk::Result> {
     state.libraries.get(key, || {
         let mut gpl = vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(part.flags());
         let mut info = vk::GraphicsPipelineCreateInfo::default()
-            .flags(
-                vk::PipelineCreateFlags::LIBRARY_KHR
-                    | vk::PipelineCreateFlags::RETAIN_LINK_TIME_OPTIMIZATION_INFO_EXT,
-            )
+            .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
             .push_next(&mut gpl);
+        if retain_ir(part, scope) {
+            info.flags |= vk::PipelineCreateFlags::RETAIN_LINK_TIME_OPTIMIZATION_INFO_EXT;
+        }
         info.p_dynamic_state = original.p_dynamic_state;
         match part {
             Part::Input => {
@@ -487,12 +489,18 @@ unsafe fn part(
                 info.subpass = original.subpass;
             }
         }
-        let (raw, _) = unsafe { native(state, cache, &info, part.name(), policy) }?;
+        let (raw, _) = unsafe { native(state, cache, &info, part.name(), scope.policy) }?;
         Ok(Arc::new(Library {
             raw,
             device: state.raw.clone(),
         }))
     })
+}
+
+fn retain_ir(part: Part, scope: Scope) -> bool {
+    part != Part::Fragment
+        || scope.policy != CompilePolicy::PreviewHelpers
+        || scope.retain_helper_ir.unwrap_or(RETAIN_HELPER_IR)
 }
 
 /// Returns None for unhandled native state, preserving the monolithic fallback.
@@ -511,12 +519,12 @@ pub(super) unsafe fn create(
     let parts = [Part::Input, Part::Vertex, Part::Fragment, Part::Output];
     let keys: Vec<_> = parts
         .iter()
-        .map(|&p| unsafe { key(original, &stages, p) })
+        .map(|&p| unsafe { key(original, &stages, p, retain_ir(p, scope)) })
         .collect::<Option<_>>()?;
     let started = Instant::now();
     let mut libraries = vec![];
     for (&p, key) in parts.iter().zip(keys) {
-        match unsafe { part(state, cache, original, &stages, p, key, scope.policy) } {
+        match unsafe { part(state, cache, original, &stages, p, key, scope) } {
             Ok(library) => libraries.push(library),
             Err(error) => return Some(error),
         }
@@ -568,8 +576,8 @@ pub(super) unsafe fn warm(
         return Ok(());
     };
     for p in [Part::Input, Part::Vertex, Part::Output] {
-        if let Some(key) = unsafe { key(info, &stages, p) } {
-            unsafe { part(state, cache, info, &stages, p, key, scope.policy) }?;
+        if let Some(key) = unsafe { key(info, &stages, p, retain_ir(p, scope)) } {
+            unsafe { part(state, cache, info, &stages, p, key, scope) }?;
         }
     }
     Ok(())
