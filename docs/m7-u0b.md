@@ -5,7 +5,8 @@ Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses]
 
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
 the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
-The full Unreal bench matrix, motion witnesses and physical floor table remain incomplete.
+The full **76/76 Unreal bench matrix** is retained; motion references and the expanded
+physical floor table remain incomplete.
 The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
 or integrated quality-pass claim is made.
 
@@ -67,6 +68,38 @@ Eight independent seeds at 4,096 spp span **0.9994038-1.0005028**. Their aggrega
 loss larger than **0.0362%** is excluded at this confidence under the independent-seed model.
 The test does not establish an
 exact zero-bias guarantee; it bounds a systematic loss at the measured precision.
+
+### Monitor failures and strict quarry replay
+
+Two later sequence processes are **unaccepted**. `process-a584c6cd` exited 0 after three
+images, but a WMI inventory timeout silently ended the inherited conflict-monitor thread.
+`process-dcfe3367` completed two images and then hit its old five-minute guard, with another
+monitor timeout. The separate RAM/disk watcher remained active: minima were **5.145 / 7.921
+GiB**. Five completed images and the sixth partial output were removed from the accepted
+directory; hashes, original metadata, PNGs and rejection reasons are under
+`reference/quarry-final/rejected-monitor-20261107`. Neither process is a clean validation pass.
+
+The runner reuses **TR0 `b9760bc`**: `GlobalMemoryStatusEx` replaces the OS-memory WMI query;
+the PDH launch/live counter remains the 4/2-GiB guard; inventory/counter errors fail closed
+and stop only the owned child. A Cargo-free resource valve waits outside the lock after a
+resource/monitor failure. A separate quarter-second hold callback stops the owned process
+when a game hold is posted. CPU fault injection verifies monitor timeouts reject a job,
+native memory reads bypass WMI, failed memory counters return an abort value, and a lost
+atomic acquisition retries without repeating an acquired job's body.
+
+New quarry states run **one state per lease**, with a **600-second functional guard inside an
+11-minute reservation**, releasing between states to alternate with TR0. Each state requires
+an independent acceleration-structure/pipeline rebuild replay: all mean/half float bits,
+all 80-byte geometric records, D/V sums and zero-invalid status must match before compaction
+and publication. A failed replay keeps its data unaccepted; no tolerance is substituted.
+
+G1b-q2 released at **21:31:17.941996Z**. The coordinated CPU gap has anchored START/END lines
+at **21:31:18.432756Z / 21:38:34.717228Z**. The warm-target build took **435.5 seconds wall**
+under shared CPU load rather than the estimated 45 seconds, and ran no GPU lease. Library
+tests exit 0: **125 passed, 120 ignored**. The resulting harness SHA256 is
+`4e5ed1a1d3b8a64aab8f027516c3638a7125438f1f78d6db687a74dd071fe5c7`;
+renderer and shader hashes are unchanged from D8, so the independent material/transport
+controls above remain applicable. D8 stays pinned for TR0's S2G corpus.
 
 ## Retained quarry references
 
@@ -132,9 +165,20 @@ were used, and final import inventories verify them.
 Package identity: executable `69d6f88a...a6e5`, pak `c1fcded5...d122`, content utoc
 `50686635...3189`; complete hashes are in `cook/b/identity.json`. Import inventories retain
 every source/mesh triangle count, bounds error and distance-field build setting.
-SV and S2G have SW/HW Epic content smokes with successful CVar and effective-tracing readback.
-The native HDR Tonemap inputs decode with captured manual pre-exposure and unit tint/local
-exposure. Full-frame SV and S2G PNGs were inspected.
+All **19 U0 configurations × four benches = 76 captures** pass the runtime settings,
+effective tracing, registered camera/FOV, final source-angle and native HDR/exposure checks.
+Each process exits 0. Actual shader platform is **PCD3D_SM6**, with D3D12 selected; all glossy
+runs read `r.EyeAdaptation.PreExposureOverride 0`. Minimum available system RAM across the
+matrix is **5.389 GiB**. Captured manual pre-exposure is 2^-11 for SV, 2^-12 for S4/S2G and
+2^-14 for S5, with unit tint/local exposure.
+
+`bench-captures.json` retains the 76 source/candidate hashes and per-run readbacks. Each
+case retains a full-resolution common-F0 PNG decoded from the actual Tonemap HDR consumer.
+The four 19-configuration matrix sheets were inspected, including silhouettes, contacts and
+reflections. Software S5 shows incorrect repeated-room reflections; S4's software paths wash
+out the enclosed indirect-light contrast while the hardware paths retain the red cast. These
+are recorded image discrepancies, not import failures or quality passes. Functional capture
+costs remain ineligible for speed claims, including the foreign-CPU-load period.
 
 The first S2G HW smoke inherited U0's quarry sun diameter (4.58366 degrees), rather than the
 bench's registered 0.53285 degrees. It is marked a content smoke and **not scored**. The retained

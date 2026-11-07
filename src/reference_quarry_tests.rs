@@ -111,13 +111,20 @@ fn gpu_reference_quarry() {
         }
         let start = std::time::Instant::now();
         let image = render(&device, &queue, &scene, &view, &settings).unwrap();
+        let render_seconds = start.elapsed().as_secs_f64();
+        let replay = render(&device, &queue, &scene, &view, &settings).unwrap();
+        let replay_report = super::tests::replay_report(&image, &replay);
+        let identical = replay_report["bit_identical"] == true;
         rendered += 1;
         super::tests::save(
             &dir,
             name,
             &image,
-            serde_json::json!({"frame":frame,"content":info,"seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,"camera_background":scene.camera_background}),
+            serde_json::json!({"frame":frame,"content":info,"seconds":render_seconds,"qualification_seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,"camera_background":scene.camera_background,
+                "accepted_for_scoring":identical,"strict_replay":replay_report,
+                "replay_scope":"same seed and dispatch layout, independent AS and pipeline rebuild; every HDR-half and geometry byte"}),
         );
+        assert!(identical, "{name}: strict quarry replay differs");
         let status = std::process::Command::new("py")
             .args([
                 "-3",

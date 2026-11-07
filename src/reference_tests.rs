@@ -829,7 +829,7 @@ fn gpu_reference_benches() {
     }
 }
 
-fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
+pub(super) fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
     assert_eq!((a.width, a.height), (b.width, b.height));
     let width = a.width;
     let rgb = |a: &[[f32; 3]], b: &[[f32; 3]]| {

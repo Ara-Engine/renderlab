@@ -5,6 +5,7 @@ and uses U0's game/renderer and 4/2-GiB memory guards. Existing leases are never
 """
 import argparse
 import contextlib
+import ctypes
 import datetime as dt
 import hashlib
 import importlib.util
@@ -40,22 +41,28 @@ def game_state():
 
 
 def cpu_readiness(u,timing=False):
-    """Observe foreign builds without controlling them. Low headroom waits outside
-    the GPU lock until stillkit has been gone for 60 seconds; timing always waits."""
-    started=time.monotonic();clear_since=None;paused=False;next_notice=0
+    """TR0 b9760bc resource valve: tasklist, no WMI memory dependency or process control."""
+    pause=OUT/"resource-pause.json"
+    started=time.monotonic();clear_since=None;paused=pause.exists();next_notice=0
     while True:
-        raw=u.E2E.powershell("@(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(cargo|rustc|clippy-driver)\\.exe$' -and $_.CommandLine -match 'stillkit' } | Select-Object Name,ProcessId) | ConvertTo-Json -Compress")
-        processes=json.loads(raw) if raw.strip() else []
-        if isinstance(processes,dict):processes=[processes]
+        processes=[]
+        for name in ("cargo.exe","rustc.exe","clippy-driver.exe"):
+            try:
+                result=subprocess.run(["tasklist","/FI","IMAGENAME eq "+name,"/FO","CSV","/NH"],
+                    capture_output=True,text=True,creationflags=u.FLAGS,timeout=15)
+                if result.returncode or '"'+name+'"' in result.stdout.lower():processes.append(name)
+            except subprocess.TimeoutExpired:processes.append(name+":inventory-timeout")
         ram=u.E2E.available_gib();now=time.monotonic()
         if processes:clear_since=None
         elif clear_since is None:clear_since=now
         if ram<5:paused=True
         waiting=ram<5 or ((timing or paused) and (processes or now-clear_since<60))
-        record=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),foreign_stillkit=processes,
+        record=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),foreign_compilers=processes,
             available_gib=ram,timing_eligible_for_claim=False if processes else None,
             timing_requested=timing,paused_for_memory=paused,waiting=bool(waiting),seconds=now-started)
         if not waiting:
+            if pause.exists():
+                u.save(OUT/"resource-pause-released.json",dict(json.loads(pause.read_text()),released=record));pause.unlink()
             with (OUT/"cpu-readiness.jsonl").open("a") as log:log.write(json.dumps(record)+"\n")
             return record
         if now>=next_notice:
@@ -67,15 +74,53 @@ def ue(allow_game=False):
     u=load("m7-u0-ue")
     u.OUT=OUT;u.OWNER="m7-u0b"
     original_state=u.E2E.state
-    def state():
-        snapshot=original_state();mode=game_state()
+    original_powershell=u.E2E.powershell
+    original_available=u.E2E.available_gib
+    # Reuse TR0 b9760bc's native-memory and fail-closed monitor controls.
+    def monitor_powershell(command):
+        if command.startswith("Get-CimInstance Win32_OperatingSystem"):
+            class Memory(ctypes.Structure):
+                _fields_=[("length",ctypes.c_ulong),("load",ctypes.c_ulong)]+[
+                    (name,ctypes.c_ulonglong) for name in
+                    ("total_physical","available_physical","total_page","available_page",
+                     "total_virtual","available_virtual","extended_virtual")]
+            value=Memory();value.length=ctypes.sizeof(value)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(value)):raise ctypes.WinError()
+            return json.dumps(dict(FreePhysicalMemory=value.available_physical//1024,
+                TotalVisibleMemorySize=value.total_physical//1024))
+        return original_powershell(command)
+    u.E2E.powershell=monitor_powershell
+    def available():
+        try:
+            value=original_available()
+            return value if math.isfinite(value) and value>=0 else 0.
+        except Exception:return 0.
+    u.E2E.available_gib=available
+    def game_filter(snapshot):
+        mode=game_state()
         snapshot["game_protocol"]=mode
         if allow_game and mode=="relaxed":
             snapshot["permitted_game_processes"]=snapshot["games"]
             snapshot["games"]=[]
             snapshot["timings_contended"]=True
         return snapshot
+    def state():
+        try:
+            snapshot=original_state()
+            snapshot["monitor_memory_source"]="TR0 b9760bc GlobalMemoryStatusEx; launch/live floor uses PDH"
+        except Exception as error:
+            sentinel=dict(Name="u0b-monitor-error",ProcessId=-1,ParentProcessId=-1,
+                ExecutablePath="",monitor_error=repr(error))
+            snapshot=dict(games=[],foreign_renderers=[sentinel],builds=[],free_gib=0,
+                available_gib=0,gpu="unavailable",monitor_error=repr(error))
+        return game_filter(snapshot)
     u.E2E.state=state
+    original_preflight=u.preflight
+    u.preflight=lambda path,wait_seconds=0:original_preflight(path,wait_seconds=0)
+    def abort_requested():
+        mode=game_state()
+        return "GAME HOLD requested" if mode=="hold" or (mode=="relaxed" and not allow_game) else None
+    u.ABORT_REQUESTED=abort_requested
     if allow_game and game_state()=="relaxed":
         u.START_GIB=6.0;u.ABORT_GIB=3.0
         u.UE_FLAGS=["-corelimit=2" if f=="-corelimit=8" else f for f in u.UE_FLAGS]
@@ -180,6 +225,31 @@ def build(args):
     print((OUT/"build.json").read_text())
 
 
+def build_gap(args):
+    """The explicitly coordinated, lease-free CPU gap immediately after G1b-q2."""
+    u=ue();next_notice=0
+    while True:
+        released=any(line.startswith("m7-g1b g1b-q2 window released")
+            for line in u.SCHEDULE.read_text().splitlines())
+        if released and not u.LOCK.exists():break
+        if time.monotonic()>=next_notice:
+            print("CPU build queued until G1b-q2 release; no GPU/build starts",flush=True);next_notice=time.monotonic()+120
+        time.sleep(.5)
+    if game_state()!="released":raise SystemExit("CPU measurement build deferred during game hold")
+    started=dt.datetime.now(dt.timezone.utc).isoformat();status="failed"
+    u.schedule_line("[m7-u0b CPU build gap START] "+started+" no GPU lease may start; max2 Cargo jobs; strict quarry replay harness")
+    try:
+        build(args);status="passed"
+    finally:
+        ended=dt.datetime.now(dt.timezone.utc).isoformat()
+        u.schedule_line("[m7-u0b CPU build gap END] "+ended+" status="+status+"; no owned Cargo remains; one-state alternation may resume")
+        u.save(OUT/"build-gap.json",dict(start=started,end=ended,status=status))
+    gate=OUT/"gpu-defer.txt"
+    if gate.exists() and gate.read_text().startswith("Diagnosing a reference conflict-monitor timeout"):
+        gate.unlink()
+    finish(args)
+
+
 def reference(args):
     u=ue(allow_game=True);out=OUT/"reference"/args.label;out.mkdir(parents=True,exist_ok=True)
     env=dict(os.environ,RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
@@ -219,8 +289,18 @@ def reference(args):
             environment={k:v for k,v in env.items() if k.startswith("RENDERLAB_M7_")},
             manifest_sha256=u.sha(args.manifest) if args.manifest else None,game_protocol=game_state(),
             foreign_cpu_at_acquire=owner.get("foreign_cpu_readiness"),timing_eligible_for_claim=False))
-        u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],process,
-                  timeout=max(30,int(u.remaining_seconds(owner))-10),cwd=REPO,env=env)
+        try:
+            u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],process,
+                timeout=min(600,max(30,int(u.remaining_seconds(owner))-15)),cwd=REPO,env=env)
+        except (RuntimeError,SystemExit):
+            path=process/"process.json";preflight=process/"preflight.json"
+            record=json.loads(path.read_text()) if path.exists() else {}
+            initial=json.loads(preflight.read_text()) if preflight.exists() else {}
+            minimum=record.get("minimum_available_gib",initial.get("available_gib"))
+            if (minimum is not None and minimum<4) or "monitor_error" in json.dumps([record,initial]) or "timeout" in json.dumps(record.get("failures",[])):
+                u.save(OUT/"resource-pause.json",dict(reason="reference resource/monitor failure",run=str(process),
+                    utc=dt.datetime.now(dt.timezone.utc).isoformat(),policy="TR0 b9760bc: wait outside lock for 60 Cargo-free seconds"))
+            raise
 
 
 def s4(args):
@@ -455,8 +535,8 @@ def sequence(args):
     while True:
         before={name for name in names if (root/(name+".npz")).exists()}
         if len(before)==len(names):break
-        reference(argparse.Namespace(label=args.label,manifest=args.manifest,batch_frames=3,
-            minutes=5,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None))
+        reference(argparse.Namespace(label=args.label,manifest=args.manifest,batch_frames=1,
+            minutes=11,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None))
         for name in names:
             if name in before or not (root/(name+".json")).exists():continue
             if not (root/(name+".npz")).exists():
@@ -464,6 +544,10 @@ def sequence(args):
                     cwd=REPO,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
         after={name for name in names if (root/(name+".npz")).exists()}
         if after==before:raise RuntimeError("reference batch made no progress")
+        for name in after-before:
+            meta=json.loads((root/(name+".json")).read_text())
+            if meta.get("accepted_for_scoring") is not True or not meta.get("strict_replay",{}).get("bit_identical"):
+                raise RuntimeError("new quarry reference did not pass strict replay: "+name)
         print(f"sequence references {len(after)}/{len(names)}",flush=True)
         time.sleep(3)
 
@@ -604,7 +688,7 @@ def walk(args):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest="cmd",required=True)
-    sub.add_parser("build");sub.add_parser("prepare");sub.add_parser("prepare_sv")
+    sub.add_parser("build");sub.add_parser("build_gap");sub.add_parser("prepare");sub.add_parser("prepare_sv")
     q=sub.add_parser("matrix");q.add_argument("label",default="bench-matrix",nargs="?")
     q=sub.add_parser("sequence");q.add_argument("label");q.add_argument("manifest",type=Path)
     sub.add_parser("floors");sub.add_parser("finish")

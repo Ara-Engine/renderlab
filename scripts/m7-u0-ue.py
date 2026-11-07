@@ -145,6 +145,9 @@ def preflight(path, wait_seconds=180):
     return record
 
 
+ABORT_REQUESTED = None
+
+
 def guarded(command, out, timeout, cwd=None, env=None):
     """Run one hidden owned process; stop it on a game, foreign renderer or low memory."""
     out.mkdir(parents=True, exist_ok=True)
@@ -161,31 +164,42 @@ def guarded(command, out, timeout, cwd=None, env=None):
 
         def kill(reason):
             failures.append(reason)
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=FLAGS)
+            if proc.poll() is None:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=FLAGS)
 
         def watch_memory():
-            while not stop.wait(0.25):
-                value = E2E.available_gib()
-                samples.append(round(value, 3))
-                disk = shutil.disk_usage(OUT).free / 2**30
-                disk_samples.append(round(disk, 3))
-                if disk < 2 and proc.poll() is None:
-                    kill(dict(reason="output disk below 2 GiB", output_free_gib=disk))
-                    return
-                if value < ABORT_GIB and proc.poll() is None:
-                    kill(dict(reason="available memory below 2 GiB", available_gib=value))
-                    return
+            try:
+                while not stop.wait(0.25):
+                    if ABORT_REQUESTED and (reason := ABORT_REQUESTED()):
+                        if proc.poll() is None:
+                            kill(dict(reason=reason))
+                        return
+                    value = E2E.available_gib()
+                    samples.append(round(value, 3))
+                    disk = shutil.disk_usage(OUT).free / 2**30
+                    disk_samples.append(round(disk, 3))
+                    if disk < 2 and proc.poll() is None:
+                        kill(dict(reason="output disk below 2 GiB", output_free_gib=disk))
+                        return
+                    if value < ABORT_GIB and proc.poll() is None:
+                        kill(dict(reason="available memory below 2 GiB", available_gib=value))
+                        return
+            except Exception as error:
+                kill(dict(reason="memory/hold monitor unavailable", error=repr(error)))
 
         def watch_conflicts():
-            while not stop.wait(2):
-                snapshot = E2E.state()
-                ours = {proc.pid}
-                foreign = [p for p in snapshot["foreign_renderers"] if p["ProcessId"] not in ours
-                           and not engine_tool(p)]
-                games = [p for p in snapshot["games"] if not engine_tool(p)]
-                if (games or foreign) and proc.poll() is None:
-                    kill(dict(reason="game or foreign renderer", games=games, foreign=foreign))
-                    return
+            try:
+                while not stop.wait(2):
+                    snapshot = E2E.state()
+                    ours = {proc.pid}
+                    foreign = [p for p in snapshot["foreign_renderers"] if p["ProcessId"] not in ours
+                               and not engine_tool(p)]
+                    games = [p for p in snapshot["games"] if not engine_tool(p)]
+                    if (games or foreign) and proc.poll() is None:
+                        kill(dict(reason="game or foreign renderer", games=games, foreign=foreign))
+                        return
+            except Exception as error:
+                kill(dict(reason="conflict monitor unavailable", error=repr(error)))
 
         threads = [threading.Thread(target=watch_memory), threading.Thread(target=watch_conflicts)]
         for thread in threads:
