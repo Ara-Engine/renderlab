@@ -1,5 +1,7 @@
 # N8l: the non-RT exact walk under camera motion, divergence and latency
 
+**Follow-up: [N8m](non-rt-n8m.md)** found the residency limiter left open below: the one-workgroup-per-tile launch, not a resource. Registers and spilled shared memory both allow 12 warps per SM; the launch reached 8.5-9.3 and ended in a tail of late heavy tiles. Persistent workgroups taking tiles heaviest first hold 12.00 warps and cut camera-moving frames 22-23% (1.93-1.96 → 1.50-1.51 ms), byte-identically.
+
 Follow-up unit to [N8i](non-rt-n8i.md), 2026-11-07 UTC, base `d798200`, merged with main `f09d2d0` (M1/M2 memory work), branch `t3/n8l-resumable-walk`. Brief (Islam, 2026-11-07): remove the wave divergence in the virtual-shadow exact walk, which N8i's profile put at 8.8 of 32 active lanes on camera-moving frames, byte-identically; profile before and after. Mid-unit, Islam changed the time-box: keep trying designs and profile each, rather than stop at the first 25% miss. A later addendum asked for an A/B of M2's packed vertex-position stream ([memory-m2.md](memory-m2.md), "Walk-record proposal"). Labels: **M** measured here, **I** inference.
 
 ## Result
