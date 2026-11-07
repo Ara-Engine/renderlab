@@ -90,3 +90,19 @@ Root decisions:
 The quality bar is unchanged. Avoiding a patent never justifies shipping below the floor. Record any design-around's measured cost in quality or speed.
 
 This updates the draft-2 rulings above. Non-RT non-planar reflections are no longer just a recorded miss. Design around Adshir/Snap first: the LOD-BVH and SDF-brick tiers may proceed where their parts avoid the claims, and the patented form remains the evidence-based fallback. Likewise for denoisers, try more samples and caches and unflagged filters first; SVGF-type filters are the evidence-based fallback.
+
+## Unreal comparison content on E: (cleanup record, 2026-11-07)
+
+`E:/renderlab-work/m7-u0/` holds the recooked Unreal 5.7.4 project, which has mesh distance fields. The following were deleted because they can be regenerated: the staged build under `Saved/StagedBuilds` (a byte-for-byte duplicate of `ue-package/`), `Saved/Shaders`, `Saved/ShaderDebugInfo`, `Saved/Temp`, `Saved/Logs`, `Intermediate/` and the package's crash-report configs. That freed 1.66 GB.
+
+The rest is kept, about 6.0 GB:
+
+| Kept | Size | Why | Needed by |
+|---|---:|---|---|
+| `ue-package/` | 1.45 GB | packaged build the runs use | TR0, M7-U0b, R0a, R0b, TR1, G1/G2 and R1 comparisons, integrated acceptance |
+| `ue-project/Content` | 0.98 GB | source content for importing benches | M7-U0b (bench import), R0a (reflection scenes) |
+| `ue-project/DerivedDataCache` | 1.08 GB | avoids a slow distance-field recook | M7-U0b, R0a recooks |
+| `ue-project/Saved/Cooked` | 1.81 GB | incremental cook base | M7-U0b, R0a recooks |
+| `study/`, `scenes/`, `reference/`, `fixture/`, `mitsuba*/`, `tools/` | about 0.7 GB | summaries, scenes, references, Mitsuba tooling | all M7 comparisons |
+
+Final delete: when the last Unreal-comparison unit (integrated M7 acceptance) finishes, remove `ue-package/` and `ue-project/`. Keep only the summaries, the inspected PNGs, and the scripts and configs that rebuild the project (`scripts/m7-u0-*.py`, plus the config deltas recorded in docs/m7-u0.md). The DDC and `Saved/Cooked` may be deleted earlier, once no more recooks are planned, after R0a.
