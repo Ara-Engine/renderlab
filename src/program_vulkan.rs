@@ -38,8 +38,30 @@ pub enum CompilePolicy {
 struct Scope {
     policy: CompilePolicy,
     vertex_identity: Option<[u8; 32]>,
+    boundaries: Option<Boundaries>,
 }
-thread_local! { static SCOPE: Cell<Scope> = const { Cell::new(Scope { policy: CompilePolicy::Optimized, vertex_identity: None }) }; }
+#[derive(Clone, Copy)]
+struct Boundaries {
+    environment: bool,
+    names: &'static [&'static str],
+}
+thread_local! { static SCOPE: Cell<Scope> = const { Cell::new(Scope { policy: CompilePolicy::Optimized, vertex_identity: None, boundaries: None }) }; }
+
+/// Diagnostic scope: compare call-boundary choices without editing any helper body.
+#[cfg(test)]
+pub(crate) fn with_boundaries<T>(
+    environment: bool,
+    names: &'static [&'static str],
+    compile: impl FnOnce() -> T,
+) -> T {
+    scoped(
+        Scope {
+            boundaries: Some(Boundaries { environment, names }),
+            ..SCOPE.get()
+        },
+        compile,
+    )
+}
 
 /// The scope is per creating thread, including when a reload builds a pair in parallel.
 pub fn with_policy<T>(policy: CompilePolicy, compile: impl FnOnce() -> T) -> T {
@@ -62,6 +84,7 @@ pub(crate) fn with_program_policy<T>(
         Scope {
             policy,
             vertex_identity: Some(vertex_identity),
+            ..SCOPE.get()
         },
         compile,
     )
@@ -472,7 +495,14 @@ unsafe extern "system" fn create_shader(
         CompilePolicy::PreviewNoInline | CompilePolicy::PreviewHelpers
     ) {
         let words = unsafe { std::slice::from_raw_parts(source.p_code, source.code_size / 4) };
-        no_inline(words, SCOPE.get().policy == CompilePolicy::PreviewHelpers)
+        no_inline(
+            words,
+            SCOPE.get().policy == CompilePolicy::PreviewHelpers,
+            SCOPE.get().boundaries.unwrap_or(Boundaries {
+                environment: true,
+                names: &[],
+            }),
+        )
     } else {
         None
     };
@@ -502,7 +532,7 @@ unsafe extern "system" fn create_shader(
     }
     result
 }
-fn no_inline(source: &[u32], helpers_only: bool) -> Option<Vec<u32>> {
+fn no_inline(source: &[u32], helpers_only: bool, boundaries: Boundaries) -> Option<Vec<u32>> {
     if source.len() < 5 {
         return None;
     }
@@ -523,7 +553,9 @@ fn no_inline(source: &[u32], helpers_only: bool) -> Option<Vec<u32>> {
                 .flat_map(|w| w.to_le_bytes())
                 .take_while(|&b| b != 0)
                 .collect();
-            if name.starts_with(b"environment_") || name == b"ambient" {
+            if (boundaries.environment && (name.starts_with(b"environment_") || name == b"ambient"))
+                || boundaries.names.iter().any(|n| n.as_bytes() == name)
+            {
                 helpers.push(source[at + 1]);
             }
         }
@@ -543,6 +575,14 @@ fn no_inline(source: &[u32], helpers_only: bool) -> Option<Vec<u32>> {
             words[at + 3] = (words[at + 3] & !1) | 2;
         }
         at += count;
+    }
+    if SCOPE.get().boundaries.is_some() && std::env::var_os("RENDERLAB_RELOAD_PROFILE").is_some() {
+        eprintln!(
+            "vulkan_boundary_selection environment={} names={:?} matched={}",
+            boundaries.environment,
+            boundaries.names,
+            helpers.len()
+        );
     }
     Some(words)
 }

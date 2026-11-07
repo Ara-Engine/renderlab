@@ -100,7 +100,7 @@ impl Options {
             capture_hdr: None,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
             program: PathBuf::new(),
-            shader_preview: None,
+            shader_preview: cfg!(debug_assertions).then_some(CompilePolicy::PreviewHelpers),
             frames: None,
             seconds: None,
             timestamps: true,
@@ -483,7 +483,13 @@ impl View {
             .flatten()
             .map(|p| (PathBuf::from(p), String::new()));
         let interop = if options.shader_preview.is_some() || compile_probe.is_some() {
-            shader_compiler::request_device(&adapter, &descriptor)?
+            match shader_compiler::request_device(&adapter, &descriptor) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    eprintln!("shader_preview_unavailable={error}; using ordinary compilation");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -494,6 +500,11 @@ impl View {
         eprintln!(
             "shader_compile_capabilities={:?}",
             shader_compiler::capabilities(&device)
+        );
+        let preview = shader_compiler::capabilities(&device).and(options.shader_preview);
+        eprintln!(
+            "shader_compile_policy={preview:?} development_default={}",
+            cfg!(debug_assertions)
         );
         let size = window.inner_size();
         let mut config = surface
@@ -608,7 +619,7 @@ impl View {
             );
         }
         let mut shaders = shader_watch::ShaderWatch::programs_only();
-        shaders.set_preview_policy(options.shader_preview)?;
+        shaders.set_preview_policy(preview)?;
         shaders.watch_prelude(options.shader.clone(), &source);
         shaders.watch_program(
             renderer.standard_program(),

@@ -166,6 +166,134 @@ fn gpu_vulkan_compile_screen() {
     .unwrap();
 }
 
+/// Paired fresh-source screens for call-boundary placement, without helper edits.
+#[test]
+#[ignore = "shared GPU lease, >=4 GiB RAM, experimental acknowledgment and RENDERLAB_PRIMARY_MANIFEST"]
+fn gpu_vulkan_helper_boundaries() {
+    use crate::shader_compiler::{self, CompilePolicy};
+    let _validation = validation::begin(true);
+    let mut r = renderer();
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_PRIMARY_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let candidates: &[(&str, bool, &[&str])] = &[
+        ("environment", true, &[]),
+        ("environment+shade", true, &["shade"]),
+        ("environment+surface", true, &["surface"]),
+        ("environment+brdf", true, &["brdf"]),
+        ("environment+material_normal", true, &["material_normal"]),
+        ("environment+light_sample", true, &["light_sample"]),
+        ("environment+exposed_product", true, &["exposed_product"]),
+        ("environment+hard_shadow", true, &["hard_shadow"]),
+        ("environment+unit_normal", true, &["unit_normal"]),
+        ("environment+surface+shade", true, &["surface", "shade"]),
+        (
+            "environment+large",
+            true,
+            &["surface", "shade", "material_normal", "brdf"],
+        ),
+        ("bilinear", false, &["environment_bilinear"]),
+        ("radiance", false, &["environment_radiance"]),
+        (
+            "bilinear+radiance",
+            false,
+            &["environment_bilinear", "environment_radiance"],
+        ),
+        ("tap", false, &["environment_tap"]),
+        ("all", false, &[]),
+    ];
+    let combinations: &[(&str, bool, &[&str])] = &[
+        ("environment", true, &[]),
+        ("environment+exposed_product", true, &["exposed_product"]),
+        (
+            "environment+exposed+brdf",
+            true,
+            &["exposed_product", "brdf"],
+        ),
+        (
+            "environment+exposed+unit",
+            true,
+            &["exposed_product", "unit_normal"],
+        ),
+        (
+            "environment+exposed+brdf+unit",
+            true,
+            &["exposed_product", "brdf", "unit_normal"],
+        ),
+        (
+            "environment+exposed+brdf+shadow",
+            true,
+            &["exposed_product", "brdf", "hard_shadow"],
+        ),
+        (
+            "environment+exposed+brdf+unit+normal",
+            true,
+            &["exposed_product", "brdf", "unit_normal", "material_normal"],
+        ),
+    ];
+    let combined = std::env::var_os("RENDERLAB_BOUNDARY_COMBINATIONS").is_some();
+    let candidates = if combined { combinations } else { candidates };
+    let mut rows = vec![];
+    let mut serial = 0u32;
+    for variant in [Variant::Lit, Variant::Traced] {
+        for repeat in 0..if combined { 3 } else { 2 } {
+            for &(candidate, environment, names) in candidates {
+                serial += 1;
+                let tint =
+                    f32::from_bits(0x3f000000 | (salt.wrapping_add(serial * 100003) & 0x003fffff));
+                let source = STANDARD_PROGRAM.replace(
+                    "return exposed;",
+                    &format!("return exposed*vec3<f32>({tint:.9},0.9,1.0);"),
+                );
+                let mut abi = r.program_abi();
+                abi.cache = None;
+                let modules_start = Instant::now();
+                let compiled =
+                    compile_program(&abi, &r.preludes(), "boundary-screen", &source).unwrap();
+                let modules_ms = modules_start.elapsed().as_secs_f64() * 1e3;
+                shader_compiler::take_timings(&r.device);
+                let scopes = OperationScopes::new(&r.device);
+                let policy = if candidate == "all" {
+                    CompilePolicy::PreviewNoInline
+                } else {
+                    CompilePolicy::PreviewHelpers
+                };
+                let start = Instant::now();
+                let pipeline = shader_compiler::with_boundaries(environment, names, || {
+                    shader_compiler::with_program_policy(policy, abi.vertex_identity, || {
+                        compiled.modules.pipeline(&abi, variant, 1)
+                    })
+                });
+                let api_ms = start.elapsed().as_secs_f64() * 1e3;
+                assert!(scopes.finish().is_none());
+                drop(pipeline);
+                let timings = shader_compiler::take_timings(&r.device);
+                let driver = timings.last().unwrap();
+                assert!(
+                    !driver.application_cache_hit,
+                    "fresh source must not hit the application cache"
+                );
+                let row = serde_json::json!({"variant":format!("{variant:?}"),"candidate":candidate,"repeat":repeat,"source_sha256":format!("{:x}",Sha256::digest(source.as_bytes())),"modules_ms":modules_ms,"api_ms":api_ms,"driver_ms":driver.duration.as_secs_f64()*1e3,"shader_bytes":driver.shader_bytes});
+                eprintln!("vulkan_boundaries {row}");
+                rows.push(row);
+                fs::write(
+                    out.join("helper-boundaries.json"),
+                    serde_json::to_vec_pretty(&rows).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
 /// Synthetic call-graph experiment; engine helper sources stay untouched.
 #[test]
 #[ignore = "shared GPU lease, >=4 GiB RAM, experimental acknowledgment and RENDERLAB_PRIMARY_MANIFEST"]
