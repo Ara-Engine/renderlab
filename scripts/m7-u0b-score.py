@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import zipfile
@@ -45,6 +46,16 @@ def archive(path,arrays):
 def compact(args):
     root,name=args.root,args.name
     meta=json.loads((root/(name+".json")).read_text());h,w=meta["height"],meta["width"];n=meta["samples"]
+    pending=root/(name+".compact-pending.json")
+    if os.environ.get("RENDERLAB_M7_DEFER_REFERENCE_COMPACT")=="1":
+        if meta.get("accepted_for_scoring") is not True or not meta.get("strict_replay",{}).get("bit_identical"):
+            raise ValueError("only a strict-replay-qualified quarry state can defer archival")
+        save(pending,dict(metadata_sha256=sha(root/(name+".json")),
+            status="strict GPU data complete; archive/noise/population compaction awaits GPU lease release"))
+        print(json.dumps(dict(reference=name,compaction="deferred until GPU lease release")),flush=True)
+        return
+    if pending.exists() and sha(root/(name+".json"))!=json.loads(pending.read_text())["metadata_sha256"]:
+        raise ValueError("deferred reference metadata changed")
     raw=[root/f"{name}-{suffix}" for suffix in ("mean.f32","se.f32","half0.f32","half1.f32","geometry.bin")]
     halves=[np.fromfile(root/f"{name}-half{k}.f32","<f4").reshape(h,w,3) for k in (0,1)]
     L=(halves[0]+halves[1])/2
@@ -93,6 +104,7 @@ def compact(args):
                direct_definition="physical sun-only direct radiance; includes disk integration (not the old delta-BRDF T1b estimand)",
                visibility_definition="disk visibility conditioned on centre placement and 2% forward-depth band; single-surface mask has every sample accepted")
     save(root/(name+".json"),meta)
+    if pending.exists():pending.unlink()
     for p in raw:
         if p.exists():p.unlink()
     print(json.dumps(dict(reference=name,samples=n,noise=meta["noise_relative_quantiles"],bytes=target.stat().st_size)),flush=True)

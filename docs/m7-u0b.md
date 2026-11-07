@@ -101,6 +101,23 @@ tests exit 0: **125 passed, 120 ignored**. The resulting harness SHA256 is
 renderer and shader hashes are unchanged from D8, so the independent material/transport
 controls above remain applicable. D8 stays pinned for TR0's S2G corpus.
 
+The five completed states from those failed batches subsequently regenerate with exact strict
+replay, zero invalid pixels and passing process guards. A further attempt is rejected on a
+10-second `nvidia-smi` inventory timeout; no archive is published from it. The live monitor's
+diagnostic allowance is now at most 60 seconds, bounded by the remaining reservation. The
+quarter-second memory/hold checks and fail-closed policy remain active. A monitor error that
+arrives after a child exits also rejects the run; exit 0 alone is insufficient.
+
+Canonical production defers only archival, after strict GPU validation. The compactor writes
+a pending receipt bound to the raw metadata hash; the GPU child exits and releases its lease
+before the controller computes populations/noise and publishes the lossless archive. No NPZ
+is visible before that work finishes. CPU tests cover changed-metadata rejection and actual
+half preservation across this boundary. Integrated examples release at **22:05:31.783Z /
+22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
+processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
+This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
+are unchanged. The focused Python suite passes **7 tests**.
+
 ## Retained quarry references
 
 `E:/renderlab-work/m7-u0b/reference/quarry-final` retains actual independent even/odd

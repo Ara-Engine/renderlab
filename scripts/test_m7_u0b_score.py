@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -13,6 +14,31 @@ score=importlib.util.module_from_spec(spec);spec.loader.exec_module(score)
 
 
 class PhysicalFloorTests(unittest.TestCase):
+    def test_strict_raw_data_can_defer_archival_until_lease_release(self):
+        scratch=Path("E:/renderlab-work/m7-u0b/cpu-tests");scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            root=Path(temporary);name="fixture";path=root/(name+".json")
+            meta=dict(width=2,height=2,samples=2,accepted_for_scoring=True,strict_replay=dict(bit_identical=True))
+            score.save(path,meta)
+            for suffix,value in (("mean",10),("se",1),("half0",11),("half1",9)):
+                np.full((2,2,3),value,"<f4").tofile(root/(name+"-"+suffix+".f32"))
+            args=argparse.Namespace(root=root,name=name)
+            with patch.dict(score.os.environ,{"RENDERLAB_M7_DEFER_REFERENCE_COMPACT":"1"}):
+                score.compact(args)
+            self.assertFalse((root/(name+".npz")).exists())
+            self.assertTrue((root/(name+"-half0.f32")).exists())
+            pending=root/(name+".compact-pending.json")
+            self.assertTrue(pending.exists())
+            score.save(path,dict(meta,samples=4))
+            with self.assertRaisesRegex(ValueError,"metadata changed"):
+                score.compact(args)
+            score.save(path,meta)
+            score.compact(args)
+            self.assertFalse(pending.exists())
+            with np.load(root/(name+".npz")) as arrays:
+                np.testing.assert_array_equal(arrays["L0"],np.full((2,2,3),11,"f4"))
+            self.assertFalse((root/(name+"-half0.f32")).exists())
+
     def test_independent_batches_keep_actual_halves_and_reject_duplicate_seeds(self):
         scratch=Path("E:/renderlab-work/m7-u0b/cpu-tests");scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as temporary:

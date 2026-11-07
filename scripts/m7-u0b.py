@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 import time
 
 REPO = Path(__file__).resolve().parent.parent
@@ -76,6 +77,14 @@ def ue(allow_game=False):
     original_state=u.E2E.state
     original_powershell=u.E2E.powershell
     original_available=u.E2E.available_gib
+    monitor_context=threading.local()
+    class MonitorCommands:
+        def __getattr__(self,name):return getattr(subprocess,name)
+        def run(self,command,*a,**kw):
+            if getattr(monitor_context,"active",False) and Path(str(command[0])).stem.lower()=="nvidia-smi":
+                kw["timeout"]=min(60,max(1,u.remaining_seconds(active_owner)-5)) if active_owner else 60
+            return subprocess.run(command,*a,**kw)
+    u.E2E.subprocess=MonitorCommands()
     # Reuse TR0 b9760bc's native-memory and fail-closed monitor controls.
     def monitor_powershell(command):
         if command.startswith("Get-CimInstance Win32_OperatingSystem"):
@@ -115,6 +124,11 @@ def ue(allow_game=False):
                 available_gib=0,gpu="unavailable",monitor_error=repr(error))
         return game_filter(snapshot)
     u.E2E.state=state
+    def monitor_state():
+        monitor_context.active=True
+        try:return state()
+        finally:monitor_context.active=False
+    u.MONITOR_STATE=monitor_state
     original_preflight=u.preflight
     u.preflight=lambda path,wait_seconds=0:original_preflight(path,wait_seconds=0)
     def abort_requested():
@@ -281,6 +295,8 @@ def reference(args):
     if args.manifest:
         env["RENDERLAB_M7_QUARRY_MANIFEST"]=str(args.manifest)
         env["RENDERLAB_M7_REFERENCE_BATCH"]=str(min(args.batch_frames,3) if game_state()=="relaxed" else args.batch_frames)
+        if all("alias_of" not in f for f in json.loads(args.manifest.read_text())["frames"]):
+            env["RENDERLAB_M7_DEFER_REFERENCE_COMPACT"]="1"
         if game_state()=="relaxed":env["RENDERLAB_M7_REFERENCE_MAX_FRAME_SECONDS"]="45"
         test="reference::quarry_tests::gpu_reference_quarry"
     with u.lease("reference-"+args.label,args.minutes) as owner:
@@ -297,10 +313,18 @@ def reference(args):
             record=json.loads(path.read_text()) if path.exists() else {}
             initial=json.loads(preflight.read_text()) if preflight.exists() else {}
             minimum=record.get("minimum_available_gib",initial.get("available_gib"))
-            if (minimum is not None and minimum<4) or "monitor_error" in json.dumps([record,initial]) or "timeout" in json.dumps(record.get("failures",[])):
+            problems=json.dumps([record.get("failures",[]),initial.get("monitor_error")]).lower()
+            if (minimum is not None and minimum<4) or "monitor" in problems or "timeout" in problems:
                 u.save(OUT/"resource-pause.json",dict(reason="reference resource/monitor failure",run=str(process),
                     utc=dt.datetime.now(dt.timezone.utc).isoformat(),policy="TR0 b9760bc: wait outside lock for 60 Cargo-free seconds"))
             raise
+    if args.manifest:
+        # Match TR0's bench flow: GPU child/context ends before CPU archival.
+        for receipt in out.glob("*.compact-pending.json"):
+            name=receipt.name.removesuffix(".compact-pending.json")
+            compact_env=dict(os.environ);compact_env.pop("RENDERLAB_M7_DEFER_REFERENCE_COMPACT",None)
+            subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"compact",str(out),name],
+                cwd=REPO,env=compact_env,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def s4(args):
@@ -540,8 +564,9 @@ def sequence(args):
         for name in names:
             if name in before or not (root/(name+".json")).exists():continue
             if not (root/(name+".npz")).exists():
+                env=dict(os.environ);env.pop("RENDERLAB_M7_DEFER_REFERENCE_COMPACT",None)
                 subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"compact",str(root),name],
-                    cwd=REPO,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
+                    cwd=REPO,env=env,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
         after={name for name in names if (root/(name+".npz")).exists()}
         if after==before:raise RuntimeError("reference batch made no progress")
         for name in after-before:
@@ -598,7 +623,10 @@ def finish(args):
     for label,async_off in (("timing",False),("timing-async-off",True)):
         sv.capture(argparse.Namespace(label=label,configs=["sw-mesh","hw"],timing=True,async_off=async_off))
         sv.costs(argparse.Namespace(label=label))
-    matrix(argparse.Namespace(label="bench-matrix"));load("m7-u0b-report").benches(argparse.Namespace(root=OUT/"study/bench-matrix"))
+    matrix(argparse.Namespace(label="bench-matrix"))
+    bench_summary=OUT/"bench-captures.json"
+    if not bench_summary.exists() or not json.loads(bench_summary.read_text())["complete"]:
+        load("m7-u0b-report").benches(argparse.Namespace(root=OUT/"study/bench-matrix"))
     sequence(argparse.Namespace(label="quarry-final",manifest=OUT/"quarry-unit-sequence.json"))
     load("m7-u0b-report").aliases(argparse.Namespace(manifest=OUT/"quarry.json"))
     floors(args)

@@ -14,6 +14,28 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_late_monitor_error_rejects_even_a_successful_child(self):
+        module=host.load("m7-u0-ue")
+        scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            root=Path(temporary);module.OUT=root;signal=root/"release-child";children=[]
+            original=module.subprocess.Popen
+            def spawn(*a,**kw):
+                child=original(*a,**kw);children.append(child);return child
+            def snapshot():
+                signal.touch();children[0].wait(timeout=5)
+                return dict(games=[],foreign_renderers=[],monitor_error="injected inventory error after child exit")
+            with patch.object(module,"preflight"),\
+                 patch.object(module.E2E,"available_gib",return_value=8),\
+                 patch.object(module.E2E,"state",side_effect=snapshot),\
+                 patch.object(module.subprocess,"Popen",side_effect=spawn):
+                script="import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nwhile not p.exists(): time.sleep(.01)"
+                with self.assertRaisesRegex(RuntimeError,"conflict monitor unavailable"):
+                    module.guarded([sys.executable,"-B","-c",script,str(signal)],root,timeout=8)
+            record=json.loads((root/"process.json").read_text())
+            self.assertEqual(record["exit_code"],0)
+            self.assertEqual(record["failures"][0]["reason"],"conflict monitor unavailable")
+
     def test_native_memory_inventory_and_counter_failure_are_safe(self):
         module=host.load("m7-u0-ue")
         with patch.object(host,"load",return_value=module),\
@@ -36,7 +58,8 @@ class LeaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,"conflict monitor unavailable"):
                     module.guarded([sys.executable,"-B","-c","import time; time.sleep(10)"],root,timeout=15)
             record=json.loads((root/"process.json").read_text())
-            self.assertNotEqual(record["exit_code"],0)
+            # A saturated host can deliver the inventory result after a short
+            # child has naturally exited. Either way, the job must be rejected.
             self.assertEqual(record["failures"][0]["reason"],"conflict monitor unavailable")
 
     def test_lost_atomic_acquisition_retries_but_owned_failure_propagates(self):

@@ -146,6 +146,7 @@ def preflight(path, wait_seconds=180):
 
 
 ABORT_REQUESTED = None
+MONITOR_STATE = None
 
 
 def guarded(command, out, timeout, cwd=None, env=None):
@@ -190,7 +191,10 @@ def guarded(command, out, timeout, cwd=None, env=None):
         def watch_conflicts():
             try:
                 while not stop.wait(2):
-                    snapshot = E2E.state()
+                    snapshot = MONITOR_STATE() if MONITOR_STATE else E2E.state()
+                    if snapshot.get("monitor_error"):
+                        kill(dict(reason="conflict monitor unavailable", error=snapshot["monitor_error"]))
+                        return
                     ours = {proc.pid}
                     foreign = [p for p in snapshot["foreign_renderers"] if p["ProcessId"] not in ours
                                and not engine_tool(p)]
