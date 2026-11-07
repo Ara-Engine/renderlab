@@ -6,12 +6,12 @@ Unit G1b continues [M7-G1](m7-g1.md) on branch `t3/m7-g1b` from main `1660d4c`. 
 
 The cache stays **off by default** (`IndirectSettings::enabled`), as at G1.
 
-**Cost (item 1).** These are camera-moving increments over the cache-off frame. The setup is SV at 1080p with the Lambert gate program, no per-pass timestamps, and quiet window `q2` (section 1).
+**Cost (item 1).** These are camera-moving increments over the cache-off frame. The setup is SV at 1080p with the Lambert gate program and no per-pass timestamps. The window is `q5-1`, the one quiet window with no foreign compiler at any sample (section 1.4); ranges cover its two visits of each configuration.
 
 | Path | G1 (base, same window) | G1b final | Stricter budget (root) |
 |---|---:|---:|---:|
-| RT | ⟨Q2 base RT⟩ | **⟨Q2 final RT⟩** | 0.45 ms |
-| Non-RT | ⟨Q2 base NR⟩ | **⟨Q2 final NR⟩** | 0.46 ms |
+| RT | +0.57-0.61 ms | **+0.37-0.44 ms** (median of four visits 0.41) | 0.45 ms: **met** |
+| Non-RT | +0.77 ms | **+0.49-0.50 ms** | 0.46 ms: **missed by 0.03-0.04 ms** |
 
 **Measurement correction.** G1's quoted costs (+0.684 / +0.809 ms) included its own per-pass timestamps, about 0.05 ms a frame. Without them, G1's code measures about +0.60 / +0.74 ms.
 
@@ -27,14 +27,14 @@ The cache stays **off by default** (`IndirectSettings::enabled`), as at G1.
 Every claim constraint holds, and every gate passes (section 5).
 
 **Cut spike (item 2).**
-- **Non-RT:** a reset now spreads new cells' rays over four frames (W1 form 2 direction groups, with untraced directions filled from the nearest traced direction). The non-RT cut drops from 5.7-5.8 ms to ⟨Q2 cut NR⟩. It settles exactly by frame 4.
+- **Non-RT:** a reset now spreads new cells' rays over four frames (W1 form 2 direction groups, with untraced directions filled from the nearest traced direction). The non-RT cut drops from 5.73 ms to 3.19 ms (`q5-1`). It settles exactly by frame 4.
 - **First frame after a cut:** 6.82% / 9.98% (overview / gaps), against Lumen SW Epic's 49.6% / 101.0%.
-- **RT:** the refill stays off. The RT cut is ⟨Q2 cut RT⟩, a recorded spike.
+- **RT:** the refill stays off. The RT cut is 2.62 ms against G1's 2.57-2.58, a recorded spike.
 
 **Sky steps.**
 - A constant-sky change now costs nothing: the lookup scales the cached unit-radiance values.
 - A prepared map's yaw re-integrates every cell and equals a fresh cache on the next frame: 0 pixels differ over six 15° steps, on both paths.
-- **Miss:** a continuously rotating map costs ⟨Q2 env⟩ a frame (section 3).
+- **Miss:** a continuously rotating map costs 2.4 ms a frame on non-RT and 4.7-6.3 ms on RT (section 3). On RT most of the excess is a shading-pass slowdown outside the cache, still under diagnosis.
 
 **SV gate against Unreal (Lumen Epic, U0b `35a2759`).**
 - G1b beats Lumen HW Epic (the RT comparator) and Lumen SW Epic with mesh SDFs (the non-RT comparator) on every lighting population, static and in motion, on both paths. The table is in section 4.
@@ -128,15 +128,43 @@ The renderer's per-frame GPU spans are read once per sequence, and p50s are repo
 | **L4** | Bucket start offset from key a's top bits, so a lookup hashes key a alone | — | **−0.021** | — | — | **Yes**, on both paths |
 | **S1** | Software rays visit BVH children nearest first | — | — | — | −0.010 (setup 134 → 128, rays 53 → 49 µs) | **Yes.** Identical image hashes |
 | **v3** | Setup with eight lanes per cell: candidates in parallel, items written by lanes. Plus the constant sky at lookup, the probe reusing its tile key with a 256-entry tile table, and the cut refill with a neighbour fill | 125-140 | 0.13-0.18 | +0.37-0.41 | +0.39-0.65 (noisy) | Setup 24 → 14 (RT) and 133 → 55 µs (non-RT). **Regression:** cuts without the refill, setup 453 → 1,044 (RT) and 2,983 → 7,299 µs (non-RT) |
-| **v4 (final)** | Lane 0 tries candidate 0 first; lanes 1-4 trace the other candidates only when it fails. Rays past the item capacity are spread over the cell's eight lanes. Setup grid 4,096 | ⟨Q2⟩ | ⟨Q2⟩ | **⟨Q2⟩** | **⟨Q2⟩** | Table hashes equal v3's (`3000682f6ad7f495` RT, `ad7d818201c12a39` non-RT) |
+| **v4 (final)** | Lane 0 tries candidate 0 first; lanes 1-4 trace the other candidates only when it fails. Rays past the item capacity are spread over the cell's eight lanes. Setup grid 4,096 | 122-135 | 0.18 | **+0.37-0.44** | **+0.49-0.50** | Table hashes equal v3's (`3000682f6ad7f495` RT, `ad7d818201c12a39` non-RT). RT cut setup 1,044 → 543 µs, non-RT cut (no refill) 7,299 → 1,731 µs. Frames from `q5-1`; passes from `q3` (contended) |
 
 ### 1.4 Final cost, quiet window `q2` (M)
 
-⟨Q2 table: per phase (static, camera, caster, cut, sky step) p50 and p95 for off, G1 base and final, both paths; the final's pass breakdown; the standard program's row; the rotating map row⟩
+**Window.** `q5-1`, 23:56:20-23:56:47Z, 2026-11-07.
+- It started after 122 s with no foreign `stillkit` compiler, and no stillkit process appeared at any 3 s sample from lock to release.
+- One final process ran (`g1b-final2`: off, rotated and spread, two visits each), then one G1 base process (off and rotated, two visits).
+- No per-pass timestamps.
+
+Earlier windows `q2` and `q3` overlapped stillkit and are labelled contended. Their frame p50s agree with `q5-1` to about 0.01 ms.
+
+Frame p50s in ms, per visit (visit 1 / visit 2):
+
+| Phase | RT off | RT G1 | RT final | Non-RT off | Non-RT G1 | Non-RT final (default refill) |
+|---|---:|---:|---:|---:|---:|---:|
+| Still (idle after 3 frames) | 0.423 / 0.382 | 0.737 / 0.668 | 0.620 / 0.561 | 0.483 / 0.483 | 0.776 / 0.774 | 0.673 / 0.672 |
+| Camera moving | 0.418 / 0.378 | 0.988 / 0.989 | 0.859 / 0.788 (spread 0.786 / 0.785) | 0.477 / 0.478 | 1.247 / 1.243 | 0.971 / 0.976 |
+| Caster moving | 0.425 / 0.382 | 1.590 / 1.594 | 1.530 / 1.531 | 0.482 / 0.482 | 2.152 / 2.153 | 2.025 / 2.035 |
+| Cut (a reset every two frames) | 0.424 / 0.381 | 2.584 / 2.562 | 2.625 / 2.622 (refill 2.735 / 2.721) | 0.480 / 0.488 | 5.741 / 5.725 | 3.193 / 3.187 (no refill 4.521 / 4.542) |
+| Constant-sky step | 0.422 / 0.381 | 1.666 / 1.665 | 0.562 / 0.563 | 0.484 / 0.484 | 1.743 / 1.744 | 0.668 / 0.673 |
+
+**The lookup.** Camera-frame shading with the cache, less without it, is +0.18 ms for the final on both paths (0.328-0.331 against 0.149-0.152), against +0.28 for G1 (0.430-0.436).
+
+**p95.** RT camera p95 is 1.07-1.16 ms for the final against 1.00-1.10 for G1. Non-RT camera p95 is 1.38-1.49 against 1.68-1.88.
+
+**Pass breakdown** (`q3` t5, profiled; contended CPU, GPU pass times):
+- **RT camera:** probe 135, claims and resolves 22, setup 13, rays 9 and finish 26 µs: 209 µs in all.
+- **Non-RT camera:** probe 127, claims and resolves 24, setup 55, rays 50 and finish 25 µs: 284 µs in all.
+
+**Standard program** (`q3` t6, contended): camera increment RT +0.40-0.43 ms, non-RT +0.47-0.51 ms.
 
 **Against the budget.**
 - Root's stricter reading is about 0.45 ms (0.3 × Lumen over TSR, RT) and 0.46 ms (L_sw/2, non-RT).
-- ⟨Q2 verdict⟩
+- **RT meets the stricter reading:** +0.37-0.44 ms (median 0.41) against 0.45.
+- **Non-RT misses it by 0.03-0.04 ms:** +0.49-0.50 against 0.46.
+- The non-RT rest is the software-ray setup and rays (about 0.10 ms) plus the same per-pixel probe and lookup as RT.
+- Per Islam's rule, the non-RT miss is recorded and non-RT GI is still eligible if it wins on quality, which it does on SV (section 4).
 - These are SV costs. Lumen's L is measured on the quarry, and a same-bench cost waits for the quarry harness (section 6).
 
 ## 2. Cut spike (item 2)
@@ -178,11 +206,16 @@ The renderer's per-frame GPU spans are read once per sequence, and p50s are repo
 
 ### 2.2 Cut cost (M)
 
-⟨Q2 table: cut frame p50/p95 per path for G1 base, final without refill and final default; the steady camera frame for the 1.5x rule⟩
+| `q5-1`, ms (p50, visit 1 / 2) | RT | Non-RT |
+|---|---:|---:|
+| G1 cut | 2.584 / 2.562 | 5.741 / 5.725 |
+| Final, no refill | 2.625 / 2.622 | 4.521 / 4.542 |
+| Final, refill S = 4 | 2.735 / 2.721 | **3.193 / 3.187** (the default) |
+| Steady camera frame (1.5x = rule) | 0.79 (1.18) | 0.97 (1.46) |
 
 **Profiled breakdown (screens).**
 - **Non-RT with the refill:** setup 342-353 µs, rays 500-547, finish 775, probe 260-280.
-- **RT without the refill:** probe 260, claims and resolves 110, setup ⟨Q2⟩, rays 177, finish 738.
+- **RT without the refill** (`q3`, contended): probe 240, claims and resolves 112, setup 543, rays 181, finish 747.
 
 **The finish dominates.** A cut needs every new cell's 64-direction SH projection in its first frame. The refill spreads rays, not projections.
 
@@ -208,8 +241,8 @@ It then yaws the map 15° a frame, six steps, comparing each stepped frame with 
 | Stepped frame equals fresh, six steps | **yes, 0 pixels** each step | **yes, 0 pixels** each step |
 | Pixels the yaw changes against open sky | 1,323,093-1,323,125 | same |
 | Cells re-integrated per step | 87,490 | 87,483 |
-| Rotating frame p50 / p95, ms | ⟨Q2⟩ | ⟨Q2⟩ |
-| Integrate pass p50, µs | ⟨Q2⟩ | ⟨Q2⟩ |
+| Rotating frame p50 / p95, ms | 6.31 / 20.04 (`q3` t0, final, unprofiled); 4.71 / 5.24 (C3, v3, profiled) | 2.37 / 17.97 (`q3` t0); 2.18 / 2.77 (C3) |
+| Integrate pass p50, µs | 2,170 (C3) | 998 (C3) |
 
 **Constant skies.** A constant sky's change now costs nothing.
 - Cells cache unit radiance, and the lookup multiplies by the current constant (`gi_sky_scale`).
@@ -390,13 +423,13 @@ No patented fallback is enabled.
 ## 9. Misses and open items
 
 1. **Edge population against Lumen HW Epic** (anti-aliasing, TR1's). Every other SV measure passes on both paths.
-2. ⟨Q2 cost verdict against 0.45 / 0.46 ms⟩. These are SV costs; the quarry cost is open.
+2. **Non-RT camera cost +0.49-0.50 ms against 0.46** (RT +0.37-0.44 meets 0.45). These are SV costs; the quarry cost is open.
 3. **Cut frames above 1.5x steady** on both paths. They are recorded as a cold start (section 2.2).
-4. **A rotating prepared map costs ⟨Q2⟩ a frame** (section 3). Rotating-map error against a path-traced map is untested.
+4. **A rotating prepared map costs 2.4 ms (non-RT) and 4.7-6.3 ms (RT) a frame** (section 3). Rotating-map error against a path-traced map is untested.
 5. **The quarry near field and gate are not built** (section 6).
 6. **2 px cells:** first frame at the gaps pose is 21-23%, against 4.8% settled. A 2 px cut overflows the item capacity and buckets. It is not a default.
 7. **Bucket-full inserts grow as the table fills** (M, G1's motion run: 61 → 294 a frame). A larger table or wider buckets would remove them; the quarry will show the size needed.
-8. **Not measured in a quiet window:** F1's environment and motion step costs ran beside stillkit, and Q2 re-measures the rotation.
+8. **Contended measurements:** F1, `q2` and `q3` overlapped a foreign compiler (stillkit) and are labelled contended. The rotating-map rows (`q3` t0 ended before stillkit's first sample; C3 ran before it started) and the standard-program row are not from the clean window.
 
 ## 10. Evidence and process
 
