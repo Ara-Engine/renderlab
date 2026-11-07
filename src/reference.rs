@@ -1,5 +1,5 @@
 //! M7 reference path tracer: an unbiased GPU estimate of the physical image for the GI and
-//! reflection gates. It handles a sun disk (or delta sun), a constant sky and any number of
+//! reflection gates. It handles a sun disk (or delta sun), a prepared or constant sky and any number of
 //! bounces, integrated over each pixel's footprint and over a camera shutter.
 //!
 //! The BSDF is the standard program's model (Lambert plus GGX with Schlick Fresnel), so a
@@ -22,6 +22,10 @@ pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// Empty streams use the standard defaults: UV zero, tangent +X, colour white.
+    pub uvs: Vec<[f32; 2]>,
+    pub tangents: Vec<[f32; 4]>,
+    pub colors: Vec<[f32; 4]>,
 }
 
 /// The standard program's parameters. `specular` scales the dielectric F0 of 0.04; 0 with
@@ -34,6 +38,9 @@ pub struct Material {
     pub specular: f32,
     /// Emitted radiance, cd/m^2.
     pub emission: [f32; 3],
+    pub base_color_texture: Option<renderlab_asset::BaseColorTexture>,
+    pub metallic_roughness_texture: Option<renderlab_asset::MetallicRoughnessTexture>,
+    pub normal_texture: Option<renderlab_asset::NormalTexture>,
 }
 impl Default for Material {
     fn default() -> Self {
@@ -43,6 +50,9 @@ impl Default for Material {
             roughness: 0.5,
             specular: 1.0,
             emission: [0.0; 3],
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            normal_texture: None,
         }
     }
 }
@@ -73,7 +83,24 @@ pub struct Scene {
     pub sun: Option<Sun>,
     /// Constant sky radiance, cd/m^2.
     pub sky: [f32; 3],
+    pub textures: Vec<renderlab_asset::Texture>,
+    /// Replaces the constant sky. Uses the unblurred level zero, never a roughness convolution.
+    pub environment: Option<Environment>,
+    /// Optional camera-only backdrop (secondary rays still see the sky). The matched Unreal
+    /// quarry uses a black backdrop with a specified lighting cubemap.
+    pub camera_background: Option<[f32; 3]>,
 }
+
+#[derive(Clone, Debug)]
+pub struct Environment {
+    pub radiance: renderlab_asset::environment::CubeLevel,
+    /// Source and runtime yaw combined, in the same convention as EnvironmentParameters.
+    pub yaw: f32,
+    pub intensity: f32,
+}
+
+#[path = "reference_inputs.rs"]
+mod inputs;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
@@ -111,6 +138,11 @@ pub struct Settings {
     pub max_depth: u32,
     pub seed: u32,
     pub smith: Smith,
+    /// Explicit mip level for a controlled texture-filter comparison. Zero is the physical
+    /// pixel-integrated reference: pixel jitter integrates the unblurred texture itself.
+    pub texture_lod: f32,
+    /// Capture centre hit identities, sun-only radiance and centre-conditioned visibility.
+    pub capture_geometry: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -120,6 +152,8 @@ impl Default for Settings {
             max_depth: 1024,
             seed: 0x4d37_5530,
             smith: Smith::HeightCorrelated,
+            texture_lod: 0.0,
+            capture_geometry: false,
         }
     }
 }
@@ -133,14 +167,19 @@ pub struct Image {
     pub samples: u32,
     pub mean: Vec<[f32; 3]>,
     pub standard_error: Vec<[f32; 3]>,
+    /// Actual independent even/odd means, before taking the absolute split-half difference.
+    pub halves: [Vec<[f32; 3]>; 2],
+    /// Optional 80-byte records: world vec4, geometric normal vec4, centre IDs uvec4,
+    /// direct-sun even/odd sums vec4 (w = accepted-sample visibility sum).
+    pub geometry: Vec<u8>,
     /// Pixels where a sample produced a non-finite value. Any nonzero count is a tracer bug.
     pub invalid_pixels: u32,
 }
 
 /// Interleaved vertex record: position and normal x, then normal yz and two spare floats.
-const VERTEX_FLOATS: usize = 8;
+const VERTEX_FLOATS: usize = 16;
 /// The shader's `Frame`: two camera bases (8 vec4), sun, sun value, sky, then two vec4<u32>.
-const FRAME_BYTES: usize = 13 * 16;
+const FRAME_BYTES: usize = 15 * 16;
 
 fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error> {
     let bad = |m| Err(Error::InvalidInput(m));
@@ -150,6 +189,9 @@ fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error
     for mesh in &scene.meshes {
         let n = mesh.positions.len();
         if mesh.normals.len() != n
+            || (!mesh.uvs.is_empty() && mesh.uvs.len() != n)
+            || (!mesh.tangents.is_empty() && mesh.tangents.len() != n)
+            || (!mesh.colors.is_empty() && mesh.colors.len() != n)
             || mesh.indices.is_empty()
             || mesh.indices.len() % 3 != 0
             || mesh.indices.iter().any(|&i| i as usize >= n)
@@ -157,6 +199,7 @@ fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error
             return bad("reference mesh needs matching normals and in-range triangle indices");
         }
     }
+    inputs::validate(scene)?;
     for i in &scene.instances {
         if i.mesh >= scene.meshes.len() || i.material >= scene.materials.len() {
             return bad("reference instance names a missing mesh or material");
@@ -229,7 +272,30 @@ fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, coun
     };
     floats.push(sun);
     floats.push(value);
-    floats.push([scene.sky[0], scene.sky[1], scene.sky[2], 0.0]);
+    floats.push([
+        scene.sky[0],
+        scene.sky[1],
+        scene.sky[2],
+        scene
+            .environment
+            .as_ref()
+            .map_or(0.0, |e| e.radiance.size() as f32),
+    ]);
+    let (sin, cos, intensity) = scene.environment.as_ref().map_or((0.0, 1.0, 0.0), |e| {
+        let (sin, cos) = e.yaw.sin_cos();
+        (sin, cos, e.intensity)
+    });
+    floats.push([
+        cos,
+        sin,
+        intensity,
+        f32::from(u8::from(settings.capture_geometry)),
+    ]);
+    floats.push(
+        scene
+            .camera_background
+            .map_or([0.0, 0.0, 0.0, 0.0], |v| [v[0], v[1], v[2], 1.0]),
+    );
     let mut bytes: Vec<u8> = floats
         .iter()
         .flatten()
@@ -244,7 +310,7 @@ fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, coun
         settings.max_depth,
         settings.seed,
         smith,
-        0,
+        settings.texture_lod.to_bits(),
     ] {
         bytes.extend(word.to_le_bytes());
     }
@@ -298,8 +364,16 @@ pub fn render(
             (vertex_data.len() / VERTEX_FLOATS) as u32,
             index_data.len() as u32,
         ));
-        for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
-            vertex_data.extend([p[0], p[1], p[2], n[0], n[1], n[2], 0.0, 0.0]);
+        for (k, (p, n)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
+            let uv = mesh.uvs.get(k).copied().unwrap_or([0.0; 2]);
+            vertex_data.extend([p[0], p[1], p[2], n[0], n[1], n[2], uv[0], uv[1]]);
+            vertex_data.extend(
+                mesh.tangents
+                    .get(k)
+                    .copied()
+                    .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+            );
+            vertex_data.extend(mesh.colors.get(k).copied().unwrap_or([1.0; 4]));
         }
         index_data.extend(&mesh.indices);
     }
@@ -331,30 +405,38 @@ pub fn render(
         &instance_data,
         wgpu::BufferUsages::empty(),
     );
-    let material_data = floats(scene.materials.iter().flat_map(|m| {
-        let [r, g, b] = m.base_color;
-        let [er, eg, eb] = m.emission;
-        [
-            r,
-            g,
-            b,
-            m.metallic,
-            er,
-            eg,
-            eb,
-            0.0,
-            m.roughness,
-            m.specular,
-            0.0,
-            0.0,
-        ]
-    }));
+    let material_data = floats(
+        scene
+            .materials
+            .iter()
+            .flat_map(|m| {
+                let [r, g, b] = m.base_color;
+                let [er, eg, eb] = m.emission;
+                [
+                    r,
+                    g,
+                    b,
+                    m.metallic,
+                    er,
+                    eg,
+                    eb,
+                    0.0,
+                    m.roughness,
+                    m.specular,
+                    m.normal_texture.map_or(1.0, |t| t.scale),
+                    0.0,
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
+    let material_data = inputs::material_bytes(scene, material_data);
     let materials = storage(
         device,
         "reference materials",
         &material_data,
         wgpu::BufferUsages::empty(),
     );
+    let (texels, texture_info, environment) = inputs::upload(device, scene)?;
     let pixels = u64::from(view.width) * u64::from(view.height);
     let sums_bytes = pixels * 32;
     let sums = device.create_buffer(&wgpu::BufferDescriptor {
@@ -363,6 +445,17 @@ pub fn render(
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let geometry_bytes = if settings.capture_geometry {
+        pixels * 80
+    } else {
+        80
+    };
+    let geometry = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reference geometric populations"),
+        size: geometry_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let frame = device.create_buffer(&wgpu::BufferDescriptor {
@@ -472,6 +565,10 @@ pub fn render(
             storage_entry(4, true),
             storage_entry(5, true),
             storage_entry(6, false),
+            storage_entry(7, true),
+            storage_entry(8, true),
+            storage_entry(9, true),
+            storage_entry(10, false),
         ],
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -505,6 +602,22 @@ pub fn render(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: sums.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: texels.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: texture_info.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: environment.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: geometry.as_entire_binding(),
             },
         ],
     });
@@ -551,12 +664,20 @@ pub fn render(
     }
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("reference readback"),
-        size: sums_bytes,
+        size: sums_bytes
+            + if settings.capture_geometry {
+                geometry_bytes
+            } else {
+                0
+            },
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(&sums, 0, &readback, 0, sums_bytes);
+    if settings.capture_geometry {
+        encoder.copy_buffer_to_buffer(&geometry, 0, &readback, sums_bytes, geometry_bytes);
+    }
     queue.submit([encoder.finish()]);
     let (sender, receiver) = std::sync::mpsc::channel();
     readback
@@ -574,7 +695,11 @@ pub fn render(
         .map_err(|_| Error::InvalidInput("reference readback mapping failed"))?
         .to_vec();
     readback.unmap();
-    Ok(finish(&bytes, view, settings.samples))
+    let mut image = finish(&bytes[..sums_bytes as usize], view, settings.samples);
+    if settings.capture_geometry {
+        image.geometry = bytes[sums_bytes as usize..].to_vec();
+    }
+    Ok(image)
 }
 
 /// Means and split-half standard errors from the even/odd sums (8 floats per pixel).
@@ -585,6 +710,7 @@ fn finish(bytes: &[u8], view: &View, samples: u32) -> Image {
     let pixels = (view.width * view.height) as usize;
     let mut mean = Vec::with_capacity(pixels);
     let mut standard_error = Vec::with_capacity(pixels);
+    let mut halves = [Vec::with_capacity(pixels), Vec::with_capacity(pixels)];
     let mut invalid_pixels = 0;
     for p in 0..pixels {
         let even: [f32; 3] = std::array::from_fn(|c| value(p * 8 + c));
@@ -597,6 +723,8 @@ fn finish(bytes: &[u8], view: &View, samples: u32) -> Image {
             invalid_pixels += 1;
         }
         mean.push(std::array::from_fn(|c| (even[c] + odd[c]) / samples as f32));
+        halves[0].push(even.map(|v| v / even_n));
+        halves[1].push(odd.map(|v| v / odd_n));
         standard_error.push(std::array::from_fn(|c| {
             0.5 * (even[c] / even_n - odd[c] / odd_n).abs()
         }));
@@ -607,6 +735,8 @@ fn finish(bytes: &[u8], view: &View, samples: u32) -> Image {
         samples,
         mean,
         standard_error,
+        halves,
+        geometry: Vec::new(),
         invalid_pixels,
     }
 }
@@ -616,3 +746,7 @@ const SHADER: &str = include_str!("../shaders/reference_path_tracer.wgsl");
 #[cfg(test)]
 #[path = "reference_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reference_quarry_tests.rs"]
+mod quarry_tests;

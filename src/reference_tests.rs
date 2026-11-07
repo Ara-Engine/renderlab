@@ -13,6 +13,7 @@ fn quad(half: f32, y: f32) -> Mesh {
         ],
         normals: vec![[0.0, 1.0, 0.0]; 4],
         indices: vec![0, 2, 1, 0, 3, 2],
+        ..Default::default()
     }
 }
 fn instance(mesh: usize, material: usize) -> Instance {
@@ -118,7 +119,7 @@ fn shader_validates_with_ray_queries() {
         naga::valid::Capabilities::all(),
     )
     .validate(&module)
-    .expect("WGSL validates");
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
 }
 
 /// A schema-2 bench (scripts/m7-u0-scenes.py) as a reference scene: one instance per mesh.
@@ -144,6 +145,13 @@ pub(super) fn load_bench(path: &Path) -> Bench {
             roughness: f(&m["roughness"]),
             specular: f(&m["specular"]),
             emission: v3(&m["emission"]),
+            base_color_texture: m["base_texture"].as_u64().map(|texture| {
+                renderlab_asset::BaseColorTexture {
+                    texture: texture as u32,
+                    sampler: Default::default(),
+                }
+            }),
+            ..Default::default()
         })
         .collect();
     let mut meshes = vec![];
@@ -159,6 +167,10 @@ pub(super) fn load_bench(path: &Path) -> Bench {
                 .iter()
                 .map(|x| x.as_u64().unwrap() as u32)
                 .collect(),
+            uvs: m["uvs"].as_array().map_or_else(Vec::new, |list| {
+                list.iter().map(|v| [f(&v[0]), f(&v[1])]).collect()
+            }),
+            ..Default::default()
         });
         instances.push(instance(i, m["material"].as_u64().unwrap() as usize));
     }
@@ -199,6 +211,27 @@ pub(super) fn load_bench(path: &Path) -> Bench {
             instances,
             sun,
             sky: v3(&v["sky"]["constant"]),
+            textures: v["textures"].as_array().map_or_else(Vec::new, |list| {
+                list.iter()
+                    .map(|t| renderlab_asset::Texture {
+                        role: renderlab_asset::TextureRole::BaseColorSrgb,
+                        mips: t["mips"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|m| renderlab_asset::Mip {
+                                width: m["width"].as_u64().unwrap() as u32,
+                                height: m["height"].as_u64().unwrap() as u32,
+                                rgba8: std::fs::read(
+                                    path.parent().unwrap().join(m["file"].as_str().unwrap()),
+                                )
+                                .unwrap(),
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            }),
+            ..Default::default()
         },
         views,
         smith: if v["smith"] == "separable" {
@@ -229,7 +262,7 @@ fn bench_loader_reads_the_generated_schema() {
     assert!(validate(&bench.scene, &bench.views[0].1, &Settings::default()).is_ok());
 }
 
-fn gpu() -> (wgpu::Device, wgpu::Queue) {
+pub(super) fn gpu() -> (wgpu::Device, wgpu::Queue) {
     assert_eq!(
         std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
         Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK"),
@@ -248,6 +281,7 @@ fn gpu() -> (wgpu::Device, wgpu::Queue) {
         max_acceleration_structures_per_shader_stage: 1,
         max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
         max_buffer_size: a.max_buffer_size,
+        max_storage_buffers_per_shader_stage: 9,
         ..Default::default()
     };
     // SAFETY: the test caller explicitly accepts wgpu's experimental implementation risk.
@@ -262,7 +296,7 @@ fn gpu() -> (wgpu::Device, wgpu::Queue) {
     .unwrap()
 }
 
-fn output() -> PathBuf {
+pub(super) fn output() -> PathBuf {
     let dir = PathBuf::from(
         std::env::var("RENDERLAB_M7_REFERENCE_OUT").expect("RENDERLAB_M7_REFERENCE_OUT"),
     );
@@ -270,7 +304,7 @@ fn output() -> PathBuf {
     dir
 }
 
-fn save(dir: &Path, name: &str, image: &Image, meta: serde_json::Value) {
+pub(super) fn save(dir: &Path, name: &str, image: &Image, meta: serde_json::Value) {
     let raw = |v: &[[f32; 3]]| {
         v.iter()
             .flatten()
@@ -283,6 +317,12 @@ fn save(dir: &Path, name: &str, image: &Image, meta: serde_json::Value) {
         raw(&image.standard_error),
     )
     .unwrap();
+    for (half, values) in image.halves.iter().enumerate() {
+        std::fs::write(dir.join(format!("{name}-half{half}.f32")), raw(values)).unwrap();
+    }
+    if !image.geometry.is_empty() {
+        std::fs::write(dir.join(format!("{name}-geometry.bin")), &image.geometry).unwrap();
+    }
     let mut meta = meta;
     meta["width"] = image.width.into();
     meta["height"] = image.height.into();
@@ -299,13 +339,37 @@ fn save(dir: &Path, name: &str, image: &Image, meta: serde_json::Value) {
 fn region(image: &Image, expected: [f32; 3], pixels: impl Iterator<Item = usize>) -> (f64, f64) {
     let (mut sum, mut var, mut n) = (0.0f64, 0.0f64, 0.0f64);
     for p in pixels {
-        for (c, e) in expected.iter().enumerate() {
-            sum += f64::from(image.mean[p][c] / e);
-            var += f64::from(image.standard_error[p][c] / e).powi(2);
-            n += 1.0;
-        }
+        // RGB shares a path and is correlated. Pool per-pixel channel means first; the
+        // triangle inequality bounds their uncertainty without inventing three samples.
+        sum += (0..3)
+            .map(|c| f64::from(image.mean[p][c] / expected[c]))
+            .sum::<f64>()
+            / 3.0;
+        var += ((0..3)
+            .map(|c| f64::from(image.standard_error[p][c] / expected[c]))
+            .sum::<f64>()
+            / 3.0)
+            .powi(2);
+        n += 1.0;
     }
     (sum / n, var.sqrt() / n)
+}
+
+#[test]
+fn region_does_not_count_correlated_rgb_as_three_paths() {
+    let image = Image {
+        width: 1,
+        height: 1,
+        samples: 4,
+        mean: vec![[8.0; 3]],
+        standard_error: vec![[0.8; 3]],
+        halves: [vec![[8.8; 3]], vec![[7.2; 3]]],
+        geometry: Vec::new(),
+        invalid_pixels: 0,
+    };
+    let (mean, se) = region(&image, [8.0; 3], 0..1);
+    assert_eq!(mean, 1.0);
+    assert!((se - 0.1).abs() < 1e-7);
 }
 
 /// Analytic gates: a white Lambert sphere under a constant sky has radiance equal to the sky
@@ -357,6 +421,7 @@ fn gpu_reference_analytic() {
         instances: vec![instance(0, 0)],
         sky: [0.0; 3],
         sun: None,
+        ..Default::default()
     };
     // Le = 2, rho = 0.75: L = 8 everywhere.
     let v = View {
@@ -367,15 +432,28 @@ fn gpu_reference_analytic() {
         samples: 4096,
         ..Default::default()
     };
-    let image = render(&device, &queue, &furnace, &v, &settings).unwrap();
-    let (mean, se) = region(&image, [8.0; 3], 0..image.mean.len());
-    save(
-        &dir,
-        "furnace",
-        &image,
-        serde_json::json!({"expected": 8.0, "relative_mean": mean, "relative_se": se}),
-    );
-    rows.push(("furnace", mean, se, image.invalid_pixels));
+    let mut seeds = vec![];
+    for k in 0..8 {
+        let settings = Settings {
+            seed: settings.seed.wrapping_add(k * 7919),
+            ..settings
+        };
+        let image = render(&device, &queue, &furnace, &v, &settings).unwrap();
+        let (mean, se) = region(&image, [8.0; 3], 0..image.mean.len());
+        save(
+            &dir,
+            &format!("furnace-{k}"),
+            &image,
+            serde_json::json!({"expected":8.0,"relative_mean":mean,"relative_se":se,"seed":settings.seed}),
+        );
+        seeds.push(serde_json::json!({"seed":settings.seed,"mean":mean,"se":se}));
+        rows.push((format!("furnace-{k}"), mean, se, image.invalid_pixels));
+    }
+    std::fs::write(
+        dir.join("furnace-seeds.json"),
+        serde_json::to_vec_pretty(&seeds).unwrap(),
+    )
+    .unwrap();
     // Delta sun on a Lambert floor at 30 degrees elevation, sky black: L = rho/pi * E * sin(30).
     let floor = Scene {
         meshes: vec![quad(50.0, 0.0)],
@@ -390,6 +468,7 @@ fn gpu_reference_analytic() {
             angular_radius: 0.0,
         }),
         sky: [0.0; 3],
+        ..Default::default()
     };
     let v = view(Vec3::new(0.0, 1.0, 1.0), Vec3::new(0.0, 0.0, -0.5), 16);
     let image = render(
@@ -411,7 +490,7 @@ fn gpu_reference_analytic() {
         &image,
         serde_json::json!({"expected": expected, "relative_mean": mean, "relative_se": se}),
     );
-    rows.push(("delta-floor", mean, se, image.invalid_pixels));
+    rows.push(("delta-floor".into(), mean, se, image.invalid_pixels));
     // Sky only on the same floor: L = rho * sky (a plane sees the whole upper hemisphere).
     let sky = Scene {
         sun: None,
@@ -436,7 +515,90 @@ fn gpu_reference_analytic() {
         &image,
         serde_json::json!({"expected": 50.0, "relative_mean": mean, "relative_se": se}),
     );
-    rows.push(("sky-floor", mean, se, image.invalid_pixels));
+    rows.push(("sky-floor".into(), mean, se, image.invalid_pixels));
+    let prepared_sky = Scene {
+        sky: [0.0; 3],
+        environment: Some(Environment {
+            radiance: renderlab_asset::environment::CubeLevel::new(
+                8,
+                vec![[100.0; 3]; 6 * 8 * 8],
+                renderlab_asset::environment::Limits::unbounded(),
+            )
+            .unwrap(),
+            yaw: 0.7,
+            intensity: 1.0,
+        }),
+        ..sky.clone()
+    };
+    let image = render(
+        &device,
+        &queue,
+        &prepared_sky,
+        &v,
+        &Settings {
+            samples: 8192,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (mean, se) = region(&image, [50.0; 3], 0..image.mean.len());
+    save(
+        &dir,
+        "cube-sky-floor",
+        &image,
+        serde_json::json!({"expected":50.0,"relative_mean":mean,"relative_se":se}),
+    );
+    rows.push(("cube-sky-floor".into(), mean, se, image.invalid_pixels));
+    // A constant tangent-space normal tests the complete prepared normal-map decode,
+    // tangent frame and linear (not sRGB) texture sampling against analytic direct light.
+    let texel = [128u8, 180, 230, 255];
+    let decoded = Vec3::new(
+        128.0 / 255.0 * 2.0 - 1.0,
+        180.0 / 255.0 * 2.0 - 1.0,
+        230.0 / 255.0 * 2.0 - 1.0,
+    )
+    .normalize();
+    let mut normal_floor = sky;
+    normal_floor.sky = [0.0; 3];
+    normal_floor.sun = Some(Sun {
+        to_light: Vec3::Y,
+        illuminance: [1000.0; 3],
+        angular_radius: 0.0,
+    });
+    normal_floor.materials[0].normal_texture = Some(renderlab_asset::NormalTexture {
+        texture: 0,
+        sampler: Default::default(),
+        scale: 1.0,
+    });
+    normal_floor.textures.push(renderlab_asset::Texture {
+        role: renderlab_asset::TextureRole::NormalLinear,
+        mips: vec![renderlab_asset::Mip {
+            width: 2,
+            height: 2,
+            rgba8: texel.repeat(4),
+        }],
+    });
+    let image = render(
+        &device,
+        &queue,
+        &normal_floor,
+        &view(Vec3::new(0.0, 3.0, 0.1), Vec3::ZERO, 16),
+        &Settings {
+            samples: 64,
+            max_depth: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let expected = 0.5 / std::f32::consts::PI * 1000.0 * decoded.z;
+    let (mean, se) = region(&image, [expected; 3], 0..image.mean.len());
+    save(
+        &dir,
+        "normal-floor",
+        &image,
+        serde_json::json!({"expected":expected,"relative_mean":mean,"relative_se":se}),
+    );
+    rows.push(("normal-floor".into(), mean, se, image.invalid_pixels));
     std::fs::write(dir.join("analytic.json"), serde_json::to_vec_pretty(&serde_json::json!(rows
         .iter()
         .map(|(n, m, s, i)| serde_json::json!({"case": n, "relative_mean": m, "relative_se": s, "invalid_pixels": i}))

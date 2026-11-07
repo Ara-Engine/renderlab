@@ -357,7 +357,7 @@ def workload_events(out, workload):
     return events
 
 
-def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160):
+def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160, level=None):
     c = CONFIGS[config]
     commands = BASE_COMMANDS + c["commands"] + READBACK + list(extra)
     settle = workload in SETTLE
@@ -377,7 +377,7 @@ def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160):
     csv_events.sort(key=lambda e: e[0])
     command = [PACKAGE, "../../../M5Calibration/M5Calibration.uproject", *UE_FLAGS,
                f"-abslog={out / 'ue.log'}", *COMMON_INI, *c["ini"], "-dx12", "-sm6", "-RenderOffscreen",
-               f"/Game/M6Quarry/View{pose}", "-game", "-ResX=1920", "-ResY=1080", "-ForceRes", "-NoVSync",
+               level or f"/Game/M6Quarry/View{pose}", "-game", "-ResX=1920", "-ResY=1080", "-ForceRes", "-NoVSync",
                "-csvGpuStats", "-csvCompression=0", "-ExitAfterCsvProfiling",
                "-csvExecCmds=" + ",".join(f"{f}:{cmd}" for f, cmd in csv_events),
                "-ExecCmds=" + ",".join(commands + [f"csvprofile frames={frames}"])]
