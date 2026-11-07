@@ -3,6 +3,13 @@
 2026-11-07 UTC. Base `f09d2d0`, merged with main `311075c` (N8l, N8k) before the
 final checks. Branch `t3/m3-texture-residency`.
 
+**RT scope:** all Interactive RT timings, speed claims and memory rows here are
+**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
+rows describe a separate explicit opt-in. In this record, "default" describes full
+texture residency within each explicitly selected path. Texture `Exact` is distinct
+from `SoftShadows::Exact`.
+
 **Merged opt-in, streaming off by default (Islam, 2026-11-07).** `TextureResidency::Full`
 is the default in the renderer, the viewer and every test and bench. The default frame
 is main's frame: the same textures, the same shading module source, group-2 layout and
@@ -315,6 +322,10 @@ Complete buffers were compared, not region averages:
   isotropic configurations.
 
 ## Cost per stage
+
+RT timings and speed comparisons in every subsection below are **measured on the
+non-default fast setup (traced + Interactive)**, with the named texture residency
+policy applied to that explicitly selected path.
 
 ### Default `Full` against main
 

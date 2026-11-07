@@ -13,6 +13,9 @@ mod reload_tests;
 #[path = "visibility_buffer_tests.rs"]
 mod visibility_buffer_tests;
 
+#[path = "primary_ray_rt1_tests.rs"]
+mod primary_ray_rt1_tests;
+
 const SEED_EDIT: (&str, &str) = (
     "    let seed=fresh_hash(pixel.x+pixel.y*width);",
     "    var seed=fresh_hash(pixel.x+pixel.y*width);\n    if FRESH_SEED!=0u {seed=fresh_hash(seed^(FRESH_SEED*0x9e3779b9u));}",
