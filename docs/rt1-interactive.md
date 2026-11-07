@@ -285,7 +285,8 @@ Verification conditions and latency are separate from implementation:
   test. Start RAM 8,844 MiB; sampled minimum 5,573 MiB. Foreign compilation reached
   19 rustc processes. No new timing result is inferred from either contended lease.
 - Both tests exit 0 with `errors=0`, `missing_layer=0`, `active_layer=1`.
-  The two owned leases total **63.35 s** and are released; one prior attempt
+  The two guarded runs total **63.35 s**; the lock ledger records **63.39 s held**,
+  and both leases are released. One prior attempt
   deferred on the foreign lock without running. No game, window, input automation,
   desktop capture, memory abort or owned compiler occurred during either lease.
 - **CPU replay:** frozen replay 4.81 s; source-ray corroboration plus replay
