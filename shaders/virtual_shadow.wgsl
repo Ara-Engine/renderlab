@@ -614,16 +614,15 @@ override VSM_ORIGIN_STEP:bool=true;
 // bits 2-3): near-contact occluder edges that miss the texel centre (N8b). 1: every
 // placement (N8b); 2: beyond the texel under the ray, only other placements' surfaces; 0: off.
 fn vsm_block_mode()->u32 {return (vsm.misc.w>>2u)&3u;}
-// The lookup's scratch (N8m). A 256-byte header the encoder zeroes before each lookup: the
-// persistent workgroups' tile queue, then the tile order's per-bucket counts and cursors. Then
-// `words`: per trace tile (vsm_tile_count) its successor in the order, then the work the last
-// lookup of that tile recorded; then the VSM_DEBUG trace, two uvec4s per pixel.
+// The lookup's scratch (N8m): `queue`, the persistent workgroups' tile queue, then `words`. The
+// encoder zeroes the queue and the first VSM_HEAD words before each lookup: the tile order's
+// per-bucket counts, then its cursors. After them, per trace tile (vsm_tile_count) its place in
+// the order, then the work the last lookup of that tile recorded; then the VSM_DEBUG trace, two
+// uvec4s per pixel. (N8k's hybrid binds its receiver queue here instead: the count in `queue`,
+// two words per receiver in `words`; virtual_shadow_hybrid.wgsl.)
 const VSM_BUCKETS:u32=16u;
-struct VsmScratch {
-    queue:atomic<u32>,pad0:array<u32,15>,
-    counts:array<atomic<u32>,VSM_BUCKETS>,cursors:array<atomic<u32>,VSM_BUCKETS>,pad1:array<u32,16>,
-    words:array<atomic<u32>>,
-};
+const VSM_HEAD:u32=2u*VSM_BUCKETS;
+struct VsmScratch {queue:atomic<u32>,pad0:u32,pad1:u32,pad2:u32,words:array<atomic<u32>>};
 @group(0) @binding(20) var<storage,read_write> vsm_scratch:VsmScratch;
 // Trace tiles in the image: the scratch's per-tile word count.
 fn vsm_tile_grid()->vec2<u32> {return (textureDimensions(vsm_world)+VSM_TRACE_TILE-vec2<u32>(1u))/VSM_TRACE_TILE;}
@@ -1441,11 +1440,11 @@ fn vsm_lookup_tile(group:vec2<u32>,local:vec2<u32>) {
     vsm_visible(id,countOneBits(vsm_active&~blocked));
     // The tile's work for the next frame's order: its heaviest lane's, where it is not light.
     let work=vsm_ring_tests+vsm_visits;
-    if VSM_PERSIST!=0u && VSM_ORDER && work>=VSM_HEAVY {
-        atomicMax(&vsm_scratch.words[vsm_tile_count()+tile.y*vsm_tile_grid().x+tile.x],work);
+    if VSM_PERSIST!=0u && VSM_ORDER && !casters && work>=VSM_HEAVY {
+        atomicMax(&vsm_scratch.words[VSM_HEAD+vsm_tile_count()+tile.y*vsm_tile_grid().x+tile.x],work);
     }
     if VSM_DEBUG {
-        let index=2u*vsm_tile_count()+8u*(id.x+id.y*size.x);
+        let index=VSM_HEAD+2u*vsm_tile_count()+8u*(id.x+id.y*size.x);
         atomicStore(&vsm_scratch.words[index],vsm_dbg.x);atomicStore(&vsm_scratch.words[index+1u],vsm_dbg.y);
         atomicStore(&vsm_scratch.words[index+2u],vsm_dbg.z);atomicStore(&vsm_scratch.words[index+3u],vsm_dbg.w);
         for(var k=4u;k<8u;k+=1u) {atomicStore(&vsm_scratch.words[index+k],0u);}
@@ -1483,8 +1482,10 @@ fn vsm_lookup_grid()->vec2<u32> {
         if lane==0u {vsm_wg_tile=atomicAdd(&vsm_scratch.queue,1u);}
         let t=workgroupUniformLoad(&vsm_wg_tile);
         if t>=tiles {break;}
+        // Casters-only frames (N8f) keep the grid's order: their work is where the casters
+        // reach, which the order (recorded by the last other frame) does not predict.
         var g=t;
-        if VSM_ORDER {g=atomicLoad(&vsm_scratch.words[t]);}
+        if VSM_ORDER && (vsm.n8e.w&1u)==0u {g=atomicLoad(&vsm_scratch.words[VSM_HEAD+t]);}
         vsm_lookup_tile(vec2<u32>(g%grid.x,g/grid.x),local.xy);
     }
 }
@@ -1500,7 +1501,7 @@ fn vsm_order_bucket(g:u32,grid:vec2<u32>)->vec2<u32> {
     }
     let dense=vsm_tile_grid();
     if any(tile>=dense) {return vec2<u32>(0u,VSM_NONE);}
-    let word=vsm_tile_count()+tile.y*dense.x+tile.x;
+    let word=VSM_HEAD+vsm_tile_count()+tile.y*dense.x+tile.x;
     let work=atomicLoad(&vsm_scratch.words[word]);
     return vec2<u32>(min(VSM_BUCKETS-1u,32u-countLeadingZeros(work)),word);
 }
@@ -1514,7 +1515,7 @@ var<workgroup> vsm_wg_base:array<u32,VSM_BUCKETS>;
     workgroupBarrier();
     if li<VSM_BUCKETS {
         let n=atomicLoad(&vsm_wg_counts[li]);
-        if n!=0u {atomicAdd(&vsm_scratch.counts[li],n);}
+        if n!=0u {atomicAdd(&vsm_scratch.words[li],n);}
     }
 }
 // Places each grid tile after every heavier bucket's tiles (within its own bucket, workgroups in
@@ -1533,13 +1534,13 @@ var<workgroup> vsm_wg_base:array<u32,VSM_BUCKETS>;
     if li<VSM_BUCKETS {
         let n=atomicLoad(&vsm_wg_counts[li]);
         var start=0u;
-        for(var k=li+1u;k<VSM_BUCKETS;k+=1u) {start+=atomicLoad(&vsm_scratch.counts[k]);}
-        if n!=0u {start+=atomicAdd(&vsm_scratch.cursors[li],n);}
+        for(var k=li+1u;k<VSM_BUCKETS;k+=1u) {start+=atomicLoad(&vsm_scratch.words[k]);}
+        if n!=0u {start+=atomicAdd(&vsm_scratch.words[VSM_BUCKETS+li],n);}
         vsm_wg_base[li]=start;
     }
     workgroupBarrier();
     if inside {
-        atomicStore(&vsm_scratch.words[vsm_wg_base[b.x]+slot],id.x);
+        atomicStore(&vsm_scratch.words[VSM_HEAD+vsm_wg_base[b.x]+slot],id.x);
         if b.y!=VSM_NONE {atomicStore(&vsm_scratch.words[b.y],0u);}
     }
 }
