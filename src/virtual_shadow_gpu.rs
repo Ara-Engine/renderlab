@@ -476,8 +476,8 @@ pub(super) struct VirtualState {
     queue_layout: Owned<wgpu::PipelineLayout>,
     /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
     hybrid_module: Option<Owned<wgpu::ShaderModule>>,
-    /// N8n: the surface cache (first use of `VirtualLookup::Surface`); kept across resets, which
-    /// retire its cells.
+    /// N8n: the surface cache while `VirtualLookup::Surface` is the lookup; kept across resets,
+    /// which retire its cells.
     surface: Option<SurfaceCache>,
 }
 /// Screen constants with this prefix belong to the map lookup's module, the others to the
@@ -1450,7 +1450,11 @@ impl Renderer {
         self.ensure_virtual_casters(draws)?;
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        if s.lookup == VirtualLookup::Surface && state.surface.is_none() {
+        // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
+        // for frames in flight).
+        if s.lookup != VirtualLookup::Surface {
+            state.surface = None;
+        } else if state.surface.is_none() {
             state.surface = Some(SurfaceCache::new(
                 &self.device,
                 &self.ledger,
@@ -1512,6 +1516,9 @@ impl Renderer {
         }
         let mut invalidated = [false; MAX_LEVELS];
         let cache = &mut state.cache;
+        // N8n: a sun leaving the map's hysteresis retires the surface cache's cells too, as the
+        // rebased map looks up every pixel again (measured: lagged cells after a sun jump).
+        let sun_rebased = cache.light != Some(light_bits);
         if cache.light != Some(light_bits) {
             cache.light = Some(light_bits);
             invalidated = [true; MAX_LEVELS];
@@ -2116,7 +2123,7 @@ impl Renderer {
                 &self.queue,
                 sun,
                 !rects.is_empty(),
-                surface_flush,
+                surface_flush || sun_rebased,
                 producer,
                 still,
             );

@@ -146,6 +146,15 @@ fn vsc_reached(world:vec3<f32>,current:u32,recorded:u32)->bool {
     return false;
 }
 
+// Whether pixel id lies in a moved caster's old or new screen bounds (vsm_reached's first test).
+fn vsc_in_moved(id:vec2<u32>)->bool {
+    let c=vec2<f32>(id)+vec2<f32>(0.5);
+    for(var i=0u;i<vsm.counts.w;i+=1u) {
+        let s=vsm.srects[i];
+        if all(c>=s.xy) && all(c<=s.zw) {return true;}
+    }
+    return false;
+}
 // Whether pixel id has a receiver the lookup shadows (vsm_prepare's early outs).
 fn vsc_shadowed(id:vec2<u32>,record:vec4<u32>,world:vec4<f32>,normal:vec4<f32>)->bool {
     let light=lights[0];
@@ -250,9 +259,12 @@ override VSC_PROBE_Y:u32=8u;
                 if finer {atomicAdd(&vsc_stats[2],1u);}
             }
             // A still frame keeps a walking pixel's last count (its cell is current: neither
-            // the sun since its refresh nor anything else changed it).
+            // the sun since its refresh nor anything else changed it), unless the pixel lies in
+            // a moved caster's old or new screen bounds, where its receiver may have changed
+            // (N8f's screen rectangles; measured without them: 533-778 pixels differed from a
+            // fresh lookup after 48 caster-moving frames).
             let unshown=visible>=VSC_UNSHOWN && visible!=VSC_MISS;
-            let still=(vsc.flags&2u)!=0u && unshown;
+            let still=(vsc.flags&2u)!=0u && unshown && !vsc_in_moved(id);
             if visible>=VSC_UNSHOWN {miss=!still;} else {vsm_visible(id,visible);}
             heavy=miss && unshown && (visible&7u)>=VSC_HEAVY;
         }

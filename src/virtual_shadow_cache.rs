@@ -57,6 +57,9 @@ pub(super) struct SurfaceCache {
     casters: u32,
     last_sun: Option<[u32; 3]>,
     producer: Vec<u64>,
+    /// Frames since the sun last turned: cells it left behind refresh on their phase frames in
+    /// the 16 after it, so those frames are never idle.
+    since_turn: u32,
     /// This frame changes nothing the cells or the target depend on: no pass runs.
     idle: bool,
 }
@@ -189,6 +192,7 @@ impl SurfaceCache {
             casters: 0,
             last_sun: None,
             producer: vec![],
+            since_turn: 0,
             idle: false,
         }
     }
@@ -210,7 +214,7 @@ impl SurfaceCache {
     /// counters from zero, so a replayed sequence repeats its refresh schedule.
     pub(super) fn restart(&mut self) {
         self.flush();
-        (self.frame, self.sun, self.casters) = (0, 0, 0);
+        (self.frame, self.sun, self.casters, self.since_turn) = (0, 0, 0, 0);
         self.last_sun = None;
     }
 
@@ -242,8 +246,14 @@ impl SurfaceCache {
             }
         }
         self.last_sun = Some(sun);
-        // Nothing a count depends on changed, so the target already holds this frame's.
-        self.idle = still && !turned && !moved && !restarted;
+        self.since_turn = if turned {
+            0
+        } else {
+            self.since_turn.saturating_add(1)
+        };
+        // Nothing a count depends on changed, and no cell is still due for the last turn, so
+        // the target already holds this frame's counts.
+        self.idle = still && self.since_turn >= 16 && !moved && !restarted;
         let still = still && !restarted;
         if moved {
             self.casters = (self.casters + 1) & CASTER_MASK;
