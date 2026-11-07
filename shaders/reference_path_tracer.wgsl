@@ -24,7 +24,7 @@ struct Frame {
     size:vec4<u32>,
     // x max path depth (Mitsuba semantics: 1 = emitters only, 2 = direct), y seed, z smith (0 correlated, 1 separable).
     options:vec4<u32>,
-    measurement:vec4<u32>, // x independent visibility rays per accepted primary sample
+    measurement:vec4<u32>, // x visibility rays per primary; y precise 1-cos(sun radius), bitcast f32
 };
 struct Vertex {a:vec4<f32>, b:vec4<f32>, tangent:vec4<f32>, color:vec4<f32>};
 struct Instance {offsets:vec4<u32>, n0:vec4<f32>, n1:vec4<f32>, n2:vec4<f32>};  // vertex, index, material
@@ -175,7 +175,18 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     let v0=vertices[inst.offsets.x+indices[base]];
     let v1=vertices[inst.offsets.x+indices[base+1u]];
     let v2=vertices[inst.offsets.x+indices[base+2u]];
-    let w=vec3<f32>(1.0-h.barycentrics.x-h.barycentrics.y,h.barycentrics);
+    var w=vec3<f32>(1.0-h.barycentrics.x-h.barycentrics.y,h.barycentrics);
+    // Hardware chooses the closest primitive. Recompute its interpolation from the
+    // source triangle so AS-layout-dependent barycentric rounding cannot change shading.
+    let ro=h.world_to_object*vec4<f32>(origin,1.0);
+    let rd=h.world_to_object*vec4<f32>(direction,0.0);
+    let e1=v1.a.xyz-v0.a.xyz;let e2=v2.a.xyz-v0.a.xyz;
+    let pvec=cross(rd,e2);let det=dot(e1,pvec);
+    if abs(det)>1e-20 {
+        let tvec=ro-v0.a.xyz;let qvec=cross(tvec,e1);
+        let u=dot(tvec,pvec)/det;let v=dot(rd,qvec)/det;
+        w=vec3<f32>(1.0-u-v,u,v);
+    }
     let local=v0.a.xyz*w.x+v1.a.xyz*w.y+v2.a.xyz*w.z;
     let p=h.object_to_world*vec4<f32>(local,1.0);
     let normal_matrix=mat3x3<f32>(inst.n0.xyz,inst.n1.xyz,inst.n2.xyz);
@@ -218,26 +229,32 @@ fn offset(p:vec3<f32>, ng:vec3<f32>)->vec3<f32> {
     let m=max(max(abs(p.x),abs(p.y)),abs(p.z));
     return p+ng*(1e-4+4e-7*m);
 }
+fn sun_height()->f32 {return bitcast<f32>(frame.measurement.y);}
+fn sample_sun()->vec3<f32> {
+    if sun_height()==0.0 {return frame.sun.xyz;}
+    let h=rand()*sun_height();let phi=2.0*PI*rand();
+    let r=sqrt(h*(2.0-h));
+    return basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),1.0-h);
+}
 fn primary_visibility(hit:Hit)->f32 {
     if frame.sun_value.w==0.0 {return 0.0;}
     var total=0.0;
     let start=offset(hit.p,hit.ng);
     let n=frame.measurement.x;
     for (var k=0u;k<n;k+=1u) {
-        var wi=frame.sun.xyz;
-        if frame.sun.w<1.0 {
-            let z=1.0-rand()*(1.0-frame.sun.w);let phi=2.0*PI*rand();
-            let r=sqrt(max(0.0,1.0-z*z));
-            wi=basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),z);
-        }
+        let wi=sample_sun();
         if dot(hit.ng,wi)>0.0 && !occluded(start,wi) {total+=1.0;}
     }
     return total/f32(n);
 }
 
 // Radiance arriving from an escaped direction: the sun disk inside its cone, else the sky.
-fn in_sun(d:vec3<f32>)->bool {return frame.sun_value.w>0.0 && frame.sun.w<1.0 && dot(d,frame.sun.xyz)>=frame.sun.w;}
-fn sun_pdf()->f32 {return 1.0/(2.0*PI*(1.0-frame.sun.w));}
+fn in_sun(d:vec3<f32>)->bool {
+    let s=cross(d,frame.sun.xyz);
+    return frame.sun_value.w>0.0 && sun_height()>0.0 && dot(d,frame.sun.xyz)>0.0
+        && dot(s,s)<=sun_height()*(2.0-sun_height());
+}
+fn sun_pdf()->f32 {return 1.0/(2.0*PI*sun_height());}
 
 struct Lobe {alpha:f32, a2:f32, f0:vec3<f32>, diffuse:vec3<f32>, spec:f32, p_spec:f32};
 fn lobe(m:Material, nv:f32)->Lobe {
@@ -372,17 +389,9 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
         let start=offset(hit.p,hit.ng);
         // Next-event estimation: sun.
         if frame.sun_value.w>0.0 {
-            var wi:vec3<f32>;
+            let wi=sample_sun();
             var light_pdf=0.0;
-            if frame.sun.w>=1.0 {
-                wi=frame.sun.xyz;
-            } else {
-                let z=1.0-rand()*(1.0-frame.sun.w);
-                let phi=2.0*PI*rand();
-                let r=sqrt(max(0.0,1.0-z*z));
-                wi=basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),z);
-                light_pdf=sun_pdf();
-            }
+            if sun_height()>0.0 {light_pdf=sun_pdf();}
             let cos_l=dot(hit.n,wi);
             let visible=dot(hit.ng,wi)>0.0 && !occluded(start,wi);
             if cos_l>0.0 && visible {

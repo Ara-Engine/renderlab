@@ -182,7 +182,7 @@ pub struct Image {
 
 /// Interleaved vertex record: position and normal x, then normal yz and two spare floats.
 const VERTEX_FLOATS: usize = 16;
-/// The shader's `Frame`: two camera bases (8 vec4), sun, sun value, sky, then two vec4<u32>.
+/// The shader's Frame: eight camera vec4s, five lighting/background vec4s and three uvec4s.
 const FRAME_BYTES: usize = 16 * 16;
 
 fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error> {
@@ -256,19 +256,26 @@ fn basis(pose: Pose, up: Vec3, tan_y: f32) -> [[f32; 4]; 4] {
 
 fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, count: u32) -> Vec<u8> {
     let tan_y = (view.fov_y * 0.5).tan();
-    let mut floats: Vec<[f32; 4]> = Vec::with_capacity(11);
+    let mut floats: Vec<[f32; 4]> = Vec::with_capacity(13);
     floats.extend(basis(view.open, view.up, tan_y));
     floats.extend(basis(view.close, view.up, tan_y));
+    // 1-cos(r) loses precision for small disks. Retain the stable cone height as
+    // well as the nominal cosine used by packet inspection.
+    let cone_height = scene.sun.map_or(0.0, |s| {
+        (2.0 * (0.5 * f64::from(s.angular_radius)).sin().powi(2)) as f32
+    });
     let (sun, value) = match scene.sun {
         Some(s) => {
             let d = s.to_light.normalize();
             let cos_r = s.angular_radius.cos();
             let [r, g, b] = s.illuminance;
             // A uniform disk of angular radius r gives illuminance E = L * pi * sin^2(r).
-            let scale = if s.angular_radius == 0.0 {
+            let scale = if cone_height == 0.0 {
                 1.0
             } else {
-                1.0 / (std::f32::consts::PI * s.angular_radius.sin().powi(2))
+                (1.0 / (std::f64::consts::PI
+                    * f64::from(cone_height)
+                    * (2.0 - f64::from(cone_height)))) as f32
             };
             let cos_r = if s.angular_radius == 0.0 { 1.0 } else { cos_r };
             (
@@ -320,7 +327,7 @@ fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, coun
         smith,
         settings.texture_lod.to_bits(),
         settings.visibility_samples,
-        0,
+        cone_height.to_bits(),
         0,
         0,
     ] {
@@ -361,6 +368,20 @@ pub fn render(
     view: &View,
     settings: &Settings,
 ) -> Result<Image, Error> {
+    Ok(render_repeats(device, queue, scene, view, settings, 1, false)?.remove(0))
+}
+
+/// Keep scene resources fixed when diagnosing a replay. Every repetition clears all
+/// measurement state; normal callers request one image through `render`.
+fn render_repeats(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &Scene,
+    view: &View,
+    settings: &Settings,
+    repetitions: usize,
+    rebuild_pipeline: bool,
+) -> Result<Vec<Image>, Error> {
     validate(scene, view, settings)?;
     if !device.features().contains(FEATURES) {
         return Err(Error::InvalidInput(
@@ -467,7 +488,9 @@ pub fn render(
     let geometry = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("reference geometric populations"),
         size: geometry_bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let frame = device.create_buffer(&wgpu::BufferDescriptor {
@@ -538,7 +561,6 @@ pub fn render(
         })
         .collect();
     encoder.build_acceleration_structures(entries.iter(), [&tlas]);
-    encoder.clear_buffer(&sums, 0, None);
     queue.submit([encoder.finish()]);
 
     let storage_entry = |binding, read_only| wgpu::BindGroupLayoutEntry {
@@ -633,24 +655,27 @@ pub fn render(
             },
         ],
     });
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("reference path tracer"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("reference path tracer"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("reference path tracer"),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            }),
-        ),
-        module: &module,
-        entry_point: Some("trace_samples"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let make_pipeline = || {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("reference path tracer"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("reference path tracer"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("reference path tracer"),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            module: &module,
+            entry_point: Some("trace_samples"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    let pipeline = make_pipeline();
     let wait = || {
         device
             .poll(wgpu::PollType::Wait {
@@ -659,59 +684,69 @@ pub fn render(
             })
             .map_err(Error::Poll)
     };
-    let mut first = 0;
-    while first < settings.samples {
-        let count = settings.samples_per_dispatch.min(settings.samples - first);
-        queue.write_buffer(&frame, 0, &frame_bytes(scene, view, settings, first, count));
+    let mut images = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let rebuilt_pipeline = rebuild_pipeline.then(make_pipeline);
+        let pipeline = rebuilt_pipeline.as_ref().unwrap_or(&pipeline);
         let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(view.width.div_ceil(8), view.height.div_ceil(8), 1);
+        encoder.clear_buffer(&sums, 0, None);
+        encoder.clear_buffer(&geometry, 0, None);
+        queue.submit([encoder.finish()]);
+        let mut first = 0;
+        while first < settings.samples {
+            let count = settings.samples_per_dispatch.min(settings.samples - first);
+            queue.write_buffer(&frame, 0, &frame_bytes(scene, view, settings, first, count));
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(view.width.div_ceil(8), view.height.div_ceil(8), 1);
+            }
+            queue.submit([encoder.finish()]);
+            wait()?;
+            first += count;
+        }
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reference readback"),
+            size: sums_bytes
+                + if settings.capture_geometry {
+                    geometry_bytes
+                } else {
+                    0
+                },
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&sums, 0, &readback, 0, sums_bytes);
+        if settings.capture_geometry {
+            encoder.copy_buffer_to_buffer(&geometry, 0, &readback, sums_bytes, geometry_bytes);
         }
         queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| drop(sender.send(result)));
         wait()?;
-        first += count;
+        receiver
+            .recv()
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(Error::InvalidInput("reference readback failed"))?;
+        let bytes = readback
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|_| Error::InvalidInput("reference readback mapping failed"))?
+            .to_vec();
+        readback.unmap();
+        let mut image = finish(&bytes[..sums_bytes as usize], view, settings.samples);
+        if settings.capture_geometry {
+            image.geometry = bytes[sums_bytes as usize..].to_vec();
+        }
+        images.push(image);
     }
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("reference readback"),
-        size: sums_bytes
-            + if settings.capture_geometry {
-                geometry_bytes
-            } else {
-                0
-            },
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    encoder.copy_buffer_to_buffer(&sums, 0, &readback, 0, sums_bytes);
-    if settings.capture_geometry {
-        encoder.copy_buffer_to_buffer(&geometry, 0, &readback, sums_bytes, geometry_bytes);
-    }
-    queue.submit([encoder.finish()]);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    readback
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, move |result| drop(sender.send(result)));
-    wait()?;
-    receiver
-        .recv()
-        .ok()
-        .and_then(Result::ok)
-        .ok_or(Error::InvalidInput("reference readback failed"))?;
-    let bytes = readback
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|_| Error::InvalidInput("reference readback mapping failed"))?
-        .to_vec();
-    readback.unmap();
-    let mut image = finish(&bytes[..sums_bytes as usize], view, settings.samples);
-    if settings.capture_geometry {
-        image.geometry = bytes[sums_bytes as usize..].to_vec();
-    }
-    Ok(image)
+    Ok(images)
 }
 
 /// Means and split-half standard errors from the even/odd sums (8 floats per pixel).

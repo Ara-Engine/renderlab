@@ -98,6 +98,46 @@ fn sun_disk_radiance_reproduces_its_illuminance() {
 }
 
 #[test]
+fn narrow_sun_encoding_preserves_illuminance() {
+    for radius in [0.00465, 0.0001, 0.05] {
+        let scene = Scene {
+            sun: Some(Sun {
+                to_light: Vec3::Y,
+                illuminance: [1000.0; 3],
+                angular_radius: radius,
+            }),
+            ..Default::default()
+        };
+        let bytes = frame_bytes(
+            &scene,
+            &view(Vec3::Z, Vec3::ZERO, 4),
+            &Settings::default(),
+            0,
+            1,
+        );
+        let f = |word: usize| {
+            f32::from_le_bytes(bytes[4 * word..4 * word + 4].try_into().unwrap()) as f64
+        };
+        // The shader samples this encoded cone height, including when nominal cos(r)
+        // rounds to one. Its radiance must integrate to the requested illuminance.
+        // Historical packets encoded only cos(r); the revised packet also carries
+        // its precise cone height. Decode either format to test the actual cone.
+        let height = if f(61) > 0.0 { f(61) } else { 1.0 - f(35) };
+        assert!(
+            height > 0.0,
+            "a finite disk must not become a delta at radius {radius}"
+        );
+        let integral = f(36) * std::f64::consts::PI * height * (2.0 - height);
+        assert!(
+            (integral / 1000.0 - 1.0).abs() < 2e-6,
+            "radius {radius}: {integral}"
+        );
+        let exact = 2.0 * (0.5 * f64::from(radius)).sin().powi(2);
+        assert!((height / exact - 1.0).abs() < 2e-7);
+    }
+}
+
+#[test]
 fn split_half_error_matches_its_definition() {
     let v = view(Vec3::Z, Vec3::ZERO, 1);
     // even sum 6 over 2 samples (mean 3), odd sum 2 over 2 samples (mean 1).
@@ -657,6 +697,39 @@ fn gpu_reference_analytic() {
         serde_json::json!({"expected":expected,"relative_mean":mean,"relative_se":se}),
     );
     rows.push(("normal-floor".into(), mean, se, image.invalid_pixels));
+    let mut disk_floor = normal_floor;
+    disk_floor.materials[0].normal_texture = None;
+    disk_floor.materials[0].specular = 0.0;
+    disk_floor.textures.clear();
+    for radius in [0.00465, 0.0001] {
+        disk_floor.sun.as_mut().unwrap().angular_radius = radius;
+        let image = render(
+            &device,
+            &queue,
+            &disk_floor,
+            &view(Vec3::new(0.0, 3.0, 0.1), Vec3::ZERO, 16),
+            &Settings {
+                samples: 4096,
+                max_depth: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = 0.5 / std::f32::consts::PI * 1000.0;
+        let (mean, se) = region(&image, [expected; 3], 0..image.mean.len());
+        assert!(
+            (mean - 1.0).abs() < (4.0 * se).max(5e-5),
+            "small disk {radius}: {mean} +/- {se}"
+        );
+        let name = format!("disk-floor-{radius}");
+        save(
+            &dir,
+            &name,
+            &image,
+            serde_json::json!({"radius":radius,"expected":expected,"relative_mean":mean,"relative_se":se}),
+        );
+        rows.push((name, mean, se, image.invalid_pixels));
+    }
     std::fs::write(dir.join("analytic.json"), serde_json::to_vec_pretty(&serde_json::json!(rows
         .iter()
         .map(|(n, m, s, i)| serde_json::json!({"case": n, "relative_mean": m, "relative_se": s, "invalid_pixels": i}))
@@ -681,7 +754,7 @@ fn gpu_reference_benches() {
     let dir = output();
     let spp: u32 = std::env::var("RENDERLAB_M7_SPP").map_or(4096, |s| s.parse().unwrap());
     let list = std::env::var("RENDERLAB_M7_BENCHES").expect("RENDERLAB_M7_BENCHES");
-    let mut first: Option<(String, Vec<[f32; 3]>)> = None;
+    let mut first = true;
     for entry in list.split(';').filter(|s| !s.is_empty()) {
         let (bench_dir, spp) = entry
             .rsplit_once('@')
@@ -718,45 +791,23 @@ fn gpu_reference_benches() {
                 "camera_background":bench.scene.camera_background,
                 "visibility_samples_per_primary":settings.visibility_samples}),
             );
-            if first.is_none() {
-                first = Some((format!("{name}/{pose}"), image.mean));
-                let replay = render(&device, &queue, &bench.scene, v, &settings).unwrap();
-                let (label, mean) = first.as_ref().unwrap();
-                let identical = replay
-                    .mean
-                    .iter()
-                    .flatten()
-                    .zip(mean.iter().flatten())
-                    .all(|(a, b)| a.to_bits() == b.to_bits());
-                let mut changed_pixels = 0;
-                let mut changed_channels = 0;
-                let mut sum_squared = 0.0f64;
-                let mut max_abs = 0.0f32;
-                let mut max_ulp = 0;
-                let mut examples = Vec::new();
-                for (pixel, (a, b)) in mean.iter().zip(&replay.mean).enumerate() {
-                    if a.map(f32::to_bits) == b.map(f32::to_bits) {
-                        continue;
-                    }
-                    changed_pixels += 1;
-                    for (x, y) in a.iter().zip(b) {
-                        changed_channels += u32::from(x.to_bits() != y.to_bits());
-                        sum_squared += f64::from(x - y).powi(2);
-                        max_abs = max_abs.max((x - y).abs());
-                        // Radiance is nonnegative, so IEEE bit distance is ULP distance.
-                        max_ulp = max_ulp.max(x.to_bits().abs_diff(y.to_bits()));
-                    }
-                    if examples.len() < 32 {
-                        examples.push(serde_json::json!({"pixel":[pixel as u32 % v.width,pixel as u32 / v.width],"first":a,"replay":b}));
-                    }
+            if first {
+                first = false;
+                let label = format!("{name}/{pose}");
+                let count = std::env::var("RENDERLAB_M7_REPLAYS")
+                    .map_or(1, |v| v.parse::<usize>().unwrap());
+                assert!(count > 0);
+                let mut reports = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let replay = render(&device, &queue, &bench.scene, v, &settings).unwrap();
+                    reports.push(replay_report(&image, &replay));
                 }
+                let identical = reports.iter().all(|r| r["bit_identical"] == true);
                 std::fs::write(
                     dir.join("replay.json"),
-                    serde_json::to_vec_pretty(&serde_json::json!({"case":label,"bit_identical":identical,
-                        "changed_pixels":changed_pixels,"changed_channels":changed_channels,
-                        "rms_absolute":(sum_squared/(3*mean.len()) as f64).sqrt(),
-                        "max_absolute":max_abs,"max_ulp":max_ulp,"first_changed_examples":examples,
-                        "scope":"same seed and dispatch layout, independent acceleration-structure rebuild"}))
+                    serde_json::to_vec_pretty(&serde_json::json!({"case":label,"comparisons":reports,
+                        "bit_identical":identical,
+                        "scope":"same seed and dispatch layout, independent acceleration-structure and pipeline rebuild"}))
                     .unwrap(),
                 )
                 .unwrap();
@@ -764,4 +815,97 @@ fn gpu_reference_benches() {
             }
         }
     }
+}
+
+fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    let width = a.width;
+    let rgb = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+        let mut changed_pixels = 0;
+        let mut changed_channels = 0;
+        let mut sum_squared = 0.0f64;
+        let mut max_abs = 0.0f32;
+        let mut max_ulp = 0;
+        let mut examples = Vec::new();
+        for (pixel, (x, y)) in a.iter().zip(b).enumerate() {
+            if x.map(f32::to_bits) == y.map(f32::to_bits) {
+                continue;
+            }
+            changed_pixels += 1;
+            for (x, y) in x.iter().zip(y) {
+                changed_channels += u32::from(x.to_bits() != y.to_bits());
+                sum_squared += f64::from(x - y).powi(2);
+                max_abs = max_abs.max((x - y).abs());
+                max_ulp = max_ulp.max(x.to_bits().abs_diff(y.to_bits()));
+            }
+            if examples.len() < 32 {
+                examples.push(serde_json::json!({"pixel":[pixel as u32 % width,pixel as u32 / width],"first":x,"replay":y}));
+            }
+        }
+        serde_json::json!({"changed_pixels":changed_pixels,"changed_channels":changed_channels,
+            "rms_absolute":(sum_squared/(3*a.len()) as f64).sqrt(),"max_absolute":max_abs,
+            "max_ulp":max_ulp,"first_changed_examples":examples})
+    };
+    let mut centre = true;
+    let mut counts = true;
+    let mut visibility = true;
+    for (x, y) in a.geometry.chunks_exact(80).zip(b.geometry.chunks_exact(80)) {
+        centre &= x[..12] == y[..12] && x[16..44] == y[16..44];
+        counts &= x[12..16] == y[12..16] && x[44..48] == y[44..48];
+        visibility &= x[60..64] == y[60..64] && x[76..80] == y[76..80];
+    }
+    let mean = rgb(&a.mean, &b.mean);
+    let half0 = rgb(&a.halves[0], &b.halves[0]);
+    let half1 = rgb(&a.halves[1], &b.halves[1]);
+    let identical = mean["changed_channels"] == 0
+        && half0["changed_channels"] == 0
+        && half1["changed_channels"] == 0
+        && a.geometry == b.geometry
+        && a.invalid_pixels == 0
+        && b.invalid_pixels == 0;
+    serde_json::json!({"bit_identical":identical,"mean":mean,"half0":half0,"half1":half1,
+        "geometry_captured":!a.geometry.is_empty(),"centre_geometry_identical":centre,
+        "accepted_counts_identical":counts,"visibility_sums_identical":visibility,
+        "all_geometry_bytes_identical":a.geometry==b.geometry,
+        "invalid_pixels":[a.invalid_pixels,b.invalid_pixels]})
+}
+
+#[test]
+#[ignore = "GPU; diagnostic replay with fixed AS/pipeline; RENDERLAB_M7_BENCHES"]
+fn gpu_reference_replay_loaded() {
+    let list = std::env::var("RENDERLAB_M7_BENCHES").unwrap();
+    let entry = list.split(';').next().unwrap();
+    let (path, spp) = entry.rsplit_once('@').unwrap();
+    let bench = load_bench(&Path::new(path).join("scene.json"));
+    let view = &bench.views[0].1;
+    let settings = Settings {
+        samples: spp.parse().unwrap(),
+        smith: bench.smith,
+        capture_geometry: std::env::var("RENDERLAB_M7_CAPTURE_GEOMETRY").as_deref() == Ok("1"),
+        ..Default::default()
+    };
+    let (device, queue) = gpu();
+    let images = render_repeats(
+        &device,
+        &queue,
+        &bench.scene,
+        view,
+        &settings,
+        3,
+        std::env::var("RENDERLAB_M7_REBUILD_PIPELINE").as_deref() == Ok("1"),
+    )
+    .unwrap();
+    let reports: Vec<_> = images[1..]
+        .iter()
+        .map(|b| replay_report(&images[0], b))
+        .collect();
+    std::fs::write(
+        output().join("loaded-replay.json"),
+        serde_json::to_vec_pretty(&reports).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        reports.iter().all(|r| r["bit_identical"] == true),
+        "fixed-resource replay differs"
+    );
 }

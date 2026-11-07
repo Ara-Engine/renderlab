@@ -6,7 +6,8 @@ Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses]
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
 the new packaged benches and three quiet static visits per configuration are retained.
 The full Unreal bench matrix, motion witnesses and physical floor table remain incomplete.
-An S2G same-seed replay failure is under diagnosis. No new 2x or quality-pass claim is made.
+The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
+or integrated quality-pass claim is made.
 
 ## Reference implementation
 
@@ -37,7 +38,7 @@ private scan payloads and captures stay out of Git.
 
 ## Validation retained so far
 
-- Library tests: **124 passed, 118 ignored**, exit 0. The new CPU checks cover cube-CDF support
+- Library tests: **125 passed, 119 ignored**, exit 0. The new CPU checks cover cube-CDF support
   and RGB-correlated uncertainty; Naga validates the complete measurement shader.
 - GPU analytic run `reference/analytic-final`: all pass, zero invalid pixels. Delta-sun and
   constant-sky Lambert floors are 1.000000. The prepared-cube floor is
@@ -96,10 +97,10 @@ runtime readback: the implementation hard-coded `Some([0;3])`, and all L/D split
 the upper 64 wholly missed rows are exactly zero. No archive bytes were changed. No immutable
 per-run source snapshot was saved for those older runs; later recipes retain build/input hashes.
 
-Zero-shutter Q-walk frames 0, 1, 47, 48, 49, 63 and 64 are retained at 1,024 spp, with
+Zero-shutter Q-walk frames 0, 1, 47, 48, 49, 56, 63 and 64 are retained at 1,024 spp, with
 32 independent visibility rays per accepted primary sample. Thirty-eight exact-camera aliases
-also have JSON controls, including hold frames 65-96, 80/81 and return 159/160. Frame 56 and
-the rest of TR0's original 60 scored frames (26 distinct cameras) are prioritized ahead
+also have JSON controls, including hold frames 65-96, 80/81 and return 159/160. The rest of
+TR0's original 60 scored frames (26 distinct cameras) are prioritized ahead
 of the full sequence. The extra adjacent witnesses increase the prioritized distinct total
 to 31. The finite-shutter rows are separate; they are not substituted for Unreal's zero shutter.
 
@@ -168,19 +169,59 @@ not be inferred from overlapping short-visit ranges. No timing during play count
 
 ### S4 convergence and the S2G replay diagnostic
 
-S4's inherited 4,096-spp interior reference has 5.7% / 15% median/p95 noise. The requested
-approximately 64k run is queued: its estimated five-minute continuous full-GPU load conflicts
-with the relaxed game hold's short-lease/stress restriction. It remains too noisy for a gate;
+S4's inherited 4,096-spp interior reference has 5.7% / 15% median/p95 noise. Its approximately
+64k run was deferred during the relaxed game hold because its estimated five-minute continuous
+GPU load exceeded the permitted short screens. After the 15:36 UTC game release it is queued
+behind the ordered quiet windows. It remains too noisy for a gate;
 the sample count is not lowered to obtain a pass.
 
 TR0's `gr-1p-64-a` S2G probe used the unmodified registered geometry, sky and sun, black
 primary control and the 1-pixel camera track's frame 64. Its first 1,024-spp image was finite
 (5.06 seconds), but an independent AS rebuild with the same seed failed bit identity. Process
 exit 101, 11.65 seconds wall, minimum available RAM 4.37 GiB. This is a failed reference
-test, not accepted score data. No material/shader change has been made to hide it. The next
-instrumented replay records changed pixels/channels, absolute RMS/max, ULP distance and sample
-locations while retaining the strict assertion. AS shared-edge choices, per-render state and
-small floating-point differences are the current hypotheses; none is claimed as the cause.
+test, not accepted score data. Instrumentation then localized the failure: fixed-AS repeats
+are bit-identical, including when the shader module and pipeline are recreated. Independent
+AS builds can differ by at most two f32 ULPs in secondary RGB; all 80-byte geometric records
+(centre point/normal/identity, counts, D and V sums) remain byte-identical. Changing AS build
+preference did not fix it and was discarded.
+
+The retained fix recomputes barycentrics from the hardware-selected source triangle using
+Moller-Trumbore arithmetic. Closest-hit traversal and the material model are retained. The
+original 1,024-spp S2G replay now passes on mean RGB, both halves and every geometry byte.
+The textured Mitsuba cross-check rerun also passes: +0.000443% bias, 0.107 sigma, 0.328% L1,
+block z RMS 0.9595 and zero of 900 blocks beyond 4 sigma. The strict assertion is retained;
+failed probes remain separate and explicitly unaccepted for scoring.
+
+A second, independent precision error affected small sun disks: encoding only f32 cos(r)
+lost **0.2108%** of irradiance at S2G's r=0.00465 (997.892 lux for 1,000 requested), and
+rounded r=0.0001 to a delta. A failing CPU energy regression reproduced this before the fix.
+The frame now also carries stable cone height `2*sin(r/2)^2`; sampling avoids subtracting
+nearly equal numbers, the disk test uses cross-product sine squared, and radiance/PDF use
+the same cone. GPU Lambert controls read **1.00000030** and **1.00000036** respectively,
+with zero invalid pixels. At the quarry's r=0.04, the old encoding's irradiance error was
+only **+0.000127%**, far below the retained split-half noise. Older quarry archives remain
+the same physical target at that recorded precision; no archive is silently replaced.
+
+The exact S2G fixture passes **eight independent AS-rebuild replays** on the final cone
+encoding, with both HDR halves and every geometry byte identical. The qualified executable
+SHA256 is `bf169ef7f8599bbff53bc8edcdb1875e8c117b09630e1c912e0f0f5d73335dfb`.
+TR0 pins a copy for its own S2G campaign; this unit does not duplicate that campaign.
+The qualified 1-pixel-track frame 64 archive includes its exact pose/light/FOV, black-primary
+control, original and generated source-scene hashes, D/V/HDR halves and geometric populations.
+Geometry export is opt-in
+for generic benches via `RENDERLAB_M7_CAPTURE_GEOMETRY=1`; quarry exports always include it.
+The diagnostic loaded-resource test also verifies explicit sum/geometry clearing between
+repeats. Build recipes retain binary and source hashes. Final independent checks of the same
+binary pass: textured X3 at 32,768 spp retains the figures above; finite-disk X2 at 16,384 spp
+has **+0.005112%** bias (1.212 sigma), **0.4026%** L1 against Mitsuba seed-to-seed **0.7731%**,
+block z RMS **0.8220**, and **0.0833%** of 3,600 blocks beyond 4 sigma. Both sheets were inspected.
+
+TR0's first qualified S2G score against an older reflection/GI-off native capture shows a
+large highlight deficit. On its fixed top-5%-full-reference masks, physical D/full is
+0.998963 for metal and 0.998458 for dielectric, so omitted interreflection does not explain
+native/full ratios 0.159/0.675. Those are combined material/lighting/reconstruction errors,
+not an isolated TSR defect. A fresh sun-only control with actual angle, camera, light,
+exposure and material/normal readbacks is planned before expanding that S2G comparison.
 
 ## Temporal reference interface
 

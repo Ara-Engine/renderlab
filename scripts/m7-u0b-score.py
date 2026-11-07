@@ -99,7 +99,7 @@ def compact(args):
 
 def score(args):
     metadata=json.loads(args.reference.with_suffix(".json").read_text())
-    if metadata.get("camera_background")!=[0,0,0] or metadata.get("archive_sha256")!=sha(args.reference):
+    if metadata.get("accepted_for_scoring") is False or metadata.get("camera_background")!=[0,0,0] or metadata.get("archive_sha256")!=sha(args.reference):
         raise ValueError("reference needs verified black-primary metadata and archive hash")
     with np.load(args.reference) as r:
         ref=(r["L0"]+r["L1"])/2
@@ -128,6 +128,84 @@ def score(args):
     save(args.out,dict(reference_sha256=sha(args.reference),candidate_sha256=sha(args.candidate),
          pre_exposure=args.pre_exposure,exposure_stops=args.stops,
          scope="unexposed physical reference; F0 Reinhard+sRGB codes at registered exposure and +4 stops",measures=results))
+
+
+def floor(args):
+    """Physical combined-error floors, with explicit missing cameras. Internal TSR ages
+    are unavailable; this is not an isolated reconstruction or visibility comparison."""
+    def key(p):return np.asarray(p["eye"]+p["target"]+[p.get("fov_y",p.get("fov_y_radians",.85))],"<f4").tobytes()
+    refs={}
+    for path in args.reference.glob("*.json"):
+        meta=json.loads(path.read_text());frame=meta.get("frame")
+        archive_path=path.with_suffix(".npz")
+        if not frame or not archive_path.exists() or frame["open"]!=frame["close"] or frame.get("sky_only"):continue
+        if meta.get("accepted_for_scoring") is False or meta.get("camera_background")!=[0,0,0] or sha(archive_path)!=meta["archive_sha256"]:
+            raise ValueError("unverified reference "+str(path))
+        pose=dict(frame["open"],fov_y=frame["fov_y"]);k=key(pose)
+        if k not in refs or meta["samples"]>refs[k][1]["samples"]:refs[k]=(archive_path,meta)
+    def measures(error,noise,populations):
+        e2=(error**2).mean(-1);v2=(noise**2).mean(-1);result={}
+        for name,mask in populations.items():
+            if not mask.any():continue
+            result[name]=dict(n=int(mask.sum()),rms=float(np.sqrt(e2[mask].mean())),
+                rms_noise_subtracted=float(np.sqrt(max(0,float((e2-v2)[mask].mean())))),
+                reference_noise_rms=float(np.sqrt(v2[mask].mean())),
+                p99=float(np.sqrt(np.quantile(e2[mask],.99))),maximum=float(np.abs(error[mask]).max()),
+                signed_mean=float(error[mask].mean()))
+        return result
+    for directory in sorted(args.root.iterdir()):
+        if not directory.is_dir() or not (directory/"native.json").exists():continue
+        recipe=json.loads((directory/"recipe.json").read_text())
+        camera=json.loads((directory/"camera-readback.json").read_text())
+        runtime=json.loads((directory/"readback.json").read_text())
+        native=json.loads((directory/"native.json").read_text())["frames"]
+        if not camera["all_ok"] or not runtime["all_ok"] or len(native)!=len(recipe["frames"]):
+            raise ValueError("capture coverage/readback failed: "+str(directory))
+        rows=[];residuals=[];missing=[];previous=None
+        for index,(pose,capture) in enumerate(zip(recipe["frames"],native,strict=True)):
+            source=refs.get(key(pose))
+            if source is None:missing.append(index);previous=None;continue
+            reference_path,meta=source
+            candidate_path=Path(capture["archive"])
+            if sha(candidate_path)!=capture["archive_sha256"]:raise ValueError("candidate changed")
+            with np.load(candidate_path) as candidate:
+                exposure=float(candidate["pre_exposure"])
+                if exposure!=capture["pre_exposure"] or exposure!=2.**args.stops:raise ValueError("pre-exposure drift")
+                hdr=candidate["hdr"][...,:3]/exposure
+            with np.load(reference_path) as reference:
+                halves=[reference[k] for k in ("L0","L1")];mean=(halves[0]+halves[1])/2
+                if mean.shape!=hdr.shape or not np.isfinite(hdr).all():raise ValueError("invalid native HDR")
+                populations={k[4:]:reference[k] for k in reference.files if k.startswith("pop_")}
+                hit=reference["hit"][...,0]
+            row=dict(frame=index,phase=pose.get("phase"),reference=str(reference_path),
+                     reference_sha256=meta["archive_sha256"],samples=meta["samples"],
+                     candidate_sha256=capture["archive_sha256"],measures={})
+            for offset in (0,4):
+                ref=codes(mean,args.stops+offset);estimate=codes(hdr,args.stops+offset)
+                split=[codes(h,args.stops+offset) for h in halves]
+                row["measures"][str(offset)]=measures(estimate-ref,(split[0]-split[1])/2,populations)
+                if previous is not None and previous["frame"]==index-1:
+                    old=previous["display"][offset]
+                    common=populations["all-covered"]&previous["covered"]&(hit==previous["hit"])
+                    mask={name:value&common for name,value in populations.items()}
+                    residual=estimate-old[0]-(ref-old[1])
+                    noise=((split[0]-old[2][0])-(split[1]-old[2][1]))/2
+                    residuals.append(dict(frames=[index-1,index],offset=offset,phase=pose.get("phase"),
+                        static_camera=key(pose)==key(recipe["frames"][index-1]),
+                        measures=measures(residual,noise,mask)))
+                if offset==0 and index in (0,48,64,120,128,160):
+                    pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
+                    Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/f"physical-{index:03}.png")
+            previous=dict(frame=index,covered=populations["all-covered"],hit=hit,
+                          display={o:(codes(hdr,args.stops+o),codes(mean,args.stops+o),
+                              [codes(h,args.stops+o) for h in halves]) for o in (0,4)})
+            rows.append(row)
+        result=dict(config=recipe["config"],effective_mode=runtime["effective_mode"],
+            scope="physical combined foreground/material/lighting/reconstruction error; black primary before accumulation; visible-sky silhouette behavior untested",
+            motion_definition="consecutive F0 candidate step minus physical-reference step; common covered placement; no internal-age filter; split-half residual noise reported/subtracted",
+            age_filter_available=False,complete=not missing,missing_frames=missing,frames=rows,motion=residuals)
+        save(directory/"physical-floor.json",result)
+        print(json.dumps(dict(config=recipe["config"],scored=len(rows),missing=len(missing),motion_rows=len(residuals))),flush=True)
 
 
 def decode(args):
@@ -201,6 +279,7 @@ def main():
     q.add_argument("--pre-exposure",type=float,required=True);q.add_argument("--out",type=Path,required=True)
     q.add_argument("--stops",type=int,default=-14)
     q=s.add_parser("decode");q.add_argument("dump",type=Path);q.add_argument("out",type=Path);q.add_argument("--stops",type=int,default=-14)
+    q=s.add_parser("floor");q.add_argument("root",type=Path);q.add_argument("reference",type=Path);q.add_argument("--stops",type=int,default=-14)
     a=p.parse_args();globals()[a.command](a)
 
 

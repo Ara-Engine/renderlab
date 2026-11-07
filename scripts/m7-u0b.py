@@ -5,6 +5,7 @@ and uses U0's game/renderer and 4/2-GiB memory guards. Existing leases are never
 """
 import argparse
 import contextlib
+import datetime as dt
 import importlib.util
 import json
 import math
@@ -107,9 +108,25 @@ def build(args):
         lock=json.loads((ue().LOCK/"owner.json").read_text())
         if lock.get("owner")=="m7-u0b":raise RuntimeError("no Cargo in own lease")
     begin=time.perf_counter()
+    def foreign_quiet():
+        path=ue().LOCK/"owner.json"
+        try:owner=json.loads(path.read_text())
+        except (FileNotFoundError,json.JSONDecodeError):return None
+        if owner.get("owner")!="m7-u0b" and ("quiet" in owner.get("label","").lower() or
+                owner.get("owner") in ("rt1c","m7-tr0","dl3-preview-default")):return owner
+        return None
+    if foreign_quiet():raise SystemExit("CPU build deferred for another worker's measurement lease")
     with (OUT/"build.jsonl").open("w") as log,(OUT/"build.stderr.log").open("w") as err:
-        p=subprocess.run(["cargo","test","-p","renderlab","--lib","-j","2","--target-dir",str(TARGET),"--message-format=json"],
+        p=subprocess.Popen(["cargo","test","-p","renderlab","--lib","-j","2","--target-dir",str(TARGET),"--message-format=json"],
                          cwd=REPO,stdout=log,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
+        while p.poll() is None:
+            owner=foreign_quiet()
+            if owner:
+                subprocess.run(["taskkill","/PID",str(p.pid),"/T","/F"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+                p.wait()
+                raise SystemExit("Owned CPU build stopped for quiet owner "+owner["owner"])
+            time.sleep(.25)
     if p.returncode:raise SystemExit((OUT/"build.stderr.log").read_text()[-3000:])
     records=[json.loads(l) for l in (OUT/"build.jsonl").read_text().splitlines() if l.startswith("{")]
     exe=next(x["executable"] for x in reversed(records) if x.get("reason")=="compiler-artifact" and x.get("executable") and x["target"]["name"]=="renderlab")
@@ -130,6 +147,10 @@ def reference(args):
     if args.benches:
         env["RENDERLAB_M7_BENCHES"]=";".join(str((OUT if (OUT/"scenes"/x.split("@")[0]/"scene.json").exists() else BASE)/"scenes"/x.split("@")[0])+"@"+x.split("@")[1] for x in args.benches)
         test="reference::tests::gpu_reference_benches"
+    if args.geometry:env["RENDERLAB_M7_CAPTURE_GEOMETRY"]="1"
+    if args.replay_loaded:
+        if not args.benches:raise ValueError("loaded replay requires --benches")
+        test="reference::tests::gpu_reference_replay_loaded"
     if args.manifest:
         env["RENDERLAB_M7_QUARRY_MANIFEST"]=str(args.manifest)
         env["RENDERLAB_M7_REFERENCE_BATCH"]=str(min(args.batch_frames,3) if game_state()=="relaxed" else args.batch_frames)
@@ -184,6 +205,8 @@ def cook(args):
 def quiet_desktop(u,root):
     """Pause the live wallpaper through its supported watched setting, then restore only that
     setting. Do not stop applications or overwrite concurrent changes to other preferences."""
+    root=root/"windows"/dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    root.mkdir(parents=True)
     u.preflight(root/"quiet-preflight.json",wait_seconds=0)
     path=Path(os.environ["APPDATA"])/"mypaper/config.json"
     config=json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else None
@@ -200,8 +223,9 @@ def quiet_desktop(u,root):
             time.sleep(2)
         u.save(root/"quiet-start.json",samples)
         if float(samples[-1]["gpu"].split(",")[2])>3:raise RuntimeError("no quiet GPU start after wallpaper pause")
-        yield
+        yield root
     finally:
+        u.save(root/"quiet-end.json",dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),game_protocol=game_state()))
         if original is not None:
             current=json.loads(path.read_text(encoding="utf-8-sig"))
             current["paused"]=original;path.write_text(json.dumps(current,indent=2)+"\n",encoding="utf-8")
@@ -213,7 +237,8 @@ def study(args):
     benches=args.benches or ["quarry"]
     u.schedule_line(f"[m7-u0b gap request] quiet={args.quiet} asks for an exclusive {args.minutes}-minute gap: {configs}, benches={benches}; no Cargo, hidden/offscreen, wallpaper paused only for quiet timings.")
     with u.lease("study-"+args.label,args.minutes) as owner:
-        with quiet_desktop(u,root) if args.quiet else contextlib.nullcontext():
+        if args.quiet:u.schedule_line(f"[m7-u0b QUIET window] label={args.label} token={owner['token']} expected_minutes={args.minutes}; exclusive GPU, wallpaper paused, no other lease/compiler/heavy build until owned release.")
+        with (quiet_desktop(u,root) if args.quiet else contextlib.nullcontext()) as quiet_window:
             for visit in range(args.repeats):
                 for bench in benches:
                     u.PACKAGE_DIR=(BASE if bench=="quarry" else OUT)/"ue-package"
@@ -221,8 +246,16 @@ def study(args):
                     for config in configs if visit%2==0 else reversed(configs):
                         if u.remaining_seconds(owner)<100:
                             print("Short lease complete; resume unfinished cases with the same command",flush=True);return
-                        out=root/f"{bench}-{config}-{args.workload}-{visit}";out.mkdir(exist_ok=True)
-                        if (out/"readback.json").exists() and json.loads((out/"readback.json").read_text())["all_ok"]:continue
+                        bench_label=bench+("-"+args.bench_pose if args.bench_pose else "")
+                        out=root/f"{bench_label}-{config}-{args.workload}-{visit}"
+                        attempts=[out,*root.glob("retry*-"+out.name)]
+                        if any((p/"summary.json").exists() and (p/"readback.json").exists() and
+                               json.loads((p/"readback.json").read_text())["all_ok"] for p in attempts):continue
+                        if out.exists() and any(out.iterdir()):
+                            number=1
+                            while (root/f"retry{number}-{out.name}").exists():number+=1
+                            out=root/f"retry{number}-{out.name}"
+                        out.mkdir(exist_ok=True)
                         extra=[];events=[]
                         if args.hdr:
                             extra=["r.DumpGPU.Upload 0","r.DumpGPU.Explore 0","r.DumpGPU.Stream 0","r.DumpGPU.Texture 2",
@@ -237,6 +270,8 @@ def study(args):
                         scene=None
                         if bench!="quarry":
                             scene=json.loads((BASE/"scenes"/bench/"scene.json").read_text())
+                            pose=next(p for p in scene["poses"] if p["name"]==args.bench_pose) if args.bench_pose else scene["poses"][0]
+                            if args.bench_pose:extra.append(u.macro(out,"registered-pose",pose_commands(pose)))
                             # U0's HRT configuration sets the quarry's 4.58-degree disk. These
                             # benches register a 0.5329-degree disk, so restore it after the preset.
                             angle=math.degrees(2*scene["sun"]["angular_radius"]) if scene["sun"] else 0
@@ -252,9 +287,18 @@ def study(args):
                                        actual_sun_angle_degrees=actual[-1] if actual else None,
                                        sun_angle_ok=bool(actual) and abs(actual[-1]-angle)<2e-5)
                             u.save(out/"scene-readback.json",proof);ok=ok and proof["sun_angle_ok"]
+                        if args.hdr and args.workload=="static":
+                            if scene is None:
+                                expected=json.loads((OUT/"quarry-static.json").read_text())["frames"][0]
+                                expected=dict(expected["open"],fov_y_radians=expected["fov_y"])
+                            else:
+                                expected=dict(pose,fov_y_radians=math.radians(scene["fov_y_degrees"]))
+                            camera=check_camera((out/"ue.log").read_text(encoding="utf-8-sig",errors="replace"),[expected])
+                            u.save(out/"camera-readback.json",dict(frames=camera,all_ok=True))
                         summary=u.PROFILE.summarize(out/"profile.csv");summary["pass_costs_async_off"]=u.pass_costs(out)
                         summary["timing_eligible_for_claim"]=bool(args.quiet and game_state()=="released")
                         summary["game_protocol"]=game_state()
+                        summary["quiet_window"]=str(quiet_window) if quiet_window else None
                         u.save(out/"summary.json",summary)
                         print(json.dumps(dict(case=out.name,readback_ok=ok,gpu=summary["statistics"]["GPUTime"])),flush=True)
                         if not ok:raise RuntimeError("readback failed "+str(out))
@@ -265,6 +309,24 @@ def pose_commands(p):
     pitch=math.degrees(math.atan2(dy,math.hypot(dx,dz)));yaw=math.degrees(math.atan2(dx,-dz))
     return [f'ke CameraActor K2_SetActorLocation "(X={-100*z:.9f},Y={100*x:.9f},Z={100*y:.9f})" false () false',
             f'ke CameraActor K2_SetActorRotation "(Pitch={pitch:.9f},Yaw={yaw:.9f},Roll=0)" false']
+
+
+def check_camera(log,frames):
+    rows=re.findall(r"CameraCachePrivate = .*?Location=\(X=([^,]+),Y=([^,]+),Z=([^\)]+)\),Rotation=\(Pitch=([^,]+),Yaw=([^,]+),Roll=([^\)]+)\),FOV=([^,]+)",log)
+    if len(rows)!=len(frames):raise RuntimeError(f"camera readback coverage {len(rows)} != {len(frames)}")
+    checks=[]
+    for i,(row,p) in enumerate(zip(rows,frames)):
+        x,y,z,pitch,yaw,roll,fov=map(float,row);a,b=map(math.radians,(pitch,yaw))
+        eye=[y/100,z/100,-x/100]
+        actual=[math.cos(a)*math.sin(b),math.sin(a),-math.cos(a)*math.cos(b)]
+        d=[v-e for v,e in zip(p["target"],p["eye"])];length=math.sqrt(sum(v*v for v in d));expected=[v/length for v in d]
+        error=max(abs(e-v) for e,v in zip(eye,p["eye"]))
+        direction_error=max(abs(e-v) for e,v in zip(expected,actual))
+        expected_fov=math.degrees(2*math.atan(math.tan(p["fov_y_radians"]/2)*1920/1080))
+        if error>1e-6 or direction_error>1e-6 or abs(roll)>1e-5 or abs(fov-expected_fov)>2e-4:
+            raise RuntimeError(f"camera mismatch {i}: eye{error}, direction{direction_error}, FOV{fov}/{expected_fov}")
+        checks.append(dict(frame=i,eye_error_m=error,direction_error=direction_error,fov_degrees=fov,expected_fov_degrees=expected_fov))
+    return checks
 
 
 def walk(args):
@@ -295,18 +357,7 @@ def walk(args):
             if not u.readback(out,config,u.scalability_expectations()):raise RuntimeError("walk readback failed")
         u.guarded=original_guarded
         log=(out/"ue.log").read_text(encoding="utf-8-sig",errors="replace")
-        rows=re.findall(r"CameraCachePrivate = .*?Location=\(X=([^,]+),Y=([^,]+),Z=([^\)]+)\),Rotation=\(Pitch=([^,]+),Yaw=([^,]+),Roll=([^\)]+)\),FOV=([^,]+)",log)
-        if len(rows)!=len(frames):raise RuntimeError(f"camera readback coverage {len(rows)} != {len(frames)}")
-        checks=[]
-        for i,(row,p) in enumerate(zip(rows,frames)):
-            x,y,z,pitch,yaw,roll,fov=map(float,row);a,b=map(math.radians,(pitch,yaw))
-            eye=[y/100,z/100,-x/100]
-            actual=[math.cos(a)*math.sin(b),math.sin(a),-math.cos(a)*math.cos(b)]
-            d=[v-e for v,e in zip(p["target"],p["eye"])];length=math.sqrt(sum(v*v for v in d));expected=[v/length for v in d]
-            error=max(abs(e-v) for e,v in zip(eye,p["eye"]))
-            direction_error=max(abs(e-v) for e,v in zip(expected,actual))
-            if error>1e-6 or direction_error>1e-6 or abs(roll)>1e-5:raise RuntimeError(f"camera mismatch {i}: {error}, {direction_error}")
-            checks.append(dict(frame=i,eye_error_m=error,direction_error=direction_error,fov_degrees=fov))
+        checks=check_camera(log,frames)
         u.save(out/"camera-readback.json",dict(sequence_sha256=u.sha(source),frames=checks,all_ok=True))
         u.save(out/"recipe.json",dict(sequence=str(source),sequence_sha256=u.sha(source),frames=frames,
                 shutter="zero",capture_only=True,first_csv_frame=96,arm_csv_frame=95,
@@ -323,8 +374,10 @@ def main():
     q=sub.add_parser("reference");q.add_argument("label");q.add_argument("--minutes",type=int,default=15)
     q.add_argument("--benches",nargs="+");q.add_argument("--manifest",type=Path)
     q.add_argument("--batch-frames",type=int,default=16)
+    q.add_argument("--geometry",action="store_true");q.add_argument("--replay-loaded",action="store_true")
     q=sub.add_parser("study");q.add_argument("label");q.add_argument("--minutes",type=int,default=30)
     q.add_argument("--configs",nargs="+");q.add_argument("--benches",nargs="+");q.add_argument("--repeats",type=int,default=1)
+    q.add_argument("--bench-pose")
     q.add_argument("--quiet",action="store_true");q.add_argument("--hdr",action="store_true")
     q.add_argument("--workload",choices=("static","camera","sun","pan"),default="static")
     q=sub.add_parser("walk");q.add_argument("label");q.add_argument("--configs",nargs="+",default=["ue-sw-e","ue-hw-e","ue-sw-h","ue-hw-h"])
