@@ -25,7 +25,9 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 fn key(source: &[u8], settings: Settings, limits: CookLimits) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(ALGORITHM);
-    if settings.normal_variance {
+    if settings.normal_moments {
+        h.update(b"normal-moments-v4/bilinear-slope-integrals/half-layers/1");
+    } else if settings.normal_variance {
         h.update(b"normal-maps-v3/mikktspace-0.3.0/gltf-negated-mikk-w/ignore-tangent-without-normal/frame2e-4/area1e-6/linear+Y/mean-length-mips-v1/rms-spread-alpha/scale-xy");
     } else if settings.normal_maps {
         h.update(b"normal-maps-v2/mikktspace-0.3.0/gltf-negated-mikk-w/ignore-tangent-without-normal/frame2e-4/area1e-6/linear+Y/normalized-area-mips-v1/scale-xy");
@@ -331,7 +333,7 @@ pub fn cook_file(
     limits: CookLimits,
 ) -> Result<CookResult> {
     ensure(
-        !settings.normal_variance || settings.normal_maps,
+        !(settings.normal_variance || settings.normal_moments) || settings.normal_maps,
         "normal variance requires normal maps",
     )?;
     let total = Instant::now();
@@ -341,7 +343,9 @@ pub fn cook_file(
     let lookup = Instant::now();
     let identity = key(&source, settings, limits);
     let key_path = cache
-        .join(if settings.normal_variance {
+        .join(if settings.normal_moments {
+            "normal-v4/keys"
+        } else if settings.normal_variance {
             "normal-v3/keys"
         } else if settings.normal_maps {
             "normal-v2/keys"

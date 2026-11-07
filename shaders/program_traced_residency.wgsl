@@ -64,7 +64,7 @@ fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>
     }
     return textureSampleGrad(primary_metallic_roughness[i],primary_mr_sampler[i],uv,dx,dy);
 }
-fn sample_normal_map_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+fn sample_normal_layer_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>, layer:i32) -> vec4<f32> {
     let i=input.receiver.slot;
     let word=primary_residency.slots[3u*i+2u];
     if word!=0u {
@@ -75,5 +75,5 @@ fn sample_normal_map_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec
         }
         rl_record(input.pixel,3u*i+2u,word,probe);
     }
-    return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,dx,dy);
+    return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
 }

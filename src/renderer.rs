@@ -789,7 +789,11 @@ impl Renderer {
                 visibility: material_stages,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: if binding == 5 {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    },
                     multisampled: false,
                 },
                 count: None,
@@ -1953,7 +1957,7 @@ impl Renderer {
                 size: wgpu::Extent3d {
                     width: first.width,
                     height: first.height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: data.role.layers(),
                 },
                 mip_level_count: data.mips.len() as u32,
                 sample_count: 1,
@@ -1965,7 +1969,7 @@ impl Renderer {
             ResourceKind::Texture,
         );
         let view = self.ledger.own(
-            texture.create_view(&Default::default()),
+            texture.create_view(&texture_residency::texture_view_descriptor(data.role)),
             ResourceKind::TextureView,
         );
         for (level, mip) in data.mips.iter().enumerate() {
@@ -1977,13 +1981,15 @@ impl Renderer {
                 &mip.rgba8,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(mip.width * 4),
+                    bytes_per_row: Some(
+                        mip.width * (data.role.texel_bytes() as u32 / data.role.layers()),
+                    ),
                     rows_per_image: Some(mip.height),
                 },
                 wgpu::Extent3d {
                     width: mip.width,
                     height: mip.height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: data.role.layers(),
                 },
             );
             self.uploads.textures += mip.rgba8.len() as u64;

@@ -3,6 +3,7 @@ use crate::*;
 pub const SCHEMA_VERSION: u32 = 1;
 pub const NORMAL_SCHEMA_VERSION: u32 = 2;
 pub const NORMAL_VARIANCE_SCHEMA_VERSION: u32 = 3;
+pub const NORMAL_MOMENTS_SCHEMA_VERSION: u32 = 4;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -85,6 +86,12 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
     let version = if asset
         .textures
         .iter()
+        .any(|t| t.role == TextureRole::NormalSlopeMoments)
+    {
+        NORMAL_MOMENTS_SCHEMA_VERSION
+    } else if asset
+        .textures
+        .iter()
         .any(|t| t.role == TextureRole::NormalVarianceLinear)
     {
         NORMAL_VARIANCE_SCHEMA_VERSION
@@ -128,6 +135,7 @@ pub fn encode(asset: &Asset, limits: Limits) -> Result<Vec<u8>> {
             TextureRole::MetallicRoughnessLinear => 1,
             TextureRole::NormalLinear => 2,
             TextureRole::NormalVarianceLinear => 3,
+            TextureRole::NormalSlopeMoments => 4,
         });
         w.count(t.mips.len())?;
         for m in &t.mips {
@@ -260,7 +268,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1..=3) {
+    if !matches!(version, 1..=4) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -397,7 +405,8 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             0 => TextureRole::BaseColorSrgb,
             1 => TextureRole::MetallicRoughnessLinear,
             2 if version >= 2 => TextureRole::NormalLinear,
-            3 if version == 3 => TextureRole::NormalVarianceLinear,
+            3 if version >= 3 => TextureRole::NormalVarianceLinear,
+            4 if version >= 4 => TextureRole::NormalSlopeMoments,
             _ => return Err(Error("invalid texture role")),
         };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;
@@ -425,7 +434,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Asset> {
             if t.mips.len() + 1 == n && (w != 1 || h != 1) {
                 return Err(Error("incomplete mip chain"));
             }
-            let size = product(product(w as usize, h as usize)?, 4)?;
+            let size = product(product(w as usize, h as usize)?, role.texel_bytes())?;
             let length = r.count(size, 1, 1)?;
             if size != length {
                 return Err(Error("invalid mip byte count"));

@@ -410,6 +410,30 @@ adopt no filtering. The material `normal_mapped` flag remains 0/1; the new
 are supplied by the engine. The 48-byte material block and 16-byte hit record
 are unchanged. Limits and measured acceptance are in [the U1 record](m7-u1.md).
 
+M7 U1b adds `SurfaceInput.world_dx/world_dy`, one-pixel world-position
+differentials on both paths, and the optional `specular_brdf(input, light_direction,
+base, metallic, roughness)` helper. The standard program now enables
+`SPECULAR_AA=true` and calls this helper for direct lights, retaining the original
+roughness in each GGX summand. Environment sampling stays unchanged. The helper
+integrates 256 deterministic spatial samples in the current footprint; it reads
+no previous frame or neighbouring lighting. It filters the BRDF response, while
+light direction, attenuation and visibility remain evaluated at the centre.
+
+Normal-mapped materials need the cooker's `--normal-maps --normal-moments`
+encoding (RLA v4, two RGBA16Float layers, four times RGBA8 storage).
+`normal_statistics(input)` exposes mean slope and full covariance after
+texture filtering, independent of any BRDF. `normal_variance=2` identifies this
+encoding; 0 and 1 keep their U1 meanings. `sample_normal_layer_grad` supplies
+explicit-footprint layer access; `sample_normal_map` keeps its decoded-normal
+contract. Legacy mapped materials bypass the new helper because their
+distribution was discarded. Unmapped curved normals use geometric differentials.
+Constant normal distributions bypass integration. Non-calling custom programs
+keep their own shading. The material block, hit records and dispatch remain
+unchanged. Custom perturbed normals, tangent discontinuities, environment AA,
+coverage AA and spatially varying visibility are outside this helper's measured
+contract. Covariance-based `filtered_brdf` selectors are experiments, not the
+accepted standard method. See [U1b](m7-u1b.md) for cost, gate results and limits.
+
 The probe is at `D:/Coding/renderlab-work/programmable-shading-probe/`:
 
 - `src/main.rs` (sha256 prefix `f3371700d76f2e19`) and `wgsl/` with `api_common`, `api_raster`, `api_traced`, `api_screen`, `standard`, `toon` and `outline`;

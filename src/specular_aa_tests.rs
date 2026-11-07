@@ -9,11 +9,12 @@ use std::path::Path;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SOURCE: &str = include_str!("../shaders/scene.wgsl");
 
-const FILTER: &str = "filtered_roughness(clamp(material.roughness*mr.g,0.0,1.0),\n        select(0.0,material_normal_variance(input)+geometric_normal_variance(input),SPECULAR_AA))";
-
 fn unfiltered() -> String {
-    assert!(crate::STANDARD_PROGRAM.contains(FILTER));
-    crate::STANDARD_PROGRAM.replace(FILTER, "clamp(material.roughness*mr.g,0.0,1.0)")
+    assert!(crate::STANDARD_PROGRAM.contains("const SPECULAR_AA:bool=true;"));
+    crate::STANDARD_PROGRAM.replace(
+        "const SPECULAR_AA:bool=true;",
+        "const SPECULAR_AA:bool=false;",
+    )
 }
 
 fn reference_source() -> String {
@@ -35,9 +36,48 @@ fn reference_source() -> String {
     )
 }
 
+const U1B_VARIANTS: [(&str, u32, usize); 12] = [
+    ("before", 0, 1),
+    ("covariance-point", 1, 2),
+    ("reference", 0, 1),
+    ("default", 0, 3),
+    ("covariance-bilinear", 1, 3),
+    ("mixture-9", 2, 3),
+    ("mixture-25", 3, 3),
+    ("footprint-mixture-9", 4, 3),
+    ("footprint-mixture-25", 5, 3),
+    ("gated-mixture", 6, 3),
+    ("spatial-256", 7, 3),
+    ("adaptive-tail", 8, 3),
+];
+fn u1b_program(method: u32) -> String {
+    unfiltered().replace(
+        "brdf(n,v,light.direction,base,metal,rough)",
+        &format!("filtered_brdf(input,light.direction,base,metal,rough,{method}u)"),
+    )
+}
+fn u1b() -> bool {
+    std::env::var_os("RENDERLAB_U1B").is_some()
+}
+fn variants() -> Vec<usize> {
+    if u1b() {
+        std::env::var("RENDERLAB_U1_VARIANTS")
+            .ok()
+            .map(|s| s.split(',').map(|n| n.parse::<usize>().unwrap()).collect())
+            .unwrap_or_else(|| vec![0, 1, 4, 5, 6, 7, 8, 9, 10, 11])
+    } else {
+        vec![0, 1]
+    }
+}
+
 #[test]
 fn benchmark_programs_validate_before_taking_a_gpu_lease() {
-    for program in [unfiltered(), reference_source()] {
+    for program in [
+        unfiltered(),
+        reference_source(),
+        u1b_program(1),
+        u1b_program(6),
+    ] {
         let composed =
             crate::program::compose(SOURCE, &program, crate::program::Stage::Raster, false);
         crate::program::analyse("U1 bench", &program, &composed).unwrap();
@@ -94,17 +134,28 @@ fn hdr(r: &mut Renderer) -> Vec<f32> {
 }
 
 /// GPU sums stay in one crop-sized buffer; no per-subframe readbacks.
+fn reference_side() -> u32 {
+    let side = std::env::var("RENDERLAB_REFERENCE_SIDE")
+        .ok()
+        .map(|s| s.parse::<u32>().unwrap())
+        .unwrap_or(16);
+    assert!(side.is_power_of_two() && (8..=128).contains(&side));
+    side
+}
+
 struct Average {
     pipeline: wgpu::ComputePipeline,
     sums: wgpu::Buffer,
     readback: wgpu::Buffer,
     sample: wgpu::Buffer,
+    samples: u32,
 }
 impl Average {
     fn new(r: &Renderer, size: [u32; 2]) -> Self {
+        let samples = reference_side() * reference_side();
         let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("U1 film average"),
-            source: wgpu::ShaderSource::Wgsl(format!("@group(0) @binding(0) var image:texture_2d<f32>; @group(0) @binding(1) var<storage,read_write> sums:array<vec4<f32>>; @group(0) @binding(2) var<uniform> sample:vec4<u32>; @compute @workgroup_size(8,8) fn main(@builtin(global_invocation_id) id:vec3<u32>) {{ if any(id.xy>=vec2<u32>({}u,{}u)) {{return;}} let i=id.x+id.y*{}u; let c=textureLoad(image,vec2<i32>(id.xy),0); sums[i]+=c*(1.0/256.0); let half=select(1u,2u,(sample.x&1u)!=0u)*{}u; sums[half+i]+=c*(1.0/128.0); }}",size[0],size[1],size[0],size[0]*size[1]).into()),
+            source: wgpu::ShaderSource::Wgsl(format!("@group(0) @binding(0) var image:texture_2d<f32>; @group(0) @binding(1) var<storage,read_write> sums:array<vec4<f32>>; @group(0) @binding(2) var<uniform> sample:vec4<u32>; @compute @workgroup_size(8,8) fn main(@builtin(global_invocation_id) id:vec3<u32>) {{ if any(id.xy>=vec2<u32>({}u,{}u)) {{return;}} let i=id.x+id.y*{}u; let c=textureLoad(image,vec2<i32>(id.xy),0); sums[i]+=c*(1.0/{}.0); let half=select(1u,2u,(sample.x&1u)!=0u)*{}u; sums[half+i]+=c*(1.0/{}.0); }}",size[0],size[1],size[0],samples,size[0]*size[1],samples/2).into()),
         });
         let pipeline = r
             .device
@@ -126,6 +177,7 @@ impl Average {
             })
         };
         Self {
+            samples,
             pipeline,
             sums: make(
                 wgpu::BufferUsages::STORAGE
@@ -147,7 +199,7 @@ impl Average {
         t: &wgpu::Texture,
         c: &Camera,
         scene: &mut [Patch],
-    ) -> (Vec<f32>, f64) {
+    ) -> (Vec<f32>, f64, [f64; 7]) {
         let mut encoder = r.device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&self.sums, 0, None);
         r.queue.submit([encoder.finish()]);
@@ -180,15 +232,18 @@ impl Average {
                 },
             ],
         });
-        for sample in 0..256u32 {
+        let side = reference_side();
+        for sample in 0..self.samples {
             r.queue.write_buffer(&self.sample, 0, &sample.to_le_bytes());
-            // Independently scrambled samples in the 16x16 spatial strata.
+            // Independently scrambled spatial strata; the material gradient remains fixed.
             let mut h = sample.wrapping_mul(0x9e3779b9) ^ 0x83d2e19b;
             h ^= h >> 16;
             h = h.wrapping_mul(0x7feb352d);
             h ^= h >> 15;
-            let jx = ((sample % 16) as f32 + ((h & 65535) as f32 + 0.5) / 65536.0) / 16.0 - 0.5;
-            let jy = ((sample / 16) as f32 + ((h >> 16) as f32 + 0.5) / 65536.0) / 16.0 - 0.5;
+            let jx =
+                ((sample % side) as f32 + ((h & 65535) as f32 + 0.5) / 65536.0) / side as f32 - 0.5;
+            let jy =
+                ((sample / side) as f32 + ((h >> 16) as f32 + 0.5) / 65536.0) / side as f32 - 0.5;
             let jitter = Mat4::from_translation(Vec3::new(
                 -2.0 * jx / t.width() as f32,
                 2.0 * jy / t.height() as f32,
@@ -234,7 +289,41 @@ impl Average {
             .map(|(_, (&a, &b))| f64::from(a - b).powi(2))
             .sum::<f64>();
         let uncertainty = (delta / ((channels / 4 * 3) as f64)).sqrt() / 2.0;
-        (values[..channels].to_vec(), uncertainty)
+        let mut squares = [0.0; 7];
+        let mut counts = [0usize; 7];
+        let eye_x = c.view().inverse().w_axis.x as f64;
+        let pitch = 8.0 * (0.4f64).tan() / f64::from(t.height());
+        for pixel in 0..channels / 4 {
+            let x = eye_x
+                + (pixel as u32 % t.width()) as f64 * pitch
+                + (0.5 - f64::from(t.width()) / 2.0) * pitch;
+            let y = (f64::from(t.height()) / 2.0 - 0.5 - (pixel as u32 / t.width()) as f64) * pitch;
+            let d = (0..3)
+                .map(|ch| {
+                    f64::from(
+                        values[channels + 4 * pixel + ch] - values[2 * channels + 4 * pixel + ch],
+                    )
+                    .powi(2)
+                })
+                .sum::<f64>();
+            for population in 0..7 {
+                let x0 = -1.65 + (population % 3) as f64 * 1.1;
+                let y0 = 0.65 - (population / 3) as f64 * 0.65;
+                if x > x0 + 2.0 * pitch
+                    && x < x0 + 1.05 - 2.0 * pitch
+                    && y > y0 + 2.0 * pitch
+                    && y < y0 + 0.6 - 2.0 * pitch
+                {
+                    squares[population] += d;
+                    counts[population] += 3;
+                }
+            }
+        }
+        (
+            values[..channels].to_vec(),
+            uncertainty,
+            std::array::from_fn(|i| (squares[i] / counts[i] as f64).sqrt() / 2.0),
+        )
     }
 }
 
@@ -255,27 +344,42 @@ fn scene(r: &mut Renderer, root: &Path) -> Vec<Patch> {
         .collect();
     let before = unfiltered();
     let reference = reference_source();
-    let candidate = crate::STANDARD_PROGRAM.replace(
-        "const SPECULAR_AA:bool=false;",
-        "const SPECULAR_AA:bool=true;",
+    // Historical U1 can still be replayed after changing the standard default.
+    let candidate = unfiltered().replace(
+        "let rough=clamp(material.roughness*mr.g,0.0,1.0);",
+        "let rough=filtered_roughness(clamp(material.roughness*mr.g,0.0,1.0),material_normal_variance(input)+geometric_normal_variance(input));",
     );
-    let programs: Vec<_> = [
-        before.as_str(),
-        candidate.as_str(),
-        reference.as_str(),
-        crate::STANDARD_PROGRAM,
-    ]
-    .iter()
-    .enumerate()
-    .map(|(i, source)| {
-        r.test_drain("U1 program");
-        r.try_create_program(&crate::ProgramDescriptor {
-            label: &format!("U1 mode {i}"),
-            source,
+    let sources: Vec<String> = if u1b() {
+        U1B_VARIANTS
+            .iter()
+            .enumerate()
+            .map(|(i, (_, method, _))| match i {
+                0 => before.clone(),
+                2 => reference.clone(),
+                3 => crate::STANDARD_PROGRAM.to_string(),
+                _ => u1b_program(*method),
+            })
+            .collect()
+    } else {
+        vec![
+            before.clone(),
+            candidate,
+            reference,
+            crate::STANDARD_PROGRAM.to_string(),
+        ]
+    };
+    let programs: Vec<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| {
+            r.test_drain("U1 program");
+            r.try_create_program(&crate::ProgramDescriptor {
+                label: &format!("U1 mode {i}"),
+                source,
+            })
+            .unwrap()
         })
-        .unwrap()
-    })
-    .collect();
+        .collect();
     (0..7)
         .map(|i| {
             let column = i % 3;
@@ -341,7 +445,11 @@ fn scene(r: &mut Renderer, root: &Path) -> Vec<Patch> {
                         roughness,
                         base_color: [0.7, 0.5, 0.25, 1.],
                         normal_texture: (i < 3).then(|| TextureBinding {
-                            texture: &textures[usize::from(mode == 0 || mode == 3)],
+                            texture: &textures[if u1b() {
+                                U1B_VARIANTS[mode].2
+                            } else {
+                                usize::from(mode == 0 || mode == 3)
+                            }],
                             sampler: Sampler::default(),
                         }),
                         double_sided: true,
@@ -410,7 +518,7 @@ fn gpu_specular_aa_motion_screen() {
     let _validation = validation::begin(true);
     let root = std::path::PathBuf::from(std::env::var("RENDERLAB_U1_ROOT").unwrap());
     let mode = std::env::var("RENDERLAB_U1_MODE").unwrap_or_else(|_| "software".into());
-    let reference = mode == "reference";
+    let reference = mode.starts_with("reference");
     let native = std::env::var_os("RENDERLAB_U1_NATIVE").is_some();
     let size = if native { [1920, 1080] } else { [320, 180] };
     let (device, queue) = device(true);
@@ -430,36 +538,59 @@ fn gpu_specular_aa_motion_screen() {
     let average = reference.then(|| Average::new(&r, size));
     let mut timings = vec![];
     let mut uncertainty = vec![];
+    // The first native screen exposed idle/boost transition outliers (up to 8x).
+    // Warm a representative busy shader before measuring the small static batch;
+    // keep the original eight measured repeats and retain the first run separately.
+    if native && u1b() {
+        let c = configure(&mut r, "static", 0, size[0]);
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            frame(&mut r, &t, &c, &mut scene, 10);
+            let _ = r.poll().unwrap();
+        }
+        r.test_drain("U1 native clock warmup");
+        let _ = r.poll().unwrap();
+    }
     for track in ["static", "camera", "light"] {
         let count = if track == "static" { 1 } else { 12 };
         for index in 0..if native { 0 } else { count } {
             let c = configure(&mut r, track, index, size[0]);
             if let Some(average) = &average {
-                let (image, error) = average.integrate(&mut r, &t, &c, &mut scene);
+                let (image, error, population_errors) =
+                    average.integrate(&mut r, &t, &c, &mut scene);
                 uncertainty.push(
-                    json!({"track":track,"frame":index,"half_difference_rms_over_two":error}),
+                    json!({"track":track,"frame":index,"half_difference_rms_over_two":error,"population_half_difference_rms_over_two":population_errors}),
                 );
                 write_frame(&out.join(format!("{track}-{index}.f32")), &image);
             } else {
-                let mut before = None;
-                for variant in 0..2 {
+                let expected_mode = if u1b() { 10 } else { 0 };
+                let mut expected = None;
+                for variant in variants() {
                     frame(&mut r, &t, &c, &mut scene, variant);
                     let image = hdr(&mut r);
                     write_frame(&out.join(format!("{track}-{index}-{variant}.f32")), &image);
-                    if variant == 0 {
-                        before = Some(image);
+                    if variant == expected_mode {
+                        expected = Some(image);
                     }
                 }
+                if expected.is_none() {
+                    frame(&mut r, &t, &c, &mut scene, expected_mode);
+                    expected = Some(hdr(&mut r));
+                }
                 frame(&mut r, &t, &c, &mut scene, 3);
-                assert_eq!(
-                    hdr(&mut r),
-                    before.unwrap(),
-                    "default must equal the unfiltered non-caller, every pixel"
-                );
+                let actual = hdr(&mut r);
+                write_frame(&out.join(format!("{track}-{index}-3.f32")), &actual);
+                if u1b() {
+                    assert_eq!(
+                        actual,
+                        expected.unwrap(),
+                        "default must equal the accepted spatial helper, every pixel"
+                    );
+                }
             }
         }
         if !reference {
-            for variant in 0..2 {
+            for variant in variants() {
                 for _ in 0..8 {
                     let c = configure(&mut r, track, 0, size[0]);
                     frame(&mut r, &t, &c, &mut scene, variant);
@@ -489,6 +620,6 @@ fn gpu_specular_aa_motion_screen() {
             }
         }
     }
-    fs::write(out.join("manifest.json"),serde_json::to_vec_pretty(&json!({"size":size,"mode":mode,"features":features,"primary":format!("{:?}",r.primary_mode),"samples":256,"shutter":0,"roughness":[0.08,0.15,0.3],"default_identity_frames":if reference||native {0}else{25},"reference_uncertainty":uncertainty,"timings":timings})).unwrap()).unwrap();
+    fs::write(out.join("manifest.json"),serde_json::to_vec_pretty(&json!({"size":size,"mode":mode,"features":features,"primary":format!("{:?}",r.primary_mode),"samples":reference_side()*reference_side(),"shutter":0,"roughness":[0.08,0.15,0.3],"default_identity_frames":if reference||native {0}else{25},"reference_uncertainty":uncertainty,"variants":if u1b(){serde_json::json!(U1B_VARIANTS.iter().map(|(name,_,_)|name).collect::<Vec<_>>())}else{serde_json::json!(["before","isotropic"])},"timings":timings})).unwrap()).unwrap();
     assert!(r.fault.get().is_none());
 }

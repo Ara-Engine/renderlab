@@ -14,7 +14,7 @@ struct PrimaryMaterial { value:Material };
 @group(2) @binding(12) var primary_base_sampler:binding_array<sampler,PRIMARY_BATCHES>;
 @group(2) @binding(13) var primary_metallic_roughness:binding_array<texture_2d<f32>,PRIMARY_BATCHES>;
 @group(2) @binding(14) var primary_mr_sampler:binding_array<sampler,PRIMARY_BATCHES>;
-@group(2) @binding(15) var primary_normal_map:binding_array<texture_2d<f32>,PRIMARY_BATCHES>;
+@group(2) @binding(15) var primary_normal_map:binding_array<texture_2d_array<f32>,PRIMARY_BATCHES>;
 @group(2) @binding(16) var primary_normal_sampler:binding_array<sampler,PRIMARY_BATCHES>;
 
 fn sample_base_color(input:SurfaceInput) -> vec4<f32> {
@@ -34,9 +34,9 @@ fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>
     let i=input.receiver.slot;
     return textureSampleGrad(primary_metallic_roughness[i],primary_mr_sampler[i],uv,dx,dy);
 }
-fn sample_normal_map_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+fn sample_normal_layer_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>, layer:i32) -> vec4<f32> {
     let i=input.receiver.slot;
-    return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,dx,dy);
+    return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
 }
 // The DFG table has one level, so this equals the raster sample.
 fn environment_dfg(n_dot_v:f32, roughness:f32) -> vec2<f32> {

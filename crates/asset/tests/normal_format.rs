@@ -67,7 +67,7 @@ fn v2_roundtrip_rejects_truncation_counts_basis_frames_and_nonfinite_scale() {
     }
     // First primitive header starts after the 24-byte asset and 4-byte mesh header.
     for (offset, word) in [
-        (4, 4),
+        (4, 5),
         (32, u32::MAX),
         (36, u32::MAX),
         (40, 3),
@@ -152,4 +152,34 @@ fn normal_variance_v3_is_explicit_and_legacy_v2_bytes_keep_their_meaning() {
         encode(&decode(&v2, Limits::default()).unwrap(), Limits::default()).unwrap(),
         v2
     );
+}
+
+#[test]
+fn slope_moments_v4_roundtrip_layers_finiteness_and_budget_are_checked() {
+    let mut a = mapped();
+    a.textures[0].role = TextureRole::NormalSlopeMoments;
+    a.textures[0].mips[0].rgba8 = [0u16, 0, 0, 0, 0, 0, 0, 0x3c00]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let b = encode(&a, Limits::default()).unwrap();
+    assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 4);
+    assert_eq!(decode(&b, Limits::default()).unwrap(), a);
+    let count = a.validate(Limits::default()).unwrap().decoded_bytes;
+    assert!(
+        a.validate(Limits {
+            max_decoded_bytes: count - 1,
+            ..Limits::default()
+        })
+        .is_err()
+    );
+    let mut old = b.clone();
+    old[4..8].copy_from_slice(&3u32.to_le_bytes());
+    assert!(decode(&old, Limits::default()).is_err());
+    a.textures[0].mips[0].rgba8[0..2].copy_from_slice(&0x7c00u16.to_le_bytes());
+    assert!(encode(&a, Limits::default()).is_err());
+    let mut bad = b;
+    let n = bad.len();
+    bad[n - 2..].copy_from_slice(&0x7e01u16.to_le_bytes());
+    assert!(decode(&bad, Limits::default()).is_err());
 }

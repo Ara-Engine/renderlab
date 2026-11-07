@@ -175,8 +175,12 @@ impl MaterialDescriptor<'_> {
         bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
         let variance = self
             .normal_texture
-            .is_some_and(|t| t.texture.0.role == TextureRole::NormalVarianceLinear);
-        bytes[40..44].copy_from_slice(&u32::from(variance).to_ne_bytes());
+            .map_or(0u32, |t| match t.texture.0.role {
+                TextureRole::NormalVarianceLinear => 1,
+                TextureRole::NormalSlopeMoments => 2,
+                _ => 0,
+            });
+        bytes[40..44].copy_from_slice(&variance.to_ne_bytes());
         bytes
     }
 }
@@ -202,9 +206,12 @@ pub(crate) fn validate_texture(
             || Some(mip.rgba8.len() as u64)
                 != u64::from(w)
                     .checked_mul(u64::from(h))
-                    .and_then(|x| x.checked_mul(4))
+                    .and_then(|x| x.checked_mul(data.role.texel_bytes() as u64))
         {
             return Err(Error::InvalidInput("texture mip dimensions/bytes mismatch"));
+        }
+        if !data.role.texels_finite(&mip.rgba8) {
+            return Err(Error::InvalidInput("nonfinite texture texel"));
         }
         bytes = bytes
             .checked_add(mip.rgba8.len() as u64)

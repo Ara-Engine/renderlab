@@ -8,6 +8,7 @@ mod import;
 mod mip;
 pub mod normal_fixture;
 pub mod normal_map;
+pub mod normal_moments;
 pub mod tangent;
 pub mod virtual_cache;
 pub mod virtual_cook;

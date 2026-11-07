@@ -12,6 +12,9 @@
 struct SurfaceInput {
     // Receiver point in metres.
     world:vec3<f32>,
+    // Pixel footprint on this triangle, without neighbouring lighting or visibility.
+    world_dx:vec3<f32>,
+    world_dy:vec3<f32>,
     // Unit plane normal of the receiver triangle on its source-front side.
     geometric:vec3<f32>,
     // Interpolated vertex normal and tangent, world space, not normalized.
@@ -150,10 +153,14 @@ fn filtered_roughness(roughness:f32, variance:f32) -> f32 {
 // cancellation. A small UNORM quantization dead zone keeps constant maps unchanged.
 // Scale^2 is a small-slope approximation; zero scale eliminates map variance.
 fn material_normal_variance(input:SurfaceInput) -> f32 {
+    if input.material.normal_variance==2u {
+        let covariance=normal_statistics(input).covariance;
+        return min(covariance.x+covariance.z,1.0);
+    }
     let sample=sample_normal_map(input);
     let mean_length=clamp(length(sample.xyz*2.0-vec3<f32>(1.0)),1e-6,1.0);
     var spread=max(2.0*(1.0-mean_length)/mean_length-0.008,0.0);
-    if input.material.normal_variance!=0u { spread+=sample.a*sample.a; }
+    if input.material.normal_variance==1u { spread+=sample.a*sample.a; }
     let scale=min(abs(input.material.normal_scale),1e10);
     return select(0.0,min(spread*scale*scale,1.0),input.material.normal_mapped!=0u);
 }
@@ -171,3 +178,12 @@ fn geometric_normal_variance(input:SurfaceInput) -> f32 {
 }
 
 // ---- end of the shared program API ----
+
+// Layer access records the same footprint as ordinary normal sampling, including residency.
+fn sample_normal_map_grad(input:SurfaceInput,uv:vec2<f32>,dx:vec2<f32>,dy:vec2<f32>)->vec4<f32> {
+    if input.material.normal_variance==2u {
+        let value=sample_normal_layer_grad(input,uv,dx,dy,1).yzw;
+        return vec4<f32>(unit_normal(value)*0.5+vec3<f32>(0.5),0.0);
+    }
+    return sample_normal_layer_grad(input,uv,dx,dy,0);
+}
