@@ -59,10 +59,10 @@ fn schedule_defaults(source: &str) -> (u32, bool) {
 fn trace_tiles(size: [u32; 2]) -> u64 {
     u64::from(size[0].div_ceil(8)) * u64::from(size[1].div_ceil(4))
 }
-/// The scratch's bytes before the decision trace: the header, then per trace tile its place
-/// in the order and its recorded work.
+/// The scratch's bytes before the decision trace: the header, then per trace tile four order
+/// entries (WGSL `VSM_ORDER_SLOTS`) and its recorded work.
 pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
-    SCRATCH_HEADER + 8 * trace_tiles(size)
+    SCRATCH_HEADER + 20 * trace_tiles(size)
 }
 /// Device features the page raster needs: 64-bit (height, id) max atomics. Casters are the
 /// meshes' visibility-buffer clusters, so the device must also support
