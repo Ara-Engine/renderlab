@@ -728,11 +728,12 @@ fn profile_json(r: &mut Renderer) -> Json {
     let c = r.indirect_counters().unwrap().unwrap_or_default();
     json!({
         "us": {"probe": p.probe, "claim": p.claim, "resolve": p.resolve, "scan": p.scan,
-               "args": p.args, "trace": p.trace, "integrate": p.integrate, "total": p.total()},
+               "args": p.args, "trace": p.trace(), "setup": p.setup, "rays": p.rays, "finish": p.finish,
+               "integrate": p.integrate, "total": p.total()},
         "counters": {"misses": c.misses, "traces": c.traces, "integrates": c.integrates,
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
-                     "local_overflow": c.local_overflow},
+                     "ray_items": c.ray_items, "local_overflow": c.local_overflow},
     })
 }
 /// The shading pass and the whole span of the most recent completed frame, ms.
@@ -856,7 +857,8 @@ fn sequence(
         "shading_ms": tail(samples.iter().map(|g| g.mesh_pass.as_secs_f64() * 1e3).collect()),
         "cache_us": {
             "total": pass(|p| p.total()), "probe": pass(|p| p.probe), "claim": pass(|p| p.claim),
-            "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "trace": pass(|p| p.trace),
+            "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "trace": pass(|p| p.trace()),
+            "setup": pass(|p| p.setup), "rays": pass(|p| p.rays), "finish": pass(|p| p.finish),
             "integrate": pass(|p| p.integrate),
         },
     })
@@ -976,8 +978,11 @@ fn gpu_gi_sky_visibility_sv() {
         let label = format!("{path:?}").to_lowercase();
         let [standard, materials, toon] = std::mem::take(&mut rig.materials);
         let mut path_json = json!({});
+        // The measured configurations name rotation explicitly: "trilinear-4px" and "on"
+        // are unrotated, "rotated-4px" and the "rotated" timing rows are the default.
         let base = IndirectSettings {
             enabled: true,
+            rotate_directions: false,
             ..Default::default()
         };
         // Configurations: GI off (the pre-M7 image), then the W3 lookups and cell sizes.
@@ -1171,26 +1176,55 @@ fn gpu_gi_sky_visibility_sv() {
         }
         rig.settings(base);
         // Determinism: the table and image after the same sequence, in this process
-        // (cross-process equality compares these hashes between runs).
+        // (cross-process equality compares these hashes between runs). Table hashes skip
+        // the header, which holds this frame's settings.
         if section("gates") {
             let (_, eye, target) = &poses[0];
             rig.r.reset_indirect();
             rig.frame(&sv, *eye, *target, &materials);
             rig.frame(&sv, *eye, *target, &materials);
             let table = rig.r.indirect_table().unwrap().unwrap();
-            let a = (hash_words(&table), hash_image(&rig.radiance(&sv)));
+            let a = (
+                hash_words(&table[HEADER_WORDS as usize..]),
+                hash_image(&rig.radiance(&sv)),
+            );
             rig.r.reset_indirect();
             rig.frame(&sv, *eye, *target, &materials);
             rig.frame(&sv, *eye, *target, &materials);
             let table = rig.r.indirect_table().unwrap().unwrap();
-            let b = (hash_words(&table), hash_image(&rig.radiance(&sv)));
+            let b = (
+                hash_words(&table[HEADER_WORDS as usize..]),
+                hash_image(&rig.radiance(&sv)),
+            );
+            // Serial tracing (one thread per cell) traces the same rays into the same bits.
+            rig.settings(IndirectSettings {
+                parallel_rays: false,
+                ..base
+            });
+            rig.r.reset_indirect();
+            rig.frame(&sv, *eye, *target, &materials);
+            rig.frame(&sv, *eye, *target, &materials);
+            let table = rig.r.indirect_table().unwrap().unwrap();
+            let serial = (
+                hash_words(&table[HEADER_WORDS as usize..]),
+                hash_image(&rig.radiance(&sv)),
+            );
+            rig.settings(base);
             path_json["determinism"] = json!({"table": a.0, "image": a.1,
-                "table_repeat_equal": a.0 == b.0, "image_repeat_equal": a.1 == b.1});
+                "table_repeat_equal": a.0 == b.0, "image_repeat_equal": a.1 == b.1,
+                "serial_table_equal": a.0 == serial.0, "serial_image_equal": a.1 == serial.1});
         }
         // Motion: per-frame cost and flicker against per-frame references.
         for (config, s) in [
             ("off", IndirectSettings::default()),
             ("trilinear-4px", base),
+            (
+                "rotated-4px",
+                IndirectSettings {
+                    rotate_directions: true,
+                    ..base
+                },
+            ),
             (
                 "blend-4px",
                 IndirectSettings {
@@ -1306,12 +1340,12 @@ fn gpu_gi_sky_visibility_sv() {
             }
             rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
         }
-        // Timing: continuous sequences for the cache off (the pre-M7 frame), the default and
-        // the best-quality variant, visited in turn `visits` times (timing[label] lists
-        // the visits).
+        // Timing: continuous sequences for the cache off (the pre-M7 frame), unrotated,
+        // rotated (the default), serial tracing and the best-quality variant, visited in
+        // turn `visits` times (timing[label] lists the visits).
         if section("timing") {
             let (_, eye, target) = poses[0].clone();
-            let mut timing = json!({"off": [], "on": [], "best": []});
+            let mut timing = json!({"off": [], "on": [], "rotated": [], "serial": [], "best": []});
             let best = IndirectSettings {
                 level_blend: 0.125,
                 directions: 128,
@@ -1321,8 +1355,29 @@ fn gpu_gi_sky_visibility_sv() {
             let order = [
                 ("off", IndirectSettings::default()),
                 ("on", base),
+                (
+                    "rotated",
+                    IndirectSettings {
+                        rotate_directions: true,
+                        ..base
+                    },
+                ),
+                (
+                    "serial",
+                    IndirectSettings {
+                        parallel_rays: false,
+                        ..base
+                    },
+                ),
                 ("best", best),
             ];
+            // Warm-up, discarded: clocks and caches settle before the first visit.
+            rig.settings(base);
+            rig.r.reset_indirect();
+            sequence(&mut rig, &sv, &materials, 64, |_, t| {
+                let d = Vec3::new(0.01 * t as f32, 0.0, 0.0);
+                (eye + d, target + d)
+            });
             for (label, s) in (0..visits).flat_map(|_| order) {
                 rig.settings(s);
                 rig.r.reset_indirect();
@@ -1360,7 +1415,10 @@ fn gpu_gi_sky_visibility_sv() {
                         .unwrap();
                     (eye, target)
                 });
-                timing[label].as_array_mut().unwrap().push(json!({"static": still,
+                timing[label]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"static": still,
                     "camera": camera, "caster": caster, "cut": cut, "environment": environment}));
             }
             // The environment step's lag: the stepped frame against a fresh cache.

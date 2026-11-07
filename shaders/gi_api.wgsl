@@ -28,13 +28,13 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> vec4<f32> {
         }
         let slot=gi_find(gi_key(level,bin,cell));
         if slot==0xffffffffu { continue; }
-        if (gi_table[gi_key_word(slot)]&GI_VALID)==0u { continue; }
+        if (gi_table[gi_hot(slot)]&GI_VALID)==0u { continue; }
         let hot=gi_hot(slot);
         var e=vec3<f32>(0.0);
         for(var i=0u;i<9u;i+=1u) {
             e+=gi_y[i]*vec3<f32>(gi_half(hot,i*3u),gi_half(hot,i*3u+1u),gi_half(hot,i*3u+2u));
         }
-        out+=vec4<f32>(w*bitcast<f32>(gi_table[hot])*e,w);
+        out+=vec4<f32>(w*bitcast<f32>(gi_table[hot+1u])*e,w);
     }
     return out;
 }

@@ -18,7 +18,7 @@ use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
 /// Key, hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
-const SLOT_WORDS: u64 = 1 + 16 + 24;
+const SLOT_WORDS: u64 = 16 + 24;
 const COUNTER_WORDS: u64 = 16;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
@@ -26,8 +26,12 @@ const FRAME_BYTES: usize = 64 + 64 * 16;
 const MAX_BOXES: usize = 32;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
 const CLAIM_ROUNDS: u32 = 3;
-/// Probe, three claim and resolve rounds, scan, arguments, trace, integrate.
-const PROFILE_STAMPS: u32 = 2 * (4 + 2 * CLAIM_ROUNDS + 1);
+/// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
+/// traced in parallel. A frame wanting more traces the rest in setup, per cell.
+const RAY_ITEMS: u32 = 1 << 20;
+/// Probe, miss arguments, three claim and resolve rounds, scan, arguments, setup, ray
+/// arguments, rays, finish and integrate.
+const PROFILE_STAMPS: u32 = 2 * (9 + 2 * CLAIM_ROUNDS);
 /// Frames the profile ring holds, and its per-frame stride (resolve offsets are
 /// 256-byte aligned).
 const PROFILE_RING: u64 = 64;
@@ -89,6 +93,9 @@ pub struct IndirectSettings {
     /// which decorrelates quadrature error between cells (as noise); off, cells with
     /// the same normal share directions, and the error is smooth.
     pub rotate_directions: bool,
+    /// Trace visibility rays one per thread (default). Off, each queued cell traces its
+    /// rays in one thread (A/B measurement); the bits and values are the same.
+    pub parallel_rays: bool,
 }
 impl Default for IndirectSettings {
     fn default() -> Self {
@@ -105,8 +112,12 @@ impl Default for IndirectSettings {
             direction_phases: 1,
             invalidate_casters: true,
             directions: 64,
-            rotate_directions: false,
+            // Unrotated, cells with the same normal share their quadrature error, which
+            // shows as faint cell-sized rectangles on flat faces; rotated, it becomes a
+            // fine fixed mottle (SV frame error 1.93% -> 1.64%), with no extra rays.
+            rotate_directions: true,
             level_blend: 0.0,
+            parallel_rays: true,
         }
     }
 }
@@ -153,12 +164,24 @@ pub struct IndirectProfile {
     pub resolve: f64,
     pub scan: f64,
     pub args: f64,
-    pub trace: f64,
+    /// Tracing: query points and ray items, the rays, then the bits and SH per cell.
+    pub setup: f64,
+    pub rays: f64,
+    pub finish: f64,
     pub integrate: f64,
 }
 impl IndirectProfile {
+    pub fn trace(&self) -> f64 {
+        self.setup + self.rays + self.finish
+    }
     pub fn total(&self) -> f64 {
-        self.probe + self.claim + self.resolve + self.scan + self.args + self.trace + self.integrate
+        self.probe
+            + self.claim
+            + self.resolve
+            + self.scan
+            + self.args
+            + self.trace()
+            + self.integrate
     }
 }
 
@@ -179,6 +202,8 @@ pub struct IndirectCounters {
     pub lost: u32,
     /// Visibility rays traced this frame (probe rays excluded).
     pub rays: u32,
+    /// Rays requested as parallel items; past RAY_ITEMS the rest trace in setup.
+    pub ray_items: u32,
 }
 
 struct Resources {
@@ -206,7 +231,11 @@ struct Pipelines {
     resolve: Owned<wgpu::ComputePipeline>,
     scan: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
-    trace: Owned<wgpu::ComputePipeline>,
+    args_rays: Owned<wgpu::ComputePipeline>,
+    args_misses: Owned<wgpu::ComputePipeline>,
+    setup: Owned<wgpu::ComputePipeline>,
+    rays: Owned<wgpu::ComputePipeline>,
+    finish: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
 }
 /// Group 1: the traced shading ABI's geometry tables, built from the same draws in
@@ -349,11 +378,17 @@ pub(super) fn kernel_source(software: bool, directions: u32) -> String {
     let line = "const GI_DIRECTIONS:u32=64u;";
     assert_eq!(cells.matches(line).count(), 1);
     let cells = cells.replace(line, &format!("const GI_DIRECTIONS:u32={directions}u;"));
+    let kernels = include_str!("../shaders/gi_cache.wgsl");
+    assert_eq!(
+        kernels
+            .matches(&format!("const GI_RAY_ITEMS:u32={RAY_ITEMS}u;"))
+            .count(),
+        1
+    );
     format!(
-        "{enables}{}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}\n{cells}\n{rays}\n{}",
+        "{enables}{}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}\n{cells}\n{rays}\n{kernels}",
         include_str!("../shaders/scene.wgsl"),
         include_str!("../shaders/primary_rays.wgsl"),
-        include_str!("../shaders/gi_cache.wgsl"),
     )
 }
 
@@ -399,10 +434,13 @@ impl Renderer {
         if reallocate {
             let misses = slots;
             let table_bytes = (HEADER_WORDS + u64::from(slots) * SLOT_WORDS) * 4;
+            // Counters, claims, misses, trace and integrate queues, ray items and their
+            // staged bits, then the request table (the frame offsets follow this order).
             let work_bytes = (COUNTER_WORDS
                 + u64::from(slots)
                 + u64::from(misses) * MISS_WORDS
                 + 2 * u64::from(slots)
+                + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
                 + 2 * u64::from(requests(misses)))
                 * 4;
             let buffer = |label, size, usage| {
@@ -435,7 +473,7 @@ impl Renderer {
                 ),
                 dispatch: buffer(
                     "indirect cache dispatch",
-                    32,
+                    64,
                     storage | wgpu::BufferUsages::INDIRECT,
                 ),
                 slots,
@@ -615,12 +653,14 @@ impl Renderer {
                 };
                 IndirectProfile {
                     probe: pass(0),
-                    claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum(),
-                    resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum(),
-                    scan: pass(1 + 2 * rounds),
-                    args: pass(2 + 2 * rounds),
-                    trace: pass(3 + 2 * rounds),
-                    integrate: pass(4 + 2 * rounds),
+                    claim: (0..rounds).map(|k| pass(2 + 2 * k)).sum(),
+                    resolve: (0..rounds).map(|k| pass(3 + 2 * k)).sum(),
+                    scan: pass(2 + 2 * rounds),
+                    args: pass(1) + pass(3 + 2 * rounds) + pass(5 + 2 * rounds),
+                    setup: pass(4 + 2 * rounds),
+                    rays: pass(6 + 2 * rounds),
+                    finish: pass(7 + 2 * rounds),
+                    integrate: pass(8 + 2 * rounds),
                 }
             })
             .collect())
@@ -661,6 +701,7 @@ impl Renderer {
             refreshed: w[9],
             lost: w[10],
             rays: w[11],
+            ray_items: w[12],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -843,7 +884,11 @@ impl Renderer {
             resolve: compute("gi_resolve", main),
             scan: compute("gi_scan", main),
             args: compute("gi_args", &layouts.args_pipeline),
-            trace: compute("gi_trace", main),
+            args_rays: compute("gi_args_rays", &layouts.args_pipeline),
+            args_misses: compute("gi_args_misses", &layouts.args_pipeline),
+            setup: compute("gi_setup", main),
+            rays: compute("gi_rays", main),
+            finish: compute("gi_finish", main),
             integrate: compute("gi_integrate", main),
         };
         if let Some(error) = scopes.finish() {
@@ -1087,6 +1132,7 @@ impl Renderer {
         }
         header[11] = s.direction_phases;
         header[12] = s.level_blend.to_bits();
+        header[13] = if s.parallel_rays { RAY_ITEMS } else { 0 };
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -1183,8 +1229,10 @@ impl Renderer {
         put(9, misses);
         put(10, traces);
         put(11, traces + r.slots);
-        put(12, traces + 2 * r.slots);
+        let items = traces + 2 * r.slots;
+        put(12, items + RAY_ITEMS + RAY_ITEMS / 32);
         put(13, requests(r.misses) - 1);
+        put(14, items);
         for (i, b) in boxes.iter().enumerate() {
             for k in 0..3 {
                 put(16 + i * 8 + k, b[k].to_bits());
@@ -1336,10 +1384,14 @@ impl GiState {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
         }
         encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
-        // The request table, after the counters, claims, misses and both queues.
-        let requests_at =
-            (COUNTER_WORDS + u64::from(r.slots) * 3 + u64::from(r.misses) * MISS_WORDS) * 4;
-        encoder.clear_buffer(&r.work, requests_at, None);
+        // The staged ray bits and the request table: everything after the counters,
+        // claims, misses, both queues and the ray items.
+        let staged_at = (COUNTER_WORDS
+            + u64::from(r.slots) * 3
+            + u64::from(r.misses) * MISS_WORDS
+            + u64::from(RAY_ITEMS))
+            * 4;
+        encoder.clear_buffer(&r.work, staged_at, None);
         let queries = self.profile.as_ref().map(|p| &*p.queries);
         let ring = self
             .profile
@@ -1373,7 +1425,18 @@ impl GiState {
                 pass.dispatch_workgroups_indirect(&r.dispatch, offset);
             }
         };
-        let rows = r.misses.div_ceil(64);
+        let args_pass =
+            |encoder: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, stamp: u32| {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("indirect cache arguments"),
+                    timestamp_writes: stamps(stamp),
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &*g.args, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            };
+        // Indirect arguments, each sized once its count is final: queued cells at 0,
+        // integrations at 16, ray items at 32 (after setup), misses at 48 (after the probe).
         main_pass(
             encoder,
             "indirect cache probe",
@@ -1382,25 +1445,26 @@ impl GiState {
             Some(plan.groups),
             None,
         );
+        args_pass(encoder, &p.args_misses, 1);
         for k in 0..CLAIM_ROUNDS {
             main_pass(
                 encoder,
                 "indirect cache claim",
                 &p.claim,
-                1 + 2 * k,
-                Some([rows, 1]),
+                2 + 2 * k,
                 None,
+                Some(48),
             );
             main_pass(
                 encoder,
                 "indirect cache resolve",
                 &p.resolve,
-                2 + 2 * k,
-                Some([rows, 1]),
+                3 + 2 * k,
                 None,
+                Some(48),
             );
         }
-        let s = 1 + 2 * CLAIM_ROUNDS;
+        let s = 2 + 2 * CLAIM_ROUNDS;
         main_pass(
             encoder,
             "indirect cache scan",
@@ -1413,31 +1477,33 @@ impl GiState {
             }),
             None,
         );
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("indirect cache arguments"),
-                timestamp_writes: stamps(s + 1),
-            });
-            pass.set_pipeline(&p.args);
-            pass.set_bind_group(0, &*g.args, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
+        args_pass(encoder, &p.args, s + 1);
         main_pass(
             encoder,
-            "indirect cache trace",
-            &p.trace,
+            "indirect cache setup",
+            &p.setup,
             s + 2,
             None,
             Some(0),
         );
-        main_pass(
-            encoder,
-            "indirect cache integrate",
-            &p.integrate,
-            s + 3,
-            None,
-            Some(16),
-        );
+        args_pass(encoder, &p.args_rays, s + 3);
+        for (k, (label, pipeline, offset)) in [
+            ("indirect cache rays", &p.rays, 32),
+            ("indirect cache finish", &p.finish, 0),
+            ("indirect cache integrate", &p.integrate, 16),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            main_pass(
+                encoder,
+                label,
+                pipeline,
+                s + 4 + k as u32,
+                None,
+                Some(offset),
+            );
+        }
         if let Some(profile) = self.profile.as_mut() {
             let slot = profile.written % PROFILE_RING;
             encoder.resolve_query_set(

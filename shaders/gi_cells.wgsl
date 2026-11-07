@@ -41,6 +41,9 @@ const GI_H_PHASES:u32=11u;
 // Level blend half-width (f32, in levels): within it of a level switch, the two levels
 // mix with a continuous fixed weight, so moving eyes do not pop cells; 0 is off.
 const GI_H_BLEND:u32=12u;
+// Ray items in use: GI_RAY_ITEMS traces rays in parallel, 0 traces each cell's rays in
+// setup (one thread per cell). The same rays and bits either way.
+const GI_H_ITEMS:u32=13u;
 // The levels a point reads and the weight of the second: one level away from a switch
 // (or with the blend off), two around it. `margin` widens the band for the kernels,
 // which must also cover a shading module's rounding at the switch itself.
@@ -64,12 +67,12 @@ const GI_F_FIELD:u32=2u;
 // Rotate each cell's directions about its normal by an angle its key fixes.
 const GI_F_ROTATE:u32=4u;
 
-// Table layout after the header: one key word per slot (dense, so a bucket's eight keys
-// share one 32-byte sector), then the hot records, then the cold records.
-// Key word: key a (31 bits) with GI_VALID set while the SH is current and the cell has a
-// query point; 0 for an empty slot.
-// Hot record: word 0 the f32 scale; words 1..14 the 27 SH halves (coefficient i*3+c for
-// band i, channel c), divided by the scale; word 15 spare.
+// Table layout after the header: the hot records, then the cold records.
+// Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and
+// the cell has a query point (0 for an empty slot); word 1 the f32 scale; words 2..15
+// the 27 SH halves (coefficient i*3+c for band i, channel c), divided by the scale. A
+// lookup's first bucket probe usually hits, so the key shares the record's first sector
+// (a separate dense key array measured 0.011 ms slower in shading).
 const GI_VALID:u32=0x80000000u;
 const GI_KEY_BITS:u32=0x7fffffffu;
 // Cold record word offsets.
@@ -80,9 +83,13 @@ const GI_C_DEF:u32=3u;
 const GI_C_CELL:u32=4u;
 const GI_C_NORMAL:u32=7u;
 const GI_C_POINT:u32=8u;
+// This frame's first ray item (valid while directions are pending).
+const GI_C_BASE:u32=11u;
 const GI_C_BITS:u32=12u;
 // Directions traced since the cell's last invalidation (GI_MAX_WORDS words).
 const GI_C_KNOWN:u32=16u;
+// Directions with ray items this frame, between setup and finish (GI_MAX_WORDS words).
+const GI_C_PENDING:u32=20u;
 // State bits: the value is current; the cell has no canonical query point; some
 // directions are still untraced (counted as open sky until they are); queued for
 // tracing this frame.
@@ -93,9 +100,8 @@ const GI_QUEUED:u32=8u;
 
 fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_table[i]); }
-fn gi_key_word(slot:u32) -> u32 { return GI_HEADER+slot; }
-fn gi_hot(slot:u32) -> u32 { return GI_HEADER+gi_word(GI_H_MASK)+1u+slot*GI_HOT_WORDS; }
-fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*(1u+GI_HOT_WORDS)+slot*GI_COLD_WORDS; }
+fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
+fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*GI_COLD_WORDS; }
 
 // Level whose edge is the smallest power-of-two multiple of the minimum edge at least
 // `footprint` times the eye distance. The kernels request both levels near a boundary,
@@ -187,20 +193,21 @@ fn gi_key(level:u32, bin:u32, cell:vec3<i32>) -> vec2<u32> {
     let b=gi_mix(c.z^gi_mix(c.x^gi_mix(c.y^gi_mix(d^0x85ebca6bu))));
     return vec2<u32>(max(a&GI_KEY_BITS,1u),b);
 }
-// The slot holding `key`, or 0xffffffff: one key word per probed slot, all in the
-// bucket's sector. Shading and the kernels search identically.
+// The slot holding `key`, or 0xffffffff: one hot word per probed slot, starting at the
+// key's own offset (where its insert put it when free). Shading and the kernels search
+// identically.
 fn gi_find(key:vec2<u32>) -> u32 {
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
     for(var i=0u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((key.y+i)&(GI_BUCKET-1u));
-        if (gi_table[gi_key_word(slot)]&GI_KEY_BITS)==key.x { return slot; }
+        if (gi_table[gi_hot(slot)]&GI_KEY_BITS)==key.x { return slot; }
     }
     return 0xffffffffu;
 }
 // SH coefficient j (band j / 3, channel j % 3) of a hot record, before its scale.
 fn gi_half(hot:u32, j:u32) -> f32 {
-    let pair=unpack2x16float(gi_table[hot+1u+(j>>1u)]);
+    let pair=unpack2x16float(gi_table[hot+2u+(j>>1u)]);
     return select(pair.x,pair.y,(j&1u)!=0u);
 }
 
