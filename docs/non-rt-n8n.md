@@ -273,7 +273,7 @@ Surface is above VSM on every S2 and S3 quality measure in every phase, and equa
   - 06:29-06:50: reading and design.
   - 06:50-07:20: the canonical-point cache and its counters (P1-P2b).
   - 07:20-07:56: consensus reuse, idle frames, keys without the triangle, schedules, heavy-first, split and bound screens (P3-P9).
-  - 07:56-08:45: the final leases, the three gate fixes and their re-verification (F1-F6).
-  - 08:45-09:20: scoring and this record.
+  - 07:58-08:45: the final leases, the three gate fixes, their re-verification and the scoring (F1-F6).
+  - 08:45-08:51: this record and the cleanup.
 
   GPU leases total 55 minutes; implementation, CPU scoring and analysis took the rest.
