@@ -70,6 +70,7 @@ pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualSh
         Some("exact") => crate::VirtualLookup::Exact,
         Some("map") => crate::VirtualLookup::Map,
         Some("hybrid") => crate::VirtualLookup::Hybrid,
+        Some("surface") => crate::VirtualLookup::Surface,
         _ => s.lookup,
     };
     Some(s)

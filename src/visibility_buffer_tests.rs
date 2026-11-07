@@ -99,6 +99,25 @@ fn timing(r: &mut Renderer, label: &str, rows: &mut Vec<serde_json::Value>) {
         rows.push(serde_json::json!({"label":label,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms)}));
     }
 }
+/// N8n: with `VSC_STATS` among a variant's constants, the surface cache's counters after each
+/// frame (drains the GPU, so that variant's timings are not used).
+fn surface_stats(
+    r: &mut Renderer,
+    on: bool,
+    label: &str,
+    frame: usize,
+    stats: &mut Vec<serde_json::Value>,
+) {
+    if !on {
+        return;
+    }
+    if let Some([probes, hits, finer, sun, unshown, misses]) = r.test_surface_stats() {
+        stats.push(
+            serde_json::json!({"label": label, "frame": frame, "probes": probes, "hits": hits,
+            "finer_hits": finer, "sun_refreshes": sun, "unshown": unshown, "misses": misses}),
+        );
+    }
+}
 /// N8h: the renderer's GPU memory by owner (ledger), wgpu's HAL counters and the
 /// allocator's report grouped by resource label, to `memory-<label>.json`.
 fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
@@ -812,6 +831,7 @@ fn gpu_visibility_quarry() {
     let mut stages = vec![];
     let mut changed = vec![];
     let mut rows = vec![];
+    let mut cache_rows = vec![];
     // The 64-seed Exact reference needs traced fresh visibility (an RT device).
     let seeded = if !no_rt && m["reference"].as_bool() != Some(false) {
         let module = seeded_module(&r);
@@ -883,6 +903,31 @@ fn gpu_visibility_quarry() {
             // Each configuration replays an independent sequence, including when the
             // settings equal the preceding configuration's restored settings.
             r.reset_virtual_shadow_cache();
+            // N8n: `approach_frames` camera frames stepping `approach_step` metres a frame along
+            // x into the pose first, so the pose's frames start from what motion cached.
+            let approach = m["approach_frames"].as_u64().unwrap_or(0) as u32;
+            let approach_step = m["approach_step"].as_f64().unwrap_or(0.002) as f32;
+            for i in (1..=approach).rev() {
+                let pose = &cameras.frames[index];
+                let step = Vec3::X * (approach_step * i as f32);
+                let moved = Camera::look_at(
+                    Vec3::from_array(pose.eye) + step,
+                    Vec3::from_array(pose.target) + step,
+                    Vec3::from_array(pose.up),
+                    pose.fov_y_radians,
+                    pose.near,
+                    pose.far,
+                )
+                .unwrap();
+                r.primary_mode = mode;
+                render(
+                    &mut r,
+                    &color,
+                    &moved,
+                    &mut asset.draws(Visibility::Frustum),
+                );
+                let _ = r.poll().unwrap();
+            }
             let suffix = match caster {
                 Some(c) if mode != PrimaryVisibility::Traced => format!("-ce{c}{variant}"),
                 _ => variant.clone(),
@@ -899,6 +944,9 @@ fn gpu_visibility_quarry() {
             } else {
                 4
             };
+            let stats = constants
+                .iter()
+                .any(|&(name, v)| name == "VSC_STATS" && v != 0.0);
             let mut first = None;
             for i in 0..warm + 8 {
                 // N8i: the variant's constants, once the shadow state exists (an unchanged
@@ -926,6 +974,13 @@ fn gpu_visibility_quarry() {
                 } else {
                     timing(&mut r, if i < warm { "warm" } else { &label }, &mut rows);
                 }
+                surface_stats(
+                    &mut r,
+                    stats,
+                    &format!("{label}-static"),
+                    i,
+                    &mut cache_rows,
+                );
             }
             r.test_drain("N1c quarry timing tail");
             timing(&mut r, &label, &mut rows);
@@ -951,6 +1006,7 @@ fn gpu_visibility_quarry() {
                         &mut asset.draws(Visibility::Frustum),
                     );
                     timing(&mut r, &format!("{label}-turn"), &mut rows);
+                    surface_stats(&mut r, stats, &format!("{label}-turn"), i, &mut cache_rows);
                 }
                 r.test_drain("N8c quarry turning tail");
                 timing(&mut r, &format!("{label}-turn"), &mut rows);
@@ -991,6 +1047,10 @@ fn gpu_visibility_quarry() {
                 // N8g: `move_wrap` > 0 walks the camera back and forth over that many steps, so
                 // long traced runs stay near the pose (every frame still moves).
                 let wrap = m["move_wrap"].as_u64().unwrap_or(0) as u32;
+                // N8n: `move_step` metres a frame along x (default 1 mm), and `move_yaw` radians
+                // a frame of pan about the vertical through the eye (default none).
+                let step_metres = m["move_step"].as_f64().unwrap_or(0.001) as f32;
+                let yaw = m["move_yaw"].as_f64().unwrap_or(0.0) as f32;
                 for i in 1..=move_frames {
                     let at = if wrap > 0 {
                         let k = i % (2 * wrap);
@@ -998,10 +1058,13 @@ fn gpu_visibility_quarry() {
                     } else {
                         i
                     };
-                    let step = Vec3::X * (0.001 * at as f32);
+                    let step = Vec3::X * (step_metres * at as f32);
+                    let eye = Vec3::from_array(pose.eye);
+                    let turned = glam::Mat3::from_rotation_y(yaw * at as f32)
+                        * (Vec3::from_array(pose.target) - eye);
                     let moved = Camera::look_at(
-                        Vec3::from_array(pose.eye) + step,
-                        Vec3::from_array(pose.target) + step,
+                        eye + step,
+                        eye + step + turned,
                         Vec3::from_array(pose.up),
                         pose.fov_y_radians,
                         pose.near,
@@ -1015,6 +1078,8 @@ fn gpu_visibility_quarry() {
                         &mut asset.draws(Visibility::Frustum),
                     );
                     timing(&mut r, &format!("{label}-move"), &mut rows);
+                    let i = i as usize;
+                    surface_stats(&mut r, stats, &format!("{label}-move"), i, &mut cache_rows);
                 }
                 r.test_drain("N8f camera motion tail");
                 timing(&mut r, &format!("{label}-move"), &mut rows);
@@ -1030,6 +1095,14 @@ fn gpu_visibility_quarry() {
                         &mut asset.draws(Visibility::Frustum),
                     );
                     timing(&mut r, &format!("{label}-caster"), &mut rows);
+                    let i = i as usize;
+                    surface_stats(
+                        &mut r,
+                        stats,
+                        &format!("{label}-caster"),
+                        i,
+                        &mut cache_rows,
+                    );
                 }
                 r.test_drain("N8f caster motion tail");
                 timing(&mut r, &format!("{label}-caster"), &mut rows);
@@ -1091,6 +1164,13 @@ fn gpu_visibility_quarry() {
         serde_json::to_vec_pretty(&rows).unwrap(),
     )
     .unwrap();
+    if !cache_rows.is_empty() {
+        fs::write(
+            out.join("surface-stats.json"),
+            serde_json::to_vec_pretty(&cache_rows).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
