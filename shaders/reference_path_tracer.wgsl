@@ -24,6 +24,7 @@ struct Frame {
     size:vec4<u32>,
     // x max path depth (Mitsuba semantics: 1 = emitters only, 2 = direct), y seed, z smith (0 correlated, 1 separable).
     options:vec4<u32>,
+    measurement:vec4<u32>, // x independent visibility rays per accepted primary sample
 };
 struct Vertex {a:vec4<f32>, b:vec4<f32>, tangent:vec4<f32>, color:vec4<f32>};
 struct Instance {offsets:vec4<u32>, n0:vec4<f32>, n1:vec4<f32>, n2:vec4<f32>};  // vertex, index, material
@@ -104,11 +105,19 @@ fn environment_index(uv:vec3<f32>)->u32 {
     let p=vec2<u32>(clamp((uv.yz*0.5+0.5)*f32(n),vec2<f32>(0.0),vec2<f32>(f32(n)-1.0)));
     return u32(uv.x)*n*n+p.y*n+p.x;
 }
-fn environment_tap(face:u32, xy:vec2<i32>)->vec3<f32> {
+fn environment_remap(face:u32, xy:vec2<i32>)->vec3<f32> {
     let n=frame.sky.w;
     // Project out-of-face bilinear taps onto their neighbouring face (seam-aware cube lookup).
     let d=environment_direction(face,(vec2<f32>(xy)+0.5)*(2.0/n)-1.0);
     return environment_texels[environment_index(environment_uv(d))].rgb;
+}
+fn environment_tap(face:u32, xy:vec2<i32>)->vec3<f32> {
+    let n=i32(frame.sky.w);
+    if (xy.x<0 || xy.x>=n) && (xy.y<0 || xy.y>=n) {
+        let q=clamp(xy,vec2<i32>(0),vec2<i32>(n-1));
+        return (environment_remap(face,q)+environment_remap(face,vec2<i32>(xy.x,q.y))+environment_remap(face,vec2<i32>(q.x,xy.y)))/3.0;
+    }
+    return environment_remap(face,xy);
 }
 fn sky_radiance(d:vec3<f32>)->vec3<f32> {
     if frame.sky.w==0.0 {return frame.sky.rgb;}
@@ -172,7 +181,8 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     let normal_matrix=mat3x3<f32>(inst.n0.xyz,inst.n1.xyz,inst.n2.xyz);
     var ng=normalize(normal_matrix*cross(v1.a.xyz-v0.a.xyz,v2.a.xyz-v0.a.xyz));
     let ns=vec3<f32>(v0.a.w,v0.b.xy)*w.x+vec3<f32>(v1.a.w,v1.b.xy)*w.y+vec3<f32>(v2.a.w,v2.b.xy)*w.z;
-    var n=normalize(normal_matrix*ns);
+    var n=normal_matrix*ns;
+    if dot(n,n)<=1e-12 {n=ng;} else {n=normalize(n);}
     let uv=v0.b.zw*w.x+v1.b.zw*w.y+v2.b.zw*w.z;
     let color=v0.color.rgb*w.x+v1.color.rgb*w.y+v2.color.rgb*w.z;
     let m=materials[inst.offsets.z];
@@ -194,9 +204,8 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
         if length(decoded)>1e-6/scale {mapped=normalize(decoded);}
         n=normalize(t*mapped.x+b*mapped.y+n*mapped.z);
     }
-    // Two-sided: shade the side the ray arrived from; keep the shading normal in that hemisphere.
-    if dot(ng,direction)>0.0 {ng=-ng;}
-    if dot(n,ng)<0.0 {n=-n;}
+    // Match material_normal: a source-back face reverses the complete perturbed frame.
+    if dot(ng,direction)>0.0 {ng=-ng;n=-n;}
     return Hit(true,p,n,ng,inst.offsets.z,uv,color,vec2<u32>(h.instance_custom_data+1u,h.primitive_index+1u));
 }
 fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
@@ -208,6 +217,22 @@ fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
 fn offset(p:vec3<f32>, ng:vec3<f32>)->vec3<f32> {
     let m=max(max(abs(p.x),abs(p.y)),abs(p.z));
     return p+ng*(1e-4+4e-7*m);
+}
+fn primary_visibility(hit:Hit)->f32 {
+    if frame.sun_value.w==0.0 {return 0.0;}
+    var total=0.0;
+    let start=offset(hit.p,hit.ng);
+    let n=frame.measurement.x;
+    for (var k=0u;k<n;k+=1u) {
+        var wi=frame.sun.xyz;
+        if frame.sun.w<1.0 {
+            let z=1.0-rand()*(1.0-frame.sun.w);let phi=2.0*PI*rand();
+            let r=sqrt(max(0.0,1.0-z*z));
+            wi=basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),z);
+        }
+        if dot(hit.ng,wi)>0.0 && !occluded(start,wi) {total+=1.0;}
+    }
+    return total/f32(n);
 }
 
 // Radiance arriving from an escaped direction: the sun disk inside its cone, else the sky.
@@ -316,6 +341,7 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
             let ds=dot(hit.p-frame.eye0.xyz,frame.forward0.xyz);
             // T1b's registered centre-surface condition: placement plus 2% camera-depth band.
             sample_accepted=select(0u,1u,hit.identity.x==reference_centre.identity.x && abs(ds-dc)<=0.02*dc);
+            if sample_accepted!=0u {sample_visibility=primary_visibility(hit);}
         }
         if !hit.hit {
             if depth==1u && frame.background.w>0.0 {return frame.background.rgb;}
@@ -359,7 +385,6 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
             }
             let cos_l=dot(hit.n,wi);
             let visible=dot(hit.ng,wi)>0.0 && !occluded(start,wi);
-            if depth==1u && sample_accepted!=0u {sample_visibility=select(0.0,1.0,visible);}
             if cos_l>0.0 && visible {
                 let f=bsdf(m,l,hit.n,v,wi);
                 if light_pdf==0.0 {

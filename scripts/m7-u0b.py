@@ -28,12 +28,36 @@ def load(name):
     return module
 
 
-def ue():
+def game_state():
+    state="released"
+    for line in Path("E:/renderlab-work/gpu-schedule.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("[GAME HOLD RELEASED]"):state="released"
+        elif line.startswith("[GAME HOLD RELAXED]"):state="relaxed"
+        elif line.startswith("[GAME HOLD]"):state="hold"
+    return state
+
+
+def ue(allow_game=False):
     u=load("m7-u0-ue")
     u.OUT=OUT;u.OWNER="m7-u0b"
+    original_state=u.E2E.state
+    def state():
+        snapshot=original_state();mode=game_state()
+        snapshot["game_protocol"]=mode
+        if allow_game and mode=="relaxed":
+            snapshot["permitted_game_processes"]=snapshot["games"]
+            snapshot["games"]=[]
+            snapshot["timings_contended"]=True
+        return snapshot
+    u.E2E.state=state
+    if allow_game and game_state()=="relaxed":
+        u.START_GIB=6.0;u.ABORT_GIB=3.0
+        u.UE_FLAGS=["-corelimit=2" if f=="-corelimit=8" else f for f in u.UE_FLAGS]
     base_tool=u.engine_tool
     def engine_tool(p):
         if base_tool(p):return True
+        path=(p.get("ExecutablePath") or "").lower().replace("/","\\")
+        if p["Name"].lower()=="build-script-build.exe" and "\\target\\" in path and "\\build\\crossbeam-" in path:return True
         if re.fullmatch(r"renderlab-[0-9a-f]+\.exe",p["Name"].lower()):
             # Non-ignored library tests are CPU-only. A running ignored test stays a
             # renderer conflict; a PID which exited between snapshots is no conflict.
@@ -43,6 +67,37 @@ def ue():
             return bool(line) and "--ignored" not in line and "--include-ignored" not in line
         return False
     u.engine_tool=engine_tool
+    original_lease=u.lease
+    original_guarded=u.guarded
+    active_owner=None
+    def bounded_guarded(command,*a,**kw):
+        if active_owner is not None:
+            remaining=int(u.remaining_seconds(active_owner))-5
+            if remaining<1:raise RuntimeError("owned GPU lease is ending")
+            kw["timeout"]=min(kw.get("timeout",remaining),remaining)
+        return original_guarded(command,*a,**kw)
+    u.guarded=bounded_guarded
+    @contextlib.contextmanager
+    def queued_lease(label,minutes):
+        nonlocal active_owner
+        mode=game_state()
+        if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
+        if mode=="relaxed":minutes=min(minutes,3)
+        deadline=time.monotonic()+900
+        next_notice=0
+        while u.LOCK.exists():
+            mode=game_state()
+            if mode=="hold" or (mode=="relaxed" and not allow_game):raise SystemExit("Queued until GAME HOLD RELEASED: "+label)
+            if time.monotonic()>=deadline:raise RuntimeError("no shared GPU gap within 15 minutes")
+            if time.monotonic()>=next_notice:
+                print("Waiting for shared GPU slot; requesting",label,flush=True)
+                next_notice=time.monotonic()+30
+            time.sleep(.5)
+        with original_lease(label,minutes) as owner:
+            active_owner=owner
+            try:yield owner
+            finally:active_owner=None
+    u.lease=queued_lease
     return u
 
 
@@ -60,24 +115,32 @@ def build(args):
     exe=next(x["executable"] for x in reversed(records) if x.get("reason")=="compiler-artifact" and x.get("executable") and x["target"]["name"]=="renderlab")
     BINARY.parent.mkdir(exist_ok=True)
     shutil.copyfile(exe,BINARY)
-    ue().save(OUT/"build.json",dict(seconds=time.perf_counter()-begin,exit_code=p.returncode,binary_sha256=ue().sha(BINARY)))
+    inputs=("src/reference.rs","src/reference_inputs.rs","src/reference_tests.rs","src/reference_quarry_tests.rs","shaders/reference_path_tracer.wgsl")
+    ue().save(OUT/"build.json",dict(seconds=time.perf_counter()-begin,exit_code=p.returncode,binary_sha256=ue().sha(BINARY),
+        inputs_sha256={name:ue().sha(REPO/name) for name in inputs}))
     print((OUT/"build.json").read_text())
 
 
 def reference(args):
-    u=ue();out=OUT/"reference"/args.label;out.mkdir(parents=True,exist_ok=True)
+    u=ue(allow_game=True);out=OUT/"reference"/args.label;out.mkdir(parents=True,exist_ok=True)
     env=dict(os.environ,RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
              RENDERLAB_M7_REFERENCE_OUT=str(out),VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
     env.pop("VK_INSTANCE_LAYERS",None)
     test="reference::tests::gpu_reference_analytic"
     if args.benches:
-        env["RENDERLAB_M7_BENCHES"]=";".join(str(BASE/"scenes"/x.split("@")[0])+"@"+x.split("@")[1] for x in args.benches)
+        env["RENDERLAB_M7_BENCHES"]=";".join(str((OUT if (OUT/"scenes"/x.split("@")[0]/"scene.json").exists() else BASE)/"scenes"/x.split("@")[0])+"@"+x.split("@")[1] for x in args.benches)
         test="reference::tests::gpu_reference_benches"
     if args.manifest:
         env["RENDERLAB_M7_QUARRY_MANIFEST"]=str(args.manifest)
+        env["RENDERLAB_M7_REFERENCE_BATCH"]=str(min(args.batch_frames,3) if game_state()=="relaxed" else args.batch_frames)
+        if game_state()=="relaxed":env["RENDERLAB_M7_REFERENCE_MAX_FRAME_SECONDS"]="45"
         test="reference::quarry_tests::gpu_reference_quarry"
     with u.lease("reference-"+args.label,args.minutes) as owner:
-        u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],out/"process",
+        process=out/("process-"+owner["token"][:8]);process.mkdir(exist_ok=True)
+        u.save(process/"reference-recipe.json",dict(binary_sha256=u.sha(BINARY),build=json.loads((OUT/"build.json").read_text()),
+            environment={k:v for k,v in env.items() if k.startswith("RENDERLAB_M7_")},
+            manifest_sha256=u.sha(args.manifest) if args.manifest else None,game_protocol=game_state()))
+        u.guarded([BINARY,test,"--exact","--ignored","--nocapture","--test-threads=1"],process,
                   timeout=max(30,int(u.remaining_seconds(owner))-10),cwd=REPO,env=env)
 
 
@@ -121,6 +184,7 @@ def cook(args):
 def quiet_desktop(u,root):
     """Pause the live wallpaper through its supported watched setting, then restore only that
     setting. Do not stop applications or overwrite concurrent changes to other preferences."""
+    u.preflight(root/"quiet-preflight.json",wait_seconds=0)
     path=Path(os.environ["APPDATA"])/"mypaper/config.json"
     config=json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else None
     original=config.get("paused",False) if config is not None else None
@@ -144,7 +208,7 @@ def quiet_desktop(u,root):
 
 
 def study(args):
-    u=ue();root=OUT/"study"/args.label;root.mkdir(parents=True,exist_ok=True)
+    u=ue(allow_game=not args.quiet);root=OUT/"study"/args.label;root.mkdir(parents=True,exist_ok=True)
     configs=args.configs or list(u.CONFIGS)
     benches=args.benches or ["quarry"]
     u.schedule_line(f"[m7-u0b gap request] quiet={args.quiet} asks for an exclusive {args.minutes}-minute gap: {configs}, benches={benches}; no Cargo, hidden/offscreen, wallpaper paused only for quiet timings.")
@@ -155,7 +219,8 @@ def study(args):
                     u.PACKAGE_DIR=(BASE if bench=="quarry" else OUT)/"ue-package"
                     u.PACKAGE=u.PACKAGE_DIR/"Windows/Engine/Binaries/Win64/UnrealGame.exe"
                     for config in configs if visit%2==0 else reversed(configs):
-                        if u.remaining_seconds(owner)<100:raise RuntimeError("lease nearly over; resume unfinished runs")
+                        if u.remaining_seconds(owner)<100:
+                            print("Short lease complete; resume unfinished cases with the same command",flush=True);return
                         out=root/f"{bench}-{config}-{args.workload}-{visit}";out.mkdir(exist_ok=True)
                         if (out/"readback.json").exists() and json.loads((out/"readback.json").read_text())["all_ok"]:continue
                         extra=[];events=[]
@@ -169,13 +234,86 @@ def study(args):
                             if args.hdr and args.workload=="pan":
                                 for f in (97,112,128,159):
                                     events += [(f-2,f"r.DumpGPU.Directory {(out/f'hdr-{f:03}').as_posix()}"),(f-1,"DumpGPU"),(f+1,"getall PlayerCameraManager CameraCachePrivate")]
+                        scene=None
+                        if bench!="quarry":
+                            scene=json.loads((BASE/"scenes"/bench/"scene.json").read_text())
+                            # U0's HRT configuration sets the quarry's 4.58-degree disk. These
+                            # benches register a 0.5329-degree disk, so restore it after the preset.
+                            angle=math.degrees(2*scene["sun"]["angular_radius"]) if scene["sun"] else 0
+                            extra += [f"set DirectionalLightComponent LightSourceAngle {angle:.9f}",
+                                      "r.Shadow.CacheWPOPrimitives 1","r.Shadow.CacheWPOPrimitives 0",*u.READBACK]
                         u.launch_ue(out,config,args.workload,extra=extra,events=events,frames=220 if args.hdr else 160,
                                     level=None if bench=="quarry" else f"/Game/M7U0b/{bench}/Bench")
                         ok=u.readback(out,config,u.scalability_expectations())
+                        if scene is not None:
+                            log=(out/"ue.log").read_text(encoding="utf-8-sig",errors="replace")
+                            actual=[float(v) for v in re.findall(r"\.LightSourceAngle = ([0-9.eE+-]+)",log)]
+                            proof=dict(scene_sha256=u.sha(BASE/"scenes"/bench/"scene.json"),expected_sun_angle_degrees=angle,
+                                       actual_sun_angle_degrees=actual[-1] if actual else None,
+                                       sun_angle_ok=bool(actual) and abs(actual[-1]-angle)<2e-5)
+                            u.save(out/"scene-readback.json",proof);ok=ok and proof["sun_angle_ok"]
                         summary=u.PROFILE.summarize(out/"profile.csv");summary["pass_costs_async_off"]=u.pass_costs(out)
+                        summary["timing_eligible_for_claim"]=bool(args.quiet and game_state()=="released")
+                        summary["game_protocol"]=game_state()
                         u.save(out/"summary.json",summary)
                         print(json.dumps(dict(case=out.name,readback_ok=ok,gpu=summary["statistics"]["GPUTime"])),flush=True)
                         if not ok:raise RuntimeError("readback failed "+str(out))
+
+
+def pose_commands(p):
+    x,y,z=p["eye"];dx,dy,dz=[b-a for a,b in zip(p["eye"],p["target"])]
+    pitch=math.degrees(math.atan2(dy,math.hypot(dx,dz)));yaw=math.degrees(math.atan2(dx,-dz))
+    return [f'ke CameraActor K2_SetActorLocation "(X={-100*z:.9f},Y={100*x:.9f},Z={100*y:.9f})" false () false',
+            f'ke CameraActor K2_SetActorRotation "(Pitch={pitch:.9f},Yaw={yaw:.9f},Roll=0)" false']
+
+
+def walk(args):
+    """Contiguous native Lumen capture on the exact registered Q-walk. The GPU lease is
+    released before CPU HDR decoding, so other workers can use that time."""
+    u=ue(allow_game=True);root=OUT/"walk"/args.label;root.mkdir(parents=True,exist_ok=True)
+    source=Path("E:/renderlab-work/t1-gpu/sequences/q-walk.json")
+    frames=json.loads(source.read_text())["frames"]
+    macros=OUT/"m"/args.label;macros.mkdir(parents=True,exist_ok=True)
+    events=[]
+    for i,p in enumerate(frames):
+        text=(["getall PlayerCameraManager CameraCachePrivate"] if i else [])+pose_commands(p)
+        events.append((96+i,u.macro(macros,f"m{i}",text)))
+    events += [(95,"DumpGPU"),(96+len(frames),"getall PlayerCameraManager CameraCachePrivate")]
+    for config in args.configs:
+        out=root/config;out.mkdir(exist_ok=True)
+        if (out/"native.json").exists():continue
+        extra=["r.DumpGPU.Upload 0","r.DumpGPU.Explore 0","r.DumpGPU.Stream 0","r.DumpGPU.Texture 2","r.DumpGPU.Buffer 2",
+               "r.DumpGPU.PassParameters 1",f"r.DumpGPU.FrameCount {len(frames)}","r.DumpGPU.Root Tonemap*",f"r.DumpGPU.Directory {(out/'hdr').as_posix()}"]
+        original_guarded=u.guarded
+        def bounded_command(command,*a,**kw):
+            length=len(subprocess.list2cmdline([str(c) for c in command]))
+            if length>=16000:raise ValueError(f"UE's 16-KiB FCommandLine bound: {length}")
+            return original_guarded(command,*a,**kw)
+        u.guarded=bounded_command
+        with u.lease("walk-"+args.label+"-"+config,8):
+            u.launch_ue(out,config,"static",extra=extra,events=events,frames=96+len(frames)+80)
+            if not u.readback(out,config,u.scalability_expectations()):raise RuntimeError("walk readback failed")
+        u.guarded=original_guarded
+        log=(out/"ue.log").read_text(encoding="utf-8-sig",errors="replace")
+        rows=re.findall(r"CameraCachePrivate = .*?Location=\(X=([^,]+),Y=([^,]+),Z=([^\)]+)\),Rotation=\(Pitch=([^,]+),Yaw=([^,]+),Roll=([^\)]+)\),FOV=([^,]+)",log)
+        if len(rows)!=len(frames):raise RuntimeError(f"camera readback coverage {len(rows)} != {len(frames)}")
+        checks=[]
+        for i,(row,p) in enumerate(zip(rows,frames)):
+            x,y,z,pitch,yaw,roll,fov=map(float,row);a,b=map(math.radians,(pitch,yaw))
+            eye=[y/100,z/100,-x/100]
+            actual=[math.cos(a)*math.sin(b),math.sin(a),-math.cos(a)*math.cos(b)]
+            d=[v-e for v,e in zip(p["target"],p["eye"])];length=math.sqrt(sum(v*v for v in d));expected=[v/length for v in d]
+            error=max(abs(e-v) for e,v in zip(eye,p["eye"]))
+            direction_error=max(abs(e-v) for e,v in zip(expected,actual))
+            if error>1e-6 or direction_error>1e-6 or abs(roll)>1e-5:raise RuntimeError(f"camera mismatch {i}: {error}, {direction_error}")
+            checks.append(dict(frame=i,eye_error_m=error,direction_error=direction_error,fov_degrees=fov))
+        u.save(out/"camera-readback.json",dict(sequence_sha256=u.sha(source),frames=checks,all_ok=True))
+        u.save(out/"recipe.json",dict(sequence=str(source),sequence_sha256=u.sha(source),frames=frames,
+                shutter="zero",capture_only=True,first_csv_frame=96,arm_csv_frame=95,
+                package_executable_sha256=u.sha(u.PACKAGE),config=config))
+        subprocess.run(["py","-3","-B",str(REPO/"scripts/m7-u0b-score.py"),"decode",str(out/"hdr"),str(out/"native.npz")],check=True,
+                       cwd=REPO,stdout=(out/"decode.log").open("w"),creationflags=subprocess.CREATE_NO_WINDOW)
+        print("decoded native walk",config,flush=True)
 
 
 def main():
@@ -184,10 +322,12 @@ def main():
     q=sub.add_parser("cook");q.add_argument("label")
     q=sub.add_parser("reference");q.add_argument("label");q.add_argument("--minutes",type=int,default=15)
     q.add_argument("--benches",nargs="+");q.add_argument("--manifest",type=Path)
+    q.add_argument("--batch-frames",type=int,default=16)
     q=sub.add_parser("study");q.add_argument("label");q.add_argument("--minutes",type=int,default=30)
     q.add_argument("--configs",nargs="+");q.add_argument("--benches",nargs="+");q.add_argument("--repeats",type=int,default=1)
     q.add_argument("--quiet",action="store_true");q.add_argument("--hdr",action="store_true")
     q.add_argument("--workload",choices=("static","camera","sun","pan"),default="static")
+    q=sub.add_parser("walk");q.add_argument("label");q.add_argument("--configs",nargs="+",default=["ue-sw-e","ue-hw-e","ue-sw-h","ue-hw-h"])
     args=p.parse_args();globals()[args.cmd](args)
 
 

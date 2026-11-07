@@ -143,6 +143,9 @@ pub struct Settings {
     pub texture_lod: f32,
     /// Capture centre hit identities, sun-only radiance and centre-conditioned visibility.
     pub capture_geometry: bool,
+    /// Independent sun visibility rays for each accepted primary sample in geometric
+    /// captures. Does not change the radiance estimator; 32 matches T1b's visibility budget.
+    pub visibility_samples: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -154,6 +157,7 @@ impl Default for Settings {
             smith: Smith::HeightCorrelated,
             texture_lod: 0.0,
             capture_geometry: false,
+            visibility_samples: 32,
         }
     }
 }
@@ -179,7 +183,7 @@ pub struct Image {
 /// Interleaved vertex record: position and normal x, then normal yz and two spare floats.
 const VERTEX_FLOATS: usize = 16;
 /// The shader's `Frame`: two camera bases (8 vec4), sun, sun value, sky, then two vec4<u32>.
-const FRAME_BYTES: usize = 15 * 16;
+const FRAME_BYTES: usize = 16 * 16;
 
 fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error> {
     let bad = |m| Err(Error::InvalidInput(m));
@@ -227,7 +231,11 @@ fn validate(scene: &Scene, view: &View, settings: &Settings) -> Result<(), Error
     if view.width == 0 || view.height == 0 || !(1e-4..3.1).contains(&view.fov_y) {
         return bad("reference view needs a size and a field of view in (0, pi)");
     }
-    if settings.samples < 2 || settings.samples_per_dispatch == 0 || settings.max_depth == 0 {
+    if settings.samples < 2
+        || settings.samples_per_dispatch == 0
+        || settings.max_depth == 0
+        || settings.visibility_samples == 0
+    {
         return bad("reference settings need at least two samples, a dispatch size and a depth");
     }
     Ok(())
@@ -311,6 +319,10 @@ fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, coun
         settings.seed,
         smith,
         settings.texture_lod.to_bits(),
+        settings.visibility_samples,
+        0,
+        0,
+        0,
     ] {
         bytes.extend(word.to_le_bytes());
     }

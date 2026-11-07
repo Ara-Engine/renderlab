@@ -17,7 +17,13 @@ fn gpu_reference_quarry() {
         renderlab_asset::decode(&asset_bytes, renderlab_asset::Limits::unlimited()).unwrap();
     drop(asset_bytes);
     let mut scene = Scene::from_prepared(asset);
-    scene.camera_background = Some([0.0; 3]);
+    scene.camera_background = Some(
+        manifest["camera_background"]
+            .as_array()
+            .map_or([0.0; 3], |v| {
+                std::array::from_fn(|i| v[i].as_f64().unwrap() as f32)
+            }),
+    );
     let env_bytes = read("environment");
     let environment_sha = format!("{:x}", sha2::Sha256::digest(&env_bytes));
     let env = renderlab_asset::environment::decode(
@@ -55,7 +61,15 @@ fn gpu_reference_quarry() {
         serde_json::to_vec_pretty(&info).unwrap(),
     )
     .unwrap();
+    let batch_limit =
+        std::env::var("RENDERLAB_M7_REFERENCE_BATCH").map_or(u32::MAX, |v| v.parse().unwrap());
+    let mut rendered = 0;
+    let frame_limit = std::env::var("RENDERLAB_M7_REFERENCE_MAX_FRAME_SECONDS")
+        .map_or(f64::INFINITY, |v| v.parse().unwrap());
     for frame in manifest["frames"].as_array().unwrap() {
+        if rendered >= batch_limit {
+            break;
+        }
         let name = frame["name"].as_str().unwrap();
         if let Some(alias) = frame["alias_of"].as_str() {
             assert!(
@@ -97,11 +111,12 @@ fn gpu_reference_quarry() {
         }
         let start = std::time::Instant::now();
         let image = render(&device, &queue, &scene, &view, &settings).unwrap();
+        rendered += 1;
         super::tests::save(
             &dir,
             name,
             &image,
-            serde_json::json!({"frame":frame,"content":info,"seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth}),
+            serde_json::json!({"frame":frame,"content":info,"seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,"camera_background":scene.camera_background}),
         );
         let status = std::process::Command::new("py")
             .args([
@@ -122,5 +137,11 @@ fn gpu_reference_quarry() {
             settings.samples,
             start.elapsed().as_secs_f64()
         );
+        if start.elapsed().as_secs_f64() > frame_limit {
+            eprintln!(
+                "Reference frame exceeded the game-contention limit; stopping this batch cleanly"
+            );
+            break;
+        }
     }
 }

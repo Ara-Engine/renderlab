@@ -231,6 +231,9 @@ pub(super) fn load_bench(path: &Path) -> Bench {
                     })
                     .collect()
             }),
+            camera_background: v["camera_background"]
+                .as_array()
+                .map(|_| v3(&v["camera_background"])),
             ..Default::default()
         },
         views,
@@ -395,12 +398,17 @@ fn gpu_reference_analytic() {
                     p[u] = a;
                     p[v] = b;
                     let mut n = [0.0f32; 3];
-                    n[axis] = -side;
+                    n[axis] = side;
                     m.positions.push(p);
                     m.normals.push(n);
                 }
-                m.indices
-                    .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                if side > 0.0 {
+                    m.indices
+                        .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                } else {
+                    m.indices
+                        .extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+                }
             }
         }
         m
@@ -549,6 +557,56 @@ fn gpu_reference_analytic() {
         serde_json::json!({"expected":50.0,"relative_mean":mean,"relative_se":se}),
     );
     rows.push(("cube-sky-floor".into(), mean, se, image.invalid_pixels));
+    let mut texels = Vec::new();
+    for face in renderlab_asset::environment::CubeFace::ALL {
+        for y in 0..128 {
+            for x in 0..128 {
+                let d = face.direction([
+                    2.0 * (f64::from(x) + 0.5) / 128.0 - 1.0,
+                    2.0 * (f64::from(y) + 0.5) / 128.0 - 1.0,
+                ]);
+                texels.push([
+                    (100.0 + 30.0 * d[1]) as f32,
+                    (120.0 - 40.0 * d[1]) as f32,
+                    (50.0 + 15.0 * d[1]) as f32,
+                ]);
+            }
+        }
+    }
+    let gradient_sky = Scene {
+        environment: Some(Environment {
+            radiance: renderlab_asset::environment::CubeLevel::new(
+                128,
+                texels,
+                renderlab_asset::environment::Limits::unbounded(),
+            )
+            .unwrap(),
+            yaw: 0.7,
+            intensity: 1.0,
+        }),
+        ..prepared_sky
+    };
+    // Integral of (a+b*y) cos(theta) over the upper hemisphere is pi*(a+2*b/3).
+    let expected = [60.0, 46.6666667, 30.0];
+    let image = render(
+        &device,
+        &queue,
+        &gradient_sky,
+        &v,
+        &Settings {
+            samples: 16384,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (mean, se) = region(&image, expected, 0..image.mean.len());
+    save(
+        &dir,
+        "gradient-cube-floor",
+        &image,
+        serde_json::json!({"expected":expected,"relative_mean":mean,"relative_se":se}),
+    );
+    rows.push(("gradient-cube-floor".into(), mean, se, image.invalid_pixels));
     // A constant tangent-space normal tests the complete prepared normal-map decode,
     // tangent frame and linear (not sRGB) texture sampling against analytic direct light.
     let texel = [128u8, 180, 230, 255];
@@ -638,6 +696,8 @@ fn gpu_reference_benches() {
             let settings = Settings {
                 samples: spp,
                 smith: bench.smith,
+                capture_geometry: std::env::var("RENDERLAB_M7_CAPTURE_GEOMETRY").as_deref()
+                    == Ok("1"),
                 ..Default::default()
             };
             let start = std::time::Instant::now();
@@ -654,7 +714,9 @@ fn gpu_reference_benches() {
                 &image,
                 serde_json::json!({
                 "bench": name, "pose": pose, "scene_sha256": bench.sha256, "seconds": seconds,
-                "seed": settings.seed, "max_depth": settings.max_depth, "smith": format!("{:?}", settings.smith)}),
+                "seed": settings.seed, "max_depth": settings.max_depth, "smith": format!("{:?}", settings.smith),
+                "camera_background":bench.scene.camera_background,
+                "visibility_samples_per_primary":settings.visibility_samples}),
             );
             if first.is_none() {
                 first = Some((format!("{name}/{pose}"), image.mean));
@@ -666,11 +728,35 @@ fn gpu_reference_benches() {
                     .flatten()
                     .zip(mean.iter().flatten())
                     .all(|(a, b)| a.to_bits() == b.to_bits());
+                let mut changed_pixels = 0;
+                let mut changed_channels = 0;
+                let mut sum_squared = 0.0f64;
+                let mut max_abs = 0.0f32;
+                let mut max_ulp = 0;
+                let mut examples = Vec::new();
+                for (pixel, (a, b)) in mean.iter().zip(&replay.mean).enumerate() {
+                    if a.map(f32::to_bits) == b.map(f32::to_bits) {
+                        continue;
+                    }
+                    changed_pixels += 1;
+                    for (x, y) in a.iter().zip(b) {
+                        changed_channels += u32::from(x.to_bits() != y.to_bits());
+                        sum_squared += f64::from(x - y).powi(2);
+                        max_abs = max_abs.max((x - y).abs());
+                        // Radiance is nonnegative, so IEEE bit distance is ULP distance.
+                        max_ulp = max_ulp.max(x.to_bits().abs_diff(y.to_bits()));
+                    }
+                    if examples.len() < 32 {
+                        examples.push(serde_json::json!({"pixel":[pixel as u32 % v.width,pixel as u32 / v.width],"first":a,"replay":b}));
+                    }
+                }
                 std::fs::write(
                     dir.join("replay.json"),
-                    serde_json::to_vec(
-                        &serde_json::json!({"case": label, "bit_identical": identical}),
-                    )
+                    serde_json::to_vec_pretty(&serde_json::json!({"case":label,"bit_identical":identical,
+                        "changed_pixels":changed_pixels,"changed_channels":changed_channels,
+                        "rms_absolute":(sum_squared/(3*mean.len()) as f64).sqrt(),
+                        "max_absolute":max_abs,"max_ulp":max_ulp,"first_changed_examples":examples,
+                        "scope":"same seed and dispatch layout, independent acceleration-structure rebuild"}))
                     .unwrap(),
                 )
                 .unwrap();
