@@ -540,15 +540,16 @@ full covariance were **not built** in this continuation; they remain explicit
 next experiments, not claimed failures. A fitted mixture must preserve its
 actual tail distribution and interpolation across neighbouring texels/mips.
 
-Final checks: library **122 passed, 117 ignored**; cook/asset **91 passed,
+Final checks after also merging main `156405d` (RT1b and DL2) as `220120c`:
+library **123 passed, 120 ignored**; cook/asset **91 passed,
 2 ignored**; fmt and diff checks pass. Cook/asset strict Clippy passes; renderer
 Clippy passes with the two previously documented baseline lint classes excluded.
 Unrestricted renderer Clippy still has the existing shadow/visibility failures;
-no suppression or shadow-file edit was added. Main remains an ancestor of the
-branch. No U1b edit touches `film_accumulation.rs` or the decisions TSV; the
+no suppression or shadow-file edit was added. Main `156405d` is an ancestor of
+the branch. No U1b edit touches `film_accumulation.rs` or the decisions TSV; the
 merge imports main's already-committed changes.
 
-Fifteen successful guarded GPU child runs took 344.77 s, including 103.94 s for
+Seventeen successful guarded GPU child runs took 396.59 s, including 103.94 s for
 the refined reference; all exit 0 with no validation error. One stale executable
 path was rejected before launching a child and corrected. Minimum observed
 free RAM was 7010 MiB; foreign compiler contention is recorded (up to fourteen
@@ -556,8 +557,15 @@ rustc processes). This worker used two Cargo jobs and none in its GPU leases.
 Implementation/merge/CPU-probe time was not isolated from queue waits; it is not
 reported as GPU time. Cargo durations and each verification run are retained.
 
-Current executable SHA-256:
+Cost-screen executable SHA-256 (before the final DL2/RT1b integration):
 `de6f847f200be0abdced96ae369166c13b81bf79980a43d6118a46f919a8b1b4`.
+The final merged verification executable is
+`cf510e91af5b16670cff3b1a0565b62c626a4914aee31032551c590bda03a5df`.
+Both paths were recaptured on that build: **all 750 HDR buffers are byte-identical**,
+including the unfiltered default, so the quality scores and inspected figures
+are unchanged. `merged-capture-proof.json` records every comparison. DL2's
+ordinary rendering policy is unchanged; cost figures above retain their measured
+build identity rather than claiming a new post-merge timing campaign.
 The evidence retains `gates-r2.json`, `gates-original.json`, per-frame and
 summary JSON, `versus-spatial256.json`, native manifests/stage summaries,
 `quarry-textures.json`, CPU probes and inspected `contact-sheet-r2.png` and
@@ -565,3 +573,10 @@ summary JSON, `versus-spatial256.json`, native manifests/stage summaries,
 at delivery. Reproduce this batch with variants `0,10,12,...,23`, then give the
 same explicit list to the scorer's `--variants` argument; `--contact-variants`
 chooses the inspected figure columns. The standard program remains opt-in.
+
+The last owned GPU lease released at 14:37:11Z, before the game hold at
+14:39:03Z. No recorded U1b timing overlaps play; no GPU work was started after
+the hold. The remaining integration note, push and cleanup are CPU-only. The
+next GPU qualification step is deferred to a quiet period: optimized paired
+costs and actual normal-mapped quarry residency/quality, alongside TR1's proposed
+amortized footprint. No active GPU job or lease is left behind.
