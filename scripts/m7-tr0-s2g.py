@@ -83,7 +83,7 @@ def material_instances():
 def collect(case, archive, metadata, kind):
     """Retain centre geometry independently from low-spp colour; physical archives stay lossless."""
     destination = OUT / "geometry" / (key(sequences()[case["track"]][case["frame"]]) + ".npz")
-    if not destination.exists() and not (OUT / "ages/protocol.json").exists():
+    if not destination.exists() and not (OUT / "geometry/deleted-raw.json").exists():
         destination.parent.mkdir(parents=True, exist_ok=True)
         with np.load(archive) as data:
             np.savez_compressed(destination, **{k: data[k] for k in ("world", "hit", "depth")})
@@ -378,17 +378,26 @@ def colour_control(args):
     print(json.dumps(dict(rows=rows, measured_pre_exposure=measured_pe), indent=2))
 
 
-def ages(_):
+def ages(args):
     registration = json.loads((OUT / "plan.json").read_text())
-    missing = [case["key"] for case in registration["geometry"] if not (OUT / "geometry" / (case["key"] + ".npz")).exists()]
+    selected = set(args.tracks or TRACKS)
+    needed = {key(pose) for name, frames in sequences().items() if name in selected for pose in frames}
+    missing = [identity for identity in needed if not (OUT / "geometry" / (identity + ".npz")).exists()]
     if missing:
         raise SystemExit(f"geometry stage incomplete: {len(missing)} distinct views missing; no ages generated")
     cached_key, cached = None, None
-    records = []
-    static_updates = 0
+    protocol_path = OUT / "ages/protocol.json"
+    old = json.loads(protocol_path.read_text()) if protocol_path.exists() else {}
+    if old and old["source_sequences"] != registration["source_sequences"]:
+        raise ValueError("existing ages have a different registered input timeline")
+    records = [r for r in old.get("records", []) if r["track"] not in selected]
+    static_updates_by_track = dict(old.get("static_updates_by_track", {}))
     for name, frames in sequences().items():
+        if name not in selected:
+            continue
         previous, old_pose, age = None, None, None
         previous_key = None
+        static_updates = 0
         for i, pose in enumerate(frames):
             identity = key(pose)
             path = OUT / "geometry" / (identity + ".npz")
@@ -412,8 +421,11 @@ def ages(_):
                                 pixels=int(age.size), age0=int((age == 0).sum()), age32=int((age >= 32).sum())))
             previous, old_pose, previous_key = cached, pose, identity
         print("geometry ages", name, len(frames), flush=True)
-    save(OUT / "ages/protocol.json", dict(records=records, source_sequences=registration["source_sequences"], script_sha256=SCRIPT_SHA,
-        exact_static_view_updates=static_updates,
+        static_updates_by_track[name] = static_updates
+    records.sort(key=lambda row: (row["track"], row["frame"]))
+    save(protocol_path, dict(records=records, source_sequences=registration["source_sequences"], script_sha256=SCRIPT_SHA,
+        static_updates_by_track=static_updates_by_track, exact_static_view_updates=sum(static_updates_by_track.values()),
+        complete=len(records) == 640,
         definition="Fixed external benchmark ages: nearest previous centre, same instance, 2% forward depth; age0 on rejection, +1 on acceptance capped255. Black infinity is same-pixel for pure translation. Sun changes do not reset geometric age.",
         scope="S2G only; does not replace recovered original T1b age masks. Offline scoring only, no renderer consumes these ages."))
 
@@ -465,8 +477,10 @@ def check(_):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "ages", "check", "prune-geometry"):
+    for name in ("plan", "check", "prune-geometry"):
         commands.add_parser(name)
+    p = commands.add_parser("ages")
+    p.add_argument("--tracks", choices=TRACKS, nargs="+", help="Generate completed tracks incrementally; retain geometry until all 640 ages exist")
     p = commands.add_parser("import")
     p.add_argument("metadata", type=Path)
     p = commands.add_parser("trace")

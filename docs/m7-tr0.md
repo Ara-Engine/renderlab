@@ -71,25 +71,25 @@ The T1b column below is carried evidence from `b8fa1f3`, not a new render. `base
 
 | Measure | Recorded T1b, Q-walk | TSR Epic | TSR High |
 |---|---|---|---|
-| F1 all-covered, moving frames 48/64, L0 / L4 / D4, × Exact bar | 0.65–0.69 / 0.60–0.64 / 0.74–0.79 | Pending matched reference/masks | Pending matched reference/masks |
-| F1 partial L0 / D4, same frames | 0.61–0.65 / 0.64–0.68 | Pending | Pending |
-| F1 occluded L0 / D4 | 0.71–0.72 / **1.57–1.69** | Pending | Pending |
-| F1 edge L0 / L4 | **1.06–1.08 / 1.01–1.04** | Pending | Pending |
-| F1 background-centre L0 / L4 / D4 | **1.37–1.42 / 1.46–1.49 / 1.44–1.46** | Pending | Pending |
-| F1 hold frame 96, all-covered L0 / L4 / D4 | 0.12 / 0.13 / 0.14 | Pending | Pending |
-| F1 return frame 120, background-centre L0 / L4 / D4 | **2.21 / 2.13 / 1.81** | Pending | Pending |
-| R_F solid maximum, bound 0.002 | **0.40–0.61** moving; 0.10–0.28 hold | Pending visibility estimand | Pending visibility estimand |
-| Silhouette trails | **5–8 px**, cliff-coloured trails into sky, reverses side on return | Pending reference/edge mask | Pending reference/edge mask |
-| Background L0, 1.5–3 px / 3–6 px from silhouette, frame 64 | **9.80 / 7.09 codes**, Exact 0 / 0 | Pending | Pending |
-| F2 disocclusion, all-covered L0 at age 3 / 7 | **18.0 / 13.4**, Interactive 11.4 / 8.3 | Pending event masks | Pending event masks |
-| F2 background-centre L0 at age 7 | **39.4**, Interactive 11.3 | Pending | Pending |
-| F3 bias | **996 failing cases** | Pending | Pending |
-| F4 D4 pixels >16 codes, frame 128 | **3,934**, Exact 3,356 | Pending R_D reference | Pending R_D reference |
-| F5 changed-pixel L0, frame 72 (+8 after stop) | 2.7519, bar 7.9715; ghost bias fails on 30 frame/channel cases | Pending changed mask/reference | Pending changed mask/reference |
-| F6 moving residual, L0 | 3.1–3.8 codes, Exact 7.0–7.2 | Pending reference subtraction | Pending reference subtraction |
-| F6 hold steps L0 / L4 (covered pixels) | 0.2769 / 0.3297 codes | Pending same population | Pending same population |
-| Settle to the film bar after each event | Hold RMS passes at +8; F2 revealed age-7 **fails**; no universal passing settle count | Pending film-reference curve | Pending film-reference curve |
-| Q-disocclusion, Q-sun and S2-glossy | **Not run on T1b** | Capture/score work in progress | Cost curve work in progress |
+| F1 all-covered, moving frames 48/64, L0 / L4 / D4, × Exact bar | 0.65–0.69 / 0.60–0.64 / 0.74–0.79 | Frozen target unavailable | Frozen target unavailable |
+| F1 partial L0 / D4, same frames | 0.61–0.65 / 0.64–0.68 | Same limit | Same limit |
+| F1 occluded L0 / D4 | 0.71–0.72 / **1.57–1.69** | Same limit | Same limit |
+| F1 edge L0 / L4 | **1.06–1.08 / 1.01–1.04** | Same limit | Same limit |
+| F1 background-centre L0 / L4 / D4 | **1.37–1.42 / 1.46–1.49 / 1.44–1.46** | Same limit | Same limit |
+| F1 hold frame 96, all-covered L0 / L4 / D4 | 0.12 / 0.13 / 0.14 | Same limit | Same limit |
+| F1 return frame 120, background-centre L0 / L4 / D4 | **2.21 / 2.13 / 1.81** | Same limit | Same limit |
+| R_F solid maximum, bound 0.002 | **0.40–0.61** moving; 0.10–0.28 hold | Not exposed by final colour | Not exposed by final colour |
+| Silhouette trails | **5–8 px**, cliff-coloured trails into sky, reverses side on return | Physical-target extent below | Physical-target extent below |
+| Background L0, 1.5–3 px / 3–6 px from silhouette, frame 64 | **9.80 / 7.09 codes**, Exact 0 / 0 | Physical-target rows below | Physical-target rows below |
+| F2 disocclusion, all-covered L0 at age 3 / 7 | **18.0 / 13.4**, Interactive 11.4 / 8.3 | Physical-target rows below | Physical-target rows below |
+| F2 background-centre L0 at age 7 | **39.4**, Interactive 11.3 | Physical-target rows below | Physical-target rows below |
+| F3 bias | **996 failing cases** | Means/SE retained; Exact-bar test unavailable | Same limit |
+| F4 D4 pixels >16 codes, frame 128 | **3,934**, Exact 3,356 | Original R_D unavailable | Original R_D unavailable |
+| F5 changed-pixel L0, frame 72 (+8 after stop) | 2.7519, bar 7.9715; ghost bias fails on 30 frame/channel cases | Physical-target +8 rows below | Physical-target scores retained |
+| F6 moving residual, L0 | 3.1–3.8 codes, Exact 7.0–7.2 | Physical-target rows below | Physical-target rows below |
+| F6 hold steps L0 / L4 (covered pixels) | 0.2769 / 0.3297 codes | Same-population rows below | Same-population rows below |
+| Settle to the film bar after each event | Hold RMS passes at +8; F2 revealed age-7 **fails**; no universal passing settle count | Original Exact/reference gate unavailable | Same limit |
+| Q-disocclusion, Q-sun and S2-glossy | **Not run on T1b** | S2G reference scoring in progress; quarry extras provisional | Quiet cost curve complete |
 
 TSR's post-TSR colour must not be presented as film visibility `R_F`. A native shadow mask before TSR does not include TSR's reconstruction leakage and is not a substitute for it. Separate matched full, sun-only and visibility-output runs (or another validated equivalent) are needed for the original three estimands.
 
@@ -154,6 +154,8 @@ Distance bands use raw RMS (the reference is nearly black there); recovery rows 
 
 This is a new physical-mask comparison, not T1b's old frame-72 2.7519/bar-7.9715 gate. At frame 64 on the same converged all-covered mask, L0 mean/SE is **-3.5901/0.01715** for T1b, **+3.9394/0.01760** for Epic HRT and **+3.9443/0.01760** for Epic no-RT. The material/lighting bias on this physical target must not be described as reconstruction error alone.
 
+The original F5 bias condition compares `abs(candidate mean)` with **`abs(Exact mean) + 2*candidate SE`**. A combined physical-target mean exceeding two SE alone is not that test. Neither those means nor a self-steady proxy supplies an original film-settle count. The +8 witness, all 33 held-frame error rows and their uncertainty remain available without inventing an Exact value.
+
 The targeted check also records thresholded **background error extent**: centre misses, T1b age ≥32, at least 1.5 px from the reference edge; mean absolute RGB error above 1/4/8 F0 codes. At frame 64 L0, both Epic paths have **zero pixels above any of these thresholds** in that domain. T1b has **6,913 / 4,136 / 2,596 pixels**; their 95th-percentile nearest-edge distances are **19.0 / 15.0 / 13.15 px**, maxima **26.25 / 22.20 / 21.40 px**. This is explicitly a thresholded nearest-edge extent, not connected-trail length or the historical visual 5–8 px estimate. It does not certify the 0–1.5 px integration band or visible-sky silhouettes.
 
 Full-frame physical reference, T1b black replay, Epic on both paths and High comparison/error sheets are retained and inspected at frames **64 and 128**, at L0 and L4, under `E:/renderlab-work/m7-tr0/inspect/`. They use one fixed 0–64-code absolute-error scale, with saturation explicitly labelled and split-half reference differences shown separately. Per-sheet JSON pins every input hash. These support the silhouette and whole-image audit; they do not turn sparse checkpoint scoring into a complete movie certification.
@@ -191,6 +193,8 @@ Concrete **p50 ceilings for TR1**, in addition to beating Epic on every quality 
 | Q-walk, HRT | 0.727325 ms | 1.618175 ms |
 | S2G, no RT | 0.700575 ms | 1.322625 ms |
 | S2G, HRT | 0.67495 ms | 1.497425 ms |
+
+`scripts/m7-tr0-bar.py` exports the retained per-measure physical-target comparisons to `E:/renderlab-work/m7-tr0/bar/physical-measures.csv` and pins their sources in `bar/tr1-bar.json`. The JSON also contains all four Epic **p50/p95/p99 half-cost ceilings**. It preserves missing S2G cases explicitly, keeps the historical frozen-target file separate, and never declares TR1 accepted. Colour RMS, absolute bias, highlight energy-ratio error, spatial drift, disocclusion-age pools, background extents and reference-subtracted flicker remain individual measures; improvement in one does not cancel a loss in another.
 
 These ceilings use the paired **end-to-end increment**, not half the standalone TSR marker. No TR1 implementation has been timed or qualified here. `cost-per-frame.csv` retains **1,220 per-input-frame rows** with eight paired samples each, median/p95 frame and pass costs; the first eight cold-repeat frames are excluded as registered and remain in raw CSV. `cost-summary.json` keeps `quiet` and earlier `screen` rows separate. Capture processes and the memory-aborted earlier block are excluded. All game-time timing is ineligible; none supplies this table.
 
@@ -230,7 +234,7 @@ States 1 and 2 also pass their own strict replay. Every subsequent production st
 
 Targeted scores of the synchronized 1-pixel captures against **D8 f64** retain the whole-image difference between paths. At frame 64, noise-subtracted all-covered L0 RMS is **5.3973 no-RT / 11.0541 HRT**. The fixed physical-reference highlight energy ratios are **0.15903 / 0.59444** on metal and **0.67460 / 0.62308** on dielectric. By frame 95 those ratios are **0.12012 / 0.58781** and **0.77321 / 0.67826**. Hold 80→81 covered/same-instance L0 step RMS is **0.18719 / 0.37629**, before external age filtering. These are combined final-colour errors, not an attribution to TSR alone. Full-frame/error sheets at 64 and 95 are retained for inspection; final age-filtered/full-track results remain pending.
 
-`scripts/m7-tr0-s2g.py plan` registers all 640 S2G frames, deduplicated only by exact f32 effective camera/light inputs into 129 primary-centre geometries and 288 physical states. Shared offline age masks use same instance and 2% forward-depth acceptance, with explicit pure-translation infinity handling; exact static-view identity increments the same deterministic centre pixels directly. These are scoring masks, never renderer inputs. Analytic static, placement/depth rejection and newly revealed boundary controls pass, as does the qualified full-resolution static age control. Camera physical references also supply the centre geometry, avoiding a duplicate geometry render campaign. Lossless scoring archives omit redundant geometry copies and verify SHA256 for every retained NPY payload; the f64 CPU control retains all scored arrays exactly while reducing 82.85 MB to 53.00 MB.
+`scripts/m7-tr0-s2g.py plan` registers all 640 S2G frames, deduplicated only by exact f32 effective camera/light inputs into 129 primary-centre geometries and 288 physical states. Shared offline age masks use same instance and 2% forward-depth acceptance, with explicit pure-translation infinity handling; exact static-view identity increments the same deterministic centre pixels directly. These are scoring masks, never renderer inputs. Analytic static, placement/depth rejection and newly revealed boundary controls pass, as does the qualified full-resolution static age control. Completed tracks can publish ages incrementally; the protocol lists every generated frame and explicitly remains incomplete until all 640 exist. Camera physical references also supply the centre geometry, avoiding a duplicate geometry render campaign. A controller handoff during incremental publication skipped one geometry copy at camera-0.25px frame 52. Its 1024-spp colour archive stayed hash-identical; a separate two-sample strict replay recovered only deterministic centre world/hit/depth. Its radiance is excluded from film scoring, and `geometry/frame-052-recovery.json` records the repair. The BF/D8 f64 world/hit/depth arrays used for ages also compare byte-identical. Lossless scoring archives omit redundant geometry copies and verify SHA256 for every retained NPY payload; the f64 CPU control retains all scored arrays exactly while reducing 82.85 MB to 53.00 MB.
 
 TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding its 45-second contention cutoff with only 3.117 GiB available RAM, and continued CPU scoring. Short native captures resumed after headroom improved. The **game hold was released at 15:36:21Z**. TR0 explicitly reserved the second quiet window after rt1c, before dl3 and U0b's long timings. The queued `tq1` cost matrix uses one exclusive lease; old screens and any game-time timings remain separate and cannot supply the final speed denominator.
 
@@ -242,7 +246,7 @@ TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding i
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
-- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay and sun-only diagnostic raw dumps are now summarized and deleted. Current ledgers total **36.81 GB / 3,238 files**, including the rejected reference probe; `retention-summary.json` pins all 26 source ledgers. Every deletion is hashed. Large S2G inputs remain pending scoring and will be deleted after their summaries are complete.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. The current eight S2G inputs remain pending scoring and will be deleted after their summaries are complete.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
