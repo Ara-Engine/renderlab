@@ -40,7 +40,7 @@ pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats};
+pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats, WalkRecords};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
@@ -49,6 +49,11 @@ pub use wgpu;
 /// Raster shadow receivers read the actual triangle's world-space vertices.
 /// Callers must request this native Vulkan device feature.
 pub const RECEIVER_FEATURES: wgpu::Features = wgpu::Features::SHADER_PER_VERTEX;
+
+/// Device memory hints Renderlab recommends for `wgpu::DeviceDescriptor::memory_hints`:
+/// wgpu's 8-64 MiB allocator blocks. Its default 128-256 MiB blocks left about 570 MiB
+/// unused on the scan quarry, with no measured frame-time difference (docs/non-rt-n8h.md).
+pub const MEMORY_HINTS: wgpu::MemoryHints = wgpu::MemoryHints::MemoryUsage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fault(pub String);

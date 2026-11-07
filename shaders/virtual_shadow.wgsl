@@ -56,9 +56,12 @@ struct VsmFrame {
     // the pixel rectangles of their old and new bounds.
     rects:array<vec4<f32>,VSM_MAX_RECTS>,
     srects:array<vec4<f32>,VSM_MAX_RECTS>,
-    // Per traced batch, the first word of its triangles in vsm_horizons (N8b) in bits 0-24,
-    // and (N8g) the first vsm_records slot of its walk records in bits 25-31 (127: none).
+    // Per traced batch, the first word of its triangles in vsm_horizons (N8b).
     horizon:array<vec4<u32>,16>,
+    // N8h: per traced batch (two per vec4), its first walk record in the draw list's record
+    // numbering and its recorded triangles: primitives below the count have records, the
+    // others (appended LOD triangles under WalkRecords::Source) read the chains.
+    records:array<vec4<u32>,32>,
     // N8e: x directions evaluated (1-8, the first of the eight); y the rolling refresh (block
     // a in bits 0-3, b in 4-7, this frame's tile in the block in 8-11 and 12-15, bit 16 set on
     // a rolling frame); z the walk cap (0: none); w bit 0 on a rolling frame that moved casters
@@ -434,29 +437,36 @@ fn vsm_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
     if words%3u!=1u {return VSM_MISSING;}
     return primary_indices[batch].data[(words-1u)/2u+primitive*3u+edge];
 }
-// N8g walk records (virtual_shadow_records.wgsl, docs/non-rt-n8g.md): per triangle 48
-// contiguous bytes holding its positions and neighbours, in segments of 2^21 triangles (one
-// binding each). The lookup reads geometry only through vsm_tri and vsm_nb; a batch without
-// records (or VSM_RECORDS off, screens) reads the chains above.
-struct VsmRecords {data:array<vec4<u32>>};
+// N8g walk records (virtual_shadow_records.wgsl, docs/non-rt-n8g.md), N8h's layout
+// (docs/non-rt-n8h.md): per recorded triangle its three positions' bits, 36 contiguous bytes,
+// in segments of 2^21 records (one binding each) packed across batches. Edge neighbours stay
+// in the index buffer's adjacency suffix: a neighbour's address depends only on the primitive,
+// so its load issues beside the record's. The lookup reads geometry only through vsm_tri and
+// vsm_nb; a primitive at or above its batch's recorded count, or VSM_RECORDS off (screens),
+// reads the chains.
+struct VsmRecords {data:array<u32>};
 @group(2) @binding(9) var<storage,read> vsm_records:binding_array<VsmRecords,PRIMARY_BATCHES>;
 override VSM_RECORDS:bool=true;
 const VSM_SEGMENT_BITS:u32=21u;
-fn vsm_record_slot(batch:u32,primitive:u32)->u32 {
-    return (vsm.horizon[batch/4u][batch%4u]>>25u)+(primitive>>VSM_SEGMENT_BITS);
+// The record's segment and first word, or x PRIMARY_BATCHES when the triangle has none.
+fn vsm_record_at(batch:u32,primitive:u32)->vec2<u32> {
+    let pair=vsm.records[batch/2u];
+    let odd=(batch&1u)!=0u;
+    if !VSM_RECORDS || primitive>=select(pair.y,pair.w,odd) {return vec2<u32>(PRIMARY_BATCHES,0u);}
+    let at=select(pair.x,pair.z,odd)+primitive;
+    return vec2<u32>(at>>VSM_SEGMENT_BITS,(at&((1u<<VSM_SEGMENT_BITS)-1u))*9u);
 }
 fn vsm_tri(batch:u32,primitive:u32)->array<vec3<f32>,3> {
-    let slot=vsm_record_slot(batch,primitive);
-    if !VSM_RECORDS || slot>=PRIMARY_BATCHES {return vsm_triangle(batch,primitive);}
-    let base=(primitive&((1u<<VSM_SEGMENT_BITS)-1u))*3u;
-    return array<vec3<f32>,3>(bitcast<vec3<f32>>(vsm_records[slot].data[base].xyz),
-        bitcast<vec3<f32>>(vsm_records[slot].data[base+1u].xyz),
-        bitcast<vec3<f32>>(vsm_records[slot].data[base+2u].xyz));
+    let at=vsm_record_at(batch,primitive);
+    if at.x>=PRIMARY_BATCHES {return vsm_triangle(batch,primitive);}
+    let s=at.x;let i=at.y;
+    return array<vec3<f32>,3>(
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i],vsm_records[s].data[i+1u],vsm_records[s].data[i+2u])),
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i+3u],vsm_records[s].data[i+4u],vsm_records[s].data[i+5u])),
+        bitcast<vec3<f32>>(vec3<u32>(vsm_records[s].data[i+6u],vsm_records[s].data[i+7u],vsm_records[s].data[i+8u])));
 }
 fn vsm_nb(batch:u32,primitive:u32,edge:u32)->u32 {
-    let slot=vsm_record_slot(batch,primitive);
-    if !VSM_RECORDS || slot>=PRIMARY_BATCHES {return vsm_neighbour(batch,primitive,edge);}
-    return vsm_records[slot].data[(primitive&((1u<<VSM_SEGMENT_BITS)-1u))*3u+edge].w;
+    return vsm_neighbour(batch,primitive,edge);
 }
 fn vsm_unit(n:vec3<f32>)->vec3<f32> {
     let scale=max(max(abs(n.x),abs(n.y)),abs(n.z));
@@ -820,7 +830,7 @@ fn vsm_beyond_horizon(r:VsmReceiver,l:vec3<f32>)->bool {
     let x=m[0].xyz;let y=m[1].xyz;let z=m[2].xyz;
     let s=dot(x,x);
     if abs(dot(y,y)-s)>1e-4*s || abs(dot(z,z)-s)>1e-4*s || abs(dot(x,y))>1e-4*s || abs(dot(y,z))>1e-4*s || abs(dot(z,x))>1e-4*s {return false;}
-    let h=unpack2x16float(vsm_horizons[(vsm.horizon[r.batch/4u][r.batch%4u]&0x1ffffffu)+r.primitive]);
+    let h=unpack2x16float(vsm_horizons[vsm.horizon[r.batch/4u][r.batch%4u]+r.primitive]);
     let a=vsm_to_world(vsm_own[0],r.slot);
     let winding=cross(vsm_to_world(vsm_own[1],r.slot)-a,vsm_to_world(vsm_own[2],r.slot)-a);
     if dot(winding,winding)==0.0 {return false;}

@@ -1,5 +1,7 @@
 # N8g: the non-RT shadow pass under camera motion, restructured and profiled again
 
+**Follow-up: [N8h](non-rt-n8h.md)** cut the records to 36 bytes for source triangles only (1,193 → 448 MiB on the no-RT quarry, byte-identical), keeping most of the gain, and measured total VRAM against Unreal. With MemoryUsage allocator blocks (now Renderlab's default), ours is below Unreal on the no-RT and RT paths.
+
 Follow-up unit to [N8f](non-rt-n8f.md), 2026-11-06 UTC, base `79e8ba2`, branch `t3/n8g-shadow-camera-motion`. Brief (Islam, 2026-11-06): make camera-moving frames of the non-RT virtual-shadow pass cheap with a structural change that takes the per-pixel work off dependent geometry fetches. Quarry camera-moving frames cost 2.53-2.58 ms against Unreal VSM's estimated 0.5 ms and a 1.61 ms no-RT frame target. Quality must stay at or above VSM on every measure. Labels: **M** measured here, **I** inference.
 
 ## Result

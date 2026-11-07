@@ -23,6 +23,7 @@ fn no_rt_renderer() -> Renderer {
             | crate::VIRTUAL_FEATURES
             | wgpu::Features::TIMESTAMP_QUERY,
         required_limits: crate::visibility_limits(wgpu::Limits::default()),
+        memory_hints: super::test_memory_hints(),
         ..Default::default()
     }))
     .unwrap();
@@ -97,6 +98,49 @@ fn timing(r: &mut Renderer, label: &str, rows: &mut Vec<serde_json::Value>) {
         let ms = |v: Duration| v.as_secs_f64() * 1000.;
         rows.push(serde_json::json!({"label":label,"span_ms":ms(t.render_span),"primary_ms":t.receiver_pass.map(ms),"shadow_ms":t.visibility_compute.map(ms)}));
     }
+}
+/// N8h: the renderer's GPU memory by owner (ledger), wgpu's HAL counters and the
+/// allocator's report grouped by resource label, to `memory-<label>.json`.
+fn memory_report(r: &Renderer, out: &std::path::Path, label: &str) {
+    let stats = r.stats();
+    let o = &stats.ownership;
+    let mut groups: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let report = r.device.generate_allocator_report();
+    for a in report.iter().flat_map(|r| &r.allocations) {
+        let e = groups.entry(a.name.clone()).or_default();
+        e.0 += a.size;
+        e.1 += 1;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|(_, (bytes, _))| std::cmp::Reverse(*bytes));
+    let value = serde_json::json!({
+        "label": label,
+        "allocator_allocated_bytes": report.as_ref().map(|r| r.total_allocated_bytes),
+        "allocator_reserved_bytes": report.as_ref().map(|r| r.total_reserved_bytes),
+        "allocator_blocks": report.as_ref().map(|r| r.blocks.len()),
+        "hal_buffer_bytes": stats.hal.buffer_bytes,
+        "hal_texture_bytes": stats.hal.texture_bytes,
+        "ledger_live_bytes": {
+            "environment": o.environment_bytes.live, "texture": o.texture_bytes.live,
+            "material": o.material_bytes.live, "target": o.target_bytes.live,
+            "light": o.light_bytes.live, "shadow": o.shadow_bytes.live, "lut": o.lut_bytes.live,
+            "hardware_as_estimated": o.hardware_as_estimated_bytes.live,
+            "hardware_as_observed": o.hardware_as_observed_bytes.live,
+            "hardware_scratch_estimated": o.hardware_scratch_estimated_bytes.live,
+        },
+        "by_label": groups.iter().map(|(name, (bytes, count))| {
+            serde_json::json!({"name": name, "bytes": bytes, "count": count})
+        }).collect::<Vec<_>>(),
+    });
+    fs::write(
+        out.join(format!("memory-{label}.json")),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+}
+/// N8h: the triangles with walk records under this configuration.
+fn record_counters(r: &mut Renderer, label: &str) -> serde_json::Value {
+    serde_json::json!({"label": label, "recorded": r.test_walk_records()})
 }
 fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
     r.test_drain("N1b snapshot");
@@ -680,7 +724,13 @@ fn gpu_visibility_quarry() {
     if !no_rt {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     }
-    r.set_soft_shadows(SoftShadows::Virtual);
+    // N8h: `soft_shadows: "interactive"` measures the RT shadow path instead (memory runs).
+    let interactive = m["soft_shadows"].as_str() == Some("interactive");
+    r.set_soft_shadows(if interactive {
+        SoftShadows::Interactive
+    } else {
+        SoftShadows::Virtual
+    });
     let color = target(&r, 1920, 1080);
     // Cut error bounds (px; negative = original geometry) and software extents (px).
     let list = |key: &str, default: f32| -> Vec<f32> {
@@ -726,6 +776,7 @@ fn gpu_visibility_quarry() {
         v.iter().map(|x| x.as_u64().unwrap() as usize).collect()
     });
     let stage_repeats = m["stage_repeats"].as_u64().unwrap_or(8) as usize;
+    let mut records = vec![];
     let mut stages = vec![];
     let mut changed = vec![];
     let mut rows = vec![];
@@ -758,7 +809,11 @@ fn gpu_visibility_quarry() {
                 &mut asset.draws(Visibility::Frustum),
             );
             reference(&mut r, &seeded, &out, &format!("p{pose}"));
-            r.set_soft_shadows(SoftShadows::Virtual);
+            r.set_soft_shadows(if interactive {
+                SoftShadows::Interactive
+            } else {
+                SoftShadows::Virtual
+            });
         }
         let mut configs = vec![];
         if !no_rt {
@@ -834,6 +889,8 @@ fn gpu_visibility_quarry() {
             }
             r.test_drain("N1c quarry timing tail");
             timing(&mut r, &label, &mut rows);
+            memory_report(&r, &out, &label);
+            records.push(record_counters(&mut r, &label));
             if turn_frames > 0 {
                 // N8c: the sun turning every frame re-rasterizes every requested page.
                 let Light::Directional { travel, lux } = lighting.lights[0] else {
@@ -977,6 +1034,11 @@ fn gpu_visibility_quarry() {
     fs::write(
         out.join("stages.json"),
         serde_json::to_vec_pretty(&stages).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        out.join("records.json"),
+        serde_json::to_vec_pretty(&records).unwrap(),
     )
     .unwrap();
     fs::write(

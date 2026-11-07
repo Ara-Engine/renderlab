@@ -1,15 +1,15 @@
-// N8g walk records (docs/non-rt-n8g.md): per addressed triangle of one traced draw, its three
-// object-space positions with its edge-adjacency neighbours, one vec4<u32> per k = 0..2: xyz
-// the bits of corner k's position, w the adjacency word of edge k (vsm_neighbour's) or
-// 0xffffffff without adjacency. The lookup then reads a triangle and its neighbours from 48
-// contiguous bytes instead of index -> vertex -> adjacency chains. Bits are copied, never
-// computed, so walks over records equal walks over the index, vertex and adjacency buffers.
-// virtual_shadow_gpu.rs prepends PRIMARY_BATCHES and dispatches one pass per segment of
-// 2^21 triangles (one storage binding each): `count` triangles from `first`.
+// N8g walk records (docs/non-rt-n8g.md) in N8h's layout (docs/non-rt-n8h.md): per recorded
+// triangle of one traced draw, the bits of its three object-space corner positions, nine
+// u32 (36 bytes). The lookup then reads a triangle's positions from one contiguous record
+// instead of index -> vertex chains. Bits are copied, never computed, so walks over records
+// equal walks over the index and vertex buffers. virtual_shadow_gpu.rs prepends
+// PRIMARY_BATCHES and dispatches one pass per piece of a batch within one segment of 2^21
+// records (one storage binding each): `count` triangles from `first`, written from record
+// `at` of the segment.
 
-struct VsmRecordPass {batch:u32,count:u32,first:u32,pad:u32};
+struct VsmRecordPass {batch:u32,count:u32,first:u32,at:u32};
 @group(0) @binding(22) var<uniform> vsm_record_pass:VsmRecordPass;
-@group(0) @binding(23) var<storage,read_write> vsm_records_out:array<vec4<u32>>;
+@group(0) @binding(23) var<storage,read_write> vsm_records_out:array<u32>;
 struct VsmVec4s {data:array<vec4<f32>>};
 struct VsmU32s {data:array<u32>};
 @group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VsmVec4s,PRIMARY_BATCHES>;
@@ -20,14 +20,12 @@ struct VsmU32s {data:array<u32>};
     if local>=vsm_record_pass.count {return;}
     let t=vsm_record_pass.first+local;
     let b=vsm_record_pass.batch;
-    // The adjacency suffix of the index buffer (receiver_adjacency.rs): 6T+1 words.
-    let words=arrayLength(&primary_indices[b].data);
-    let adjacency=words%3u==1u;
+    let out=(vsm_record_pass.at+local)*9u;
     for(var k=0u;k<3u;k+=1u) {
         let index=primary_indices[b].data[3u*t+k];
         let p=bitcast<vec3<u32>>(primary_vertices[b].data[index*3u].xyz);
-        var n=0xffffffffu;
-        if adjacency {n=primary_indices[b].data[(words-1u)/2u+3u*t+k];}
-        vsm_records_out[3u*local+k]=vec4<u32>(p,n);
+        vsm_records_out[out+3u*k]=p.x;
+        vsm_records_out[out+3u*k+1u]=p.y;
+        vsm_records_out[out+3u*k+2u]=p.z;
     }
 }

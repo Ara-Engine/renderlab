@@ -149,6 +149,14 @@ fn renderer(validate: bool) -> Renderer {
     renderer_with_features(validate, wgpu::Features::empty())
 }
 
+/// Test devices use `crate::MEMORY_HINTS`; N8h's comparison runs pick wgpu's default
+/// 128-256 MiB blocks with `RENDERLAB_MEMORY_HINTS=performance`.
+pub(crate) fn test_memory_hints() -> wgpu::MemoryHints {
+    match std::env::var("RENDERLAB_MEMORY_HINTS").as_deref() {
+        Ok("performance") => wgpu::MemoryHints::Performance,
+        _ => crate::MEMORY_HINTS,
+    }
+}
 fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     let startup = Instant::now();
     assert_eq!(
@@ -183,6 +191,7 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
         }),
         // The test caller explicitly accepts the experimental device contract above.
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+        memory_hints: test_memory_hints(),
         ..Default::default()
     }))
     .unwrap();
