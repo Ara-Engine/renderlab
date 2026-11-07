@@ -22,12 +22,28 @@ All tracks use a nominal 60 Hz simulation at **1920×1080 internal and output, T
 
 - Hidden process startup, `CREATE_NO_WINDOW`, `-RenderOffscreen`, unattended/no sound/no crash UI. No desktop input, desktop capture, viewer or visible window.
 - `r.EyeAdaptation.PreExposureOverride=0`, fixed manual exposure, no dynamic resolution. Epic is `sg.AntiAliasingQuality=3`, High is `=2`. Every setting in the installed `AntiAliasingQuality@N` section is checked against runtime `DumpCVars`, including **200% Epic history and 100% High history**. High is not silently forced to Epic's history resolution.
-- U0's matched direct-light/environment subset, no Lumen GI/reflections; VSM 8×8 and HRT 1-spp/denoised paths are kept separate. The purpose is reconstruction of T1b's subset, not a new Lumen quality comparison.
+- U0's matched direct-light/environment subset, no Lumen GI/reflections; VSM 8×8 and HRT 1-spp/denoised paths are kept separate. `vsm` retains U0's RT-capable device setup; **`vsm-nort` additionally disables `r.RayTracing` globally and checks its readback**. These are not silently combined. The purpose is reconstruction of T1b's subset, not a new Lumen quality comparison.
 - **Native main-view HDR**, read from the resource actually consumed by the Tonemap pass. Epic consumes `TSR.Output`; High at native resolution consumes a slice of `TSR.History.Color`. Resource name, description, writer version and SHA256 are recorded for every frame. No SceneCapture2D or HighResShot temporal substitute.
 - `DumpGPU` says it starts **next frame**. It is armed one CSV frame before motion begins. The next tick's camera cache is read before applying the next pose, and every captured pose is checked numerically for source-space position, direction and horizontal FOV. Earlier smoke runs that lacked this correction are excluded.
 - UE clamps the inherited global near clip to **1 cm**, while T1b registers 0.5 cm. This inherited U0 mismatch remains disclosed; it is not silently called projection identity.
 
-The HDR is **pre-exposed**. A dump and camera match do not alone establish the physical radiance conversion. Per-frame exposure proof, matching reference transport, geometric populations and event/age masks are required before publishing T1b-unit error scores.
+The HDR is **pre-exposed**. With `r.DumpGPU.Buffer=2`, Tonemap's 32-byte `EyeAdaptationBuffer` records global exposure in `[0].x` and average local exposure in `[1].x`; its scalar parameters record `ColorScale0`. On **all 161 High/VSM and all 161 Epic/HRT Q-walk frames**, global exposure is exactly `2^-14`, local exposure is 1 and tint is white. The installed `FViewInfo::UpdatePreExposure` uses those factors for a warmed manual-exposure view, establishing the radiance scale for these captures. A new physical reference is multiplied by `2^-14` before the frozen F0 transform. This conversion is not image fitting. Matching reference transport, geometric populations and event/age masks are still required before publishing T1b-unit error scores.
+
+Completed capture inventory at this checkpoint:
+
+| Run | Scene / track / preset | Native HDR frames | Per-frame camera checks | Exposure checks | Light-direction checks |
+|---|---|---:|---|---|---|
+| `walk-epic-vsm-a` | Quarry Q-walk, Epic/VSM | 161 | 161 pass | Buffer was not enabled; unavailable | Static U0 setup |
+| `w-h-v-c1` | Quarry Q-walk, High/VSM | 161 | 161 pass | 161 pass | Static U0 setup |
+| `w-e-r-c1` | Quarry Q-walk, Epic/HRT | 161 | 161 pass | 161 pass | Static U0 setup |
+| `d-e-v-c1` | Quarry Q-disocclusion, Epic/VSM | 48 | 48 pass | 48 pass | Static U0 setup |
+| `j-e-v-c1` | Quarry Q-sun-jump, Epic/VSM | 33 | 33 pass | 33 pass | This earlier capture predates the light readback; provisional |
+| `sf-e-v-c1` | Quarry Q-sun-fast, Epic/VSM | 64 | 64 pass | 64 pass | 64 pass |
+| `g-e-v-c1` | S2G camera 1 px/frame, Epic/VSM | 160 | 160 pass | 160 pass (`2^-12`) | 160 pass |
+
+S2G uses U0b's separate `E:/renderlab-work/m7-u0b/ue-package`, `/Game/M7U0b/S2G/Bench`; U0's original package is untouched. The other S2G camera speeds and continuous-sun track, additional High/HRT runs, Q-zoom and Q-sun-slow remain outstanding. Smoke captures are not quality samples.
+
+**Full-image mismatch found by inspection:** this S2G package has a black visible background, whereas U0's original physical S2G reference shows the constant sky. A SkyLight illuminates the scene but does not draw a sky. The 160-frame capture is valid as a record of Unreal's output, but **provisional for matched-reference quality** until visible background semantics agree. Excluding the sky pixels would not certify silhouettes, so no such mask is used to hide the mismatch. U0b has the image paths and the correction request. Quarry primary clear colour versus reference RLE2 sky must likewise be audited.
 
 ## TSR versus the recorded T1b scores
 
@@ -63,19 +79,22 @@ Capture and timing use different processes. The timing process alternates **no A
 
 The native CSV `GPUTime` is the whole GPU-frame measure. `GPU/TemporalSuperResolution` is a pass stat, not a substitute for the frame's end-to-end increment. Both and the per-frame A/B deltas are retained. CPU/frame wall time is not substituted for GPU time. No Cargo runs inside a TR0 lease.
 
-Initial **contended screen only**, RTX 4070 SUPER 12 GB / NVIDIA 617.14 / Ryzen 7 7800X3D, Q-walk Epic/VSM, two A/B pairs, 306 measured frames per method:
+Current **desktop screens only**, RTX 4070 SUPER 12 GB / NVIDIA 617.14 / Ryzen 7 7800X3D. All completed visits are pooled without favourable-visit filtering in `cost-summary.json`. Capture processes and a block aborted below 2 GiB are excluded:
 
-| Measure | p50 ms | p95 ms |
-|---|---:|---:|
-| Whole GPU frame, no AA | 1.7037 | 2.3782 |
-| Whole GPU frame, TSR Epic | 3.1784 | 4.2726 |
-| TSR pass | 1.2032 | 1.7963 |
+| Q-walk path / preset | A/B pairs; frames/method | No-AA frame p50 | TSR frame p50 / p95 | Paired frame increment p50 / p95 | TSR pass p50 / p95 |
+|---|---:|---:|---:|---:|---:|
+| VSM / Epic | 4; 612 | 1.7015 | 3.2094 / 4.2713 | 1.4966 / 2.4654 | 1.2083 / 1.8011 |
+| VSM / High | 2; 306 | 1.6657 | 2.7438 / 2.7967 | 1.0723 / 1.1380 | 0.8171 / 0.8285 |
+| HRT / Epic | 2; 306 | 1.7813 | 3.2662 / 3.3296 | 1.4837 / 1.5567 | 1.2175 / 1.2357 |
+| VSM, globally no RT / Epic | 2; 306 | 1.6623 | 3.2332 / 3.2997 | 1.5648 / 1.6487 | 1.2031 / 1.2091 |
 
 This is not the final quiet denominator and certifies no 2× claim. The original U0 screen (TSR pass 1.41–1.59 ms) is another workload/state screen, not silently averaged into this table. T1b's recorded total span was 1.108–1.128 ms, +0.203–0.223 ms over Interactive, on its separate Vulkan run; those are historical measurements, not a matched TSR A/B.
 
 ## Settle diagnostics and remaining work
 
 `hold-diagnostic.json` reports full-image consecutive-frame changes and residuals to the **last held frame** after the F0 transform. That is useful for capture diagnostics but uses neither an independent reference nor T1b's covered/changed populations. Its settle threshold (mean <0.5 code and p99 <4, sustained to the end) is labelled as a self-residual proxy and cannot pass the eight-frame film gate.
+
+On Q-walk, High/VSM's full-image median hold step is **0.1349 code**, with the proxy threshold first sustained 3 frames after the hold starts. Epic/HRT's is **0.1770 code**, already below that proxy threshold at the first held frame. These include the large black background and compare with the final hold; they are **not** directly comparable to T1b's covered-pixel 0.2769 / 0.3297 values, and are not film-settle results.
 
 The dependency is being closed in U0b: quarry texture/normal/RLE2-sky support, reference sequences and S2G import/cook. T1b's original raw references, compact populations and age buffers were deleted under retention policy; its recorded score JSON remains. Rebuilding those masks and the relevant full/sun/visibility reference estimands is required for the exact side-by-side gate. A new multi-bounce reference must not silently replace T1b's original direct-plus-environment reference while retaining its old numerical bar.
 
@@ -86,6 +105,7 @@ The dependency is being closed in U0b: quarry texture/normal/RLE2-sky support, r
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for reference scoring. Current deletion ledgers total **12.55 GB** (9.21 GB of unused resources plus 3.34 GB of completed/smoke raw data); every deletion is hashed.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
@@ -93,10 +113,15 @@ The dependency is being closed in U0b: quarry texture/normal/RLE2-sky support, r
 ```powershell
 py -3 -B scripts/m7-tr0.py plan
 py -3 -B scripts/m7-tr0.py baseline
+py -3 -B scripts/m7-tr0.py cost
 py -3 -B scripts/m7-tr0.py run <fresh-label> --track q-walk --quality 3 --path vsm --capture
 py -3 -B scripts/m7-tr0.py summarize <fresh-label>
 # Timing: omit --capture; use four fresh labels for eight A/B pairs.
 # High: --quality 2. Hardware-shadow path: --path hrt.
+# Globally disabled hardware RT: --path vsm-nort.
+# S2G: --track s2g-camera-1px (automatically selects U0b's separate package).
+# Physical-reference scoring, once U0b's lossless zero-shutter references are ready:
+py -3 -B scripts/m7-tr0.py score <fresh-label> --reference <U0b-reference-directory>
 # Only after all scoring is summarized:
 py -3 -B scripts/m7-tr0.py clean <fresh-label>
 ```
