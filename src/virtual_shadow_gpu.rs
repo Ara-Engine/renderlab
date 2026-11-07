@@ -24,6 +24,9 @@
 //! trace tile in sixteen per frame while the camera, casters and settings hold still.
 use super::*;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
+#[path = "virtual_shadow_cache.rs"]
+mod surface_cache;
+use surface_cache::SurfaceCache;
 
 /// Levels a frame can use; also the WGSL `VSM_MAX_LEVELS`.
 pub(super) const MAX_LEVELS: usize = 8;
@@ -151,11 +154,20 @@ pub enum VirtualLookup {
     /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
     /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
     Hybrid,
+    /// N8n: `Exact`'s walk per receiver surface cell instead of per pixel, kept across frames
+    /// in a hash table (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md). Camera motion
+    /// walks only cells no earlier frame computed; each cell is evaluated at one canonical point,
+    /// so it does not shimmer. Adds the table (32 MiB) and the miss queue (8 bytes per pixel).
+    Surface,
 }
 impl VirtualLookup {
     /// Whether the map lookup and its per-texel data run.
     fn map(self) -> bool {
-        self != Self::Exact
+        matches!(self, Self::Map | Self::Hybrid)
+    }
+    /// Whether the lookup queues receivers in `Resources::queue` (8 bytes per pixel).
+    fn queues(self) -> bool {
+        matches!(self, Self::Hybrid | Self::Surface)
     }
 }
 impl Default for VirtualShadowSettings {
@@ -402,6 +414,8 @@ struct Groups {
     queue: Owned<wgpu::BindGroup>,
     /// The exact lookup's group with the queue in its scratch binding.
     queued: Owned<wgpu::BindGroup>,
+    /// N8n: the surface cache's probe, dispatch and insert groups.
+    surface: Option<[Owned<wgpu::BindGroup>; 3]>,
 }
 /// What the cache remembers between frames to decide which pages are still valid.
 #[derive(Default)]
@@ -462,6 +476,9 @@ pub(super) struct VirtualState {
     queue_layout: Owned<wgpu::PipelineLayout>,
     /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
     hybrid_module: Option<Owned<wgpu::ShaderModule>>,
+    /// N8n: the surface cache while `VirtualLookup::Surface` is the lookup; kept across resets,
+    /// which retire its cells.
+    surface: Option<SurfaceCache>,
 }
 /// Screen constants with this prefix belong to the map lookup's module, the others to the
 /// exact one.
@@ -1065,6 +1082,7 @@ impl VirtualState {
             map_layout,
             queue_layout,
             hybrid_module: None,
+            surface: None,
         }
     }
 
@@ -1123,6 +1141,9 @@ impl VirtualState {
         self.rolling = false;
         self.schedule = 0;
         self.casters_only = false;
+        if let Some(surface) = &mut self.surface {
+            surface.restart();
+        }
         if let Some(old) = self.resources.take() {
             self.retired.push((last, old));
         }
@@ -1239,8 +1260,10 @@ impl VirtualState {
         } else {
             16
         };
-        let queue_bytes = if self.settings.lookup == VirtualLookup::Hybrid {
+        // N8n: the surface cache's queued walk keeps its chunk cursor after the queue.
+        let queue_bytes = if self.settings.lookup.queues() {
             16 + 8 * u64::from(size[0]) * u64::from(size[1])
+                + 16 * u64::from(self.settings.lookup == VirtualLookup::Surface)
         } else {
             32
         };
@@ -1269,7 +1292,7 @@ impl VirtualState {
                 16 * 12,
                 B::STORAGE | B::INDIRECT,
             ),
-            queue: buffer("N8k hybrid queue", queue_bytes, B::STORAGE),
+            queue: buffer("N8k hybrid queue", queue_bytes, B::STORAGE | B::COPY_SRC),
             queue_dispatch: buffer("N8k hybrid queue dispatch", 16, B::STORAGE | B::INDIRECT),
             _area: area,
             area: area_view,
@@ -1427,6 +1450,17 @@ impl Renderer {
         self.ensure_virtual_casters(draws)?;
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
+        // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
+        // for frames in flight).
+        if s.lookup != VirtualLookup::Surface {
+            state.surface = None;
+        } else if state.surface.is_none() {
+            state.surface = Some(SurfaceCache::new(
+                &self.device,
+                &self.ledger,
+                &self.lighting.bindings,
+            ));
+        }
         // N8e: the map keeps the sun direction it was rasterized for while the sun stays
         // within `sun_hysteresis` of it; the march and page requests then widen their cone by
         // that angle (the lookup's directions are always the current sun's).
@@ -1482,6 +1516,9 @@ impl Renderer {
         }
         let mut invalidated = [false; MAX_LEVELS];
         let cache = &mut state.cache;
+        // N8n: a sun leaving the map's hysteresis retires the surface cache's cells too, as the
+        // rebased map looks up every pixel again (measured: lagged cells after a sun jump).
+        let sun_rebased = cache.light != Some(light_bits);
         if cache.light != Some(light_bits) {
             cache.light = Some(light_bits);
             invalidated = [true; MAX_LEVELS];
@@ -1530,8 +1567,11 @@ impl Renderer {
             }
             [lo - 2.0, hi + 2.0]
         };
+        // N8n: placements the rectangles do not describe retire the surface cache's cells.
+        let mut surface_flush = false;
         if cache.models.len() != placements {
             invalidated = [true; MAX_LEVELS];
+            surface_flush = true;
         } else {
             for (p, model) in models.iter().enumerate() {
                 if *model != cache.models[p] {
@@ -1546,6 +1586,7 @@ impl Renderer {
             if rects.len() > MAX_RECTS {
                 invalidated = [true; MAX_LEVELS];
                 rects.clear();
+                surface_flush = true;
             }
         }
         cache.models = models;
@@ -1885,10 +1926,12 @@ impl Renderer {
         )?;
         let constants = state.constants.clone();
         let rebuild = constants != state.built;
-        // N8k: `VMAP_` constants are the map lookup's, the others the exact lookup's.
+        // N8k: `VMAP_` constants are the map lookup's, the others the exact lookup's (N8n: but
+        // `VSC_`, the surface cache's).
         let (map_constants, exact): (Vec<_>, Vec<_>) = constants
             .iter()
             .copied()
+            .filter(|(name, _)| !name.starts_with(surface_cache::CONSTANTS))
             .partition(|(name, _)| name.starts_with(MAP_CONSTANTS));
         if rebuild {
             let map = |entry, layout: &wgpu::PipelineLayout| {
@@ -1994,6 +2037,14 @@ impl Renderer {
                 ),
             );
         }
+        if state.settings.lookup == VirtualLookup::Surface {
+            state.surface.as_mut().unwrap().ensure_pipelines(
+                &self.device,
+                &self.ledger,
+                &state.lookup_layout,
+                &constants,
+            );
+        }
         let casters = state.casters.as_ref().unwrap();
         let mut key: Vec<u64> = camera
             .view()
@@ -2032,8 +2083,13 @@ impl Renderer {
         // N8e rolling refresh: a frame that changes nothing but the sun (inside the map's
         // hysteresis) keeps the counts of the tiles it does not look up. The renderer clears
         // `rolling` whenever another pass writes the visibility target.
-        let rolling =
-            state.rolling && (!state.page_work || casters_only) && !rebuild && s.refresh > 1;
+        // N8n: the surface cache keeps every cell itself; its frames never roll.
+        let was_rolling = state.rolling;
+        let rolling = state.rolling
+            && (!state.page_work || casters_only)
+            && !rebuild
+            && s.refresh > 1
+            && s.lookup != VirtualLookup::Surface;
         state.casters_only = rolling && casters_only;
         state.history_frames = if rolling {
             state.history_frames.wrapping_add(1)
@@ -2049,6 +2105,29 @@ impl Renderer {
             0
         };
         state.schedule = schedule;
+        if s.lookup == VirtualLookup::Surface {
+            // N8n: the cells' epochs. A cell depends on the sun, the casters, the receiver
+            // producer and its cut; the camera only chooses which cells are asked for. A still
+            // frame (N8e's rolling condition, N8f's casters-only frames included) keeps the
+            // target's counts where nothing changed them.
+            let still = was_rolling && (!state.page_work || casters_only) && !rebuild;
+            let producer = vec![
+                self.primary_mode as u64,
+                u64::from(self.lod_pixels.to_bits()),
+                u64::from(self.software_extent.to_bits()),
+                u64::from(self.lod_lift.to_bits()),
+                state.casters.as_ref().unwrap().generation,
+            ];
+            let sun = (-travel).normalize().to_array().map(f32::to_bits);
+            state.surface.as_mut().unwrap().advance(
+                &self.queue,
+                sun,
+                !rects.is_empty(),
+                surface_flush || sun_rebased,
+                producer,
+                still,
+            );
+        }
         for value in [
             s.directions,
             schedule,
@@ -2249,6 +2328,24 @@ impl Renderer {
                         buffer(35, &r.mips),
                     ],
                 ),
+                surface: state
+                    .surface
+                    .as_ref()
+                    .filter(|_| state.settings.lookup == VirtualLookup::Surface)
+                    .map(|surface| {
+                        surface.groups(
+                            &self.device,
+                            &self.ledger,
+                            r,
+                            [
+                                &hit,
+                                &tiles,
+                                &fresh.world.view,
+                                &fresh.normal.view,
+                                &fresh.visibility.view,
+                            ],
+                        )
+                    }),
                 mip_dispatch: group(
                     "N8k mip dispatch arguments",
                     &l.mip_dispatch,
@@ -2329,6 +2426,33 @@ impl Renderer {
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
             let _ = (&h.params, &h.record_params, &h.segments);
+        }
+        if let Some(surface) = state
+            .surface
+            .as_ref()
+            .filter(|_| state.settings.lookup == VirtualLookup::Surface)
+        {
+            // N8n: probe, queued walk and insert; page work (if any) began the span.
+            let timestamps = timestamps.map(|t| wgpu::ComputePassTimestampWrites {
+                query_set: t.query_set,
+                beginning_of_pass_write_index: if state.page_work {
+                    None
+                } else {
+                    t.beginning_of_pass_write_index
+                },
+                end_of_pass_write_index: t.end_of_pass_write_index,
+            });
+            surface.encode(
+                encoder,
+                timestamps,
+                r,
+                g.surface.as_ref().unwrap(),
+                &g.queued,
+                arrays,
+                &state.horizons.as_ref().unwrap().record_array,
+                self.lighting.bind(),
+            );
+            return;
         }
         if hybrid {
             encoder.clear_buffer(&r.queue, 0, Some(16));
@@ -2552,6 +2676,7 @@ mod tests {
             records_source(),
             map_source(),
             hybrid_source(),
+            surface_cache::surface_source(),
         ] {
             assert!(!source.contains("ray_query") && !source.contains("acceleration_structure"));
             let module = naga::front::wgsl::parse_str(&source)
