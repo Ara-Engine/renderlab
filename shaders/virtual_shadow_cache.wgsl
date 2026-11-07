@@ -10,9 +10,9 @@
 // without walking only when the cell is solid (fully lit or fully blocked) and the pixel that
 // computed it found every receiver of its 3x3 neighbourhood with the same count: the cell then
 // lies inside a region that agreed. Every other pixel (a cell beside a shadow edge or penumbra,
-// or a cell not yet computed) walks exactly at its own receiver point, so the cache never shows
-// a lit receiver darker than its own walk would, nor moves an edge by a cell. Directions are
-// jittered by the cell, so a pixel's penumbra noise is anchored to the surface.
+// or a cell not yet computed) walks exactly at its own receiver point, with Exact's directions,
+// so the cache never shows a lit receiver darker than its own walk would, nor moves an edge by a
+// cell.
 //
 // Per frame (encode_virtual): vsc_probe looks up every covered pixel's cell in a hash table
 // (vsc_table), writes shown cells and queues the other pixels in the lookup's scratch
@@ -72,6 +72,11 @@ override VSC_CONSENSUS:u32=1u;
 // Walk the canonical point of the pixel's cell: the cube's centre projected onto the triangle,
 // kept off its edges by the resolve's 4-epsilon margin (else the pixel's own receiver point).
 override VSC_CANONICAL:bool=false;
+// Jitter a walk's directions by its cell (anchored to the surface) rather than by its pixel, as
+// Exact does. Measured: the cell's jitter let S1's umbra receivers see one direction more (4
+// leaks a pose against Exact's 0 and 2), and S2's camera phases flickered more against the film
+// reference (.0198 against .0143): a pixel's noise then changes whenever its point enters a new cell.
+override VSC_JITTER:bool=false;
 
 // Cell edge in receiver pixels (a power of two keeps cell and map levels in step).
 override VSC_CELL:f32=1.0;
@@ -309,8 +314,8 @@ fn vsc_cursor()->u32 {return arrayLength(&vsm_scratch.words)-1u;}
     vsc_dispatch[4]=(n+63u)/64u;vsc_dispatch[5]=1u;vsc_dispatch[6]=1u;
 }
 
-// vsm_prepare at the pixel's receiver point (VSC_CANONICAL: its cell's canonical point), with the
-// cell's jitter.
+// vsm_prepare at the pixel's receiver point (VSC_CANONICAL: its cell's canonical point), with
+// Exact's per-pixel jitter (VSC_JITTER: the cell's).
 fn vsc_prepare(id:vec2<u32>)->VsmPixel {
     var out:VsmPixel;
     let p=vec2<i32>(id);
@@ -357,7 +362,9 @@ fn vsc_prepare(id:vec2<u32>)->VsmPixel {
     out.r=VsmReceiver(point,n,world.w,thin,slot,batch,primitive);
     let l=-light.travel_outer.xyz;
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
-    let seed=vsc_chain(0x2545f491u,slot,primitive,side,cell.level,cell.coords);
+    let size=textureDimensions(vsm_world);
+    var seed=vsm_hash(id.x+id.y*size.x);
+    if VSC_JITTER {seed=vsc_chain(0x2545f491u,slot,primitive,side,cell.level,cell.coords);}
     let shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
     let slope=view.texel.z;
     vsm_active=0xffu>>(8u-vsm.n8e.x);
