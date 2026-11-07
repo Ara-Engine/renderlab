@@ -34,6 +34,8 @@ def main():
             test = "gpu_visibility_bench"
             scene = Path("E:/renderlab-work/contact-fold/fixture/scene.json") if name == "S1" else Path(f"E:/renderlab-work/motion-benches/{name}/fixture/scene.json")
             m["scene"] = str(scene)
+        # N8p changes the library default; retain N1b's recorded Exact reference output.
+        m["virtual"] = {"lookup": "exact"}
         path = a.root / f"manifest-{step}.json"
         path.write_text(json.dumps(m, indent=2))
         env = dict(os.environ, RENDERLAB_PRIMARY_MANIFEST=str(path))

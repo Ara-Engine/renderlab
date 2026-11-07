@@ -1,4 +1,6 @@
-# N8o: the surface cache made deterministic and caster-exact; still opt-in
+# N8o: the surface cache made deterministic and caster-exact; opt-in at this checkpoint
+
+**Subsequent decision: [N8p](non-rt-n8p.md)** adopts Surface as the default by Islam's instruction. This record preserves N8o's original Exact-parity gate and its measured misses.
 
 Follow-up unit to [N8n](non-rt-n8n.md), 2026-11-07 UTC, base main `fb169cd`, branch `t3/n8o-surface-default`.
 
@@ -13,7 +15,7 @@ Labels: **M** measured here, **I** inference.
 
 ## Result
 
-**All three blockers are fixed (M). Surface is still not the default: it does not reach Exact's quality on every measure.**
+**All three blockers are fixed (M). Surface was not made the default in this unit: it does not reach Exact's quality on every measure.**
 
 | Blocker | N8n | N8o (M) |
 |---|---|---|
@@ -21,7 +23,7 @@ Labels: **M** measured here, **I** inference.
 | Caster staleness | 530-570 pixels differ from a fresh lookup; undecidable | Static camera: rolled frame **byte-identical** to a fresh lookup and to a fresh Surface run (both poses). With camera history: every differing pixel also differs, with the same count, in a twin run whose caster held still (**0 unexplained**) |
 | Caster-moving cost | 1.715-1.773 ms (Exact 1.692-1.782) | **1.560-1.649 ms** against Exact's 1.676-1.707 on the same binary; trace spans 1,638-1,743 µs against 1,690-1,828 |
 
-**Why Surface stays opt-in** (the brief's own fallback):
+**Why Surface stayed opt-in in N8o** (the brief's own fallback):
 - **Quarry:** Surface is above Unreal VSM on every measure, but below Exact on four of five. With film-reference scores (pose 0):
   - partial RMS .365 against .353;
   - solid flips 2,685 against 2,434;
@@ -259,12 +261,12 @@ Surface's flicker is at least 4x below VSM's in every moving phase (4-350x). It 
   - counts hashes after the camera and caster phases;
   - `caster_frames`/`caster_wrap` and `turn_wrap`;
   - `--caster-gates` and `--move-wrap` in scripts/n1c-batch.py.
-- **Unchanged:** shaders/virtual_shadow.wgsl and Exact's output (main's hashes above), `VirtualShadowSettings::default()` (Exact), and docs/milestones-5-6-decisions.tsv.
+- **Unchanged:** shaders/virtual_shadow.wgsl and Exact's output (main's hashes above), `VirtualShadowSettings::default()` (Exact at this checkpoint; Surface since N8p), and docs/milestones-5-6-decisions.tsv.
 - **Programmability.** Cells hold visibility counts and bookkeeping only. No lighting-model data entered hit records, clusters, maps or the lookup, which still outputs the counts user shading programs consume.
 
 ## Misses, honestly
 
-- **Not the default.** Surface does not reach Exact's quality on every measure:
+- **Not made the default in N8o.** Surface does not reach Exact's quality on every measure:
   - the quarry's partial RMS, flips, leaks and lost edges (+2.9-12%), traced and no-RT;
   - S3 rotate 1's leaks (2 against 1);
   - flicker in two S3 phases (+0.3% and +1.0%).

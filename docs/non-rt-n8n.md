@@ -1,12 +1,12 @@
 # N8n: a surface-keyed visibility cache for the non-RT virtual-shadow pass
 
-**Follow-up: [N8o](non-rt-n8o.md)** makes Surface deterministic (every phase hash-equal across visits and processes) and its caster invalidation exact (a rolled frame equals a fresh lookup byte for byte at a static camera; with camera history every difference is reuse), and caster-moving frames cheaper than Exact's (1.56-1.65 against 1.68-1.71 ms). It stays opt-in: on the quarry it is below Exact on four of five film-reference measures (above VSM on all), and camera motion still costs about 1.04 ms.
+**Follow-ups: [N8o](non-rt-n8o.md)** makes Surface deterministic (every phase hash-equal across visits and processes) and its caster invalidation exact (a rolled frame equals a fresh lookup byte for byte at a static camera; with camera history every difference is reuse), and caster-moving frames cheaper than Exact's (1.56-1.65 against 1.68-1.71 ms). It stayed opt-in in N8o: on the quarry it is below Exact on four of five film-reference measures (above VSM on all), and camera motion still costs about 1.04 ms. [N8p](non-rt-n8p.md) subsequently adopts it as the default by Islam's decision.
 
 Follow-up unit to [N8m](non-rt-n8m.md), 2026-11-07 UTC, base main `f40cc5b`, branch `t3/n8n-surface-cache`. Brief (Islam, 2026-11-07): the camera moves, but the sun and the casters do not, so a receiver point's shadow does not change. Key the exact walk's results by the receiver's surface point instead of its pixel, walk only the misses, and invalidate on sun changes (N8e's hysteresis) and caster motion (N8f's reach test). It need not be byte-identical, but it must beat Unreal VSM on every measure, including temporal stability under camera motion, within the memory budget. Make it the default only if it beats VSM everywhere. Labels: **M** measured here, **I** inference.
 
 ## Result
 
-**Kept, opt-in: `VirtualLookup::Surface`.** It is above Unreal VSM on every quality measure of every bench, and on motion stability. It is not the default: camera-moving frames miss VSM's estimated cost.
+**Kept at this checkpoint, opt-in: `VirtualLookup::Surface`.** It is above Unreal VSM on every quality measure of every bench, and on motion stability. It was not the default at this checkpoint: camera-moving frames miss VSM's estimated cost. [N8p](non-rt-n8p.md) subsequently adopts N8o's corrected Surface as the default by Islam's decision.
 
 | No-RT quarry, shadow pass, ms (M) | Static | Sun turning | Camera moving | Caster moving | No-RT frame (static / camera / caster) |
 |---|---:|---:|---:|---:|---|
@@ -249,7 +249,7 @@ Surface is above VSM on every S2 and S3 quality measure in every phase, and equa
   - walking boundary pixels in N8m's ordered tile schedule instead of a queue;
   - folding `vsm_mark`'s page requests into the probe, so only walking pixels request pages (about 25 µs).
 - **Carried from N8e-N8m:** none of Exact's misses got worse. S1 pose 1's 2 umbra leaks are gone in Surface (0); the quarry's lit-darkened margin widens (30-40 against 87-88).
-- Not film quality in any mode, and never presented as meeting the film gate. Surface is not the default.
+- Not film quality in any mode, and never presented as meeting the film gate. Surface was not the default at this checkpoint; see [N8p](non-rt-n8p.md) for the subsequent default decision.
 
 ## Evidence and time
 

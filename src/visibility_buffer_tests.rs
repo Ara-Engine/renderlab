@@ -521,6 +521,12 @@ fn gpu_visibility_bench() {
     if !no_rt {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     }
+    // Preserve N1b's recorded Exact reference output.
+    r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
+        lookup: crate::VirtualLookup::Exact,
+        ..Default::default()
+    })
+    .unwrap();
     let mut scene = vec![];
     for g in &b.meshes {
         let vertices: Vec<_> = g
@@ -661,6 +667,12 @@ fn gpu_visibility_fixture() {
     fs::create_dir_all(&out).unwrap();
     let mut r = no_rt_renderer();
     light(&mut r);
+    // Preserve N1b's recorded Exact reference output.
+    r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
+        lookup: crate::VirtualLookup::Exact,
+        ..Default::default()
+    })
+    .unwrap();
     let (mesh, mut instances) = geometry(
         &mut r,
         &[
@@ -1429,6 +1441,7 @@ fn gpu_primary_memory_modes() {
     r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
         pages: 4,
         refresh: 1,
+        lookup: crate::VirtualLookup::Exact,
         ..Default::default()
     })
     .unwrap();
@@ -1600,6 +1613,7 @@ fn gpu_virtual_configuration_reset() {
     let settings = crate::VirtualShadowSettings {
         pages: 4,
         walk_records: crate::WalkRecords::Off,
+        lookup: crate::VirtualLookup::Exact,
         ..Default::default()
     };
     let mut expected = None;

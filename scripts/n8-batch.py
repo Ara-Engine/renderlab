@@ -45,7 +45,9 @@ def link_references(root, bench, cases):
 def manifests(root):
     quarry = json.loads(QUARRY.read_text())
     repeats = int(os.environ.get("N8B_REPEATS", "8"))
-    variants = json.loads(os.environ.get("N8B_VARIANTS", '{"default": {}}'))
+    # Pre-N8p reference screens keep Exact, including partial settings in lease scripts.
+    variants = {name: {**settings, "virtual": {"lookup": "exact", **settings.get("virtual", {})}}
+                for name, settings in json.loads(os.environ.get("N8B_VARIANTS", '{"default": {}}')).items()}
     return {
         "fixture": ("gpu_virtual_fixture", dict(output=str(root / "fixture-run"))),
         "s1": ("gpu_contact_fold_batch", dict(scene=str(S1 / "fixture/scene.json"), output=str(root / "S1/renderlab"), modes=MODES)),
@@ -89,9 +91,8 @@ def main():
     record = []
     for step in steps:
         test, manifest = plan[step]
-        if "N8_VIRTUAL" in os.environ:
-            # VirtualShadowSettings overrides (JSON), e.g. a variant screen.
-            manifest = dict(manifest, virtual=json.loads(os.environ["N8_VIRTUAL"]))
+        # Historical reference benches retain Exact; an explicit Surface selection wins.
+        manifest = dict(manifest, virtual={"lookup": "exact", **json.loads(os.environ.get("N8_VIRTUAL", "{}"))})
         if "N8B_CONSTANTS" in os.environ:
             # Lookup override constants (JSON) for the diagnosis traces.
             manifest = dict(manifest, constants=json.loads(os.environ["N8B_CONSTANTS"]))

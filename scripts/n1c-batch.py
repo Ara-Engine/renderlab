@@ -61,11 +61,13 @@ def main():
                      move_wrap=a.move_wrap)
             if a.caster_error:
                 m["caster_error"] = a.caster_error
-            if os.environ.get("N8_VIRTUAL"):
-                m["virtual"] = json.loads(os.environ["N8_VIRTUAL"])
+            # This reference harness retains main's recorded Exact hashes after N8p.
+            # Surface experiments must name their lookup; the library/parser default is Surface.
+            m["virtual"] = {"lookup": "exact", **json.loads(os.environ.get("N8_VIRTUAL", "{}"))}
             # N8e: {name: settings}, every configuration once per variant (labels -v{name}).
             if os.environ.get("N8E_VARIANTS"):
-                m["virtual_variants"] = json.loads(os.environ["N8E_VARIANTS"])
+                m["virtual_variants"] = {name: {"lookup": "exact", **settings}
+                                         for name, settings in json.loads(os.environ["N8E_VARIANTS"]).items()}
             if not a.no_lod:
                 m.update(virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))
         else:

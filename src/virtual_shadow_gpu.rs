@@ -73,8 +73,10 @@ pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
 pub const VIRTUAL_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
-/// Tuning of `SoftShadows::Virtual`. Defaults follow docs/non-rt-n8.md, non-rt-n8c.md and
-/// non-rt-n8e.md; N8c's output is `walk_cap: 0, refresh: 1, sun_hysteresis: 0.0`.
+/// Tuning of `SoftShadows::Virtual`. Surface is the default lookup (docs/non-rt-n8p.md);
+/// Exact remains selectable as the reference. Other defaults follow docs/non-rt-n8.md,
+/// non-rt-n8c.md and non-rt-n8e.md; N8c's output is
+/// `walk_cap: 0, refresh: 1, sun_hysteresis: 0.0` with `lookup: VirtualLookup::Exact`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualShadowSettings {
     /// Metres beyond which other surfaces are found only through the map. The receiver's
@@ -136,7 +138,8 @@ pub struct VirtualShadowSettings {
     /// and its march and page requests widen their cone by this angle. 0 rasterizes again
     /// whenever the sun turns.
     pub sun_hysteresis: f32,
-    /// N8k: which lookup decides visibility from the shared clipmap (docs/non-rt-n8k.md).
+    /// Which lookup decides visibility from the shared clipmap: Surface by default,
+    /// Exact for the reference (docs/non-rt-n8p.md).
     pub lookup: VirtualLookup,
 }
 
@@ -145,7 +148,6 @@ pub struct VirtualShadowSettings {
 pub enum VirtualLookup {
     /// Exact watertight tests of the receiver's 1-ring and of every map candidate's triangles
     /// (shaders/virtual_shadow.wgsl): the reference.
-    #[default]
     Exact,
     /// N8k: light-space map data only (shaders/virtual_shadow_lookup.wgsl): per-texel height
     /// planes and planarity errors written at page-draw time, rebuilt between texel centres.
@@ -154,13 +156,14 @@ pub enum VirtualLookup {
     /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
     /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
     Hybrid,
-    /// N8n/N8o: `Exact`'s walks kept per receiver surface cell across frames in a hash table
+    /// The default. N8n/N8o: `Exact`'s walks kept per receiver surface cell across frames in a hash table
     /// (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md, docs/non-rt-n8o.md). A pixel
     /// shows its cell's count only where the cell is solid and every pixel that computed it agreed
     /// with its neighbourhood; every other pixel walks as `Exact` does. Static frames run nothing,
     /// and camera motion walks only shadow-boundary pixels and cells not seen yet. Deterministic;
     /// caster motion retires exactly the cells it can reach. Adds the table and its claim words
     /// (64 MiB) and the miss queue (8 bytes per pixel).
+    #[default]
     Surface,
 }
 impl VirtualLookup {
@@ -191,7 +194,7 @@ impl Default for VirtualShadowSettings {
             refresh: 16,
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
-            lookup: VirtualLookup::Exact,
+            lookup: VirtualLookup::Surface,
         }
     }
 }

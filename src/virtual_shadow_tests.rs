@@ -307,9 +307,8 @@ pub(crate) fn set_screen_constants(r: &mut Renderer, constants: Vec<(&'static st
 pub(super) fn diagnosis_renderer(m: &serde_json::Value) -> Renderer {
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-    if let Some(settings) = virtual_settings(m) {
-        r.set_virtual_shadow_settings(settings).unwrap();
-    }
+    r.set_virtual_shadow_settings(exact_virtual_settings(m))
+        .unwrap();
     r
 }
 
@@ -360,8 +359,7 @@ fn gpu_virtual_quarry_screen() {
     };
     let mut rows = vec![];
     for (name, v) in m["variants"].as_object().unwrap() {
-        let settings =
-            virtual_settings(&serde_json::json!({ "virtual": v["virtual"] })).unwrap_or_default();
+        let settings = exact_virtual_settings(&serde_json::json!({ "virtual": v["virtual"] }));
         r.set_virtual_shadow_settings(settings).unwrap();
         r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
         r.set_soft_shadows(SoftShadows::Virtual);
@@ -448,11 +446,11 @@ fn gpu_virtual_quarry_diagnose() {
     let color = target(&r, 1920, 1080);
     // Optional `variants`: {name: {settings}} screens on the one loaded asset; each writes
     // quarry-<name>/ beside the base quarry/ trace.
-    let base = virtual_settings(&m).unwrap_or_default();
+    let base = exact_virtual_settings(&m);
     let mut variants = vec![(out.clone(), base)];
     if let Some(list) = m["variants"].as_object() {
         for (name, v) in list {
-            let s = virtual_settings(&serde_json::json!({ "virtual": v })).unwrap();
+            let s = exact_virtual_settings(&serde_json::json!({ "virtual": v }));
             let dir = out.with_file_name(format!("quarry-{name}"));
             fs::create_dir_all(&dir).unwrap();
             variants.push((dir, s));
@@ -491,9 +489,8 @@ fn gpu_virtual_fixture() {
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-    if let Some(settings) = virtual_settings(&m) {
-        r.set_virtual_shadow_settings(settings).unwrap();
-    }
+    r.set_virtual_shadow_settings(exact_virtual_settings(&m))
+        .unwrap();
     // 1 cm cells with 2-6 mm relief: ring contacts, map contacts and grazing self-shadow.
     let floor = grid(200, 2.0, |x, z| {
         0.004 * (x * 47.).sin() * (z * 31.).cos() + 0.002 * ((x + z) * 113.).sin()
@@ -603,7 +600,7 @@ fn gpu_virtual_fixture() {
     fs::write(
         out.join("fixture.json"),
         serde_json::to_vec_pretty(&serde_json::json!({"rows":rows,"timing":timing,
-            "settings":format!("{:?}", virtual_settings(&m).unwrap_or_default())}))
+            "settings":format!("{:?}", exact_virtual_settings(&m))}))
         .unwrap(),
     )
     .unwrap();
@@ -616,9 +613,8 @@ fn gpu_virtual_quarry() {
     let out = PathBuf::from(m["output"].as_str().unwrap()).join("quarry");
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
-    if let Some(settings) = virtual_settings(&m) {
-        r.set_virtual_shadow_settings(settings).unwrap();
-    }
+    r.set_virtual_shadow_settings(exact_virtual_settings(&m))
+        .unwrap();
     let (mut asset, cameras) = load_quarry(&m, &mut r);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
@@ -632,7 +628,7 @@ fn gpu_virtual_quarry() {
     let Light::Directional { travel, lux } = lighting.lights[0] else {
         panic!("quarry sun");
     };
-    let base = virtual_settings(&m).unwrap_or_default();
+    let base = exact_virtual_settings(&m);
     // A reference on today's traced receivers, as gpu_primary_traced_quarry_acceptance
     // builds it: the mean of 256-ray Exact seeds 1-64 (16,384 rays), its per-seed sigma,
     // coverage and depth. The frozen Level B reference predates the current receivers.
@@ -763,7 +759,7 @@ fn gpu_virtual_quarry() {
     fs::write(
         out.join("quarry.json"),
         serde_json::to_vec_pretty(&serde_json::json!({"stats":stats,"timing":timing,
-            "settings":format!("{:?}", virtual_settings(&m).unwrap_or_default()),
+            "settings":format!("{:?}", exact_virtual_settings(&m)),
             "scope":"traced primaries; shadow_ms is N8's page update plus lookup (Interactive: none, fused in receiver_ms)"}))
         .unwrap(),
     )

@@ -703,8 +703,7 @@ fn gpu_motion_virtual_screen() {
     };
     let mut rows = vec![];
     for (name, v) in m["variants"].as_object().unwrap() {
-        let settings =
-            virtual_settings(&serde_json::json!({ "virtual": v["virtual"] })).unwrap_or_default();
+        let settings = exact_virtual_settings(&serde_json::json!({ "virtual": v["virtual"] }));
         r.set_virtual_shadow_settings(settings).unwrap();
         r.set_soft_shadows(SoftShadows::Virtual);
         frame(&mut r, &color, &camera, &mut scene);
@@ -766,9 +765,8 @@ fn gpu_motion_bench_batch() {
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-    if let Some(settings) = virtual_settings(&m) {
-        r.set_virtual_shadow_settings(settings).unwrap();
-    }
+    r.set_virtual_shadow_settings(exact_virtual_settings(&m))
+        .unwrap();
     let selected = |key: &str, name: &str| {
         m[key]
             .as_array()
