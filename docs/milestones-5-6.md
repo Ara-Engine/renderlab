@@ -16,6 +16,22 @@ M6 adds direct shadows with measured softness, contact quality, distance handlin
 
 Basic exposure/tone mapping belongs in M5 so lighting can be evaluated immediately. Advanced temporal reconstruction stays later. Environment illumination is not general local bounce GI. M5-M6 do not claim Lumen-equivalent indirect transport or full lighting support for transparency/volumes.
 
+## Non-RT shadow default (N8p, 2026-11-07)
+
+Islam authorizes `VirtualLookup::Surface` as the default for `SoftShadows::Virtual`,
+including the viewer's inherited settings. `VirtualLookup::Exact` remains selectable as
+the reference; historical Exact identity/reference gates select it explicitly. This does
+not change the separate `SoftShadows` sampling preference.
+
+[N8p](non-rt-n8p.md) records every N8o quality, flicker, timing and memory comparison.
+Surface beats Unreal VSM on every recorded quality measure and fixes S1 pose 1's
+2-leak miss, while remaining below Exact on four quarry measures. Static shadow work
+is 0 ms; camera motion is 1.043-1.046 ms against Exact's 1.493-1.503 ms, still above
+VSM's estimated ~0.5 ms. Non-RT reserved memory is 3,503.7 MiB against Exact's 3,439.7
+and VSM's 3,912. This is a default decision within the measured shadow subset, not M6
+acceptance or film-quality parity. A planned refinement will reuse a cell only when
+it never scores worse than the pixel's own walk, bringing the default toward Exact's quality.
+
 ## Execution and verification
 
 1. Ground material/normal/texture, render-pass, virtual-geometry and viewer interfaces. Reuse the M4 evidence and scan artifacts. Read industry-rendering-costs.md; Ara designs are historical evidence, not constraints or inherited implementations.

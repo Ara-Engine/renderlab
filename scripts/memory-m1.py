@@ -106,9 +106,9 @@ def run(binary, root, name, memory_only, memory_hints, poses, visits):
     m.update(output=str(out), validate=False, timing=True, reference=False, hash_only=False,
              poses=poses[:1] if memory_only else poses, stage_repeats=0,
              turn_frames=0 if memory_only else 16, move_frames=0 if memory_only else 48,
-             no_rt=name == "nort", lod_pixels=[])
+             no_rt=name == "nort", lod_pixels=[], virtual={"lookup": "exact"})
     if visits > 1:
-        m.update(virtual_variants={f"visit{i}": {} for i in range(visits)}, hash_only=True)
+        m.update(virtual_variants={f"visit{i}": {"lookup": "exact"} for i in range(visits)}, hash_only=True)
     if name == "nort":
         m.update(lod_pixels=[0.35], software_extent=[32], lod_lift=[1],
                  virtual_cache=str(DETAIL / "cache"), virtual_manifest=str(DETAIL / "virtual.manifest"))

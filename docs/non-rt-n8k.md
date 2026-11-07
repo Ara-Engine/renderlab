@@ -4,7 +4,7 @@ Follow-up unit to [N8i](non-rt-n8i.md), [N8j](non-rt-n8j.md) and [N8l](non-rt-n8
 
 ## Result
 
-**No variant beats VSM on every quality measure at ≤ 1 ms camera-moving. Each direction below was built and measured, and its data is in this record.** Exact (main's N8l walk) stays the default; Map and Hybrid are opt-in.
+**No variant beats VSM on every quality measure at ≤ 1 ms camera-moving. Each direction below was built and measured, and its data is in this record.** At this checkpoint Exact (main's N8l walk) stayed the default; Map and Hybrid were opt-in. [N8p](non-rt-n8p.md) subsequently makes Surface the default and retains Exact as the reference.
 
 - **Map** (`VirtualLookup::Map`, shaders/virtual_shadow_lookup.wgsl) reads only light-space map data per pixel.
   - **Cost:** 0.94-0.96 ms camera-moving on the no-RT quarry. Exact costs 1.95 on the same binary; VSM's is estimated at about 0.5.
@@ -77,7 +77,7 @@ P23 skips each lookup at its entry: `VMAP_SKIP` 3 writes lit before any work, `V
 
 ## What was built (M)
 
-- **Setting.** `VirtualShadowSettings::lookup: VirtualLookup` (`Exact` default, `Map`, `Hybrid`). Shared edits are small: the enum and its export, one parser line in the test settings, dispatch selection in `encode_virtual`, the constants list for screens.
+- **Setting.** `VirtualShadowSettings::lookup: VirtualLookup` (`Exact` reference, `Map`, `Hybrid`; Surface is the default since [N8p](non-rt-n8p.md)). Shared edits are small: the enum and its export, one parser line in the test settings, dispatch selection in `encode_virtual`, the constants list for screens.
 - **Per-texel data at page-draw time** (`vmap_resolve`, my module; only for pages rasterized this frame). For the top and peel triangles, it stores the light-space height plane (f16 gradient, with the winding's facing toward the sun in bit 0) and the plane's planarity error: its largest prediction error at a same-placement 4-neighbour inside the page. These are 8 + 4 bytes per texel. A min-mip pyramid of the top layer sits beside main's max-mips.
 - **Map lookup** (`vmap_lookup`, shaders/virtual_shadow_lookup.wgsl). Per pixel it reads the receiver record (world point, geometric normal, placement and primitive) and light-space map words only. No triangle, vertex or adjacency is fetched. Its steps:
   - **Facing.** A direction below the receiver's facet plane is blocked. Mode 6 frees one that rises above a sun-facing own plane, for front-viewed, sun-facing receivers.

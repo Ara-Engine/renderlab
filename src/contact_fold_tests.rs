@@ -126,9 +126,8 @@ fn gpu_contact_fold_batch() {
     fs::create_dir_all(&root).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-    if let Some(settings) = virtual_settings(&m) {
-        r.set_virtual_shadow_settings(settings).unwrap();
-    }
+    r.set_virtual_shadow_settings(exact_virtual_settings(&m))
+        .unwrap();
     let selected = |name: &str| {
         m["modes"]
             .as_array()

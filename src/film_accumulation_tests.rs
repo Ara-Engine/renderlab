@@ -29,6 +29,7 @@ mod motion_bench_tests;
 pub(crate) mod virtual_shadow_tests;
 
 /// Optional `virtual` manifest object overriding `VirtualShadowSettings` fields.
+/// An omitted lookup follows the library's Surface default.
 pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualShadowSettings> {
     let v = m.get("virtual")?;
     let mut s = crate::VirtualShadowSettings::default();
@@ -74,6 +75,42 @@ pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualSh
         _ => s.lookup,
     };
     Some(s)
+}
+
+/// Pre-N8p reference benches retain Exact unless the manifest explicitly selects a lookup.
+/// Keep this separate from the settings parser so default-path gates exercise Surface.
+pub(crate) fn exact_virtual_settings(m: &serde_json::Value) -> crate::VirtualShadowSettings {
+    let mut settings = virtual_settings(m).unwrap_or_default();
+    if m["virtual"]["lookup"].is_null() {
+        settings.lookup = crate::VirtualLookup::Exact;
+    }
+    settings
+}
+
+#[test]
+fn virtual_manifest_lookup_defaults_and_overrides() {
+    assert_eq!(
+        crate::VirtualLookup::default(),
+        crate::VirtualLookup::Surface
+    );
+    assert_eq!(
+        virtual_settings(&serde_json::json!({"virtual": {}}))
+            .unwrap()
+            .lookup,
+        crate::VirtualLookup::Surface
+    );
+    assert_eq!(
+        exact_virtual_settings(&serde_json::json!({})).lookup,
+        crate::VirtualLookup::Exact
+    );
+    for (name, lookup) in [
+        ("exact", crate::VirtualLookup::Exact),
+        ("surface", crate::VirtualLookup::Surface),
+    ] {
+        let manifest = serde_json::json!({"virtual": {"lookup": name}});
+        assert_eq!(virtual_settings(&manifest).unwrap().lookup, lookup);
+        assert_eq!(exact_virtual_settings(&manifest).lookup, lookup);
+    }
 }
 
 /// Two independent stratified halves of 512 samples (32 x 16 strata each), randomized in
