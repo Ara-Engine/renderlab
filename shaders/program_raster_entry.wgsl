@@ -11,7 +11,7 @@
     let face=-geometric;
     let source_geometric=select(-face,face,source_front);
     let pixel=vec2<i32>(input.position.xy);
-    let surface_input=SurfaceInput(input.world,source_geometric,input.normal,input.tangent,input.handedness,
+    let surface_input=SurfaceInput(input.world,source_geometric,input.normal,dpdx(input.normal),dpdy(input.normal),input.tangent,input.handedness,
         input.uv,dpdx(input.uv),dpdy(input.uv),input.color,source_front,lighting.eye,vec2<u32>(pixel),material,
         raster_receiver(input.world,triangle,pixel,material.thin!=0u));
     let surface_output=surface(surface_input);

@@ -20,17 +20,29 @@ fn srgb(v: f64) -> u8 {
 
 /// Area box filter. Fractional coverage includes every odd edge texel.
 pub(crate) fn build(width: u32, height: u32, rgba8: Vec<u8>, role: TextureRole) -> Result<Texture> {
-    if role == TextureRole::NormalLinear {
-        let prepared = crate::normal_map::prepare_rgba8(width, height, &rgba8)?;
+    if role.is_normal() {
+        let prepared = if role == TextureRole::NormalVarianceLinear {
+            crate::normal_map::prepare_rgba8(width, height, &rgba8)?
+        } else {
+            crate::normal_map::prepare_rgba8_legacy(width, height, &rgba8)?
+        };
         return Ok(Texture {
             role,
             mips: prepared
                 .mips()
                 .iter()
-                .map(|m| Mip {
-                    width: m.width(),
-                    height: m.height(),
-                    rgba8: m.rgba8(),
+                .map(|m| {
+                    let mut rgba8 = m.rgba8();
+                    if role == TextureRole::NormalLinear {
+                        for p in rgba8.chunks_exact_mut(4) {
+                            p[3] = 255;
+                        }
+                    }
+                    Mip {
+                        width: m.width(),
+                        height: m.height(),
+                        rgba8,
+                    }
                 })
                 .collect(),
         });

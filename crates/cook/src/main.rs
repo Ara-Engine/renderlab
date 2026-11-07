@@ -67,8 +67,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             fixtures::generate(Path::new(directory))?;
             for (name,bytes) in fixtures::sources()? { println!("{}",json!({"limits":effective,"source":name,"bytes":bytes.len(),"sha256":hash_hex(&bytes)})); }
         },
-        ["cook",source,cache,manifest,flags @ ..] if flags.iter().all(|f| matches!(*f,"--reject-missing-normals" | "--normal-maps")) => {
-            let settings=Settings { missing_normals:if flags.contains(&"--reject-missing-normals") { MissingNormals::Reject } else { MissingNormals::Flat }, normal_maps:flags.contains(&"--normal-maps") };
+        ["cook",source,cache,manifest,flags @ ..] if flags.iter().all(|f| matches!(*f,"--reject-missing-normals" | "--normal-maps" | "--normal-variance")) => {
+            let settings=Settings { missing_normals:if flags.contains(&"--reject-missing-normals") { MissingNormals::Reject } else { MissingNormals::Flat }, normal_maps:flags.contains(&"--normal-maps"), normal_variance:flags.contains(&"--normal-variance") };
             let result=cook_file(Path::new(source),Path::new(cache),Path::new(manifest),settings,limits)?;
             let r=result.report;let c=r.counts;
             println!("{}",json!({"limits":effective,"source":source,"manifest":manifest,"key":result.loaded.key,"payload_sha256":result.loaded.payload_hash,
@@ -86,7 +86,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}",json!({"limits":effective,"key":loaded.key,"payload_sha256":loaded.payload_hash,"meshes":c.meshes,"primitives":c.primitives,"placements":c.placements,
                 "vertices":c.vertices,"indices":c.indices,"textures":c.textures,"mip_levels":c.mip_levels,"decoded_bytes":c.decoded_bytes}));
         },
-        _=>return Err("usage: renderlab-cook fixtures DIRECTORY | cook SOURCE.glb CACHE CURRENT.manifest [--reject-missing-normals] [--normal-maps] | inspect CACHE MANIFEST".into())
+        _=>return Err("usage: renderlab-cook fixtures DIRECTORY | cook SOURCE.glb CACHE CURRENT.manifest [--reject-missing-normals] [--normal-maps] [--normal-variance] | inspect CACHE MANIFEST".into())
     }
     Ok(())
 }

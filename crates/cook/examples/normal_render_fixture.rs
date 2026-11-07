@@ -1,4 +1,4 @@
-//! Owned normal-bearing GLB -> regular v2 -> virtual v2 inputs for the GPU phase.
+//! Owned normal-bearing GLB -> regular v3 -> virtual v2 inputs for the GPU phase.
 use renderlab_asset::{self as asset, virtual_mesh::VirtualLimits};
 use renderlab_cook::{
     self as cook, CookLimits, Settings, normal_fixture, virtual_cache, virtual_cook,
@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &directory.join("normal.manifest"),
         Settings {
             normal_maps: true,
+            normal_variance: true,
             ..Default::default()
         },
         CookLimits::default(),
@@ -32,10 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match name {
             "flat" => {
                 for texture in &mut a.textures {
-                    if texture.role == asset::TextureRole::NormalLinear {
+                    if texture.role.is_normal() {
                         for mip in &mut texture.mips {
                             for pixel in mip.rgba8.chunks_exact_mut(4) {
-                                pixel.copy_from_slice(&[128, 128, 255, 255]);
+                                pixel.copy_from_slice(&[128, 128, 255, 0]);
                             }
                         }
                     }

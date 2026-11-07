@@ -315,7 +315,7 @@ fn normal_decode_is_linear_positive_y_alpha_ignored_and_scale_is_xy_then_normali
 }
 
 #[test]
-fn normal_mips_average_vectors_renormalize_and_explicitly_discard_variance() {
+fn normal_mips_keep_mean_length_separate_from_unit_direction() {
     let map = normal_map::prepare_vectors(2, 1, vec![[0.6, 0.0, 0.8], [-0.6, 0.0, 0.8]]).unwrap();
     near(map.mips()[1].vectors()[0], [0.0, 0.0, 1.0]);
     let mixed = normal_map::prepare_vectors(2, 1, vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).unwrap();
@@ -327,9 +327,47 @@ fn normal_mips_average_vectors_renormalize_and_explicitly_discard_variance() {
             0.0,
         ],
     );
-    assert_eq!(map.mips()[1].rgba8(), [128, 128, 255, 255]);
+    assert!((map.mips()[1].mean_lengths()[0] - 0.8).abs() < 1e-6);
+    assert_eq!(map.mips()[1].rgba8(), [128, 128, 255, 180]);
     let uniform = normal_map::prepare_vectors(2, 1, vec![[0.0, 0.0, 1.0]; 2]).unwrap();
-    assert_eq!(map.mips()[1], uniform.mips()[1]);
+    assert_ne!(map.mips()[1], uniform.mips()[1]);
+    assert_eq!(uniform.mips()[1].rgba8(), [128, 128, 255, 0]);
+}
+
+#[test]
+fn coarse_normal_mips_average_original_means_including_cancellation() {
+    // The first pair cancels; its fallback direction must never enter the next mean.
+    let map = normal_map::prepare_vectors(
+        4,
+        1,
+        vec![
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap();
+    assert_eq!(map.mips()[1].mean_lengths(), &[0.0, 1.0]);
+    near(map.mips()[2].vectors()[0], [0.0, 0.0, 1.0]);
+    assert!((map.mips()[2].mean_lengths()[0] - 0.5).abs() < 1e-6);
+    // For asymmetric pairs, renormalizing intermediate means would also change direction.
+    let map = normal_map::prepare_vectors(
+        4,
+        1,
+        vec![
+            [0.6, 0.0, 0.8],
+            [-0.6, 0.0, 0.8],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+    )
+    .unwrap();
+    near(
+        map.mips()[2].vectors()[0],
+        unit([0.0, 0.5, 0.4]).map(|v| v as f32),
+    );
+    assert!((map.mips()[2].mean_lengths()[0] - 0.5f32.hypot(0.4)).abs() < 1e-6);
 }
 
 #[test]
