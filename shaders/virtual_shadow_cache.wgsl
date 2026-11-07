@@ -41,9 +41,10 @@
 //     frames while the sun turns, staggered by world-space block);
 //   - no caster moved since, or it was checked on every caster-moving frame since: a hit on such
 //     a frame is kept (and marked current) only if N8f's conservative reach test, widened to the
-//     cell's cube and, for a shown cell, to the neighbourhood that certified it (its margin),
-//     clears it. The walk at any point of that region, and so the cell's count and its verdict,
-//     cannot have changed (N8o). A cell nobody looked at on a caster-moving frame becomes stale.
+//     cell's cube, clears it, and stays shown only if the test widened to the neighbourhood that
+//     certified it (its margin) clears it too. The walk at any point of those regions, and so the
+//     cell's count and its verdict, cannot have changed (N8o). A cell nobody looked at on a
+//     caster-moving frame becomes stale.
 // Visibility only: the lookup still outputs the counts that user shading programs consume.
 
 // x frame counter, y sun epoch (bumped on every frame the sun direction changes), z caster epoch
@@ -188,8 +189,10 @@ fn vsc_current(e:vec2<u32>)->bool {
     return e.x!=0u && ((e.y>>12u)&63u)==(vsc.casters&63u) && (e.y>>19u)==(vsc.sun&8191u);
 }
 // A cell's cached visible count, VSC_UNSHOWN | its work, VSC_STALE | its work or VSC_MISS. On a
-// caster-moving frame a kept hit is marked current (its caster epoch rewritten): every pixel of
-// the cell decides alike (vsc_reached), so the rewrite is the same whichever writes it.
+// caster-moving frame a kept hit is marked current (its caster epoch rewritten). Where the moved
+// casters reach a shown cell's certifying neighbourhood but not its cube, its count still holds
+// and it is kept unshown, so its pixels walk once the camera moves. Every pixel of the cell
+// decides alike (vsc_reached), so the rewrite is the same whichever writes it.
 fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
     let key=vsc_key(slot,side,c);
     let base=key.bucket*VSC_SLOTS;
@@ -204,22 +207,25 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
         }
         let epoch=(e.y>>12u)&63u;
         let current=vsc.casters&63u;
-        var keep=epoch==current;
+        var value=e.y;
         // One caster-moving frame behind: still valid where the moved casters cannot reach.
-        if !keep && moved && epoch==((current+63u)&63u) {
-            if vsc_reached(vsc_centre(c),vsc_extent(c,e.y),(e.y>>4u)&15u) {
+        if epoch!=current {
+            if !moved || epoch!=((current+63u)&63u) {return VSC_STALE|vsc_work(e);}
+            let centre=vsc_centre(c);
+            let recorded=(value>>4u)&15u;
+            if vsc_reached(centre,0.8660254*c.size,recorded) {
                 if VSC_STATS {atomicAdd(&vsc_stats[2],1u);}
-            } else {
-                vsc_table[base+s]=vec2<u32>(e.x,(e.y&~(63u<<12u))|(current<<12u));
-                keep=true;
+                return VSC_STALE|vsc_work(e);
             }
+            value=(value&~(63u<<12u))|(current<<12u);
+            if (value&VSC_SHOWN)!=0u && vsc_reached(centre,vsc_extent(c,value),recorded) {value&=~(VSC_SHOWN|15u);}
+            vsc_table[base+s]=vec2<u32>(e.x,value);
         }
-        if !keep {return VSC_STALE|vsc_work(e);}
-        if (e.y&VSC_SHOWN)==0u {
+        if (value&VSC_SHOWN)==0u {
             if VSC_STATS {atomicAdd(&vsc_stats[4],1u);}
-            return VSC_UNSHOWN|(e.y&7u);
+            return VSC_UNSHOWN|(value&7u);
         }
-        return select(0u,vsm.n8e.x,(e.y&1u)!=0u);
+        return select(0u,vsm.n8e.x,(value&1u)!=0u);
     }
     return VSC_MISS;
 }
@@ -396,8 +402,9 @@ fn vsc_margin(size:f32,far:f32)->u32 {
 // The verdict of pixel p's walk with `visible` of k directions open: grade 2 or 1 when the walk
 // is solid and every receiver within VSC_CONSENSUS pixels finished this frame with its count,
 // and the farthest of them, or of the cubes their counts came from, is within c.size * 2^margin
-// (margin at most 7) of the cell's centre; else grade 0. z: that farthest distance in sixteenths of the cell's edge, rounded up (the
-// fills' margins start from it, alike in both passes).
+// (margin at most 7) of the cell's centre; else grade 0. z: that farthest distance in quarters of
+// the cell's edge, rounded up, or 63 when it exceeds 15.75 (the fills' margins start from it,
+// alike in both passes; 63 makes none).
 fn vsc_verdict(p:vec2<i32>,c:VscCell,visible:u32)->vec3<u32> {
     let k=vsm.n8e.x;
     if visible!=k && visible!=0u {return vec3<u32>(0u);}
@@ -412,24 +419,24 @@ fn vsc_verdict(p:vec2<i32>,c:VscCell,visible:u32)->vec3<u32> {
             // Uncovered tiles hold no hit records or counts of this frame (vsm_covered).
             if any(q<vec2<i32>(0)) || any(q>=size) || !vsm_covered(vec2<u32>(q)) {continue;}
             if textureLoad(vsc_counts,q,0).x!=count {return vec3<u32>(0u);}
-            // The neighbour's count may be its own cell's, computed anywhere in that cube.
+            // The neighbour's count may be its own cell's, computed anywhere in that cube, whose
+            // edge is at most VSC_CELL footprints (vsc_cell).
             let wq=textureLoad(vsm_world,q,0).xyz;
-            far=max(far,length(wq-centre)+1.7320508*vsc_cell(wq).size);
+            far=max(far,length(wq-centre)+1.7320508*VSC_CELL*length(wq-vsm.eye.xyz)*vsm.eye.w);
         }
     }
-    let sixteenths=u32(min(ceil(far/c.size*16.0),16383.0));
-    let margin=vsc_margin(c.size,f32(sixteenths)*c.size/16.0);
+    let margin=vsc_margin(c.size,far);
     if margin==8u {
         if VSC_STATS {atomicAdd(&vsc_stats[5],1u);}
         return vec3<u32>(0u);
     }
-    return vec3<u32>(select(1u,2u,visible==k),margin,sixteenths);
+    return vec3<u32>(select(1u,2u,visible==k),margin,u32(min(ceil(far/c.size*4.0),63.0)));
 }
 // The slot a result writes, from the table as this frame's probe left it (vsc_resolve writes
 // it only after every claim): its cell's own, else the first slot that is empty or not current
 // from one the fingerprint picks, else (unless `fill`) that one. A fill never replaces a current
-// value: VSC_SLOTS * buckets when it would.
-fn vsc_target(key:VscKey,fill:bool)->u32 {
+// value: VSC_SLOTS * buckets when it would. y: the slot holds the cell current and unshown.
+fn vsc_target(key:VscKey,fill:bool)->vec2<u32> {
     let base=key.bucket*VSC_SLOTS;
     let pick=(key.fingerprint>>8u)&(VSC_SLOTS-1u);
     let none=VSC_SLOTS*(vsc.buckets+1u);
@@ -437,41 +444,42 @@ fn vsc_target(key:VscKey,fill:bool)->u32 {
     for(var s=0u;s<VSC_SLOTS;s+=1u) {
         let e=vsc_table[base+s];
         if e.x==key.fingerprint && ((e.y>>8u)&15u)==key.check {
-            return select(base+s,none,fill && vsc_current(e));
+            let current=vsc_current(e);
+            return vec2<u32>(select(base+s,none,fill && current),u32(current && (e.y&VSC_SHOWN)==0u));
         }
         let t=(pick+s)&(VSC_SLOTS-1u);
         if free==VSC_SLOTS && !vsc_current(vsc_table[base+t]) {free=t;}
     }
-    if free==VSC_SLOTS {return select(base+pick,none,fill);}
-    return base+free;
+    if free==VSC_SLOTS {return vec2<u32>(select(base+pick,none,fill),0u);}
+    return vec2<u32>(base+free,0u);
 }
 // A certified result also fills the cells of the midpoints to its pixel's 3x3 neighbours on the
 // same placement and side: they lie inside the neighbourhood that agreed, where the next frames'
 // receiver points land (without them, measured: 81% of receivers shown while the camera moves,
 // against 86%). A fill claims below any pixel's own result, only where no current value is, and
-// its margin covers the source's neighbourhood from the fill's centre.
+// its margin covers the source's neighbourhood from the fill's centre. Fills are made only on
+// frames that move the camera: until it moves, no receiver point lands in them.
 override VSC_SPLAT:bool=true;
 struct VscFill {valid:bool,key:VscKey,margin:u32};
-fn vsc_fill(x:VscResult,n:u32,sixteenths:u32)->VscFill {
+// Neighbour n's fill (n of the 3x3, 4 the pixel itself), from its world point.
+fn vsc_fill_at(x:VscResult,wq:vec3<f32>,quarters:u32)->VscFill {
     var out:VscFill;
-    let q=x.p+vec2<i32>(i32(n%3u)-1,i32(n/3u)-1);
-    let size=vec2<i32>(textureDimensions(vsm_world));
-    if n==4u || any(q<vec2<i32>(0)) || any(q>=size) || !vsm_covered(vec2<u32>(q)) {return out;}
-    let record=textureLoad(vsm_hit,q,0);
-    let wq=textureLoad(vsm_world,q,0);
-    let nq=textureLoad(vsm_normal,q,0);
-    if record.x!=x.slot+1u || vsc_side(wq.xyz,nq.xyz,nq.w<0.0)!=x.side {return out;}
-    let c=vsc_cell((x.world+wq.xyz)*0.5);
+    let c=vsc_cell((x.world+wq)*0.5);
     out.key=vsc_key(x.slot,x.side,c);
     if out.key.bucket==x.key.bucket && out.key.fingerprint==x.key.fingerprint {return out;}
-    let far=f32(sixteenths)*x.cell.size/16.0+length(vsc_centre(c)-vsc_centre(x.cell));
+    let far=f32(quarters)*x.cell.size/4.0+length(vsc_centre(c)-vsc_centre(x.cell));
     out.margin=vsc_margin(c.size,far);
     out.valid=out.margin<8u;
     return out;
 }
-// Claims each queued result's slot, and its fills'. Word 2k+1 becomes the result with its
-// verdict: bit 31, the visible count, start level << 4, work << 8, grade << 12, margin << 14,
-// the farthest neighbour in sixteenths << 17.
+fn vsc_neighbour(x:VscResult,n:u32)->vec2<i32> {return x.p+vec2<i32>(i32(n%3u)-1,i32(n/3u)-1);}
+// The fill mask's bit for neighbour n (the 3x3 without its centre).
+fn vsc_fill_bit(n:u32)->u32 {return 1u<<(n-u32(n>4u));}
+// Claims each queued result's slot (unless the slot already holds its cell current and unshown:
+// its verdict cannot change), and its fills'. Word 2k+1 becomes the result with its verdict:
+// bit 31, the visible count, start level << 4, work << 8 (3 bits), bit 11 when the slot was kept,
+// grade << 12, margin << 14, the farthest neighbour in quarters << 17 and the claimed fills' mask
+// << 23 (vsc_fill_bit).
 @compute @workgroup_size(64) fn vsc_claim(@builtin(global_invocation_id) gid:vec3<u32>) {
     let heavy=vsm_scratch.pad0;
     if gid.x>=atomicLoad(&vsm_scratch.queue)+heavy {return;}
@@ -481,22 +489,34 @@ fn vsc_fill(x:VscResult,n:u32,sixteenths:u32)->VscFill {
     let x=vsc_result(k);
     if !x.valid {return;}
     let verdict=vsc_verdict(x.p,x.cell,result&15u);
-    let priority=vsc_priority(true,verdict.x,verdict.y,x.p);
-    let slot=vsc_target(x.key,false);
-    atomicMax(&vsc_claims[2u*slot],priority);
-    atomicMax(&vsc_claims[2u*slot+1u],~priority);
-    atomicStore(&vsm_scratch.words[2u*k+1u],(result&0x80000fffu)|(verdict.x<<12u)|(verdict.y<<14u)|(verdict.z<<17u));
-    if !VSC_SPLAT || verdict.x==0u {return;}
-    for(var n=0u;n<9u;n+=1u) {
-        let f=vsc_fill(x,n,verdict.z);
-        if !f.valid {continue;}
-        let fill=vsc_target(f.key,true);
-        if fill==VSC_SLOTS*(vsc.buckets+1u) {continue;}
-        if VSC_STATS {atomicAdd(&vsc_stats[6],1u);}
-        let p=vsc_priority(false,verdict.x,f.margin,x.p);
-        atomicMax(&vsc_claims[2u*fill],p);
-        atomicMax(&vsc_claims[2u*fill+1u],~p);
+    let aim=vsc_target(x.key,false);
+    if aim.y==0u {
+        let priority=vsc_priority(true,verdict.x,verdict.y,x.p);
+        atomicMax(&vsc_claims[2u*aim.x],priority);
+        atomicMax(&vsc_claims[2u*aim.x+1u],~priority);
     }
+    var mask=0u;
+    if VSC_SPLAT && verdict.x!=0u && verdict.z<63u && (vsc.flags&2u)==0u {
+        let size=vec2<i32>(textureDimensions(vsm_world));
+        for(var n=0u;n<9u;n+=1u) {
+            let q=vsc_neighbour(x,n);
+            if n==4u || any(q<vec2<i32>(0)) || any(q>=size) || !vsm_covered(vec2<u32>(q)) {continue;}
+            let wq=textureLoad(vsm_world,q,0);
+            let nq=textureLoad(vsm_normal,q,0);
+            if textureLoad(vsm_hit,q,0).x!=x.slot+1u || vsc_side(wq.xyz,nq.xyz,nq.w<0.0)!=x.side {continue;}
+            let f=vsc_fill_at(x,wq.xyz,verdict.z);
+            if !f.valid {continue;}
+            let fill=vsc_target(f.key,true).x;
+            if fill==VSC_SLOTS*(vsc.buckets+1u) {continue;}
+            if VSC_STATS {atomicAdd(&vsc_stats[6],1u);}
+            let p=vsc_priority(false,verdict.x,f.margin,x.p);
+            atomicMax(&vsc_claims[2u*fill],p);
+            atomicMax(&vsc_claims[2u*fill+1u],~p);
+            mask|=vsc_fill_bit(n);
+        }
+    }
+    let work=min((result>>8u)&15u,7u)<<8u;
+    atomicStore(&vsm_scratch.words[2u*k+1u],(result&0x800000ffu)|work|(aim.y<<11u)|(verdict.x<<12u)|(verdict.y<<14u)|(verdict.z<<17u)|(mask<<23u));
 }
 // The slot of `key`'s bucket whose highest claim is `priority`, after clearing its claims, and
 // the grade of its lowest claim; VSC_SLOTS when this claim did not win.
@@ -522,24 +542,25 @@ fn vsc_won(key:VscKey,priority:u32)->vec2<u32> {
     if gid.x>=atomicLoad(&vsm_scratch.queue)+heavy {return;}
     let k=vsc_entry(gid.x,heavy);
     let result=atomicLoad(&vsm_scratch.words[2u*k+1u]);
-    if (result&0x80000000u)==0u {return;}
+    let kept=(result&0x800u)!=0u;
+    let mask=(result>>23u)&0xffu;
+    if (result&0x80000000u)==0u || (kept && mask==0u) {return;}
     let x=vsc_result(k);
     if !x.valid {return;}
     let grade=(result>>12u)&3u;
     let margin=(result>>14u)&7u;
     let epochs=((vsc.casters&63u)<<12u)|((vsc.sun&8191u)<<19u)|(result&0xf0u);
-    let won=vsc_won(x.key,vsc_priority(true,grade,margin,x.p));
-    if won.x!=VSC_SLOTS {
-        let e=vsc_table[won.x];
-        let kept=e.x==x.key.fingerprint && ((e.y>>8u)&15u)==x.key.check && vsc_current(e) && (e.y&VSC_SHOWN)==0u;
-        let shown=grade!=0u && won.y==grade && !kept;
-        let field=select(min((result>>8u)&15u,7u),u32(grade==2u)|(margin<<1u),shown);
-        vsc_table[won.x]=vec2<u32>(x.key.fingerprint,field|(x.key.check<<8u)|epochs|select(0u,VSC_SHOWN,shown));
+    if !kept {
+        let won=vsc_won(x.key,vsc_priority(true,grade,margin,x.p));
+        if won.x!=VSC_SLOTS {
+            let shown=grade!=0u && won.y==grade;
+            let field=select((result>>8u)&7u,u32(grade==2u)|(margin<<1u),shown);
+            vsc_table[won.x]=vec2<u32>(x.key.fingerprint,field|(x.key.check<<8u)|epochs|select(0u,VSC_SHOWN,shown));
+        }
     }
-    if !VSC_SPLAT || grade==0u {return;}
     for(var n=0u;n<9u;n+=1u) {
-        let f=vsc_fill(x,n,(result>>17u)&16383u);
-        if !f.valid {continue;}
+        if n==4u || (mask&vsc_fill_bit(n))==0u {continue;}
+        let f=vsc_fill_at(x,textureLoad(vsm_world,vsc_neighbour(x,n),0).xyz,(result>>17u)&63u);
         let fill=vsc_won(f.key,vsc_priority(false,grade,f.margin,x.p));
         if fill.x==VSC_SLOTS {continue;}
         // Fills that disagree leave the cell unshown, with no work estimate.

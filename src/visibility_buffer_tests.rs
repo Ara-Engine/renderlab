@@ -1266,8 +1266,18 @@ fn gpu_visibility_quarry() {
                 let batch = m["move_batch"].as_u64().unwrap_or(0) as usize;
                 let base = asset.model(batch, 0);
                 let start = Instant::now();
-                for i in 1..=move_frames {
-                    let step = Mat4::from_translation(Vec3::X * (0.001 * i as f32));
+                // N8o: `caster_frames` (default `move_frames`) caster-moving frames; `caster_wrap`
+                // > 0 steps the placement back and forth over that many millimetres (traces).
+                let caster_frames = m["caster_frames"].as_u64().map_or(move_frames, |n| n as u32);
+                let caster_wrap = m["caster_wrap"].as_u64().unwrap_or(0) as u32;
+                for i in 1..=caster_frames {
+                    let at = if caster_wrap > 0 {
+                        let k = i % (2 * caster_wrap);
+                        k.min(2 * caster_wrap - k)
+                    } else {
+                        i
+                    };
+                    let step = Mat4::from_translation(Vec3::X * (0.001 * at as f32));
                     asset.set_model(batch, 0, step * base).unwrap();
                     render(
                         &mut r,
@@ -1289,7 +1299,7 @@ fn gpu_visibility_quarry() {
                 wall(
                     &mut walls,
                     format!("{label}-caster"),
-                    move_frames as usize,
+                    caster_frames as usize,
                     start,
                 );
                 timing(&mut r, &format!("{label}-caster"), &mut rows);
