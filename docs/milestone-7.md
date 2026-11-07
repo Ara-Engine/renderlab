@@ -70,3 +70,23 @@ Root decisions:
 - **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
 - **RT memory baseline:** M7 starts from the RT default path, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410.
 - **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
+
+## Patent policy (Islam, 2026-11-07)
+
+"Design around them, and consider taking parts if needed and more, and if all fails then we can just use them." This replaces "hold until Islam rules" for the flags above. Apply it in this order:
+
+1. **Design around first.** Prefer methods with no patent exposure. Examples:
+   - GI without the ReSTIR-plus-world-space-cache combination of US 11,315,310;
+   - history rejection other than variance clipping (US 10,116,916);
+   - denoisers outside the SVGF and gradient patents;
+   - reflections outside Adshir/Snap and ReSTIR.
+2. **Unclaimed parts are allowed** where the claim needs the full combination. Examples: resampled reuse alone, or a world-space cache alone. The design doc notes which claim each part avoids, and why.
+3. **Fall back only on evidence.** Use a patented method only if every design-around candidate measurably fails the quality gates (the Unreal floor on every measure, static and in motion, on both paths), or is clearly worse in the final image. Record:
+   - the failed alternatives and their numbers;
+   - the patent number.
+
+   Keep the patented method behind a named setting where practical, so it can be swapped out later.
+
+The quality bar is unchanged. Avoiding a patent never justifies shipping below the floor. Record any design-around's measured cost in quality or speed.
+
+This updates the draft-2 rulings above. Non-RT non-planar reflections are no longer just a recorded miss. Design around Adshir/Snap first: the LOD-BVH and SDF-brick tiers may proceed where their parts avoid the claims, and the patented form remains the evidence-based fallback. Likewise for denoisers, try more samples and caches and unflagged filters first; SVGF-type filters are the evidence-based fallback.
