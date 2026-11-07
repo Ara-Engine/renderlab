@@ -1,5 +1,7 @@
 # N8m: the exact lookup's occupancy limiter, found and removed
 
+**Follow-up: [N8n](non-rt-n8n.md)** keeps the exact walk's counts per receiver surface cell across frames (`VirtualLookup::Surface`, opt-in). Camera-moving frames fall 31% (1.49-1.53 → 1.03-1.04 ms) and static frames to nothing, above Unreal VSM on every quality measure and on flicker in motion; camera motion still misses VSM's estimated ~0.5 ms.
+
 Follow-up unit to [N8l](non-rt-n8l.md), 2026-11-07 UTC, base main `a6d773e`, merged with main `311075c` ([N8k](non-rt-n8k.md)'s map and hybrid lookups), branch `t3/n8m-occupancy`. Brief (Islam, 2026-11-07): keep cutting the non-RT virtual-shadow exact lookup on camera-moving frames (no-RT quarry 1.96-1.98 ms against Unreal VSM's estimated ~0.5 ms). N8l found it memory-latency bound, at about 7.5 resident warps per SM where registers allow 12, limiter unknown. Find the limiter with Nsight counters, raise occupancy, measure every step, output byte-identical to main. Addendum (root, mid-unit): N8k merged; time its Hybrid (`march_samples` 6, walk cap 16) beside Exact, and report its queued exact pass if it moves. Labels: **M** measured here, **I** inference.
 
 ## Result
