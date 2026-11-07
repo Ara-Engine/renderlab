@@ -24,7 +24,7 @@ pub enum CompilePolicy {
     /// Retains helper call boundaries as a compiler hint. Original IR is always
     /// used by Optimized; no WGSL helper body is changed.
     PreviewNoInline,
-    /// Screen the cost of retaining only the environment helper call boundaries.
+    /// Retains measured helper boundaries for transient development compilation.
     PreviewHelpers,
     /// Fast-linked graphics libraries; compute uses the preview flag.
     LibraryFast,
@@ -39,13 +39,37 @@ struct Scope {
     policy: CompilePolicy,
     vertex_identity: Option<[u8; 32]>,
     boundaries: Option<Boundaries>,
+    helper_libraries: Option<bool>,
+    retain_helper_ir: Option<bool>,
 }
 #[derive(Clone, Copy)]
 struct Boundaries {
     environment: bool,
     names: &'static [&'static str],
 }
-thread_local! { static SCOPE: Cell<Scope> = const { Cell::new(Scope { policy: CompilePolicy::Optimized, vertex_identity: None, boundaries: None }) }; }
+thread_local! { static SCOPE: Cell<Scope> = const { Cell::new(Scope { policy: CompilePolicy::Optimized, vertex_identity: None, boundaries: None, helper_libraries: None, retain_helper_ir: None }) }; }
+const HELPER_LIBRARIES: bool = false;
+const RETAIN_HELPER_IR: bool = true;
+const PREVIEW_BOUNDARIES: Boundaries = Boundaries {
+    environment: true,
+    names: &["exposed_product", "brdf", "unit_normal"],
+};
+
+#[cfg(test)]
+pub(crate) fn with_helper_libraries<T>(
+    enabled: bool,
+    retain: bool,
+    compile: impl FnOnce() -> T,
+) -> T {
+    scoped(
+        Scope {
+            helper_libraries: Some(enabled),
+            retain_helper_ir: Some(retain),
+            ..SCOPE.get()
+        },
+        compile,
+    )
+}
 
 /// Diagnostic scope: compare call-boundary choices without editing any helper body.
 #[cfg(test)]
@@ -350,10 +374,11 @@ unsafe extern "system" fn create_graphics(
     // retain the original pointer fields only for this synchronous native call.
     let mut copies = unsafe { std::slice::from_raw_parts(infos, count as usize) }.to_vec();
     if count == 1
-        && matches!(
+        && (matches!(
             policy,
             CompilePolicy::LibraryFast | CompilePolicy::LibraryLto
-        )
+        ) || (policy == CompilePolicy::PreviewHelpers
+            && scope.helper_libraries.unwrap_or(HELPER_LIBRARIES)))
         && let Some(result) =
             unsafe { library::create(&state, cache, &copies[0], allocator, out, scope) }
     {
@@ -498,10 +523,7 @@ unsafe extern "system" fn create_shader(
         no_inline(
             words,
             SCOPE.get().policy == CompilePolicy::PreviewHelpers,
-            SCOPE.get().boundaries.unwrap_or(Boundaries {
-                environment: true,
-                names: &[],
-            }),
+            SCOPE.get().boundaries.unwrap_or(PREVIEW_BOUNDARIES),
         )
     } else {
         None

@@ -239,13 +239,78 @@ fn gpu_vulkan_helper_boundaries() {
             &["exposed_product", "brdf", "unit_normal", "material_normal"],
         ),
     ];
+    let finalists: &[(&str, bool, &[&str])] = &[
+        ("environment", true, &[]),
+        ("environment+libraries", true, &[]),
+        ("environment+libraries-minimal", true, &[]),
+        (
+            "environment+exposed+unit",
+            true,
+            &["exposed_product", "unit_normal"],
+        ),
+        (
+            "environment+exposed+unit+libraries",
+            true,
+            &["exposed_product", "unit_normal"],
+        ),
+        (
+            "environment+exposed+unit+libraries-minimal",
+            true,
+            &["exposed_product", "unit_normal"],
+        ),
+        (
+            "environment+exposed+brdf+unit",
+            true,
+            &["exposed_product", "brdf", "unit_normal"],
+        ),
+    ];
+    let final_screen = std::env::var_os("RENDERLAB_BOUNDARY_FINALISTS").is_some();
+    let paired = std::env::var_os("RENDERLAB_BOUNDARY_PAIRS").is_some();
     let combined = std::env::var_os("RENDERLAB_BOUNDARY_COMBINATIONS").is_some();
-    let candidates = if combined { combinations } else { candidates };
+    let candidates = if final_screen {
+        finalists
+    } else if combined {
+        combinations
+    } else {
+        candidates
+    };
+    let repeats = if final_screen {
+        5
+    } else if combined {
+        3
+    } else {
+        2
+    };
     let mut rows = vec![];
     let mut serial = 0u32;
-    for variant in [Variant::Lit, Variant::Traced] {
-        for repeat in 0..if combined { 3 } else { 2 } {
+    let variants: &[Variant] = if paired {
+        &[Variant::Lit]
+    } else {
+        &[Variant::Lit, Variant::Traced]
+    };
+    for &variant in variants {
+        if paired {
+            let abi = r.program_abi();
+            let scopes = OperationScopes::new(&r.device);
+            for index in 0..variant.len() {
+                shader_compiler::with_program_policy(
+                    CompilePolicy::WarmLibraries,
+                    abi.vertex_identity,
+                    || {
+                        r.program_slot(r.standard.id())
+                            .modules
+                            .pipeline(&abi, variant, index)
+                    },
+                );
+            }
+            assert!(scopes.finish().is_none());
+        }
+        for repeat in 0..repeats {
             for &(candidate, environment, names) in candidates {
+                let host_unix_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
                 serial += 1;
                 let tint =
                     f32::from_bits(0x3f000000 | (salt.wrapping_add(serial * 100003) & 0x003fffff));
@@ -267,21 +332,43 @@ fn gpu_vulkan_helper_boundaries() {
                     CompilePolicy::PreviewHelpers
                 };
                 let start = Instant::now();
-                let pipeline = shader_compiler::with_boundaries(environment, names, || {
-                    shader_compiler::with_program_policy(policy, abi.vertex_identity, || {
-                        compiled.modules.pipeline(&abi, variant, 1)
+                let create = |index| {
+                    shader_compiler::with_boundaries(environment, names, || {
+                        shader_compiler::with_helper_libraries(
+                            candidate.contains("+libraries"),
+                            !candidate.ends_with("-minimal"),
+                            || {
+                                shader_compiler::with_program_policy(
+                                    policy,
+                                    abi.vertex_identity,
+                                    || compiled.modules.pipeline(&abi, variant, index),
+                                )
+                            },
+                        )
                     })
-                });
+                };
+                let pipelines = if paired {
+                    in_parallel(
+                        &r.device,
+                        (0..variant.len()).map(|index| move || create(index)),
+                    )
+                } else {
+                    vec![(create(1), None)]
+                };
                 let api_ms = start.elapsed().as_secs_f64() * 1e3;
                 assert!(scopes.finish().is_none());
-                drop(pipeline);
+                for (_, error) in &pipelines {
+                    assert!(error.is_none(), "{error:?}");
+                }
+                drop(pipelines);
                 let timings = shader_compiler::take_timings(&r.device);
                 let driver = timings.last().unwrap();
                 assert!(
                     !driver.application_cache_hit,
                     "fresh source must not hit the application cache"
                 );
-                let row = serde_json::json!({"variant":format!("{variant:?}"),"candidate":candidate,"repeat":repeat,"source_sha256":format!("{:x}",Sha256::digest(source.as_bytes())),"modules_ms":modules_ms,"api_ms":api_ms,"driver_ms":driver.duration.as_secs_f64()*1e3,"shader_bytes":driver.shader_bytes});
+                let row = serde_json::json!({"variant":format!("{variant:?}"),"candidate":candidate,"paired":paired,"repeat":repeat,"host_unix_seconds":host_unix_seconds,"source_sha256":format!("{:x}",Sha256::digest(source.as_bytes())),"modules_ms":modules_ms,"api_ms":api_ms,"driver_ms":driver.duration.as_secs_f64()*1e3,"driver_kind":driver.kind,"shader_bytes":driver.shader_bytes,
+                    "parts":timings.iter().map(|t|serde_json::json!({"kind":t.kind,"ms":t.duration.as_secs_f64()*1e3,"cache_hit":t.application_cache_hit})).collect::<Vec<_>>()});
                 eprintln!("vulkan_boundaries {row}");
                 rows.push(row);
                 fs::write(

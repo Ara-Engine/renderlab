@@ -344,6 +344,7 @@ struct View {
     shaders: shader_watch::ShaderWatch,
     shader_rejected: bool,
     shader_preview: bool,
+    preview_capture: Option<(Revision, bool)>,
     compile_probe: Option<(PathBuf, String)>,
     shader_check: Instant,
     settings_check: Instant,
@@ -503,7 +504,7 @@ impl View {
         );
         let preview = shader_compiler::capabilities(&device).and(options.shader_preview);
         eprintln!(
-            "shader_compile_policy={preview:?} development_default={}",
+            "shader_compile_policy={preview:?} debug_build={}",
             cfg!(debug_assertions)
         );
         let size = window.inner_size();
@@ -648,6 +649,7 @@ impl View {
             shaders,
             shader_rejected: false,
             shader_preview: false,
+            preview_capture: None,
             compile_probe,
             shader_check: Instant::now(),
             settings_check: Instant::now(),
@@ -732,6 +734,16 @@ impl View {
             std::fs::remove_file(path)?;
             self.hdr_written = false;
         }
+        if let Some((revision, true)) = self.preview_capture
+            && self.hdr_capture.is_none()
+            && let Some(capture) = self.renderer.try_capture_hdr()?
+        {
+            if capture.info().revision != revision {
+                return Err("preview capture revision changed before copy".into());
+            }
+            self.hdr_capture = Some(capture);
+            self.preview_capture = None;
+        }
         if let Some(capture) = &mut self.hdr_capture {
             let info = capture.info();
             if let Some(bytes) = capture.try_read()? {
@@ -784,7 +796,9 @@ impl View {
                 self.lighting_file.poll(path, &mut self.renderer);
             }
         }
-        if self.shader_check.elapsed() >= Duration::from_millis(10) {
+        if self.preview_capture.is_none()
+            && self.shader_check.elapsed() >= Duration::from_millis(10)
+        {
             self.shader_check = Instant::now();
             // Measurement control only: reuse one loaded scene across compiler modes.
             if let Some((path, accepted)) = &mut self.compile_probe
@@ -854,10 +868,12 @@ impl View {
                         // Untimed image-quality probe: queue a renderer-owned HDR copy
                         // of this preview's first frame before optimization can replace it.
                         if self.shader_preview
+                            && options.capture_hdr.is_some()
                             && self.compile_probe.is_some()
                             && std::env::var_os("RENDERLAB_LATENCY_PREVIEW_CAPTURE").is_some()
                         {
                             self.hdr_written = false;
+                            self.preview_capture = Some((report.revision, false));
                         }
                     }
                     Err(renderlab::ReloadError::Rejected {
@@ -905,6 +921,11 @@ impl View {
         Ok(false)
     }
     fn redraw(&mut self, options: &Options) -> Result<(), Box<dyn std::error::Error>> {
+        // Untimed quality probe only: let a flight slot drain for the exact preview
+        // copy before another render or optimized promotion can replace its HDR image.
+        if self.preview_capture.is_some_and(|(_, rendered)| rendered) {
+            return Ok(());
+        }
         if self.finish_at.is_some()
             || self.size.width == 0
             || self.size.height == 0
@@ -1233,12 +1254,20 @@ impl View {
             );
         }
         if let Some(report) = report {
+            if let Some((revision, rendered)) = &mut self.preview_capture
+                && *revision == report.revision
+            {
+                *rendered = true;
+            }
             if options.capture_hdr.is_some()
                 && !self.hdr_written
                 && self.hdr_capture.is_none()
                 && self.view_mode == ViewMode::Lit
             {
                 self.hdr_capture = self.renderer.try_capture_hdr()?;
+                if self.hdr_capture.is_some() {
+                    self.preview_capture = None;
+                }
             }
             if options.log_frames {
                 eprintln!(
