@@ -16,9 +16,9 @@
 //
 // Per frame (encode_virtual): vsc_probe looks up every covered pixel's cell in a hash table
 // (vsc_table), writes shown cells and queues the other pixels in the lookup's scratch
-// (vsm_scratch, the hybrid's layout: count, spread, then two words per pixel; walks known to be
-// heavy from the top end); vsc_args sizes the next three dispatches; vsc_missed runs the exact
-// walk for the queue, heaviest first; vsc_claim and vsc_resolve store the results.
+// (vsm_scratch, the hybrid's layout: count, spread, then two words per pixel) with its cell's
+// work estimate; vsc_args sizes the next dispatches; vsc_sort orders the queue heaviest first;
+// vsc_missed runs the exact walk for it; vsc_claim and vsc_resolve store the results.
 // A frame that changes nothing a count depends on runs no pass; one that keeps the camera (only
 // the sun turned or casters moved) keeps the counts of the walking pixels nothing reached.
 //
@@ -111,15 +111,18 @@ fn vsc_chain(seed:u32,slot:u32,side:u32,level:i32,coords:vec3<i32>)->u32 {
 }
 // The bucket hashes the cell's 4x4x4-cell world block and places the block's 64 cells in 64
 // consecutive buckets (2 KiB), so a tile's probes share cache lines; an independent chain over
-// the cell is its fingerprint (52 bits name a cell). Refresh phases are per block too, so a
-// turning sun's refreshes stay coherent.
+// the cell is its fingerprint (52 bits name a cell). Refresh phases are per world block of
+// 2^VSC_PHASE_BLOCK cells a side, so a turning sun's refreshes stay coherent on screen.
+override VSC_PHASE_BLOCK:u32=2u;
 fn vsc_key(slot:u32,side:u32,c:VscCell)->VscKey {
     let block=c.coords>>vec3<u32>(2u);
     let local=vec3<u32>(c.coords&vec3<i32>(3));
     let h=vsc_chain(0x1234567u,slot,side,c.level,block);
     let f=vsc_chain(0x7654321u,slot,side,c.level,c.coords);
     let bucket=((h<<6u)|local.x|(local.y<<2u)|(local.z<<4u))&vsc.buckets;
-    return VscKey(bucket,max(f,1u),h>>28u,(h>>24u)&(VSC_LAG-1u));
+    var phase=h>>24u;
+    if VSC_PHASE_BLOCK!=2u {phase=vsc_chain(0x2468aceu,slot,side,c.level,c.coords>>vec3<u32>(VSC_PHASE_BLOCK));}
+    return VscKey(bucket,max(f,1u),h>>28u,phase&(VSC_LAG-1u));
 }
 // The opaque receiver's viewed side of its plane (the same for every point of the plane).
 fn vsc_side(world:vec3<f32>,geometric:vec3<f32>,thin:bool)->u32 {
@@ -233,18 +236,26 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
 
 var<workgroup> vsc_wg_misses:atomic<u32>;
 var<workgroup> vsc_wg_base:u32;
-var<workgroup> vsc_wg_heavy:atomic<u32>;
-var<workgroup> vsc_wg_heavy_base:u32;
-// Cells whose last walk did at least 2^(VSC_HEAVY-1) work units walk first: the probe queues
-// them from the queue's top end down (their count in the word before the cursor), the others
-// from word 0 up, and the walk takes the top end first (N8m: the slowest walks must not start
-// last; N8n measured the queued walk spending 60% of its time in a tail).
+var<workgroup> vsc_wg_buckets:array<atomic<u32>,8>;
+// The walk order (N8m's heaviest first, applied to the queue): the probe queues each walking
+// pixel with its cell's last work estimate as a bucket, and vsc_sort copies the queue after
+// itself in bucket order, heaviest first, so the slowest walks start first and a warp's walks
+// are of similar length. VSC_SORT buckets: 8, the estimate's bit length; 2, whether it reaches
+// VSC_HEAVY (N8n's order); 1, none. Pixels with no estimate (absent cells) take VSC_UNKNOWN.
+override VSC_SORT:u32=8u;
 override VSC_HEAVY:u32=5u;
-fn vsc_capacity()->u32 {return (arrayLength(&vsm_scratch.words)-4u)/2u;}
-fn vsc_heavy_count()->u32 {return arrayLength(&vsm_scratch.words)-2u;}
-// The queue entry the walk's k-th lane slot takes: the heavy ones (the top end, in order), then
-// the others.
-fn vsc_entry(k:u32,heavy:u32)->u32 {return select(k-heavy,vsc_capacity()-1u-k,k<heavy);}
+override VSC_UNKNOWN:u32=3u;
+fn vsc_bucket(visible:u32)->u32 {
+    let work=select(visible&7u,VSC_UNKNOWN,visible==VSC_MISS);
+    if VSC_SORT>=8u {return work;}
+    if VSC_SORT==2u {return u32(work>=VSC_HEAVY);}
+    return 0u;
+}
+// The queue's tail (32 words before the buffer's end): per bucket its count (probe), its first
+// entry in the sorted copy (vsc_args) and its fill cursor (vsc_sort); the last word is the walk's
+// chunk cursor. Entries are two words each, after the 4-word header.
+fn vsc_tail()->u32 {return arrayLength(&vsm_scratch.words)-32u;}
+fn vsc_capacity()->u32 {return (arrayLength(&vsm_scratch.words)-36u)/2u;}
 var<workgroup> vsc_wg_hits:atomic<u32>;
 var<workgroup> vsc_wg_probes:atomic<u32>;
 // The probe's workgroup in pixels (multiples of the 8x4 trace tile); the encoder reads them from
@@ -253,13 +264,14 @@ override VSC_PROBE_X:u32=16u;
 override VSC_PROBE_Y:u32=8u;
 // Every covered pixel of the frame, VSC_PROBE_X x VSC_PROBE_Y a workgroup.
 @compute @workgroup_size(VSC_PROBE_X,VSC_PROBE_Y) fn vsc_probe(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    if lane==0u {atomicStore(&vsc_wg_misses,0u);atomicStore(&vsc_wg_heavy,0u);atomicStore(&vsc_wg_hits,0u);atomicStore(&vsc_wg_probes,0u);}
+    if lane==0u {atomicStore(&vsc_wg_misses,0u);atomicStore(&vsc_wg_hits,0u);atomicStore(&vsc_wg_probes,0u);}
+    if lane<8u {atomicStore(&vsc_wg_buckets[lane],0u);}
     workgroupBarrier();
     let size=textureDimensions(vsm_world);
     let id=gid.xy;
     let inside=all(id<size) && textureLoad(vsm_tiles,id/VSM_TRACE_TILE,0).x!=0u;
     var miss=false;
-    var heavy=false;
+    var bucket=0u;
     if inside {
         let p=vec2<i32>(id);
         let record=textureLoad(vsm_hit,p,0);
@@ -282,59 +294,79 @@ override VSC_PROBE_Y:u32=8u;
             let unshown=(visible&0xfffffff0u)==VSC_UNSHOWN;
             let still=(vsc.flags&2u)!=0u && unshown && !vsc_in_moved(id);
             if visible>=VSC_UNSHOWN {miss=!still;} else {vsm_visible(id,visible);}
-            heavy=miss && visible!=VSC_MISS && (visible&7u)>=VSC_HEAVY;
+            bucket=vsc_bucket(visible);
         }
     }
     var at=0u;
-    if miss && !heavy {at=atomicAdd(&vsc_wg_misses,1u);}
-    if heavy {at=atomicAdd(&vsc_wg_heavy,1u);}
+    if miss {
+        at=atomicAdd(&vsc_wg_misses,1u);
+        atomicAdd(&vsc_wg_buckets[bucket],1u);
+    }
     workgroupBarrier();
     if lane==0u {
         let n=atomicLoad(&vsc_wg_misses);
         if n!=0u {vsc_wg_base=atomicAdd(&vsm_scratch.queue,n);}
-        let h=atomicLoad(&vsc_wg_heavy);
-        if h!=0u {vsc_wg_heavy_base=atomicAdd(&vsm_scratch.words[vsc_heavy_count()],h);}
         if VSC_STATS {atomicAdd(&vsc_stats[0],atomicLoad(&vsc_wg_probes));atomicAdd(&vsc_stats[1],atomicLoad(&vsc_wg_hits));}
+    }
+    if lane<8u {
+        let n=atomicLoad(&vsc_wg_buckets[lane]);
+        if n!=0u {atomicAdd(&vsm_scratch.words[vsc_tail()+lane],n);}
     }
     workgroupBarrier();
     if miss {
-        let k=select(vsc_wg_base+at,vsc_capacity()-1u-(vsc_wg_heavy_base+at),heavy);
+        // Word 2k+1 holds the bucket until the walk writes its result (bit 31).
+        let k=vsc_wg_base+at;
         atomicStore(&vsm_scratch.words[2u*k],id.x|(id.y<<16u));
-        atomicStore(&vsm_scratch.words[2u*k+1u],0u);
+        atomicStore(&vsm_scratch.words[2u*k+1u],bucket);
     }
 }
 
 // The queued walk's lanes per miss (as vmap_queue_args: a small queue spreads each miss over up to
-// VSC_SPREAD lanes, up to VSC_LANES lanes in all), then its dispatch and the insert passes'.
-// N8m's schedule: VSC_PERSIST workgroups (0: one per 32 lanes) take 32-lane chunks from a cursor,
-// the queue buffer's last word (after the queue's), which this pass zeroes.
+// VSC_SPREAD lanes, up to VSC_LANES lanes in all), the sorted copy's bucket offsets (scratch pad0:
+// the copy's first entry, n; 0 when unsorted), then the dispatches of the walk and of the sort
+// and insert passes. N8m's schedule: VSC_PERSIST workgroups (0: one per 32 lanes) take 32-lane
+// chunks from a cursor, the queue buffer's last word, zeroed with the tail by the encoder.
 override VSC_SPREAD:u32=8u;
 override VSC_LANES:u32=8192u;
 override VSC_PERSIST:u32=4096u;
 fn vsc_cursor()->u32 {return arrayLength(&vsm_scratch.words)-1u;}
 @compute @workgroup_size(1) fn vsc_args() {
-    let heavy=atomicLoad(&vsm_scratch.words[vsc_heavy_count()]);
-    let light=atomicLoad(&vsm_scratch.queue);
-    let n=light+heavy;
-    vsm_scratch.pad0=heavy;
+    let n=atomicLoad(&vsm_scratch.queue);
+    var first=0u;
+    if VSC_SORT>1u && 2u*n<=vsc_capacity() {
+        first=n;
+        var at=0u;
+        for(var b=8u;b>0u;b-=1u) {
+            atomicStore(&vsm_scratch.words[vsc_tail()+8u+b-1u],at);
+            at+=atomicLoad(&vsm_scratch.words[vsc_tail()+b-1u]);
+        }
+    }
+    vsm_scratch.pad0=first;
     let spread=clamp(VSC_LANES/max(n,1u),1u,max(VSC_SPREAD,1u));
     vsm_scratch.spread=spread;
-    atomicStore(&vsm_scratch.words[vsc_cursor()],0u);
     let groups=(n*spread+31u)/32u;
     vsc_dispatch[0]=select(groups,min(groups,VSC_PERSIST),VSC_PERSIST!=0u);vsc_dispatch[1]=1u;vsc_dispatch[2]=1u;
     vsc_dispatch[4]=(n+63u)/64u;vsc_dispatch[5]=1u;vsc_dispatch[6]=1u;
 }
 
+// Copies queue entry i to its bucket's next place in the sorted copy (pad0 != 0).
+@compute @workgroup_size(64) fn vsc_sort(@builtin(global_invocation_id) gid:vec3<u32>) {
+    let first=vsm_scratch.pad0;
+    if first==0u || gid.x>=atomicLoad(&vsm_scratch.queue) {return;}
+    let b=atomicLoad(&vsm_scratch.words[2u*gid.x+1u])&7u;
+    let k=first+atomicLoad(&vsm_scratch.words[vsc_tail()+8u+b])+atomicAdd(&vsm_scratch.words[vsc_tail()+16u+b],1u);
+    atomicStore(&vsm_scratch.words[2u*k],atomicLoad(&vsm_scratch.words[2u*gid.x]));
+    atomicStore(&vsm_scratch.words[2u*k+1u],0u);
+}
 // The exact walk for queue lane g (each queued pixel on `spread` lanes), with Exact's setup
 // (vsm_prepare: the pixel's receiver point, directions and per-pixel jitter). Word 2k+1 gets bit
 // 31, the visible count, the start level << 4 and the work's bit length << 8 for vsc_claim.
 fn vsc_walk(g:u32) {
     let spread=max(vsm_scratch.spread,1u);
     if g%spread!=0u {return;}
-    let heavy=vsm_scratch.pad0;
     let slot_k=g/spread;
-    if slot_k>=atomicLoad(&vsm_scratch.queue)+heavy {return;}
-    let k=vsc_entry(slot_k,heavy);
+    if slot_k>=atomicLoad(&vsm_scratch.queue) {return;}
+    let k=vsm_scratch.pad0+slot_k;
     let word=atomicLoad(&vsm_scratch.words[2u*k]);
     let id=vec2<u32>(word&0xffffu,word>>16u);
     let px=vsm_prepare(id);
@@ -359,7 +391,7 @@ var<workgroup> vsc_wg_chunk:u32;
 @compute @workgroup_size(32) fn vsc_missed(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     vsm_lane=li;
     if VSC_PERSIST==0u {vsc_walk(gid.x);return;}
-    let lanes=(atomicLoad(&vsm_scratch.queue)+vsm_scratch.pad0)*max(vsm_scratch.spread,1u);
+    let lanes=atomicLoad(&vsm_scratch.queue)*max(vsm_scratch.spread,1u);
     loop {
         if li==0u {vsc_wg_chunk=atomicAdd(&vsm_scratch.words[vsc_cursor()],1u);}
         let t=workgroupUniformLoad(&vsc_wg_chunk);
@@ -482,9 +514,8 @@ fn vsc_fill_bit(n:u32)->u32 {return 1u<<(n-u32(n>4u));}
 // grade << 12, margin << 14, the farthest neighbour in quarters << 17 and the claimed fills' mask
 // << 23 (vsc_fill_bit).
 @compute @workgroup_size(64) fn vsc_claim(@builtin(global_invocation_id) gid:vec3<u32>) {
-    let heavy=vsm_scratch.pad0;
-    if gid.x>=atomicLoad(&vsm_scratch.queue)+heavy {return;}
-    let k=vsc_entry(gid.x,heavy);
+    if gid.x>=atomicLoad(&vsm_scratch.queue) {return;}
+    let k=vsm_scratch.pad0+gid.x;
     let result=atomicLoad(&vsm_scratch.words[2u*k+1u]);
     if (result&0x80000000u)==0u {return;}
     let x=vsc_result(k);
@@ -539,9 +570,8 @@ fn vsc_won(key:VscKey,priority:u32)->vec2<u32> {
 // shown: a cell once seen beside a differing count stays unshown until it is due again. The
 // winner clears the claims.
 @compute @workgroup_size(64) fn vsc_resolve(@builtin(global_invocation_id) gid:vec3<u32>) {
-    let heavy=vsm_scratch.pad0;
-    if gid.x>=atomicLoad(&vsm_scratch.queue)+heavy {return;}
-    let k=vsc_entry(gid.x,heavy);
+    if gid.x>=atomicLoad(&vsm_scratch.queue) {return;}
+    let k=vsm_scratch.pad0+gid.x;
     let result=atomicLoad(&vsm_scratch.words[2u*k+1u]);
     let kept=(result&0x800u)!=0u;
     let mask=(result>>23u)&0xffu;

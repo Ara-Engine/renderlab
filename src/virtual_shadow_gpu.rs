@@ -1263,10 +1263,11 @@ impl VirtualState {
         } else {
             16
         };
-        // N8n: the surface cache's queued walk keeps its chunk cursor after the queue.
+        // N8n/N8o: the surface cache's queue keeps its sort counters and chunk cursor after
+        // the entries (surface_cache::QUEUE_TAIL).
         let queue_bytes = if self.settings.lookup.queues() {
             16 + 8 * u64::from(size[0]) * u64::from(size[1])
-                + 16 * u64::from(self.settings.lookup == VirtualLookup::Surface)
+                + surface_cache::QUEUE_TAIL * u64::from(self.settings.lookup == VirtualLookup::Surface)
         } else {
             32
         };

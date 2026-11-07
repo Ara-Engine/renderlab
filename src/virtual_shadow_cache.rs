@@ -18,6 +18,9 @@ const UNIFORM_BYTES: u64 = 32;
 /// so an old value can never look current.
 const SUN_MASK: u32 = (1 << 10) - 1;
 const CASTER_MASK: u32 = (1 << 6) - 1;
+/// Bytes after the queue's entries: per walk-order bucket a count, offset and cursor, and the
+/// walk's chunk cursor (WGSL `vsc_tail`, `vsc_cursor`).
+pub(super) const QUEUE_TAIL: u64 = 128;
 /// Screen constants of this module (WGSL `override VSC_*`).
 pub(super) const CONSTANTS: &str = "VSC_";
 
@@ -33,6 +36,7 @@ pub(super) fn surface_source() -> String {
 pub(super) struct SurfacePipelines {
     probe: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
+    sort: Owned<wgpu::ComputePipeline>,
     missed: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
     resolve: Owned<wgpu::ComputePipeline>,
@@ -327,6 +331,7 @@ impl SurfaceCache {
         self.pipelines = Some(SurfacePipelines {
             probe: compute("vsc_probe", &self.probe_layout),
             args: compute("vsc_args", &self.args_pipeline_layout),
+            sort: compute("vsc_sort", &self.args_pipeline_layout),
             missed: compute("vsc_missed", lookup_layout),
             claim: compute("vsc_claim", &self.insert_pipeline_layout),
             resolve: compute("vsc_resolve", &self.insert_pipeline_layout),
@@ -397,8 +402,9 @@ impl SurfaceCache {
         ]
     }
 
-    /// Probe every covered pixel, size the queue's dispatches, walk the misses at their own
-    /// receiver points, and claim and resolve the results' slots, in one compute pass.
+    /// Probe every covered pixel, size the queue's dispatches, sort the queue heaviest first,
+    /// walk the misses at their own receiver points, and claim and resolve the results' slots,
+    /// in one compute pass.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn encode(
         &self,
@@ -425,9 +431,9 @@ impl SurfaceCache {
             encoder.clear_buffer(&self.table, 0, None);
         }
         encoder.clear_buffer(&r.queue, 0, Some(16));
-        // The heavy walks' count and the walk's cursor (vsc_heavy_count, vsc_cursor).
+        // The sort counters and the walk's cursor (vsc_tail, vsc_cursor).
         let tail = 16 + 8 * u64::from(width) * u64::from(height);
-        encoder.clear_buffer(&r.queue, tail, Some(16));
+        encoder.clear_buffer(&r.queue, tail, Some(QUEUE_TAIL));
         encoder.clear_buffer(&self.stats, 0, None);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8n surface cache visibility"),
@@ -443,6 +449,8 @@ impl SurfaceCache {
         pass.set_pipeline(&p.args);
         pass.set_bind_group(0, &*groups[1], &[]);
         pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&p.sort);
+        pass.dispatch_workgroups_indirect(&self.dispatch, 16);
         pass.set_pipeline(&p.missed);
         pass.set_bind_group(0, queued, &[]);
         pass.set_bind_group(1, arrays, &[]);
@@ -459,7 +467,7 @@ impl SurfaceCache {
 
     /// Tests: the last frame's counters (probed receivers, hits, cells the caster test retired,
     /// sun refreshes, cells found but not shown, certified walks past the largest margin, fill
-    /// claims; `VSC_STATS` only) and its queued walks (both ends).
+    /// claims; `VSC_STATS` only) and its queued walks.
     #[cfg(test)]
     pub(super) fn read_stats(
         &self,
@@ -476,9 +484,6 @@ impl SurfaceCache {
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(&self.stats, 0, &staging, 0, 32);
         encoder.copy_buffer_to_buffer(&r.queue, 0, &staging, 32, 16);
-        // The heavy walks' count (vsc_heavy_count), in the queue's tail.
-        let tail = 16 + 8 * u64::from(r.size[0]) * u64::from(r.size[1]);
-        encoder.copy_buffer_to_buffer(&r.queue, tail, &staging, 48, 16);
         queue.submit([encoder.finish()]);
         staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         device
@@ -495,7 +500,7 @@ impl SurfaceCache {
             word(2),
             word(3),
             word(4),
-            word(8) + word(14),
+            word(8),
             word(5),
             word(6),
         ]
@@ -546,11 +551,12 @@ mod tests {
             (0, Some(&[0, 7, 8, 9, 10, 20, 49, 50, 51, 52, 53])),
             (3, None),
         ];
-        let passes: [(&str, Layout); 5] = [
+        let passes: [(&str, Layout); 6] = [
             ("vsc_probe", cache),
             ("vsc_claim", insert),
             ("vsc_resolve", insert),
             ("vsc_args", &[(0, Some(&[20, 48]))]),
+            ("vsc_sort", &[(0, Some(&[20, 48]))]),
             ("vsc_missed", lookup),
         ];
         for (entry, layout) in passes {
