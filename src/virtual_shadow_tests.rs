@@ -202,8 +202,45 @@ pub(super) fn diagnose(
     }
     fs::write(out.join(format!("{label}-trace.u32x4")), trace).unwrap();
 }
-/// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl).
-const SCREEN_CONSTANTS: [&str; 18] = [
+/// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl, and the
+/// N8k map lookup's `VMAP_` ones in shaders/virtual_shadow_lookup.wgsl).
+const SCREEN_CONSTANTS: [&str; 54] = [
+    "VSM_QUEUED_RING",
+    "VMAP_FACE_PLAUS",
+    "VMAP_LONE_PARTIAL",
+    "VMAP_LONE",
+    "VMAP_FACE_MARGIN",
+    "VSM_QUEUED_ALL",
+    "VMAP_AMB_FACING",
+    "VMAP_UMBRA",
+    "VMAP_UMBRA_PAD",
+    "VMAP_OWN_MATCH",
+    "VMAP_CEILING",
+    "VMAP_RATIO",
+    "VMAP_OWN_FAR",
+    "VMAP_PLAUS_MODE",
+    "VMAP_FACING_OWN",
+    "VMAP_CLEAN",
+    "VMAP_OWN_NEAR",
+    "VMAP_OWN_REACH",
+    "VMAP_OWN_COVER",
+    "VMAP_SCHEDULE",
+    "VMAP_COST",
+    "VMAP_FACING",
+    "VMAP_OWN",
+    "VMAP_PLAUS",
+    "VMAP_TRACE",
+    "VMAP_COVER",
+    "VMAP_ABS",
+    "VMAP_CROSS",
+    "VMAP_CURVE",
+    "VMAP_REFINE",
+    "VMAP_PEEL",
+    "VMAP_PLANES",
+    "VMAP_TANGENT",
+    "VMAP_MIP",
+    "VMAP_SKIP",
+    "VMAP_EXTRA_SAMPLES",
     "VSM_SKIP",
     "VSM_RECORDS",
     "VSM_CAP_RULE",

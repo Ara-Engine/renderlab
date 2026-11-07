@@ -40,7 +40,9 @@ pub use receiver_adjacency::MeshUpload;
 pub use renderer::Renderer;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{VIRTUAL_FEATURES, VirtualShadowSettings, VirtualShadowStats, WalkRecords};
+pub use renderer::{
+    VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
+};
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
