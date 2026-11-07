@@ -17,8 +17,8 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
-/// Hot (shading) plus cold (kernel) record words per slot; shaders/gi_cells.wgsl.
-const SLOT_WORDS: u64 = 16 + 24;
+/// Key, hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
+const SLOT_WORDS: u64 = 1 + 16 + 24;
 const COUNTER_WORDS: u64 = 16;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
@@ -175,6 +175,10 @@ pub struct IndirectCounters {
     pub created: u32,
     pub invalidated: u32,
     pub refreshed: u32,
+    /// Claims that lost their slot this frame (they retry next round or frame).
+    pub lost: u32,
+    /// Visibility rays traced this frame (probe rays excluded).
+    pub rays: u32,
 }
 
 struct Resources {
@@ -655,6 +659,8 @@ impl Renderer {
             created: w[7],
             invalidated: w[8],
             refreshed: w[9],
+            lost: w[10],
+            rays: w[11],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1042,12 +1048,15 @@ impl Renderer {
     }
 
     /// Decides and uploads this frame's cache work. Runs after `prepare_primary`.
+    /// `scene_generation` names this frame's TLAS, counting a build prepared but not yet
+    /// encoded (as `prepare_primary` does), so hardware rays never trace last frame's scene.
     pub(super) fn prepare_gi(
         &mut self,
         draws: &[PreparedDraw<'_>],
         camera: &Camera,
         size: [u32; 2],
         eligible: bool,
+        scene_generation: u64,
     ) -> Result<(), Error> {
         self.gi.plan = None;
         if self.gi.resources.is_none() {
@@ -1215,21 +1224,20 @@ impl Renderer {
             scan: flags != 0,
             clear,
         });
-        self.prepare_gi_groups(software)?;
+        self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
         self.gi.frame = self.gi.frame.wrapping_add(1);
         Ok(())
     }
 
-    fn prepare_gi_groups(&mut self, software: bool) -> Result<(), Error> {
+    fn prepare_gi_groups(&mut self, software: bool, scene_generation: u64) -> Result<(), Error> {
         let targets = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        // A new software geometry buffer drops the groups itself; transform changes rewrite it.
         let rays = if software {
             self.gi.packed.as_ref().map_or(0, |p| p.bytes)
         } else {
-            self.hardware_shadows
-                .as_ref()
-                .map_or(0, |h| h.stats.tlas_builds)
+            scene_generation
         };
         let key = (
             (*targets.hit.texture).clone(),

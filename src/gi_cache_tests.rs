@@ -731,7 +731,7 @@ fn profile_json(r: &mut Renderer) -> Json {
                "args": p.args, "trace": p.trace, "integrate": p.integrate, "total": p.total()},
         "counters": {"misses": c.misses, "traces": c.traces, "integrates": c.integrates,
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
-                     "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow,
+                     "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
                      "local_overflow": c.local_overflow},
     })
 }
@@ -744,6 +744,78 @@ fn frame_gpu(r: &mut Renderer) -> Json {
     })
 }
 
+/// A reference image, rendered once and kept as f32 mean and standard error in
+/// RENDERLAB_M7_G1_REFS (default E:/renderlab-work/m7-g1/refs) under a key naming the
+/// scene, view, sample count and specular scale, so later short leases reuse it
+/// instead of path tracing again. Raw caches are deleted once G1 is summarized.
+fn cached_reference(
+    device: &(wgpu::Device, wgpu::Queue),
+    sv: &Sv,
+    moved: &[(usize, Mat4)],
+    specular: f32,
+    eye: Vec3,
+    target: Vec3,
+    settings: &reference::Settings,
+) -> reference::Image {
+    use sha2::Digest;
+    let dir = PathBuf::from(
+        env("RENDERLAB_M7_G1_REFS").unwrap_or_else(|| "E:/renderlab-work/m7-g1/refs".into()),
+    );
+    let mut h = sha2::Sha256::new();
+    h.update(sv.sha.as_bytes());
+    for v in [eye, target] {
+        h.update(v.to_array().map(f32::to_le_bytes).concat());
+    }
+    for (i, m) in moved {
+        h.update(i.to_le_bytes());
+        h.update(m.to_cols_array().map(f32::to_le_bytes).concat());
+    }
+    h.update(specular.to_le_bytes());
+    h.update(settings.samples.to_le_bytes());
+    h.update(settings.max_depth.to_le_bytes());
+    h.update(settings.seed.to_le_bytes());
+    let path = dir.join(format!("{:x}.f32", h.finalize()));
+    let pixels = (sv.size[0] * sv.size[1]) as usize;
+    let raw =
+        |v: &[[f32; 3]]| -> Vec<u8> { v.iter().flatten().flat_map(|x| x.to_le_bytes()).collect() };
+    if let Ok(bytes) = std::fs::read(&path)
+        && bytes.len() == pixels * 24
+    {
+        let decode = |b: &[u8]| -> Vec<[f32; 3]> {
+            b.chunks_exact(12)
+                .map(|c| {
+                    std::array::from_fn(|k| {
+                        f32::from_le_bytes(c[4 * k..4 * k + 4].try_into().unwrap())
+                    })
+                })
+                .collect()
+        };
+        return reference::Image {
+            width: sv.size[0],
+            height: sv.size[1],
+            samples: settings.samples,
+            mean: decode(&bytes[..pixels * 12]),
+            standard_error: decode(&bytes[pixels * 12..]),
+            invalid_pixels: 0,
+        };
+    }
+    let image = reference::render(
+        &device.0,
+        &device.1,
+        &reference_scene(sv, moved, specular),
+        &reference_view(sv, eye, target),
+        settings,
+    )
+    .unwrap();
+    assert_eq!(image.invalid_pixels, 0);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &path,
+        [raw(&image.mean), raw(&image.standard_error)].concat(),
+    )
+    .unwrap();
+    image
+}
 fn quantiles(mut v: Vec<f64>) -> Json {
     if v.is_empty() {
         return Json::Null;
@@ -798,6 +870,16 @@ fn gpu_gi_sky_visibility_sv() {
     std::fs::create_dir_all(&out).unwrap();
     let spp: u32 = env("RENDERLAB_M7_G1_SPP").map_or(4096, |s| s.parse().unwrap());
     let quick = env("RENDERLAB_M7_G1_QUICK").as_deref() == Some("1");
+    // RENDERLAB_M7_G1_SECTIONS: a comma list of quality, gates, motion, caster and timing
+    // (all by default), so a quiet cost window runs timing alone.
+    let sections = env("RENDERLAB_M7_G1_SECTIONS");
+    let section = |name: &str| {
+        sections
+            .as_deref()
+            .is_none_or(|w| w.split(',').any(|x| x.trim() == name))
+    };
+    // RENDERLAB_M7_G1_VISITS: interleaved timing visits per configuration (default 1).
+    let visits: usize = env("RENDERLAB_M7_G1_VISITS").map_or(1, |s| s.parse().unwrap());
     let sv = load(&bench);
     let names = population_names(&sv);
     let start = Instant::now();
@@ -815,15 +897,7 @@ fn gpu_gi_sky_visibility_sv() {
     };
     let mut references = vec![];
     for (name, eye, target) in &poses {
-        let image = reference::render(
-            &rt.0,
-            &rt.1,
-            &reference_scene(&sv, &[], 0.0),
-            &reference_view(&sv, *eye, *target),
-            &settings(spp),
-        )
-        .unwrap();
-        assert_eq!(image.invalid_pixels, 0);
+        let image = cached_reference(&rt, &sv, &[], 0.0, *eye, *target, &settings(spp));
         png(
             &out.join(format!("{name}-reference.png")),
             sv.size,
@@ -834,16 +908,7 @@ fn gpu_gi_sky_visibility_sv() {
     }
     let standard_refs: Vec<_> = poses
         .iter()
-        .map(|(_, eye, target)| {
-            reference::render(
-                &rt.0,
-                &rt.1,
-                &reference_scene(&sv, &[], 1.0),
-                &reference_view(&sv, *eye, *target),
-                &settings(spp),
-            )
-            .unwrap()
-        })
+        .map(|(_, eye, target)| cached_reference(&rt, &sv, &[], 1.0, *eye, *target, &settings(spp)))
         .collect();
     // Motion: a 2 cm-per-frame pan along x at the gaps pose, 9 frames.
     let (motion_eye, motion_target) = (sv.poses.last().unwrap().1, sv.poses.last().unwrap().2);
@@ -851,14 +916,15 @@ fn gpu_gi_sky_visibility_sv() {
     let motion_frames = if quick { 3 } else { 9 };
     let motion_refs: Vec<_> = (0..motion_frames)
         .map(|t| {
-            reference::render(
-                &rt.0,
-                &rt.1,
-                &reference_scene(&sv, &[], 0.0),
-                &reference_view(&sv, motion_eye + pan(t), motion_target + pan(t)),
+            cached_reference(
+                &rt,
+                &sv,
+                &[],
+                0.0,
+                motion_eye + pan(t),
+                motion_target + pan(t),
                 &settings(spp),
             )
-            .unwrap()
         })
         .collect();
     // Caster: the contact sphere moves +1 cm per frame in x for 8 frames.
@@ -868,14 +934,15 @@ fn gpu_gi_sky_visibility_sv() {
         .position(|m| m.name == "contact-sphere")
         .unwrap();
     let caster = |t: usize| Mat4::from_translation(Vec3::new(0.01 * t.min(8) as f32, 0.0, 0.0));
-    let caster_ref = reference::render(
-        &rt.0,
-        &rt.1,
-        &reference_scene(&sv, &[(sphere, caster(8))], 0.0),
-        &reference_view(&sv, poses[0].1, poses[0].2),
+    let caster_ref = cached_reference(
+        &rt,
+        &sv,
+        &[(sphere, caster(8))],
+        0.0,
+        poses[0].1,
+        poses[0].2,
         &settings(spp),
-    )
-    .unwrap();
+    );
     let reference_seconds = start.elapsed().as_secs_f64();
     eprintln!("G1 references in {reference_seconds:.1} s");
 
@@ -988,6 +1055,14 @@ fn gpu_gi_sky_visibility_sv() {
                 ),
             ]);
         }
+        // RENDERLAB_M7_G1_CONFIGS: a comma list of the configurations to score (all by default).
+        let wanted = env("RENDERLAB_M7_G1_CONFIGS");
+        configs.retain(|(c, _)| {
+            section("quality")
+                && wanted
+                    .as_deref()
+                    .is_none_or(|w| w.split(',').any(|x| x.trim() == *c))
+        });
         for (config, s) in &configs {
             let mut config_json = json!({});
             for (((pose, eye, target), reference), standard_ref) in
@@ -1082,7 +1157,7 @@ fn gpu_gi_sky_visibility_sv() {
             path_json[*config] = config_json;
         }
         // A program that never calls the cache runs no cache pass and draws the same bytes.
-        {
+        if section("gates") {
             let (_, eye, target) = &poses[0];
             rig.settings(IndirectSettings::default());
             rig.frame(&sv, *eye, *target, &toon);
@@ -1097,7 +1172,7 @@ fn gpu_gi_sky_visibility_sv() {
         rig.settings(base);
         // Determinism: the table and image after the same sequence, in this process
         // (cross-process equality compares these hashes between runs).
-        {
+        if section("gates") {
             let (_, eye, target) = &poses[0];
             rig.r.reset_indirect();
             rig.frame(&sv, *eye, *target, &materials);
@@ -1140,7 +1215,7 @@ fn gpu_gi_sky_visibility_sv() {
                 },
             ),
         ] {
-            if quick && config == "nearest-4px" {
+            if (quick && config == "nearest-4px") || !section("motion") {
                 continue;
             }
             rig.settings(s);
@@ -1164,7 +1239,7 @@ fn gpu_gi_sky_visibility_sv() {
                 json!({"flicker": flicker(&frames, &motion_refs, &all), "frames": costs});
         }
         // Caster: invalidation spikes, then the settled image against a fresh cache.
-        {
+        if section("caster") {
             rig.settings(base);
             let (_, eye, target) = &poses[0];
             rig.r.reset_indirect();
@@ -1186,6 +1261,15 @@ fn gpu_gi_sky_visibility_sv() {
                 .zip(&fresh)
                 .map(|(a, b)| (0..3).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max))
                 .fold(0.0f32, f32::max);
+            png(
+                &out.join(format!("{label}-caster-rolled-vs-fresh-x64.png")),
+                sv.size,
+                rolled
+                    .iter()
+                    .zip(&fresh)
+                    .map(|(a, b)| std::array::from_fn(|k| (a[k] - b[k]).abs() * 64.0)),
+                (sv.exposure).exp2(),
+            );
             let placements = rig.placements(&sv);
             let sets = labels(&sv, &placements, *eye, *target);
             let open = open_luminance(&sv, &sets, &caster_ref);
@@ -1193,6 +1277,7 @@ fn gpu_gi_sky_visibility_sv() {
             path_json["caster"] = json!({
                 "frames": costs, "rolled_equals_fresh": hash_image(&rolled) == hash_image(&fresh),
                 "rolled_max_abs_difference": max_diff,
+                "rolled_pixels_differing": rolled.iter().zip(&fresh).filter(|(a, b)| a != b).count(),
                 "rolled_score": score(&rolled, &caster_ref, open, &all),
             });
             // Rotation alone (exact invalidation off): staleness by frames since the stop.
@@ -1221,11 +1306,24 @@ fn gpu_gi_sky_visibility_sv() {
             }
             rig.instances[sphere].set(0, Mat4::IDENTITY).unwrap();
         }
-        // Timing: continuous sequences, cache on and off (the pre-M7 frame).
-        {
+        // Timing: continuous sequences for the cache off (the pre-M7 frame), the default and
+        // the best-quality variant, visited in turn `visits` times (timing[label] lists
+        // the visits).
+        if section("timing") {
             let (_, eye, target) = poses[0].clone();
-            let mut timing = json!({});
-            for (label, s) in [("on", base), ("off", IndirectSettings::default())] {
+            let mut timing = json!({"off": [], "on": [], "best": []});
+            let best = IndirectSettings {
+                level_blend: 0.125,
+                directions: 128,
+                rotate_directions: true,
+                ..base
+            };
+            let order = [
+                ("off", IndirectSettings::default()),
+                ("on", base),
+                ("best", best),
+            ];
+            for (label, s) in (0..visits).flat_map(|_| order) {
                 rig.settings(s);
                 rig.r.reset_indirect();
                 let still = sequence(&mut rig, &sv, &materials, 24, |_, _| (eye, target));
@@ -1262,8 +1360,8 @@ fn gpu_gi_sky_visibility_sv() {
                         .unwrap();
                     (eye, target)
                 });
-                timing[label] = json!({"static": still, "camera": camera, "caster": caster,
-                    "cut": cut, "environment": environment});
+                timing[label].as_array_mut().unwrap().push(json!({"static": still,
+                    "camera": camera, "caster": caster, "cut": cut, "environment": environment}));
             }
             // The environment step's lag: the stepped frame against a fresh cache.
             rig.settings(base);

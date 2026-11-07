@@ -64,9 +64,12 @@ const GI_F_FIELD:u32=2u;
 // Rotate each cell's directions about its normal by an angle its key fixes.
 const GI_F_ROTATE:u32=4u;
 
-// Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and
-// the cell has a query point; word 1 the f32 scale; words 2..15 the 27 SH halves
-// (coefficient i*3+c for band i, channel c), divided by the scale.
+// Table layout after the header: one key word per slot (dense, so a bucket's eight keys
+// share one 32-byte sector), then the hot records, then the cold records.
+// Key word: key a (31 bits) with GI_VALID set while the SH is current and the cell has a
+// query point; 0 for an empty slot.
+// Hot record: word 0 the f32 scale; words 1..14 the 27 SH halves (coefficient i*3+c for
+// band i, channel c), divided by the scale; word 15 spare.
 const GI_VALID:u32=0x80000000u;
 const GI_KEY_BITS:u32=0x7fffffffu;
 // Cold record word offsets.
@@ -90,8 +93,9 @@ const GI_QUEUED:u32=8u;
 
 fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_table[i]); }
-fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
-fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*GI_COLD_WORDS; }
+fn gi_key_word(slot:u32) -> u32 { return GI_HEADER+slot; }
+fn gi_hot(slot:u32) -> u32 { return GI_HEADER+gi_word(GI_H_MASK)+1u+slot*GI_HOT_WORDS; }
+fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*(1u+GI_HOT_WORDS)+slot*GI_COLD_WORDS; }
 
 // Level whose edge is the smallest power-of-two multiple of the minimum edge at least
 // `footprint` times the eye distance. The kernels request both levels near a boundary,
@@ -183,33 +187,33 @@ fn gi_key(level:u32, bin:u32, cell:vec3<i32>) -> vec2<u32> {
     let b=gi_mix(c.z^gi_mix(c.x^gi_mix(c.y^gi_mix(d^0x85ebca6bu))));
     return vec2<u32>(max(a&GI_KEY_BITS,1u),b);
 }
-// The slot holding `key`, or 0xffffffff: one hot word per probed slot. Shading and the
-// kernels search identically.
+// The slot holding `key`, or 0xffffffff: one key word per probed slot, all in the
+// bucket's sector. Shading and the kernels search identically.
 fn gi_find(key:vec2<u32>) -> u32 {
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
     for(var i=0u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((key.y+i)&(GI_BUCKET-1u));
-        if (gi_table[gi_hot(slot)]&GI_KEY_BITS)==key.x { return slot; }
+        if (gi_table[gi_key_word(slot)]&GI_KEY_BITS)==key.x { return slot; }
     }
     return 0xffffffffu;
 }
 // SH coefficient j (band j / 3, channel j % 3) of a hot record, before its scale.
 fn gi_half(hot:u32, j:u32) -> f32 {
-    let pair=unpack2x16float(gi_table[hot+2u+(j>>1u)]);
+    let pair=unpack2x16float(gi_table[hot+1u+(j>>1u)]);
     return select(pair.x,pair.y,(j&1u)!=0u);
 }
 
-// Real L2 spherical harmonics, in the order 00, 1-1, 10, 11, 2-2, 2-1, 20, 21, 22.
-struct GiSh { c:array<f32,9> };
-fn gi_sh_basis(d:vec3<f32>) -> GiSh {
-    var y:GiSh;
-    y.c[0]=0.282095;
-    y.c[1]=0.488603*d.y; y.c[2]=0.488603*d.z; y.c[3]=0.488603*d.x;
-    y.c[4]=1.092548*d.x*d.y; y.c[5]=1.092548*d.y*d.z;
-    y.c[6]=0.315392*(3.0*d.z*d.z-1.0);
-    y.c[7]=1.092548*d.x*d.z; y.c[8]=0.546274*(d.x*d.x-d.y*d.y);
-    return y;
+// Real L2 spherical harmonics of d, in the order 00, 1-1, 10, 11, 2-2, 2-1, 20, 21, 22,
+// written to gi_y: a private array, never passed or returned by value (a by-value array
+// costs a local-memory copy per call).
+var<private> gi_y:array<f32,9>;
+fn gi_sh_basis(d:vec3<f32>) {
+    gi_y[0]=0.282095;
+    gi_y[1]=0.488603*d.y; gi_y[2]=0.488603*d.z; gi_y[3]=0.488603*d.x;
+    gi_y[4]=1.092548*d.x*d.y; gi_y[5]=1.092548*d.y*d.z;
+    gi_y[6]=0.315392*(3.0*d.z*d.z-1.0);
+    gi_y[7]=1.092548*d.x*d.z; gi_y[8]=0.546274*(d.x*d.x-d.y*d.y);
 }
 // Clamped-cosine convolution weights per band (Ramamoorthi and Hanrahan 2001).
 fn gi_band_weight(i:u32) -> f32 {

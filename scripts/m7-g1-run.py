@@ -42,9 +42,10 @@ def build(args):
     artifacts = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
     exe = next(a["executable"] for a in reversed(artifacts) if a.get("reason") == "compiler-artifact" and a.get("executable")
                and a["target"]["name"] == "renderlab")
-    BINARY.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(exe, BINARY)
-    print("binary", BINARY)
+    staged = BINARY.with_name(args.name + ".exe")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(exe, staged)
+    print("binary", staged)
 
 
 def window_open(u):
@@ -55,12 +56,25 @@ def window_open(u):
     lines = u.SCHEDULE.read_text(encoding="utf-8").splitlines()
     now = u.utc()
     last_release = max((i for i, l in enumerate(lines) if "window released" in l and not l.startswith("[")), default=-1)
+    stamp = r"window released (\d{4}-\d\d-\d\dT[\d:.]+(?:\+00:00|Z)?)"
     for i, line in enumerate(lines):
-        m = re.match(r"\[(\S+) reservation\] owner=(\S+) end=(\S+)", line)
+        # Any reservation (plain or quiet, any case) names its owner; one with an end time
+        # blocks until that end or a later release line from its owner.
+        m = re.match(r"\[(\S+) [^\]]*reservation\] owner=(\S+)", line, re.IGNORECASE)
         if m and m.group(2) != u.OWNER:
             released = any(l.startswith(m.group(2) + " ") and "window released" in l for l in lines[i + 1:])
-            if not released and dt.datetime.fromisoformat(m.group(3)) > now:
-                return line
+            end = re.search(r"\bend=(\S+?)[;,]?(?:\s|$)", line)
+            if end:
+                if not released and dt.datetime.fromisoformat(end.group(1).replace("Z", "+00:00")) > now:
+                    return line
+            elif not released and "quiet" in line.lower():
+                # A queued quiet run gets the lock first: for 3 minutes after every
+                # release line, short screens leave it free so the next quiet owner can
+                # start; once started, its own reservation line blocks above.
+                stamps = re.findall(stamp, "\n".join(lines[i + 1:]))
+                last = max((dt.datetime.fromisoformat(s.replace("Z", "+00:00")) for s in stamps), default=None)
+                if last is None or (now - last).total_seconds() < 180:
+                    return line
         m = re.match(r"\[(\S+) [^\]]*(request|queue)\]", line)
         if m and m.group(1) != u.OWNER and i > last_release:
             return line
@@ -122,11 +136,23 @@ def gpu(args):
         env["VK_LOADER_LAYERS_DISABLE"] = "VK_LAYER_KHRONOS_validation"
         env.pop("VK_INSTANCE_LAYERS", None)
     env["RENDERLAB_M7_G1_PATHS"] = args.paths
+    env["RENDERLAB_M7_G1_VISITS"] = str(args.visits)
+    if args.configs:
+        env["RENDERLAB_M7_G1_CONFIGS"] = args.configs
+    if args.sections:
+        env["RENDERLAB_M7_G1_SECTIONS"] = args.sections
+    # Each binary is one process writing its own subdirectory, in order, inside one lease
+    # (a paired A/B of staged builds); a single binary writes the label directory itself.
+    binaries = [Path(b) for b in args.binary] or [BINARY]
     with u.lease("g1-" + args.label, args.minutes) as owner:
         out.mkdir(parents=True)
         try:
-            u.guarded([BINARY, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"], out / "run",
-                      timeout=max(60, int(u.remaining_seconds(owner)) - 30), cwd=REPO, env=env)
+            for binary in binaries:
+                target = out / binary.stem if len(binaries) > 1 else out
+                target.mkdir(exist_ok=True)
+                env["RENDERLAB_M7_G1_OUT"] = str(target)
+                u.guarded([binary, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"], target / "run",
+                          timeout=max(60, int(u.remaining_seconds(owner)) - 30), cwd=REPO, env=env)
         finally:
             (out / "contention.json").write_text(json.dumps(dict(
                 game_running=contended_by_game, hold=hold,
@@ -137,7 +163,8 @@ def gpu(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("build")
+    sub.add_parser("build").add_argument("--as", dest="name", default=BINARY.stem,
+                                         help="staged name under bin/ (variants for a paired A/B)")
     p = sub.add_parser("gpu")
     p.add_argument("label")
     p.add_argument("--minutes", type=int, default=10)
@@ -147,6 +174,10 @@ def main():
     p.add_argument("--force-schedule", action="store_true", help="ignore pending requests (root-assigned slot)")
     p.add_argument("--allow-game", action="store_true", help="under [GAME HOLD RELAXED] only: run headless beside the game")
     p.add_argument("--paths", default="rt,rtsoftware,nonrt", help="comma list of rt, rtsoftware, nonrt")
+    p.add_argument("--configs", default="", help="comma list of configurations to score (default all)")
+    p.add_argument("--sections", default="", help="comma list of quality, gates, motion, caster, timing (default all)")
+    p.add_argument("--visits", type=int, default=1, help="interleaved timing visits per configuration")
+    p.add_argument("--binary", action="append", default=[], help="staged test binary; repeat for a paired A/B")
     args = parser.parse_args()
     dict(build=build, gpu=gpu)[args.command](args)
 

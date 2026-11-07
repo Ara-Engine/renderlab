@@ -2873,11 +2873,16 @@ impl Renderer {
             // Traced and visibility-buffer frames feed the cache; every other lit frame
             // publishes it as off, so its programs read the unoccluded environment.
             let scopes = OperationScopes::new(&self.device);
+            let scene_generation = self
+                .hardware_shadows
+                .as_ref()
+                .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
             let result = self.prepare_gi(
                 draws,
                 camera,
                 [color.width(), color.height()],
                 traced && !temporal,
+                scene_generation,
             );
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
