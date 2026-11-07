@@ -9,13 +9,35 @@ import subprocess
 import sys
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 
 spec=importlib.util.spec_from_file_location("host",Path(__file__).with_name("m7-u0b.py"))
 host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_path_query_exit_race_keeps_process_but_live_failure_rejects(self):
+        exit_code=0
+        def first(snapshot,pointer):
+            pointer._obj.pid=os.getpid();pointer._obj.parent=os.getppid();pointer._obj.name="python.exe"
+            return 1
+        def query(*args):host.ctypes.set_last_error(31);return 0
+        def status(process,pointer):pointer._obj.value=exit_code;return 1
+        def end(*args):host.ctypes.set_last_error(18);return 0
+        api=SimpleNamespace(CreateToolhelp32Snapshot=Mock(return_value=1),Process32FirstW=Mock(side_effect=first),
+            Process32NextW=Mock(side_effect=end),OpenProcess=Mock(return_value=2),
+            QueryFullProcessImageNameW=Mock(side_effect=query),GetExitCodeProcess=Mock(side_effect=status),
+            CloseHandle=Mock(return_value=1))
+        with patch.object(host.ctypes,"WinDLL",return_value=api):
+            rows=host.native_process_inventory()
+            self.assertEqual(rows[0]["ProcessId"],os.getpid())
+            self.assertIsNone(rows[0]["ExecutablePath"])
+            self.assertTrue(rows[0]["exited_during_image_query"])
+            exit_code=259
+            with self.assertRaisesRegex(RuntimeError,"process image query failed"):
+                host.native_process_inventory()
+        self.assertEqual(api.CloseHandle.call_count,4)
+
     def test_native_process_inventory_keeps_identity_and_rejects_query_errors(self):
         rows=host.native_process_inventory()
         current=next(p for p in rows if p["ProcessId"]==os.getpid())

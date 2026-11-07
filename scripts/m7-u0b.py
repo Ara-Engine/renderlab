@@ -60,6 +60,7 @@ def native_process_inventory():
         "Process32NextW":([wintypes.HANDLE,ctypes.POINTER(Entry)],wintypes.BOOL),
         "OpenProcess":([wintypes.DWORD,wintypes.BOOL,wintypes.DWORD],wintypes.HANDLE),
         "QueryFullProcessImageNameW":([wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)],wintypes.BOOL),
+        "GetExitCodeProcess":([wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)],wintypes.BOOL),
         "CloseHandle":([wintypes.HANDLE],wintypes.BOOL)}
     for name,(arguments,result) in signatures.items():
         function=getattr(api,name);function.argtypes=arguments;function.restype=result
@@ -79,11 +80,17 @@ def native_process_inventory():
                     path=ctypes.create_unicode_buffer(32768);length=wintypes.DWORD(len(path))
                     if api.QueryFullProcessImageNameW(process,0,path,ctypes.byref(length)):
                         row["ExecutablePath"]=path.value
-                    else:row["image_query_error"]=ctypes.get_last_error()
+                    else:
+                        row["image_query_error"]=ctypes.get_last_error()
+                        if row["image_query_error"]==31:
+                            status=wintypes.DWORD()
+                            if not api.GetExitCodeProcess(process,ctypes.byref(status)):
+                                raise ctypes.WinError(ctypes.get_last_error())
+                            row["exited_during_image_query"]=status.value!=259  # STILL_ACTIVE
                 finally:close(process)
             else:row["image_query_error"]=ctypes.get_last_error()
-            if row.get("image_query_error",0) not in (0,5,87,1168):
-                raise ctypes.WinError(row["image_query_error"])
+            if row.get("image_query_error",0) not in (0,5,87,1168) and not row.get("exited_during_image_query"):
+                raise RuntimeError("process image query failed: "+json.dumps(row))
             rows.append(row)
             more=api.Process32NextW(snapshot,ctypes.byref(entry))
         if ctypes.get_last_error()!=18:raise ctypes.WinError(ctypes.get_last_error())  # ERROR_NO_MORE_FILES

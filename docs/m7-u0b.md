@@ -118,7 +118,7 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **11 tests** after the telemetry-routing and
+are unchanged. The focused Python suite passes **12 tests** after the telemetry-routing and
 bounded static-matrix handoff checks.
 
 ## Retained quarry references
@@ -617,7 +617,7 @@ is gone for 60 seconds.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
-inventory and the PDH memory guard remain mandatory and fail closed. Eight focused CPU
+inventory and the PDH memory guard remain mandatory and fail closed. Nine focused CPU
 guard tests cover this routing, native memory, failed inventory after a successful child
 exit, ordinary monitor failure, the atomic-acquisition race and requeuing every unfinished
 static configuration after a short lease. The floor scorer also rejects process failures
@@ -649,6 +649,15 @@ compiler valve use this inventory. A CPU probe reads **466 processes in 0.0207 s
 under the foreign load; this is a guard diagnostic, not renderer performance. Tests verify
 the real current PID/parent/path, synthetic game/renderer/build classification and failed
 native queries. No renderer, shader or reference binary changes for this repair.
+
+The first native-guard attempt (`process-1bd46a50`) rejects an image-query error 31 rather
+than accepting incomplete inventory. The follow-up allows that error only when a read-only
+[termination-status query](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess)
+proves the process has exited; its name/PID remains in the snapshot. A still-active error
+continues to reject the inventory. A focused CPU test covers both outcomes and handle
+closure; eight live snapshots subsequently read 461–463 processes in 0.124 seconds total.
+The original failed query did not record its PID/status, so its cause is not retrospectively
+claimed proven. The next quarry retry passes strict replay and the updated guard.
 
 After their summaries and full-image inspection, **113 native HDR archives over 5 MB** were
 deleted. Their per-case cleanup ledgers preserve hashes; score JSON, readbacks and inspected
