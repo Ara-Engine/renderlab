@@ -59,6 +59,8 @@ impl HardwareShadowOptions {
 pub struct HardwareShadowStats {
     /// Cumulative immutable mesh builds submitted by this renderer.
     pub blas_builds: u64,
+    /// Immutable mesh BLAS generations compacted after their build completed.
+    pub blas_compactions: u64,
     /// Cumulative placement-generation builds submitted by this renderer.
     pub tlas_builds: u64,
     /// Placements in the active scene, including camera-invisible casters.

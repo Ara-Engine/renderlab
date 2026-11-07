@@ -1,0 +1,86 @@
+name,nort,rt,traced-virtual,usage,lifetime
+(wgpu internal) default external texture params buffer,256,256,256,wgpu internal initialization/build/staging resource,wgpu-managed; build scratch/staging retired by submission completion
+(wgpu internal) zero init buffer,524288,524288,524288,wgpu internal initialization/build/staging resource,wgpu-managed; build scratch/staging retired by submission completion
+(wgpu-core) instances_buffer,0,768,768,wgpu internal initialization/build/staging resource,wgpu-managed; build scratch/staging retired by submission completion
+N1c 64-bit depth and cluster IDs,16588800,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c LOD groups,840064,0,384,STORAGE/COPY_DST: cluster placements or hierarchy groups,VisibilityBuffer or VirtualState caster generation; separate tables per consumer
+N1c absent cluster data,528,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c ambiguous-edge fallback policy,256,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c cluster instances,27399936,0,6706944,STORAGE/COPY_DST: cluster placements or hierarchy groups,VisibilityBuffer or VirtualState caster generation; separate tables per consumer
+"N1c cluster vertices, triangles and primitive tables",363657904,237933632,237933632,"STORAGE/COPY_DST: exact positions, packed u8 local triangles, primitive IDs",Mesh cluster hierarchy
+N1c conservative min depth,5594112,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c hardware-cluster depth,8847552,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c image size,80,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+"N1c indirect software dispatch, hardware draw and counts",256,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c pass-1 HZB rejects and pyramid dispatches,856656,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c software then hardware clusters,3424992,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c unused HZB base input,1216,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N1c view and pass,384,0,0,visibility-buffer cluster/cut/HZB/raster storage or uniforms,VisibilityBuffer draw-list/size generation; retired after last submission
+N8 decision trace,16,0,16,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 frame,1776,0,1776,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 level and mip uniforms,4144,0,4144,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 page epochs,3072,0,3072,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 page requests,3072,0,3072,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 receiver levels,8847360,0,8848240,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 ring horizon passes,16416,0,16416,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8 ring horizons,104209360,0,52139616,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c absent cluster data,16,0,16,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c clipmap max-mips,16777216,0,16777216,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c clipmap peel layer,100663296,0,100663296,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c clipmap top layer,100663296,0,100663296,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c hardware raster area,8389264,0,8388944,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c page raster arguments and cluster lists,13700224,0,6707200,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8c pages rasterized this frame,3072,0,3072,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8f caster cull dispatch,16,0,16,virtual-shadow storage/clipmap cache/raster data/uniforms,VirtualState cache/draw-list generation; retired after last submission
+N8g absent walk records,48,0,48,storage geometry walk records/build uniforms,VirtualState draw-list generation; rebuilt on geometry/settings change
+N8g walk record passes,32768,0,32768,storage geometry walk records/build uniforms,VirtualState draw-list generation; rebuilt on geometry/settings change
+N8g walk records,469256512,0,469256512,storage geometry walk records/build uniforms,VirtualState draw-list generation; rebuilt on geometry/settings change
+aligned timestamp resolve,768,768,768,QUERY_RESOLVE/COPY_SRC or COPY_DST/MAP_READ,Renderer timestamp flight ring
+camera,128,128,128,uniform/storage frame lighting,Renderer/LightingState
+disjoint shadow raster matrices,176,176,176,uniform/storage/sampled depth shadow resources (fallback in these paths),ShadowState generation; retired after last submission
+exposed linear HDR,17694720,17694720,17694720,render/storage/sampled RGBA16F HDR target,Lighting target-size generation; retired after last submission
+flight timestamps,240,240,240,QUERY_RESOLVE/COPY_SRC or COPY_DST/MAP_READ,Renderer timestamp flight ring
+fresh exact world position and depth,35389440,35389440,35389440,receiver/normal/count images (headless check: output attachment),FreshState target-size generation (headless check: harness)
+fresh geometric normal and coverage,35389440,35389440,35389440,receiver/normal/count images (headless check: output attachment),FreshState target-size generation (headless check: harness)
+fresh headless check,8847360,8847360,8847360,receiver/normal/count images (headless check: output attachment),FreshState target-size generation (headless check: harness)
+fresh visible ray counts,8847360,8847360,8847360,receiver/normal/count images (headless check: output attachment),FreshState target-size generation (headless check: harness)
+immutable environment cube,102264512,102264512,102264512,sampled environment array; COPY_DST,EnvironmentMap handle (two renderer fallback cubes persist)
+immutable material factors,1344,1344,1344,uniform/storage material data,Material; renderer fallback material persists
+immutable material texture,1073765760,1073765760,1073765760,sampled RGBA8 texture with all source mips; COPY_DST,Texture/Material handle (three renderer fallback textures persist)
+instance transforms,768,768,768,vertex/storage instance data; COPY_DST,Instances
+light records,64,64,64,uniform/storage frame lighting,Renderer/LightingState
+lighting eye/count/environment/exposure,64,64,64,uniform/storage frame lighting,Renderer/LightingState
+material program parameters,3328,3328,3328,uniform/storage material data,Material; renderer fallback material persists
+mesh indices,0,312839680,312839680,INDEX/STORAGE/COPY_SRC/COPY_DST; BLAS_INPUT on RT devices; adjacency suffix,Mesh; original buffer also retained by BLAS after LOD attachment on RT devices
+mesh indices with appended LOD triangles,625256272,0,0,INDEX/STORAGE/COPY_SRC/COPY_DST; BLAS_INPUT on RT devices; adjacency suffix,Mesh; original buffer also retained by BLAS after LOD attachment on RT devices
+mesh vertices,318424128,318425600,318425600,VERTEX/STORAGE/COPY_DST; BLAS_INPUT on RT devices (shared),Mesh; BLAS also retains the same buffer on RT devices
+normal transforms,768,768,768,vertex/storage instance data; COPY_DST,Instances
+prepared DFG RG16F,66112,66112,66112,sampled BRDF integration LUT,Renderer
+primary absent storage,48,48,48,storage draw/placement tables,PrimaryState geometry generation; retired after last submission
+"primary camera inverse, clear and culling",176,176,176,uniform/storage camera/shading region,PrimaryState
+primary edge dispatch arguments,16,16,16,STORAGE/INDIRECT/COPY_DST (work queues also COPY_SRC); ABI-sized placeholders outside traced Interactive,PrimaryState target-size/repair-capacity generation; retired after last submission
+primary edge worklist,74649616,74649616,74649616,STORAGE/INDIRECT/COPY_DST (work queues also COPY_SRC); ABI-sized placeholders outside traced Interactive,PrimaryState target-size/repair-capacity generation; retired after last submission
+primary hard receiver epsilon,8847360,8847360,8847360,sampled/storage image; test COPY_SRC,PrimaryState target-size generation; retired after last submission
+primary hit records,35389440,35389440,35389440,sampled/storage image; test COPY_SRC,PrimaryState target-size generation; retired after last submission
+primary placement draws,48,48,48,storage draw/placement tables,PrimaryState geometry generation; retired after last submission
+primary placement normals,768,768,768,storage draw/placement tables,PrimaryState geometry generation; retired after last submission
+primary placement transforms,768,768,768,storage draw/placement tables,PrimaryState geometry generation; retired after last submission
+primary shading region,16,16,16,uniform/storage camera/shading region,PrimaryState
+primary sparse fallback and changed receivers,8294416,8294416,8294416,STORAGE/INDIRECT/COPY_DST (work queues also COPY_SRC); ABI-sized placeholders outside traced Interactive,PrimaryState target-size/repair-capacity generation; retired after last submission
+primary tile coverage,368640,368640,368640,sampled/storage image; test COPY_SRC,PrimaryState target-size generation; retired after last submission
+redrawn hard shadow depth array,512,512,512,uniform/storage/sampled depth shadow resources (fallback in these paths),ShadowState generation; retired after last submission
+renderlab hardware 1 BLAS 1,0,69949952,69949952,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 10,0,139897600,139897600,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 11,0,69879040,69879040,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 12,0,69914880,69914880,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 2,0,69885440,69885440,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 3,0,69949696,69949696,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 4,0,69224704,69224704,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 5,0,70042368,70042368,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 6,0,69949696,69949696,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 7,0,69949696,69949696,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 8,0,70020608,70020608,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 BLAS 9,0,73119488,73119488,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+renderlab hardware 1 TLAS 13,0,5376,5376,acceleration structure,Mesh BLAS or active/retired TLAS generation; retired after last submission
+shadow sampling records,848,848,848,uniform/storage/sampled depth shadow resources (fallback in these paths),ShadowState generation; retired after last submission
+visible instance IDs,192,192,192,vertex/storage instance data; COPY_DST,Instances
