@@ -1,5 +1,7 @@
 # N8i: the edge certificate and a compacted second kernel, built and rejected
 
+**Follow-up: [N8l](non-rt-n8l.md)** built the resumable work loop recorded below, then subgroup-cooperative walks and a cooperative ring. All lost to their own overhead, with profiles. What paid was latency: per-lane workgroup tables, neighbour prefetch and per-walk hoists cut camera-moving frames 17.5% (no-RT quarry 2.38-2.40 → 1.96-1.98 ms), byte-identically.
+
 Follow-up unit to [N8h](non-rt-n8h.md), 2026-11-07 UTC, base `15fd73f` merged with main `7fe0bdd` (N8j's history reset), branch `t3/n8i-edge-certificate`. Brief (Islam, 2026-11-07): cut the non-RT virtual-shadow pass on camera-moving frames (no-RT quarry 2.41-2.43 ms against Unreal VSM's estimated ~0.5 ms), starting with N8g's unbuilt light-space edge certificate, then the remaining divergence, for example a compacted second kernel. Labels: **M** measured here, **I** inference.
 
 ## Result
