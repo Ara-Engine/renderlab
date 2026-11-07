@@ -141,6 +141,75 @@ figure.suptitle("Q-walk disocclusion — fixed age pools across all 60 original 
 figure.supxlabel("Different pixels contribute at each age; these pools are not one event's settle trajectory.\nNew black-primary physical target. At age 7: 729 covered and 3,738 background-centre pixels.", fontsize=8)
 save(figure, "quarry-revealed-age-curves")
 
+quarter_paths = [ROOT / "runs" / label / "physical-scores.json" for label in ("g25-e-n-s1", "g25-e-r-s1")]
+if all(path.exists() for path in quarter_paths):
+    quarter = [(label, read("runs/" + label + "/physical-scores.json")) for label in ("g25-e-n-s1", "g25-e-r-s1")]
+    assert all(len(score["rows"]) == 160 and not score["missing_frames"] for _, score in quarter)
+    figure, axes = plt.subplots(2, 2, figsize=(11, 7), layout="constrained")
+    for index, (_, score) in enumerate(quarter):
+        label, colour = ("No RT", "#285e9b") if index == 0 else ("HRT", "#b16c1f")
+        frames = [r["frame"] for r in score["rows"]]
+        axes[0, 0].plot(frames, [r["measures"]["L0"]["all-covered"]["rms_noise_subtracted"] for r in score["rows"]], label=label, color=colour)
+        axes[0, 1].plot(frames, [r["highlights"]["metal-0.1"]["energy_ratio"] for r in score["rows"]], label=label, color=colour)
+        flicker = [r for r in score["motion_residuals"] if r["channel"] == "L0" and r["tsr_rms"] is not None]
+        axes[1, 0].plot([r["frames"][1] for r in flicker], [r["tsr_rms"] for r in flicker], label=label, color=colour)
+        for population, style in (("all-covered", "-"), ("background-centre", "--")):
+            pools = [score["transient_pools"][f"revealed/{age}/{population}/L0"] for age in range(8)]
+            axes[1, 1].plot(range(8), [p["tsr_rms_noise_subtracted"] for p in pools], label=label + " " + population,
+                            color=colour, linestyle=style, marker="o", markersize=3)
+    for axis in (axes[0, 0], axes[0, 1], axes[1, 0]):
+        axis.axvspan(64, 95, color="#888888", alpha=.12)
+        axis.set_xlabel("Registered input frame")
+    axes[0, 0].set_title("Current covered population: L0 RMS")
+    axes[0, 1].set_title("Metal r=0.1: highlight energy / physical target")
+    axes[0, 1].axhline(1, color="#555555", linestyle=":", linewidth=1)
+    axes[1, 0].set_title("Reference-subtracted L0 flicker, same instance / age ≥8")
+    axes[1, 1].set_title("Revealed age pools: L0 RMS")
+    axes[1, 1].set_xlabel("Shared geometry age")
+    axes[1, 1].set_xticks(range(8))
+    axes[0, 0].legend(fontsize=8)
+    axes[1, 1].legend(fontsize=8)
+    for axis in axes.flat:
+        axis.set_ylim(bottom=0)
+        axis.grid(alpha=.2)
+    figure.suptitle("S2G quarter-pixel camera track — 160 frames on each Epic TSR path", fontsize=12)
+    figure.supxlabel("D8 physical target, black primary, zero shutter; combined lighting/shading and reconstruction error. Grey: camera hold.\nEnergy masks are each frame's reference top 5%. Age pools contain different pixels; they are not one event's settle trajectory.", fontsize=8)
+    save(figure, "s2g-quarter-comparison")
+
+matrix = read("s2g/synchronized-candidates.json")
+if all((ROOT / "runs" / c["label"] / "physical-scores.json").exists() for c in matrix):
+    glossy = [(c, read("runs/" + c["label"] + "/physical-scores.json")) for c in matrix]
+    if all(len(s["rows"]) == 160 and not s["missing_frames"] for _, s in glossy):
+        tracks = ("s2g-camera-0.25px", "s2g-camera-0.5px", "s2g-camera-1px", "s2g-sun-0.25deg")
+        for kind in ("error", "highlight-energy"):
+            figure, axes = plt.subplots(2, 2, figsize=(11, 7), layout="constrained")
+            for axis, track in zip(axes.flat, tracks, strict=True):
+                for case, score in glossy:
+                    if case["track"] != track:
+                        continue
+                    label, colour = ("No RT", "#285e9b") if case["path"] == "vsm-nort" else ("HRT", "#b16c1f")
+                    frames = [r["frame"] for r in score["rows"]]
+                    if kind == "error":
+                        axis.plot(frames, [r["measures"]["L0"]["all-covered"]["rms_noise_subtracted"] for r in score["rows"]],
+                                  label=label, color=colour)
+                    else:
+                        for population, style in (("metal-0.1", "-"), ("dielectric-0.2", "--")):
+                            axis.plot(frames, [r["highlights"][population]["energy_ratio"] for r in score["rows"]],
+                                      label=label + " " + population, color=colour, linestyle=style)
+                if track != "s2g-sun-0.25deg":
+                    axis.axvspan(64, 95, color="#888888", alpha=.12)
+                if kind == "highlight-energy":
+                    axis.axhline(1, color="#555555", linestyle=":", linewidth=1)
+                axis.set_title(track.removeprefix("s2g-"))
+                axis.set_xlabel("Registered input frame")
+                axis.set_ylabel("All-covered L0 RMS codes" if kind == "error" else "Energy / physical full-radiance target")
+                axis.set_ylim(bottom=0)
+                axis.grid(alpha=.2)
+            axes.flat[0].legend(fontsize=8)
+            figure.suptitle("S2G Epic TSR — all 640 registered frames on both paths", fontsize=12)
+            figure.supxlabel("D8-qualified physical references, black primary, zero shutter, no fitting. Grey: camera hold; sun turns continuously.\nErrors include lighting/shading and reconstruction. Highlight masks are each reference frame's top 5% within its current material.", fontsize=8)
+            save(figure, "s2g-" + kind + "-curves")
+
 (OUT / "figure-provenance.json").write_text(json.dumps(dict(sources=sources,
     script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()), indent=2) + "\n")
 print("Scientific PNG/SVG figures retained", OUT)

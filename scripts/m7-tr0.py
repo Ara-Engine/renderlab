@@ -183,8 +183,9 @@ def queued_lease(label, minutes, wait_seconds=0):
     announced = False
     while True:
         headless_policy(minutes)
+        resources_ready = compiler_safety_valve()
         if (not (ROOT / "gpu-defer.txt").exists() and not U0.LOCK.exists()
-                and U0.E2E.available_gib() >= U0.START_GIB and compiler_safety_valve()):
+                and U0.E2E.available_gib() >= U0.START_GIB and resources_ready):
             stack = contextlib.ExitStack()
             try:
                 owner = stack.enter_context(U0.lease(label, minutes))
