@@ -224,7 +224,7 @@ const SCREEN_CONSTANTS: [&str; 18] = [
     "VSM_EXTRA_SAMPLES",
 ];
 /// `{"constants": {name: number}}` as the state's override list.
-pub(super) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)> {
+pub(crate) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)> {
     v["constants"].as_object().map_or_else(Vec::new, |object| {
         object
             .iter()
@@ -239,7 +239,7 @@ pub(super) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)
     })
 }
 /// Sets the lookup constants; the state must exist (after one Virtual frame).
-pub(super) fn set_screen_constants(r: &mut Renderer, constants: Vec<(&'static str, f64)>) {
+pub(crate) fn set_screen_constants(r: &mut Renderer, constants: Vec<(&'static str, f64)>) {
     r.virtual_shadows.as_mut().unwrap().constants = constants;
 }
 /// A traced renderer with the manifest's `virtual` settings, for the diagnosis tests.
