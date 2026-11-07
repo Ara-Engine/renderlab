@@ -15,6 +15,8 @@ mod visibility_buffer_tests;
 
 #[path = "primary_ray_rt1_tests.rs"]
 mod primary_ray_rt1_tests;
+#[path = "primary_ray_rt1b_tests.rs"]
+mod primary_ray_rt1b_tests;
 
 const SEED_EDIT: (&str, &str) = (
     "    let seed=fresh_hash(pixel.x+pixel.y*width);",
