@@ -24,6 +24,14 @@ const RASTER_PARAMETERS: &str = "@group(2) @binding(7) var<uniform> params:Param
 /// Traced shading reads each draw's block from a binding array and copies the hit's.
 const TRACED_PARAMETERS: &str = "struct RlParameters { value:Parameters };\n@group(2) @binding(17) var<storage,read> rl_parameters:binding_array<RlParameters,PRIMARY_BATCHES>;\nvar<private> params:Parameters;\nfn rl_load_parameters(slot:u32) { params=rl_parameters[slot].value; }\n";
 const TRACED_NO_PARAMETERS: &str = "fn rl_load_parameters(slot:u32) {}\n";
+/// M7 indirect-light inputs (world radiance cache): composed only for programs that
+/// call them, so every other program's modules are unchanged (shaders/gi_api.wgsl).
+const INDIRECT_API: [&str; 2] = [
+    include_str!("../shaders/gi_cells.wgsl"),
+    include_str!("../shaders/gi_api.wgsl"),
+];
+/// The engine inputs `INDIRECT_API` defines.
+const INDIRECT_INPUTS: [&str; 1] = ["indirect_irradiance"];
 
 /// Source of a shading program: WGSL without bindings that defines
 /// `fn surface(input: SurfaceInput) -> Surface` and
@@ -286,7 +294,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             TRACED_ENTRY,
         ),
     };
-    let mut source = format!("{head}\n{COMMON_API}{api}{binding}// ---- program ----\n");
+    let indirect = if uses_indirect(program) {
+        INDIRECT_API.concat()
+    } else {
+        String::new()
+    };
+    let mut source = format!("{head}\n{COMMON_API}{api}{indirect}{binding}// ---- program ----\n");
     let start = source.len();
     source.push_str(program);
     let program = start..source.len();
@@ -331,6 +344,13 @@ fn tokens<'a>(source: &'a str) -> Vec<&'a str> {
 }
 fn declares(source: &str, keyword: &str, name: &str) -> bool {
     tokens(source).windows(2).any(|w| w == [keyword, name])
+}
+/// Whether `program` names an indirect-light engine input outside comments; those
+/// programs get the cache inputs and make frames run the cache passes.
+pub(crate) fn uses_indirect(program: &str) -> bool {
+    tokens(program)
+        .into_iter()
+        .any(|t| INDIRECT_INPUTS.contains(&t))
 }
 /// Whether `program` declares `struct Parameters`, which composition binds as `params`.
 pub(crate) fn declares_parameters(program: &str) -> bool {

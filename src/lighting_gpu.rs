@@ -4,9 +4,13 @@ use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
 pub(super) struct LightBuffer {
     shadow_generation: u64,
     environment_generation: u64,
+    indirect_generation: u64,
     _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
+    /// The same group with the indirect cache's header-only table at binding 20: the
+    /// cache kernels write the real table through their own group 0 (gi_cache.rs).
+    kernel: Owned<wgpu::BindGroup>,
     _allocation: Allocation,
 }
 pub(super) struct Hdr {
@@ -111,6 +115,18 @@ impl LightingGpu {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
+                        },
+                        count: None,
+                    },
+                    // The world radiance cache table, read by `indirect_irradiance`
+                    // (shaders/gi_api.wgsl); only modules whose program calls it use it.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 20,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -220,6 +236,9 @@ impl LightingGpu {
     }
     pub fn bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().bind
+    }
+    pub fn kernel_bind(&self) -> &wgpu::BindGroup {
+        &self.active.as_ref().unwrap().kernel
     }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
@@ -361,6 +380,7 @@ impl Renderer {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
                 || active.environment_generation != self.environment.generation
+                || active.indirect_generation != self.gi.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -372,79 +392,89 @@ impl Renderer {
                 }),
                 ResourceKind::Buffer,
             );
-            let bind = self.ledger.own(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("lighting"),
-                    layout: &state.bindings,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::TextureView(
-                                self.environment
-                                    .selected
-                                    .as_ref()
-                                    .map_or(&state.dummy_environment.view, |map| {
-                                        &map.0.diffuse.view
-                                    }),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::TextureView(
-                                self.environment
-                                    .selected
-                                    .as_ref()
-                                    .map_or(&state.dummy_environment.view, |map| {
-                                        &map.0.specular.view
-                                    }),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 9,
-                            resource: wgpu::BindingResource::TextureView(
-                                self.environment
-                                    .selected
-                                    .as_ref()
-                                    .and_then(|map| map.0.specular_second.as_ref())
-                                    .map_or(&state.dummy_environment.view, |cube| &cube.view),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: state.uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&state.dfg_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::Sampler(&state.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(
-                                self.shadows.sample_view(),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: self.shadows.records().as_entire_binding(),
-                        },
-                    ],
-                }),
-                ResourceKind::BindGroup,
-            );
+            let group = |label, table: &wgpu::Buffer| {
+                self.ledger.own(
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(label),
+                        layout: &state.bindings,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 20,
+                                resource: table.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(
+                                    self.environment
+                                        .selected
+                                        .as_ref()
+                                        .map_or(&state.dummy_environment.view, |map| {
+                                            &map.0.diffuse.view
+                                        }),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::TextureView(
+                                    self.environment
+                                        .selected
+                                        .as_ref()
+                                        .map_or(&state.dummy_environment.view, |map| {
+                                            &map.0.specular.view
+                                        }),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 9,
+                                resource: wgpu::BindingResource::TextureView(
+                                    self.environment
+                                        .selected
+                                        .as_ref()
+                                        .and_then(|map| map.0.specular_second.as_ref())
+                                        .map_or(&state.dummy_environment.view, |cube| &cube.view),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: state.uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&state.dfg_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&state.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(
+                                    self.shadows.sample_view(),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: self.shadows.records().as_entire_binding(),
+                            },
+                        ],
+                    }),
+                    ResourceKind::BindGroup,
+                )
+            };
+            let bind = group("lighting", self.gi.shading_table());
+            let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
             let next = LightBuffer {
                 shadow_generation: self.shadows.stats.resource_generation,
                 environment_generation: self.environment.generation,
+                indirect_generation: self.gi.generation,
                 _environment: self.environment.selected.clone(),
                 buffer,
                 bind,
+                kernel,
                 _allocation: self.ledger.allocate(AllocationKind::Light, needed),
             };
             if let Some(old) = state.active.replace(next) {

@@ -26,13 +26,14 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     if dot(v,v)<0.5 { v=n; }
     let ab=environment_dfg(dot(n,v),rough);
     let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
-    var exposed=exposed_product(environment_constant(),base*(1.0-metal)+f0*ab.x+vec3<f32>(ab.y));
+    // Sky diffuse is the engine's incident irradiance at this receiver: occluded by the
+    // world radiance cache when it runs, the open environment otherwise.
+    let diffuse=exposed_product(indirect_irradiance(input,n),base*((1.0-metal)/PI));
+    var exposed=min(diffuse+exposed_product(environment_constant(),f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
     if environment_enabled() {
-        let irradiance=environment_irradiance(n);
         let reflected=reflect(-v,n);
         let radiance=environment_reflection(reflected,rough);
-        exposed=min(environment_product(irradiance,base*((1.0-metal)/PI))+
-            environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
+        exposed=min(diffuse+environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
     }
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);

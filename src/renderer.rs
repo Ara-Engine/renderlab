@@ -33,6 +33,11 @@ use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 #[path = "texture_residency.rs"]
 mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
+#[path = "gi_cache.rs"]
+mod gi_cache;
+pub use gi_cache::{
+    IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
+};
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
     pub instances: &'a crate::Instances,
@@ -569,6 +574,8 @@ pub struct Renderer {
     upload_cpu: CpuFrame,
     /// Streamed textures' resident levels and requests (`texture_residency.rs`).
     residency: texture_residency::Residency,
+    /// M7 world radiance cache (`gi_cache.rs`).
+    gi: gi_cache::GiState,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -841,6 +848,7 @@ impl Renderer {
             [&bindings, &instance_bindings, &material_bindings],
         );
         let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
+        let gi = gi_cache::GiState::new(&device, &ledger);
         // Traced visibility reads hit-triangle positions back from the shared AS.
         let traced = hardware.is_some()
             && options.samples == SampleCount::One
@@ -998,6 +1006,7 @@ impl Renderer {
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
+            gi,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2860,6 +2869,21 @@ impl Renderer {
                 self.prepare_film(key);
             }
         }
+        if lit {
+            // Traced and visibility-buffer frames feed the cache; every other lit frame
+            // publishes it as off, so its programs read the unoccluded environment.
+            let scopes = OperationScopes::new(&self.device);
+            let result = self.prepare_gi(
+                draws,
+                camera,
+                [color.width(), color.height()],
+                traced && !temporal,
+            );
+            if let Some(error) = scopes.finish() {
+                return Err(self.fail(error.to_string()));
+            }
+            result?;
+        }
         self.check_fault()?;
         let view = self
             .ledger
@@ -2930,6 +2954,7 @@ impl Renderer {
                 if streaming {
                     self.encode_request_clear(&mut encoder);
                 }
+                self.gi.encode(&mut encoder, self.lighting.kernel_bind());
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
         }
@@ -3361,6 +3386,7 @@ impl Renderer {
         }
         self.residency.prune();
         self.lighting.collect(self.completed_submission);
+        self.gi.collect(self.completed_submission);
         self.environment
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
