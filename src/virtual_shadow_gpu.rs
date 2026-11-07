@@ -458,6 +458,8 @@ pub(super) struct VirtualState {
     /// the screens' `VMAP_` constants).
     map_module: Owned<wgpu::ShaderModule>,
     map_layout: Owned<wgpu::PipelineLayout>,
+    /// N8m: the hybrid queue dispatch's layout (its pass is rebuilt with the `VMAP_` constants).
+    queue_layout: Owned<wgpu::PipelineLayout>,
     /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
     hybrid_module: Option<Owned<wgpu::ShaderModule>>,
 }
@@ -1061,6 +1063,7 @@ impl VirtualState {
             lookup_defaults: schedule_defaults(&shader_source()),
             map_module,
             map_layout,
+            queue_layout,
             hybrid_module: None,
         }
     }
@@ -1888,21 +1891,25 @@ impl Renderer {
             .copied()
             .partition(|(name, _)| name.starts_with(MAP_CONSTANTS));
         if rebuild {
-            state.pipelines.map = self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("vmap_lookup"),
-                        layout: Some(&state.map_layout),
-                        module: &state.map_module,
-                        entry_point: Some("vmap_lookup"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &map_constants,
-                            ..Default::default()
-                        },
-                        cache: None,
-                    }),
-                ResourceKind::ComputePipeline,
-            );
+            let map = |entry, layout: &wgpu::PipelineLayout| {
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(layout),
+                            module: &state.map_module,
+                            entry_point: Some(entry),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &map_constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
+            state.pipelines.map = map("vmap_lookup", &state.map_layout);
+            state.pipelines.queue_args = map("vmap_queue_args", &state.queue_layout);
         }
         if state.debug && state.pipelines.debug.is_none() || rebuild {
             let layout = &state.lookup_layout;

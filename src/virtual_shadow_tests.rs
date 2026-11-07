@@ -206,7 +206,9 @@ pub(super) fn diagnose(
 }
 /// Lookup override constants a variant screen may set (shaders/virtual_shadow.wgsl, and the
 /// N8k map lookup's `VMAP_` ones in shaders/virtual_shadow_lookup.wgsl).
-const SCREEN_CONSTANTS: [&str; 60] = [
+const SCREEN_CONSTANTS: [&str; 62] = [
+    "VMAP_QUEUE_SPREAD",
+    "VSM_QUEUED_SPREAD",
     "VMAP_SOFT",
     "VMAP_RING",
     "VMAP_FAR_REACH",

@@ -200,9 +200,12 @@ struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
 @group(0) @binding(47) var<storage,read_write> vmap_queue:array<atomic<u32>>;
 @group(0) @binding(48) var<storage,read_write> vmap_queue_dispatch:array<u32,4>;
 // The exact pass's indirect dispatch over the queue, 32 receivers a workgroup.
+// N8m: lanes per queued receiver in the hybrid's exact pass (virtual_shadow_hybrid.wgsl's
+// VSM_QUEUED_SPREAD, which must match): one receiver per this many lanes, the others idle.
+override VMAP_QUEUE_SPREAD:u32=1u;
 @compute @workgroup_size(1) fn vmap_queue_args() {
     let n=atomicLoad(&vmap_queue[0]);
-    vmap_queue_dispatch[0]=(n+31u)/32u;vmap_queue_dispatch[1]=1u;vmap_queue_dispatch[2]=1u;
+    vmap_queue_dispatch[0]=(n*VMAP_QUEUE_SPREAD+31u)/32u;vmap_queue_dispatch[1]=1u;vmap_queue_dispatch[2]=1u;
 }
 fn vmap_hybrid()->bool {return (vsm.misc.w&256u)!=0u;}
 

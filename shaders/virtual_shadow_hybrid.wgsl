@@ -13,10 +13,15 @@ override VSM_QUEUED_ALL:bool=true;
 // confirms it, every other map decision stands. Its blocks are near-field ones (facing, an own
 // surface near the receiver), which the ring decides exactly; it skips the march's long walks.
 override VSM_QUEUED_RING:bool=false;
+// N8m: lanes per receiver (VMAP_QUEUE_SPREAD, which sizes the dispatch, must match). Queued
+// receivers are few and heavy: spreading them over more warps runs fewer divergent walks per warp
+// and keeps more warps resident.
+override VSM_QUEUED_SPREAD:u32=1u;
 // N8l keeps per-lane direction tables in workgroup memory (vsm_lane); 32 lanes, as vsm_lookup.
 @compute @workgroup_size(32) fn vsm_lookup_queued(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     vsm_lane=li;
-    let k=gid.x;
+    if gid.x%VSM_QUEUED_SPREAD!=0u {return;}
+    let k=gid.x/VSM_QUEUED_SPREAD;
     if k>=atomicLoad(&vsm_scratch.queue) {return;}
     let word=vec2<u32>(atomicLoad(&vsm_scratch.words[2u*k]),atomicLoad(&vsm_scratch.words[2u*k+1u]));
     let id=vec2<u32>(word.x&0xffffu,word.x>>16u);
