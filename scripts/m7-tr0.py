@@ -71,63 +71,9 @@ class MonitorCommands:
 U0.E2E.subprocess = MonitorCommands()
 
 
-def process_inventory():
-    """Read the guard's same four process fields without a WMI worker."""
-    from ctypes import wintypes as w
-
-    class Entry(ctypes.Structure):
-        _fields_ = [("size", w.DWORD), ("usage", w.DWORD), ("pid", w.DWORD),
-                    ("heap", ctypes.c_size_t), ("module", w.DWORD), ("threads", w.DWORD),
-                    ("parent", w.DWORD), ("priority", w.LONG), ("flags", w.DWORD),
-                    ("name", w.WCHAR * 260)]
-
-    api = ctypes.WinDLL("kernel32", use_last_error=True)
-    api.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
-    api.CreateToolhelp32Snapshot.restype = w.HANDLE
-    for name in ("Process32FirstW", "Process32NextW"):
-        function = getattr(api, name)
-        function.argtypes, function.restype = [w.HANDLE, ctypes.POINTER(Entry)], w.BOOL
-    api.OpenProcess.argtypes, api.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
-    api.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
-    api.QueryFullProcessImageNameW.restype = w.BOOL
-    api.GetExitCodeProcess.argtypes, api.GetExitCodeProcess.restype = [w.HANDLE, ctypes.POINTER(w.DWORD)], w.BOOL
-    api.CloseHandle.argtypes, api.CloseHandle.restype = [w.HANDLE], w.BOOL
-    snapshot = api.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
-    if snapshot == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    rows, entry = [], Entry()
-    entry.size = ctypes.sizeof(entry)
-    try:
-        if not api.Process32FirstW(snapshot, ctypes.byref(entry)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        while True:
-            path = None
-            process = api.OpenProcess(0x1000, False, entry.pid)  # QUERY_LIMITED_INFORMATION
-            if process:
-                try:
-                    buffer, length = ctypes.create_unicode_buffer(32768), w.DWORD(32768)
-                    if api.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(length)):
-                        path = buffer.value
-                    else:
-                        error = ctypes.get_last_error()
-                        if error != 5:
-                            exit_code = w.DWORD()
-                            if not api.GetExitCodeProcess(process, ctypes.byref(exit_code)) or exit_code.value == 259:
-                                raise ctypes.WinError(error)
-                finally:
-                    api.CloseHandle(process)
-            elif ctypes.get_last_error() not in (5, 87):
-                raise ctypes.WinError(ctypes.get_last_error())
-            # Protected/exited processes retain their snapshot name/IDs and a
-            # null path, as Win32_Process does for inaccessible image paths.
-            rows.append(dict(Name=entry.name, ProcessId=entry.pid, ParentProcessId=entry.parent, ExecutablePath=path))
-            if not api.Process32NextW(snapshot, ctypes.byref(entry)):
-                if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
-                    raise ctypes.WinError(ctypes.get_last_error())
-                break
-    finally:
-        api.CloseHandle(snapshot)
-    return rows
+PROCESS_GUARD = load("m7-tr0-process")
+PROCESS_GUARD_SHA = hashlib.sha256(Path(PROCESS_GUARD.__file__).read_bytes()).hexdigest()
+process_inventory = PROCESS_GUARD.native_process_inventory
 
 
 def monitor_powershell(command):
@@ -159,6 +105,7 @@ def monitored_state():
         result = _state()
         result["monitor_memory_source"] = "GlobalMemoryStatusEx; launch/live floor uses PDH available memory"
         result["monitor_process_source"] = "Toolhelp process snapshot plus QueryFullProcessImageNameW; same names, IDs, parent IDs and paths"
+        result["monitor_process_helper_sha256"] = PROCESS_GUARD_SHA
         result["monitor_gpu_telemetry"] = "preflight only; live process/game checks remain mandatory"
         return result
     except Exception as error:
@@ -1603,7 +1550,7 @@ def inspect(args):
             axes[1, column].set_title("Mean absolute RGB error" if column else "Reference half difference / 2")
             for axis in axes[:, column]:
                 axis.axis("off")
-        figure.suptitle(f"{track} frame {args.frame}, F0 L{stops}; fixed error scale 0–64 codes, saturates above 64; black primary")
+        figure.suptitle(f"{track} frame {args.frame}, F0 L{stops}; fixed error scale 0â€“64 codes, saturates above 64; black primary")
         figure.colorbar(heat, ax=axes[1, :].tolist(), location="bottom", fraction=.05, pad=.02, label="F0 codes (64+ saturated)")
         figure.savefig(destination / f"{track}-f{args.frame:03}-L{stops}.png", dpi=160)
         plt.close(figure)
