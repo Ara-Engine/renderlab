@@ -1379,3 +1379,6 @@ fn gpu_virtual_configuration_reset() {
         r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
     }
 }
+
+#[path = "texture_residency_tests.rs"]
+mod texture_residency_tests;
