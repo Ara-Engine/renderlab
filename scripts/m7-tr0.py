@@ -1,8 +1,9 @@
 """TR0 measurement tooling; never edits renderer code or the U0 package.
 
 plan creates immutable input timelines; run blocks on its own bounded, hidden
-offscreen GPU lease; summarize and clean are CPU-only. Missing references and
-T1b age masks are explicit gaps, never inferred from TSR's final colour.
+offscreen GPU lease; summarize and clean are CPU-only. Missing reference frames
+and post-TSR direct/visibility estimands are explicit gaps. Restored T1b ages
+are reused only after the original replay and black-primary controls pass.
 """
 import argparse
 import csv
@@ -36,8 +37,34 @@ def load(name):
 U0 = load("m7-u0-ue")
 U0.OUT, U0.OWNER = ROOT, "m7-tr0"
 _engine_tool = U0.engine_tool
-U0.engine_tool = lambda p: _engine_tool(p) or p["Name"].lower() == "build-script-build.exe"
 NATIVE = load("bench-motion-score")
+
+
+def activity_policy():
+    lines = U0.SCHEDULE.read_text(encoding="utf-8", errors="replace").splitlines()
+    controls = [line for line in lines if re.match(r"^\[GAME HOLD(?: RELAXED| RELEASED)?\]", line)]
+    last = controls[-1] if controls else ""
+    state = "relaxed" if last.startswith("[GAME HOLD RELAXED]") else "hold" if last.startswith("[GAME HOLD]") else "released"
+    return dict(state=state, directive=last, speed_claim_eligible=False)
+
+
+def engine_tool(p):
+    name = p["Name"].lower()
+    return _engine_tool(p) or name == "build-script-build.exe" or (name == "cs2.exe" and activity_policy()["state"] == "relaxed")
+
+
+U0.engine_tool = engine_tool
+
+
+def headless_policy(minutes):
+    policy = activity_policy()
+    if policy["state"] == "hold":
+        print("deferred before lease: GAME HOLD", flush=True)
+        raise SystemExit(3)
+    if policy["state"] == "relaxed" and minutes > 3:
+        raise ValueError("game-play work is limited to short <=3-minute headless leases")
+    U0.START_GIB = 6 if policy["state"] == "relaxed" else 4
+    return policy
 
 
 def save(path, value):
@@ -114,8 +141,8 @@ def plan(_):
                                exposure_stops=glossy["exposure_stops"], sun_radius=glossy["sun"]["angular_radius"]))
         inputs[name] = dict(path=str(destination), sha256=digest(destination), frames=len(frames), t1b_scored=False)
     save(ROOT / "inputs/manifest.json", dict(base_commit="708e87c", inputs=inputs,
-         reference_gaps=["T1b walk compact reference buffers deleted", "T1b per-pixel ages deleted",
-                         "U0 tracer has no quarry textures, RLE2 sky, or quarry RLA upload",
+         reference_gaps=["Original T1b frozen compact references deleted; U0b physical references are a separate estimand",
+                         "Restored T1b age masks require history-check and the black-primary compatibility control",
                          "T1b never ran Q-disocclusion, Q-zoom or Q-sun"],
          package=str(U0.PACKAGE), package_exe_sha256=digest(U0.PACKAGE)))
     print(json.dumps({k: {a: b for a, b in v.items() if a != "contents"} for k, v in inputs.items()}, indent=2))
@@ -183,17 +210,25 @@ def readback(out, quality, path):
             desired = np.array(p["to_light"])
             desired /= np.linalg.norm(desired)
             light_checks.append(dict(frame=p["frame"], ok=bool(np.max(np.abs(actual - desired)) < 1e-6), to_light=actual.tolist()))
+    source_angles = [float(m.group(1)) for m in re.finditer(r"\.LightSourceAngle = ([0-9.eE+-]+)", log)]
+    angle_expected = recipe.get("sun_diameter_degrees")
+    angle_check = dict(expected=angle_expected, actual=source_angles,
+                       ok=angle_expected is not None and bool(source_angles) and all(abs(v - angle_expected) < 1e-5 for v in source_angles))
     result = dict(ok=all(c["ok"] for c in checks + camera_checks + light_checks), checks=checks, camera_checks=camera_checks,
                   light_checks=light_checks, light_readback_complete=not light_poses or len(light_checks) == len(light_poses),
+                  sun_angle=angle_check,
                   camera_readbacks=cameras,
                   d3d12_sm6="PCD3D_SM6" in log and "LogD3D12RHI" in log,
                   commandline_offscreen="-RenderOffscreen" in log)
     save(out / "readback.json", result)
     if not result["ok"] or not result["d3d12_sm6"] or not result["light_readback_complete"]:
         raise ValueError("runtime readback failed: " + str(out))
+    if angle_expected is not None and not angle_check["ok"]:
+        raise ValueError("runtime sun-diameter readback failed: " + str(out))
 
 
 def run(args):
+    policy = headless_policy(args.minutes)
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
         print("Waiting for shared GPU/memory guard (bounded)", flush=True)
@@ -245,8 +280,9 @@ def run(args):
                           (["getall DirectionalLightComponent RelativeRotation"] if "to_light" in frames[-1] else []))))
     count = start + repeats * (len(frames) + 16) + (96 if args.capture else 0)
     config = settings(args.quality, args.path)
-    if glossy:
-        config.append(f"set DirectionalLightComponent LightSourceAngle {math.degrees(2 * source['sun_radius']):.9f}")
+    sun_diameter = math.degrees(2 * source["sun_radius"]) if glossy else math.degrees(.08)
+    config.append(f"set DirectionalLightComponent LightSourceAngle {sun_diameter:.9f}")
+    config.append("getall DirectionalLightComponent LightSourceAngle")
     expected_fov = math.degrees(2 * math.atan(math.tan(frames[0]["fov_y_radians"] / 2) * 1920 / 1080))
     initial = copy.deepcopy(frames[0])
     if args.track == "q-sun-jump":
@@ -272,7 +308,8 @@ def run(args):
     events = [(f, replacements.get(cmd, cmd)) for f, cmd in events]
     startup_macro = replacements[startup_macro]
     ini = [c.replace("r.RayTracing=True", "r.RayTracing=False") if args.path == "vsm-nort" else c for c in U0.COMMON_INI]
-    command = [U0.PACKAGE, "../../../M5Calibration/M5Calibration.uproject", *U0.UE_FLAGS,
+    flags = ["-corelimit=2" if policy["state"] == "relaxed" and f == "-corelimit=8" else f for f in U0.UE_FLAGS]
+    command = [U0.PACKAGE, "../../../M5Calibration/M5Calibration.uproject", *flags,
                f"-abslog={out / 'ue.log'}", *ini, "-dx12", "-sm6", "-RenderOffscreen",
                "/Game/M7U0b/S2G/Bench" if glossy else "/Game/M6Quarry/View0", "-game", "-ResX=1920", "-ResY=1080", "-ForceRes", "-NoVSync",
                "-UseFixedTimeStep", "-FPS=60", "-csvGpuStats", "-csvCompression=0", "-ExitAfterCsvProfiling",
@@ -299,16 +336,19 @@ def run(args):
           smoke=args.smoke, start=start, frames=frames, repeats=repeats, gap=16, csv_frames=count,
           sequence_sha256=digest(ROOT / "inputs" / (args.track + ".json")), script_sha256=digest(__file__),
           package_exe_sha256=digest(U0.PACKAGE), exposure_stops=source.get("exposure_stops", -14),
+          sun_diameter_degrees=sun_diameter,
           scene="S2G" if glossy else "quarry", shutter=0,
           note="Timing: 2 no-AA/TSR paired full-track replays in one process; four invocations give eight pairs. Even repeats no AA, odd repeats TSR. Cold reset per replay. Capture and timing are separate processes. No reference score implied."))
     csv_root = U0.PACKAGE_DIR / "Windows/M5Calibration/Saved/Profiling/CSV"
     before = set(csv_root.glob("*.csv"))
     try:
+        policy = headless_policy(args.minutes)
+        save(out / "activity-policy.json", policy)
         with U0.lease(args.label, args.minutes):
             save(out / "package-identity.json", dict(executable_sha256=digest(U0.PACKAGE),
                  paks={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.pak")},
                  utocs={str(p.relative_to(U0.PACKAGE_DIR)): digest(p) for p in U0.PACKAGE_DIR.rglob("*.utoc")}))
-            U0.guarded(actual_command, out, timeout=args.minutes * 60 - 20, cwd=U0.PACKAGE.parent)
+            U0.guarded(actual_command, out, timeout=min(args.minutes * 60 - 20, 120) if policy["state"] == "relaxed" else args.minutes * 60 - 20, cwd=U0.PACKAGE.parent)
     finally:
         # Only the exclusively-created directory and its own copied macros.
         if short_dir.parent.resolve() != U0.PACKAGE.parent.parent.resolve():
@@ -329,6 +369,8 @@ def run(args):
 def summarize(args):
     out = ROOT / "runs" / args.label
     recipe = json.loads((out / "recipe.json").read_text())
+    policy_path = out / "activity-policy.json"
+    policy = json.loads(policy_path.read_text()) if policy_path.exists() else {"state": "pre-game-screen"}
     rows = list(csv.reader((out / "profile.csv").open(encoding="utf-8-sig")))
     header = rows[0]
     data = rows[1:]
@@ -371,6 +413,7 @@ def summarize(args):
         save(out / "timing.json", dict(by_method=by_method, paired_delta_p50_ms=float(np.median(pairs)),
              paired_delta_p95_ms=float(np.quantile(pairs, .95)), pairs=len(pairs), valid_timing=not recipe["smoke"],
              per_frame=frame_costs,
+             activity_policy=policy, contended=True, eligible_for_speed_claim=False,
              scope="2 adjacent no-AA/TSR full-track pairs per process, same frame indices, first 8 frames excluded per track. Four processes give eight pairs. Native CSV GPUTime plus TSR stat. Desktop contention recorded in preflight."))
         print(json.dumps(by_method, indent=2))
         return
@@ -455,11 +498,11 @@ def clean(args):
     root = (ROOT / "runs" / args.label).resolve()
     if ROOT.resolve() not in root.parents or not root.is_dir():
         raise ValueError("cleanup outside owned run")
-    if not (root / "capture-readback.json").exists():
+    if not (root / "capture-readback.json").exists() and not (root / "history-readback.json").exists():
         raise ValueError("summarize before cleanup")
     deleted = []
     for path in root.rglob("*"):
-        if path.is_file() and path.stat().st_size > 5_000_000 and path.suffix.lower() in (".bin", ".npz", ".npy", ".exr"):
+        if path.is_file() and path.stat().st_size > 5_000_000 and path.suffix.lower() in (".bin", ".npz", ".npy", ".exr", ".rgba16f", ".u32", ".f32"):
             deleted.append(dict(path=str(path), bytes=path.stat().st_size, sha256=digest(path)))
             path.unlink()
     previous = root / "deleted-raw.json"
@@ -472,10 +515,18 @@ def prune(args):
     root = (ROOT / "runs" / args.label).resolve()
     if ROOT.resolve() not in root.parents or not root.is_dir():
         raise ValueError("prune outside owned run")
-    summary = json.loads((root / "capture-readback.json").read_text())
-    keep = {Path(r["hdr"]["path"]).resolve() for r in summary["identities"]}
+    if (root / "capture-readback.json").exists():
+        summary = json.loads((root / "capture-readback.json").read_text())
+        keep = {Path(r["hdr"]["path"]).resolve() for r in summary["identities"]}
+        candidates = (root / "dump").rglob("*.bin")
+    else:
+        history = json.loads((root / "history-readback.json").read_text())
+        if not history["age_masks_compatible"]:
+            raise ValueError("audit historical replay before pruning")
+        keep = {p.resolve() for p in (root / "data").glob("full-f*.rgba16f")}
+        candidates = (root / "data").glob("*.rgba16f")
     deleted = []
-    for path in (root / "dump").rglob("*.bin"):
+    for path in candidates:
         if path.stat().st_size > 5_000_000 and path.resolve() not in keep:
             deleted.append(dict(path=str(path), bytes=path.stat().st_size, sha256=digest(path)))
             path.unlink()
@@ -526,7 +577,9 @@ def cost(_):
         group = groups.setdefault(key, dict(visits=[], samples=[]))
         group["visits"].append(dict(label=path.parent.name, preflight_sha256=digest(path.parent / "preflight.json"),
                                      process_sha256=digest(path.parent / "process.json"),
-                                     minimum_available_gib=process["minimum_available_gib"]))
+                                     minimum_available_gib=process["minimum_available_gib"],
+                                     activity_policy=timing.get("activity_policy", {"state": "pre-game-screen"}),
+                                     eligible_for_speed_claim=False))
         group["samples"].extend(timing["per_frame"])
     rows = []
     for (track, shadow_path, quality), group in groups.items():
@@ -542,30 +595,147 @@ def cost(_):
     print(json.dumps(rows, indent=2))
 
 
+def history(args):
+    """Recover T1b's deleted age masks with its original archived executable, no build."""
+    binary = T1 / "builds/b15/renderlab-test.exe"
+    expected = (T1 / "builds/b15/sha256.txt").read_text().split()[0]
+    if digest(binary) != expected:
+        raise ValueError("archived T1b executable hash changed")
+    policy = headless_policy(args.minutes)
+    if args.wait_seconds:
+        deadline = time.monotonic() + args.wait_seconds
+        print("Waiting for bounded historical-replay GPU gap", flush=True)
+        while U0.LOCK.exists() or U0.E2E.available_gib() < 4:
+            if time.monotonic() >= deadline:
+                raise SystemExit(3)
+            time.sleep(2)
+    out = ROOT / "runs" / args.label
+    out.mkdir(parents=True, exist_ok=False)
+    manifest = json.loads((T1 / "walk-b15.json").read_text())
+    manifest.update(output=str(out / "data"), replay=False)
+    if args.black_background:
+        lighting = json.loads(Path(manifest["lighting"]).read_text())
+        lighting["environment"] = [0, 0, 0]
+        save(out / "lighting-black-background.json", lighting)
+        manifest.update(lighting=str(out / "lighting-black-background.json"), validate=False)
+    save(out / "manifest.json", manifest)
+    env = dict(os.environ, RENDERLAB_PRIMARY_MANIFEST=str(out / "manifest.json"),
+               RAYON_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2", OMP_NUM_THREADS="2",
+               RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+    test = "renderer::fresh_shadow_tests::primary_ray_gpu_tests::film_reference_tests::film_accumulation_tests::gpu_film_t1_motion"
+    policy = headless_policy(args.minutes)
+    save(out / "activity-policy.json", policy)
+    with U0.lease(args.label, args.minutes):
+        U0.guarded([binary, test, "--ignored", "--exact", "--nocapture", "--test-threads=1"],
+                   out, timeout=min(args.minutes * 60 - 15, 120) if policy["state"] == "relaxed" else args.minutes * 60 - 15, cwd=REPO, env=env)
+    original_path = T1 / "walk-b15/motion.json"
+    actual = json.loads((out / "data/motion.json").read_text())
+    original = json.loads(original_path.read_text())
+    checks = {program: actual["digests"][program][0] == original["digests"][program][0]
+              for program in original["digests"]}
+    save(out / "history-readback.json", dict(binary_sha256=expected, original_sha256=digest(original_path),
+         checks=checks, same_scored_frames=actual["scored"] == original["scored"],
+         age_masks_compatible=all(checks.values()) and actual["scored"] == original["scored"],
+         note="All scored image hashes and final histories must match before reusing restored masks with recorded T1b scores."))
+    if not all(checks.values()) or actual["scored"] != original["scored"]:
+        raise ValueError("historical image/history replay differs; restored masks are not yet accepted")
+    print("historical T1b image/history identity passed", checks, flush=True)
+
+
+def history_check(args):
+    """Audit completed historical data independently of the test process's exit status."""
+    out = ROOT / "runs" / args.label
+    original_path = T1 / "walk-b15/motion.json"
+    actual_path = out / "data/motion.json"
+    actual, original = [json.loads(p.read_text()) for p in (actual_path, original_path)]
+    checks = {p: actual["digests"][p][0] == original["digests"][p][0] for p in original["digests"]}
+    counters = actual["frames"] == original["frames"]
+    process = json.loads((out / "process.json").read_text())
+    log = (out / "stdout.log").read_text(errors="replace")
+    errors = [line for line in log.splitlines() if "gpu_diagnostic ERROR" in line]
+    result = dict(checks=checks, per_frame_counters_identical=counters,
+         scored_frames_identical=actual["scored"] == original["scored"],
+         image_hashes=sum(len(actual["digests"][p][0]) - 1 for p in checks),
+         final_histories=len(checks), frame_counter_rows=len(actual["frames"]),
+         original_sha256=digest(original_path), replay_sha256=digest(actual_path),
+         process_exit_code=process["exit_code"], clean_test_pass=process["exit_code"] == 0 and not errors,
+         diagnostic_errors=errors,
+         age_masks_compatible=all(checks.values()) and counters and actual["scored"] == original["scored"],
+         limit="Original age-file hashes were not retained. Compatibility follows the original binary, all image/final-history hashes and every per-frame counter; a nonzero test exit is never relabelled a clean test.")
+    save(out / "history-readback.json", result)
+    print(json.dumps(result, indent=2))
+
+
+def black_check(args):
+    """Accept a black-clear replay only if its shading and all age masks stay unchanged."""
+    out, base = [ROOT / "runs" / n for n in (args.label, args.baseline)]
+    actual, original = [json.loads((p / "data/motion.json").read_text()) for p in (out, base)]
+    age_checks = [digest(out / "data" / f"age-f{i:03}.u8") == digest(base / "data" / f"age-f{i:03}.u8") for i in actual["scored"]]
+    controls = {p: actual["digests"][p][0] == original["digests"][p][0] for p in ("sun", "visibility")}
+    old, new = [np.fromfile(p / "data/full-f000.rgba16f", "<f2").reshape(1080, 1920, 4) for p in (base, out)]
+    with np.load(args.reference) as ref:
+        cover = ref["pop_all-covered"]
+    foreground_identical = np.array_equal(old[cover], new[cover])
+    background_black = np.array_equal(new[0, 0, :3], [0, 0, 0])
+    counters = actual["frames"] == original["frames"]
+    passed = all(age_checks) and all(controls.values()) and foreground_identical and background_black and counters
+    process = json.loads((out / "process.json").read_text())
+    save(out / "history-readback.json", dict(age_masks_compatible=passed, age_files=len(age_checks),
+         every_age_file_identical=all(age_checks), unchanged_control_programs=controls,
+         cold_covered_pixels=int(cover.sum()), cold_foreground_hdr_identical=foreground_identical,
+         black_background=background_black, per_frame_counters_identical=counters,
+         baseline_history_sha256=digest(base / "data/motion.json"), process_exit_code=process["exit_code"],
+         validation_enabled=False,
+         note="Explicit black visible-clear benchmark variant; the RLE2 illumination stays bound. Never relabelled as the original coloured-clear recorded score. Cold foreground and sun/visibility controls plus every age file must remain byte-identical."))
+    if not passed:
+        raise ValueError("black-background variant changed shading or masks; cannot use it")
+    print("black-clear compatibility passed", int(cover.sum()), "cold covered pixels; age files", len(age_checks))
+
+
 def score(args):
     """Score native colour against U0b lossless, zero-shutter physical references.
 
     This supplies R_L-style measurements, not T1b's old direct/environment bar,
     internal restart ages or an invented post-TSR visibility output.
     """
+    from scipy.ndimage import distance_transform_edt
     out = ROOT / "runs" / args.label
     recipe = json.loads((out / "recipe.json").read_text())
     capture = json.loads((out / "capture-readback.json").read_text())
     if not recipe["capture"] or recipe["smoke"] or capture.get("exposure_readback_frames") != len(recipe["frames"]):
         raise ValueError("full capture and per-frame exposure proof required before scoring")
+    moving_light = any("to_light" in p for p in recipe["frames"])
     def camera_key(p):
-        return tuple(p["eye"] + p["target"])
+        # The reference View API and T1b camera are f32; canonicalize their effective input bits.
+        values = p["eye"] + p["target"]
+        if moving_light:
+            if "to_light" not in p:
+                return None
+            values += p["to_light"]
+        return np.asarray(values, dtype="<f4").tobytes()
     references = {}
-    for path in args.reference.glob(recipe["track"] + "-*.json"):
+    paths = list(args.reference.glob(recipe["track"] + "-*.json"))
+    if recipe["track"] == "q-walk":
+        paths += list(args.reference.glob("quarry-p*.json"))
+    for path in paths:
         meta = json.loads(path.read_text())
         frame = meta.get("frame", {})
         if not frame or frame.get("open") != frame.get("close") or frame.get("sky_only"):
             continue
         archive = path.with_suffix(".npz")
         if archive.exists():
-            references[camera_key(frame["open"])] = (archive, meta)
+            key = camera_key(dict(frame["open"], **({"to_light": frame["to_light"]} if "to_light" in frame else {})))
+            if key is not None:
+                if meta.get("camera_background") != [0., 0., 0.]:
+                    raise ValueError("reference must apply black to primary misses before integration")
+                if meta.get("archive_sha256") and digest(archive) != meta["archive_sha256"]:
+                    raise ValueError("reference archive differs from its provenance")
+                references[key] = (archive, meta)
     if not references:
         raise ValueError("no lossless zero-shutter references available; no quality score can be published")
+    arrival = {}
+    for f, p in enumerate(recipe["frames"]):
+        arrival.setdefault(camera_key(p), f)
     dump = NATIVE.s1.native.Dump(out / "dump")
     groups = {}
     for event in dump.passes:
@@ -574,7 +744,13 @@ def score(args):
     if len(groups) != len(recipe["frames"]):
         raise ValueError("native/reference frame coverage mismatch")
     codes = load("m6-temporal-gpu-score").codes
-    rows, residuals, missing = [], [], []
+    historical = None
+    if args.history:
+        historical = ROOT / "runs" / args.history
+        check = json.loads((historical / "history-readback.json").read_text())
+        if not check["age_masks_compatible"]:
+            raise ValueError("historical image/history/counter identity is not verified")
+    rows, residuals, missing, transient = [], [], [], {}
     previous = None
     for i, (_, events) in enumerate(sorted(groups.items())):
         p = recipe["frames"][i]
@@ -592,17 +768,50 @@ def score(args):
         hdr, identity = NATIVE.resource(dump, name, consumer)
         if identity["sha256"] != capture["identities"][i]["hdr"]["sha256"]:
             raise ValueError("candidate bytes changed since capture readback")
+        old_hdr, age = None, None
+        if historical:
+            age_path = historical / "data" / f"age-f{i:03}.u8"
+            hdr_path = historical / "data" / f"full-f{i:03}.rgba16f"
+            if age_path.exists() and hdr_path.exists():
+                age = np.fromfile(age_path, dtype="u1").reshape(1080, 1920)
+                old_hdr = np.fromfile(hdr_path, dtype="<f2").reshape(1080, 1920, 4)[..., :3].astype("f4")
         with np.load(archive) as ref:
             scale = 2 ** recipe.get("exposure_stops", -14)
             mean = (ref["L0"] + ref["L1"]) * .5 * scale
             halves = [ref[k] * scale for k in ("L0", "L1")]
             result = dict(frame=i, reference=str(archive), reference_sha256=digest(archive),
                           samples=meta.get("samples"), hdr_sha256=identity["sha256"], measures={})
+            distance = distance_transform_edt(~ref["pop_edge"]) if "pop_edge" in ref else None
+            result["background_distance_bands"] = {}
+            background_checks = []
+            for y, x in ((0, 0), (0, 1919), (1079, 0), (1079, 1919)):
+                if "pop_background-centre" in ref and ref["pop_background-centre"][y, x]:
+                    value = dict(pixel=[x, y], reference_exposed=mean[y, x].tolist(),
+                                 tsr_exposed=hdr[y, x, :3].tolist())
+                    if old_hdr is not None:
+                        value["t1b_exposed"] = old_hdr[y, x].tolist()
+                    background_checks.append(value)
+            result["background_checks"] = background_checks
+            changed = None
+            back = i - 8
+            if back >= 0 and camera_key(recipe["frames"][back]) == camera_key(p):
+                back = arrival[camera_key(p)] - 8
+            back_source = references.get(camera_key(recipe["frames"][back])) if back >= 0 else None
+            if back_source is not None and camera_key(recipe["frames"][back]) != camera_key(p):
+                with np.load(back_source[0]) as before:
+                    if all(k in ref and k in before for k in ("visibility", "D0", "D1")):
+                        now_d = (ref["D0"] + ref["D1"]) * .5 * scale
+                        before_d = (before["D0"] + before["D1"]) * .5 * scale
+                        changed = (np.abs(ref["visibility"] - before["visibility"]) > .05) | (np.abs(codes(now_d, 4) - codes(before_d, 4)).mean(-1) > 8)
+                        changed &= ref["pop_all-covered"]
+                        result["changed"] = dict(back_frame=back, pixels=int(changed.sum()), measures={})
             for stops in (0, 4):
                 candidate, reference = codes(hdr[..., :3], stops), codes(mean, stops)
                 error = candidate - reference
                 noise = (codes(halves[0], stops) - codes(halves[1], stops)) * .5
                 e2, v2 = np.mean(error ** 2, -1), np.mean(noise ** 2, -1)
+                old_error = codes(old_hdr, stops) - reference if old_hdr is not None else None
+                old_e2 = np.mean(old_error ** 2, -1) if old_error is not None else None
                 pops = {}
                 for key in ref.files:
                     if key.startswith("pop_"):
@@ -612,25 +821,80 @@ def score(args):
                                   rms_noise_subtracted=float(np.sqrt(max(0, float((e2 - v2)[mask].mean())))),
                                   signed_mean=float(error[mask].mean()), maximum=float(np.max(np.abs(error[mask]))),
                                   reference_noise_rms=float(np.sqrt(v2[mask].mean())))
+                            signed = error.mean(-1)[mask]
+                            pops[key[4:]]["se"] = float(signed.std(ddof=1) / math.sqrt(signed.size)) if signed.size > 1 else 0
+                            if old_e2 is not None:
+                                pops[key[4:]]["t1b_replay_same_physical_reference"] = dict(
+                                    rms=float(np.sqrt(old_e2[mask].mean())),
+                                    rms_noise_subtracted=float(np.sqrt(max(0, float((old_e2 - v2)[mask].mean())))),
+                                    signed_mean=float(old_error[mask].mean()),
+                                    se=float(old_error.mean(-1)[mask].std(ddof=1) / math.sqrt(int(mask.sum()))) if mask.sum() > 1 else 0)
+                                converged = mask & (age >= 32)
+                                if converged.any():
+                                    pops[key[4:]]["same_t1b_age32_pixels"] = dict(n=int(converged.sum()),
+                                        tsr=float(np.sqrt(max(0, float((e2 - v2)[converged].mean())))),
+                                        t1b=float(np.sqrt(max(0, float((old_e2 - v2)[converged].mean())))))
+                                for value in range(8):
+                                    for event in ("start", "revealed"):
+                                        selected = mask & (age == value) & ((i - age == 0) if event == "start" else (i - age > 0))
+                                        if selected.any():
+                                            name = f"{event}/{value}/{key[4:]}/L{stops}"
+                                            pool = transient.setdefault(name, dict(n=0, tsr_e2=0., t1b_e2=0., reference_v2=0.))
+                                            pool["n"] += int(selected.sum())
+                                            pool["tsr_e2"] += float(e2[selected].sum())
+                                            pool["t1b_e2"] += float(old_e2[selected].sum())
+                                            pool["reference_v2"] += float(v2[selected].sum())
+                if distance is not None and "pop_background-centre" in ref:
+                    bands = {}
+                    for low, high in ((0, 1.5), (1.5, 3), (3, 6), (6, float("inf"))):
+                        mask = ref["pop_background-centre"] & (distance >= low) & (distance < high)
+                        if age is not None:
+                            mask &= age >= 32
+                        if mask.any():
+                            band = dict(n=int(mask.sum()), tsr_rms=float(np.sqrt(e2[mask].mean())))
+                            if old_e2 is not None:
+                                band["t1b_rms"] = float(np.sqrt(old_e2[mask].mean()))
+                            bands[f"{low:g}-{high:g}"] = band
+                    result["background_distance_bands"][f"L{stops}"] = bands
                 result["measures"][f"L{stops}"] = pops
-                if stops == 0:
-                    if previous is not None and previous[0] == i - 1:
-                        residual = (candidate - previous[1]) - (reference - previous[2])
-                        covered = ref["pop_all-covered"] if "pop_all-covered" in ref else ref["pop_image"]
-                        covered = covered & previous[3]
-                        if "hit" in ref and previous[4] is not None:
-                            covered &= ref["hit"][..., 0] == previous[4]
-                        residuals.append(dict(frames=[i - 1, i], L0_rms=float(np.sqrt((residual[covered] ** 2).mean())),
-                                             pixels=int(covered.sum()), age_filter_available=False))
-                    previous = (i, candidate, reference,
-                                ref["pop_all-covered"] if "pop_all-covered" in ref else ref["pop_image"],
-                                ref["hit"][..., 0] if "hit" in ref else None)
+                if changed is not None and changed.any():
+                    field = dict(tsr_rms=float(np.sqrt(e2[changed].mean())), tsr_signed_mean=float(error[changed].mean()))
+                    if old_e2 is not None:
+                        field.update(t1b_rms=float(np.sqrt(old_e2[changed].mean())), t1b_signed_mean=float(old_error[changed].mean()))
+                    result["changed"]["measures"][f"L{stops}"] = field
+                if previous is not None and previous[0] == i - 1:
+                    d_reference = reference - codes(previous[2], stops)
+                    residual = candidate - codes(previous[1], stops) - d_reference
+                    step = candidate - codes(previous[1], stops)
+                    covered = (ref["pop_all-covered"] if "pop_all-covered" in ref else ref["pop_image"]) & previous[3]
+                    if "hit" in ref and previous[4] is not None:
+                        covered &= ref["hit"][..., 0] == previous[4]
+                    if age is not None:
+                        covered &= age >= 8
+                    field = dict(frames=[i - 1, i], channel=f"L{stops}", pixels=int(covered.sum()),
+                         tsr_rms=float(np.sqrt((residual[covered] ** 2).mean())) if covered.any() else None,
+                         tsr_step_rms=float(np.sqrt((step[covered] ** 2).mean())) if covered.any() else None,
+                         age_filter_available=age is not None)
+                    if old_hdr is not None and previous[5] is not None and covered.any():
+                        old_step = codes(old_hdr, stops) - codes(previous[5], stops)
+                        field.update(t1b_rms=float(np.sqrt(((old_step - d_reference)[covered] ** 2).mean())),
+                                     t1b_step_rms=float(np.sqrt((old_step[covered] ** 2).mean())))
+                    residuals.append(field)
+            previous = (i, hdr[..., :3].astype("f4"), mean,
+                        ref["pop_all-covered"] if "pop_all-covered" in ref else ref["pop_image"],
+                        ref["hit"][..., 0].copy() if "hit" in ref else None, old_hdr)
             rows.append(result)
+    for pool in transient.values():
+        for name in ("tsr", "t1b"):
+            pool[name + "_rms"] = math.sqrt(pool[name + "_e2"] / pool["n"])
+            pool[name + "_rms_noise_subtracted"] = math.sqrt(max(0, (pool[name + "_e2"] - pool["reference_v2"]) / pool["n"]))
     save(out / "physical-scores.json", dict(rows=rows, missing_frames=missing, motion_residuals=residuals,
+         transient_pools=transient, historical_variant=args.history,
          compared_with="U0b physical, disk-integrated multi-bounce reference, zero shutter, no fitting",
          carried_t1b_is_same_estimand=False,
-         unavailable=["T1b original-bar ratios", "T1b restart-age F1/F2", "post-TSR R_D/R_F", "film-reference settle without every event frame"],
-         note="Do not claim TSR-vs-recorded-T1b dominance from different references. Both raw and reference-noise-subtracted errors retained."))
+         matched_temporal_comparison_certified=False,
+         unavailable=["T1b original-bar ratios", "post-TSR R_D/R_F", "film-reference settle without every event frame"],
+         note="Check primary-background semantics before any dominance claim. Corner diagnostics are evidence, not a replacement for full-image validation. Both raw and reference-noise-subtracted errors retained; sparse references cannot certify the motion gate."))
     print("physical reference frames scored", len(rows), "missing", len(missing))
 
 
@@ -651,13 +915,24 @@ def main():
     p.add_argument("--minutes", type=int, default=6)
     p.add_argument("--wait-seconds", type=int, default=0)
     p.add_argument("--package-dir", type=Path)
-    for command in ("summarize", "clean", "prune"):
+    for command in ("summarize", "clean", "prune", "history-check"):
         commands.add_parser(command).add_argument("label")
     p = commands.add_parser("score")
     p.add_argument("label")
     p.add_argument("--reference", type=Path, required=True)
+    p.add_argument("--history")
+    p = commands.add_parser("history")
+    p.add_argument("label")
+    p.add_argument("--minutes", type=int, default=3)
+    p.add_argument("--wait-seconds", type=int, default=0)
+    p.add_argument("--black-background", action="store_true")
+    p = commands.add_parser("black-check")
+    p.add_argument("label")
+    p.add_argument("--baseline", required=True)
+    p.add_argument("--reference", type=Path, required=True)
     args = parser.parse_args()
-    dict(plan=plan, run=run, summarize=summarize, clean=clean, prune=prune, baseline=baseline, score=score, cost=cost)[args.command](args)
+    {"plan": plan, "run": run, "summarize": summarize, "clean": clean, "prune": prune, "baseline": baseline,
+     "score": score, "cost": cost, "history": history, "history-check": history_check, "black-check": black_check}[args.command](args)
 
 
 if __name__ == "__main__":
