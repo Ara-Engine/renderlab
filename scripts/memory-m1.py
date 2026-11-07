@@ -35,7 +35,7 @@ def resource(name):
     if name == "N1c cluster vertices, triangles and primitive tables":
         return "STORAGE/COPY_DST: exact positions, packed u8 local triangles, primitive IDs", "Mesh cluster hierarchy"
     if name in ("N1c cluster instances", "N1c LOD groups"):
-        return "STORAGE/COPY_DST: cluster placements or hierarchy groups", "VisibilityBuffer or VirtualState caster generation; separate tables per consumer"
+        return "STORAGE/COPY_DST: cluster placements or hierarchy groups", "VisibilityBuffer or VirtualState caster generation; matching immutable tables shared since M2"
     if name.startswith("renderlab hardware"):
         return "acceleration structure", "Mesh BLAS or active/retired TLAS generation; retired after last submission"
     if name == "immutable material texture":

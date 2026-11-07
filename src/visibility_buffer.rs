@@ -289,8 +289,8 @@ pub(super) struct VisibilityBuffer {
     matrix: Mat4,
     frames: u64,
     count: u32,
-    _clusters: Buffer,
-    _groups: Buffer,
+    _clusters: Arc<Buffer>,
+    _groups: Arc<Buffer>,
     configs: [Buffer; 2],
     _lists: [Buffer; 2],
     args: [Buffer; 2],
@@ -442,11 +442,38 @@ fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
 /// N1c's primaries and N8c's shadow page raster both cull this table.
 pub(super) struct ClusterInstances {
     pub count: u32,
-    pub clusters: Buffer,
-    pub groups: Buffer,
+    pub clusters: Arc<Buffer>,
+    pub groups: Arc<Buffer>,
+}
+/// Only weak references: primary and shadow consumers own their shared immutable
+/// tables. Dropping both consumers releases the generation without a cache purge.
+#[derive(Default)]
+pub(super) struct ClusterInstanceCache(std::sync::Mutex<Option<CachedClusterInstances>>);
+struct CachedClusterInstances {
+    key: Vec<(std::sync::Weak<Owned<wgpu::Buffer>>, usize)>,
+    count: u32,
+    clusters: std::sync::Weak<Buffer>,
+    groups: std::sync::Weak<Buffer>,
 }
 impl ClusterInstances {
     pub fn new(r: &Renderer, draws: &[PreparedDraw<'_>]) -> Result<Self, Error> {
+        let mut cache = r.cluster_instances.0.lock().unwrap();
+        if let Some(cached) = cache.as_ref()
+            && cached.key.len() == draws.len()
+            && cached.key.iter().zip(draws).all(|((data, count), d)| {
+                d.mesh.clusters.as_ref().is_some_and(|c| {
+                    std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
+                })
+            })
+            && let (Some(clusters), Some(groups)) =
+                (cached.clusters.upgrade(), cached.groups.upgrade())
+        {
+            return Ok(Self {
+                count: cached.count,
+                clusters,
+                groups,
+            });
+        }
         let mut records = vec![];
         let mut groups = vec![];
         let mut placement = 0u32;
@@ -513,10 +540,26 @@ impl ClusterInstances {
             r.queue
                 .write_buffer(&group_buffer.value, 0, &words(groups.iter().copied()));
         }
+        let clusters = Arc::new(clusters);
+        let groups = Arc::new(group_buffer);
+        *cache = Some(CachedClusterInstances {
+            key: draws
+                .iter()
+                .map(|d| {
+                    (
+                        Arc::downgrade(&d.mesh.clusters.as_ref().unwrap().data),
+                        d.instances.len(),
+                    )
+                })
+                .collect(),
+            count: count as u32,
+            clusters: Arc::downgrade(&clusters),
+            groups: Arc::downgrade(&groups),
+        });
         Ok(Self {
             count: count as u32,
             clusters,
-            groups: group_buffer,
+            groups,
         })
     }
 }

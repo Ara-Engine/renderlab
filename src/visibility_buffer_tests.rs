@@ -1207,6 +1207,44 @@ fn gpu_primary_memory_modes() {
 }
 
 #[test]
+#[ignore = "M2 owned GPU lease: immutable table sharing and generation release"]
+fn gpu_shared_cluster_tables() {
+    use crate::renderer::{PreparedDraw, visibility_buffer::ClusterInstances};
+    fn draws<'a>(mesh: &'a Mesh, instances: &'a Instances) -> [PreparedDraw<'a>; 1] {
+        [PreparedDraw {
+            mesh,
+            instances,
+            material: None,
+            indices: 0..mesh.index_count,
+            slots: 0..instances.len() as u32,
+            reference_ids: None,
+        }]
+    }
+    let mut r = no_rt_renderer();
+    let positions = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+    let (mesh, mut instances) = geometry(&mut r, &positions, &[0, 1, 2]);
+    let first = ClusterInstances::new(&r, &draws(&mesh, &instances)).unwrap();
+    instances.set(0, Mat4::from_translation(Vec3::Y)).unwrap();
+    let second = ClusterInstances::new(&r, &draws(&mesh, &instances)).unwrap();
+    assert!(Arc::ptr_eq(&first.clusters, &second.clusters));
+    assert!(Arc::ptr_eq(&first.groups, &second.groups));
+    let doubled = r
+        .try_upload_instances(&[Mat4::IDENTITY; 2])
+        .unwrap()
+        .unwrap();
+    r.test_drain("M2 table instances");
+    let changed = ClusterInstances::new(&r, &draws(&mesh, &doubled)).unwrap();
+    assert_eq!(changed.count, first.count * 2);
+    assert!(!Arc::ptr_eq(&first.clusters, &changed.clusters));
+    let weak = Arc::downgrade(&changed.clusters);
+    let (replacement, _) = geometry(&mut r, &positions, &[0, 1, 2]);
+    let replaced = ClusterInstances::new(&r, &draws(&replacement, &doubled)).unwrap();
+    assert!(!Arc::ptr_eq(&changed.clusters, &replaced.clusters));
+    drop(changed);
+    assert!(weak.upgrade().is_none(), "cache must not retain GPU tables");
+}
+
+#[test]
 #[ignore = "N8j owned GPU lease: configuration history must restart at the reset boundary"]
 fn gpu_virtual_configuration_reset() {
     let mut r = no_rt_renderer();
