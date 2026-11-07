@@ -1,6 +1,6 @@
 # M5-M6: lighting and shadows
 
-Authorized by Islam on 2026-11-03 after the real-quarry checkpoint `95f9de6a3e0a0cbe4c80289ba228a25f69351e50`. Implement M5 and M6 in the main checkout while isolated pstack hillclimbs address M4's moving-stream CPU cost and historical resize stall. This supersedes earlier stop-after-M4 text. M7 and later remain outside implementation scope.
+Authorized by Islam on 2026-11-03 after the real-quarry checkpoint `95f9de6a3e0a0cbe4c80289ba228a25f69351e50`. Implement M5 and M6 in the main checkout while isolated pstack hillclimbs address M4's moving-stream CPU cost and historical resize stall. This supersedes earlier stop-after-M4 text. M7 and later remain outside implementation scope. Update 2026-11-07: Islam authorized M7 (see [milestone-7.md](milestone-7.md)). M5's glossy-motion and environment-visibility items fold into M7, since GI and reflections replace those mechanisms. M5's development-loop timings and matched Unreal acceptance, and M6's camera-moving shadow cost, continue in an isolated hillclimb worktree.
 
 ## Acceptance target
 
