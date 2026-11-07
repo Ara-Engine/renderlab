@@ -331,7 +331,8 @@ impl SurfaceCache {
         self.pipelines = Some(SurfacePipelines {
             probe: compute("vsc_probe", &self.probe_layout),
             args: compute("vsc_args", &self.args_pipeline_layout),
-            sort: compute("vsc_sort", &self.args_pipeline_layout),
+            // Bound with the probe's group: the dispatch group's arguments are its own source.
+            sort: compute("vsc_sort", &self.probe_layout),
             missed: compute("vsc_missed", lookup_layout),
             claim: compute("vsc_claim", &self.insert_pipeline_layout),
             resolve: compute("vsc_resolve", &self.insert_pipeline_layout),
@@ -450,6 +451,7 @@ impl SurfaceCache {
         pass.set_bind_group(0, &*groups[1], &[]);
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(&p.sort);
+        pass.set_bind_group(0, &*groups[0], &[]);
         pass.dispatch_workgroups_indirect(&self.dispatch, 16);
         pass.set_pipeline(&p.missed);
         pass.set_bind_group(0, queued, &[]);
@@ -556,7 +558,7 @@ mod tests {
             ("vsc_claim", insert),
             ("vsc_resolve", insert),
             ("vsc_args", &[(0, Some(&[20, 48]))]),
-            ("vsc_sort", &[(0, Some(&[20, 48]))]),
+            ("vsc_sort", cache),
             ("vsc_missed", lookup),
         ];
         for (entry, layout) in passes {
