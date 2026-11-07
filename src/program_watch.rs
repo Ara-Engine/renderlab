@@ -2,6 +2,7 @@
 //! changed file reloads in its own transaction, and a rejection keeps the last working
 //! pipelines. A rejected file is retried after the next successful reload of another
 //! file, so a program that needs a new prelude helper applies once that helper lands.
+use crate::shader_compiler::CompilePolicy;
 use crate::{Program, ReloadError, ReloadReport, Renderer};
 use std::{
     path::{Path, PathBuf},
@@ -17,6 +18,21 @@ pub enum Kind {
     /// A caller-registered program. The watcher retains its owned handle.
     Program(Program),
 }
+impl Kind {
+    fn program(&self, renderer: &Renderer) -> Option<Program> {
+        match self {
+            Self::Prelude => None,
+            Self::Standard => Some(renderer.standard_program().clone()),
+            Self::Program(p) => Some(p.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadStage {
+    Preview,
+    Optimized,
+}
 
 struct File {
     path: PathBuf,
@@ -25,12 +41,19 @@ struct File {
     text: String,
     rejected: bool,
     queued: Option<Change>,
+    optimization: Option<Optimization>,
 }
 
+#[derive(Clone, Copy)]
 struct Change {
     detected: Instant,
     file_age: Duration,
     retry: bool,
+}
+struct Optimization {
+    text: String,
+    change: Change,
+    after_frame: u64,
 }
 
 struct Pending {
@@ -38,10 +61,13 @@ struct Pending {
     text: String,
     change: Change,
     job: crate::renderer::ProgramReload,
+    stage: ReloadStage,
+    upgrade: bool,
 }
 
 /// One reload attempt.
 pub struct Reload {
+    pub stage: ReloadStage,
     pub kind: Kind,
     pub path: PathBuf,
     pub result: Result<ReloadReport, ReloadError>,
@@ -55,6 +81,7 @@ pub struct Reload {
 pub struct ShaderWatch {
     files: Vec<File>,
     pending: Option<Pending>,
+    preview: Option<CompilePolicy>,
 }
 
 impl ShaderWatch {
@@ -69,6 +96,7 @@ impl ShaderWatch {
                     text: crate::STANDARD_PROGRAM.into(),
                     rejected: false,
                     queued: None,
+                    optimization: None,
                 },
                 File {
                     path: prelude,
@@ -76,9 +104,11 @@ impl ShaderWatch {
                     text: prelude_text,
                     rejected: false,
                     queued: None,
+                    optimization: None,
                 },
             ],
             pending: None,
+            preview: None,
         }
     }
 
@@ -99,6 +129,7 @@ impl ShaderWatch {
             text: accepted_source.into(),
             rejected: false,
             queued: None,
+            optimization: None,
         };
         if let Some(existing) = self.files.iter_mut().find(|f| f.kind == kind) {
             *existing = file;
@@ -121,6 +152,7 @@ impl ShaderWatch {
             text: accepted_source.into(),
             rejected: false,
             queued: None,
+            optimization: None,
         };
         if let Some(existing) = self.files.iter_mut().find(|f| f.kind == Kind::Prelude) {
             *existing = file;
@@ -134,12 +166,46 @@ impl ShaderWatch {
         Self {
             files: vec![],
             pending: None,
+            preview: None,
         }
     }
 
     /// Whether a file's current text is rejected, so the last working pipelines render.
     pub fn rejected(&self) -> bool {
         self.files.iter().any(|f| f.rejected)
+    }
+
+    /// Opt-in, transient development output. Configure while idle on a device made
+    /// by shader_compiler::request_device. A preview is presented for at least one
+    /// submitted frame before its optimized replacement starts. Temporal frames
+    /// always use optimized pipelines. Normal/release callers keep the default None.
+    pub fn set_preview_policy(
+        &mut self,
+        policy: Option<CompilePolicy>,
+    ) -> Result<(), crate::Error> {
+        if policy.is_some()
+            && (!cfg!(debug_assertions)
+                || !matches!(
+                    policy,
+                    Some(
+                        CompilePolicy::Preview
+                            | CompilePolicy::PreviewHelpers
+                            | CompilePolicy::PreviewNoInline
+                            | CompilePolicy::LibraryFast
+                    )
+                ))
+        {
+            return Err(crate::Error::InvalidInput(
+                "shader preview requires a development build and a preview policy",
+            ));
+        }
+        if self.pending.is_some() || self.files.iter().any(|f| f.optimization.is_some()) {
+            return Err(crate::Error::InvalidInput(
+                "change shader compile policy after the current reload finishes",
+            ));
+        }
+        self.preview = policy;
+        Ok(())
     }
 
     /// The standard program beside a prelude: `<prelude dir>/programs/standard.wgsl`.
@@ -207,11 +273,32 @@ impl ShaderWatch {
         if self.pending.as_ref().is_some_and(|p| p.job.is_finished()) {
             let pending = self.pending.take().unwrap();
             let file = &mut self.files[pending.index];
-            if pending.text == file.text && pending.job.current(renderer) {
-                let change = file.queued.take().unwrap_or(pending.change);
+            let matches = if pending.upgrade {
+                file.kind
+                    .program(renderer)
+                    .is_some_and(|p| renderer.program_source_matches(&p, &pending.text))
+            } else {
+                pending.text == file.text
+            };
+            if matches && pending.job.current(renderer) {
+                let change = if file.text == pending.text {
+                    file.queued.take().unwrap_or(pending.change)
+                } else {
+                    pending.change
+                };
                 let result = renderer.finish_program_reload(pending.job);
-                file.rejected = matches!(result, Err(ReloadError::Rejected { .. }));
+                if file.text == pending.text {
+                    file.rejected = matches!(result, Err(ReloadError::Rejected { .. }));
+                }
+                if result.is_ok() && pending.stage == ReloadStage::Preview {
+                    file.optimization = Some(Optimization {
+                        text: pending.text,
+                        change,
+                        after_frame: renderer.stats().frames,
+                    });
+                }
                 reloads.push(Reload {
+                    stage: pending.stage,
                     kind: file.kind.clone(),
                     path: file.path.clone(),
                     result,
@@ -222,7 +309,17 @@ impl ShaderWatch {
             } else {
                 // A renderer change needs a fresh snapshot even when the file did not
                 // change. Preserve the original save timestamp for latency accounting.
-                file.queued.get_or_insert(pending.change);
+                if pending.upgrade {
+                    if matches {
+                        file.optimization = Some(Optimization {
+                            text: pending.text,
+                            change: pending.change,
+                            after_frame: renderer.stats().frames.saturating_sub(1),
+                        });
+                    }
+                } else {
+                    file.queued.get_or_insert(pending.change);
+                }
                 pending.job.discard();
             }
         }
@@ -242,22 +339,31 @@ impl ShaderWatch {
         {
             let file = &mut self.files[index];
             let change = file.queued.take().unwrap();
-            let program = match &file.kind {
-                Kind::Prelude => None,
-                Kind::Standard => Some(renderer.standard_program().clone()),
-                Kind::Program(program) => Some(program.clone()),
-            };
+            let program = file.kind.program(renderer);
             if let Some(program) = program {
-                match renderer.start_program_reload(&program, &file.text) {
+                let preview = self.preview.filter(|_| renderer.can_preview_programs());
+                let stage = if preview.is_some() {
+                    ReloadStage::Preview
+                } else {
+                    ReloadStage::Optimized
+                };
+                match renderer.start_program_reload_with_policy(
+                    &program,
+                    &file.text,
+                    preview.unwrap_or_default(),
+                ) {
                     Ok(job) => {
                         self.pending = Some(Pending {
                             index,
                             text: file.text.clone(),
                             change,
                             job,
+                            stage,
+                            upgrade: false,
                         })
                     }
                     Err(result) => reloads.push(Reload {
+                        stage,
                         kind: file.kind.clone(),
                         path: file.path.clone(),
                         result: Err(result),
@@ -288,6 +394,61 @@ impl ShaderWatch {
                 reloads.push(reload);
             }
         }
+        if self.pending.is_none() && !self.files.iter().any(|f| f.queued.is_some()) {
+            let frames = renderer.stats().frames;
+            for file in &mut self.files {
+                if let Some(plan) = &file.optimization
+                    && !file
+                        .kind
+                        .program(renderer)
+                        .is_some_and(|p| renderer.program_source_matches(&p, &plan.text))
+                {
+                    file.optimization = None;
+                }
+            }
+            let next = self
+                .files
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| {
+                    f.optimization
+                        .as_ref()
+                        .filter(|p| frames > p.after_frame)
+                        .map(|p| (i, p.change.detected))
+                })
+                .min_by_key(|(_, saved)| *saved);
+            if let Some((index, _)) = next {
+                let file = &mut self.files[index];
+                let plan = file.optimization.take().unwrap();
+                let program = file.kind.program(renderer).unwrap();
+                let policy = if self.preview == Some(CompilePolicy::LibraryFast) {
+                    CompilePolicy::LibraryLto
+                } else {
+                    CompilePolicy::Optimized
+                };
+                match renderer.start_program_reload_with_policy(&program, &plan.text, policy) {
+                    Ok(job) => {
+                        self.pending = Some(Pending {
+                            index,
+                            text: plan.text,
+                            change: plan.change,
+                            job,
+                            stage: ReloadStage::Optimized,
+                            upgrade: true,
+                        })
+                    }
+                    Err(error) => reloads.push(Reload {
+                        stage: ReloadStage::Optimized,
+                        kind: file.kind.clone(),
+                        path: file.path.clone(),
+                        result: Err(error),
+                        detected: plan.change.detected,
+                        file_age: plan.change.file_age,
+                        retry: plan.change.retry,
+                    }),
+                }
+            }
+        }
         reloads
     }
 
@@ -310,6 +471,7 @@ impl ShaderWatch {
         };
         file.rejected = matches!(result, Err(ReloadError::Rejected { .. }));
         Reload {
+            stage: ReloadStage::Optimized,
             kind: file.kind.clone(),
             path: file.path.clone(),
             result,

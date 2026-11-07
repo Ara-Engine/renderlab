@@ -23,7 +23,8 @@ pub(crate) struct ProgramReload {
     primary_hash: [u8; 32],
     variants: Vec<Variant>,
     started: Instant,
-    worker: JoinHandle<Result<Prepared, Error>>,
+    policy: crate::shader_compiler::CompilePolicy,
+    worker: JoinHandle<(Result<Prepared, Error>, Duration)>,
 }
 impl ProgramReload {
     pub(crate) fn is_finished(&self) -> bool {
@@ -47,10 +48,37 @@ impl ProgramReload {
 }
 
 impl Renderer {
+    #[cfg(test)]
     pub(crate) fn start_program_reload(
         &mut self,
         program: &crate::Program,
         source: &str,
+    ) -> Result<ProgramReload, ReloadError> {
+        self.start_program_reload_with_policy(
+            program,
+            source,
+            crate::shader_compiler::CompilePolicy::Optimized,
+        )
+    }
+
+    pub(crate) fn can_preview_programs(&self) -> bool {
+        crate::shader_compiler::capabilities(&self.device).is_some()
+            && !self.hot.iter().any(|(_, v)| *v == Variant::Temporal)
+    }
+
+    pub(crate) fn program_source_matches(&self, program: &crate::Program, source: &str) -> bool {
+        Arc::ptr_eq(&program.0.renderer, &self.identity)
+            && self
+                .programs
+                .iter()
+                .any(|slot| slot.id == program.id() && slot.source == source)
+    }
+
+    pub(crate) fn start_program_reload_with_policy(
+        &mut self,
+        program: &crate::Program,
+        source: &str,
+        policy: crate::shader_compiler::CompilePolicy,
     ) -> Result<ProgramReload, ReloadError> {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
@@ -128,6 +156,7 @@ impl Renderer {
                     primary: None,
                     cache: cache.as_ref(),
                     modules: &modules,
+                    vertex_identity: Sha256::digest(raster.as_bytes()).into(),
                 };
                 let compiled = compile_program(
                     &abi,
@@ -141,6 +170,7 @@ impl Renderer {
                     &text,
                 )?;
                 let module_time = started.elapsed();
+                let vertex_identity = Sha256::digest(raster.as_bytes()).into();
                 let jobs = recipes.iter().flat_map(|recipe| {
                     let abi = &abi;
                     let compiled = &compiled;
@@ -151,50 +181,54 @@ impl Renderer {
                         .map(move |(index, layout)| {
                             move || {
                                 let m = &compiled.modules;
-                                match recipe.variant {
-                                    Variant::Lit | Variant::Hardware | Variant::Fresh => {
-                                        let module = match recipe.variant {
-                                            Variant::Lit => &m.lit,
-                                            Variant::Hardware => m.hardware.as_ref().unwrap(),
-                                            _ => m.fresh.as_ref().unwrap(),
-                                        };
-                                        Built::Render(mesh_pipeline(
-                                            abi.device,
-                                            abi.ledger,
-                                            module,
-                                            layout,
-                                            wgpu::TextureFormat::Rgba16Float,
-                                            "fs_lit",
-                                            index == 1,
-                                            if recipe.variant == Variant::Fresh {
-                                                SampleCount::One
-                                            } else {
-                                                samples
-                                            },
-                                            abi.cache,
-                                        ))
-                                    }
-                                    Variant::Traced | Variant::Temporal => {
-                                        let module = if recipe.variant == Variant::Temporal {
-                                            m.temporal.as_ref().unwrap()
-                                        } else {
-                                            &m.traced.as_ref().unwrap()[index]
-                                        };
-                                        Built::Compute(abi.ledger.own(
-                                            abi.device.create_compute_pipeline(
-                                                &wgpu::ComputePipelineDescriptor {
-                                                    label: Some("background program shading"),
-                                                    layout: Some(layout),
-                                                    module,
-                                                    entry_point: Some("primary_shade_tiles"),
-                                                    compilation_options: Default::default(),
-                                                    cache: abi.cache,
+                                crate::shader_compiler::with_program_policy(
+                                    policy,
+                                    vertex_identity,
+                                    || match recipe.variant {
+                                        Variant::Lit | Variant::Hardware | Variant::Fresh => {
+                                            let module = match recipe.variant {
+                                                Variant::Lit => &m.lit,
+                                                Variant::Hardware => m.hardware.as_ref().unwrap(),
+                                                _ => m.fresh.as_ref().unwrap(),
+                                            };
+                                            Built::Render(mesh_pipeline(
+                                                abi.device,
+                                                abi.ledger,
+                                                module,
+                                                layout,
+                                                wgpu::TextureFormat::Rgba16Float,
+                                                "fs_lit",
+                                                index == 1,
+                                                if recipe.variant == Variant::Fresh {
+                                                    SampleCount::One
+                                                } else {
+                                                    samples
                                                 },
-                                            ),
-                                            ResourceKind::ComputePipeline,
-                                        ))
-                                    }
-                                }
+                                                abi.cache,
+                                            ))
+                                        }
+                                        Variant::Traced | Variant::Temporal => {
+                                            let module = if recipe.variant == Variant::Temporal {
+                                                m.temporal.as_ref().unwrap()
+                                            } else {
+                                                &m.traced.as_ref().unwrap()[index]
+                                            };
+                                            Built::Compute(abi.ledger.own(
+                                                abi.device.create_compute_pipeline(
+                                                    &wgpu::ComputePipelineDescriptor {
+                                                        label: Some("background program shading"),
+                                                        layout: Some(layout),
+                                                        module,
+                                                        entry_point: Some("primary_shade_tiles"),
+                                                        compilation_options: Default::default(),
+                                                        cache: abi.cache,
+                                                    },
+                                                ),
+                                                ResourceKind::ComputePipeline,
+                                            ))
+                                        }
+                                    },
+                                )
                             }
                         })
                 });
@@ -230,7 +264,7 @@ impl Renderer {
             if let Err(Error::Fault(error)) = &result {
                 let _ = fault.set(error.clone());
             }
-            result
+            (result, started.elapsed())
         });
         Ok(ProgramReload {
             program: program.clone(),
@@ -239,6 +273,7 @@ impl Renderer {
             primary_hash: self.primary_hash,
             variants,
             started,
+            policy,
             worker,
         })
     }
@@ -249,10 +284,13 @@ impl Renderer {
         &mut self,
         reload: ProgramReload,
     ) -> Result<ReloadReport, ReloadError> {
-        let prepared = reload.worker.join().unwrap_or_else(|_| {
-            Err(Error::Fault(Fault(
-                "program compile worker panicked".into(),
-            )))
+        let (prepared, elapsed) = reload.worker.join().unwrap_or_else(|_| {
+            (
+                Err(Error::Fault(Fault(
+                    "program compile worker panicked".into(),
+                ))),
+                reload.started.elapsed(),
+            )
         });
         let Prepared {
             compiled,
@@ -268,21 +306,33 @@ impl Renderer {
             Err(error) => {
                 return Err(ReloadError::Rejected {
                     diagnostic: error.to_string(),
-                    compile: reload.started.elapsed(),
+                    compile: elapsed,
                 });
             }
         };
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
-        Ok(self.install_program(
+        let report = self.install_program(
             &reload.program,
             &reload.source,
             compiled,
             variants,
             built,
             compile,
-        ))
+        );
+        self.programs
+            .iter_mut()
+            .find(|s| s.id == reload.program.id())
+            .unwrap()
+            .preview = matches!(
+            reload.policy,
+            crate::shader_compiler::CompilePolicy::Preview
+                | crate::shader_compiler::CompilePolicy::PreviewHelpers
+                | crate::shader_compiler::CompilePolicy::PreviewNoInline
+                | crate::shader_compiler::CompilePolicy::LibraryFast
+        );
+        Ok(report)
     }
 }
 

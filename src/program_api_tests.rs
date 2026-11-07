@@ -24,7 +24,7 @@ fn renderer() -> Renderer {
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     eprintln!("toon_adapter={:?}", adapter.get_info());
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let descriptor = wgpu::DeviceDescriptor {
         required_features: crate::RECEIVER_FEATURES
             | crate::TRACED_FEATURES
             | wgpu::Features::EXPERIMENTAL_RAY_QUERY
@@ -39,8 +39,14 @@ fn renderer() -> Renderer {
         // This ignored test requires the explicit acknowledgment checked above.
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
-    }))
-    .unwrap();
+    };
+    let (device, queue) = if std::env::var_os("RENDERLAB_VULKAN_INTEROP").is_some() {
+        crate::shader_compiler::request_device(&adapter, &descriptor)
+            .unwrap()
+            .unwrap()
+    } else {
+        pollster::block_on(adapter.request_device(&descriptor)).unwrap()
+    };
     Renderer::new_with_hardware_shadows(
         device,
         queue,
@@ -60,6 +66,168 @@ fn renderer() -> Renderer {
         PRELUDE,
     )
     .unwrap()
+}
+
+/// Short driver screen: fresh unique sources per policy, no asset/window/readback.
+#[test]
+#[ignore = "shared GPU lease, >=4 GiB RAM, experimental acknowledgment and RENDERLAB_PRIMARY_MANIFEST"]
+fn gpu_vulkan_compile_screen() {
+    use crate::shader_compiler::{self, CompilePolicy};
+    let _validation = validation::begin(true);
+    assert!(std::env::var_os("RENDERLAB_VULKAN_INTEROP").is_some());
+    let mut r = renderer();
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    eprintln!(
+        "vulkan_capabilities={:?}",
+        shader_compiler::capabilities(&r.device)
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_PRIMARY_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let mut rows = vec![];
+    let mut serial = 0u32;
+    for variant in [Variant::Lit, Variant::Traced] {
+        let vertex_identity = Sha256::digest(PRELUDE.as_bytes()).into();
+        let abi = r.program_abi();
+        let scopes = OperationScopes::new(&r.device);
+        shader_compiler::with_program_policy(CompilePolicy::WarmLibraries, vertex_identity, || {
+            r.program_slot(r.standard.id())
+                .modules
+                .pipeline(&abi, variant, 1)
+        });
+        assert!(scopes.finish().is_none());
+        eprintln!(
+            "vulkan_warm variant={variant:?} timings={:?}",
+            shader_compiler::take_timings(&r.device)
+        );
+        for repeat in 0..2 {
+            for policy in [
+                CompilePolicy::Optimized,
+                CompilePolicy::Preview,
+                CompilePolicy::PreviewNoInline,
+                CompilePolicy::PreviewHelpers,
+                CompilePolicy::LibraryFast,
+                CompilePolicy::LibraryLto,
+            ] {
+                if variant == Variant::Traced
+                    && matches!(
+                        policy,
+                        CompilePolicy::LibraryFast | CompilePolicy::LibraryLto
+                    )
+                {
+                    continue;
+                }
+                serial += 1;
+                let tint = f32::from_bits(
+                    0x3f000000 | ((salt.wrapping_add(serial * 100003)) & 0x003fffff),
+                );
+                let source = STANDARD_PROGRAM.replace(
+                    "return exposed;",
+                    &format!("return exposed*vec3<f32>({tint:.9},0.9,1.0);"),
+                );
+                let mut abi = r.program_abi();
+                abi.cache = None;
+                let compiled =
+                    compile_program(&abi, &r.preludes(), "driver-screen", &source).unwrap();
+                shader_compiler::take_timings(&r.device);
+                let scopes = OperationScopes::new(&r.device);
+                let start = Instant::now();
+                let pipeline =
+                    shader_compiler::with_program_policy(policy, vertex_identity, || {
+                        compiled.modules.pipeline(&abi, variant, 1)
+                    });
+                let elapsed = start.elapsed();
+                assert!(scopes.finish().is_none());
+                drop(pipeline);
+                let timings = shader_compiler::take_timings(&r.device);
+                assert!(!timings.is_empty());
+                let driver = timings.last().unwrap();
+                let row = serde_json::json!({"variant":format!("{variant:?}"),"policy":format!("{policy:?}"),"repeat":repeat,
+                    "tint":tint,"source_sha256":format!("{:x}",Sha256::digest(source.as_bytes())),
+                    "api_ms":elapsed.as_secs_f64()*1e3,"driver_ms":driver.duration.as_secs_f64()*1e3,"cache_hit":driver.application_cache_hit,
+                    "shader_bytes":driver.shader_bytes,
+                    "parts":timings.iter().map(|t|serde_json::json!({"kind":t.kind,"ms":t.duration.as_secs_f64()*1e3,"cache_hit":t.application_cache_hit,"shader_bytes":t.shader_bytes})).collect::<Vec<_>>()});
+                eprintln!("vulkan_screen {row}");
+                rows.push(row);
+            }
+        }
+    }
+    fs::write(
+        out.join("compile-screen.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Synthetic call-graph experiment; engine helper sources stay untouched.
+#[test]
+#[ignore = "shared GPU lease, >=4 GiB RAM, experimental acknowledgment and RENDERLAB_PRIMARY_MANIFEST"]
+fn gpu_vulkan_helper_size() {
+    use crate::shader_compiler::{self, CompilePolicy};
+    let _validation = validation::begin(true);
+    let mut r = renderer();
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::env::var("RENDERLAB_PRIMARY_MANIFEST").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let out = PathBuf::from(manifest["output"].as_str().unwrap());
+    fs::create_dir_all(&out).unwrap();
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let mut rows = vec![];
+    for variant in [Variant::Lit, Variant::Traced] {
+        for repeat in 0..2 {
+            for calls in [0, 1, 2, 4] {
+                let tint =
+                    0.5 + f64::from(salt.wrapping_add(repeat * 100003 + calls * 99391)) * 1e-11;
+                let mut body = format!("var c=input.color.xyz*{tint:.10};");
+                for i in 0..calls {
+                    body += &format!(
+                        "c+=environment_reflection(normalize(input.normal+vec3<f32>({:.3},0.2,0.3)),clamp(input.uv.x*{:.3}+0.1,0.0,1.0));",
+                        0.1 + f64::from(i) * 0.17,
+                        0.5 + f64::from(i) * 0.07
+                    );
+                }
+                let source = format!(
+                    "struct Surface {{ color:vec3<f32> }}; fn surface(input:SurfaceInput)->Surface {{ return Surface(input.color.xyz); }} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {{ {body} return expose(c); }}"
+                );
+                let mut abi = r.program_abi();
+                abi.cache = None;
+                let compiled =
+                    compile_program(&abi, &r.preludes(), "helper-size", &source).unwrap();
+                for policy in [CompilePolicy::Optimized, CompilePolicy::PreviewNoInline] {
+                    shader_compiler::take_timings(&r.device);
+                    let scopes = OperationScopes::new(&r.device);
+                    let start = Instant::now();
+                    let pipeline =
+                        shader_compiler::with_program_policy(policy, abi.vertex_identity, || {
+                            compiled.modules.pipeline(&abi, variant, 1)
+                        });
+                    let api_ms = start.elapsed().as_secs_f64() * 1e3;
+                    assert!(scopes.finish().is_none());
+                    drop(pipeline);
+                    let timings = shader_compiler::take_timings(&r.device);
+                    let driver = timings.last().unwrap();
+                    rows.push(serde_json::json!({"variant":format!("{variant:?}"),"policy":format!("{policy:?}"),"calls":calls,"repeat":repeat,"api_ms":api_ms,"driver_ms":driver.duration.as_secs_f64()*1e3,"shader_bytes":driver.shader_bytes,"source_sha256":format!("{:x}",Sha256::digest(source.as_bytes()))}));
+                }
+            }
+        }
+    }
+    fs::write(
+        out.join("helper-size.json"),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    )
+    .unwrap();
 }
 
 fn admitted<T>(
@@ -420,4 +588,102 @@ fn gpu_registered_program_files_defaults_arrays() {
         serde_json::to_string(&rows).unwrap()
     );
     assert!(r.fault.get().is_none());
+    if std::env::var_os("RENDERLAB_VULKAN_INTEROP").is_some() {
+        use crate::program_watch::ReloadStage;
+        use crate::shader_compiler::{self, CompilePolicy};
+        let mut comparisons = vec![];
+        let standard = r.standard_program().clone();
+        let material = admitted(&mut r, |r| {
+            r.try_create_material(&MaterialDescriptor::default())
+        });
+        for mode in [PrimaryVisibility::Raster, PrimaryVisibility::Traced] {
+            r.set_primary_visibility(mode).unwrap();
+            r.reload_program(&standard, STANDARD_PROGRAM).unwrap();
+            let baseline = frame(&mut r, &material);
+            for policy in [
+                CompilePolicy::Preview,
+                CompilePolicy::PreviewNoInline,
+                CompilePolicy::PreviewHelpers,
+                CompilePolicy::LibraryFast,
+            ] {
+                let edited = STANDARD_PROGRAM.replace(
+                    "return exposed;",
+                    "return exposed*vec3<f32>(0.713257,0.9,1.0);",
+                );
+                let mut staged = ShaderWatch::programs_only();
+                staged.watch_program(&standard, &path, STANDARD_PROGRAM);
+                staged.set_preview_policy(Some(policy)).unwrap();
+                fs::write(&path, &edited).unwrap();
+                let started = Instant::now();
+                let preview = loop {
+                    let mut results = staged.poll_async(&mut r);
+                    if !results.is_empty() {
+                        break results.remove(0);
+                    }
+                    assert_eq!(frame(&mut r, &material), baseline);
+                    assert!(started.elapsed() < Duration::from_secs(60));
+                };
+                assert_eq!(preview.stage, ReloadStage::Preview);
+                preview.result.unwrap();
+                assert!(
+                    staged.set_preview_policy(None).is_err(),
+                    "promotion remains owned until a preview frame"
+                );
+                let preview_image = frame(&mut r, &material);
+                let mut rejected = false;
+                if policy == CompilePolicy::Preview {
+                    fs::write(&path, "invalid WGSL").unwrap();
+                }
+                loop {
+                    let results = staged.poll_async(&mut r);
+                    let mut promoted = false;
+                    for result in results {
+                        match result.result {
+                            Ok(_) => {
+                                assert_eq!(result.stage, ReloadStage::Optimized);
+                                promoted = true;
+                            }
+                            Err(ReloadError::Rejected { .. }) => rejected = true,
+                            Err(error) => panic!("{error}"),
+                        }
+                    }
+                    if promoted {
+                        break;
+                    }
+                    assert_eq!(frame(&mut r, &material), preview_image);
+                    assert!(started.elapsed() < Duration::from_secs(60));
+                }
+                assert_eq!(rejected, policy == CompilePolicy::Preview);
+                assert_eq!(
+                    staged.rejected(),
+                    rejected,
+                    "optimizing the last accepted source must retain the current invalid-file diagnostic"
+                );
+                let optimized = frame(&mut r, &material);
+                r.reload_program(&standard, &edited).unwrap();
+                let native = frame(&mut r, &material);
+                let different = |a: &[u8], b: &[u8]| {
+                    a.chunks_exact(8)
+                        .zip(b.chunks_exact(8))
+                        .filter(|(a, b)| a != b)
+                        .count()
+                };
+                let row = serde_json::json!({"mode":format!("{mode:?}"),"policy":format!("{policy:?}"),"preview_different_pixels":different(&preview_image,&native),"optimized_different_pixels":different(&optimized,&native),"pixels":64*64,
+                    "preview_sha256":format!("{:x}",Sha256::digest(&preview_image)),"optimized_sha256":format!("{:x}",Sha256::digest(&optimized)),"native_sha256":format!("{:x}",Sha256::digest(&native)),"timings":format!("{:?}",shader_compiler::take_timings(&r.device))});
+                assert_eq!(
+                    optimized, native,
+                    "optimized pipeline must equal native output: {row}"
+                );
+                comparisons.push(row);
+                drop(staged);
+                r.reload_program(&standard, STANDARD_PROGRAM).unwrap();
+                assert_eq!(frame(&mut r, &material), baseline);
+            }
+        }
+        fs::write(
+            out.join("preview-images.json"),
+            serde_json::to_vec_pretty(&comparisons).unwrap(),
+        )
+        .unwrap();
+    }
 }

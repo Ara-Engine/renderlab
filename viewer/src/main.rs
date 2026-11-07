@@ -3,6 +3,7 @@ mod policy;
 #[path = "../../support/runtime_policy.rs"]
 mod runtime_policy;
 use renderlab::asset;
+use renderlab::shader_compiler::{self, CompilePolicy};
 #[path = "../../examples/m4/cameras.rs"]
 mod cameras;
 #[path = "../../support/environment_controls.rs"]
@@ -63,6 +64,7 @@ struct Options {
     /// The standard shading program's file; defaults to programs/standard.wgsl beside the
     /// prelude.
     program: PathBuf,
+    shader_preview: Option<CompilePolicy>,
     lighting: Option<PathBuf>,
     environment: Option<PathBuf>,
     environment_settings: Option<PathBuf>,
@@ -98,6 +100,7 @@ impl Options {
             capture_hdr: None,
             shader: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shaders/scene.wgsl"),
             program: PathBuf::new(),
+            shader_preview: None,
             frames: None,
             seconds: None,
             timestamps: true,
@@ -243,6 +246,10 @@ impl Options {
                 }
                 "--shader" => options.shader = args.next().ok_or("missing shader path")?.into(),
                 "--program" => options.program = args.next().ok_or("missing program path")?.into(),
+                "--shader-preview" => {
+                    options.shader_preview =
+                        preview_policy(&args.next().ok_or("missing compile policy")?)?
+                }
                 "--no-timestamps" => options.timestamps = false,
                 "--log-frames" => options.log_frames = true,
                 "--trace-surface" => options.trace_surface = true,
@@ -271,21 +278,36 @@ impl Options {
         Ok(options)
     }
 }
+fn preview_policy(text: &str) -> Result<Option<CompilePolicy>, String> {
+    let policy = match text {
+        "optimized" => None,
+        "preview" => Some(CompilePolicy::Preview),
+        "no-inline" => Some(CompilePolicy::PreviewNoInline),
+        "helpers" => Some(CompilePolicy::PreviewHelpers),
+        "library" => Some(CompilePolicy::LibraryFast),
+        _ => {
+            return Err(
+                "shader preview requires optimized|preview|no-inline|helpers|library".into(),
+            );
+        }
+    };
+    if policy.is_some() && !cfg!(debug_assertions) {
+        return Err("shader preview is a transient development state; use a debug build".into());
+    }
+    Ok(policy)
+}
 struct Marker {
     revision: Revision,
     origin: Instant,
     file_age: Duration,
     startup: bool,
+    category: &'static str,
     presented: bool,
     completed: bool,
 }
 impl Marker {
     fn emit(&self, kind: &str, frame: FrameId, at: Instant) {
-        let category = if self.startup {
-            "startup"
-        } else {
-            "shader_write"
-        };
+        let category = self.category;
         // Shader writes: save to detection (the file's age when read, which the poll
         // interval bounds), then detection to `kind`.
         let detected = at.saturating_duration_since(self.origin);
@@ -321,6 +343,8 @@ struct View {
     applied_input_stamp: Option<Instant>,
     shaders: shader_watch::ShaderWatch,
     shader_rejected: bool,
+    shader_preview: bool,
+    compile_probe: Option<(PathBuf, String)>,
     shader_check: Instant,
     settings_check: Instant,
     lighting_file: lighting_settings::LightingFile,
@@ -449,12 +473,28 @@ impl View {
             } else {
                 wgpu::Features::PIPELINE_CACHE
             };
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: required_features | renderlab::RECEIVER_FEATURES,
-                memory_hints: renderlab::MEMORY_HINTS,
-                ..Default::default()
-            }))?;
+        let descriptor = wgpu::DeviceDescriptor {
+            required_features: required_features | renderlab::RECEIVER_FEATURES,
+            memory_hints: renderlab::MEMORY_HINTS,
+            ..Default::default()
+        };
+        let compile_probe = latency_probe
+            .then(|| std::env::var_os("RENDERLAB_SHADER_COMPILE_POLICY_FILE"))
+            .flatten()
+            .map(|p| (PathBuf::from(p), String::new()));
+        let interop = if options.shader_preview.is_some() || compile_probe.is_some() {
+            shader_compiler::request_device(&adapter, &descriptor)?
+        } else {
+            None
+        };
+        let (device, queue) = match interop {
+            Some(pair) => pair,
+            None => pollster::block_on(adapter.request_device(&descriptor))?,
+        };
+        eprintln!(
+            "shader_compile_capabilities={:?}",
+            shader_compiler::capabilities(&device)
+        );
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -568,6 +608,7 @@ impl View {
             );
         }
         let mut shaders = shader_watch::ShaderWatch::programs_only();
+        shaders.set_preview_policy(options.shader_preview)?;
         shaders.watch_prelude(options.shader.clone(), &source);
         shaders.watch_program(
             renderer.standard_program(),
@@ -595,6 +636,8 @@ impl View {
             applied_input_stamp: None,
             shaders,
             shader_rejected: false,
+            shader_preview: false,
+            compile_probe,
             shader_check: Instant::now(),
             settings_check: Instant::now(),
             lighting_file,
@@ -606,6 +649,7 @@ impl View {
                 origin: start,
                 file_age: Duration::ZERO,
                 startup: true,
+                category: "startup",
                 presented: false,
                 completed: false,
             }]),
@@ -731,17 +775,49 @@ impl View {
         }
         if self.shader_check.elapsed() >= Duration::from_millis(10) {
             self.shader_check = Instant::now();
+            // Measurement control only: reuse one loaded scene across compiler modes.
+            if let Some((path, accepted)) = &mut self.compile_probe
+                && let Ok(text) = std::fs::read_to_string(path)
+                && text != *accepted
+                && let Some(mode) = text.split_whitespace().next()
+            {
+                let policy = preview_policy(if mode == "reference" {
+                    "optimized"
+                } else {
+                    mode
+                })?;
+                if self.shaders.set_preview_policy(policy).is_ok() {
+                    if mode == "reference" {
+                        let source = std::fs::read_to_string(&options.program)?;
+                        let program = self.renderer.standard_program().clone();
+                        let origin = Instant::now();
+                        let report = self.renderer.reload_program(&program, &source)?;
+                        self.markers.push_back(Marker {
+                            revision: report.revision,
+                            origin,
+                            file_age: Duration::ZERO,
+                            startup: false,
+                            category: "shader_reference",
+                            presented: false,
+                            completed: false,
+                        });
+                    }
+                    eprintln!("shader_compile_policy_applied={text}");
+                    *accepted = text;
+                }
+            }
             for reload in self.shaders.poll_async(&mut self.renderer) {
                 let file = reload.path.display();
                 match reload.result {
                     Ok(report) => {
                         eprintln!(
-                            "reload_compile_ms={:.3} revision={} file={file} kind={:?} retry={} save_to_detect_ms={:.3}",
+                            "reload_compile_ms={:.3} revision={} file={file} kind={:?} retry={} save_to_detect_ms={:.3} stage={:?}",
                             report.compile.as_secs_f64() * 1000.0,
                             report.revision.0,
                             reload.kind,
                             reload.retry,
                             reload.file_age.as_secs_f64() * 1000.0,
+                            reload.stage,
                         );
                         if self.markers.len() == 16 {
                             self.markers.pop_front();
@@ -752,9 +828,26 @@ impl View {
                             origin: reload.detected,
                             file_age: reload.file_age,
                             startup: false,
+                            category: if reload.stage
+                                == renderlab::program_watch::ReloadStage::Preview
+                            {
+                                "shader_preview"
+                            } else {
+                                "shader_write"
+                            },
                             presented: false,
                             completed: false,
                         });
+                        self.shader_preview =
+                            reload.stage == renderlab::program_watch::ReloadStage::Preview;
+                        // Untimed image-quality probe: queue a renderer-owned HDR copy
+                        // of this preview's first frame before optimization can replace it.
+                        if self.shader_preview
+                            && self.compile_probe.is_some()
+                            && std::env::var_os("RENDERLAB_LATENCY_PREVIEW_CAPTURE").is_some()
+                        {
+                            self.hdr_written = false;
+                        }
                     }
                     Err(renderlab::ReloadError::Rejected {
                         diagnostic,
@@ -1156,6 +1249,8 @@ impl View {
                 report.scene.total_instances,
                 if self.shader_rejected {
                     " | shader rejected; last valid pipeline active"
+                } else if self.shader_preview {
+                    " | transient developer shader preview; optimizing"
                 } else {
                     ""
                 }
