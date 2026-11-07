@@ -141,6 +141,11 @@ pub struct VirtualShadowSettings {
     /// Which lookup decides visibility from the shared clipmap: Surface by default,
     /// Exact for the reference (docs/non-rt-n8p.md).
     pub lookup: VirtualLookup,
+    /// Surface only, opt-in (docs/m6-acceptance.md): also show a penumbra cell's count when
+    /// every receiver around the pixels that computed it was partial too, so camera motion
+    /// walks fewer penumbra pixels. A shown partial count is another pixel's sample of the same
+    /// penumbra, not the showing pixel's own walk: it spends quality surplus over Unreal.
+    pub surface_partial: bool,
 }
 
 /// The per-pixel decision of `SoftShadows::Virtual` (`VirtualShadowSettings::lookup`).
@@ -195,6 +200,7 @@ impl Default for VirtualShadowSettings {
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
             lookup: VirtualLookup::Surface,
+            surface_partial: false,
         }
     }
 }
@@ -2051,6 +2057,10 @@ impl Renderer {
             );
         }
         if state.settings.lookup == VirtualLookup::Surface {
+            let mut constants = constants.clone();
+            if state.settings.surface_partial {
+                constants.push(("VSC_PARTIAL", 1.0));
+            }
             state.surface.as_mut().unwrap().ensure_pipelines(
                 &self.device,
                 &self.ledger,
@@ -2126,6 +2136,7 @@ impl Renderer {
             let still = was_rolling && (!state.page_work || casters_only) && !rebuild;
             let producer = vec![
                 self.primary_mode as u64,
+                u64::from(s.surface_partial),
                 u64::from(self.lod_pixels.to_bits()),
                 u64::from(self.software_extent.to_bits()),
                 u64::from(self.lod_lift.to_bits()),

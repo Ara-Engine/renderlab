@@ -14,9 +14,10 @@ const TABLE_BYTES: u64 = BUCKETS as u64 * 32;
 const CLAIM_BYTES: u64 = BUCKETS as u64 * 4 * 8;
 /// WGSL `VscFrame`.
 const UNIFORM_BYTES: u64 = 32;
-/// Widths of the value's epoch fields (WGSL: sun 10 bits, casters 6); a wrap clears the table,
-/// so an old value can never look current.
+/// Widths of the value's epoch fields (WGSL: sun 10 bits, 9 with `VSC_PARTIAL`, casters 6); a
+/// wrap clears the table, so an old value can never look current.
 const SUN_MASK: u32 = (1 << 10) - 1;
+const PARTIAL_SUN_MASK: u32 = (1 << 9) - 1;
 const CASTER_MASK: u32 = (1 << 6) - 1;
 /// Bytes after the queue's entries: per walk-order bucket a count, offset and cursor, and the
 /// walk's chunk cursor (WGSL `vsc_tail`, `vsc_cursor`).
@@ -24,12 +25,22 @@ pub(super) const QUEUE_TAIL: u64 = 128;
 /// Screen constants of this module (WGSL `override VSC_*`).
 pub(super) const CONSTANTS: &str = "VSC_";
 
-/// The exact module with shaders/virtual_shadow_cache.wgsl appended.
+/// The exact module with shaders/virtual_shadow_cache.wgsl appended. Tests may substitute a
+/// variant of the cache file through `RENDERLAB_VSC_SHADER`, as `RENDERLAB_VSM_SHADER` does for
+/// the exact lookup.
 pub(super) fn surface_source() -> String {
+    #[cfg(test)]
+    let variant = std::env::var("RENDERLAB_VSC_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    #[cfg(not(test))]
+    let variant: Option<String> = None;
     format!(
         "{}\n{}",
         shader_source(),
-        include_str!("../shaders/virtual_shadow_cache.wgsl")
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_cache.wgsl"))
     )
 }
 
@@ -65,6 +76,8 @@ pub(super) struct SurfaceCache {
     clear: AtomicBool,
     frame: u32,
     sun: u32,
+    /// The built passes' sun epoch width (`vsc_sun_mask`).
+    sun_mask: u32,
     casters: u32,
     last_sun: Option<[u32; 3]>,
     producer: Vec<u64>,
@@ -207,6 +220,7 @@ impl SurfaceCache {
             clear: AtomicBool::new(false),
             frame: 0,
             sun: 0,
+            sun_mask: SUN_MASK,
             casters: 0,
             last_sun: None,
             producer: vec![],
@@ -259,7 +273,7 @@ impl SurfaceCache {
         }
         let turned = self.last_sun.is_some_and(|s| s != sun);
         if turned {
-            self.sun = (self.sun + 1) & SUN_MASK;
+            self.sun = (self.sun + 1) & self.sun_mask;
             if self.sun == 0 {
                 self.flush();
             }
@@ -338,6 +352,13 @@ impl SurfaceCache {
             resolve: compute("vsc_resolve", &self.insert_pipeline_layout),
         });
         self.built = Some(constants);
+        let partial = self.built_constant("VSC_PARTIAL", 0.0) != 0.0;
+        let mask = if partial { PARTIAL_SUN_MASK } else { SUN_MASK };
+        if mask != self.sun_mask {
+            self.sun_mask = mask;
+            self.sun &= mask;
+            self.flush();
+        }
     }
 
     /// The probe, dispatch and insert passes' groups 0, over this frame's targets.
