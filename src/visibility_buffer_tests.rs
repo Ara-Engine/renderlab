@@ -145,6 +145,19 @@ fn record_counters(r: &mut Renderer, label: &str) -> serde_json::Value {
 fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
     r.test_drain("N1b snapshot");
     let [hits, counts] = interactive_outputs(r);
+    if manifest()["hash_only"].as_bool() == Some(true) {
+        use sha2::Digest;
+        let sha256 = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+        fs::write(
+            out.join(format!("{label}.hashes.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "counts_sha256": sha256(&counts), "hits_sha256": sha256(&hits),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        return;
+    }
     fs::write(out.join(format!("{label}.hit")), hits).unwrap();
     fs::write(out.join(format!("{label}.counts")), counts).unwrap();
     fs::write(out.join(format!("{label}.hdr")), capture(r)).unwrap();
@@ -848,6 +861,9 @@ fn gpu_visibility_quarry() {
                 ..*settings
             })
             .unwrap();
+            // Each configuration replays an independent sequence, including when the
+            // settings equal the preceding configuration's restored settings.
+            r.reset_virtual_shadow_cache();
             let suffix = match caster {
                 Some(c) if mode != PrimaryVisibility::Traced => format!("-ce{c}{variant}"),
                 _ => variant.clone(),
@@ -1051,4 +1067,140 @@ fn gpu_visibility_quarry() {
         serde_json::to_vec_pretty(&rows).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+#[ignore = "N8j owned GPU lease: configuration history must restart at the reset boundary"]
+fn gpu_virtual_configuration_reset() {
+    let mut r = no_rt_renderer();
+    light(&mut r);
+    let lighting = Lighting {
+        lights: r.lighting.source_lights.clone(),
+        environment: [0.03; 3],
+        exposure_stops: -8.,
+    };
+    let shadows = r.shadows.settings.clone();
+    let (mesh, mut instances) = geometry(
+        &mut r,
+        &[
+            [-2., 0., -2.],
+            [2., 0., -2.],
+            [2., 0., 2.],
+            [-2., 0., 2.],
+            [-0.4, 0., 0.],
+            [0.4, 0., 0.],
+            [0., 0.8, 0.],
+        ],
+        &[0, 2, 1, 0, 3, 2, 4, 5, 6],
+    );
+    let color = target(&r, 320, 192);
+    let camera = Camera::look_at(
+        Vec3::new(0.2, 1.2, 2.5),
+        Vec3::ZERO,
+        Vec3::Y,
+        45f32.to_radians(),
+        0.01,
+        100.,
+    )
+    .unwrap();
+    let settings = crate::VirtualShadowSettings {
+        pages: 4,
+        walk_records: crate::WalkRecords::Off,
+        ..Default::default()
+    };
+    let mut expected = None;
+    for (records, reset) in [
+        (crate::WalkRecords::Off, false),
+        (crate::WalkRecords::Source, false),
+        (crate::WalkRecords::Source, true),
+        (crate::WalkRecords::Off, false),
+        (crate::WalkRecords::Off, true),
+    ] {
+        let settings = crate::VirtualShadowSettings {
+            walk_records: records,
+            ..settings
+        };
+        r.set_virtual_shadow_settings(settings).unwrap();
+        assert_eq!(
+            r.virtual_settings, settings,
+            "saved settings must stay current"
+        );
+        if reset {
+            r.reset_virtual_shadow_cache();
+        }
+        for _ in 0..40 {
+            render(
+                &mut r,
+                &color,
+                &camera,
+                &mut [Draw::new(&mesh, &mut instances)],
+            );
+        }
+        let Light::Directional { travel, lux } = lighting.lights[0] else {
+            unreachable!()
+        };
+        for i in 1..=16 {
+            let mut lit = lighting.clone();
+            lit.lights[0] = Light::Directional {
+                travel: Mat4::from_rotation_y(0.0005 * i as f32).transform_vector3(travel),
+                lux,
+            };
+            r.set_lighting_and_shadows(&lit, &shadows).unwrap();
+            render(
+                &mut r,
+                &color,
+                &camera,
+                &mut [Draw::new(&mesh, &mut instances)],
+            );
+        }
+        r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+        render(
+            &mut r,
+            &color,
+            &camera,
+            &mut [Draw::new(&mesh, &mut instances)],
+        );
+        r.test_drain("N8j configuration");
+        let image = interactive_outputs(&r);
+        if let Some(expected) = &expected {
+            assert!(
+                image == *expected,
+                "{records:?}, reset={reset}: fresh counts and receivers"
+            );
+        } else {
+            expected = Some(image);
+        }
+        let out = PathBuf::from(manifest()["output"].as_str().unwrap());
+        fs::create_dir_all(&out).unwrap();
+        let mut png = png::Encoder::new(
+            fs::File::create(out.join(format!("reset-{records:?}-{reset}.png"))).unwrap(),
+            320,
+            192,
+        );
+        png.set_color(png::ColorType::Rgba);
+        png.set_depth(png::BitDepth::Eight);
+        png.write_header()
+            .unwrap()
+            .write_image_data(&read_texture(&r, &color))
+            .unwrap();
+        // Leave caster bounds, the light basis and rolling counts from another frame.
+        // Restore inputs without rendering them: the next boundary must discard history.
+        instances
+            .set(0, Mat4::from_translation(Vec3::new(0., 0.1, 0.)))
+            .unwrap();
+        let mut moved = lighting.clone();
+        moved.lights[0] = Light::Directional {
+            travel: -Vec3::new(0.6, 0.8, 0.3).normalize(),
+            lux,
+        };
+        r.set_lighting_and_shadows(&moved, &shadows).unwrap();
+        render(
+            &mut r,
+            &color,
+            &camera,
+            &mut [Draw::new(&mesh, &mut instances)],
+        );
+        instances.set(0, Mat4::IDENTITY).unwrap();
+        r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+    }
 }
