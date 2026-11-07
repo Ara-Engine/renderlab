@@ -61,9 +61,6 @@ pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualSh
     if let Some(peel_own) = v["peel_own"].as_bool() {
         s.peel_own = peel_own;
     }
-    if let Some(partial) = v["surface_partial"].as_bool() {
-        s.surface_partial = partial;
-    }
     s.walk_records = match v["walk_records"].as_str() {
         Some("off") => crate::WalkRecords::Off,
         Some("source") => crate::WalkRecords::Source,

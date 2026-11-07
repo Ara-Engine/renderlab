@@ -11,7 +11,9 @@ the workload's motion, one step a frame, through the measured block 96-159:
   quarry harness's move phase (`move_frames`, src/visibility_buffer_tests.rs).
 - sun: the sun turns 0.5 mrad a frame about source Y (UE yaw), as the harness's turn phase.
 - caster: placement 0 (Quarry_00) translates 1 mm a frame along source X, as `move_batch` 0.
-  It needs a movable component; `--probe` reports mobility and the actor names first.
+  It needs a movable component; the probe reports mobility and the actor names first. Console
+  `ke` can only set every StaticMeshComponent movable at once, so all twelve become movable.
+- movable: the caster workload's mobility change alone, nothing moving (its control).
 
 ProfileGPU trees at PROFILE_FRAMES price VSM's stages separately (invalidation, page marking,
 page allocation, raster, merge, projection); those frames and the next are excluded from the
@@ -49,7 +51,7 @@ CONFIGS = {  # label: (matched e2e source launch, r.RayTracing)
     "vsm-rt": ("e2e-matched-s3-01-vsm-static", True),
     "hrt": ("e2e-matched-s3-02-hrt-static", True),
 }
-WORKLOADS = ("static", "camera", "sun", "caster")
+WORKLOADS = ("static", "camera", "sun", "caster", "movable")
 
 
 def step_command(workload, k, caster_actor):
@@ -67,9 +69,9 @@ def step_command(workload, k, caster_actor):
 
 def csv_commands(workload, session, caster_actor, mobility):
     commands = []
-    if workload == "caster" and mobility:
+    if workload in ("caster", "movable") and mobility:
         commands.append((1, f"exec {EXEC_PREFIX}/{session}/caster-mobility.txt"))
-    if workload != "static":
+    if workload not in ("static", "movable"):
         folder = EXEC_ROOT / session / workload
         folder.mkdir(parents=True, exist_ok=True)
         for f in range(MOTION_START, FRAMES):
@@ -162,15 +164,16 @@ def run(session, blocks=2, workloads=WORKLOADS, configs=tuple(CONFIGS)):
     status = 0
     if not (OUT / session / "probe" / "ue.log").exists():
         status |= probe(session)
-    actor, mobility = caster_target(session) if "caster" in workloads else (None, [])
+    moving = "caster" in workloads or "movable" in workloads
+    actor, mobility = caster_target(session) if moving else (None, [])
     # Readbacks before (first) and after (last) the probe's `ke ... SetMobility Movable`.
     movable = [m for p, m in mobility if p.endswith("." + (actor or "?")) or p.endswith(":" + (actor or "?"))]
     needs_mobility = not movable or "Movable" not in movable[0]
-    if "caster" in workloads:
+    if moving:
         print("caster actor", actor, "mobility", movable, flush=True)
         if actor is None or (needs_mobility and (not movable or "Movable" not in movable[-1])):
             print("caster dropped: no Quarry_00 actor, or ke cannot make it movable", flush=True)
-            workloads = tuple(w for w in workloads if w != "caster")
+            workloads = tuple(w for w in workloads if w not in ("caster", "movable"))
         elif needs_mobility:
             (EXEC_ROOT / session / "caster-mobility.txt").write_text(
                 "ke StaticMeshComponent SetMobility Movable\n", encoding="ascii")

@@ -64,8 +64,7 @@ struct VscFrame {frame:u32,sun:u32,casters:u32,flags:u32,buckets:u32,pad0:u32,pa
 //   bit 18: shown;
 //   bits 19-21: its last walk's work as a bit length (at most 7; N8m's measure, the walk order's
 //     estimate when the cell must walk again);
-//   bits 22-31: the sun epoch & 1023. With VSC_PARTIAL, bits 22-30 hold the sun epoch & 511 and
-//     bit 31 marks a shown partial cell, whose bits 0-3 are its visible directions instead.
+//   bits 22-31: the sun epoch & 1023.
 @group(0) @binding(50) var<storage,read_write> vsc_table:array<vec2<u32>>;
 // VSC_STATS screens: probed receivers, hits, cells the caster test retired, refreshes due to the
 // sun, cells found but not shown, certified walks whose neighbourhood exceeded the largest
@@ -78,21 +77,6 @@ struct VscFrame {frame:u32,sun:u32,casters:u32,flags:u32,buckets:u32,pad0:u32,pa
 // lowest. Zero between frames: each slot's winner clears them.
 @group(0) @binding(53) var<storage,read_write> vsc_claims:array<atomic<u32>>;
 const VSC_SHOWN:u32=1u<<18u;
-// M6 close (docs/m6-acceptance.md), `VirtualShadowSettings::surface_partial`: a partial (penumbra)
-// cell is shown too when every receiver of its computing pixels' 3x3 neighbourhoods was partial
-// as well, so the cell lies inside a penumbra and never beside a lit or umbra receiver. Its
-// shown count is one computing pixel's (the claim winner's), with that pixel's directions: a
-// different sample of the same penumbra than a walk at the showing pixel. Spends quality
-// surplus over Unreal (not Exact-equal); off by default.
-override VSC_PARTIAL:bool=false;
-const VSC_PARTIAL_BIT:u32=1u<<31u;
-// A partial cell's certifying neighbourhood must lie within c.size * 2^VSC_PARTIAL_MARGIN (the
-// caster test then widens to it). With 1-pixel cells a 3x3 neighbourhood spans about 4-7 edges.
-override VSC_PARTIAL_MARGIN:u32=3u;
-// The value's sun epoch bits (src/virtual_shadow_cache.rs wraps the epoch at the same width).
-fn vsc_sun_mask()->u32 {return select(1023u,511u,VSC_PARTIAL);}
-fn vsc_sun_of(e:vec2<u32>)->u32 {return (e.y>>22u)&vsc_sun_mask();}
-fn vsc_partial(value:u32)->bool {return VSC_PARTIAL && (value&(VSC_PARTIAL_BIT|VSC_SHOWN))==(VSC_PARTIAL_BIT|VSC_SHOWN);}
 // The consensus neighbourhood's radius in pixels (1: 3x3).
 override VSC_CONSENSUS:u32=1u;
 // Cell edge in receiver pixels (a power of two keeps cell and map levels in step).
@@ -149,7 +133,6 @@ fn vsc_side(world:vec3<f32>,geometric:vec3<f32>,thin:bool)->u32 {
 fn vsc_extent(c:VscCell,value:u32)->f32 {
     let cube=0.8660254*c.size;
     if (value&VSC_SHOWN)==0u {return cube;}
-    if vsc_partial(value) {return max(cube,c.size*exp2(f32(VSC_PARTIAL_MARGIN)));}
     return max(cube,c.size*exp2(f32((value>>1u)&7u)));
 }
 
@@ -207,7 +190,7 @@ const VSC_UNSHOWN:u32=0xffffffe0u;
 fn vsc_work(e:vec2<u32>)->u32 {return (e.y>>19u)&7u;}
 // A slot's value is current: computed at this sun epoch and caster epoch.
 fn vsc_current(e:vec2<u32>)->bool {
-    return e.x!=0u && ((e.y>>12u)&63u)==(vsc.casters&63u) && vsc_sun_of(e)==(vsc.sun&vsc_sun_mask());
+    return e.x!=0u && ((e.y>>12u)&63u)==(vsc.casters&63u) && (e.y>>22u)==(vsc.sun&1023u);
 }
 // A cell's cached visible count, VSC_UNSHOWN | its work, VSC_STALE | its work or VSC_MISS. On a
 // caster-moving frame a kept hit is marked current (its caster epoch rewritten). Where the moved
@@ -221,7 +204,7 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
     for(var s=0u;s<VSC_SLOTS;s+=1u) {
         let e=vsc_table[base+s];
         if e.x!=key.fingerprint || ((e.y>>8u)&15u)!=key.check {continue;}
-        let lag=((vsc.sun&vsc_sun_mask())-vsc_sun_of(e))&vsc_sun_mask();
+        let lag=((vsc.sun&1023u)-(e.y>>22u))&1023u;
         if lag!=0u && (lag>=VSC_LAG || ((vsc.frame+key.phase)&(VSC_LAG-1u))==0u) {
             if VSC_STATS {atomicAdd(&vsc_stats[3],1u);}
             return VSC_STALE|vsc_work(e);
@@ -239,16 +222,13 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
                 return VSC_STALE|vsc_work(e);
             }
             value=(value&~(63u<<12u))|(current<<12u);
-            if (value&VSC_SHOWN)!=0u && vsc_reached(centre,vsc_extent(c,value),recorded) {
-                value&=~(VSC_SHOWN|15u|select(0u,VSC_PARTIAL_BIT,VSC_PARTIAL));
-            }
+            if (value&VSC_SHOWN)!=0u && vsc_reached(centre,vsc_extent(c,value),recorded) {value&=~(VSC_SHOWN|15u);}
             vsc_table[base+s]=vec2<u32>(e.x,value);
         }
         if (value&VSC_SHOWN)==0u {
             if VSC_STATS {atomicAdd(&vsc_stats[4],1u);}
             return VSC_UNSHOWN|((value>>19u)&7u);
         }
-        if vsc_partial(value) {return value&15u;}
         return select(0u,vsm.n8e.x,(value&1u)!=0u);
     }
     return VSC_MISS;
@@ -483,10 +463,7 @@ fn vsc_margin(size:f32,far:f32)->u32 {
 // alike in both passes; 63 makes none).
 fn vsc_verdict(p:vec2<i32>,c:VscCell,visible:u32)->vec3<u32> {
     let k=vsm.n8e.x;
-    if visible!=k && visible!=0u {
-        if VSC_PARTIAL {return vsc_partial_verdict(p,c);}
-        return vec3<u32>(0u);
-    }
+    if visible!=k && visible!=0u {return vec3<u32>(0u);}
     let count=(256u*visible+k/2u)/k;
     let size=vec2<i32>(textureDimensions(vsc_counts));
     let centre=vsc_centre(c);
@@ -510,30 +487,6 @@ fn vsc_verdict(p:vec2<i32>,c:VscCell,visible:u32)->vec3<u32> {
         return vec3<u32>(0u);
     }
     return vec3<u32>(select(1u,2u,visible==k),margin,u32(min(ceil(far/c.size*4.0),63.0)));
-}
-// VSC_PARTIAL: grade 3 for a partial walk when every covered receiver within VSC_CONSENSUS pixels
-// finished this frame partial too (neither 0 nor 256) and within c.size * 2^VSC_PARTIAL_MARGIN of
-// the cell's centre (as vsc_verdict measures it); else grade 0. No fills (z 63).
-fn vsc_partial_verdict(p:vec2<i32>,c:VscCell)->vec3<u32> {
-    let size=vec2<i32>(textureDimensions(vsc_counts));
-    let centre=vsc_centre(c);
-    let r=i32(VSC_CONSENSUS);
-    var far=0.0;
-    for(var y=-r;y<=r;y+=1) {
-        for(var x=-r;x<=r;x+=1) {
-            let q=p+vec2<i32>(x,y);
-            if any(q<vec2<i32>(0)) || any(q>=size) || !vsm_covered(vec2<u32>(q)) {continue;}
-            let n=textureLoad(vsc_counts,q,0).x;
-            if n==0u || n>=256u {return vec3<u32>(0u);}
-            let wq=textureLoad(vsm_world,q,0).xyz;
-            far=max(far,length(wq-centre)+1.7320508*VSC_CELL*length(wq-vsm.eye.xyz)*vsm.eye.w);
-        }
-    }
-    if vsc_margin(c.size,far)>VSC_PARTIAL_MARGIN {
-        if VSC_STATS {atomicAdd(&vsc_stats[5],1u);}
-        return vec3<u32>(0u);
-    }
-    return vec3<u32>(3u,VSC_PARTIAL_MARGIN,63u);
 }
 // The slot a result writes, from the table as this frame's probe left it (vsc_resolve writes
 // it only after every claim): its cell's own, else the first slot that is empty or not current
@@ -650,14 +603,12 @@ fn vsc_won(key:VscKey,priority:u32)->vec2<u32> {
     if !x.valid {return;}
     let grade=(result>>12u)&3u;
     let margin=(result>>14u)&7u;
-    let epochs=((vsc.casters&63u)<<12u)|(((result>>8u)&7u)<<19u)|((vsc.sun&vsc_sun_mask())<<22u)|(result&0xf0u);
+    let epochs=((vsc.casters&63u)<<12u)|(((result>>8u)&7u)<<19u)|((vsc.sun&1023u)<<22u)|(result&0xf0u);
     if !kept {
         let won=vsc_won(x.key,vsc_priority(true,grade,margin,x.p));
         if won.x!=VSC_SLOTS {
             let shown=grade!=0u && won.y==grade;
-            var field=select(0u,u32(grade==2u)|(margin<<1u),shown);
-            // A partial cell (grade 3, VSC_PARTIAL only) keeps the winner's visible directions.
-            if shown && grade==3u {field=(result&15u)|VSC_PARTIAL_BIT;}
+            let field=select(0u,u32(grade==2u)|(margin<<1u),shown);
             vsc_table[won.x]=vec2<u32>(x.key.fingerprint,field|(x.key.check<<8u)|epochs|select(0u,VSC_SHOWN,shown));
         }
     }
