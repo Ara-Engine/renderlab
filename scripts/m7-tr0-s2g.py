@@ -182,7 +182,7 @@ def trace(args):
             archive = run / "data" / (name + ".npz")
             meta = json.loads(archive.with_suffix(".json").read_text())
             meta.update(accepted_for_scoring=args.kind == "physical", qualification=dict(binary_sha256=QUALIFIED,
-                        provider="U0b eight independent-AS/pipeline f0 rebuilds, affine-difference colour fix; further controls tracked separately",
+                        provider="U0b D8: eight independent-AS/pipeline f0 and f64 rebuilds, affine-difference colour fix, X3 and finite-disk X2 Mitsuba controls pass",
                         batch_replay=str(run / "reference-readback.json")))
             collect(case, archive, meta, args.kind)
             removed.append(dict(path=str(archive), bytes=archive.stat().st_size, sha256=sha(archive)))

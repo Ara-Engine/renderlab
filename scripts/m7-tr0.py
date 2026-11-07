@@ -83,7 +83,7 @@ def queued_lease(label, minutes, wait_seconds=0):
     announced = False
     while True:
         headless_policy(minutes)
-        if not U0.LOCK.exists() and U0.E2E.available_gib() >= U0.START_GIB:
+        if not (ROOT / "gpu-defer.txt").exists() and not U0.LOCK.exists() and U0.E2E.available_gib() >= U0.START_GIB:
             stack = contextlib.ExitStack()
             try:
                 owner = stack.enter_context(U0.lease(label, minutes))
@@ -301,7 +301,7 @@ def run(args):
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
         print("Waiting for shared GPU/memory guard (bounded)", flush=True)
-        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
+        while U0.E2E.available_gib() < U0.START_GIB:
             if time.monotonic() >= deadline:
                 print("deferred: GPU/memory wait expired; no lease acquired", flush=True)
                 raise SystemExit(3)
@@ -834,7 +834,7 @@ def history(args):
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
         print("Waiting for bounded historical-replay GPU gap", flush=True)
-        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
+        while U0.E2E.available_gib() < U0.START_GIB:
             if time.monotonic() >= deadline:
                 raise SystemExit(3)
             time.sleep(2)
@@ -937,7 +937,7 @@ def reference(args):
         raise ValueError("reference source must retain registered 1920x1080 size")
     if args.wait_seconds:
         deadline = time.monotonic() + args.wait_seconds
-        while U0.LOCK.exists() or U0.E2E.available_gib() < U0.START_GIB:
+        while U0.E2E.available_gib() < U0.START_GIB:
             if time.monotonic() >= deadline:
                 print("deferred: no reference lease acquired", flush=True)
                 raise SystemExit(3)
@@ -1047,6 +1047,8 @@ def score(args):
         paths += list(args.reference.glob("quarry-p*.json"))
     for path in paths:
         meta = json.loads(path.read_text())
+        if meta.get("accepted_for_scoring") is False:
+            raise ValueError("reference archive is explicitly unaccepted: " + str(path))
         frame = meta.get("frame", {})
         if not frame or frame.get("open") != frame.get("close") or frame.get("sky_only"):
             continue
@@ -1351,10 +1353,17 @@ def inspect(args):
     codes = load("m6-temporal-gpu-score").codes
     images, identities = [], []
     archive_sha = None
+    track = None
     for label in args.labels:
         out = ROOT / "runs" / label
         recipe = json.loads((out / "recipe.json").read_text())
-        score = json.loads((out / "physical-scores.json").read_text())
+        if recipe.get("program", "full") != "full":
+            raise ValueError("whole-image sheets currently require full-colour captures")
+        if track is not None and recipe["track"] != track:
+            raise ValueError("image sheet candidates use different registered tracks")
+        track = recipe["track"]
+        score_path = out / "physical-batches" / (args.score_tag + ".json") if args.score_tag else out / "physical-scores.json"
+        score = json.loads(score_path.read_text())
         row = next(r for r in score["rows"] if r["frame"] == args.frame)
         if archive_sha is None:
             archive = Path(row["reference"])
@@ -1385,7 +1394,7 @@ def inspect(args):
             raise ValueError("candidate changed before image inspection")
         pe = capture["identities"][args.frame]["exposure"]["values"][0]
         images.append((label, rgb[..., :3] * (scale / pe)))
-        identities.append(dict(label=label, hdr=identity))
+        identities.append(dict(label=label, hdr=identity, score=str(score_path), score_sha256=digest(score_path)))
     destination = ROOT / "inspect"
     destination.mkdir(exist_ok=True)
     for stops in (0, 4):
@@ -1401,11 +1410,11 @@ def inspect(args):
             axes[1, column].set_title("Mean absolute RGB error" if column else "Reference half difference / 2")
             for axis in axes[:, column]:
                 axis.axis("off")
-        figure.suptitle(f"Q-walk frame {args.frame}, F0 L{stops}; fixed error scale 0–64 codes, saturates above 64; black primary")
+        figure.suptitle(f"{track} frame {args.frame}, F0 L{stops}; fixed error scale 0–64 codes, saturates above 64; black primary")
         figure.colorbar(heat, ax=axes[1, :].tolist(), location="bottom", fraction=.05, pad=.02, label="F0 codes (64+ saturated)")
-        figure.savefig(destination / f"q-walk-f{args.frame:03}-L{stops}.png", dpi=160)
+        figure.savefig(destination / f"{track}-f{args.frame:03}-L{stops}.png", dpi=160)
         plt.close(figure)
-    save(destination / f"q-walk-f{args.frame:03}.json", dict(reference=str(archive), reference_sha256=archive_sha,
+    save(destination / f"{track}-f{args.frame:03}.json", dict(reference=str(archive), reference_sha256=archive_sha,
          identities=identities, script_sha256=SCRIPT_SHA,
          scope="Whole image and absolute-error heatmaps; same physical target/registered exposure, no fitted alignment or gain. Distinct from frozen original T1b reference."))
     print("whole-frame inspection sheets retained", args.frame)
@@ -1421,6 +1430,7 @@ def main():
     p.add_argument("--labels", nargs="+", required=True)
     p.add_argument("--frame", type=int, default=64)
     p.add_argument("--history")
+    p.add_argument("--score-tag", help="Inspect a retained targeted score without replacing the full score")
     p = commands.add_parser("run")
     p.add_argument("label")
     p.add_argument("--track", choices=("q-walk", "q-disocclusion", "q-zoom", "q-sun-slow", "q-sun-fast", "q-sun-jump",
