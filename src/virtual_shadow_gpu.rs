@@ -844,13 +844,23 @@ impl VirtualState {
         settings.validate()?;
         if settings != self.settings {
             self.settings = settings;
-            // Every cached page depends on the level ladder, window size and caster cut.
-            self.cache = Cache::default();
-            if let Some(old) = self.resources.take() {
-                self.retired.push((last, old));
-            }
+            self.reset(last);
         }
         Ok(())
+    }
+
+    fn reset(&mut self, last: u64) {
+        // Pages, hysteresis anchors and kept counts belong to the same history. Geometry
+        // records and pipelines are independent of it and can stay warm.
+        self.cache = Cache::default();
+        self.key.clear();
+        self.history_frames = 0;
+        self.rolling = false;
+        self.schedule = 0;
+        self.casters_only = false;
+        if let Some(old) = self.resources.take() {
+            self.retired.push((last, old));
+        }
     }
 
     pub fn collect(&mut self, completed: u64) {
@@ -992,18 +1002,26 @@ impl VirtualState {
 const AREA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth16Unorm;
 
 impl Renderer {
-    /// Tuning for `SoftShadows::Virtual`; a change drops every cached page.
+    /// Tuning for `SoftShadows::Virtual`; a change drops cached pages and count history.
+    /// Setting the same value keeps history; use `reset_virtual_shadow_cache` to restart it.
     pub fn set_virtual_shadow_settings(
         &mut self,
         settings: VirtualShadowSettings,
     ) -> Result<(), Error> {
         settings.validate()?;
-        match &mut self.virtual_shadows {
-            Some(state) => state.set_settings(settings, self.submissions),
-            None => {
-                self.virtual_settings = settings;
-                Ok(())
-            }
+        if let Some(state) = &mut self.virtual_shadows {
+            state.set_settings(settings, self.submissions)?;
+        }
+        self.virtual_settings = settings;
+        Ok(())
+    }
+
+    /// Restart virtual shadows from the current scene, camera, sun and settings. The next
+    /// frame rebuilds requested pages and looks up every pixel, discarding rolling counts
+    /// and map hysteresis from earlier frames. In-flight resources retire normally.
+    pub fn reset_virtual_shadow_cache(&mut self) {
+        if let Some(state) = &mut self.virtual_shadows {
+            state.reset(self.submissions);
         }
     }
     pub fn virtual_shadow_stats(&self) -> VirtualShadowStats {

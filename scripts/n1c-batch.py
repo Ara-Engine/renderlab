@@ -30,6 +30,7 @@ def main():
     p.add_argument("--stage-repeats", type=int, default=8)
     p.add_argument("--no-lod", action="store_true", help="original geometry clusters only")
     p.add_argument("--no-reference", action="store_true")
+    p.add_argument("--hash-only", action="store_true", help="snapshot counts/hit hashes without HDR/world dumps")
     p.add_argument("--caster-error", type=float, nargs="+", help="N8c caster cut errors (texels; negative: original geometry)")
     p.add_argument("--turn", type=int, default=0, help="N8c sun-turning frames timed after each configuration")
     p.add_argument("--move-frames", type=int, default=0, help="N8f camera-moving, then caster-moving frames timed after each configuration")
@@ -40,7 +41,8 @@ def main():
     for step in a.steps:
         no_rt = step.endswith("-no-rt")
         name = step.removesuffix("-no-rt")
-        m = dict(output=str(a.root / step), no_rt=no_rt, validate=not a.timing, timing=a.timing)
+        m = dict(output=str(a.root / step), no_rt=no_rt, validate=not a.timing, timing=a.timing,
+                 hash_only=a.hash_only)
         if name == "fixture":
             test = "gpu_visibility_fixture"
         elif name == "quarry":
