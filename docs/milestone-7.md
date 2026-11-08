@@ -143,3 +143,11 @@ Shipped anti-aliasing (IQ1, 2026-11-08, [iq1-quarry-image.md](iq1-quarry-image.m
 - On the quarry (13 M triangles, no covered pixel's 3x3 block on one triangle), the missing pixel integration causes Islam's black pinholes (about 1,300 per frame) and the grain.
 - TR1 removes them: 1,290 → 40 pinholes still, 10–34 per Q-walk frame, every population better at both exposures on both paths.
 - IQ1 proposes TR1 as the default on traced and visibility-buffer frames. The switch is TR1b's gate.
+
+Default anti-aliasing ruling (Islam, delegated, 2026-11-08). TR1 becomes the default on both paths (traced and visibility-buffer frames), because the no-AA default it replaces is worse on every measure (IQ1, docs/iq1-quarry-image.md). Conditions:
+1. TR1 still misses the Unreal TSR Epic floor on moving edges and newly revealed pixels. The default is never presented as meeting the Unreal bar until it does; TR1b keeps closing those gaps.
+2. A named setting switches TR1 off.
+3. Before the default flips, the claim that TR1 is better everywhere must also hold on the quarry walk with the real sky visible behind silhouettes, on both paths. If TR1 is worse than no-AA anywhere there, the default doesn't flip, and it's reported instead.
+4. Cost tails above the half-TSR ceiling stay recorded as a miss.
+5. Earlier quality gates are re-scored on the new default image, noting which numbers moved.
+IQ1 also found the RT-device code default is still raster primaries, which TR1 doesn't reconstruct. A TR1 default helps RT users only once traced primaries are the RT default (RT1d).
