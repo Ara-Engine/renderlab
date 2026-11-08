@@ -8,7 +8,8 @@
 // value: no common projection, matching, reservoir, history or denoiser (P0's C1/C7,
 // docs/m7-p0-claims.md). Traced frames admit one program, so every hit is shaded by that
 // same program's `surface` and `shade`, with view vector -d and a ray-cone footprint; at a
-// hit `specular_incident` is zero, so the hit takes its own untraced estimate (one bounce).
+// hit `specular_incident` is zero, so the hit takes its own untraced estimate (one bounce),
+// and its indirect inputs read the open environment (no world radiance cache at hits).
 // Temporal integration is TR1's: its frame rotation word turns the glossy strata.
 
 // The program's specular lobe: GGX about `normal` with alpha (perceptual roughness
@@ -115,8 +116,9 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
 }
 
 // Traces this receiver's declared lobe before its `shade` reads `specular_incident`.
-// Called by the traced entry after `surface`; restores the receiver's parameters and
-// indirect inputs, which hit shading replaces.
+// Called by the traced entry after `surface` and before the receiver's indirect inputs are
+// prepared (src/program.rs); hits read the open environment state (`rl_indirect_open`: the
+// cache-off values, no cache lookup per hit). Restores the receiver's parameters.
 fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,size:vec2<u32>) {
     rl_specular=vec4<f32>(0.0);
     let lobe=reflection_lobe(s,input);
@@ -166,7 +168,6 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         if hit.kind!=0u {
             let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
             rl_load_parameters(h.batch);
-            rl_indirect_prepare(h.input);
             let hs=surface(h.input);
             radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
             shaded=true;
@@ -175,10 +176,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         valid+=1u;
     }
     rl_reflection_hit=false;
-    if shaded {
-        rl_load_parameters(batch);
-        rl_indirect_prepare(input);
-    }
+    if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}
     rl_specular=vec4<f32>(sum/f32(valid),traced);
 }

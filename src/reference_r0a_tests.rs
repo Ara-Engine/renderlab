@@ -380,7 +380,8 @@ fn gpu_r0a_current() {
                     "bench": name, "pose": pose, "scene_sha256": bench.sha256,
                     "width":view.width,"height":view.height,"exposure_stops":exposure,
                     "rt_device":rt,"primary_visibility":format!("{:?}",renderer.primary_visibility()),
-                    "reflection_implementation":"current production environment only; indirect cache remains disabled",
+                    "reflection_implementation":"current production default: M7-R1 traced reflections on traced frames, environment only on non-RT; indirect cache remains disabled",
+                    "tr1":tr1,
                     "shadow_configuration":if rt {"hardware Interactive disk"} else {"Virtual disk; visibility-buffer non-RT default"},
                     "timing_eligible_for_claim":false
                 }))

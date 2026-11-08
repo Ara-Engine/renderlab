@@ -66,8 +66,13 @@ const REFLECTION_API: &str = include_str!("../shaders/reflections.wgsl");
 /// programs that use only one half of the pair. Its untraced estimate stays the answer.
 const REFLECTION_STUB: &str = "struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };\nfn specular_incident(input:SurfaceInput)->vec4<f32> { return vec4<f32>(0.0); }\n";
 /// The traced entry traces the lobe after the receiver's `surface`, before `shade` reads it.
-const REFLECTION_ENTRY_SEAM: &str = "    let surface_output=surface(surface_input);\n";
-const REFLECTION_ENTRY_CALL: &str = "    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n";
+/// The receiver's indirect inputs are prepared after the trace, so hit shading never
+/// overwrites them and the cache's prepared state is not live across the ray loop (a restore
+/// after the loop cost +0.62 ms of quarry shading with the cache on). `surface` and the hits
+/// read the open environment state (`rl_indirect_open`).
+const REFLECTION_ENTRY_SEAM: &str =
+    "    rl_indirect_prepare(surface_input);\n    let surface_output=surface(surface_input);\n";
+const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);\n";
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -408,7 +413,17 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
-    let (reflection, traces) = reflection_api(head, program, stage);
+    let (mut reflection, traces) = reflection_api(head, program, stage);
+    if traces {
+        // M7-R1: the indirect inputs' cache-off state, which reads the open environment.
+        reflection.push_str(match (indirect_calls, specular) {
+            (true, true) => {
+                "fn rl_indirect_open() { gi_rx_valid=false; es_visibility=vec3<f32>(1.0); }\n"
+            }
+            (true, false) => "fn rl_indirect_open() { gi_rx_valid=false; }\n",
+            _ => "fn rl_indirect_open() {}\n",
+        });
+    }
     let mut source = format!(
         "{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{reflection}{binding}// ---- program ----\n"
     );
@@ -434,11 +449,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     if traces {
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
-        source.push_str(&entry.replacen(
-            REFLECTION_ENTRY_SEAM,
-            &format!("{REFLECTION_ENTRY_SEAM}{REFLECTION_ENTRY_CALL}"),
-            1,
-        ));
+        source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
     } else {
         source.push_str(entry);
     }

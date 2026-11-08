@@ -26,7 +26,7 @@ fn reflection_composition_contract() {
     let fresh = "@group(0) @binding(2) var fresh_scene:acceleration_structure;\n";
     let toon = include_str!("../shaders/programs/toon.wgsl");
     let standard = crate::STANDARD_PROGRAM;
-    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);";
+    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);";
     for stage in [Stage::Raster, Stage::Traced, Stage::TracedStreamed, Stage::Cell] {
         let source = compose(hardware, toon, stage, true).source;
         assert!(!source.contains("SpecularLobe") && !source.contains("rl_reflection"));
