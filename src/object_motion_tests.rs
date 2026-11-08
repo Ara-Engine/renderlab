@@ -86,6 +86,7 @@ fn gpu_mv1_mq1_static_identity() {
         }
         r.set_shadows(&Shadows::default()).unwrap();
         r.set_indirect(IndirectSettings::off()).unwrap();
+        r.set_reconstruction(Reconstruction::default()).unwrap();
         r.test_reload_standard(&standard_returning(
             "select(vec3<f32>(0.04,0.1,0.2),vec3<f32>(0.9,0.6,0.12),fract(input.uv.x*8.0)>0.5)",
         ))
