@@ -17,7 +17,7 @@ struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_side
     thin:u32, normal_scale:f32, normal_mapped:u32, normal_variance:u32, pad:u32 };
 struct Receiver { world:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, slot:u32, epsilon:f32, thin:bool };
 struct LightingUniform {eye:vec3<f32>,count:u32,environment:vec3<f32>,exposure:f32,map:vec4<f32>};
-struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>};
+struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>, source:vec4<f32>};
 var<private> lighting:LightingUniform;
 var<private> lights:array<Light,1>;
 var<private> suppress_specular:bool;
@@ -29,7 +29,7 @@ fn unit_normal(n:vec3<f32>)->vec3<f32> {
 fn setup() {
     lighting=LightingUniform(frame.eye0.xyz,u32(frame.sun_value.w>0.0),frame.sky.rgb,probe.exposure,vec4<f32>(0.0));
     lights[0]=Light(vec4<f32>(0.0),vec4<f32>(-frame.sun.xyz,0.0),
-        vec4<f32>(frame.sun_value.rgb*select(PI*sun_height()*(2.0-sun_height()),1.0,sun_height()==0.0),0.0),vec4<u32>(0u));
+        vec4<f32>(frame.sun_value.rgb*select(PI*sun_height()*(2.0-sun_height()),1.0,sun_height()==0.0),0.0),vec4<u32>(0u),vec4<f32>(0.0));
 }
 fn hard_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {
     let start=offset(receiver.world,receiver.geometric);var sum=0.0;

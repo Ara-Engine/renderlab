@@ -380,6 +380,7 @@ fn gpu_hardware_shadow_rejects_unsupported_before_writes_and_preserves_featurele
             position: Vec3::Z,
             candela: [1.; 3],
             range: None,
+            source_radius: 0.0,
         }],
         ..Default::default()
     };
