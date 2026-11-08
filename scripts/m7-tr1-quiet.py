@@ -24,10 +24,12 @@ import time
 from pathlib import Path
 
 os.environ["M7_G1_UNIT"] = "m7-tr1"
+# TR1b: new bulk output on D: (milestone-7.md, 2026-11-08); E:/renderlab-work/m7-tr1 keeps the earlier evidence.
+os.environ.setdefault("M7_G1_ROOT", "D:/Coding/renderlab-work")
 spec = importlib.util.spec_from_file_location("m7_g1_run", Path(__file__).with_name("m7-g1-run.py"))
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
-RUNS = Path("E:/renderlab-work/m7-tr1/runs")
+RUNS = Path("D:/Coding/renderlab-work/m7-tr1/runs")
 
 
 @contextlib.contextmanager
@@ -105,7 +107,7 @@ def main():
         plan_args = argparse.Namespace(label=label, plan=args.plan, minutes=args.minutes, spp=2048, paths="rt,nonrt",
                                        after="", check_only=False, quiet=True, force_schedule=False)
         try:
-            with quiet_desktop(u, Path("E:/renderlab-work/m7-tr1/quiet") / label):
+            with quiet_desktop(u, Path("D:/Coding/renderlab-work/m7-tr1/quiet") / label):
                 runner.plan(plan_args)
         except SystemExit as stop:
             if stop.code == 3:

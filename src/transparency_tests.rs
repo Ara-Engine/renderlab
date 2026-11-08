@@ -92,8 +92,8 @@ fn pre_tp1_standard() -> String {
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };",
          "struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };"),
         ("    let alpha=material_coverage(material,material.base_color.a*sampled.a*input.color.a);
-    return Surface(n,base,metal,rough,alpha);",
-         "    return Surface(n,base,metal,rough);"),
+    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);",
+         "    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);"),
         ("    // TP1: a transparent surface reflects diffusely over its coverage only.
     let base=s.base*s.alpha;",
          "    let base=s.base;"),
@@ -115,8 +115,8 @@ fn pre_tp1_standard_is_exact() {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(pre_tp1_standard().as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    // shaders/programs/standard.wgsl at 984a18b.
-    assert_eq!(hex, "2a3498a583a44fc45f9580decc5adb31c65ecc86b9efbb8f22aee7d3085b2dde");
+    // shaders/programs/standard.wgsl at main ae95d3a (DC1, before TP1).
+    assert_eq!(hex, "52f85e454919938f87bcc240d82f91ca906582e7a606c58f3bacf34160c1a8ad");
 }
 
 fn env(name: &str) -> Option<String> {
@@ -532,12 +532,12 @@ fn gpu_tp1_scene() {
         let ndc = [(x as f32 + 0.5) / width as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / height as f32 * 2.0];
         let far = unproject * glam::Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
         let dir = (far.truncate() / far.w - eye).normalize();
-        // Misses fall back to a point 6 m along the ray, a metre below eye height.
-        Some(if d < 1e20 { eye + dir * (d / dir.dot(forward)) } else { eye + dir * 6.0 - up })
+        // Only island hits: the backdrop is empty.
+        (d < 1e20).then(|| eye + dir * (d / dir.dot(forward)))
     };
     // Pose 0 sees the quarry island over a black backdrop: bushes on its gravel and sand,
     // the fire on the sand in front of the cliff.
-    let picks: Vec<(f32, f32)> = vec![(0.33, 0.57), (0.40, 0.69), (0.47, 0.73), (0.70, 0.68), (0.80, 0.60), (0.36, 0.62)];
+    let picks: Vec<(f32, f32)> = vec![(0.33, 0.56), (0.36, 0.58), (0.45, 0.66), (0.52, 0.69), (0.62, 0.66), (0.80, 0.60)];
     let bushes: Vec<Vec3> = picks.iter().filter_map(|&(x, y)| pick(x, y)).collect();
     let fire_at = pick(0.56, 0.67).unwrap();
     let centre = pick(0.5, 0.55).map_or(8.0, |p| (p - eye).dot(forward));
@@ -551,8 +551,9 @@ fn gpu_tp1_scene() {
     let leaf_rgba = leaf_texture(256);
     let mask = crate::cutout::AlphaMask::from_rgba8(256, 256, &leaf_rgba);
     let (card_vertices, card_indices) = card();
+    let cells: u32 = env("RENDERLAB_TP1_CELLS").map_or(96, |s| s.parse().unwrap());
     let cut_start = Instant::now();
-    let cut = crate::cutout::cutout(&MeshData { vertices: &card_vertices, indices: &card_indices }, &mask, 1.0, 0.5, 96).unwrap();
+    let cut = crate::cutout::cutout(&MeshData { vertices: &card_vertices, indices: &card_indices }, &mask, 1.0, 0.5, cells).unwrap();
     let cut_ms = cut_start.elapsed().as_secs_f64() * 1e3;
     let leaf_texture = upload_texture(&mut r, crate::asset::TextureRole::BaseColorSrgb, 256, leaf_rgba);
     let leaf_mesh = upload_mesh(&mut r, &cut.vertices, &cut.indices);
@@ -575,7 +576,7 @@ fn gpu_tp1_scene() {
     assert!(models.iter().all(|m| m.is_finite()), "TP1 foliage placements {:?}", log["picks"]);
     let mut foliage = upload_instances(&mut r, &models);
     log["foliage"] = serde_json::json!({"cards": models.len(), "cut_triangles": cut.indices.len() / 3,
-        "cut_vertices": cut.vertices.len(), "cut_ms": cut_ms, "cells": 96});
+        "cut_vertices": cut.vertices.len(), "cut_ms": cut_ms, "cells": cells});
 
     // 3. Glass: a rippled clear pane facing the camera.
     let (pane_vertices, pane_indices) = pane(2.2, 1.6, 48);
@@ -670,6 +671,13 @@ fn gpu_tp1_scene() {
         }
         save(&mut r, "opaque");
         // The opaque image with the pre-TP1 standard program: TP1 leaves it unchanged.
+        // TR1 off for this pair, so both images are single frames of the same shading.
+        let reconstruction = r.reconstruction;
+        r.set_reconstruction(Reconstruction::off()).unwrap();
+        for _ in 0..3 {
+            render(&mut r, &camera, &mut asset, None, None);
+        }
+        r.test_drain("TP1 identity current");
         let current = read_texture(&r, &target, 4);
         let standard = r.standard_program().clone();
         r.reload_program(&standard, &pre_tp1_standard()).unwrap();
@@ -679,6 +687,7 @@ fn gpu_tp1_scene() {
         r.test_drain("TP1 identity");
         let before = read_texture(&r, &target, 4);
         r.reload_program(&standard, crate::STANDARD_PROGRAM).unwrap();
+        r.set_reconstruction(reconstruction).unwrap();
         let differing = current.chunks_exact(4).zip(before.chunks_exact(4)).filter(|(a, b)| a != b).count();
         log["identity"] = serde_json::json!({"differing_pixels": differing,
             "note": "opaque quarry, TP1 standard program vs the pre-TP1 one, presented RGBA8"});

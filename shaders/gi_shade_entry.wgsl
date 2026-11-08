@@ -87,7 +87,7 @@ fn gs_surface_input(slot:u32, p:u32, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> Sur
     if primitive==GI_NO_PRIMITIVE {
         let receiver=Receiver(q,nc,vec2<i32>(-1),batch,1e-3*edge,(info&0x20000000u)!=0u);
         return SurfaceInput(q,dx,dy,nc,nc,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),1.0,
-            vec2<f32>(0.5),vec2<f32>(1e4,0.0),vec2<f32>(0.0,1e4),vec4<f32>(1.0),true,eye,vec2<u32>(0u),material,receiver);
+            vec2<f32>(0.5),vec2<f32>(1e4,0.0),vec2<f32>(0.0,1e4),vec4<f32>(1.0),true,eye,vec2<u32>(0u),material,receiver,decal_none());
     }
     let tangent=(info>>31u)!=0u;
     let i=primitive*3u;
@@ -113,7 +113,7 @@ fn gs_surface_input(slot:u32, p:u32, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> Sur
     let receiver=primary_receiver(q,array<vec3<f32>,3>(ta.position,tb.position,tc.position),p,vec2<i32>(-1));
     return SurfaceInput(q,dx,dy,s*geometric,s*(a.normal*w.x+b.normal*w.y+c.normal*w.z),normal_dx,normal_dy,
         a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,s*a.handedness,a.uv*w.x+b.uv*w.y+c.uv*w.z,uv[0],uv[1],
-        a.color*w.x+b.color*w.y+c.color*w.z,true,eye,vec2<u32>(0u),material,receiver);
+        a.color*w.x+b.color*w.y+c.color*w.z,true,eye,vec2<u32>(0u),material,receiver,decal_none());
 }
 // One cell's outgoing radiance: rgb, w 1 (written), or 0 for a cell without a value.
 fn gs_shade(slot:u32) -> vec4<f32> {
@@ -128,7 +128,7 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     let q=vec3<f32>(bitcast<f32>(gi_word(cold+GI_C_POINT)),bitcast<f32>(gi_word(cold+GI_C_POINT+1u)),bitcast<f32>(gi_word(cold+GI_C_POINT+2u)));
     let nc=gi_unpack_normal(gi_word(cold+GI_C_NORMAL));
     let edge=gi_edge(gi_word(cold+GI_C_DEF)&0xffu);
-    let input=gs_surface_input(slot,p,q,nc,edge);
+    let input=decal_prepare(gs_surface_input(slot,p,q,nc,edge));
     rl_load_parameters(input.receiver.slot);
     let s=surface(input);
     var out=rl_emission(s,input);

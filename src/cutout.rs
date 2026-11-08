@@ -134,7 +134,55 @@ pub fn cutout(
             below = above;
         }
     }
-    Ok(out)
+    let extent = data
+        .vertices
+        .iter()
+        .flat_map(|v| v.position)
+        .fold(1e-6f32, |m, c| m.max(c.abs()));
+    Ok(weld(out, extent))
+}
+
+/// Joins vertices that share a position and uv (cells emit their own; neighbours compute
+/// the same points), then drops triangles that collapse or have no area, so the result is
+/// a connected mesh: receiver adjacency then finds its edges.
+fn weld(mesh: CutoutMesh, extent: f32) -> CutoutMesh {
+    let scale = f64::from((1u32 << 22) as f32 / extent);
+    let key = |v: &Vertex| -> [i64; 5] {
+        let p = v.position.map(|c| (f64::from(c) * scale).round() as i64);
+        let t = v.uv.map(|c| (f64::from(c) * f64::from(1u32 << 22)).round() as i64);
+        [p[0], p[1], p[2], t[0], t[1]]
+    };
+    let mut slots = std::collections::HashMap::with_capacity(mesh.vertices.len());
+    let mut out = CutoutMesh::default();
+    let remap: Vec<u32> = mesh
+        .vertices
+        .iter()
+        .map(|v| {
+            *slots.entry(key(v)).or_insert_with(|| {
+                out.vertices.push(*v);
+                out.vertices.len() as u32 - 1
+            })
+        })
+        .collect();
+    let floor = (f64::from(extent) * 1e-7).powi(2);
+    for t in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| remap[t[k] as usize]);
+        if a == b || b == c || a == c {
+            continue;
+        }
+        let [pa, pb, pc] = [a, b, c].map(|i| out.vertices[i as usize].position.map(f64::from));
+        let (e1, e2) = ([0, 1, 2].map(|k| pb[k] - pa[k]), [0, 1, 2].map(|k| pc[k] - pa[k]));
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        if n.iter().map(|x| x * x).sum::<f64>() * 0.25 <= floor {
+            continue;
+        }
+        out.indices.extend([a, b, c]);
+    }
+    out
 }
 
 fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -165,7 +213,14 @@ fn cell_polygons(
     if inside.iter().all(|&i| !i) {
         return vec![];
     }
+    // Interpolated from the edge's lower (y, then x) node, so the two cells sharing an
+    // edge compute the same point bit for bit.
     let crossing = |a: usize, b: usize| {
+        let (a, b) = if (corners[a][1], corners[a][0]) <= (corners[b][1], corners[b][0]) {
+            (a, b)
+        } else {
+            (b, a)
+        };
         let t = values[a] / (values[a] - values[b]);
         [
             corners[a][0] + (corners[b][0] - corners[a][0]) * t,
@@ -213,6 +268,8 @@ fn clip_to_triangle(mut polygon: Vec<[f64; 2]>, uv: &[[f64; 2]; 3], ccw: bool) -
                 next.push(p);
             }
             if (sp >= 0.0) != (sq >= 0.0) {
+                // From the lower endpoint, as cell crossings are.
+                let ((p, sp), (q, sq)) = if (p[1], p[0]) <= (q[1], q[0]) { ((p, sp), (q, sq)) } else { ((q, sq), (p, sp)) };
                 let t = sp / (sp - sq);
                 next.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
             }
@@ -306,6 +363,25 @@ mod tests {
         let empty = AlphaMask { width: 1, height: 1, alpha: vec![0.0] };
         let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &empty, 1.0, 0.5, 16).unwrap();
         assert!(mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn cut_cells_weld_into_one_connected_mesh() {
+        let (vertices, indices) = quad();
+        let mask = disk(256, 0.3);
+        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &mask, 1.0, 0.5, 64).unwrap();
+        // Interior edges are shared by two triangles; only the contour is open.
+        let mut edges = std::collections::HashMap::new();
+        for t in mesh.indices.chunks_exact(3) {
+            for k in 0..3 {
+                let (a, b) = (t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3]));
+                *edges.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        let open = edges.values().filter(|&&n| n == 1).count();
+        assert!(edges.values().all(|&n| n <= 2));
+        // The disk's contour is about 2 pi r * 64 cells long: a few hundred open edges.
+        assert!(open < 600, "{open} open of {}", edges.len());
     }
 
     #[test]

@@ -2,6 +2,9 @@
 mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
+// DC1: one storage binding beside lighting; no separate render pass.
+#[path = "decal_gpu.rs"]
+mod decal_gpu;
 use lighting_gpu::LightingGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
@@ -15,8 +18,8 @@ mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
-pub use primary_ray_gpu::temporal_reconstruction::Reconstruction;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
+pub use primary_ray_gpu::temporal_reconstruction::{Reconstruction, RenderScale};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -591,6 +594,8 @@ pub struct Renderer {
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
+    /// TR1b upscaling: the scaled frame's internal colour target and output HDR.
+    upscale: Option<temporal_reconstruction::Upscale>,
     /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
     transparency: transparency_gpu::TransparencyState,
 }
@@ -1034,6 +1039,7 @@ impl Renderer {
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,
+            upscale: None,
             transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
@@ -2237,7 +2243,9 @@ impl Renderer {
             ..Default::default()
         });
         pass.set_pipeline(&self.pipeline.present);
-        pass.set_bind_group(0, &*hdr.bind, &[]);
+        // TR1b upscaling: a scaled frame presents the reconstruction's target-size output.
+        let bind = self.upscale.as_ref().map_or(&*hdr.bind, |u| &*u.present);
+        pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2300,9 +2308,12 @@ impl Renderer {
         self.validate_color(color)?;
         // Temporal reconstruction samples traced and visibility-buffer lit frames at the
         // next lattice offset: every matrix of this frame comes from the jittered camera.
+        // TR1b (default on): Temporal soft shadows keep their own film history and are never
+        // reconstructed, so their frames are not jittered either.
         self.reconstruction_frame = (self.reconstruction.enabled
             && view_mode == ViewMode::Lit
-            && self.primary_mode != PrimaryVisibility::Raster)
+            && self.primary_mode != PrimaryVisibility::Raster
+            && self.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.reconstruction_index);
         let jittered;
         let camera = match self.reconstruction_frame {
@@ -2312,6 +2323,11 @@ impl Renderer {
             }
             None => camera,
         };
+        // TR1b upscaling (temporal_reconstruction.rs RenderScale): a scaled reconstructed
+        // frame renders every pass into an internal target; the reconstruction resolves to
+        // the caller's size and present writes the caller's target.
+        let internal = self.upscale_target(color);
+        let color = internal.as_ref().unwrap_or(color);
         if self.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
             fresh_shadow_gpu::admit_targets(&self.shadows.settings, color.width(), color.height())?;
         }
@@ -3195,13 +3211,19 @@ impl Renderer {
             }
         }
         // TP1: transparent draws and particles, after opaque shading and reconstruction.
-        if lit {
+        // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
+        if lit && self.upscale.is_none() {
             self.encode_transparency(&mut encoder, draws, transparent, traced)?;
         }
+        // TR1b upscaling: present writes the caller's target, not the internal one.
+        let output_view = self.upscale.as_ref().map(|u| {
+            self.ledger
+                .attachment(u.output.create_view(&Default::default()))
+        });
         if lit && self.lighting.hdr.is_some() {
             self.encode_hdr_present(
                 &mut encoder,
-                &view,
+                output_view.as_ref().unwrap_or(&view),
                 self.timing
                     .as_ref()
                     .filter(|_| timed)

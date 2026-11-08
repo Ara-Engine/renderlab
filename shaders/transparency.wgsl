@@ -141,7 +141,8 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
         let inside=dot(t1,-ng);
         if dot(t1,t1)>0.0 && inside>0.05 {
             let exit=world+t1*(tp_draw.thickness/inside);
-            var t2=refract(t1,-ng,ior);
+            // Leaving through the back face: its normal faces the ray, as ng does.
+            var t2=refract(t1,ng,ior);
             if dot(t2,t2)==0.0 { t2=d; }
             // Continue to the opaque surface's depth behind this pixel.
             let along=max(opaque-dot(exit-tp.eye.xyz,tp.forward.xyz),0.0)/max(dot(t2,tp.forward.xyz),0.05);
@@ -166,7 +167,8 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     let pixel=vec2<i32>(input.position.xy);
     let surface_input=SurfaceInput(input.world,dpdx(input.world),dpdy(input.world),source_geometric,input.normal,dpdx(input.normal),dpdy(input.normal),input.tangent,input.handedness,
         input.uv,dpdx(input.uv),dpdy(input.uv),input.color,source_front,lighting.eye,vec2<u32>(pixel),material,
-        raster_receiver(input.world,triangle,pixel,material.thin!=0u));
+        raster_receiver(input.world,triangle,pixel,material.thin!=0u),decal_none());
+    // DC1 decals project onto opaque receivers; transparent surfaces take none.
     let surface_output=surface(surface_input);
     // Engine inputs in uniform control flow: coverage alpha and the refraction normal.
     let sampled_alpha=sample_base_color(surface_input).a;

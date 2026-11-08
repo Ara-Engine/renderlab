@@ -43,7 +43,8 @@ fn primary_gradients(ray:PrimaryRay,world:vec3<f32>,n:vec3<f32>,e1:vec3<f32>,e2:
 // Pixels per clear block; primary_ray_gpu.rs CLEAR_TILE must match.
 const PRIMARY_CLEAR_TILE=16u;
 // Deferred shading of primary_region with this module's program. Misses take the lit
-// clear colour; uncovered tiles take it without reading their stale hit records.
+// clear colour (or the visible sky, primary_miss); uncovered tiles take it without reading
+// their stale hit records.
 // Visibility is the module's hard_shadow: inline ray or counts.
 // Sixteen-pixel groups shade the gather-bound soft image about a fifth faster than
 // 32; primary_ray_gpu.rs SHADE_TILE must match.
@@ -60,7 +61,7 @@ const PRIMARY_CLEAR_TILE=16u;
         let base=vec2<u32>(group.x,group.y-shaded.y)*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);
         for(var k=0u;k<PRIMARY_CLEAR_TILE;k+=1u) {
             let p=base+vec2<u32>(0u,k);
-            if all(p<size) && !(all(p>=region.xy) && all(p<region.zw)) {textureStore(primary_hdr,vec2<i32>(p),primary_frame.clear);}
+            if all(p<size) && !(all(p>=region.xy) && all(p<region.zw)) {textureStore(primary_hdr,vec2<i32>(p),primary_miss(p,size,primary_frame.clear));}
         }
         return;
     }
@@ -68,16 +69,25 @@ const PRIMARY_CLEAR_TILE=16u;
     let id=grid+vec3<u32>(region.xy,0u);
     if any(id.xy>=size) {return;}
     if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
-        textureStore(primary_hdr,vec2<i32>(id.xy),primary_frame.clear);
+        textureStore(primary_hdr,vec2<i32>(id.xy),primary_miss(id.xy,size,primary_frame.clear));
         return;
     }
     primary_shade_pixel(id.xy,size);
+}
+// A primary miss: `clear` (the lit clear colour), or with the visible sky on
+// (primary_frame.sided.w, Renderer::set_visible_environment) the selected map along the
+// pixel's camera ray at level 0, exposed and scaled as the lighting it provides.
+fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {
+    if primary_frame.sided.w==0u {return clear;}
+    let ray=primary_ray(id,size);
+    let d=normalize(ray.far-ray.near);
+    return vec4<f32>(environment_product(environment_radiance(environment_direction(d),0.0),vec3<f32>(1.0)),1.0);
 }
 // One pixel inside the image: its hit record shaded, or the clear colour for a miss.
 // The program sees the same receiver frame as on raster, with explicit footprints.
 fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);
-    if record.x==0u {textureStore(primary_hdr,pixel,primary_frame.clear);return;}
+    if record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}
     let hit=primary_decode(record);
     let ta=primary_input(hit.batch,hit.ia,hit.placement);let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
@@ -113,9 +123,9 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let source_geometric=select(-face,face,lit_front);
     let material=primary_materials[hit.batch].value;
     rl_load_parameters(hit.batch);
-    let surface_input=SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
+    let surface_input=decal_prepare(SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
-        primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel));
+        primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel),decal_none()));
     // Engine inputs computed once per receiver (src/program.rs), before the program's
     // values are live.
     rl_indirect_prepare(surface_input);

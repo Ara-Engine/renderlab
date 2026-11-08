@@ -1476,6 +1476,9 @@ impl Renderer {
             .filter(|_| self.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
+        // Visible sky (Renderer::set_visible_environment): misses sample the selected map.
+        let visible = self.environment.visible && self.environment.selected.is_some();
+        bytes[92..96].copy_from_slice(&u32::from(visible).to_ne_bytes());
         // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
         let filter = self.primary_mode == PrimaryVisibility::Traced
             && self.soft_mode == SoftShadows::Interactive
