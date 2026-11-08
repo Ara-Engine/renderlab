@@ -2,7 +2,9 @@
 
 2026-11-08, branch `t3/m7-tr1` from main `ca80f85`, main `7971991` (M7-U0b) merged. Contract: [M7](milestone-7.md), [design §6–9](m7-design.md), [P0](m7-p0-claims.md), the bar in [TR0](m7-tr0.md) (`E:/renderlab-work/m7-tr0/bar/tr1-bar.json`).
 
-<!-- STATUS -->
+**Status: TR1 is built on both paths, measured against every row of TR0's bar, and stays opt-in. It is not the default.** On the registered Q-walk it wins 12,320 of TSR Epic HRT's 22,684 rows on RT and 12,078 of TSR Epic no-RT's on non-RT, and loses 9,209 and 9,448. It beats TSR on converged and moving interiors at registered exposure, occluded pixels, hold flicker (0.244 vs 0.432 codes) and trails (no background error beyond 1.5 px at any exposure; TSR's reach 41 px at +4 stops). It loses on moving silhouettes (edge 19.9 vs 17.8 codes), revealed pixels (10.8 vs 7.7 at age 3), background-centre pixels next to edges (0.90 vs 0.37), and +4-stop populations where Renderlab's converged still image is itself above TSR's. Quiet cost: p50 increments pass the half-TSR ceilings on both paths (RT 0.377 ms vs 0.727); the p95/p99 increments and totals miss, and the non-RT total frame misses before TR1 adds anything. Byte-identical replays in and across processes, and the non-RT path on the RT device equals the no-RT device. P0 constraints hold: no variance clip, own-pixel moments, SVGF or gradients, W5 kept.
+
+Measurement and verification times are in §11.
 
 ## 1. What TR1 is
 
@@ -18,7 +20,20 @@
 8. **Revealed and restarted pixels start from this frame's samples only:** a tent over the 3×3 samples of the same surface (radius 2 inside a surface, effective count ≤ 4).
 9. **Engine events.** A key over programs, prelude, geometry, bindings, materials, textures, transforms, light colours and kinds, environment and every shadow/visibility setting restarts every pixel. Exposure changes rescale the exposed history exactly. A sun turn caps the window at `turn_angle / turn` (0.004 rad; larger turns restart). `cut_reconstruction()` restarts on a camera cut the engine cannot infer.
 
-<!-- SETTINGS -->
+### Settings (`Reconstruction`, default off; `Reconstruction::identity()` enables the measured values)
+
+| Field | Value | Meaning |
+|---|---:|---|
+| `window` | 256 | static window |
+| `blur_budget` | 1 px² | T1b's bilinear resampling budget |
+| `sharp_window` | 16 | moving window when all 16 Catmull-Rom taps are accepted |
+| `silhouette_window` | 2 | moving silhouettes |
+| `start_window`, `start_radius` | 4, 2 px | revealed pixels' spatial start |
+| `silhouette_start_radius` | 1 px | silhouettes' spatial estimate (bilinear at the pixel centre) |
+| `turn_angle` | 0.004 rad | sun-turn window cap; larger turns restart |
+| `catmull_rom`, `spatial_start`, `rotate_directions` | on | |
+| `silhouette_mix`, `silhouette_spatial` | on | moving silhouettes keep coverage and blend this frame's bilinear 3×3 estimate |
+| `box_clamp` | off | plain min/max box over all 3×3 samples (last option, measured, no effect) |
 
 ### 1.1 Files
 
@@ -237,3 +252,85 @@ G1 added the radiance-cache table as storage binding 20 of the lighting group. T
 ### 7.2 Virtual's still-frame key ignores the projection (fixed for reconstructed frames)
 
 Virtual Surface keeps a pixel's visibility counts on a frame whose key (camera view and field of view, sun, casters, settings) is unchanged. A jittered still frame has the same view but receivers moved by the jitter, so it kept counts computed at an earlier sub-pixel receiver, and non-RT shadow edges stopped integrating over the footprint on holds. The kept state also made in-process replays diverge on the hold. TR1 now clears Virtual's `rolling` flag on reconstructed frames, the existing mechanism other passes use (one condition in `renderer.rs`; no shadow file is edited). Cost: a still non-RT TR1 frame looks up every receiver, as a moving frame does (§6). **Owner option:** key the still test on the full view-projection.
+
+## 8. Cost, memory and determinism
+
+### 8.1 Quiet cost against the half-TSR ceilings (M)
+
+TR0's method: the whole registered Q-walk replayed from a reset per visit, TR1 and the unreconstructed frame alternating (order reversed on odd visits), the first 8 track frames of each visit excluded, increments paired by input frame; 8 pairs = **1,224 frames per method**, plus one unpaired warm-up visit. The span is Renderlab's GPU render span (first pass to present end); the reconstruction pass (sample copy and resolve) has its own timestamps. RTX 4070 SUPER, NVIDIA 617.14, 1920×1080, final build `tr1final`.
+
+**Window `tq2-1`** (06:04:25–06:04:53Z): exclusive lease announced as QUIET, 120 s with no stillkit compiler before it and none at any 3 s sample inside, live wallpaper paused through its supported setting (GPU 2 % at start) and restored, no game. Evidence: `runs/tq2-1/quiet-check.json`, `quiet/tq2-1/`. An earlier window `tq-1` without the wallpaper pause is kept separately (RT increment p50 0.401 ms) and not used.
+
+| Path, ms | p50 | p95 | p99 | Ceiling p50 / p95 / p99 | Verdict |
+|---|---:|---:|---:|---|---|
+| RT increment over traced + Interactive | **0.377** | 0.815 | 1.009 | 0.727 / 0.769 / 0.816 | p50 passes; **p95, p99 miss** |
+| RT total frame with TR1 | **1.253** | 1.709 | 1.878 | 1.618 / 1.651 / 1.709 | p50 passes; **p95, p99 miss** |
+| RT reconstruction pass alone | 0.340 | 0.386 | 0.649 | — | — |
+| Non-RT increment over visibility buffer + Virtual Surface | **0.458** | 1.474 | 1.699 | 0.781 / 0.819 / 0.853 | p50 passes; **p95, p99 miss** |
+| Non-RT total frame with TR1 | 2.280 | 2.668 | 2.782 | 1.616 / 1.646 / 1.679 | **miss** (unreconstructed already 1.849 / 2.047 / 2.183) |
+| Non-RT reconstruction pass alone | 0.338 | 0.578 | 0.583 | — | — |
+
+Where the cost is (paired frames): on RT the mean increment, 0.424 ms, is almost all the pass (0.354); in the top 5 % of increments the jittered frame's trace and shading also cost more (+0.19 and +0.26 ms), as jitter and rotated directions change the work per frame. On non-RT the top 5 % are the hold frames 65–84: TR1 makes Virtual look up every jittered receiver (§7.2) while the unreconstructed still frame looks up nothing, about +1.0 ms per still frame. The non-RT total-frame miss is the shadow hillclimb's camera-moving cost before TR1 adds anything. No optimisation pass was run on the resolve: its p50 already meets the ceiling, and the default is blocked on quality (§5). Candidates for one: shade straight into the sample texture (drops the 16.6 MB copy), share the 3×3 identities through workgroup memory, and skip the plane test on Catmull-Rom's outer taps.
+
+### 8.2 Memory (M, allocator report after each run)
+
+| Path | Unreconstructed reserved | TR1 reserved | TR1's own targets | Unreal comparator |
+|---|---:|---:|---:|---:|
+| RT (traced + Interactive) | 2,414.3 MiB | 2,542.3 MiB | 118.1 MiB | HRT 5,410 MiB (DXGI) |
+| Non-RT (visibility buffer + Virtual Surface) | 3,503.7 MiB | 3,695.7 MiB | 118.1 MiB | VSM no-RT 3,912 MiB (DXGI) |
+
+TR1's own targets at 1920×1080: two Rgba32Float colour histories (67.5 MiB), two Rg32Uint anchor sets (33.75 MiB) and the Rgba16Float sample copy (16.9 MiB); the frame state is 304 bytes. Both totals stay below Unreal's, which also excludes TSR's own 200 % history. The 3,504 MiB baseline matches the recorded non-RT figure; the non-RT margin to VSM falls from 408 to 216 MiB.
+
+### 8.3 Determinism and paired identity (M, final build)
+
+| Check | Result |
+|---|---|
+| In-process replay of the whole track, RT and non-RT | byte-identical, all 93 written frames |
+| Cross-process replay (second process, same binary), RT | identical, TR1 and unreconstructed |
+| Cross-process replay, non-RT, and across the two final binaries | identical |
+| Non-RT path on the RT device (`nonrt-on-rt`) against the no-RT device | **identical on all 93 frames**, TR1 and unreconstructed |
+| Unreconstructed RT frames across every build of this unit | identical (s1, s2 and final hashes) |
+| Library suite (`--lib`, the final release test binary) | **138 passed, 0 failed, 129 ignored; process exit 0** |
+| `cargo fmt --all --check`; Clippy (`--lib --tests`) | clean; no Clippy warning in TR1's files. Pre-existing warnings on main remain in `virtual_shadow_gpu.rs`, `reference_inputs.rs`, `reference_tests.rs` and `visibility_buffer.rs` (outside TR1's ownership) |
+| CPU tests of this unit | lattice prefix and symmetry, jittered-projection pixel shift and unjittered bit identity, naga validation of the resolve module (no ray queries) and the rotated trace module, settings validation |
+
+## 9. Hand-offs
+
+- **(a) RT fast setup's eight-ray grain under +4 stops (rt1c).** On the quarry, TR1's rotated directions and history integrate it: partial (penumbra) L4 at frame 64 falls from 28.09 (Interactive 1x) to **21.99**, against TSR Epic HRT's 21.00; the converged hold reaches 21.28 (unaged, frame 96) against TSR's 20.68. That is a large reduction but **not yet a win at +4 stops**, and part of the remaining gap is the converged image's own L4 offset (§5.3). The rt1c S2 witness (frame 0 of the outward phase, a cold start for TR1) was not rerun. So TR1 does not by itself make traced + Interactive the RT default.
+- **(b) U1b's specular footprint (776 comparisons).** **Not run.** TR1 integrates the program's output over the jittered footprint, which is the "1-sample footprint" path, but U1b's gate could not be reproduced here: its 4096-stratum reference and per-variant captures were deleted at its delivery (only manifests remain), and its non-RT ("software") suite renders raster primaries, which TR1 does not reconstruct. Next step: regenerate the reference (~104 s GPU recorded), add a TR1 mode to `gpu_specular_aa_motion_screen` that renders each track's indices consecutively after a warm-up with the unfiltered program on traced and visibility-buffer primaries, and score it with `scripts/m7-u1b-score.py` as a new variant against "before". The light track turns 0.005 rad per index, past TR1's 0.004 restart angle, so it would score cold starts.
+
+## 10. Misses and open items
+
+1. **Default not changed:** TR1 loses TSR Epic rows on both paths (9,209 RT, 9,448 non-RT of 22,684): moving silhouettes, revealed pixels, background-centre near edges, and +4-stop converged populations where Renderlab's still image is itself above TSR's (§5.3).
+2. **Cost:** p50 increments pass on both paths (RT 0.377 ms, non-RT 0.458 ms against 0.727 / 0.781); every p95 and p99 increment and total misses, and non-RT's total frame misses before TR1 (§8.1). The resolve has not had its optimisation pass.
+3. **Tracks not measured:** Q-disocclusion (references exist; TSR's raw capture was deleted, so a new Unreal capture with TR0's `m7-u0` package would be needed for a comparison), Q-sun and every S2G track (S2G references deleted after TR0; 288 states would need regenerating). TR1's sun-turn rule is therefore unmeasured against TSR; at 0.25°/frame (0.0044 rad) it restarts every pixel each frame.
+4. **Post-reconstruction R_F/R_D** for TSR would need new Unreal sun-only and visibility-output captures; §5.4 gives the population equivalent instead.
+5. **Moving instances restart every pixel** (the key includes transforms). Rigid reprojection through previous transforms and per-pixel caster-motion caps are not built.
+6. **Non-RT Virtual directions do not rotate.** TR1 rotates only Interactive's (RT); Virtual's eight directions are fixed per pixel (shadow files). Non-RT penumbrae integrate only through the jittered receivers.
+7. **Two-layer silhouette history and the ±1 px reverse search were not built.** The current-frame bilinear estimate at moving silhouettes was the named-fix slot's measured best; the two-layer history is the remaining fix for mechanism 1.
+8. **Defects outside TR1** (§7.1 storage-buffer limit; §7.2 Virtual still key) need their owners.
+9. Frame 0 of a sequence is no longer the Interactive image (it is the spatial start), so T1a's T-0 identity does not apply to TR1.
+
+## 11. Evidence, reproduction and time
+
+Evidence root `E:/renderlab-work/m7-tr1/`: `plans/` (every manifest), `runs/` (process records, `tr1.json` with hashes and spans, allocator reports), `scores/` (score JSON, per-row comparisons `*-compare.json`, headline tables, settle), `inspect/` (frame 64/128 sheets at L0/L4, edge crops and the hold-step map). Raw frames were deleted after scoring and inspection; their SHA-256 are in each `tr1.json` and score file.
+
+```powershell
+py -3 -B scripts/m7-tr1-run.py build --release --beside-leases --as tr1final
+py -3 -B scripts/m7-tr1-plan.py final --paths rt,rt-b,nonrt,nonrt-b,nonrt-on-rt --binary tr1final --frames reference --variants '{"a-tr1": {}, "z-off": {"enabled": false}}'
+py -3 -B scripts/m7-tr1-wait.py final E:/renderlab-work/m7-tr1/plans/final/plan.json --minutes 30
+py -3 -B scripts/m7-tr1-score.py score E:/renderlab-work/m7-tr1/runs/final/rt/data/a-tr1 --case w-e-r-c1 --out rt.json
+py -3 -B scripts/m7-tr1-score.py compare rt.json --out rt-compare.json
+py -3 -B scripts/m7-tr1-table.py --case w-e-r-c1 TR1=rt.json
+py -3 -B scripts/m7-tr1-settle.py --case w-e-r-c1 TR1=rt.json
+# Cost: a QUIET window after 120 s without stillkit
+py -3 -B scripts/m7-tr1-plan.py quiet2 --paths rt,nonrt --binary tr1final --frames none --visits 8 --no-replay --no-write --variants '{"a-tr1": {}, "z-off": {"enabled": false}}'
+py -3 -B scripts/m7-tr1-quiet.py tq2 E:/renderlab-work/m7-tr1/plans/quiet2/plan.json --minutes 10
+py -3 -B scripts/m7-tr1-cost.py E:/renderlab-work/m7-tr1/runs/quiet2/rt/data/tr1.json
+```
+
+Runs write under `runs/<plan label>/` (the plan's manifests); lease records under `runs/<lease label>/`.
+
+**Time (UTC, 2026-11-08).** Reading and design 02:49–03:00; first implementation, harness and scorer 03:00–03:20 (first release build 2 m 30 s; later incremental release builds about 2–3 min, two jobs, beside other owners' functional leases, never inside a QUIET window). Screens s1–s10 03:23–05:25, final runs 05:20–05:40, quiet windows 05:59 and 06:04, document 06:05–06:20. GPU: 15 leases, **1,789.7 s** in total, all headless and offscreen, released, none inside another owner's QUIET window or a game hold; the two cost windows lasted 29 s and 24 s. CPU scoring: about 3 min per 60-frame candidate and 6 min per 93-frame candidate, two math threads, never inside the quiet windows. No window, viewer, focus change, input automation or desktop capture. No Unreal launch.
+
+**Cleanup.** All 339 raw frame dumps (5.62 GB) were hash-recorded (`deleted-raw.json`) and deleted after scoring and inspection. This unit's Cargo target (`E:/renderlab-work/m7-tr1/target`) is deleted at delivery; staged test binaries are kept with their SHA-256 (`tr1final` `af8bfe12…`).
