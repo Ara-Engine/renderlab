@@ -209,7 +209,10 @@ impl LightingGpu {
                         },
                         count: None,
                     },
-                ].into_iter().chain(super::transparency_gpu::transmission_shadow::binding_entries()).collect::<Vec<_>>(),
+                ]
+                .into_iter()
+                .chain(super::transparency_gpu::transmission_shadow::binding_entries())
+                .collect::<Vec<_>>(),
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -287,7 +290,9 @@ impl LightingGpu {
         let limits = device.limits();
         let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
-            transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(device, ledger),
+            transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(
+                device, ledger,
+            ),
             clusters,
             decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
@@ -502,8 +507,16 @@ impl Renderer {
                         layout: &state.bindings,
                         entries: &[
                             // TP2: shared sun transmission, independent of opaque visibility.
-                            wgpu::BindGroupEntry { binding: 26, resource: state.transmission.uniform.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 27, resource: wgpu::BindingResource::TextureView(&state.transmission.map.view) },
+                            wgpu::BindGroupEntry {
+                                binding: 26,
+                                resource: state.transmission.uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 27,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &state.transmission.map.view,
+                                ),
+                            },
                             wgpu::BindGroupEntry {
                                 binding: 21,
                                 resource: state.decals.active.buffer.as_entire_binding(),

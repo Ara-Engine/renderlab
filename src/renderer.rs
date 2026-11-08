@@ -760,7 +760,8 @@ impl Renderer {
         if device_limits.max_texture_array_layers < 6
             || device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 8
+            // TP2 adds one sampled map to the complete lighting/material ABI (15).
+            || device_limits.max_sampled_textures_per_shader_stage < 15
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(

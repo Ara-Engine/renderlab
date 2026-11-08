@@ -68,6 +68,10 @@ fn tp1_modules_validate() {
         "TP2 R1 glass reflection",
         &reflection::source(&head, crate::STANDARD_PROGRAM, false),
     );
+    validate(
+        "TP2 glass reflecting a toon program",
+        &reflection::source(&head, toon, true),
+    );
     // The standard program declares the hook; toon blends by coverage.
     assert!(crate::program::declares_transmittance(
         crate::STANDARD_PROGRAM

@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct GlassReflections {
     pub position: Depth,
     pub normal: Depth,
+    pub geometric: Depth,
     pub radiance: Depth,
     pub layout: Owned<wgpu::BindGroupLayout>,
     pub pipeline: Owned<wgpu::ComputePipeline>,
@@ -18,8 +19,9 @@ pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
     hash.finalize().into()
 }
 pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
+    let program = crate::program::glass_hit_program(program);
     let mut s =
-        crate::program::compose(head, program, crate::program::Stage::Traced, parameters).source;
+        crate::program::compose(head, &program, crate::program::Stage::Traced, parameters).source;
     // Only the hit reconstruction helpers from the generated camera entry are needed.
     s.truncate(s.find("// primary_frame.scene widened").unwrap());
     s = s
@@ -33,6 +35,7 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
     s.push_str(r#"
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
+@group(0) @binding(33) var tp_reflection_geometric:texture_2d<f32>;
 @compute @workgroup_size(8,8) fn tp_reflect(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(primary_hdr);
     if any(id.xy>=size) {return;}
@@ -40,7 +43,8 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
     if p.w==0.0 {textureStore(primary_hdr,id.xy,vec4<f32>(0.0));return;}
     let lobe=textureLoad(tp_reflection_normal,vec2<i32>(id.xy),0);
     let n=unit_normal(lobe.xyz);
-    let receiver=Receiver(p.xyz,n,vec2<i32>(id.xy),0u,p.w,true);
+    let geometric=unit_normal(textureLoad(tp_reflection_geometric,vec2<i32>(id.xy),0).xyz);
+    let receiver=Receiver(p.xyz,geometric,vec2<i32>(id.xy),0u,p.w,true);
     let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),n,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
         vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),true,lighting.eye,id.xy,primary_materials[0].value,receiver,decal_none());
     rl_indirect_open();
@@ -52,6 +56,12 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
 }
 impl Renderer {
     pub(super) fn tp_reflections(&self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
+        let limits = self.device.limits();
+        if limits.max_color_attachments < 3 || limits.max_color_attachment_bytes_per_sample < 32 {
+            return Err(Error::InvalidInput(
+                "glass reflections require three colour attachments and 32 bytes per sample",
+            ));
+        }
         let primary = self.primary.as_ref().unwrap();
         let program = self.program_slot(primary.program);
         let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
@@ -66,6 +76,13 @@ impl Renderer {
         );
         let normal = self.tp_target(
             "TP2 glass reflection lobe",
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            8,
+        );
+        let geometric = self.tp_target(
+            "TP2 glass geometric plane",
             size,
             wgpu::TextureFormat::Rgba16Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -101,6 +118,7 @@ impl Renderer {
                 ),
                 entry(31, COMPUTE, texture(UNFILTERED)),
                 entry(32, COMPUTE, texture(UNFILTERED)),
+                entry(33, COMPUTE, texture(UNFILTERED)),
             ],
         );
         let pipeline_layout = self.tp_pipeline_layout(
@@ -122,6 +140,7 @@ impl Renderer {
         Ok(GlassReflections {
             position,
             normal,
+            geometric,
             radiance,
             layout,
             pipeline,

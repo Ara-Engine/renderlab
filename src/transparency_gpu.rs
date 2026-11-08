@@ -126,12 +126,12 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
             .find("    rl_indirect_prepare(surface_input);")
             .unwrap()];
     let lobe = if crate::program::declares_reflection(program) {
-        "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha));"
+        "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha),vec4<f32>(surface_input.receiver.geometric,0.0));"
     } else {
-        "return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0));"
+        "return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0));"
     };
     let source = format!(
-        "{source}\nstruct TpLobeOutput {{ @location(0) position:vec4<f32>, @location(1) normal:vec4<f32> }};\n@fragment fn fs_tp_lobe(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool)->TpLobeOutput {{\n{body}\n{lobe}\n}}\n"
+        "{source}\nstruct TpLobeOutput {{ @location(0) position:vec4<f32>, @location(1) normal:vec4<f32>, @location(2) geometric:vec4<f32> }};\n@fragment fn fs_tp_lobe(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool)->TpLobeOutput {{\n{body}\n{lobe}\n}}\n"
     );
     if crate::program::declares_reflection(program) {
         replace_function(
@@ -390,6 +390,15 @@ const FRAGMENT: wgpu::ShaderStages = wgpu::ShaderStages::FRAGMENT;
 const COMPUTE: wgpu::ShaderStages = wgpu::ShaderStages::COMPUTE;
 
 impl Renderer {
+    fn tp_check_limits(&self) -> Result<(), Error> {
+        // Four pass textures, three material textures and twelve lighting textures.
+        if self.device.limits().max_sampled_textures_per_shader_stage < 19 {
+            return Err(Error::InvalidInput(
+                "transparent rendering requires 19 sampled textures per shader stage",
+            ));
+        }
+        Ok(())
+    }
     fn tp_layout(
         &self,
         label: &str,
@@ -956,6 +965,7 @@ impl Renderer {
                 vec![
                     Some(wgpu::TextureFormat::Rgba32Float.into()),
                     Some(wgpu::TextureFormat::Rgba16Float.into()),
+                    Some(wgpu::TextureFormat::Rgba16Float.into()),
                 ]
             } else {
                 vec![Some(wgpu::TextureFormat::Rgba16Float.into())]
@@ -1031,6 +1041,7 @@ impl Renderer {
     /// returned handle drops.
     pub fn try_create_emitter(&mut self, d: &EmitterDescriptor<'_>) -> Result<Emitter, Error> {
         self.check_fault()?;
+        self.tp_check_limits()?;
         d.validate()?;
         if d.texture
             .is_some_and(|t| !Arc::ptr_eq(&self.identity, &t.0.renderer))
@@ -1244,6 +1255,7 @@ impl Renderer {
         if transparent.is_empty() && self.transparency.emitters.is_empty() {
             return Ok(());
         }
+        self.tp_check_limits()?;
         // 4x raster frames have no single-sample depth to read (docs/m7-tp1.md gaps).
         if !traced && self.options.samples != SampleCount::One {
             return Ok(());
@@ -1370,8 +1382,9 @@ impl Renderer {
             .is_some_and(|h| h.active_scene().is_some());
         let reflect = rt
             && traced
-            && self.primary.as_ref().is_some_and(|p| {
-                crate::program::declares_reflection(&self.program_slot(p.program).source)
+            && transparent.iter().any(|draw| {
+                let program = draw.material.map_or(self.standard.id(), |m| m.program.id());
+                crate::program::declares_reflection(&self.program_slot(program).source)
             });
         #[cfg(test)]
         let reflect =
@@ -1758,6 +1771,10 @@ impl Renderer {
                         binding: 32,
                         resource: wgpu::BindingResource::TextureView(&reflection.normal.view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 33,
+                        resource: wgpu::BindingResource::TextureView(&reflection.geometric.view),
+                    },
                 ],
             })
         });
@@ -1834,18 +1851,22 @@ impl Renderer {
                         .find(|g| g.program == program)
                         .unwrap();
                     {
-                        let attachments =
-                            [&reflection.position.view, &reflection.normal.view].map(|view| {
-                                Some(wgpu::RenderPassColorAttachment {
-                                    view,
-                                    depth_slice: None,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })
-                            });
+                        let attachments = [
+                            &reflection.position.view,
+                            &reflection.normal.view,
+                            &reflection.geometric.view,
+                        ]
+                        .map(|view| {
+                            Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })
+                        });
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("TP2 glass reflection lobe"),
                             color_attachments: &attachments,

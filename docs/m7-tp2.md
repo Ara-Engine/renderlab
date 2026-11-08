@@ -18,7 +18,7 @@ The shared lighting group binds the 96-byte header at 26 and the map at 27. `lig
 
 ### R1 reflections on RT glass
 
-`src/transparency_reflection.rs` adapts R1 instead of duplicating its hit shader. A small raster pass writes the glass program's declared `reflection_lobe` and world position. A compute pass runs R1's ray loop on the frame's opaque geometry/material tables and shades reflected hits with the opaque frame's program. The final transparent program reads that exposed incident radiance through `specular_incident`, retaining control over its reflection response and transmittance.
+`src/transparency_reflection.rs` adapts R1 instead of duplicating its hit shader. A small raster pass writes the glass program's declared `reflection_lobe`, world position and independent geometric plane. A compute pass runs R1's ray loop on the frame's opaque geometry/material tables and shades reflected hits with the opaque frame's program. The final transparent program reads that exposed incident radiance through `specular_incident`, retaining control over its reflection response and transmittance. Ray offsets and geometric-side rejection remain independent of the program's shading normal.
 
 Mirror lobes use one ray; glossy lobes use R1's four fixed VNDF strata and roughness cutoff. Glass draws after TR1, so glossy strata stay fixed instead of rotating without a history filter. Reflected hits use open-environment indirect inputs, as in R1. The adapter follows the actual primary-frame buffer size rather than freezing that ABI. Non-RT currently uses the environment fallback.
 

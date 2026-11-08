@@ -16,7 +16,11 @@ def load(name):
     return module
 
 def batch(label, binary, steps):
-    for index, step in enumerate(steps):
+    import json
+    plan = OUT / ('batch-' + label + '.json')
+    rows = json.loads(plan.read_text()) if plan.exists() else [dict(binary=binary, step=step) for step in steps]
+    for index, row in enumerate(rows):
+        binary, step = row['binary'], row['step']
         path, section, profile = step.split(':')
         out = OUT / 'runs' / label / f'{index}-{path}-{profile or "final"}'
         out.mkdir(parents=True, exist_ok=True)
@@ -36,6 +40,17 @@ def batch(label, binary, steps):
             raise SystemExit(result.returncode)
         print(f'passed {step}', flush=True)
 
+def turn_ready(g, tp1):
+    lines = tp1.schedule_read_retry(lambda: g.SCHEDULE.read_text(encoding='utf-8')).splitlines()
+    orders = [i for i, line in enumerate(lines) if '[root order]' in line and 'tp2-p5' in line]
+    if not orders:
+        return True
+    later = lines[orders[-1] + 1:]
+    released = [line for line in later if 'window released' in line and not line.startswith('[')]
+    return (any('root-gate-b4' in line for line in released)
+            and any(line.startswith('m7-lc2 ') for line in released)
+            and any('r1n-g1' in line for line in released))
+
 if __name__ == '__main__':
     command, *args = sys.argv[1:]
     OUT.mkdir(parents=True, exist_ok=True)
@@ -52,7 +67,12 @@ if __name__ == '__main__':
         if command in ('build', 'build-example'):
             import json
             import shutil
+            import hashlib
+            import datetime
             label = args[0] if command == 'build' else 'example'
+            started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            head = subprocess.check_output(['git','rev-parse','HEAD'], cwd=REPO, text=True).strip()
+            diff = subprocess.check_output(['git','diff','HEAD','--','src','shaders','examples','Cargo.toml','Cargo.lock'], cwd=REPO)
             cargo_command = ['cargo','test','-p','renderlab','--lib','--no-run'] if command == 'build' else ['cargo','build','-p','renderlab','--example','game_scene']
             code = tp1.cargo(None, [*cargo_command,'-j','2','--target-dir',str(tp1.TARGET),'--message-format=json'], 'build-' + label)
             if code:
@@ -61,6 +81,11 @@ if __name__ == '__main__':
             binary = next(r['executable'] for r in reversed(records) if r.get('reason') == 'compiler-artifact' and r.get('executable'))
             (OUT / 'bin').mkdir(exist_ok=True)
             shutil.copy2(binary, OUT / 'bin' / (label + '.exe'))
+            (OUT / ('build-' + label + '.json')).write_text(json.dumps(dict(
+                started=started, finished=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                head=head, source_diff_sha256=hashlib.sha256(diff).hexdigest(),
+                binary_sha256=hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
+                command=cargo_command, profile='test/dev opt-level-1 renderlab, two Cargo jobs'), indent=2))
             print('binary', OUT / 'bin' / (label + '.exe'))
         else:
             sys.argv = [sys.argv[0], command, *args]
@@ -72,16 +97,27 @@ if __name__ == '__main__':
         runner, tp1 = load('m7-g1-run'), load('m7-tp1-run')
         g = tp1.guard()
         g.OWNER = 'm7-tp2'
+        # Preload n8's unchanged lease/guard. Starting a new Python interpreter
+        # after seeing a free lock loses every race to the in-process queues.
+        os.environ.update(N8_OWNER='m7-tp2', N8_OUT=str(OUT))
+        n8 = load('n8-run')
         deadline = time.monotonic() + 45 * 60
         g.schedule_line(f'[m7-tp2 request] owner=m7-tp2 label=tp2-{label} functional headless batch {g.utc().isoformat()}')
         while True:
-            if (OUT / 'bin' / (binary + '.exe')).exists() and not runner.quiet_active(g) and runner.hold_state(g) != 'hold' and not tp1.LOCK.exists():
-                env = dict(os.environ, N8_OWNER='m7-tp2', N8_OUT=str(OUT))
-                result = subprocess.run([sys.executable, '-B', REPO / 'scripts/n8-run.py', '--label', 'tp2-' + label,
-                    '--minutes', '30', '--fast-check', '--', sys.executable, '-B', __file__, 'batch', label,
-                    str(OUT / 'bin' / (binary + '.exe')), *steps], cwd=REPO, env=env)
-                if result.returncode != 3:
-                    raise SystemExit(result.returncode)
+            if ((OUT / 'bin' / (binary + '.exe')).exists() and turn_ready(g, tp1)
+                    and not tp1.schedule_read_retry(runner.quiet_active, g)
+                    and tp1.schedule_read_retry(runner.hold_state, g) != 'hold' and not tp1.LOCK.exists()):
+                sys.argv = [str(REPO / 'scripts/n8-run.py'), '--label', 'tp2-' + label,
+                    '--minutes', '15', '--fast-check', '--', sys.executable, '-B', __file__, 'batch', label,
+                    str(OUT / 'bin' / (binary + '.exe')), *steps]
+                n8.s1.claimed = False
+                try:
+                    code = n8.s1.runner.main()
+                finally:
+                    if n8.s1.claimed:
+                        g.schedule_line(f'm7-tp2 tp2-{label} window released {g.utc().isoformat()} (no owned GPU/build job remains).')
+                if code != 3:
+                    raise SystemExit(code)
             if time.monotonic() > deadline:
                 g.schedule_line(f'm7-tp2 request tp2-{label} withdrawn {g.utc().isoformat()} (no job remains).')
                 raise SystemExit('lease wait timed out')

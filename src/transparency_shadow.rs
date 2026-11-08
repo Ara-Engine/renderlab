@@ -46,7 +46,7 @@ pub(crate) fn binding_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
         ),
     ]
 }
-pub(crate) struct TransmissionShadow {
+pub(in crate::renderer) struct TransmissionShadow {
     pub uniform: Owned<wgpu::Buffer>,
     pub map: Depth,
     pub generation: u64,
@@ -139,7 +139,9 @@ impl Renderer {
         }
         let fit = sun.and_then(|s| shadow_fit(s, &receivers, &[]));
         let count = if fit.is_some() { transparent.len() } else { 0 };
-        if count > MAX_TRANSPARENT_DRAWS {
+        if count > MAX_TRANSPARENT_DRAWS
+            || count as u32 > self.device.limits().max_texture_array_layers
+        {
             return Err(Error::InvalidInput("more than 64 transparent shadow draws"));
         }
         let matrix = fit.map_or(Mat4::IDENTITY, |f| f.matrix);

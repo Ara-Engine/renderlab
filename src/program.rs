@@ -557,6 +557,16 @@ pub(crate) fn declares_transmittance(program: &str) -> bool {
 pub(crate) fn declares_reflection(program: &str) -> bool {
     declares(program, "fn", "reflection_lobe") && tokens(program).contains(&"specular_incident")
 }
+// TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
+// program, even when that program never asks for reflections of its own.
+pub(crate) fn glass_hit_program(program: &str) -> String {
+    let mut source = program.to_owned();
+    if !declares(program, "fn", "reflection_lobe") {
+        source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
+    }
+    source.push_str("\nfn rl_glass_requires_incident(input:SurfaceInput)->vec4<f32> {return specular_incident(input);}\n");
+    source
+}
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")
 }
