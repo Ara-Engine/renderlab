@@ -926,7 +926,9 @@ fn gpu_r0b_program_primary() {
     scene.sun = None;
     let root = std::env::var("RENDERLAB_M7_REFERENCE_OUT").unwrap();
     let root = Path::new(&root);
-    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off (explicit since TR1b made it the
+    // default: this test compares exact single frames with a pixel-centre oracle),
+    // anisotropy 1.
     let mut renderer = Renderer::new_with_hardware_shadows(
         device.clone(),
         queue.clone(),
@@ -939,6 +941,9 @@ fn gpu_r0b_program_primary() {
     .unwrap();
     renderer
         .set_primary_visibility(PrimaryVisibility::Traced)
+        .unwrap();
+    renderer
+        .set_reconstruction(crate::Reconstruction::off())
         .unwrap();
     renderer
         .set_lighting(&Lighting {

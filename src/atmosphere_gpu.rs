@@ -321,6 +321,11 @@ impl Renderer {
     pub fn atmosphere(&self) -> Atmosphere {
         self.atmosphere.settings
     }
+    /// Whether primary misses show the per-pixel sky rather than one clear colour; TR1
+    /// reconstructs them as a visible sky then.
+    pub(super) fn atmosphere_sky_visible(&self) -> bool {
+        self.atmosphere.settings.sky
+    }
     /// The first directional light: its unit direction toward the sun and its lux.
     fn atmosphere_sun(&self) -> Option<(Vec3, [f32; 3])> {
         self.lighting

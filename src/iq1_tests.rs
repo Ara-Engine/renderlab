@@ -353,6 +353,9 @@ fn gpu_iq1_quarry() {
     if path == "traced" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     }
+    // IQ1's 1x rows stay unreconstructed now that TR1 is the default (TR1b); its TR1 rows
+    // enable it explicitly.
+    r.set_reconstruction(Reconstruction::off()).unwrap();
     let lighting: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
     let v3 = |v: &serde_json::Value| -> [f32; 3] {
@@ -503,7 +506,7 @@ fn gpu_iq1_quarry() {
                 &out.join(format!("{path}-tr1x{n}{tag}-pose{pose}.f32")),
                 &capture(&mut r),
             );
-            r.set_reconstruction(Reconstruction::default()).unwrap();
+            r.set_reconstruction(Reconstruction::off()).unwrap();
         }
         // IQ1_CACHE=1: the radiance cache on (G1c's default settings, 8 settle frames),
         // then, with IQ1_JITTER, its own jittered average.

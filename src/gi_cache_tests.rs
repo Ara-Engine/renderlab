@@ -3625,6 +3625,7 @@ fn gpu_g2_quarry() {
                         // TR1's measured settings over N still frames of the settled cache,
                         // as IQ1's tr1xN (RENDERLAB_G2_TR1, default 8 and 64; empty: none).
                         for n in &tr1 {
+                            r.set_reconstruction(Reconstruction::off()).unwrap();
                             r.set_reconstruction(Reconstruction::identity()).unwrap();
                             for _ in 0..*n {
                                 draw(&mut r, &camera);
@@ -3633,7 +3634,7 @@ fn gpu_g2_quarry() {
                                 &format!("{v}-tr1x{n}-p{pose}"),
                                 &capture_radiance(&mut r, exposure),
                             );
-                            r.set_reconstruction(Reconstruction::default()).unwrap();
+                            r.set_reconstruction(Reconstruction::off()).unwrap();
                         }
                     }
                 }
@@ -3646,6 +3647,7 @@ fn gpu_g2_quarry() {
                 for v in &variants {
                     r.set_indirect(g2_variant(v)).unwrap();
                     if tr1_on {
+                        r.set_reconstruction(Reconstruction::off()).unwrap();
                         r.set_reconstruction(Reconstruction::identity()).unwrap();
                     }
                     r.reset_indirect();
@@ -3661,7 +3663,7 @@ fn gpu_g2_quarry() {
                             );
                         }
                     }
-                    r.set_reconstruction(Reconstruction::default()).unwrap();
+                    r.set_reconstruction(Reconstruction::off()).unwrap();
                 }
             }
             "determinism" => {

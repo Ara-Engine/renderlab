@@ -402,8 +402,8 @@ fn gpu_at1_quarry() {
             quarry_lux,
             3,
         ),
-        ("noon", Atmosphere::default(), false, noon, space, 3),
-        ("low", Atmosphere::default(), false, low, space, 3),
+        ("noon", Atmosphere::default(), false, noon, space, 8),
+        ("low", Atmosphere::default(), false, low, space, 8),
         ("low-volumetric", volumetric, false, low, space, 24),
     ];
     let mut log = serde_json::json!({"path": path,
