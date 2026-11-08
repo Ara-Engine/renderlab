@@ -40,6 +40,9 @@ struct SurfaceInput {
     material:Material,
     // Engine-private: pass `input` to the services below, never read it.
     receiver:Receiver,
+    // DC1: authored world-space overlays, evaluated before surface(). Programs may
+    // consume these directly or through material_base_color/metallic_roughness/normal.
+    decals:DecalInput,
 };
 
 // One light's unshadowed incidence. `direction` points toward the light.
@@ -136,7 +139,9 @@ fn material_normal(input:SurfaceInput) -> vec3<f32> {
     }
     // A source-back surface reverses the entire perturbed frame.
     if material.double_sided!=0u && !input.source_front { n=-n; }
-    return n;
+    if input.decals.normal_multiply==1.0 { return n; }
+    let decaled=unit_normal(n*input.decals.normal_multiply+input.decals.normal_add);
+    return select(n,decaled,dot(decaled,decaled)>0.5);
 }
 
 // Isotropic GGX lobe filtering. roughness is perceptual (alpha = roughness^2),

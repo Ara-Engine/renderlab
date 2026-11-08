@@ -2113,6 +2113,8 @@ impl Renderer {
             let program = self.primary.as_ref().unwrap().program;
             let mut h = Sha256::new();
             h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
+            // DC1: altered surface inputs relight bounce cells on the existing schedule.
+            h.update(self.lighting.decals.hash);
             h.update(environment);
             h.update(self.program_slot(program).source.as_bytes());
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
