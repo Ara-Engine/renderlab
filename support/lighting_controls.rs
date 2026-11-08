@@ -26,12 +26,16 @@ enum Source {
         position: [f32; 3],
         candela: [f32; 3],
         range: Option<f32>,
+        #[serde(default)]
+        source_radius: f32,
     },
     Spot {
         position: [f32; 3],
         travel: [f32; 3],
         candela: [f32; 3],
         range: Option<f32>,
+        #[serde(default)]
+        source_radius: f32,
         inner: f32,
         outer: f32,
     },
@@ -102,16 +106,19 @@ pub fn parse_with_shadows(source: &str) -> Result<(Lighting, Shadows), serde_jso
                     position,
                     candela,
                     range,
+                    source_radius,
                 } => Light::Point {
                     position: Vec3::from_array(position),
                     candela,
                     range,
+                    source_radius,
                 },
                 Source::Spot {
                     position,
                     travel,
                     candela,
                     range,
+                    source_radius,
                     inner,
                     outer,
                 } => Light::Spot {
@@ -119,6 +126,7 @@ pub fn parse_with_shadows(source: &str) -> Result<(Lighting, Shadows), serde_jso
                     travel: Vec3::from_array(travel),
                     candela,
                     range,
+                    source_radius,
                     inner,
                     outer,
                 },

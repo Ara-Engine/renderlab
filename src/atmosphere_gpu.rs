@@ -158,10 +158,17 @@ struct Kernels {
 /// from, the map, its kernel groups (the specular levels, then diffuse), and whether a
 /// frame has written it yet.
 struct Procedural {
-    key: String,
+    key: ProceduralKey,
     map: crate::environment::EnvironmentMap,
     groups: Vec<Owned<wgpu::BindGroup>>,
     written: bool,
+}
+
+#[derive(Debug, PartialEq)]
+struct ProceduralKey {
+    sun: Option<(Vec3, [f32; 3])>,
+    medium: AtmosphereMedium,
+    altitude: f32,
 }
 
 pub(super) struct AtmosphereGpu {
@@ -349,6 +356,17 @@ impl Renderer {
     pub fn atmosphere(&self) -> Atmosphere {
         self.atmosphere.settings
     }
+    #[cfg(test)]
+    pub(crate) fn test_atmosphere_environment(&self) -> (u64, u64, usize) {
+        (
+            self.environment.generation,
+            self.environment.content_revision,
+            self.environment
+                .selected
+                .as_ref()
+                .map_or(0, |m| Arc::as_ptr(&m.0) as usize),
+        )
+    }
     /// Whether primary misses show the per-pixel sky rather than one clear colour; TR1
     /// reconstructs them as a visible sky then.
     pub(super) fn atmosphere_sky_visible(&self) -> bool {
@@ -376,7 +394,7 @@ impl Renderer {
     }
 
     /// Whether the selected environment is a captured map (not the procedural one).
-    fn captured_environment(&self) -> bool {
+    pub(super) fn captured_environment(&self) -> bool {
         match (&self.environment.selected, &self.atmosphere.procedural) {
             (None, _) => false,
             (Some(a), Some(p)) => !Arc::ptr_eq(&a.0, &p.map.0),
@@ -384,10 +402,9 @@ impl Renderer {
         }
     }
 
-    /// Selects, regenerates or releases the procedural environment (`Atmosphere::environment`):
-    /// generated while no captured map is selected, again when its inputs change; a new map
-    /// bumps the environment generation, so lighting and the radiance cache take it up.
-    fn update_procedural_environment(&mut self) {
+    /// Rewrites a procedural sky in place when its lighting changes. Only a storage/yaw
+    /// change replaces the map; content revisions use GI's existing progressive relighting.
+    fn update_procedural_environment(&mut self, eye: Vec3) {
         let s = self.atmosphere.settings;
         let captured = self.captured_environment();
         let mine = self.environment.selected.is_some() && !captured;
@@ -399,18 +416,25 @@ impl Renderer {
             self.atmosphere.procedural = None;
             return;
         }
-        let sun = self.atmosphere_sun();
-        let key = format!(
-            "{sun:?} {:?} {}",
-            s.medium, self.environment.parameters.rotation_y_radians
-        );
-        if mine
-            && self
-                .atmosphere
-                .procedural
-                .as_ref()
-                .is_some_and(|p| p.key == key)
+        let key = ProceduralKey {
+            sun: self.atmosphere_sun(),
+            medium: s.medium,
+            altitude: ((eye.y - s.medium.ground_height) * 1e-3).clamp(
+                1e-3,
+                s.medium.top_radius_km - s.medium.ground_radius_km - 1e-3,
+            ),
+        };
+        if let Some(p) = self
+            .atmosphere
+            .procedural
+            .as_mut()
+            .filter(|p| mine && p.map.0.yaw == -self.environment.parameters.rotation_y_radians)
         {
+            if p.key != key {
+                p.key = key;
+                p.written = false;
+                self.environment.content_revision += 1;
+            }
             return;
         }
         let (device, ledger) = (&self.device, &self.ledger);
@@ -494,7 +518,7 @@ impl Renderer {
                 levels: ENVIRONMENT_LEVELS,
                 // World axes: cancel the caller's yaw.
                 yaw: -self.environment.parameters.rotation_y_radians,
-                hash: Sha256::digest(key.as_bytes()).into(),
+                hash: Sha256::digest(format!("{key:?}").as_bytes()).into(),
             }));
         self.environment.selected = Some(map.clone());
         self.environment.generation += 1;
@@ -517,7 +541,9 @@ impl Renderer {
     ) -> Result<(), Error> {
         let s = self.atmosphere.settings;
         self.atmosphere.active = s.active();
+        let eye = camera.view().inverse().w_axis.truncate();
         if !self.atmosphere.active {
+            self.update_procedural_environment(eye);
             self.atmosphere.previous = None;
             return Ok(());
         }
@@ -534,7 +560,7 @@ impl Renderer {
             self.atmosphere.previous = None;
         }
         self.atmosphere_volume_groups(false);
-        self.update_procedural_environment();
+        self.update_procedural_environment(eye);
         if uploads.geometry > 0
             || uploads.models > 0
             || uploads.instances > 0
@@ -833,21 +859,6 @@ impl Renderer {
     /// Creates the camera volume's kernel groups that are missing (the injection's again
     /// when the scene TLAS changed).
     fn atmosphere_volume_groups(&mut self, injection: bool) {
-        let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
-        let virtual_buffers = (self.hardware_shadows.is_none()
-            && self.primary_mode == PrimaryVisibility::VisibilityBuffer
-            && self.soft_mode == SoftShadows::Virtual
-            && self.shadows.settings.enabled()
-            && self.shadows.settings.directional_disk_angle > 0.0)
-            .then(|| self.virtual_shadows.as_ref()?.atmosphere_buffers())
-            .flatten();
-        let key = VisibilityKey {
-            virtual_map: virtual_buffers.is_some(),
-            generation: tlas.map_or(self.shadows.stats.resource_generation, |t| {
-                t as *const wgpu::Tlas as u64
-            }),
-            buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
-        };
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &mut self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -876,6 +887,22 @@ impl Renderer {
         }
         let Some(scatter) = &v.scatter else {
             return;
+        };
+        // Aerial perspective alone needs no shadow resources.
+        let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
+        let virtual_buffers = (self.hardware_shadows.is_none()
+            && self.primary_mode == PrimaryVisibility::VisibilityBuffer
+            && self.soft_mode == SoftShadows::Virtual
+            && self.shadows.settings.enabled()
+            && self.shadows.settings.directional_disk_angle > 0.0)
+            .then(|| self.virtual_shadows.as_ref()?.atmosphere_buffers())
+            .flatten();
+        let key = VisibilityKey {
+            virtual_map: virtual_buffers.is_some(),
+            generation: tlas.map_or(self.shadows.stats.resource_generation, |t| {
+                t as *const wgpu::Tlas as u64
+            }),
+            buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
         };
         if v.integrate.is_none() {
             v.integrate = Some([0, 1].map(|i| {

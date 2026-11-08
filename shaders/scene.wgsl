@@ -132,7 +132,7 @@ fn vertex_output(input: VertexInput) -> VertexOutput {
 
 // Only lit shading programs and the engine's visibility kernels use group 3.
 struct LightingUniform { eye:vec3<f32>, count:u32, environment:vec3<f32>, exposure:f32, map:vec4<f32> };
-struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
+struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32>, source:vec4<f32> };
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
 @group(3) @binding(1) var<storage,read> lights:array<Light>;
 @group(3) @binding(2) var dfg:texture_2d<f32>;

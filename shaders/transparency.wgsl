@@ -123,6 +123,7 @@ const TP_TRACE_TILE=vec2<u32>(8u,4u);
 @group(0) @binding(31) var tp_color:texture_2d<f32>;
 @group(0) @binding(32) var tp_depth:texture_2d<f32>;
 @group(0) @binding(33) var tp_sampler:sampler;
+@group(0) @binding(38) var tp_reflected:texture_2d<f32>;
 struct TpDraw { thickness:f32, pad0:f32, pad1:f32, pad2:f32 };
 @group(0) @binding(37) var<uniform> tp_draw:TpDraw;
 // The opaque light behind a thin slab at `world`: entry refraction through the shading
@@ -189,6 +190,19 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
 }
 // ---- end TP_GLASS ----
 
+// ---- TP_AA_SEED ----
+// TP2: four geometric coverage samples smooth glass edges without temporal trails.
+// Shade once per pixel; untouched samples retain the exact colour behind the pane.
+@group(0) @binding(31) var tp_seed_color:texture_2d<f32>;
+@vertex fn tp_seed_vs(@builtin(vertex_index) id:u32)->@builtin(position) vec4<f32> {
+    let p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));
+    return vec4<f32>(p[id],0.0,1.0);
+}
+@fragment fn tp_seed_fs(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32> {
+    return textureLoad(tp_seed_color,vec2<i32>(p.xy),0);
+}
+// ---- end TP_AA_SEED ----
+
 // ---- TP_PARTICLES ----
 struct TpParticle { position:vec4<f32>, velocity:vec4<f32>, light:vec4<f32> };
 // position.w age (s), velocity.w lifetime (s; 0 never alive), light.rgb incident irradiance.
@@ -244,7 +258,9 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
         if light.kind.x!=0u { continue; }
         let l=-light.travel_outer.xyz;
         let visible=select(1.0,tp_sun_visibility(world),dot(l,tp.sun.xyz)>0.9999);
-        sum+=light.rgb_inner.xyz*visible;
+        // TP2: particles receive the same coloured sun transmission as surfaces.
+        let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(world,l),light.kind.z!=0u);
+        sum+=light.rgb_inner.xyz*visible*transmission;
     }
     var sky=vec3<f32>(0.0);
     for(var a=0u;a<3u;a+=1u) {

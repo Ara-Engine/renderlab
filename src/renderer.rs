@@ -55,7 +55,7 @@ mod gi_cache;
 pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
 #[path = "transparency_gpu.rs"]
-mod transparency_gpu;
+pub(crate) mod transparency_gpu;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -762,7 +762,8 @@ impl Renderer {
         if device_limits.max_texture_array_layers < 6
             || device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 8
+            // TP2 adds one sampled map to the complete lighting/material ABI (15).
+            || device_limits.max_sampled_textures_per_shader_stage < 15
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(
@@ -2483,6 +2484,7 @@ impl Renderer {
                 matrix,
                 self.shadows.enabled(view_mode),
                 self.standard.id(),
+                self.soft_mode == SoftShadows::Temporal,
             )?;
             #[cfg(test)]
             assert!(
@@ -2898,13 +2900,18 @@ impl Renderer {
             && !temporal
             && !streamed.is_empty()
             && self.residency.mode != TextureResidency::Full;
-        if streaming {
-            // Admission guarantees one program per traced frame: the first draw's.
-            let program = draws
-                .first()
-                .and_then(|d| d.material)
-                .map_or(self.standard.id(), |m| m.program.id());
-            self.ensure_streamed(program)?;
+        // MP1: a frame whose draws use several programs shades each program's tile list
+        // with that program's list pipelines; one program keeps its single dispatch.
+        let (programs, _) = primary_ray_gpu::program_lists::frame_slots(
+            draws
+                .iter()
+                .map(|d| d.material.map_or(self.standard.id(), |m| m.program.id())),
+        );
+        if traced && !temporal && programs.len() > 1 {
+            self.ensure_lists(&programs, streaming, usize::from(soft))?;
+            self.ensure_bins()?;
+        } else if streaming {
+            self.ensure_streamed(programs.first().copied().unwrap_or(self.standard.id()))?;
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {
@@ -2947,6 +2954,8 @@ impl Renderer {
             ));
             // AT1: the camera volume and uniform the lighting group binds.
             self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
+            // TP2: publish the coloured sun map before binding the frame's lighting.
+            self.prepare_transmission(transparent)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
         cpu.upload += start.elapsed() - cpu.shadow_upload;
@@ -3129,6 +3138,10 @@ impl Renderer {
             cpu.shadow_encode = shadow_start.elapsed();
         }
         // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
+        if lit {
+            // TP2: all opaque paths and GI shading read this independent caster map.
+            self.encode_transmission(&mut encoder, transparent);
+        }
         if lit && !virtual_frame {
             self.encode_atmosphere(&mut encoder);
         }

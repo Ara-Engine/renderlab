@@ -160,7 +160,8 @@ impl Default for Settings {
 }
 
 /// The renderer's light vector and shadow requests for a sun and local lights.
-/// The sun, when present, is light 0 and the only shadowed light.
+/// The sun, when present, is light 0 and the only explicit shadow request. Local lights
+/// use the automatic local-shadow pool; their source radii pass through unchanged.
 pub(crate) fn lighting(
     sun: Option<Sun>,
     lights: &[Light],
@@ -310,11 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn sun_is_light_zero_and_the_only_shadowed_light() {
+    fn sun_is_light_zero_and_the_only_explicit_shadow_request() {
         let lamp = Light::Point {
             position: Vec3::Y,
             candela: [100.0; 3],
             range: Some(5.0),
+            source_radius: 0.125,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.
@@ -334,6 +336,10 @@ mod tests {
         .unwrap();
         assert!(matches!(lighting.lights[0], Light::Directional { .. }));
         assert_eq!(lighting.lights.len(), 3);
+        assert_eq!(
+            lighting.lights[1], lamp,
+            "source radius survives the engine facade"
+        );
         assert_eq!(lighting.environment, [1.0, 2.0, 3.0]);
         assert_eq!(lighting.exposure_stops, -3.0);
         assert!(matches!(
@@ -347,7 +353,7 @@ mod tests {
         );
         assert_eq!(shadows.directional_disk_angle, sun.angular_radius);
 
-        // No sun: an empty request vector disables shadows for every light.
+        // No sun: no explicit shadow requests; the automatic local pool still shadows lamps.
         let (lighting, shadows) =
             super::lighting(None, &[lamp], Sky::default(), Exposure::default()).unwrap();
         assert_eq!(lighting.lights.len(), 1);

@@ -126,7 +126,7 @@ pub(super) struct LightClusters {
     pipeline: Owned<wgpu::ComputePipeline>,
     /// The kernel's group, keyed on the light buffer generation it binds.
     bind: Option<(u64, Owned<wgpu::BindGroup>)>,
-    /// Bound at group 3 binding 22; `generation` changes with it.
+    /// Bound at group 3 binding 25; `generation` changes with it.
     pub atlas: Atlas,
     retired: Vec<(u64, Atlas)>,
     pub generation: u64,
@@ -316,7 +316,7 @@ impl Renderer {
             .lighting
             .pending
             .records
-            .chunks_exact_mut(64)
+            .chunks_exact_mut(crate::lighting::LIGHT_BYTES)
             .enumerate()
         {
             let w = slots
@@ -337,7 +337,14 @@ impl Renderer {
             }
         }
         let clustered = state.enabled && lights.len() <= lc::MAX_CLUSTERED;
-        let header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
+        let mut header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
+        // LC2 source sampling rotates only with TR1; comparisons with history off remain
+        // deterministic. Raster map filtering is deterministic on every frame.
+        let sample = self
+            .reconstruction_frame
+            .map_or(0u32, |k| k.wrapping_add(1) as u32);
+        header[88..92].copy_from_slice(&sample.to_ne_bytes());
+        header[100..104].copy_from_slice(&state.settings.near.to_ne_bytes());
         if let Some(span) = crate::lighting::dirty_span(&state.published, &header) {
             self.queue
                 .write_buffer(&state.frame, span.start as u64, &header[span.clone()]);
@@ -382,7 +389,9 @@ impl Renderer {
                     state.keys[slot] = None;
                     continue;
                 };
-                let record = &self.lighting.pending.records[light as usize * 64..][..64];
+                let record = &self.lighting.pending.records
+                    [light as usize * crate::lighting::LIGHT_BYTES..]
+                    [..crate::lighting::LIGHT_BYTES];
                 let key: [u8; 32] = Sha256::new()
                     .chain_update(&record[..32])
                     .chain_update(&record[60..64])
