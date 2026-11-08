@@ -11,6 +11,13 @@
 //! `limits`, `environment`, `exposure_stops`), shown as a visible sky. `--render-scale`
 //! picks a TR1 upscaling preset.
 //!
+//! Measurement modes (M7-RQ1, docs/m7-rq1.md): `--matched` renders the lighting the path
+//! tracer reproduces (uniform sky; no aerial perspective, fog or decals; the hero on the
+//! photoreal program; post off), and `--reference SPP` path-traces the same placements and
+//! camera instead (`renderlab::reference`). `--freeze FRAME` holds every frame at FRAME's
+//! time (a still camera), `--write-frames 8,47` writes exactly those frames, and
+//! `--no-post` presents without post processing.
+//!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
@@ -22,12 +29,16 @@ mod environment_controls;
 #[path = "../support/limits.rs"]
 mod policy;
 
-use renderlab::{asset, engine::*};
-use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
+use renderlab::{asset, engine::*, reference};
+use std::{collections::HashMap, f32::consts::PI, fs, path::PathBuf, time::Instant};
 
 const GAME_PROGRAM: &str = include_str!("game_scene.wgsl");
 const TOON_PROGRAM: &str = include_str!("game_toon.wgsl");
 const FPS: f32 = 30.0;
+/// Vertical field of view, degrees.
+const FOV_Y: f32 = 55.0;
+/// `--sky uniform` and `--matched`: a constant blue sky, cd/m².
+const UNIFORM_SKY: [f32; 3] = [3500.0, 5000.0, 7500.0];
 
 struct Args {
     path: Option<RenderPath>,
@@ -42,6 +53,11 @@ struct Args {
     scale: RenderScale,
     uniform_sky: bool,
     volumetric_fog: Option<bool>,
+    matched: bool,
+    post: bool,
+    reference: Option<u32>,
+    freeze: Option<u32>,
+    write_frames: Option<Vec<u32>>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -58,6 +74,11 @@ impl Args {
             scale: RenderScale::Native,
             uniform_sky: false,
             volumetric_fog: None,
+            matched: false,
+            post: true,
+            reference: None,
+            freeze: None,
+            write_frames: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -94,6 +115,18 @@ impl Args {
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
+                "--matched" => a.matched = true,
+                "--no-post" => a.post = false,
+                "--reference" => a.reference = Some(value()?.parse::<u32>()?.max(2)),
+                "--freeze" => a.freeze = Some(value()?.parse()?),
+                "--write-frames" => {
+                    a.write_frames = Some(
+                        value()?
+                            .split(',')
+                            .map(str::parse)
+                            .collect::<Result<_, _>>()?,
+                    )
+                }
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
                         "native" => RenderScale::Native,
@@ -113,6 +146,11 @@ impl Args {
         if a.frames == 0 {
             return Err("--frames must be positive".into());
         }
+        if a.reference.is_some() && a.quarry.is_some() {
+            return Err("--reference traces the procedural scene only, not --quarry".into());
+        }
+        // The path tracer reproduces only the matched lighting.
+        a.matched |= a.reference.is_some();
         Ok(a)
     }
 }
@@ -169,6 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 render_scale: args.scale,
                 // Sun shafts through a light haze (0.01 per metre over the first 128 m).
                 volumetric_fog: match args.volumetric_fog {
+                    _ if args.matched => None,
                     Some(true) => Some(VolumetricFog {
                         extra_density: 0.01,
                         ..Default::default()
@@ -176,6 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(false) => None,
                     None => Settings::default().volumetric_fog,
                 },
+                aerial_perspective: !args.matched,
+                height_fog: Settings::default().height_fog.filter(|_| !args.matched),
                 exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
             },
@@ -183,6 +224,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     engine.resize(args.size[0], args.size[1])?;
+    if args.matched || !args.post {
+        engine
+            .renderer_mut()
+            .set_post_settings(renderlab::PostSettings::disabled())?;
+    }
     eprintln!(
         "game_scene adapter={:?} path={path:?} capabilities=(rt {}, nonrt {}) size={}x{} debug_build={}",
         engine.adapter_info().name,
@@ -196,14 +242,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Two programs in one frame: photoreal props and the toon hero (MP1).
     let program = engine.create_program("game", GAME_PROGRAM)?;
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
-    let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
-        engine.create_material(&MaterialDesc {
+    // Photoreal materials, recorded with their standard-model parameters for `--reference`.
+    let mut traced_materials = HashMap::new();
+    let mut material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
+        let id = engine.create_material(&MaterialDesc {
             base_color: [color[0], color[1], color[2], 1.0],
             metallic,
             roughness,
             program: Some(program),
             ..Default::default()
-        })
+        })?;
+        traced_materials.insert(
+            id,
+            reference::Material {
+                base_color: color,
+                metallic,
+                roughness,
+                ..Default::default()
+            },
+        );
+        Ok::<_, Error>(id)
     };
     let stone = material(&mut engine, [0.62, 0.6, 0.56], 0.0, 0.9)?;
     let wood = material(&mut engine, [0.56, 0.36, 0.18], 0.0, 0.75)?;
@@ -216,15 +274,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("shadow_tint", Value::Vec3([0.22, 0.14, 0.38])),
         ("rim_color", Value::Vec3([0.35, 0.5, 0.7])),
     ];
-    let toon = engine.create_material(&MaterialDesc {
-        base_color: [0.95, 0.55, 0.2, 1.0],
-        program: Some(toon_program),
-        parameters: &hero_style,
-        ..Default::default()
-    })?;
+    // Matched runs shade the hero with the photoreal program: the path tracer has no toon.
+    let toon = if args.matched {
+        material(&mut engine, [0.95, 0.55, 0.2], 0.0, 0.5)?
+    } else {
+        engine.create_material(&MaterialDesc {
+            base_color: [0.95, 0.55, 0.2, 1.0],
+            program: Some(toon_program),
+            parameters: &hero_style,
+            ..Default::default()
+        })?
+    };
 
-    let cube = engine.create_mesh(&mesh(&cube_geometry()))?;
-    let sphere = engine.create_mesh(&mesh(&sphere_geometry(48, 24)))?;
+    // Meshes and placements are also recorded for `--reference`.
+    let mut traced_meshes = HashMap::new();
+    let mut placed: Vec<Placed> = Vec::new();
+    let cube_mesh = cube_geometry();
+    let cube = engine.create_mesh(&mesh(&cube_mesh))?;
+    traced_meshes.insert(cube, cube_mesh);
+    let sphere_mesh = sphere_geometry(48, 24);
+    let sphere = engine.create_mesh(&mesh(&sphere_mesh))?;
+    traced_meshes.insert(sphere, sphere_mesh);
     let anchor = match &quarry {
         Some(_) => {
             let policy_args = vec![
@@ -260,12 +330,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
-            let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
-            engine.spawn(plane, ground, Mat4::IDENTITY)?;
+            let plane_mesh = plane_geometry(60.0, 8);
+            let plane = engine.create_mesh(&mesh(&plane_mesh))?;
+            traced_meshes.insert(plane, plane_mesh);
+            spawn(&mut engine, &mut placed, plane, ground, Mat4::IDENTITY)?;
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
             // constant blue sky for comparison.
-            if args.uniform_sky {
-                engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
+            if args.uniform_sky || args.matched {
+                engine.set_sky(Sky::Uniform(UNIFORM_SKY))?;
             }
             Vec3::ZERO
         }
@@ -274,19 +346,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let boxed = |center: Vec3, size: Vec3| Mat4::from_translation(center) * Mat4::from_scale(size);
     // The arch: two pillars and a lintel.
     for x in [-2.2, 2.2] {
-        engine.spawn(
+        spawn(&mut engine, &mut placed, 
             cube,
             stone,
             boxed(at(x, 2.0, -3.0), Vec3::new(0.8, 4.0, 0.8)),
         )?;
     }
-    engine.spawn(
+    spawn(&mut engine, &mut placed, 
         cube,
         stone,
         boxed(at(0.0, 4.4, -3.0), Vec3::new(5.2, 0.8, 1.0)),
     )?;
     // A red wall beside it, whose colour should bleed onto the ground and hero.
-    engine.spawn(
+    spawn(&mut engine, &mut placed, 
         cube,
         red,
         boxed(at(-5.5, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
@@ -298,25 +370,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (4.5, 1.5, 1.1, 0.4),
         (4.2, 0.5, 2.3, 0.0),
     ] {
-        engine.spawn(
+        spawn(&mut engine, &mut placed, 
             cube,
             wood,
             Mat4::from_translation(at(x, y, z)) * Mat4::from_rotation_y(turn),
         )?;
     }
-    engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
+    spawn(&mut engine, &mut placed, sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
-    engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
-    let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
-    let hero_body = engine.spawn(sphere, toon, Mat4::IDENTITY)?;
-    let hero_head = engine.spawn(sphere, toon, Mat4::IDENTITY)?;
+    spawn(&mut engine, &mut placed, sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
+    let spinner = spawn(&mut engine, &mut placed, cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
+    let hero_body = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
+    let hero_head = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
 
-    engine.set_sun(Some(Sun {
+    let sun = Sun {
         travel: Vec3::new(-0.45, -0.75, -0.5),
         // Under the atmosphere this is the sun outside it (`Sun::default()`, 120 klux), which
         // its transmittance dims and warms; under `--sky uniform` it arrives as given.
         ..Default::default()
-    }))?;
+    };
+    engine.set_sun(Some(sun))?;
     // A warm lantern under the arch arrives with many-light shading (LC1): at this
     // revision a soft sun must be the only light (docs/api.md, "Current limits").
 
@@ -339,7 +412,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [256; 2],
         &puddle_rgba8(256),
     )?;
-    engine.set_decals(&[
+    // The path tracer has no decals, so matched runs leave them out.
+    let decals = [
         Decal {
             transform: ground_decal(at(0.0, 0.0, -0.6), 2.6, 1.0, 0.3),
             textures: DecalTextures {
@@ -361,13 +435,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             blend: DecalBlend::Multiply,
             ..Default::default()
         },
-    ])?;
+    ];
+    engine.set_decals(if args.matched { &[] } else { &decals })?;
 
     fs::create_dir_all(&args.out)?;
     let ready = start.elapsed();
     let mut frames = Vec::new();
+    let traced = match args.reference {
+        Some(samples) => Some(Traced::new(
+            samples,
+            &traced_meshes,
+            &traced_materials,
+            sun,
+        )?),
+        None => None,
+    };
     for frame in 0..args.frames {
-        let t = frame as f32 / FPS;
+        let written = match &args.write_frames {
+            Some(list) => list.contains(&frame),
+            None => frame % args.every == 0 || frame + 1 == args.frames,
+        };
+        if traced.is_some() && !written {
+            continue;
+        }
+        let t = args.freeze.unwrap_or(frame) as f32 / FPS;
         // The hero walks a circle through the arch and bobs.
         let walk = 0.35 * t;
         let hero = at(
@@ -375,17 +466,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.55 + 0.12 * (6.0 * t).sin().abs(),
             -1.0 + 3.0 * walk.cos(),
         );
-        engine.set_transform(hero_body, boxed(hero, Vec3::splat(0.55)))?;
-        engine.set_transform(
-            hero_head,
-            boxed(hero + Vec3::new(0.0, 0.8, 0.0), Vec3::splat(0.35)),
-        )?;
-        engine.set_transform(
-            spinner,
-            Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
-                * Mat4::from_rotation_y(1.5 * t)
-                * Mat4::from_rotation_x(0.6 * t),
-        )?;
+        let moved = [
+            (hero_body, boxed(hero, Vec3::splat(0.55))),
+            (
+                hero_head,
+                boxed(hero + Vec3::new(0.0, 0.8, 0.0), Vec3::splat(0.35)),
+            ),
+            (
+                spinner,
+                Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
+                    * Mat4::from_rotation_y(1.5 * t)
+                    * Mat4::from_rotation_x(0.6 * t),
+            ),
+        ];
         // Fly path: a slow orbit that descends and closes in on the hero.
         let orbit = 0.6 + 0.25 * t;
         let radius = 14.0 - 4.0 * (t / 2.0).min(1.0);
@@ -395,18 +488,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 5.5 - 2.0 * (t / 2.0).min(1.0),
                 radius * orbit.cos(),
             );
-        let camera = Camera::look_at(
-            eye,
-            hero.lerp(anchor + Vec3::Y, 0.5),
-            Vec3::Y,
-            55f32.to_radians(),
-            0.05,
-            500.0,
-        )?;
+        let target = hero.lerp(anchor + Vec3::Y, 0.5);
+        if let Some(traced) = &traced {
+            let begin = Instant::now();
+            let stats = traced.render(
+                &placed,
+                &moved,
+                reference::Pose { eye, target },
+                args.size,
+                exposure,
+                &args.out.join(format!("frame-{frame:03}")),
+            )?;
+            frames.push(serde_json::json!({
+                "frame": frame, "trace_seconds": begin.elapsed().as_secs_f64(), "samples": traced.samples,
+                "split_half_noise_codes_rms": stats.0, "invalid_pixels": stats.1,
+            }));
+            continue;
+        }
+        for (object, transform) in moved {
+            engine.set_transform(object, transform)?;
+        }
+        let camera = Camera::look_at(eye, target, Vec3::Y, FOV_Y.to_radians(), 0.05, 500.0)?;
         let begin = Instant::now();
         let report = engine.render(&camera)?;
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
-        let written = frame % args.every == 0 || frame + 1 == args.frames;
         if written {
             let image = engine.capture()?;
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
@@ -442,6 +547,214 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// One spawned object, recorded for the path-traced reference.
+struct Placed {
+    object: ObjectId,
+    mesh: MeshId,
+    material: MaterialId,
+    transform: Mat4,
+}
+/// Spawns an object and records its placement for `--reference`.
+fn spawn(
+    engine: &mut Engine,
+    placed: &mut Vec<Placed>,
+    mesh: MeshId,
+    material: MaterialId,
+    transform: Mat4,
+) -> Result<ObjectId, Error> {
+    let object = engine.spawn(mesh, material, transform)?;
+    placed.push(Placed {
+        object,
+        mesh,
+        material,
+        transform,
+    });
+    Ok(object)
+}
+
+/// The path-traced reference of the matched scene (`--reference SPP`): the same meshes,
+/// standard-model materials, sun disk and uniform sky, on its own ray-query device.
+struct Traced {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    samples: u32,
+    meshes: Vec<reference::Mesh>,
+    mesh_index: HashMap<MeshId, usize>,
+    materials: Vec<reference::Material>,
+    material_index: HashMap<MaterialId, usize>,
+    sun: reference::Sun,
+}
+impl Traced {
+    fn new(
+        samples: u32,
+        meshes: &HashMap<MeshId, Geometry>,
+        materials: &HashMap<MaterialId, reference::Material>,
+        sun: Sun,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref()
+            != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+        {
+            return Err("--reference needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK".into());
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
+        let a = adapter.limits();
+        let limits = renderlab::traced_limits(wgpu::Limits {
+            max_blas_primitive_count: a.max_blas_primitive_count,
+            max_blas_geometry_count: 1,
+            max_tlas_instance_count: 4096.min(a.max_tlas_instance_count),
+            max_acceleration_structures_per_shader_stage: 1,
+            max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
+            max_buffer_size: a.max_buffer_size,
+            ..Default::default()
+        });
+        // SAFETY: the caller accepted wgpu's experimental ray-query risk in the environment
+        // (checked above), as the GPU test suites require.
+        let experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: reference::FEATURES | renderlab::TRACED_FEATURES,
+                required_limits: limits,
+                experimental_features,
+                memory_hints: renderlab::MEMORY_HINTS,
+                ..Default::default()
+            }))?;
+        let mut mesh_index = HashMap::new();
+        let meshes = meshes
+            .iter()
+            .enumerate()
+            .map(|(k, (id, g))| {
+                mesh_index.insert(*id, k);
+                reference::Mesh {
+                    positions: g.vertices.iter().map(|v| v.position).collect(),
+                    normals: g.vertices.iter().map(|v| v.normal).collect(),
+                    uvs: g.vertices.iter().map(|v| v.uv).collect(),
+                    indices: g.indices.clone(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut material_index = HashMap::new();
+        let materials = materials
+            .iter()
+            .enumerate()
+            .map(|(k, (id, m))| {
+                material_index.insert(*id, k);
+                *m
+            })
+            .collect();
+        Ok(Self {
+            device,
+            queue,
+            samples,
+            meshes,
+            mesh_index,
+            materials,
+            material_index,
+            sun: reference::Sun {
+                to_light: -sun.travel.normalize(),
+                illuminance: sun.illuminance,
+                angular_radius: sun.angular_radius,
+            },
+        })
+    }
+
+    /// Traces one frame and writes `{stem}.png` plus its two independent half-sample
+    /// images (`-a`, `-b`) in the legacy display transform (exposure, x/(1+x), sRGB).
+    /// Returns the split-half noise of the mean in display codes (RMS) and the invalid
+    /// pixel count.
+    fn render(
+        &self,
+        placed: &[Placed],
+        moved: &[(ObjectId, Mat4)],
+        pose: reference::Pose,
+        size: [u32; 2],
+        exposure_stops: f32,
+        stem: &std::path::Path,
+    ) -> Result<(f64, u32), Box<dyn std::error::Error>> {
+        let instances = placed
+            .iter()
+            .map(|p| reference::Instance {
+                mesh: self.mesh_index[&p.mesh],
+                material: self.material_index[&p.material],
+                transform: moved
+                    .iter()
+                    .find(|(o, _)| *o == p.object)
+                    .map_or(p.transform, |(_, t)| *t),
+            })
+            .collect();
+        let scene = reference::Scene {
+            meshes: self.meshes.clone(),
+            materials: self.materials.clone(),
+            instances,
+            sun: Some(self.sun),
+            sky: UNIFORM_SKY,
+            ..Default::default()
+        };
+        let view = reference::View {
+            open: pose,
+            close: pose,
+            up: Vec3::Y,
+            fov_y: FOV_Y.to_radians(),
+            width: size[0],
+            height: size[1],
+        };
+        let settings = reference::Settings {
+            samples: self.samples,
+            ..Default::default()
+        };
+        let image = reference::render(&self.device, &self.queue, &scene, &view, &settings)?;
+        let scale = exposure_stops.exp2();
+        let display = |pixels: &[[f32; 3]]| -> Vec<u8> {
+            pixels
+                .iter()
+                .flat_map(|p| {
+                    let [r, g, b] = p.map(|c| {
+                        let x = (c * scale).max(0.0);
+                        (srgb(x / (1.0 + x)) * 255.0).round() as u8
+                    });
+                    [r, g, b, 255]
+                })
+                .collect()
+        };
+        let [a, b] = [display(&image.halves[0]), display(&image.halves[1])];
+        // The mean's standard error is half the halves' difference.
+        let noise = (a
+            .iter()
+            .zip(&b)
+            .enumerate()
+            .filter(|(k, _)| k % 4 != 3)
+            .map(|(_, (x, y))| (f64::from(*x) - f64::from(*y)).powi(2) / 4.0)
+            .sum::<f64>()
+            / (image.mean.len() * 3) as f64)
+            .sqrt();
+        let name = stem.file_name().unwrap_or_default().to_string_lossy();
+        for (suffix, rgba8) in [("", display(&image.mean)), ("-a", a), ("-b", b)] {
+            write_png(
+                &stem.with_file_name(format!("{name}{suffix}.png")),
+                &Image {
+                    width: size[0],
+                    height: size[1],
+                    rgba8,
+                },
+            )?;
+        }
+        Ok((noise, image.invalid_pixels))
+    }
+}
+/// The sRGB transfer function of the engine's sRGB output format.
+fn srgb(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// Vertices and triangles before upload.

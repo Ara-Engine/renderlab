@@ -95,9 +95,20 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     match scene.filter(|_| lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed))
     {
-        Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+        Some(scene) => (reflection_source().replace("RL_SCENE", scene), true),
         None => (REFLECTION_STUB.to_owned(), false),
     }
+}
+/// RQ1 screen hook (debug builds only; removed at delivery): RENDERLAB_RQ1_REFLECTIONS names
+/// a replacement for shaders/reflections.wgsl, so one binary screens variants per process.
+fn reflection_source() -> std::borrow::Cow<'static, str> {
+    #[cfg(debug_assertions)]
+    if let Some(text) = std::env::var_os("RENDERLAB_RQ1_REFLECTIONS")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        return text.into();
+    }
+    REFLECTION_API.into()
 }
 // ---- end of M7-R1 reflections ----
 
