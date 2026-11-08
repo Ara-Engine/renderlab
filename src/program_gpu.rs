@@ -88,6 +88,10 @@ pub(crate) struct ProgramPipelines {
     /// Traced shading whose sampling helpers record texture residency requests
     /// (`Renderer::ensure_streamed`): built only when a frame streams textures.
     pub streamed: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    /// MP1: tile-list shading of mixed-program frames, without and with texture
+    /// streaming, then by `Shading` (`Renderer::ensure_lists`). Built by the first mixed
+    /// frame that needs one.
+    pub list: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
 }
 impl ProgramPipelines {
     pub fn has(&self, variant: Variant) -> bool {
@@ -750,9 +754,10 @@ impl Renderer {
 
     /// The sets a frame draws with: `variant` (None for unlit, diagnostic frames) of each
     /// program its draws' materials use (none: the standard program). A traced frame
-    /// shades with its first draw's program (admission rejects mixed ones); a temporal frame
-    /// also needs that program's traced set, which its reset frames shade with; raster
-    /// frames also bind the standard program first.
+    /// builds its first draw's program's set; mixed traced frames (MP1) shade with list
+    /// pipelines built in `submit_frame` (`ensure_lists`) and need no set here. A temporal
+    /// frame (one program, by admission) also needs that program's traced set, which its
+    /// reset frames shade with; raster frames also bind the standard program first.
     pub(super) fn frame_sets<'a>(
         &self,
         draws: impl IntoIterator<Item = Option<&'a Material>>,
@@ -762,11 +767,15 @@ impl Renderer {
             return vec![];
         };
         let standard = self.standard.id();
-        let mut programs = draws
+        let programs = draws
             .into_iter()
             .map(|m| m.map_or(standard, |m| m.program.id()));
         let mut programs: Vec<u64> = if matches!(variant, Variant::Traced | Variant::Temporal) {
-            vec![programs.next().unwrap_or(standard)]
+            let (distinct, _) = primary_ray_gpu::program_lists::frame_slots(programs);
+            if variant == Variant::Traced && distinct.len() > 1 {
+                return vec![];
+            }
+            vec![distinct.first().copied().unwrap_or(standard)]
         } else {
             std::iter::once(standard).chain(programs).collect()
         };
@@ -972,6 +981,87 @@ impl Renderer {
         let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
         slot.modules.streamed = Some(modules);
         slot.pipelines.streamed = Some(pipelines);
+        Ok(())
+    }
+
+    /// MP1: the tile-list shading pipeline (`program::compose_list`) of `Shading` index
+    /// `shading`, streamed or not, of each program in `ids` that lacks it, every pipeline
+    /// concurrently: built by the first mixed-program frame that needs it. Reloads and
+    /// visibility changes drop them, like `streamed`; single-program frames never build them.
+    pub(super) fn ensure_lists(
+        &mut self,
+        ids: &[u64],
+        streamed: bool,
+        shading: usize,
+    ) -> Result<(), Error> {
+        let missing: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.program_slot(id).pipelines.list[usize::from(streamed)][shading].is_none()
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let stage = if streamed {
+            Stage::TracedStreamed
+        } else {
+            Stage::Traced
+        };
+        let head = &self.primary_sources.as_ref().unwrap().1[shading];
+        let sources: Vec<Composed> = missing
+            .iter()
+            .map(|&id| {
+                let source = &self.program_slot(id).source;
+                program::compose_list(head, source, stage, program::declares_parameters(source))
+            })
+            .collect();
+        let abi = self.program_abi();
+        let rejected = |i: usize, error| match scope_error(
+            &self.program_slot(missing[i]).label,
+            error,
+            &sources[i..=i],
+        ) {
+            Error::Fault(Fault(message)) => self.fail(message),
+            other => other,
+        };
+        let mut modules = vec![];
+        for (i, composed) in sources.iter().enumerate() {
+            let scopes = OperationScopes::new(&self.device);
+            modules.push(module(&abi, &self.program_slot(missing[i]).label, composed));
+            if let Some(error) = scopes.finish() {
+                return Err(rejected(i, error));
+            }
+        }
+        let primary = abi.primary.unwrap();
+        let built = in_parallel(
+            abi.device,
+            modules.iter().map(|module| {
+                let abi = &abi;
+                move || {
+                    primary
+                        .list_pipeline(abi.device, abi.ledger, module, shading, streamed, abi.cache)
+                }
+            }),
+        );
+        let mut pipelines = vec![];
+        for (i, (pipeline, error)) in built.into_iter().enumerate() {
+            if let Some(error) = error {
+                return Err(rejected(i, error));
+            }
+            pipelines.push(pipeline);
+        }
+        for (composed, module) in sources.iter().zip(&modules) {
+            abi.modules.insert(&composed.source, module.clone());
+        }
+        let count = pipelines.len() as u64;
+        self.pipelines.created += count;
+        self.program_cache.count(count);
+        for (id, pipeline) in missing.into_iter().zip(pipelines) {
+            let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
+            slot.pipelines.list[usize::from(streamed)][shading] = Some(pipeline);
+        }
         Ok(())
     }
 
