@@ -170,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|m| m["exposure_stops"].as_f64())
             .map_or(-14.5, |s| s as f32)
     });
+    let mut preparation = Vec::new();
 
     let mut engine = Engine::new(
         &adapter,
@@ -251,7 +252,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let limits = policy.prepared();
             let loaded = Instant::now();
             let asset = asset::decode(&fs::read(manifest_path("asset")?)?, limits)?;
+            preparation.push(serde_json::json!({"phase":"asset_read_decode", "seconds":loaded.elapsed().as_secs_f64()}));
+            let upload = Instant::now();
             let handles = engine.add_asset(asset)?;
+            preparation.push(serde_json::json!({"phase":"asset_prepare_upload", "seconds":upload.elapsed().as_secs_f64()}));
+            let environment = Instant::now();
             let map = environment_controls::load_environment(
                 &manifest_path("environment")?,
                 asset::environment::Limits {
@@ -267,6 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 intensity: 1.0,
                 background: Background::Sky,
             })?;
+            preparation.push(serde_json::json!({"phase":"environment_read_upload", "seconds":environment.elapsed().as_secs_f64()}));
             eprintln!(
                 "game_scene quarry objects={} load_seconds={:.1}",
                 handles.objects.iter().map(Vec::len).sum::<usize>(),
@@ -486,6 +492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
             "programs":programs_seconds-engine_seconds,"scene":ready.as_secs_f64()-programs_seconds},
         "pipeline_cache": args.pipeline_cache, "compilation": compilation, "driver_compilation":driver,
+        "preparation":preparation,
         "reload":reload,
         "gpu_render_span_ms": spans, "frames": frames,
         "note": "shared-GPU diagnostic timings; debug_build records the build profile; not a performance claim",
