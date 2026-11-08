@@ -55,6 +55,11 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
+    /// MQ1 (docs/m7-mq1.md): on frames where a placement's transform changed, clamp every
+    /// continued history to the plain min/max box of this frame's 3x3 samples (all nine, no
+    /// statistic), so light that moving objects change on other surfaces (shadows, reflections,
+    /// bounce) is not carried as a trail. Frames where nothing moved never clamp.
+    pub motion_box: bool,
     /// Internal resolution of reconstructed frames: every pass renders at this fraction of
     /// the target size and TR1 reconstructs the target from the jittered samples.
     pub scale: RenderScale,
@@ -97,6 +102,7 @@ impl Default for Reconstruction {
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
+            motion_box: true,
             scale: RenderScale::Native,
         }
     }
@@ -152,6 +158,9 @@ impl Reconstruction {
 
 /// WGSL Tr1Frame.
 const FRAME_BYTES: usize = 336;
+/// The previous frame's placement transforms follow the fixed frame words (64 bytes per
+/// placement, at least one), so moved placements reproject without a new binding (MQ1).
+const MODEL_BYTES: usize = 64;
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
 /// The lattice's shifts in 1/256 px: x as T1's; y chosen so the 256 points are
@@ -319,7 +328,7 @@ impl PrimaryState {
                     texture(7, uint),
                     uniform(10, super::FRAME_BYTES as u64),
                     texture(21, uint),
-                    read(40, FRAME_BYTES as u64),
+                    read(40, (FRAME_BYTES + MODEL_BYTES) as u64),
                     texture(41, float),
                     texture(42, float),
                     texture(43, uint),
@@ -434,8 +443,12 @@ pub(in crate::renderer) struct ReconstructionState {
     /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
     layer: [Depth; 2],
     sample: Depth,
+    /// The frame words, then the previous frame's placement transforms.
     frame: Buffer,
-    /// Resolve groups per written side, keyed by the textures and frame buffer they bind.
+    /// The previous reconstructed frame's placement transforms (the primary tables' bytes),
+    /// which moved placements reproject through (MQ1).
+    models: Vec<u8>,
+    /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
     groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
     /// The side this frame writes; the other holds the previous frame.
     pub parity: usize,
@@ -447,7 +460,23 @@ pub(in crate::renderer) struct ReconstructionState {
     held_frames: u32,
     pub shadow_rays: u32,
 }
-type GroupKey = (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Buffer);
+type GroupKey = (
+    wgpu::Texture,
+    wgpu::Texture,
+    wgpu::Texture,
+    wgpu::Buffer,
+    wgpu::Buffer,
+);
+
+/// The frame-state buffer for `models` bytes of placement transforms.
+fn frame_buffer(r: &Renderer, models: usize) -> Buffer {
+    Buffer::new(
+        r,
+        "TR1 frame state and previous transforms",
+        (FRAME_BYTES + models.max(MODEL_BYTES)) as u64,
+        wgpu::BufferUsages::STORAGE,
+    )
+}
 
 /// A sampled 2D target owned through the ledger (copyable in tests).
 fn target(
@@ -516,12 +545,8 @@ impl ReconstructionState {
             anchor: [anchor(), anchor()],
             layer: [layer(), layer()],
             sample: target(r, "TR1 frame samples", size, F::Rgba16Float, U::COPY_DST),
-            frame: Buffer::new(
-                r,
-                "TR1 frame state",
-                FRAME_BYTES as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            frame: frame_buffer(r, 0),
+            models: Vec::new(),
             groups: None,
             parity: 0,
             previous: None,
@@ -533,6 +558,11 @@ impl ReconstructionState {
     }
     fn size(&self) -> wgpu::Extent3d {
         self.sample.texture.size()
+    }
+    /// The colour history this frame wrote (exposed mean, sample weight; Rgba32Float).
+    #[cfg(test)]
+    pub(in crate::renderer) fn written_colour(&self) -> &wgpu::Texture {
+        &self.colour[self.parity].texture
     }
     fn output(&self) -> wgpu::Extent3d {
         self.colour[0].texture.size()
@@ -633,9 +663,12 @@ impl Renderer {
     }
 
     /// Identity of every input a reconstructed frame depends on besides the camera, the
-    /// eye, exposure and directional-light directions, which TR1 follows: a change restarts
-    /// every pixel. Programs, prelude, geometry, bindings, materials, textures, transforms,
-    /// light colours and kinds, the environment and every shadow and visibility setting.
+    /// eye, exposure, directional-light directions, skinned poses (SK1) and placement
+    /// transforms (MQ1), which TR1 follows: a change restarts every pixel. Programs, prelude,
+    /// geometry, bindings, materials, textures, new placements, light colours and kinds, the
+    /// environment and every shadow and visibility setting. Before MQ1 transform edits of
+    /// existing placements restarted every pixel, so a scene with any animated rigid object
+    /// never accumulated; they now reproject through their previous transforms.
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
@@ -651,6 +684,15 @@ impl Renderer {
         let mut hash = Sha256::new()
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
+            // MP1: a mixed frame's other programs (none for single-program frames).
+            .chain_update(
+                state
+                    .programs
+                    .iter()
+                    .skip(1)
+                    .flat_map(|p| p.to_ne_bytes())
+                    .collect::<Vec<_>>(),
+            )
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.shadows.settings).as_bytes())
@@ -669,14 +711,15 @@ impl Renderer {
             .chain_update([u8::from(self.environment.visible)])
             // AT1: the atmosphere sky on misses (atmosphere_gpu.rs).
             .chain_update([u8::from(self.atmosphere_sky_visible())]);
+        // Not `models` or `normals` (MQ1): transform edits of existing placements keep the
+        // primary tables, so placement slots are stable; new placements change `instances`
+        // and `geometry_generation`.
         for v in [
             u.environment,
             u.geometry,
             u.lut,
             u.textures,
             u.materials,
-            u.normals,
-            u.models,
             u.instances,
         ] {
             hash.update(v.to_ne_bytes());
@@ -872,13 +915,46 @@ impl Renderer {
         };
         state.reset = continued.is_none() || state.cut || event_window < 1.0;
         state.cut = false;
+        // MQ1: this frame's placement transforms, the models half of the primary tables'
+        // bytes in placement order (primary_ray_gpu.rs).
+        let models = self
+            .primary
+            .as_ref()
+            .unwrap()
+            .geometry
+            .as_ref()
+            .map_or(&[][..], |g| &g.instances[..g.instances.len() / 2]);
+        let state = self.reconstruction_state.as_mut().unwrap();
+        // Placements moved: the resolve reprojects their surfaces through the previous
+        // transforms, written after the frame words (a restart reprojects nothing).
+        let moved = !state.reset && state.models.len() == models.len() && state.models != models;
+        if state.frame.value.size() < (FRAME_BYTES + models.len().max(MODEL_BYTES)) as u64 {
+            let frame = frame_buffer(self, models.len());
+            self.reconstruction_state.as_mut().unwrap().frame = frame;
+        }
+        let state = self.reconstruction_state.as_mut().unwrap();
+        if moved {
+            self.queue
+                .write_buffer(&state.frame.value, FRAME_BYTES as u64, &state.models);
+            self.uploads.view_settings += state.models.len() as u64;
+            self.uploads.write_calls += 1;
+        }
+        if state.models != models {
+            state.models.clear();
+            state.models.extend_from_slice(models);
+        }
         let jitter = camera.jitter();
         let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
             Some((m, e, x, _, j)) if !state.reset => (m, e, exposure / x, j),
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let options = u32::from(settings.catmull_rom) | u32::from(settings.spatial_start) << 1;
+        // TR1_MOVED: placements moved (previous transforms follow the frame words); TR1_BOX:
+        // clamp continued histories to this frame's 3x3 box (MQ1).
+        let options = u32::from(settings.catmull_rom)
+            | u32::from(settings.spatial_start) << 1
+            | u32::from(moved) << 2
+            | u32::from(moved && settings.motion_box) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -914,8 +990,8 @@ impl Renderer {
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // Nothing moved: the unjittered view-projection is bit-equal (moved placements and
-        // every other scene edit restart through the key).
+        // The camera did not move: the unjittered view-projection is bit-equal. Surfaces whose
+        // vertices or placement moved are not still (the resolve compares them).
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
@@ -978,13 +1054,14 @@ impl Renderer {
         let primary = self.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
+        let state = self.reconstruction_state.as_ref().unwrap();
         let group_key: GroupKey = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
             (*out.texture).clone(),
             (**frame).clone(),
+            (*state.frame.value).clone(),
         );
-        let state = self.reconstruction_state.as_ref().unwrap();
         if state.groups.as_ref().is_none_or(|(k, _)| *k != group_key) {
             let groups = self.reconstruction_groups();
             self.reconstruction_state.as_mut().unwrap().groups = Some((group_key, groups));

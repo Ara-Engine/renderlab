@@ -707,6 +707,10 @@ pub(super) struct GiState {
     /// Cache frames a relight's scheduled gathers still need, idle view or not.
     bounce_busy: u32,
     shade: Option<ShadePipeline>,
+    /// MP1: mixed-program frames' cell shading, one pipeline per reflecting program of the
+    /// frame (`mixed_cell_entry`), used instead of `shade` while `mixed_active`.
+    mixed: Vec<ShadePipeline>,
+    mixed_active: bool,
     /// Which gather queue this frame reads (the other collects next frame's).
     parity: bool,
     /// The last cache frame's lighting key (lights, environment, program and materials),
@@ -764,6 +768,8 @@ impl GiState {
             bounce_last: None,
             bounce_busy: 0,
             shade: None,
+            mixed: vec![],
+            mixed_active: false,
             parity: false,
             light_key: None,
             light_streak: false,
@@ -1428,7 +1434,8 @@ impl Renderer {
 
     /// Compiles the frame's program's cell shading (G2) when it declares `scatter` or
     /// `emission`; false when it declares neither (it blocks light but reflects none) or the
-    /// frame has no traced shading groups.
+    /// frame has no traced shading groups. A mixed-program frame (MP1) compiles one cell
+    /// pipeline per reflecting program instead; cells of the others reflect nothing.
     fn ensure_gi_shade(&mut self, software: bool) -> Result<bool, Error> {
         let Some(state) = self.primary.as_ref() else {
             return Ok(false);
@@ -1436,21 +1443,58 @@ impl Renderer {
         if state.shading_groups().is_none() {
             return Ok(false);
         }
-        let id = state.program;
         let streamed = state.requests;
-        let source = self.program_slot(id).source.clone();
-        if !crate::program::reflects(&source) {
+        let id = state.program;
+        let programs = state.programs.clone();
+        self.gi.mixed_active = programs.len() > 1;
+        if programs.len() > 1 {
+            let mut built = vec![];
+            for id in programs {
+                if !crate::program::reflects(&self.program_slot(id).source) {
+                    continue;
+                }
+                let mut existing = std::mem::take(&mut self.gi.mixed);
+                let key = self.gi_shade_key(id, software, streamed);
+                let pipeline = match existing.iter().position(|p| p.key == key) {
+                    Some(i) => Ok(existing.swap_remove(i)),
+                    None => self.gi_shade_pipeline(id, key, true),
+                };
+                self.gi.mixed = existing;
+                built.push(pipeline?);
+            }
+            let any = !built.is_empty();
+            self.gi.mixed = built;
+            return Ok(any);
+        }
+        if !crate::program::reflects(&self.program_slot(id).source) {
             return Ok(false);
         }
-        let hash: [u8; 32] = Sha256::new()
-            .chain_update(source.as_bytes())
-            .chain_update(self.source.as_bytes())
-            .finalize()
-            .into();
-        let key = (id, hash, software, streamed);
+        let key = self.gi_shade_key(id, software, streamed);
         if self.gi.shade.as_ref().is_some_and(|p| p.key == key) {
             return Ok(true);
         }
+        self.gi.shade = Some(self.gi_shade_pipeline(id, key, false)?);
+        Ok(true)
+    }
+
+    fn gi_shade_key(&self, id: u64, software: bool, streamed: bool) -> (u64, [u8; 32], bool, bool) {
+        let hash: [u8; 32] = Sha256::new()
+            .chain_update(self.program_slot(id).source.as_bytes())
+            .chain_update(self.source.as_bytes())
+            .finalize()
+            .into();
+        (id, hash, software, streamed)
+    }
+
+    /// Program `id`'s cell shading pipeline: the single-program entry, or with `mixed`
+    /// the entry that shades only its own draws' cells (`mixed_cell_entry`).
+    fn gi_shade_pipeline(
+        &mut self,
+        id: u64,
+        key: (u64, [u8; 32], bool, bool),
+        mixed: bool,
+    ) -> Result<ShadePipeline, Error> {
+        let source = self.program_slot(id).source.clone();
         self.ensure_gi_layouts();
         let heads = if self.hardware_shadows.is_some() {
             super::primary_ray_gpu::shading_heads(&self.source)?
@@ -1458,8 +1502,11 @@ impl Renderer {
             super::primary_ray_gpu::non_rt_sources(&self.source)?.1
         };
         let parameters = crate::program::declares_parameters(&source);
-        let composed =
+        let mut composed =
             crate::program::compose(&heads[1], &source, crate::program::Stage::Cell, parameters);
+        if mixed {
+            composed.source = mixed_cell_entry(&composed.source, id);
+        }
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
@@ -1499,8 +1546,7 @@ impl Renderer {
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
         }
-        self.gi.shade = Some(ShadePipeline { key, pipeline });
-        Ok(true)
+        Ok(ShadePipeline { key, pipeline })
     }
 
     fn ensure_gi_layouts(&mut self) {
@@ -2034,12 +2080,21 @@ impl Renderer {
             return Ok(());
         }
         // Per draw (batch), its stable id, first placement and instance count, which cell
-        // shading and hardware setup map cells' materials through (G2).
+        // shading and hardware setup map cells' materials through (G2). MP1: in mixed
+        // frames the fourth word selects the draw's cell program (`mixed_cell_entry`).
         let mut table = vec![0u32; TRACED_DRAWS as usize * 4];
         let mut first = 0u32;
+        let mixed = self.gi.mixed_active;
         for (b, d) in draws.iter().enumerate().take(TRACED_DRAWS as usize) {
             let n = d.instances.len() as u32;
-            table[b * 4..b * 4 + 3].copy_from_slice(&[ids[b], first, n]);
+            let program = d.material.map_or(self.standard.id(), |m| m.program.id());
+            let selector = if mixed && crate::program::reflects(&self.program_slot(program).source)
+            {
+                cell_selector(program)
+            } else {
+                0
+            };
+            table[b * 4..b * 4 + 4].copy_from_slice(&[ids[b], first, n, selector]);
             first += n;
         }
         if self.gi.draw_table != table {
@@ -2156,13 +2211,17 @@ impl Renderer {
         // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
         // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
         let light_key: Option<[u8; 32]> = bounce.then(|| {
-            let program = self.primary.as_ref().unwrap().program;
+            let state = self.primary.as_ref().unwrap();
             let mut h = Sha256::new();
             h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
             // DC1: altered surface inputs relight bounce cells on the existing schedule.
             h.update(self.lighting.decals.hash);
             h.update(environment);
-            h.update(self.program_slot(program).source.as_bytes());
+            h.update(self.program_slot(state.program).source.as_bytes());
+            // MP1: every program of a mixed frame.
+            for &program in state.programs.iter().skip(1) {
+                h.update(self.program_slot(program).source.as_bytes());
+            }
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()
         });
@@ -2438,6 +2497,32 @@ impl Renderer {
     }
 }
 
+// ---- MP1 per-program cell shading (docs/m7-mp1.md) ----
+/// The draw table's cell-program word for a reflecting program `id` of a mixed frame; 0
+/// marks draws whose program reflects nothing.
+fn cell_selector(id: u64) -> u32 {
+    u32::try_from(id + 1).expect("program ids fit the cell selector")
+}
+const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
+const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
+/// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
+/// it, writes "reflects nothing" for draws whose program has no cell shading (every
+/// program's dispatch writes the same value), and leaves other programs' cells to theirs.
+fn mixed_cell_entry(source: &str, id: u64) -> String {
+    assert_eq!(source.matches(CELL_PLACEMENT_SEAM).count(), 1);
+    assert_eq!(source.matches(CELL_STORE_SEAM).count(), 1);
+    let check = format!(
+        "{CELL_PLACEMENT_SEAM}    let gs_program=gi_shade_draws[primary_placements[p]&0x1fffffffu].w;\n    if gs_program==0u {{ return vec4<f32>(0.0,0.0,0.0,1.0); }}\n    if gs_program!={}u {{ return vec4<f32>(-1.0); }}\n",
+        cell_selector(id)
+    );
+    source.replacen(CELL_PLACEMENT_SEAM, &check, 1).replacen(
+        CELL_STORE_SEAM,
+        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;}\n",
+        1,
+    )
+}
+// ---- end of MP1 per-program cell shading ----
+
 /// What cell shading (G2) binds besides its own group 0: traced shading's geometry (group 1)
 /// and materials (group 2), and lighting's shading group, whose binding 20 is the real table.
 pub(super) struct ShadeGroups<'a> {
@@ -2574,13 +2659,21 @@ impl GiState {
                 label: Some("indirect cache cell shading"),
                 timestamp_writes: stamps(b + 2),
             });
-            if let (true, Some(shade), Some(pipeline)) = (plan.bounce, shade, self.shade.as_ref()) {
-                pass.set_pipeline(&pipeline.pipeline);
+            // MP1: a mixed frame runs each reflecting program over the queue in turn.
+            let pipelines: Vec<_> = if self.mixed_active {
+                self.mixed.iter().collect()
+            } else {
+                self.shade.iter().collect()
+            };
+            if let (true, Some(shade)) = (plan.bounce, shade) {
                 pass.set_bind_group(0, &*g.shade, &[]);
                 pass.set_bind_group(1, shade.arrays, &[]);
                 pass.set_bind_group(2, shade.materials, &[]);
                 pass.set_bind_group(3, shade.lighting, &[]);
-                pass.dispatch_workgroups(LIGHT_GROUPS, 1, 1);
+                for pipeline in pipelines {
+                    pass.set_pipeline(&pipeline.pipeline);
+                    pass.dispatch_workgroups(LIGHT_GROUPS, 1, 1);
+                }
             }
         }
         if let Some(profile) = self.profile.as_mut() {
@@ -2658,6 +2751,10 @@ mod tests {
             let cell = compose(head, crate::STANDARD_PROGRAM, Stage::Cell, false);
             assert!(cell.source.contains("fn gi_shade_cells("));
             validate("standard cell shading", &cell.source);
+            // MP1: a mixed frame's cell entry selects its own draws' cells.
+            let mixed = mixed_cell_entry(&cell.source, 3);
+            assert!(mixed.contains("if gs_program!=4u"));
+            validate("mixed standard cell shading", &mixed);
             // Cell shading binds only its own group 0 (work, outgoing radiance, draw table):
             // nothing it reaches may read traced shading's group 0 (camera, hit records).
             let module = naga::front::wgsl::parse_str(&cell.source).unwrap();
