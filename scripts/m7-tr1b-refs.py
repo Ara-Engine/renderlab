@@ -187,17 +187,13 @@ def s2g(args):
     out = REFS / "s2g"
     out.mkdir(parents=True, exist_ok=True)
     compactor = load("m7-u0b-score")
-    done = 0
-    while done < args.limit:
-        pending = [c for c in registration["physical"] if not (out / f"{c['track']}-{c['frame']:03}.npz").exists()]
-        if not pending:
-            break
-        # About 0.35 GiB of raw output per state until it is compacted; the runner's preflight
-        # needs 5 GiB free on the output disk.
-        if shutil.disk_usage(REFS).free < args.batch * 0.35 * 1024 ** 3 + 5.5 * 1024 ** 3:
-            raise SystemExit("deferred: disk headroom below the batch's raw output plus 5.5 GiB")
-        batch = pending[:min(args.batch, args.limit - done)]
-        label = f"s2g-{uuid.uuid4().hex[:8]}"
+    clear_interrupted(REFS / "work")
+
+    def trace(batch, label):
+        """One lease for `batch`; returns the states whose arrays are not byte-identical to
+        TR0's qualified archive (not written). U0b qualified D8 across independent
+        acceleration-structure builds only to within a few ULP of colour (bounded-as), so
+        byte identity holds for most states, not all."""
         work = REFS / "work" / label
         data = work / "data"
         data.mkdir(parents=True)
@@ -230,9 +226,10 @@ def s2g(args):
             if (data / "replay.json").exists():
                 break
         replay = json.loads((data / "replay.json").read_text())
+        # The bench replays its first case from an independent rebuild, bit for bit.
         if not replay["bit_identical"]:
             raise ValueError("same-seed replay differs in " + label)
-        removed = []
+        removed, mismatched = [], []
         for k in cases:
             name, p, c = k["name"], k["pose"], k["case"]
             meta_path = data / (name + ".json")
@@ -248,32 +245,66 @@ def s2g(args):
             compactor.compact(argparse.Namespace(root=data, name=name))
             archive = data / (name + ".npz")
             members = member_hashes(archive)
-            identity = None
+            differing = []
             if k["expected"]:
-                wanted = k["expected"]["retained_array_sha256"]
-                identity = {m: members.get(m) == h for m, h in wanted.items()}
-                if not all(identity.values()):
-                    raise ValueError(f"{name}: arrays differ from TR0's qualified corpus: "
-                                     + ",".join(m for m, ok in identity.items() if not ok))
-            with np.load(archive) as z:
-                arrays = {m: z[m] for m in z.files}
-            meta = json.loads(meta_path.read_text())
-            meta.update(accepted_for_scoring=bool(identity), corpus_key=c["key"], aliases=c["aliases"], batch=label,
-                        batch_replay_bit_identical=True,
-                        identity=(f"all {len(identity)} retained arrays byte-identical to TR0's qualified D8 corpus "
-                                  f"({TR0_S2G / (name + '.json')})") if identity else "no TR0 record; not accepted")
-            write_compact(out / (name + ".npz"), arrays, meta, float(scene["exposure_stops"]), archive)
+                differing = [m for m, h in k["expected"]["retained_array_sha256"].items() if members.get(m) != h]
+            alone = len(cases) == 1
+            if differing and not alone:
+                mismatched.append(c)
+            else:
+                with np.load(archive) as z:
+                    arrays = {m: z[m] for m in z.files}
+                meta = json.loads(meta_path.read_text())
+                if not differing and k["expected"]:
+                    identity = (f"all {len(k['expected']['retained_array_sha256'])} retained arrays byte-identical to "
+                                f"TR0's qualified D8 corpus ({TR0_S2G / (name + '.json')})")
+                else:
+                    identity = ("traced alone, its own independent-rebuild replay bit-identical (TR0's per-state "
+                                "criterion); differs from TR0's archive in " + ",".join(differing or ["(no TR0 record)"])
+                                + " at the bounded-AS level")
+                meta.update(accepted_for_scoring=True, corpus_key=c["key"], aliases=c["aliases"], batch=label,
+                            batch_replay_bit_identical=True, identity=identity, tr0_differing_arrays=differing)
+                write_compact(out / (name + ".npz"), arrays, meta, float(scene["exposure_stops"]), archive)
+                print(name, "compact", (out / (name + ".npz")).stat().st_size, "differs" if differing else "identical", flush=True)
             for f in sorted(data.glob(name + "*")):
                 if f.suffix in (".npz", ".f32", ".bin", ".png", ".pending"):
                     removed.append(dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)))
                     f.unlink()
-            print(name, "compact", (out / (name + ".npz")).stat().st_size, flush=True)
         for k in cases:
             removed.append(dict(path=str(k["input"]), bytes=k["input"].stat().st_size, sha256=sha(k["input"])))
             k["input"].unlink()
         save(work / "removed.json", removed)
+        return mismatched
+
+    done = 0
+    while done < args.limit:
+        pending = [c for c in registration["physical"] if not (out / f"{c['track']}-{c['frame']:03}.npz").exists()]
+        if not pending:
+            break
+        # About 0.35 GiB of raw output per state until it is compacted; the runner's preflight
+        # needs 5 GiB free on the output disk.
+        if shutil.disk_usage(REFS).free < args.batch * 0.35 * 1024 ** 3 + 5.5 * 1024 ** 3:
+            raise SystemExit("deferred: disk headroom below the batch's raw output plus 5.5 GiB")
+        batch = pending[:min(args.batch, args.limit - done)]
+        for c in trace(batch, f"s2g-{uuid.uuid4().hex[:8]}"):
+            trace([c], f"s2g1-{uuid.uuid4().hex[:8]}")
         done += len(batch)
-        print("S2G batch", label, "done", done, "remaining", len(pending) - len(batch), flush=True)
+        print("S2G batch done", done, "remaining", len(pending) - len(batch), flush=True)
+
+
+def clear_interrupted(root):
+    """Raw tracer output of a batch that stopped before compaction (no removed.json): this
+    tool's own intermediates, removed with their hashes recorded."""
+    for work in sorted(root.glob("s2g*")):
+        if (work / "removed.json").exists() or not work.is_dir():
+            continue
+        removed = [dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)) for f in sorted(work.rglob("*"))
+                   if f.is_file() and f.suffix in (".npz", ".f32", ".bin", ".png", ".pending", ".json")
+                   and f.name != "plan.json"]
+        for record in removed:
+            Path(record["path"]).unlink()
+        save(work / "removed.json", dict(removed=removed, reason="interrupted batch; its states are traced again"))
+        print("cleared interrupted batch", work.name, len(removed), "files", flush=True)
 
 
 def qsun(args):

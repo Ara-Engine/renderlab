@@ -35,8 +35,13 @@ def main():
     plan_args = argparse.Namespace(label=args.label, plan=args.plan, minutes=args.minutes, spp=2048, paths="rt,nonrt",
                                    after="", check_only=False, quiet=args.quiet, force_schedule=False)
     while time.monotonic() < deadline:
-        blocking = runner.window_open(u) or runner.quiet_active(u, any_lease=False)
-        if not blocking and runner.hold_state(u) != "hold" and not u.LOCK.exists():
+        try:
+            blocking = runner.window_open(u) or runner.quiet_active(u, any_lease=False)
+            free = not blocking and runner.hold_state(u) != "hold" and not u.LOCK.exists()
+        except PermissionError:
+            # Another owner is writing the shared schedule at this instant: read it again.
+            free = False
+        if free:
             try:
                 runner.plan(plan_args)
                 return
