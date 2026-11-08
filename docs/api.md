@@ -2,7 +2,7 @@
 
 The engine-facing API is `renderlab::engine`. A game owns one `Engine`. It creates resources and objects through typed handles, sets lights, sky and settings, and calls `render` once per frame. Everything else in the crate root is the low-level renderer the engine wraps. That renderer's tuning surface changes as features are measured; the engine module is the part that stays stable (see [Stability](#stability-and-freeze-notes)).
 
-Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1, TR1b and R1 (main `ffdaee9`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
+Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1, TR1b, R1, G2b and AT1 (main `f159fcd`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
 
 ## Principles
 
@@ -25,9 +25,9 @@ let mut engine = Engine::new(&adapter, EngineDescriptor {
     // HardwareRt only: the caller accepts wgpu's experimental ray-query contract.
     experimental_ray_query: (path == RenderPath::HardwareRt)
         .then(|| unsafe { ExperimentalRayQuery::acknowledge() }),
+    // GI, temporal reconstruction, the physical sky, aerial perspective and height fog
+    // are on by default.
     settings: Settings {
-        global_illumination: true,
-        temporal_reconstruction: true,
         exposure: Exposure::Manual { stops: -14.5 },
         ..Default::default()
     },
@@ -43,8 +43,8 @@ let stone = engine.create_material(&MaterialDesc {
 })?;
 let crate_ = engine.spawn(cube, stone, Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0)))?;
 
+// The default sky is the physical atmosphere, which colours this sun through its air.
 engine.set_sun(Some(Sun { travel: Vec3::new(-0.45, -0.75, -0.5), ..Default::default() }))?;
-engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
 
 loop {
     engine.set_transform(crate_, model_for_this_frame)?;
@@ -54,7 +54,7 @@ loop {
 }
 ```
 
-`examples/game_scene.rs` is the complete version: procedural props, a toon-styled hero, sun, sky, GI, temporal reconstruction and a camera fly path, offscreen, with PNG frames.
+`examples/game_scene.rs` is the complete version: procedural props, a toon-styled hero, mirror and glossy spheres, decals, sun, the physical sky and fog, GI, reflections, temporal reconstruction and a camera fly path, offscreen, with PNG frames.
 
 ## Creating an engine
 
@@ -236,11 +236,13 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 
 ## Current limits
 
-- One shading program per frame on both quality paths (above).
+- One shading program per frame on both quality paths (above). MP1 lifts it, with no API change.
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
 - Local lights are unshadowed, and a soft sun (`angular_radius > 0`) must be the only light: the renderer accepts soft sun visibility only for a light list of exactly one directional light. `set_lights` with a soft sun returns `InvalidInput`. Use `angular_radius: 0.0` (hard sun) to combine the sun with local lights. Many-light shading (LC1) is expected to lift this.
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
+- On `NonRt`, reflections are the environment estimate only (R1n adds software-traced reflections), and volumetric fog is unshadowed (no sun shafts).
+- The GI cache shows bright speckles near metallic objects and faceted streaks on some flat faces, on both paths. G2c owns the fix.
 - Virtual geometry (streamed cluster meshes) and the diagnostic view modes stay on the low-level `Renderer`.
 
 ## Module layout and planned extension points
@@ -250,34 +252,36 @@ renderlab::engine            Engine, EngineDescriptor, Capabilities, RenderPath,
                              MaterialDesc, TextureRef, AssetHandles, Image, headless_adapter
 renderlab::engine (settings) Settings, Quality, Exposure, Sky, Background, Sun
 renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId
-renderlab::engine re-exports Camera, Light, AtmosphereMedium, HeightFog, VolumetricFog, Decal,
-                             DecalBlend, DecalTexture, DecalTextureKind,
-                             DecalTextures, MeshData, Vertex, Value, Limits, Mat4, Vec3, Error,
-                             RenderScale, ReloadError, ReloadReport, FrameReport, Events, FrameId,
-                             Sampler,
-                             TextureData, TangentStream, PreparedEnvironment, Renderer
+renderlab::engine re-exports Camera, Light, Mat4, Vec3, MeshData, Vertex, Value, Limits,
+                             RenderScale, AtmosphereMedium, HeightFog, VolumetricFog,
+                             Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
+                             Sampler, TextureData, TangentStream, PreparedEnvironment,
+                             Error, ReloadError, ReloadReport, FrameReport, Events, FrameId, Renderer
 renderlab::*                 the low-level renderer (expert API, not frozen)
 ```
 
-Each overnight unit lands in a named slot. The shapes below are the intended API; phase 2 confirms or adjusts them against what each unit merges.
+Each overnight unit lands in a named slot. Wired rows are on this branch; the others are the intended shape, which phase 2 confirms against what each unit merges.
 
 | Unit | Feature | Planned engine API |
 |---|---|---|
 | TR1b | TR1 default, upscaling presets | **Wired**: `Settings::temporal_reconstruction` on by default; `Settings::render_scale` (`RenderScale::{Native, Quality, Performance}`); `Background::Sky` for the visible sky |
 | G2b | GI default | **Wired**: `Settings::global_illumination` on by default, off maps to `IndirectSettings::off()`; no new calls |
 | R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). No setting, because the renderer has no switch. R1n's non-RT traced reflections need no API change. |
-| TP1 | transparency, particles | `MaterialDesc` blend/transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles` |
+| TP1 | transparency, particles | `MaterialDesc` blend and transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles`. The example gets a glass pane and a particle emitter. |
 | AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
-| SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])` |
-| LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper |
+| SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])`. The example's hero becomes a skinned character. |
+| LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper. LC1 also lifts the soft-sun-only limit, and the example's lantern returns. |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
-| PP1 | post-processing | `Settings::post` (bloom, tone mapper, colour grading); `Exposure::Auto { .. }` variant |
+| PP1 | post-processing | `Settings::post: PostSettings` (bloom, motion blur, depth of field, tone mapper, white balance, grading, vignette, grain), with `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported, following PP1's branch; an `Exposure::Auto { .. }` variant if PP1 adds auto exposure |
+| R1n | non-RT traced reflections, reflection switch | `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported; the program hooks are unchanged |
+| MP1 | per-program dispatch | no API change: materials of different programs share a frame. The example's hero moves to its own toon program, and the `style` workaround goes. |
+| G2c | GI speckles and streaks | no API change |
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.
 
 ## Stability and freeze notes
 
-Draft, to be finalised in phase 2 once the feature units have merged.
+These notes are final for everything wired above. Rows still marked planned become final when their unit merges and the row is updated.
 
 **Stable** (changes only with a recorded migration):
 
@@ -291,6 +295,19 @@ Draft, to be finalised in phase 2 once the feature units have merged.
 
 **May change**: `FrameReport`, `Events` and the other diagnostic counters; defaults that a unit's ruling flips; every low-level crate-root type and `renderer_mut()` tuning; the current limits listed above, which should only loosen.
 
+**Re-exported renderer types** (`AtmosphereMedium`, `HeightFog`, `VolumetricFog`, the decal types, `RenderScale`) are plain parameter structs and enums owned by their units. They are part of the stable surface. A field added to one of them is a breaking change for struct literals that spell out every field, so construct them with `..Default::default()`.
+
+### Migrations since phase 1
+
+| Change | When | Migration |
+|---|---|---|
+| `Sky::Map { backdrop }` became `Sky::Map { background: Background }` | TR1b | `backdrop: c` becomes `background: Background::Color(c)`; `Background::Sky` shows the map |
+| `Sky::default()` is `Sky::Atmosphere(AtmosphereMedium::default())`, not `Uniform([0; 3])` | AT1 | set `Sky::Uniform(..)` explicitly for the old look |
+| `Sun::default().illuminance` is 120,000 lux (outside the atmosphere) | AT1 | under `Uniform`/`Map` skies, set the illuminance that reaches the ground |
+| `Settings::default()`: GI and TR1 on, aerial perspective and height fog on | G2b, TR1b, AT1 | set the fields off explicitly to reproduce older frames |
+| `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
+| Soft sun plus local lights is rejected | phase 1 | hard sun (`angular_radius: 0.0`) until LC1 |
+
 ## Example
 
 ```text
@@ -299,4 +316,4 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
     cargo run --example game_scene -- --path rt --out D:/Coding/renderlab-work/api1/rt
 ```
 
-Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, `--render-scale native|quality|performance`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
+Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, `--render-scale native|quality|performance`, `--sky atmosphere|uniform`, `--volumetric-fog`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
