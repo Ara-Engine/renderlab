@@ -1315,6 +1315,15 @@ fn gpu_gi_sky_visibility_sv() {
                         ..base
                     },
                 ),
+                // G1d: the refill over eight groups, the most the 8-frame settle limit allows.
+                (
+                    "spread8-4px",
+                    IndirectSettings {
+                        rotate_directions: true,
+                        cut_phases: 8,
+                        ..base
+                    },
+                ),
             ]);
         }
         // RENDERLAB_M7_G1_CONFIGS: a comma list of the configurations to score (all by default).
@@ -1345,9 +1354,15 @@ fn gpu_gi_sky_visibility_sv() {
                 let still = profile_json(&mut rig.r);
                 let still_gpu = frame_gpu(&mut rig.r);
                 let second = rig.radiance(&sv);
-                // Settled: three more frames (W1 form 2 needs its phases); then a still
-                // frame, which runs no cache pass once inputs repeat.
-                for _ in 0..3 {
+                // Settled: three more frames (W1 form 2 needs its phases; an eight-group refill
+                // needs eight in all); then a still frame, which runs no cache pass once inputs
+                // repeat.
+                let settle = if s.cut_phases > 4 {
+                    s.cut_phases - 2
+                } else {
+                    3
+                };
+                for _ in 0..settle {
                     rig.frame(&sv, *eye, *target, &materials);
                 }
                 let image = rig.radiance(&sv);
@@ -2840,6 +2855,8 @@ fn gpu_gi_quarry() {
                 force_software: variant == "software-full",
                 directions,
                 cell_pixels,
+                // The shipping refill unless RENDERLAB_M7_G1_QUARRY_SETTINGS names one (G1d).
+                cut_phases: tuned["cut_phases"].as_u64().map_or(0, |p| p as u32),
                 ..Default::default()
             })
             .unwrap();
