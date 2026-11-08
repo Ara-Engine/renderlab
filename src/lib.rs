@@ -9,6 +9,7 @@
 //! outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+pub mod animation;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 pub mod engine;
@@ -19,6 +20,7 @@ mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
 mod instances;
+mod light_cluster;
 mod lighting;
 mod material;
 mod mesh;
@@ -46,6 +48,7 @@ pub use environment::{EnvironmentLimits, EnvironmentMap, EnvironmentParameters};
 pub use glam::{Mat4, Vec3};
 pub use hardware_shadows::{HardwareShadowOptions, HardwareShadowStats};
 pub use instances::{Instances, Visibility};
+pub use light_cluster::{LightClusterStats, LocalShadows};
 pub use lighting::{Light, Lighting, decode_f16};
 pub use material::{
     Material, MaterialDescriptor, RendererOptions, SampleCount, Texture, TextureBinding, ViewMode,
@@ -58,6 +61,7 @@ pub use primary_ray::{
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
+pub use renderer::skinning::SkinnedMeshInstance;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,

@@ -45,14 +45,21 @@ struct SurfaceInput {
     decals:DecalInput,
 };
 
-// One light's unshadowed incidence. `direction` points toward the light.
+// One light's unshadowed incidence. `direction` points toward the light; `index` is the
+// light's position in the renderer's lighting vector.
 struct LightSample { index:u32, direction:vec3<f32>, attenuation:f32, intensity:vec3<f32> };
 
-fn light_count() -> u32 { return lighting.count; }
+// The lights that can reach this receiver (LC1, docs/m7-lc1.md): its camera cluster's
+// lights in lighting-vector order, every directional and unlimited-range light included.
+// Point and spot lights beyond their range contribute exactly zero, so the loop's sum is
+// unchanged by the culling. Stages without a cluster walk every light. The count varies
+// per receiver: keep implicit-derivative sampling outside the light loop.
+fn light_count() -> u32 { return rl_light_total(); }
 
-// The fixed light loop's direction and attenuation arithmetic, unchanged.
+// The receiver's i-th light: the fixed light loop's direction and attenuation arithmetic.
 fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
-    let light=lights[i];
+    let index=rl_light_index(i);
+    let light=lights[index];
     var l=-light.travel_outer.xyz;
     var attenuation=1.0;
     if light.kind.x!=0u {
@@ -74,13 +81,15 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
             attenuation*=cone*cone;
         }
     }
-    return LightSample(i,l,attenuation,light.rgb_inner.xyz);
+    return LightSample(index,l,attenuation,light.rgb_inner.xyz);
 }
 
 // World-space visibility of the sampled light from this receiver, 1 when unshadowed:
 // ray-traced on hardware renderers, light-space maps otherwise, never screen-space. The
-// engine computes it at its own receiver, so it is identical for every program.
+// engine computes it at its own receiver, so it is identical for every program. Shadowed
+// point and spot lights (the frame's most important, LC1) use one ray or pooled PCF maps.
 fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
+    if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }
 
