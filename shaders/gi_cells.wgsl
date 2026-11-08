@@ -17,12 +17,16 @@
 // Header words, then every hot record, then every cold record.
 const GI_HEADER:u32=64u;
 const GI_HOT_WORDS:u32=24u;
-// LC2: header word 23 is the cold stride, including every light visibility word.
+// LC2 light-list plumbing: dynamic cold stride, including every light bit.
 const GI_H_COLD_WORDS:u32=23u;
-// Hot words 16-22 (G2): the bounce SH's f32 scale (0: no bounce), then its 12 halves (L1,
-// coefficient i*3+c for band index i, channel c), divided by the scale. Word 23: the packed
-// query normal (as GI_C_NORMAL), which shading's agreement weight reads in the same load.
+// Hot words 16-22 (G2): the bounce SH's f32 scale, then its 12 halves (L1, coefficient i*3+c
+// for band index i, channel c), divided by the scale. The scale word is 0 until the cell's
+// first gather and GI_BOUNCE_NONE (-0.0) after a gather that found no light, so the lookup
+// can tell a cell without a bounce value yet from one without bounce (G2c). Word 23: the
+// packed query normal (as GI_C_NORMAL), which shading's agreement weight reads in the same
+// load.
 const GI_HOT_BOUNCE:u32=16u;
+const GI_BOUNCE_NONE:u32=0x80000000u;
 const GI_HOT_NORMAL:u32=23u;
 // Slots searched per key, from an offset the key picks.
 const GI_BUCKET:u32=8u;

@@ -547,6 +547,10 @@ impl HardwareState {
     pub fn scene(&self) -> &wgpu::Tlas {
         &self.active.as_ref().unwrap().tlas
     }
+    /// TP1: the current TLAS, if one is built (transparent receivers' sun rays).
+    pub fn active_scene(&self) -> Option<&wgpu::Tlas> {
+        self.active.as_ref().map(|a| &*a.tlas)
+    }
     pub fn bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().bind
     }

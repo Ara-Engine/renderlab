@@ -1,14 +1,23 @@
 // ---- generated cell shading entry (M7 G2), after the program ----
 // The bounce light a world radiance cache cell sends back: one thread per cell queued this
 // frame, which builds the cell's SurfaceInput at its fixed query point, runs the program's
-// own `surface`, and sums, toward the cell's normal (one view-independent outgoing radiance
-// per cell):
+// own `surface`, and returns one view-independent outgoing radiance: the cell reflects as a
+// Lambertian surface whose reflectance is the program's own directional albedo toward the
+// cell's normal n,
+//   a = min(sum over sixteen fixed directions d of scatter(s, input, d, n) * 2 pi / 16, 1),
+// so the radiance is the cosine-weighted mean of what the program sends over the hemisphere
+// (its radiosity over pi), which conserves the reflected power:
 //   emission(s, input)
-//   + scatter(s, input, l, n) * light intensity * attenuation, for each light the cell's
-//     visibility ray reached (gi_light),
-//   + the program's hemispherical response (scatter over sixteen fixed directions, 2 pi / 16
-//     each) times the cell's incident irradiance (occluded sky plus bounce, from its own SH)
-//     over pi: exact for Lambert, an approximation for directional responses.
+//   + a / pi * (sum over lights the cell's visibility ray reached (gi_light) of intensity *
+//     attenuation * max(dot(n, l), 0)  +  the cell's incident irradiance: occluded sky plus
+//     bounce, from its own SH).
+// Exact for Lambert. G2 evaluated the lights as scatter(s, input, l, n), the program's
+// radiance toward n alone: a glossy or mirror cell facing the sun then sent its highlight
+// (up to 10^4 times a white surface's radiance) in every direction, and the few gather rays
+// that met such cells left bright speckles on the ground in API1's game scene
+// (docs/m7-g2c.md). The cap at 1 per channel is a passive
+// surface's energy bound: it only changes programs whose response integrates above 1, or a
+// sharp lobe that one fixed direction meets head-on (a normal-mapped mirror).
 // Composed only for programs that declare `scatter` or `emission` (src/program.rs
 // Stage::Cell); src/program.rs defines rl_scatter and rl_emission (zero when absent).
 // Writes gi_shade_out[slot] (gi_cache.wgsl gi_outgoing), which the next gathers read.
@@ -131,17 +140,6 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     let input=decal_prepare(gs_surface_input(slot,p,q,nc,edge));
     rl_load_parameters(input.receiver.slot);
     let s=surface(input);
-    var out=rl_emission(s,input);
-    // LC2 light-list plumbing only: every light's visibility, in lighting-vector order.
-    for(var first=0u;first<light_count();first+=32u) {
-        var bits=gi_word(cold+GI_C_LIGHTS+(first>>5u));
-        while bits!=0u {
-            let i=first+firstTrailingBit(bits);
-            bits&=bits-1u;
-            let light=light_sample(i,input);
-            out+=rl_scatter(s,input,light.direction,nc)*light.intensity*light.attenuation;
-        }
-    }
     let frame=gi_basis(nc);
     var albedo=vec3<f32>(0.0);
     for(var k=0u;k<GS_DIRECTIONS;k+=1u) {
@@ -150,9 +148,21 @@ fn gs_shade(slot:u32) -> vec4<f32> {
         let phi=f32(k)*2.399963229728653;
         albedo+=rl_scatter(s,input,frame*vec3<f32>(r*cos(phi),r*sin(phi),z),nc);
     }
-    albedo*=6.283185307179586/f32(GS_DIRECTIONS);
-    let incident=gi_sky_scale(gi_cell_sky_irradiance(hot,nc))+gi_cell_bounce_irradiance(hot,nc);
-    out+=albedo*incident*(1.0/PI);
+    // Nonnegative and finite (NaN fails both comparisons), then the energy bound.
+    albedo=select(vec3<f32>(0.0),albedo*(6.283185307179586/f32(GS_DIRECTIONS)),albedo>=vec3<f32>(0.0));
+    albedo=min(albedo,vec3<f32>(1.0));
+    var incident=gi_sky_scale(gi_cell_sky_irradiance(hot,nc))+gi_cell_bounce_irradiance(hot,nc);
+    // LC2 light-list plumbing only: preserve G2c's hit shading and sum all light words.
+    for(var first=0u;first<light_count();first+=32u) {
+        var bits=gi_word(cold+GI_C_LIGHTS+(first>>5u));
+        while bits!=0u {
+            let i=first+firstTrailingBit(bits);
+            bits&=bits-1u;
+            let light=light_sample(i,input);
+            incident+=light.intensity*(light.attenuation*max(dot(nc,light.direction),0.0));
+        }
+    }
+    var out=rl_emission(s,input)+albedo*incident*(1.0/PI);
     // Finite and nonnegative, as rl_finite but without the HDR store's 16-bit ceiling.
     out=min(select(vec3<f32>(0.0),out,out>=vec3<f32>(0.0)),vec3<f32>(3.4028235e38));
     return vec4<f32>(out,1.0);

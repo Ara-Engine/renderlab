@@ -447,6 +447,8 @@ impl Engine {
             thin: false,
             program: Some(program),
             parameters: desc.parameters,
+            // TP1: opaque until API1 wires its planned transmission fields (docs/api.md).
+            transparency: None,
         };
         let deadline = Instant::now() + ADMISSION;
         let material = loop {

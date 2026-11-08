@@ -1,10 +1,12 @@
 # M3: texture mip residency
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC. Base `f09d2d0`, merged with main `311075c` (N8l, N8k) before the
 final checks. Branch `t3/m3-texture-residency`.
 
 **RT scope:** all Interactive RT timings, speed claims and memory rows here are
-**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+**measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. The RT-device
 default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
 rows describe a separate explicit opt-in. In this record, "default" describes full
 texture residency within each explicitly selected path. Texture `Exact` is distinct
@@ -324,7 +326,7 @@ Complete buffers were compared, not region averages:
 ## Cost per stage
 
 RT timings and speed comparisons in every subsection below are **measured on the
-non-default fast setup (traced + Interactive)**, with the named texture residency
+historical eight-ray setup with TR1 off (traced + Interactive)**, with the named texture residency
 policy applied to that explicitly selected path.
 
 ### Default `Full` against main

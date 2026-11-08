@@ -56,7 +56,7 @@ it never scores worse than the pixel's own walk, bringing the default toward Exa
   - Map is below Unreal on lit-darkened.
   - Hybrid is slower than Surface.
   - Texture streaming costs motion frame time (Exact) or misses samples (Feedback).
-- The RT comparisons use Traced + Interactive set explicitly. The library's RT-device default is still raster primaries with the Exact soft-shadow preference; that is Islam's call.
+- The historical RT comparisons use Traced + Interactive with TR1 off. RTDEF2 now makes traced/Interactive/TR1 with an adaptive ray budget the capable 1x RT default; the new cost is recorded separately.
 
 **M5's open items stay open:**
 - **Matched Unreal acceptance.** Image fidelity and radiance parity are unproved; the speed and memory comparisons are now on matched motion.

@@ -474,6 +474,9 @@ fn gpu_lc1_quarry_night() {
     };
     if path == "traced" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    } else if path == "raster" {
+        r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+        r.set_soft_shadows(SoftShadows::Exact);
     }
     let lc2 = env("LC2").as_deref() == Some("1");
     let mut all = night_lights(count);
@@ -874,6 +877,9 @@ fn gpu_lc2_penumbra() {
     };
     if path == "traced" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    } else if path == "raster" {
+        r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+        r.set_soft_shadows(SoftShadows::Exact);
     }
     let program = r
         .try_create_program(&ProgramDescriptor {

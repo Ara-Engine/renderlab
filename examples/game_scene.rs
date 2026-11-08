@@ -4,8 +4,9 @@
 //! a mirror chrome sphere, a spinning crate and a bobbing toon-styled hero, with an emblem
 //! decal and a wet puddle decal on the ground. A sun with soft shadows, the physical
 //! atmosphere with aerial perspective and height fog, GI, traced reflections (RT) and
-//! temporal reconstruction light it, seen from a camera fly path. `--sky uniform` and
-//! `--volumetric-fog` switch the sky and add sun shafts. Every `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the
+//! temporal reconstruction light it, seen from a camera fly path. `--sky uniform` changes
+//! the sky; `--volumetric-fog` strengthens the default haze for shafts, and
+//! `--no-volumetric-fog` disables it. Every `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the
 //! ground with the registered quarry scans and its RLE2 sky (manifest keys `asset`,
 //! `limits`, `environment`, `exposure_stops`), shown as a visible sky. `--render-scale`
 //! picks a TR1 upscaling preset.
@@ -39,7 +40,7 @@ struct Args {
     temporal: bool,
     scale: RenderScale,
     uniform_sky: bool,
-    volumetric_fog: bool,
+    volumetric_fog: Option<bool>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -55,7 +56,7 @@ impl Args {
             temporal: true,
             scale: RenderScale::Native,
             uniform_sky: false,
-            volumetric_fog: false,
+            volumetric_fog: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -89,7 +90,8 @@ impl Args {
                         }
                     }
                 }
-                "--volumetric-fog" => a.volumetric_fog = true,
+                "--volumetric-fog" => a.volumetric_fog = Some(true),
+                "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
@@ -165,10 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 temporal_reconstruction: args.temporal,
                 render_scale: args.scale,
                 // Sun shafts through a light haze (0.01 per metre over the first 128 m).
-                volumetric_fog: args.volumetric_fog.then(|| VolumetricFog {
-                    extra_density: 0.01,
-                    ..Default::default()
-                }),
+                volumetric_fog: match args.volumetric_fog {
+                    Some(true) => Some(VolumetricFog {
+                        extra_density: 0.01,
+                        ..Default::default()
+                    }),
+                    Some(false) => None,
+                    None => Settings::default().volumetric_fog,
+                },
                 exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
             },
@@ -422,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "gpu_render_span_ms": spans, "frames": frames,
-        "note": "development build timings under shared-GPU contention; not a performance claim",
+        "note": "shared-GPU diagnostic timings; debug_build records the build profile; not a performance claim",
     });
     fs::write(
         args.out.join("run.json"),
