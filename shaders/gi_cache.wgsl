@@ -3,7 +3,7 @@
 // source (gi_rays_hardware.wgsl or gi_rays_software.wgsl); src/gi_cache.rs owns the
 // buffers and the per-frame order:
 //   gi_probe    covered pixels list the cells they read (bin from the interpolated
-//               vertex normal), deduplicated per 16x16 tile; each tile then finds its
+//               vertex normal), deduplicated per 8x8 tile; each tile then finds its
 //               unique cells once, marks them seen, and lists the missing ones in the
 //               frame's request table (once per frame); then each pixel walks what its
 //               lookup will read: the coarser level's cells where its level has no value
@@ -79,7 +79,7 @@ const GI_W_SPLITS:u32=15u;
 // pixels, tile-table insert calls and their probe steps, unique cells from pixels, added for
 // orphans' parents and by refinement, finds and how many found a cell, refinement walks
 // (pixel, bin and level), tiles that refined, the most unique cells in one tile, and tiles
-// by unique cells (< 128, < 256, < 512, full).
+// by unique cells (< 32, < 64, < GI_LOCAL, full).
 const GI_W_P_TILES:u32=16u;
 const GI_W_P_PIXELS:u32=17u;
 const GI_W_P_INSERTS:u32=18u;
@@ -137,14 +137,17 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
 }
 
 // ---- probe: per-tile unique cells, then one lookup each ----
-// Pixels per probe tile side (src/gi_cache.rs PROBE_TILE): 16x16 tiles find each
-// unique cell once per tile, a quarter as many tiles as 8x8 and about 40% fewer finds.
-const GI_PROBE_TILE:u32=16u;
+// Pixels per probe tile side (src/gi_cache.rs PROBE_TILE). 16x16 tiles found each unique cell
+// once per tile with about 40% fewer finds than 8x8 on SV (G1b), but on the quarry the probe
+// waits mostly at its barriers (G1d's trace: about a third of its samples), and 8x8 tiles sync
+// two warps instead of eight: the quarry probe is about 8% faster at 8x8 with 256 entries,
+// and SV unchanged (docs/m7-g1d.md).
+const GI_PROBE_TILE:u32=8u;
 const GI_PROBE_LANES:u32=GI_PROBE_TILE*GI_PROBE_TILE;
-// Entries of the tile's cell table. A 16x16 tile reads about 40-100 unique cells on SV, but
-// scanned rock reads more (its normals spread over several bins): 256 overflowed about
-// 550 times a frame on the quarry, so 512 (GI_W_LOCAL_OVERFLOW counts any cell it drops).
-const GI_LOCAL:u32=512u;
+// Entries of the tile's cell table (GI_W_LOCAL_OVERFLOW counts any cell it drops). An 8x8 tile
+// on scanned rock lists up to about 150 cells (its normals spread over several bins); 128
+// entries overflowed on the quarry, 256 do not.
+const GI_LOCAL:u32=256u;
 var<workgroup> gi_local_key:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_priority:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
@@ -316,7 +319,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
     gi_request_cells(gi_request_desc(world,l+1u,bin),priority);
     return false;
 }
-@compute @workgroup_size(16,16) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(8,8) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     for(var i=lane;i<GI_LOCAL;i+=GI_PROBE_LANES) {
         atomicStore(&gi_local_key[i],0u);
         atomicStore(&gi_local_priority[i],0xffffffffu);
@@ -476,7 +479,7 @@ fn gi_probe_stats(lane:u32, covered:bool) {
     atomicAdd(&gi_work[GI_W_P_FOUND],atomicLoad(&gi_wg_stats[6]));
     atomicAdd(&gi_work[GI_W_P_WALKS],atomicLoad(&gi_wg_stats[7]));
     atomicMax(&gi_work[GI_W_P_MAX],cells);
-    let bucket=select(select(select(3u,2u,cells<GI_LOCAL),1u,cells<256u),0u,cells<128u);
+    let bucket=select(select(select(3u,2u,cells<GI_LOCAL),1u,cells<64u),0u,cells<32u);
     atomicAdd(&gi_work[GI_W_P_HIST+bucket],1u);
 }
 // The request-table entry of key a (linear probing; zero is empty), and whether this

@@ -33,7 +33,19 @@ const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate.
 const PROFILE_STAMPS: u32 = 2 * (6 + 2 * CLAIM_ROUNDS);
 /// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
-const PROBE_TILE: u32 = 16;
+const PROBE_TILE: u32 = 8;
+/// The probe tile side; test builds that screen shader variants (RENDERLAB_GI_SHADERS) may
+/// override it with RENDERLAB_GI_PROBE_TILE to match a variant's workgroup.
+fn probe_tile() -> u32 {
+    #[cfg(test)]
+    if let Some(tile) = std::env::var("RENDERLAB_GI_PROBE_TILE")
+        .ok()
+        .and_then(|t| t.parse().ok())
+    {
+        return tile;
+    }
+    PROBE_TILE
+}
 /// Fixed grids, in 64-thread workgroups, of the passes whose counts only the GPU knows:
 /// each kernel reads its count and loops over it. Direct dispatches need no argument
 /// passes, and skip the per-dispatch validation pass wgpu adds to indirect dispatches
@@ -247,7 +259,7 @@ pub struct IndirectCounters {
 /// covered pixel, covered pixels, tile-table insert calls and their probe steps, unique cells
 /// from pixels, added for orphans' parents and by refinement, table finds and how many found
 /// a cell, refinement walks (pixel, bin and level), tiles that refined, the most unique cells
-/// in one tile, and tiles by unique cells (< 128, < 256, < 512, full).
+/// in one tile, and tiles by unique cells (< 32, < 64, < 256, full).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProbeCounters {
     pub tiles: u32,
@@ -1473,8 +1485,8 @@ impl Renderer {
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
         let groups = [
-            (region[2] - region[0]).div_ceil(PROBE_TILE),
-            (region[3] - region[1]).div_ceil(PROBE_TILE),
+            (region[2] - region[0]).div_ceil(probe_tile()),
+            (region[3] - region[1]).div_ceil(probe_tile()),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
         // A view whose every input is unchanged has nothing to trace once its cells

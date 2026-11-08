@@ -3007,9 +3007,12 @@ fn gpu_gi_quarry() {
             );
             variant_json["breakdown"] = breakdown;
         }
-        // RENDERLAB_M7_G1_QUARRY_TRACE=n (G1d): n camera frames moving back and forth over
-        // 24 cm from pose 0 at 1 cm a frame, cache on and unprofiled, for an Nsight GPU trace
-        // window inside camera motion (the motion's start is printed in process seconds).
+        // RENDERLAB_M7_G1_QUARRY_TRACE=n (G1d): n camera frames moving back and forth from
+        // pose 0 at 1 cm a frame, cache on and unprofiled, for an Nsight GPU trace window inside
+        // camera motion (the motion's start is printed in process seconds). Each sweep is
+        // RENDERLAB_M7_G1_QUARRY_SWEEP frames (default 24): short sweeps revisit existing cells
+        // (the probe and lookup alone); sweeps longer than the eviction age keep creating cells.
+        // RENDERLAB_M7_G1_QUARRY_TRACE_CUTS=k resets the cache every k frames (cut frames).
         if let Some(n) = env("RENDERLAB_M7_G1_QUARRY_TRACE").map(|n| n.parse::<usize>().unwrap()) {
             r.set_indirect(moving).unwrap();
             r.set_indirect_profiling(false);
@@ -3021,9 +3024,16 @@ fn gpu_gi_quarry() {
                 "G1d trace motion starts at {:.1} s",
                 start.elapsed().as_secs_f64()
             );
+            let sweep: usize =
+                env("RENDERLAB_M7_G1_QUARRY_SWEEP").map_or(24, |s| s.parse().unwrap());
+            let cuts: Option<usize> =
+                env("RENDERLAB_M7_G1_QUARRY_TRACE_CUTS").map(|s| s.parse().unwrap());
             for t in 0..n {
-                let k = (t % 48) as f32;
-                draw_at(&mut r, 0.01 * if k < 24.0 { k } else { 48.0 - k });
+                if cuts.is_some_and(|k| t % k == 0) {
+                    r.reset_indirect();
+                }
+                let k = t % (2 * sweep);
+                draw_at(&mut r, 0.01 * k.min(2 * sweep - k) as f32);
                 if t % 256 == 0 {
                     r.collect().unwrap();
                     r.poll().unwrap();
