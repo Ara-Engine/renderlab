@@ -226,11 +226,13 @@ def s2g(args):
             if (data / "replay.json").exists():
                 break
         replay = json.loads((data / "replay.json").read_text())
-        # The bench replays its first case from an independent rebuild, bit for bit.
-        if not replay["bit_identical"]:
-            raise ValueError("same-seed replay differs in " + label)
+        # The bench replays its first case from an independent rebuild. D8 differs there by a
+        # few ULP on some runs (bounded-AS); the bench then stops, so later cases were not
+        # rendered and stay pending.
+        replay_identical = replay["bit_identical"]
+        rendered = [k for k in cases if (data / (k["name"] + ".json")).exists()]
         removed, mismatched = [], []
-        for k in cases:
+        for k in rendered:
             name, p, c = k["name"], k["pose"], k["case"]
             meta_path = data / (name + ".json")
             meta = json.loads(meta_path.read_text())
@@ -248,8 +250,9 @@ def s2g(args):
             differing = []
             if k["expected"]:
                 differing = [m for m, h in k["expected"]["retained_array_sha256"].items() if members.get(m) != h]
-            alone = len(cases) == 1
-            if differing and not alone:
+            # Accepted when byte-identical to TR0's qualified archive, or, traced alone, when its
+            # own independent-rebuild replay is bit-identical (TR0's per-state criterion).
+            if differing and not (len(cases) == 1 and replay_identical):
                 mismatched.append(c)
             else:
                 with np.load(archive) as z:
@@ -263,7 +266,7 @@ def s2g(args):
                                 "criterion); differs from TR0's archive in " + ",".join(differing or ["(no TR0 record)"])
                                 + " at the bounded-AS level")
                 meta.update(accepted_for_scoring=True, corpus_key=c["key"], aliases=c["aliases"], batch=label,
-                            batch_replay_bit_identical=True, identity=identity, tr0_differing_arrays=differing)
+                            batch_replay_bit_identical=replay_identical, identity=identity, tr0_differing_arrays=differing)
                 write_compact(out / (name + ".npz"), arrays, meta, float(scene["exposure_stops"]), archive)
                 print(name, "compact", (out / (name + ".npz")).stat().st_size, "differs" if differing else "identical", flush=True)
             for f in sorted(data.glob(name + "*")):
@@ -287,7 +290,11 @@ def s2g(args):
             raise SystemExit("deferred: disk headroom below the batch's raw output plus 5.5 GiB")
         batch = pending[:min(args.batch, args.limit - done)]
         for c in trace(batch, f"s2g-{uuid.uuid4().hex[:8]}"):
-            trace([c], f"s2g1-{uuid.uuid4().hex[:8]}")
+            for attempt in range(3):
+                if not trace([c], f"s2g1-{uuid.uuid4().hex[:8]}"):
+                    break
+            else:
+                raise ValueError(f"{c['track']}-{c['frame']:03}: neither TR0's bytes nor a bit-identical replay in 3 tries")
         done += len(batch)
         print("S2G batch done", done, "remaining", len(pending) - len(batch), flush=True)
 
