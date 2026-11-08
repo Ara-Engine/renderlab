@@ -22,6 +22,9 @@ const SLOT_WORDS: u64 = 24 + 32;
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
 const COUNTER_WORDS: u64 = 44;
 const MISS_WORDS: u64 = 6;
+/// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
+/// GI_REQUEST_WORDS).
+const REQUEST_WORDS: u64 = 3;
 /// WGSL GiFrame: region, counts, offsets, requests, bounce, then 64 vec4 box corners.
 const FRAME_BYTES: usize = 80 + 64 * 16;
 const MAX_BOXES: usize = 32;
@@ -106,7 +109,7 @@ impl WorkLayout {
         let traces = misses + r.misses * MISS_WORDS as u32;
         let items = traces + 2 * r.slots;
         let requests_at = items + RAY_ITEMS + RAY_ITEMS / 32;
-        let queues = requests_at + 2 * requests(r.misses);
+        let queues = requests_at + REQUEST_WORDS as u32 * requests(r.misses);
         Self {
             misses,
             traces,
@@ -187,6 +190,16 @@ pub struct IndirectSettings {
     /// and every cell at a lighting, environment or program step. Each gather reads the
     /// outgoing radiance the previous ones produced, so G gathers carry G + 1 bounces.
     pub gathers: u32,
+    /// The most cells a frame gathers (G2b). When more are queued (a cut queues every visible
+    /// cell), a frame gathers those in one fixed slot group (slot % P == frame % P, P the
+    /// smallest power of two up to 64 that brings the queue under this count) and the rest
+    /// wait, so the cut's bounce work is bounded per frame rather than finished in the fewest
+    /// frames. 0 gathers every queued cell each frame.
+    pub gather_cells: u32,
+    /// Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k % S == 0 of
+    /// the cell's fixed set, each weighted S times a direction's solid angle, so it costs 1/S of
+    /// the rays. Bounce light is smoother than sky visibility; the subset is fixed per cell.
+    pub gather_stride: u32,
 }
 impl Default for IndirectSettings {
     fn default() -> Self {
@@ -212,6 +225,8 @@ impl Default for IndirectSettings {
             cut_phases: 0,
             bounce: true,
             gathers: 3,
+            gather_cells: 0,
+            gather_stride: 1,
         }
     }
 }
@@ -228,7 +243,8 @@ impl IndirectSettings {
             && [64, 128].contains(&self.directions)
             && (0.0..=0.5).contains(&self.level_blend)
             && self.cut_phases <= 8
-            && (1..=7).contains(&self.gathers);
+            && (1..=7).contains(&self.gathers)
+            && [1, 2, 4].contains(&self.gather_stride);
         if valid {
             Ok(())
         } else {
@@ -339,6 +355,8 @@ pub struct IndirectCounters {
     pub gather_absent: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
+    /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
+    pub gather_deferred: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -845,7 +863,7 @@ impl Renderer {
                 + u64::from(misses) * MISS_WORDS
                 + 2 * u64::from(slots)
                 + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
-                + 2 * u64::from(requests(misses))
+                + REQUEST_WORDS * u64::from(requests(misses))
                 + 2 * (1 + u64::from(slots))
                 + u64::from(slots))
                 * 4;
@@ -1216,6 +1234,7 @@ impl Renderer {
             gather_absent: w[39],
             gather_unshaded: w[40],
             gather_orphans: w[41],
+            gather_deferred: w[42],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1893,6 +1912,8 @@ impl Renderer {
         header[17] = u32::from(bounce);
         header[18] = layout.shade;
         header[19] = s.gathers;
+        header[20] = s.gather_cells;
+        header[21] = s.gather_stride;
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -2137,10 +2158,12 @@ impl Renderer {
             self.gi.view_frames = 0;
         }
         self.gi.view_key = Some(view_key);
-        let idle_after = if bounce {
-            IDLE_AFTER_BOUNCE
-        } else {
-            IDLE_AFTER
+        // A gather cap spreads a cut's gathers over more frames: still frames keep running
+        // until a spread of up to 64 slot groups per gather generation can have drained.
+        let idle_after = match (bounce, s.gather_cells) {
+            (false, _) => IDLE_AFTER,
+            (true, 0) => IDLE_AFTER_BOUNCE,
+            (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
         if self.gi.idle_frames >= idle_after && flags == 0 && !busy {
             self.gi.stats.idle_frames += 1;

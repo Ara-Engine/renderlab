@@ -3396,6 +3396,27 @@ fn g2_variant(name: &str) -> IndirectSettings {
             bounce: false,
             ..Default::default()
         },
+        // G2b screens: the cache with bounce, changed by '+'-joined tokens: pxF (cell edge in
+        // pixels of footprint), sN (log2 slots), capN (cells gathered a frame), gN (gathers an
+        // event schedules). "c2" and "c3" are 2 and 3 px cells in a table of 2^21 slots, to see
+        // how much of the crevice-mouth darkness cell size alone explains (docs/m7-g2b.md).
+        "c2" => g2_variant("g2+px2+s21"),
+        "c3" => g2_variant("g2+px3+s21"),
+        other if other.starts_with("g2+") => {
+            let mut s = g2_variant("g2");
+            for token in other.split('+').skip(1) {
+                let (tag, value) = token.split_at(token.find(|c: char| c.is_ascii_digit()).unwrap_or(0));
+                match tag {
+                    "px" => s.cell_pixels = value.parse().unwrap(),
+                    "s" => s.slots_log2 = value.parse().unwrap(),
+                    "cap" => s.gather_cells = value.parse().unwrap(),
+                    "g" => s.gathers = value.parse().unwrap(),
+                    "gs" => s.gather_stride = value.parse().unwrap(),
+                    _ => panic!("unknown G2b variant token {token}"),
+                }
+            }
+            s
+        }
         other => panic!("unknown G2 variant {other}"),
     }
 }
@@ -3581,7 +3602,8 @@ fn gpu_g2_quarry() {
                 "bounce_queued": c.bounce_queued, "orphans": c.orphans, "full": c.full,
                 "miss_overflow": c.miss_overflow, "lost": c.lost, "gather_absent": c.gather_absent,
                 "gather_unshaded": c.gather_unshaded, "gather_orphans": c.gather_orphans,
-                "misses": c.misses})
+                "gather_deferred": c.gather_deferred, "misses": c.misses, "splits": c.splits,
+                "local_overflow": c.local_overflow, "items": c.ray_items})
         })
     };
     let tr1: Vec<u32> = env("RENDERLAB_G2_TR1")
@@ -3591,6 +3613,9 @@ fn gpu_g2_quarry() {
         .map(|s| s.parse().unwrap())
         .collect();
     let mut results = json!({"path": path, "variants": variants, "sections": sections, "tr1": tr1});
+    // One file per process, named by its sections, so the steps of one lease that share a
+    // path's directory keep their results apart.
+    let json_out = out.join(format!("quarry-{}.json", sections.join("_")));
     for section in &sections {
         match section.as_str() {
             "static" => {
@@ -3798,21 +3823,84 @@ fn gpu_g2_quarry() {
                 r.set_indirect_profiling(false);
                 results["cost"] = timing;
             }
+            "trace" => {
+                // G2b: an Nsight GPU Trace window inside camera motion. The first variant settles
+                // at pose 0, then RENDERLAB_G2_TRACE frames (default 30,000) move back and forth
+                // 1 cm a frame over sweeps of RENDERLAB_G2_SWEEP frames (default 24: existing
+                // cells revisited, so the probe, gathers of new cells and the lookup), unprofiled.
+                // The motion's start is printed in process seconds, for ngfx --start-after-ms.
+                let frames: usize = env("RENDERLAB_G2_TRACE").map_or(30_000, |f| f.parse().unwrap());
+                let sweep: usize = env("RENDERLAB_G2_SWEEP").map_or(24, |f| f.parse().unwrap());
+                r.set_indirect(g2_variant(&variants[0])).unwrap();
+                r.set_indirect_profiling(false);
+                r.reset_indirect();
+                for _ in 0..12 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                }
+                eprintln!("G2b trace motion starts at {:.1} s", start.elapsed().as_secs_f64());
+                for t in 0..frames {
+                    let k = t % (2 * sweep);
+                    draw(&mut r, &camera_at(0, 0.01 * k.min(2 * sweep - k) as f32));
+                    if t % 256 == 0 {
+                        r.collect().unwrap();
+                        r.poll().unwrap();
+                    }
+                }
+                eprintln!("G2b trace motion ends at {:.1} s", start.elapsed().as_secs_f64());
+            }
+            "cutprofile" => {
+                // G2b: each variant's cut at pose 0, profiled: per frame (1-N, N from
+                // RENDERLAB_G2_CUT_FRAMES, default 24) the pass times, the frame span and the
+                // kernels' counters. The counter readback after each frame waits for the GPU, so
+                // spans here are per-frame GPU spans, not a pipelined frame rate.
+                let frames: usize = env("RENDERLAB_G2_CUT_FRAMES").map_or(24, |f| f.parse().unwrap());
+                let mut rows = json!({});
+                r.set_indirect_profiling(true);
+                for v in &variants {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    // A settled cache first, so the cut's frame 1 runs warm (G1d section 5).
+                    r.reset_indirect();
+                    for _ in 0..12 {
+                        draw(&mut r, &camera_at(1, 0.0));
+                    }
+                    r.test_drain("G2b cut warm-up");
+                    // A fresh profile ring, so its entries are the cut's frames (idle frames add
+                    // none: the passes stop 16 identical frames after the cut).
+                    r.set_indirect_profiling(false);
+                    r.set_indirect_profiling(true);
+                    r.reset_indirect();
+                    let mut counts = vec![];
+                    let mut span_ms = vec![];
+                    let mut shading_ms = vec![];
+                    for _ in 0..frames {
+                        draw(&mut r, &camera_at(0, 0.0));
+                        counts.push(counters(&mut r));
+                        // The counter readback waited for this frame: its GPU sample is the
+                        // newest (the renderer keeps only the last few).
+                        let gpu = r.poll().unwrap().gpu;
+                        span_ms.push(gpu.last().map_or(f64::NAN, |g| g.render_span.as_secs_f64() * 1e3));
+                        shading_ms.push(gpu.last().map_or(f64::NAN, |g| g.mesh_pass.as_secs_f64() * 1e3));
+                    }
+                    let spans = json!({"span_ms": span_ms, "shading_ms": shading_ms});
+                    let profiles = r.indirect_profiles().unwrap();
+                    let passes: Vec<_> = profiles
+                        .iter()
+                        .map(|p| json!({"total": p.total(), "probe": p.probe, "claim": p.claim + p.resolve,
+                            "scan": p.scan, "setup": p.setup, "rays": p.rays, "finish": p.finish,
+                            "gather": p.gather, "light": p.light, "shade": p.shade}))
+                        .collect();
+                    rows[v.as_str()] = json!({"spans": spans, "passes_us": passes, "counters": counts});
+                }
+                r.set_indirect_profiling(false);
+                results["cutprofile"] = rows;
+            }
             other => panic!("unknown G2 section {other}"),
         }
         results["stats"] = json!(format!("{:?}", r.indirect_stats()));
-        std::fs::write(
-            out.join("quarry.json"),
-            serde_json::to_vec_pretty(&results).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&json_out, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
     }
     results["seconds"] = json!(start.elapsed().as_secs_f64());
-    std::fs::write(
-        out.join("quarry.json"),
-        serde_json::to_vec_pretty(&results).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&json_out, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
 }
 /// The last `frames` GPU samples after skipping `skip`: per frame, the render span and the
 /// shading pass in milliseconds.
