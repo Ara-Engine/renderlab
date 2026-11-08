@@ -181,7 +181,7 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 4. **One bounce.** Hits take their own untraced specular. RF7 (facing glossy panels) misses at 23.3 vs UE HW-Hit Epic 20.2; its recursive panel-to-panel reflections are missing.
 5. **Rough band (roughness ≥ 0.5) is untraced.** RF8's wet rocks miss at 7.9 vs 3.9 (traced 0.3/0.4 bands 6.8/7.5; untraced 0.5 band 9.3). RF2's 0.5/0.7/1 spheres miss at 15.9/13.1/10.4 vs 15.3/11.9/5.5, with no local colour bleed, which needs the cache's bounce in `indirect_radiance` (G2b).
 6. **RF2's mirror spheres** miss at roughness 0 and 0.05: 14.1/15.0 vs 11.6/14.4. The reference split noise is 4.8 codes, so this ranking isn't certified.
-7. **Glossy grain without TR1.** Four static rays leave visible sparkle on roughness 0.3-0.4 metals that reflect lit and shadowed surfaces (RF2). TR1's rotated strata integrate it (m7-r1.md §5); with TR1 off, the sparkle remains.
+7. **Glossy grain without TR1.** Four static rays left visible sparkle on roughness 0.3-0.4 metals that reflect lit and shadowed surfaces (RF2). TR1's rotated strata integrate it (m7-r1.md §5). Since RQ1 these bands trace 15-16 strata. The TR1-off RF images were not re-inspected; with TR1, the residual rim sparkle is reduced (m7-rq1.md §4.2).
 8. **Hit lighting is simpler than camera-hit lighting.** At hits:
    - the sun is one hard shadow ray, with no disk penumbra;
    - the indirect inputs read the open environment, never the world radiance cache's occlusion or bounce. A cache lookup per hit cost +0.62 ms of quarry shading with the cache on (m7-r1.md §4);
@@ -195,6 +195,23 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 12. **RT quarry with the cache on:** with no ray traced, the same 309 small pixel clusters differ from main's program in two runs, so the difference is deterministic. It is attributed (I) to codegen changes in the cache lookup's inputs, now prepared after `surface`. It is unscored against the reference; the cache is off by default (m7-r1.md §4).
 13. **Programmability constraint:** in reflecting modules, `surface()` reads the open environment from the indirect inputs; `shade()` reads the prepared values. Reflection hits always read the open environment.
 
+From M7-RQ1 ([m7-rq1.md](m7-rq1.md), Islam's "mushy" report). Glossy rays now scale with roughness, 4 to 16, on both paths. Measured on the matched example against a 16,384-spp path-traced reference: gold-sphere error falls 6.30 → 5.68 on RT and 5.97 → 5.08 on non-RT in motion (frame 47), and RF2's 0.3/0.4 bands improve by 0.66/0.55 codes. Remaining:
+
+14. **Glossy history lags in motion (TR1, MQ2's).** Even with the new ray counts, the moving gold sphere is softer than the converged still: 5.68 vs 4.76 codes on RT. Surface-reprojected TR1 history trails the reflected image. MQ1's motion box limits the trail; the fix is reflection-aware reprojection (hit distance or virtual depth, or a lobe-capped window), which is MQ2's open work. Once that lands, re-measure the ray curve: history may then carry what rays carry now.
+15. **Ray cost (miss, recorded rather than reducing quality).**
+   - At 1080p, shading rises up to +2.1 ms on RT and **+13.6 ms on non-RT** where glossy roughness 0.3–0.5 fills the screen (RF8: 5.6 → 19.2 ms non-RT). RF2 rises +0.5 / +4.8 ms.
+   - The example at 720p rises +1.5 ms on RT and +3.1 ms on non-RT (GPU span p50).
+   - An 8-ray cap would cost about half and keep about 60–80 % of the gain (RT gold 5.81, non-RT 5.41 against 5.68 / 5.08). It is a one-line change (`RL_GLOSSY_MAX`).
+   - The cheaper routes are R1n's traversal levers (item 1) and item 14.
+16. **Roughness 0.1 band moved +0.02 codes** on RF2 and RF4 (both paths), from five strata instead of four. RF2's band noise is 7.7 codes; RF4's is 0.39, so its change is measured but small.
+17. **One bounce shows on metals in metals.** The gold sphere seen in the chrome sphere is olive, because the hit takes only its untraced sky specular. This is the largest single error on the chrome sphere (`rq1/scratch/chrome-err-still.png`) and the same cause as item 4.
+18. **Hit lighting from the GI cache would help, but its cost is unmeasured.** Preparing the cache lookup at each hit (`hitgi`) cut the still gold-sphere error 4.78 → 4.35 and its low-frequency bias 4.44 → 3.97. It was not adopted: R1 measured +0.62 ms of quarry shading for a similar structure with nothing traced (item 8), and no quarry timing ran tonight.
+19. **Tracing to roughness 1.0 helps little per ray.** Whole-frame rms 3.72 → 3.42 on the example flight, but the mean absolute gain is 0.015 codes, all on the 0.5-roughness hero, while every rough pixel (ground, stone) would trace. Rough metals (RF2 0.5/0.7/1) still miss UE (item 5).
+20. **Shipped-image softness outside reflections.**
+   - Post's 180° motion blur and bloom remove 15–27 % of the spheres' fine band (3–5 % of the mid band) in the moving example (PP1).
+   - The quality upscaling preset adds error on the spheres (chrome 9.40 → 10.65); the example renders native.
+   - Caustics (the gold sphere focusing the sun onto the hero and the ground) are in the path-traced reference but in no real-time path.
+
 ## TR1 (temporal reconstruction, default on; TR1b)
 
 TR1 is the default on traced and visibility-buffer lit frames, both paths, from TR1b's overnight pass; `Reconstruction::off()` switches it off ([m7-tr1b.md](m7-tr1b.md)). It is never presented as meeting the Unreal bar.
@@ -202,7 +219,7 @@ TR1 is the default on traced and visibility-buffer lit frames, both paths, from 
 **Reach.** RTDEF2 makes traced primaries and TR1 the capable 1x RT default; the viewer negotiates that path. Raster/4x and unsupported-capability fallbacks still do not reconstruct. Temporal soft-shadow frames keep their own film history and are not reconstructed.
 
 **Animated scenes (MQ1, [m7-mq1.md](m7-mq1.md)).** Before MQ1, any transform edit restarted every pixel, so the example scene (and any game with a moving object) got no anti-aliasing and no glossy integration. Moved placements now reproject through their previous transforms, and frames where something moved clamp history to a plain 3x3 min/max box. Remaining gaps, measured on the example flight against a 2x2 supersampled TR1-off control:
-- **RT mirror and glossy reflections lag under camera motion**: chrome sphere 3.07 → 6.44 codes RMS and flicker 4.05 → 9.05 versus main's restart; gold sphere static 4.34 → 4.84, although its grain falls 62 %. Surface-identity history follows the surface, not the reflected image. The fix needs a program-declared view sensitivity (window capped by lobe width) or reflection hit distances. Static scenes under camera motion have the same lag without the box (TR1b's U1b failure).
+- **RT mirror and glossy reflections lag under camera motion**: chrome sphere 3.07 → 6.44 codes RMS and flicker 4.05 → 9.05 versus main's restart; gold sphere static 4.34 → 4.84, although its grain falls 62 %. Surface-identity history follows the surface, not the reflected image. The fix needs a program-declared view sensitivity (window capped by lobe width) or reflection hit distances. Static scenes under camera motion have the same lag without the box (TR1b's U1b failure). RQ1 measured the gold sphere's four-ray grain widening this box into blocky smears; scaled glossy rays remove the blocks (m7-rq1.md), but the lag itself remains (Reflections, item 14).
 - **Skinned characters with GI on still restart every static pixel's history** on animated frames (SK1's scene-wide swept-volume widening). Recommended: set MQ1's box for skinned motion and keep the swept volume for direct shadows only.
 - Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.
 - The example's `--quarry` mode fails on both paths (mixed programs, MP1).
