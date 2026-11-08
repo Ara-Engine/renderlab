@@ -67,8 +67,8 @@ const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
         "{film_store(pixel,vec3<f32>(0.0),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));return;}",
     ),
     (
-        "textureStore(primary_hdr,pixel,vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0));",
-        "film_store(pixel,rl_finite(shade(surface_output,surface_input)),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));",
+        "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),1.0));",
+        "film_store(pixel,atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));",
     ),
 ];
 
