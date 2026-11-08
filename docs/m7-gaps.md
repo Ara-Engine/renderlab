@@ -173,6 +173,8 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 ## Reflections
 
+- **OPEN, blocking the base: non-RT courtyard reflection blotches.** In the dusk courtyard (`examples/game_scene.rs`), the non-RT chrome and gold spheres show dark blotches and patches in motion (frames 008-024) in LC3's inspected sheet (`D:/Coding/renderlab-work/lc3/final-inspected-sheet.png`), and the chrome sphere is fully black in frame 000. RT is clean. The cause is not found yet; unit RD1 owns it ([m7-rd1.md](m7-rd1.md) once it lands). Suspects: R1n software geometry or frame-0 preparation, kept history with the transform-accounting fix, RQ1 ray counts, skinned and particle meshes without software geometry, and LC3 hit shadows.
+
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
 
 1. **Non-RT reflections (R1n, [m7-r1n.md](m7-r1n.md)) trace in software, with limits.** R1's rays now run on non-RT visibility-buffer frames over per-mesh software BVHs, on by default. They beat UE SW Epic on RF1-RF7 and RF9 (RF1 4.15 vs 37.2, RF2 13.8 vs 15.9, RF6 6.7 vs 12.3, RF7 23.3 vs 35.6) and miss it on RF8 (7.96 vs 5.24, the untraced rough band, item 5). Against UE HW-Hit Epic they miss RF7 and RF8, as R1 does. They match R1's RT scores within 0.04 codes. What is still missing:
@@ -188,7 +190,7 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 4. **One bounce.** Hits take their own untraced specular. RF7 (facing glossy panels) misses at 23.3 vs UE HW-Hit Epic 20.2; its recursive panel-to-panel reflections are missing.
 5. **Rough band (roughness ≥ 0.5) is untraced.** RF8's wet rocks miss at 7.9 vs 3.9 (traced 0.3/0.4 bands 6.8/7.5; untraced 0.5 band 9.3). RF2's 0.5/0.7/1 spheres miss at 15.9/13.1/10.4 vs 15.3/11.9/5.5, with no local colour bleed, which needs the cache's bounce in `indirect_radiance` (G2b).
 6. **RF2's mirror spheres** miss at roughness 0 and 0.05: 14.1/15.0 vs 11.6/14.4. The reference split noise is 4.8 codes, so this ranking isn't certified.
-7. **Glossy grain without TR1.** Four static rays leave visible sparkle on roughness 0.3-0.4 metals that reflect lit and shadowed surfaces (RF2). TR1's rotated strata integrate it (m7-r1.md §5); with TR1 off, the sparkle remains.
+7. **Glossy grain without TR1.** Four static rays left visible sparkle on roughness 0.3-0.4 metals that reflect lit and shadowed surfaces (RF2). TR1's rotated strata integrate it (m7-r1.md §5). Since RQ1 these bands trace 15-16 strata. The TR1-off RF images were not re-inspected; with TR1, the residual rim sparkle is reduced (m7-rq1.md §4.2).
 8. **Hit lighting is simpler than camera-hit lighting.** At hits:
    - the sun is one hard shadow ray, with no disk penumbra;
    - the indirect inputs read the open environment, never the world radiance cache's occlusion or bounce. A cache lookup per hit cost +0.62 ms of quarry shading with the cache on (m7-r1.md §4);
@@ -202,6 +204,23 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 12. **RT quarry with the cache on:** with no ray traced, the same 309 small pixel clusters differ from main's program in two runs, so the difference is deterministic. It is attributed (I) to codegen changes in the cache lookup's inputs, now prepared after `surface`. It is unscored against the reference; the cache is off by default (m7-r1.md §4).
 13. **Programmability constraint:** in reflecting modules, `surface()` reads the open environment from the indirect inputs; `shade()` reads the prepared values. Reflection hits always read the open environment.
 
+From M7-RQ1 ([m7-rq1.md](m7-rq1.md), Islam's "mushy" report). Glossy rays now scale with roughness, 4 to 16, on both paths. Measured on the matched example (`examples/reflection_matched.rs`) against a 16,384-spp path-traced reference: on the merged code, gold-sphere error falls 5.87 → 5.27 in motion (frame 47) on both paths, and RF2's 0.3/0.4 bands improve by 0.66/0.55 codes. Remaining:
+
+14. **Glossy history in motion (TR1).** On the merged code, with MQ2's history cap, the moving gold sphere is still softer than the converged still: 5.27 vs 4.76 codes, both paths. MQ2's cap trades lag for per-frame grain, which these rays now carry. Reflection-aware reprojection (a per-pixel reflection hit distance or virtual depth) is still open. Once it lands, re-measure the ray curve: history may then carry what rays carry now.
+15. **Ray cost (miss, recorded rather than reducing quality).**
+   - At 1080p, shading rises up to +2.1 ms on RT and **+13.6 ms on non-RT** where glossy roughness 0.3–0.5 fills the screen (RF8: 5.6 → 19.2 ms non-RT). RF2 rises +0.5 / +4.8 ms.
+   - The example at 720p rises +1.95 ms on RT and +3.0 ms on non-RT (GPU span p50, merged code: 9.12 → 11.07 and 13.17 → 16.15 ms).
+   - An 8-ray cap would cost about half and keep about 60–80 % of the gain (RT gold 5.81, non-RT 5.41 against 5.68 / 5.08). It is a one-line change (`RL_GLOSSY_MAX`).
+   - The cheaper routes are R1n's traversal levers (item 1) and item 14.
+16. **Roughness 0.1 band moved +0.02 codes** on RF2 and RF4 (both paths), from five strata instead of four. RF2's band noise is 7.7 codes; RF4's is 0.39, so its change is measured but small.
+17. **One bounce shows on metals in metals.** The gold sphere seen in the chrome sphere is olive, because the hit takes only its untraced sky specular. This is the largest single error on the chrome sphere (`rq1/scratch/chrome-err-still.png`) and the same cause as item 4.
+18. **Hit lighting from the GI cache would help, but its cost is unmeasured.** Preparing the cache lookup at each hit (`hitgi`) cut the still gold-sphere error 4.78 → 4.35 and its low-frequency bias 4.44 → 3.97. It was not adopted: R1 measured +0.62 ms of quarry shading for a similar structure with nothing traced (item 8), and no quarry timing ran tonight.
+19. **Tracing to roughness 1.0 helps little per ray.** Whole-frame rms 3.72 → 3.42 on the example flight, but the mean absolute gain is 0.015 codes, all on the 0.5-roughness hero, while every rough pixel (ground, stone) would trace. Rough metals (RF2 0.5/0.7/1) still miss UE (item 5).
+20. **Shipped-image softness outside reflections.**
+   - Post's 180° motion blur and bloom remove 15–27 % of the spheres' fine band (3–5 % of the mid band) in the moving example (PP1).
+   - The quality upscaling preset adds error on the spheres (chrome 9.40 → 10.65); the example renders native.
+   - Caustics (the gold sphere focusing the sun onto the hero and the ground) are in the path-traced reference but in no real-time path.
+
 ## TR1 (temporal reconstruction, default on; TR1b)
 
 TR1 is the default on traced and visibility-buffer lit frames, both paths, from TR1b's overnight pass; `Reconstruction::off()` switches it off ([m7-tr1b.md](m7-tr1b.md)). It is never presented as meeting the Unreal bar.
@@ -214,6 +233,7 @@ TR1 is the default on traced and visibility-buffer lit frames, both paths, from 
   - budgets below 0.25 are unscreened;
   - the standard program's share is a uniform-light estimate, so dielectrics reflecting much brighter surroundings keep some lag;
   - a static scene under a moving camera now has its view-dependent lag capped too, but still no box (TR1b's U1b case).
+  - Glossy grain: with four glossy rays, per-frame grain widened MQ1's box into blocky smears on moving glossy metals; RQ1's roughness-scaled rays remove the blocks ([m7-rq1.md](m7-rq1.md), Reflections items 14-15).
 - **Non-RT animated scenes restarted every pixel on every frame on main `4c8ef7d`** (R1n's per-frame instance-record rewrite counted as a geometry upload, which TR1's key hashes). Found and measured by MQ2; the fix ships in RQ1. Since TR1 works there again, non-RT static edge RMS shows MQ1's moving-edge history lag: 10.87 → 11.40 codes against the lag-free control, with flicker lower everywhere and edges visibly anti-aliased where main stair-stepped.
 - **Skinned characters with GI on** no longer restart every static pixel (MQ2): animated skinned frames use MQ1's box. Evidence is non-RT only (the fixture's ground is flat, so it shows no difference on static pixels); the RT fox walk is blocked by main's BLAS/TLAS validation regression (Skinning, above).
 - Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.

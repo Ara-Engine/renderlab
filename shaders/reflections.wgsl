@@ -17,15 +17,22 @@
 // lobe or none (m7-design 3.4, constraint 1).
 struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };
 
-// Perceptual-roughness bands: one mirror ray below RL_MIRROR; RL_GLOSSY_RAYS fixed VNDF
-// strata to RL_TRACED; the traced fraction falls linearly to 0 at RL_UNTRACED, where the
-// program's own untraced estimate (ES1's `indirect_radiance` and lobes) takes over.
+// Perceptual-roughness bands: one mirror ray below RL_MIRROR; fixed VNDF strata to
+// RL_TRACED; the traced fraction falls linearly to 0 at RL_UNTRACED, where the program's own
+// untraced estimate (ES1's `indirect_radiance` and lobes) takes over.
 // RL_TRACED and RL_UNTRACED are the defaults: the frame's ReflectionSettings
 // (primary_frame.reflection, src/reflections.rs) set both, or switch tracing off.
 const RL_MIRROR:f32=0.05;
 const RL_TRACED:f32=0.35;
 const RL_UNTRACED:f32=0.5;
+// RQ1 (docs/m7-rq1.md): glossy strata grow with the lobe, ceil(RL_RAYS_PER_ROUGHNESS x
+// roughness) clamped to [RL_GLOSSY_RAYS, RL_GLOSSY_MAX]: 4 to roughness 0.08, 12 at 0.25,
+// 16 from 0.33. Wider lobes see more varied radiance; with four strata their per-frame grain
+// widened TR1's motion box and left blocky smears on moving glossy metals. The count
+// depends only on the declared lobe, so the estimate stays an unbiased stratified mean.
 const RL_GLOSSY_RAYS:u32=4u;
+const RL_GLOSSY_MAX:u32=16u;
+const RL_RAYS_PER_ROUGHNESS:f32=48.0;
 const RL_FAR:f32=1.0e6;
 
 var<private> rl_specular:vec4<f32>;
@@ -146,7 +153,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let width=pixel_angle*length(input.world-input.eye);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let mirror=rough<RL_MIRROR;
-    let count=select(RL_GLOSSY_RAYS,1u,mirror);
+    let count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
     let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);
