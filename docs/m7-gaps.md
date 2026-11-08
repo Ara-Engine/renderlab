@@ -10,14 +10,17 @@ One section per feature. Each lists the measured or inspected gaps that remain a
   unavailable; bounds are conservative mesh-wide bounds. CPU software-GI BVHs
   rebuild for changed poses, and caster invalidation is conservative. Replacing
   animated geometry also repacks the static software scene each pose: the default
-  GI quarry run is currently too expensive for game frame rates. Persistent
-  dynamic geometry ranges are needed; see SK1's measured frame cost.
+  GI quarry run is currently too expensive for game frame rates (**242 ms CPU,
+  310 ms synchronized frame** in SK1's contended opt-level-1 diagnostic run).
+  Persistent dynamic geometry ranges are needed; see SK1's measured frame cost.
 - RLS v1 supports four influences, TRS nodes and one active sampled clip. Matrix
   nodes, additional influence sets and morph targets are explicitly rejected.
   Clip blending, events, dual-quaternion skinning and automatic root motion remain
   outside the overnight base.
 - Existing TR1 model-transform edits still reset history. SK1 supplies previous
   deformed vertex positions; its walk example puts translation in the palette.
+- SK1 exposes typed renderer upload/palette APIs and a clip player. API1's planned
+  `Engine` facade adapter (`MeshId`/`ObjectId` pose ownership) remains to be wired.
 - Moving-caster shadow regions reject old receiver lighting history to avoid
   trailing shadows. With dynamic GI enabled the region is conservatively
   scene-wide; finer rejection and stable shadow sampling remain open.

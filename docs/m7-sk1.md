@@ -1,8 +1,8 @@
 # M7 SK1: animated meshes
 
 Implementation branch: `t3/m7-sk1`, based on `984a18b`, updated with main's
-`f159fcd` (default GI/bounce, TR1b, R1 and AT1), then `c7855a5` before the final
-checks. This is the 2026-11-08 overnight base, with the remaining limits listed
+`f159fcd` (default GI/bounce, TR1b, R1 and AT1), then `f870cb4` (API1) before the
+final checks. This is the 2026-11-08 overnight base, with the remaining limits listed
 below. It makes no Unreal quality or performance claim.
 
 ## Asset and cache contract
@@ -52,6 +52,9 @@ The clip sampler supports STEP, LINEAR (quaternion shortest-arc slerp), and
 CUBICSPLINE (Hermite tangents scaled by key interval, rotations normalized).
 It supports looping, seek and playback speed. A sampled mesh-local palette is
 `inverse(mesh global) * joint global * inverse bind`.
+Apply `pose.node_transform(binding.node)` as the draw's model, or premultiply it
+into those palette matrices while keeping a fixed model. This preserves animated
+mesh-node transforms as well as joint animation. Fox's mesh node is identity.
 
 One `SkinnedMeshInstance` owns one independently posed primitive. Multiple
 placements may share a pose; independent poses require independent instances.
@@ -61,6 +64,10 @@ counts those bytes separately from static geometry edits.
 
 There is no opt-in renderer switch: uploading a skinned mesh enables skinning
 automatically on RT and non-RT devices.
+
+API1's `Engine` facade currently lists SK1 as an extension point. This unit
+provides the typed renderer API above; storing independent poses behind
+`MeshId`/`ObjectId` and replacing API1's example hero remain facade integration work.
 
 ## GPU and integration
 
@@ -137,15 +144,91 @@ py -3 -B scripts/m7-sk1-report.py
 Every renderer test binary and GPU run is inside the shared `gpu-slot.lock` lease.
 Check `E:/renderlab-work/gpu-schedule.md` for QUIET/game holds first. Bulk outputs
 and the worker target are on D:. The worker target is deleted when the unit finishes.
+The retained run's target was cleaned with
+`cargo clean --target-dir D:/Coding/renderlab-work/m7-sk1/target` (2.0 GiB removed).
+Its oversized cooked RLS cache entry was also removed; the pinned source, inspected
+PNGs and measurement/log summaries remain. The skin recipe regenerates the cache.
 
 ## Verification record
 
-The first guarded run (`sk1-a1`, 16:27:57-16:28:22 UTC) passed all available lib
-tests: asset **4**, cooker **16** (2 existing ignored), renderer **149** (146
-ignored). The GPU current/previous-position oracle passed on a non-RT device and
-an RT device with zero Vulkan validation errors. The example stopped before
-rendering because its initial GI direction count was unsupported; it is corrected
-to 64. The retained image/timing run is recorded below once completed.
+Retained run **`sk1-api1-15`**, 2026-11-08 **18:22:39–18:24:56 UTC**, verified
+runtime source **`e77a4cdd648d595709cbf362a1224bd422143c64`**, including merged main
+`f870cb4`. The later report-only commit does not change that runtime source.
+
+- Asset **4**, cooker **16** (2 existing ignored), renderer **163** (149 ignored)
+  lib tests passed. Both explicit SK1 GPU tests passed. Exit 0, no guard failures,
+  **zero Vulkan validation errors**; existing unused-vertex-attribute warnings remain.
+- GPU current/previous positions match the CPU deformation oracle; inverse-transpose
+  normals survive rotation and nonuniform scale. A skinned pose matches an ordinary
+  baked-geometry image **exactly (maximum byte error 0) on both paths**. This isolated
+  direct-shadow oracle disables GI; the separate default walk keeps GI/bounce on.
+- Covered shadows: non-RT raster directional/point/spot and Virtual; RT Exact,
+  Virtual and Interactive. Both devices assert TR1 history continues after frame 0.
+- The full default walk ran **32 frames per scene/path at 960×540**, saving frames
+  0/8/16/24/31. I inspected the entire 20-frame contact sheet and full-resolution
+  frame 16 for every scene/path: coherent silhouettes and moving shadows, without
+  the earlier retained-silhouette and shadow trails. This does not certify an
+  Unreal quality floor or all possible animation/material combinations.
+- GI ran for all 32 frames in each configuration. Sums of invalidation counter
+  snapshots at 8/16/24/31 were **456,064 / 283,301** for non-RT fixture/quarry and
+  **554,116 / 642,170** for RT fixture/quarry. These are sampled counts, not unique
+  cache cells. Non-RT explicitly reports software GI; RT reports hardware GI.
+
+The retained source also fixes an integration defect exposed by the first merged
+R1 run: Naga 30 emitted illegal opaque `OpConstantNull` instructions for conditional
+ray-query declarations. Function-scope queries preserve behavior and compile cleanly;
+the existing primary SPIR-V test now checks for opaque nulls in backend output.
+An intervening run was stopped by the unchanged 2 GiB runtime memory guard while
+13 external Rust compilers were active; its partial results are not retained timings.
+
+Local evidence (ignored bulk output on D:):
+
+- [Inspected walk contact sheet](D:/Coding/renderlab-work/m7-sk1/images/contact-sheet.png)
+- Quarry frame 16: [non-RT](D:/Coding/renderlab-work/m7-sk1/images/nonrt-quarry-16.png),
+  [RT](D:/Coding/renderlab-work/m7-sk1/images/rt-quarry-16.png)
+- Fixture frame 16: [non-RT](D:/Coding/renderlab-work/m7-sk1/images/nonrt-fixture-16.png),
+  [RT](D:/Coding/renderlab-work/m7-sk1/images/rt-fixture-16.png)
+- [Timing chart](D:/Coding/renderlab-work/m7-sk1/images/timings.png),
+  [measurement JSON](D:/Coding/renderlab-work/m7-sk1/images/summary.json),
+  [guard/lease JSON](D:/Coding/renderlab-work/m7-sk1/runs/sk1-api1-15.json),
+  [complete test log](D:/Coding/renderlab-work/m7-sk1/runs/sk1-api1-15.log),
+  [compiler, hardware and executable hash](D:/Coding/renderlab-work/m7-sk1/build.json)
+
+### Diagnostic timing
+
+Ryzen 7 7800X3D, RTX 4070 SUPER, NVIDIA 617.14, Vulkan, Rust 1.96.0. Development
+test build with renderer opt-level 1 and debug assertions. Product GI/bounce,
+TR1, reflection and atmosphere defaults remain selected. Non-RT uses visibility
+primaries + Virtual shadows; RT uses traced primaries + Interactive shadows.
+The lease saw external CPU builds (up to 5 build processes in the coarse samples),
+no foreign GPU process or game, and no foreground change. This is functional timing,
+not a quiet-window optimized benchmark or an RT/non-RT superiority comparison.
+
+| Path / scene | CPU prepare/encode/submit ms | GPU render span ms | Synchronized frame wall ms | Skin compute + cluster copies µs |
+|---|---:|---:|---:|---:|
+| non-RT fixture | 7.56 | 11.36 | 19.80 | 8.89 |
+| non-RT quarry | 242.10 | 41.15 | **309.84** | 8.37 |
+| RT fixture | 6.70 | 5.77 | 14.64 | 8.10 |
+| RT quarry | 3.05 | 10.72 | 14.60 | 8.27 |
+
+Frame values average frames 24–31. Synchronized wall time includes submission,
+AS updates and the explicit GPU drain, but excludes clip sampling/palette construction
+before the timer. The renderer's existing GPU span starts after skinning/AS work;
+it is **not total GPU frame cost**. The final column is eight warmed, separately
+timestamped skin/cluster dispatches, excluding uploads, CPU bounds/BVH work and AS
+updates. Palette/parameter uploads are 1,552 bytes/frame; non-RT additionally counts
+896 bytes of cluster-bound metadata (2,448 total).
+
+The non-RT quarry is a clear performance miss: the changed Fox pose triggers a
+software-scene repack that copies static geometry too. The small skin kernel does
+not explain or conceal that 242 ms CPU cost. No quality setting was reduced to
+improve it.
+
+Implementation/integration ran approximately **16:03–18:09 UTC**, including compile
+and queue interruptions; exclusive active editing time was not instrumented.
+The final no-run compile took **93 s**. The retained verification lease took
+**137.01 s** (GPU-test suite 121.25 s); cumulative acquired verification leases,
+including rejected/aborted iterations, took **613.19 s**, excluding lease queue time.
 
 ## Remaining gaps
 
@@ -164,7 +247,12 @@ to 64. The retained image/timing run is recorded below once completed.
   approximated. Clip selection is currently by index.
 - Existing TR1 resets on instance model-transform edits. Deforming vertex history
   works with a fixed placement; the example includes translation in the palette.
+- API1's engine handle facade still needs its planned SK1 adapter. The renderer
+  API and clip player are public and usable directly.
 - The example uses the renderer's existing shadow-method contracts, including
   double-sided opaque hardware shadow casters.
+- Normal-mapped skins, large crowds and reflection-specific skinned-hit scenes
+  have not had a separate visual campaign. The shared current geometry stream
+  and acceleration updates are covered by the focused geometry/shadow oracle.
 - No new Unreal/reference campaign is part of this overnight unit; no Unreal
   equivalence or engine-wide performance bar is asserted.
