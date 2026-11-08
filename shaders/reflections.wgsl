@@ -20,6 +20,8 @@ struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };
 // Perceptual-roughness bands: one mirror ray below RL_MIRROR; RL_GLOSSY_RAYS fixed VNDF
 // strata to RL_TRACED; the traced fraction falls linearly to 0 at RL_UNTRACED, where the
 // program's own untraced estimate (ES1's `indirect_radiance` and lobes) takes over.
+// RL_TRACED and RL_UNTRACED are the defaults: the frame's ReflectionSettings
+// (primary_frame.reflection, src/reflections.rs) set both, or switch tracing off.
 const RL_MIRROR:f32=0.05;
 const RL_TRACED:f32=0.35;
 const RL_UNTRACED:f32=0.5;
@@ -128,7 +130,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let lobe=reflection_lobe(s,input);
     let alpha=clamp(lobe.alpha,0.0,1.0);
     let rough=sqrt(alpha);
-    let traced=clamp((RL_UNTRACED-rough)/(RL_UNTRACED-RL_TRACED),0.0,1.0);
+    let bands=primary_frame.reflection;
+    let traced=clamp((bands.x-rough)/max(bands.x-bands.y,1e-6),0.0,1.0);
     if traced<=0.0 || !(lobe.weight>0.0) {return;}
     let n=unit_normal(lobe.normal);
     let v=unit_normal(input.eye-input.world);
