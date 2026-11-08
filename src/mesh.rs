@@ -49,8 +49,11 @@ impl Limits {
     }
 }
 
-/// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
+/// Static geometry, or the owned output of a SkinnedMeshInstance. Drop releases
+/// caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
+    // SK1: present only for a deforming instance, automatically dispatched each frame.
+    pub(crate) skin: Option<crate::renderer::skinning::SkinGpu>,
     /// Visibility-buffer clusters: original geometry, or an attached clusterLOD hierarchy.
     pub(crate) clusters: Option<crate::renderer::visibility_buffer::Clusters>,
     pub(crate) repair_scan: bool,

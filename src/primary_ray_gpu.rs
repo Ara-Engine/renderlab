@@ -560,6 +560,8 @@ impl Buffer {
 #[derive(PartialEq)]
 struct DrawKey {
     vertex: wgpu::Buffer,
+    // SK1: static draws alias the current stream; deforming draws retain last frame.
+    previous: wgpu::Buffer,
     index: wgpu::Buffer,
     tangent: Option<wgpu::Buffer>,
     material: wgpu::BindGroup,
@@ -718,6 +720,8 @@ pub(super) struct PrimaryState {
     /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
     geometry_generation: u64,
     bindings_generation: u64,
+    // SK1: TLAS-only rebinding changes poses, not reconstruction target identity.
+    reconstruction_bindings_generation: u64,
     film_layouts: FilmLayouts,
     /// Temporal reconstruction's group 0 and pipeline layouts.
     reconstruction: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>),
@@ -928,6 +932,7 @@ impl PrimaryState {
             per_draw(read(3, 4)),
             per_draw(read(4, 16)),
             read(5, 4),
+            per_draw(read(6, 16)),
         ]
         .map(|e| wgpu::BindGroupLayoutEntry {
             visibility: wgpu::ShaderStages::COMPUTE
@@ -1070,6 +1075,7 @@ impl PrimaryState {
             bindings: None,
             geometry_generation: 0,
             bindings_generation: 0,
+            reconstruction_bindings_generation: 0,
             film: None,
             residency: None,
             requests: false,
@@ -1522,6 +1528,11 @@ impl Renderer {
             .iter()
             .map(|d| DrawKey {
                 vertex: (**d.mesh.vertex).clone(),
+                previous: d
+                    .mesh
+                    .skin
+                    .as_ref()
+                    .map_or_else(|| (**d.mesh.vertex).clone(), |s| (**s.previous).clone()),
                 index: (**d.mesh.index).clone(),
                 tangent: d.mesh.tangent.as_ref().map(|t| (**t).clone()),
                 material: (*d.material.unwrap_or(default).bind).clone(),
@@ -1554,6 +1565,15 @@ impl Renderer {
             let state = self.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
             let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);
+            let previous = padded(
+                draws.iter().map(|d| {
+                    d.mesh
+                        .skin
+                        .as_ref()
+                        .map_or(&**d.mesh.vertex, |s| &**s.previous)
+                }),
+                absent,
+            );
             let indices = padded(draws.iter().map(|d| &**d.mesh.index), absent);
             let tangents = padded(
                 draws
@@ -1589,6 +1609,7 @@ impl Renderer {
                     (3, R::BufferArray(&indices)),
                     (4, R::BufferArray(&tangents)),
                     (5, table.value.as_entire_binding()),
+                    (6, R::BufferArray(&previous)),
                 ],
             );
             let next = Geometry {
@@ -1741,6 +1762,10 @@ impl Renderer {
             scene_generation,
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
+            let reconstruction_changed = state
+                .bindings
+                .as_ref()
+                .is_none_or(|b| b.key.0 != key.0 || b.key.1 != key.1 || b.key.2 != key.2);
             use wgpu::BindingResource as R;
             let hardware = self.hardware_shadows.as_ref();
             let frame = &state.frame.as_ref().unwrap().0.value;
@@ -1885,6 +1910,7 @@ impl Renderer {
             };
             let state = self.primary.as_mut().unwrap();
             state.bindings_generation += 1;
+            state.reconstruction_bindings_generation += u64::from(reconstruction_changed);
             if let Some(old) = state.bindings.replace(next) {
                 state
                     .retired

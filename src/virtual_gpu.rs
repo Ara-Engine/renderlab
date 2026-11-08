@@ -171,6 +171,7 @@ impl Renderer {
                     ResourceKind::Buffer,
                 ));
                 pool.chunks.push(Arc::new(Mesh {
+                    skin: None,
                     clusters: None,
                     repair_scan: true,
                     acceleration: None,
@@ -226,6 +227,7 @@ impl Renderer {
                 self.queue.write_buffer(t, 0, tangent_values);
             }
             let mesh = Mesh {
+                skin: None,
                 clusters: None,
                 repair_scan: true,
                 acceleration: None,

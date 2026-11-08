@@ -43,6 +43,8 @@ mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
 #[path = "gi_cache.rs"]
 mod gi_cache;
+#[path = "skinning.rs"]
+pub(crate) mod skinning;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -1448,7 +1450,7 @@ impl Renderer {
         data: &MeshData<'_>,
         tangents: Option<&asset::TangentStream>,
     ) -> Result<Option<Mesh>, Error> {
-        self.try_upload_mesh_prepared(data, tangents, None)
+        self.try_upload_mesh_prepared(data, tangents, None, false)
     }
 
     /// Validate and prepare owned primitives concurrently without submitting GPU
@@ -1506,6 +1508,7 @@ impl Renderer {
             },
             p.tangents.as_ref(),
             Some(prepared),
+            false,
         )
     }
 
@@ -1522,6 +1525,7 @@ impl Renderer {
         data: &MeshData<'_>,
         tangents: Option<&asset::TangentStream>,
         prepared: Option<&MeshUpload>,
+        skinned: bool,
     ) -> Result<Option<Mesh>, Error> {
         self.check_fault()?;
         let started = Instant::now();
@@ -1590,7 +1594,7 @@ impl Renderer {
         let start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
         // Traced shading reads the same buffers as storage; no second geometry copy.
-        let traced = if self.primary.is_some() {
+        let traced = if self.primary.is_some() || skinned {
             wgpu::BufferUsages::STORAGE
         } else {
             wgpu::BufferUsages::empty()
@@ -1604,7 +1608,11 @@ impl Renderer {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mesh vertices"),
                 size: sizes.0,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | blas | traced,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
+                    | blas
+                    | traced,
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
@@ -1642,6 +1650,7 @@ impl Renderer {
                 &index,
                 data.indices.len() as u32,
                 adjacency_bytes,
+                skinned,
             )
         });
         if let Some(error) = scopes.finish() {
@@ -1761,6 +1770,7 @@ impl Renderer {
                 self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
             });
         Ok(Some(Mesh {
+            skin: None,
             clusters,
             repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),
             acceleration,
@@ -2392,6 +2402,8 @@ impl Renderer {
             self.busy_frames += 1;
             return Ok(None);
         };
+        // SK1: palette writes and software-ray updates only after frame admission.
+        let skinning_uploads = self.prepare_skinning(draws)?;
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.shadows.enabled(view_mode) {
@@ -2456,7 +2468,7 @@ impl Renderer {
             .frame_paths(view_mode, shadow_frame.is_some(), traced)
             .variant;
         self.ensure_pipelines(self.frame_sets(draws.iter().map(|d| d.material), variant))?;
-        let mut uploads = UploadBytes::default();
+        let mut uploads = skinning_uploads;
         let mut scene = SceneCounts::default();
         let mut visibility = Duration::ZERO;
         let mut packing = Duration::ZERO;
@@ -2940,7 +2952,7 @@ impl Renderer {
             }
             if let Some(index) = self.reconstruction_frame {
                 self.ensure_reconstruction()?;
-                self.prepare_reconstruction(camera, index);
+                self.prepare_reconstruction(camera, index, draws);
             }
         }
         if lit {
@@ -2967,12 +2979,16 @@ impl Renderer {
         let view = self
             .ledger
             .attachment(color.create_view(&Default::default()));
+        let skinned_bounds = visibility_buffer::refresh_skinned_bounds(self, draws);
+        uploads.add(skinned_bounds);
+        self.uploads.add(skinned_bounds);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mesh frame"),
             });
         let timed = self.timing_status == TimingStatus::Enabled;
+        self.encode_skinning(&mut encoder, draws, hardware_build);
         if hardware_build {
             let start = Instant::now();
             self.hardware_shadows
@@ -3287,6 +3303,21 @@ impl Renderer {
             self.atmosphere_submitted(camera, [color.width(), color.height()]);
         }
         if hardware_build {
+            // SK1: pose updates were encoded before this frame's TLAS and consumers.
+            let mut seen = std::collections::HashSet::new();
+            for d in draws {
+                if d.mesh.skin.is_some()
+                    && let Some(a) = &d.mesh.acceleration
+                    && seen.insert(Arc::as_ptr(a))
+                {
+                    self.hardware_shadows.as_mut().unwrap().dynamic_submitted(
+                        &self.device,
+                        &self.ledger,
+                        a.clone(),
+                        self.submissions,
+                    );
+                }
+            }
             self.hardware_shadows.as_mut().unwrap().scene_submitted(
                 &self.device,
                 &self.ledger,
@@ -3624,3 +3655,7 @@ mod specular_aa_tests;
 #[cfg(test)]
 #[path = "iq1_tests.rs"]
 mod iq1_tests;
+
+#[cfg(test)]
+#[path = "skinning_tests.rs"]
+mod skinning_tests;

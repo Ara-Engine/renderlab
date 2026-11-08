@@ -9,6 +9,7 @@
 //! outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+pub mod animation;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 pub mod engine;
@@ -58,6 +59,7 @@ pub use primary_ray::{
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
+pub use renderer::skinning::SkinnedMeshInstance;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,

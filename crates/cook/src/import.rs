@@ -138,7 +138,7 @@ pub(crate) fn chunks(source: &[u8], limits: CookLimits) -> Result<(&[u8], &[u8])
     Ok((json, &source[json_end + 8..end]))
 }
 
-fn preflight(json: &[u8], limits: CookLimits) -> Result<()> {
+fn preflight(json: &[u8], limits: CookLimits, skinned: bool) -> Result<()> {
     let root: serde_json::Value =
         serde_json::from_slice(json).map_err(|e| Error(format!("GLB JSON: {e}")))?;
     ensure(
@@ -166,8 +166,10 @@ fn preflight(json: &[u8], limits: CookLimits) -> Result<()> {
     }
     for key in ["skins", "animations"] {
         ensure(
-            root.get(key)
-                .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)),
+            skinned
+                || root
+                    .get(key)
+                    .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)),
             format!("unsupported {key}"),
         )?;
     }
@@ -233,7 +235,12 @@ fn preflight(json: &[u8], limits: CookLimits) -> Result<()> {
     Ok(())
 }
 
-fn validate_accessors(document: &gltf::Document, blob: &[u8], limits: CookLimits) -> Result<()> {
+fn validate_accessors(
+    document: &gltf::Document,
+    blob: &[u8],
+    limits: CookLimits,
+    skinned: bool,
+) -> Result<()> {
     let buffers: Vec<_> = document.buffers().collect();
     ensure(buffers.len() == 1, "exactly one embedded buffer required")?;
     ensure(
@@ -271,10 +278,11 @@ fn validate_accessors(document: &gltf::Document, blob: &[u8], limits: CookLimits
             "accessor count limit",
         )?;
         ensure(
-            matches!(
-                a.dimensions(),
-                Dimensions::Scalar | Dimensions::Vec2 | Dimensions::Vec3 | Dimensions::Vec4
-            ),
+            (skinned && a.dimensions() == Dimensions::Mat4)
+                || matches!(
+                    a.dimensions(),
+                    Dimensions::Scalar | Dimensions::Vec2 | Dimensions::Vec3 | Dimensions::Vec4
+                ),
             "unsupported matrix accessor",
         )?;
         let size = a.size();
@@ -584,6 +592,7 @@ fn attribute(
     semantic: &Semantic,
     vertices: usize,
     normal_maps: bool,
+    skinned: bool,
 ) -> Result<()> {
     ensure(a.count() == vertices, "inconsistent attribute counts")?;
     let float = a.data_type() == DataType::F32 && !a.normalized();
@@ -594,6 +603,14 @@ fn attribute(
         Semantic::TexCoords(0) => a.dimensions() == Dimensions::Vec2 && (float || normalized),
         Semantic::Colors(0) => {
             matches!(a.dimensions(), Dimensions::Vec3 | Dimensions::Vec4) && (float || normalized)
+        }
+        Semantic::Joints(0) if skinned => {
+            a.dimensions() == Dimensions::Vec4
+                && matches!(a.data_type(), DataType::U8 | DataType::U16)
+                && !a.normalized()
+        }
+        Semantic::Weights(0) if skinned => {
+            a.dimensions() == Dimensions::Vec4 && (float || normalized)
         }
         _ => false,
     };
@@ -609,6 +626,7 @@ fn meshes(
     materials: &mut Vec<Material>,
     settings: Settings,
     limits: CookLimits,
+    skinned: bool,
 ) -> Result<Vec<Mesh>> {
     let mut result = Vec::new();
     let (mut nv, mut ni, mut np) = (0usize, 0usize, 0usize);
@@ -642,7 +660,7 @@ fn meshes(
                 "primitive vertex limit",
             )?;
             for (s, a) in p.attributes() {
-                attribute(&a, &s, count, settings.normal_maps)?;
+                attribute(&a, &s, count, settings.normal_maps, skinned)?;
             }
             let index_count = p.indices().map_or(count, |a| a.count());
             ensure(index_count <= u32::MAX as usize, "index count width")?;
@@ -859,12 +877,16 @@ fn multiply(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     m
 }
 
-fn placements(document: &gltf::Document, limits: CookLimits) -> Result<Vec<Placement>> {
+fn placements(
+    document: &gltf::Document,
+    limits: CookLimits,
+    skinned: bool,
+) -> Result<Vec<Placement>> {
     let nodes: Vec<_> = document.nodes().collect();
     let mut parents = vec![None; nodes.len()];
     for node in &nodes {
         ensure(
-            node.skin().is_none() && node.weights().is_none(),
+            (skinned || node.skin().is_none()) && node.weights().is_none(),
             "unsupported node skin/morph weights",
         )?;
         ensure(node.camera().is_none(), "unsupported camera node")?;
@@ -953,16 +975,26 @@ fn placements(document: &gltf::Document, limits: CookLimits) -> Result<Vec<Place
 
 /// Prepare only the documented static embedded subset. No resource URI is resolved.
 pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<Asset> {
+    prepare_inner(source, settings, limits, false)
+}
+
+// SK1: the separate skin cooker opts into animation; legacy recipes remain unchanged.
+pub(crate) fn prepare_inner(
+    source: &[u8],
+    settings: Settings,
+    limits: CookLimits,
+    skinned: bool,
+) -> Result<Asset> {
     ensure(
         !(settings.normal_variance || settings.normal_moments) || settings.normal_maps,
         "normal variance requires normal maps",
     )?;
     let (json, blob) = chunks(source, limits)?;
-    preflight(json, limits)?;
+    preflight(json, limits, skinned)?;
     let gltf =
         gltf::Gltf::from_slice(source).map_err(|e| Error(format!("glTF validation: {e}")))?;
     let document = &gltf.document;
-    validate_accessors(document, blob, limits)?;
+    validate_accessors(document, blob, limits, skinned)?;
     for image in document.images() {
         ensure(
             matches!(
@@ -975,7 +1007,7 @@ pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<
             "unsupported image URI/MIME; embedded PNG/JPEG required",
         )?;
     }
-    let placements = placements(document, limits)?;
+    let placements = placements(document, limits, skinned)?;
     let mut textures = Textures {
         blob,
         limits,
@@ -1004,7 +1036,14 @@ pub fn prepare(source: &[u8], settings: Settings, limits: CookLimits) -> Result<
         .max_decoded_bytes
         .checked_sub(other_bytes)
         .ok_or_else(|| Error("aggregate prepared byte limit".into()))?;
-    let meshes = meshes(document, blob, &mut materials, settings, geometry_limits)?;
+    let meshes = meshes(
+        document,
+        blob,
+        &mut materials,
+        settings,
+        geometry_limits,
+        skinned,
+    )?;
     let asset = Asset {
         meshes,
         placements,

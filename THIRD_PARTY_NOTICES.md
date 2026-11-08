@@ -2,6 +2,10 @@
 
 Renderlab's project license remains undecided. These notices apply only to dependencies. The self-authored fixture generator introduces no third-party artwork.
 
+SK1 additionally uses the externally downloaded **Fox** test model and animations.
+Their CC0/CC BY 4.0 attribution, pinned source and modification notice are in
+[third-party/Fox.md](third-party/Fox.md). The GLB is not bundled in this repository.
+
 M3's cooker pins `gltf 1.4.1`, `image 0.25.10`, `sha2 0.10.9`, and `serde_json 1.0.149`. Their actual packaged MIT and Apache license files were inspected and copied into `third-party/licenses/<crate>-<version>/` before adoption. Each permits either MIT or Apache-2.0. `gltf` has default features disabled and enables only accessor utilities. `image` has default features disabled and enables only PNG/JPEG. `sha2` uses Rust implementations with its normal CPU dispatch, with no optional assembly or C build. It supplies SHA-256 content identity and integrity checks; Renderlab does not implement cryptography.
 
 Additional selected dependency notices are preserved alongside these after lockfile resolution. Cargo.lock records exact versions and archive checksums. Runtime packages do not depend on the cooker or its codecs.

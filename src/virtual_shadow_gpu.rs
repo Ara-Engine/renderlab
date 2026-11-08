@@ -311,7 +311,7 @@ struct Layouts {
 struct Horizons {
     /// Each draw's index buffer, addressed triangle count and recorded triangle count, in
     /// batch order.
-    key: Vec<(usize, u32, u32)>,
+    key: Vec<(usize, u32, u32, u64)>,
     /// First word of each batch's triangles.
     offsets: Vec<u32>,
     buffer: Owned<wgpu::Buffer>,
@@ -323,7 +323,7 @@ struct Horizons {
     /// count and build group (pass uniforms in `record_params`: batch, count, first triangle,
     /// first record in the segment).
     segments: Vec<Owned<wgpu::Buffer>>,
-    pieces: Vec<(u32, Owned<wgpu::BindGroup>)>,
+    pieces: Vec<(u32, u32, Owned<wgpu::BindGroup>)>,
     record_params: Owned<wgpu::Buffer>,
     /// The lookup's group 2 over `records`, placeholders after them.
     record_array: Owned<wgpu::BindGroup>,
@@ -331,6 +331,8 @@ struct Horizons {
     _allocation: Allocation,
     /// Whether this frame computes them (the first frame of a draw list).
     dispatch: bool,
+    /// SK1: only changed poses rebuild their horizons and copied walk records.
+    dirty: Vec<bool>,
 }
 /// One walk record: three corners' position bits.
 const RECORD_BYTES: u64 = 36;
@@ -1587,7 +1589,13 @@ impl Renderer {
             surface_flush = true;
         } else {
             for (p, model) in models.iter().enumerate() {
-                if *model != cache.models[p] {
+                // SK1: deformation invalidates caster pages even at a fixed model matrix.
+                let deforming = draws
+                    .iter()
+                    .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
+                    .nth(p)
+                    .unwrap_or(false);
+                if *model != cache.models[p] || deforming {
                     let [a0, a1] = rect(&cache.bounds[p]);
                     let [b0, b1] = rect(&bounds[p]);
                     rects.push([a0.min(b0), a1.max(b1)]);
@@ -1699,7 +1707,7 @@ impl Renderer {
         // N8k: the map lookup reads neither, so it keeps none.
         let map = state.settings.lookup == VirtualLookup::Map;
         let coverage = state.settings.walk_records;
-        let horizon_key: Vec<(usize, u32, u32)> = draws
+        let horizon_key: Vec<(usize, u32, u32, u64)> = draws
             .iter()
             .map(|d| {
                 let addressed = if map {
@@ -1713,13 +1721,24 @@ impl Renderer {
                     WalkRecords::Source => d.mesh.index_count / 3,
                     WalkRecords::All => addressed,
                 };
-                (Arc::as_ptr(&d.mesh.index) as usize, addressed, recorded)
+                (
+                    Arc::as_ptr(&d.mesh.index) as usize,
+                    addressed,
+                    recorded,
+                    d.mesh.skin.as_ref().map_or(0, |s| s.revision),
+                )
             })
             .collect();
-        if state.horizons.as_ref().is_none_or(|h| h.key != horizon_key) {
+        if state.horizons.as_ref().is_none_or(|h| {
+            h.key.len() != horizon_key.len()
+                || h.key
+                    .iter()
+                    .zip(&horizon_key)
+                    .any(|(a, b)| (a.0, a.1, a.2) != (b.0, b.1, b.2))
+        }) {
             let mut offsets = vec![];
             let mut words = 0u32;
-            for &(_, triangles, _) in &horizon_key {
+            for &(_, triangles, _, _) in &horizon_key {
                 offsets.push(words);
                 words += triangles;
             }
@@ -1742,7 +1761,9 @@ impl Renderer {
                 ResourceKind::Buffer,
             );
             let mut bytes = vec![0u8; crate::TRACED_DRAWS as usize * HORIZON_STRIDE as usize];
-            for (d, (&(_, triangles, _), &offset)) in horizon_key.iter().zip(&offsets).enumerate() {
+            for (d, (&(_, triangles, _, _), &offset)) in
+                horizon_key.iter().zip(&offsets).enumerate()
+            {
                 let at = d * HORIZON_STRIDE as usize;
                 for (k, value) in [d as u32, triangles, offset, 0].iter().enumerate() {
                     bytes[at + k * 4..at + k * 4 + 4].copy_from_slice(&value.to_ne_bytes());
@@ -1788,7 +1809,7 @@ impl Renderer {
             };
             let mut records = vec![];
             let mut total = 0u64;
-            for &(_, _, recorded) in &horizon_key {
+            for &(_, _, recorded, _) in &horizon_key {
                 if total + u64::from(recorded) <= capacity {
                     records.push([total as u32, recorded]);
                     total += u64::from(recorded);
@@ -1840,7 +1861,7 @@ impl Renderer {
                 .collect();
             let pieces: Vec<_> = pieces
                 .iter()
-                .map(|&(segment, [_, count, _, _])| {
+                .map(|&(segment, [batch, count, _, _])| {
                     let build = self.ledger.own(
                         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("N8g walk record pass"),
@@ -1859,7 +1880,7 @@ impl Renderer {
                         }),
                         ResourceKind::BindGroup,
                     );
-                    (count, build)
+                    (count, batch, build)
                 })
                 .collect();
             let absent = self.ledger.own(
@@ -1905,9 +1926,17 @@ impl Renderer {
                 record_array,
                 _absent: absent,
                 dispatch: true,
+                dirty: vec![true; draws.len()],
             });
         } else if let Some(h) = &mut state.horizons {
-            h.dispatch = false;
+            h.dirty = h
+                .key
+                .iter()
+                .zip(&horizon_key)
+                .map(|(a, b)| a.3 != b.3)
+                .collect();
+            h.dispatch = h.dirty.iter().any(|&dirty| dirty);
+            h.key = horizon_key;
         }
         // Each batch's first horizon word, then (N8h) its first record and recorded triangles.
         let h = state.horizons.as_ref().unwrap();
@@ -2429,13 +2458,19 @@ impl Renderer {
             });
             pass.set_pipeline(&p.horizon);
             pass.set_bind_group(1, arrays, &[]);
-            for (d, &(_, triangles, _)) in h.key.iter().enumerate() {
+            for (d, &(_, triangles, _, _)) in h.key.iter().enumerate() {
+                if !h.dirty[d] {
+                    continue;
+                }
                 pass.set_bind_group(0, &*h.group, &[d as u32 * HORIZON_STRIDE as u32]);
                 pass.dispatch_workgroups(triangles.div_ceil(64), 1, 1);
             }
             // N8g walk records, one pass per piece.
             pass.set_pipeline(&p.record);
-            for (i, (count, group)) in h.pieces.iter().enumerate() {
+            for (i, (count, batch, group)) in h.pieces.iter().enumerate() {
+                if !h.dirty[*batch as usize] {
+                    continue;
+                }
                 pass.set_bind_group(0, &**group, &[i as u32 * HORIZON_STRIDE as u32]);
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
