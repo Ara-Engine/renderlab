@@ -43,23 +43,23 @@ PP1 provides bloom, camera motion blur, camera-requested near/far gather DOF, to
 
 ## Transparency
 
-TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent materials draw in a forward pass after reconstruction.
+TP1 ([m7-tp1.md](m7-tp1.md)) and TP2 ([m7-tp2.md](m7-tp2.md)). Cutout foliage is load-time geometry; transparent materials draw in a forward pass after reconstruction. TP2 adds coloured sun transmission on both paths, R1 reflections on traced RT frames and four-sample geometric coverage.
 
-- **Shadows from transparent surfaces.** Glass casts no shadow: it isn't in the TLAS, the clipmap, the surface cache or the radiance cache. Unreal's translucent shadows (Lumen and VSM opacity) aren't matched: no tinted or coverage shadow.
+- **Shadows from transparent surfaces.** A cached 1024-square layered map filters the first directional sun by tint, coverage and Fresnel on both paths. Each draw stores only its nearest sheet; overlapping sheets/instances in that draw do not compound. Other lights, environment visibility and GI traversal still omit transparent intersections. No volumetric absorption, caustics or finite-sun transmission penumbra. The map uses engine material inputs rather than an arbitrary program's transmission model.
 - **Order.** Sorting is per object: one key per draw, from its visible instances' mean bounds centre. Instances inside a draw, and intersecting transparent objects, aren't sorted per pixel, and no OIT fallback exists. Unreal sorts per primitive with optional OIT.
 - **Refraction** is screen-space and thin-slab only. Content off screen or behind a nearer occluder falls back to the unshifted pixel. No thick or volumetric refraction, no dispersion, no rough (blurred) refraction: the colour copy has no mip chain. Each transparent draw copies the full HDR target before it draws.
-- **Anti-aliasing.** The pass runs after TR1 at one sample per pixel, so transparent edges alias. Unreal composites translucency before TSR, with responsive AA.
+- **Anti-aliasing.** TP2's four-sample coverage resolves geometric edges after TR1. Texture/shading aliasing, intersections and particles still need broader treatment; glass has no temporal history. The seed/resolve and additional attachments have a cost.
 - **Frames that skip the pass.**
   - 4x raster frames: there is no single-sample depth to read.
   - TR1b upscaled frames (`RenderScale` below native): hit records are at the internal size and presentation reads the output HDR.
 
   1x raster, traced and visibility-buffer frames at native scale run it.
-- **Cost** (M, quarry, main `f159fcd` defaults, functional lease).
-  - One glass pane: +0.22 ms on non-RT, but **+1.02 ms on RT traced**. That is unprofiled; the same pane cost +0.17 ms before the radiance cache and AT1 became defaults. Suspects: cache lookups at points with no cells, and the per-fragment hardware sun ray.
-  - Each transparent draw copies the full HDR target.
-  - TP1 in total adds +0.83 to +1.59 ms on the test scene.
-- **No traced reflections on glass.** Transparent surfaces compose the raster stage, so R1's `specular_incident` is untraced there: glass reflects the sky, the ES1 lobes and the sun, not traced scene reflections.
-- **Lighting inputs.** Transparent surfaces read the same lights, sky, ES1 lobes and radiance-cache lookups as opaque ones. The cache holds no cells of its own for transparent surfaces, so they read nearby opaque cells or the open sky. Non-RT sun visibility is a 2048² map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1.
+- **Cost** (M, quarry, TP2 `eb0f4a2`, functional lease, not QUIET-certified).
+  - Cache searches at glass receivers caused the regression: isolating an open-environment input reduced the glass increment from 1.123 to 0.173 ms. Retained RT sun rays and atmosphere.
+  - With TP2 reflections, transmission shadows and AA enabled, the measured pane increment is **0.421 ms RT traced / 0.123 ms non-RT**. Cold pipelines and moving-sun map updates are not priced by these steady-state rows.
+  - Each transparent draw still copies the full HDR target. Full data and contention limits are in the TP2 report.
+- **Reflections on glass.** Traced RT frames now run R1 for the glass program's lobe. RT raster and non-RT retain the environment fallback (R1n was not merged at this checkpoint). Hits see only opaque geometry, with no recursive glass. Glossy strata are fixed without a history denoiser; mixed-program hits retain MP1's response fallback.
+- **Lighting inputs.** Glass now uses the open environment: the radiance cache creates no cells for it, and receiver searches were expensive. Non-RT sun visibility remains a 2048² opaque map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1. Skinned transparent casters and palette-based invalidation of TP1's auxiliary opaque map remain unverified.
 - **Programmability.** A program shades transparent surfaces through its own `surface` and `shade`, plus an optional `transmittance` hook. Without the hook, it blends by coverage. Refraction uses the engine's `material_normal`, not a program normal. Streamed (non-resident) textures on transparent materials bind their resident levels without feedback.
 - **Cutout foliage.**
   - The cut is static: no alpha animation, no runtime change of cutoff or texture.
@@ -74,7 +74,7 @@ TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent 
 TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 - **Lighting.**
-  - Each particle carries one irradiance value per step, at its centre: directional lights with the sun map's visibility, plus the environment's six-axis mean irradiance.
+  - Each particle carries one irradiance value per step, at its centre: directional lights with the sun map's visibility and TP2's coloured transmission, plus the environment's six-axis mean irradiance.
   - No point or spot lights, no radiance cache, and no self-shadowing or volumetric shadowing between particles.
   - Particles cast no shadows.
   - The phase function is a fixed isotropic half.
@@ -130,7 +130,9 @@ settings and the old recorded gates remain available.
 
 ## Atmosphere
 
-AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md). The sky, aerial perspective, height fog, sun transmittance, procedural environment and shadowed volumetric fog are on by default on both paths.
+AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md) and [AT2](m7-at2.md). The sky, aerial perspective, height fog, sun transmittance, procedural environment and shadowed volumetric fog are on by default on both paths.
+
+- **No distinct light shafts.** Islam's review of VF1's sheets (2026-11-08): at low sun the fog shows only soft haze, with no distinct shafts even at "dense". Likely causes to measure: froxel resolution (16 px columns, 7.8 m first slice), the 0.9 history blend, phase-function anisotropy and the default density. Next-level item.
 
 - **Non-RT volumetric coverage is bounded by resident shadow pages.** VF1 reads Virtual's top depth layer without triangle walks or new page requests. Missing or stale fine pages fall back through coarser valid levels, then to sunlight. Fog in a volume with no resident pages can still leak sunlight. Depth-map resolution, the caster LOD and sun-basis hysteresis can differ from the RT fog's exact centre-sun rays. Conventional raster fog has the sun cascades' coverage limit. Dedicated fog page demand and a measured soft sun disk remain open.
 - **The analytic height fog's sun term is unshadowed** beyond the volumetric range, and everywhere while volumetric fog is off, as in Unreal's exponential height fog. Under the default density (about 2 % per 100 m) it isn't visible on the quarry (10 m scale). Dense fog in shadowed spaces will glow.
@@ -139,13 +141,14 @@ AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md). The sky, aerial persp
 - **A captured sky with a non-physical sun shows a dim backdrop.** The procedural sky scales with the first directional light's lux. The quarry's captured-sky protocol (a 1000 lux sun beside an RLE2 sky) therefore shows a near-black sky on misses, as it did before AT1 (a black clear colour). Scenes with a captured sky should turn on `set_visible_environment` until misses follow the selected map automatically.
 - **Visible captured-environment and constant-clear backgrounds bypass fog.** VF1 composes near volumetrics onto the procedural sky, but TR1b's selected visible-map branch returns the environment directly; a sky-off miss returns the clear colour. Surface hits remain fogged. Fogging these backgrounds consistently remains an integration gap.
 - **Only one sun.** Only the first directional light drives the sky, the sun disk, the fog and transmittance. A second directional light (a moon) gets none.
-- **The procedural environment regenerates on every sun change.** Each regeneration is a new map, so the radiance cache flushes too. A moving sun (time of day) therefore flushes GI every frame it moves, and time of day needs in-place updates the cache can track. The environment ignores camera altitude changes after generation.
+- **Continuous time of day relights progressively.** AT2 updates the procedural environment in place for sun, lux, medium and camera-altitude changes, without replacing bindings or clearing geometric GI visibility. The cache keeps its existing eight-group environment/bounce relight schedule and gather caps, so indirect light can lag a fast day cycle. Every changed frame still convolves the environment; there is no staggered cube update or altitude quantization. Changed environment yaw still replaces storage. Extreme sunrise/sunset, high-altitude travel and long day/night cycles remain unscored.
+- **Moving-sun quarry cost remains high.** AT2's contended release/validation-enabled 32-frame pair measured 5.95 to 10.16 ms RT traced and 15.45 to 43.35 ms non-RT, including GI and shadow updates. The game fixture added about 0.52/0.58 ms RT/non-RT. Removing map churn did not establish cheap quarry time of day; stage attribution and a quiet measurement on the subsequently merged GI/lighting work remain open. No quality reduction was used. [AT2](m7-at2.md).
 - **Fog temporal acceptance remains limited.** VF1 reprojects cell centres, rejects lighting/media/sky/caster changes and density discontinuities, and clamps/adapts old lighting at visibility changes. Moving casters and changing sun reset fog history, so noisy starts can recur. A scored motion/disocclusion comparison against Unreal remains open; sky temporal integration is still TR1's.
 - **VF1 validation is not clean.** Its quarry and game processes each log ten Vulkan `VUID-StandaloneSpirv-None-10684` SPIR-V layout diagnostics, starting in pipeline creation before fog is enabled. The lib suite and isolated clipmap reader log none; renders complete, but the layout issue still needs investigation. Conventional non-RT raster-map fog was shader-validated only; actual non-RT captures use VB + Virtual. See [VF1](m7-vf1.md).
 - **Transparent surfaces:** `atmosphere_surface` is ready for TP1's transparent entry. It isn't wired there in this unit.
 - **Film accumulation (`SoftShadows::Temporal`)** fogs its hits, but its misses keep `film_background()` (no sky).
 - **Slice resolution:** the aerial perspective's first slice ends at 7.8 m, and froxels are 16 px columns. VF1 inspected a short 7.5 cm camera move and hold; broader banding, aliasing and disocclusion coverage remain unscored.
-- **The sun disk has a hard, unfiltered edge** (true 0.00465 rad radius, saturating at the HDR ceiling). Its rim aliases, and raster and deferred misses differ on 117 rim pixels. It needs an analytic coverage edge, or TR1 on misses.
+- **Sun disk integration is approximate.** AT2 replaces the hard rim with analytic square-pixel coverage from explicit camera-ray footprints on raster and deferred misses, using stable chord distance. The rim is locally straight and limb intensity is sampled at the pixel centre; unusually small, subpixel custom suns need a full curved-disk/limb integral. The HDR ceiling, extreme exposure, horizon crossings and broad motion remain unscored; the old hard-rim result is superseded by AT2's measurements: deferred RT/non-RT crops match exactly across eight subpixel positions; raster retains 0.00276-0.00346 exposed-HDR crop RMS against deferred (maximum 0.0977). Disk energy varies by about 0.4% across those positions; no full curved-disk/limb reference or broad motion score was run.
 - **The procedural environment uses the legacy mip-chain layout** (no ES1 lobes; the sun is the directional light, so no lobe is lost). Its smallest face is 8 texels: at 1 texel, rough lookups cost +0.47 ms of quarry shading. Roughness is quantized in 0.25 steps between levels.
 - **The planet ground below the horizon** is a flat Lambertian albedo (0.3) lit only by the sun through the atmosphere. Misses below the horizon show that, not terrain.
 
@@ -165,7 +168,14 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
 
-1. **Non-RT has no traced reflections.** Mirror and glossy surfaces reflect only the environment, through ES1's `indirect_radiance` (occluded, with bounce, once the world radiance cache is on). RF1-RF9 are unchanged and miss UE SW Epic on every fixture: RF1 46.1 vs 37.2, RF2 21.0 vs 15.9, RF3 45.8 vs 32.2, RF4 45.7 vs 40.6, RF6 52.3 vs 12.3, RF7 48.0 vs 35.6, RF8 9.9 vs 5.2, RF9 46.2 vs 37.0. Local objects never appear in non-RT reflections. The fix is R1n's LOD-BVH software rays (design 5.2, R0c's BVH), which did not fit the time-box. The patent-fallback trigger (`NonRtReflections::CoherentHybrid`) has not been evaluated, because no design-around tier has been measured yet.
+1. **Non-RT reflections (R1n, [m7-r1n.md](m7-r1n.md)) trace in software, with limits.** R1's rays now run on non-RT visibility-buffer frames over per-mesh software BVHs, on by default. They beat UE SW Epic on RF1-RF7 and RF9 (RF1 4.15 vs 37.2, RF2 13.8 vs 15.9, RF6 6.7 vs 12.3, RF7 23.3 vs 35.6) and miss it on RF8 (7.96 vs 5.24, the untraced rough band, item 5). Against UE HW-Hit Epic they miss RF7 and RF8, as R1 does. They match R1's RT scores within 0.04 codes. What is still missing:
+   - **Large and virtual meshes have no software geometry.** Meshes over 2^19 triangles and streamed clusterLOD meshes get none, and a frame drawing any such mesh traces nothing (the coverage rule, so no ray leaks sky through a missing mesh). The quarry (twelve ~1 M-triangle scans) therefore keeps the environment estimate. The fix is R0c's cooked cluster-LOD cut chosen by ray-cone footprint, carrying drawn-triangle identity (or position-free leaves into the draw's own buffers), so hit shading keeps R1's contract.
+   - **Skinned meshes (SK1) are absent from non-RT reflections.** Their vertices move on the GPU every frame, so they are left out of the software geometry: they neither appear in nor block non-RT reflection rays, and frames that draw them still trace the rest. The fix is a per-frame CPU skin or a GPU-built tree for skinned meshes.
+   - **No LOD selection by ray cone.** Full detail is the only level; R0c's `select_cone_level` is not used yet.
+   - **Cost on reflective content is high** (m7-r1n.md §3): +1.6 to +3.5 ms of shading at 1080p on the mirror and puddle fixtures, +6.7 ms on RF8's glossy rocks (functional, contended), against Lumen's 0.07/0.22 ms reflection pass (U0, A). A flat instance loop, a 32-entry stack in the shading kernel and hit shading inlined beside it are the likely causes (I); a separate trace pass, a two-level tree and wider nodes are the levers.
+   - **Quarry with the cache on (the default): +0.30 to +0.52 ms of shading although nothing is traced** (m7-r1n.md §4), R1's codegen effect on RT now on the default path too. Images are bit-identical (cache on) with TR1 off. Fix as R1's item 11: a separate hit-shading pass or an open-only composition.
+   - **Edge slack.** Möller–Trumbore is not watertight; a 4e-6 barycentric slack closes shared-edge seams (the identity quad leaked sky without it). Hits can lie up to that fraction outside their triangle.
+   - **Transforms are rewritten whole** each frame they change; there is no refit and no moving-object special case.
 2. **Raster primaries get no traced reflections.** The RT device's code default is still raster primaries (IQ1, RT1d), and only traced-primary frames trace reflections. Raster frames keep the environment estimate, as non-RT does.
 3. **Hits on another program's object** (MP1, [m7-mp1.md](m7-mp1.md)): mixed-program frames now render on both paths, but such a hit is shaded by the reflecting surface's program with the hit's material inputs, not by the hit's own program (Programs, below). The toon program is still untested as a reflection-hit program in production; only R0b's probe has tested it.
 4. **One bounce.** Hits take their own untraced specular. RF7 (facing glossy panels) misses at 23.3 vs UE HW-Hit Epic 20.2; its recursive panel-to-panel reflections are missing.
@@ -245,8 +255,11 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
 
-- **Cost against Lumen.** One functional timing run with the camera moving: +1.32-1.62 ms on RT and +2.59-2.83 ms on non-RT over the cache-off frame. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target misses by about 2.2-2.6x (RT) and 4.3-4.7x (non-RT), and the ~0.45 ms budget by 3-6x. Largest items: the shading lookup (+0.6 ms on both paths) and the probe (0.43 ms); on non-RT also gathers (0.74 ms) and query points for new cells (0.53 ms). The run was not quiet-classified.
-- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 28 frames (RT) and 2-4 s (non-RT), not 8 frames. While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
+- **Cost against Lumen** (GC1, [m7-gc1.md](m7-gc1.md); functional runs, not quiet-classified). With the camera moving after a cut has drained, the default cache adds +1.60-2.01 ms on RT and +1.90-2.98 ms on non-RT (p50 1.68 / 2.51) over the cache-off frame, down from +1.98-2.22 / +2.75-2.95 on main before GC1. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target still misses by about 2.6-3.2x (RT) and 3.1-4.9x (non-RT).
+  - **Largest stage: the shading pass's increment**, +1.01 ms (RT) and +0.78-0.88 ms (non-RT). It grew since G2b's +0.6 as main's shading grew, and is codegen-sensitive (a lookup variant that saved 0.1 ms on RT cost 0.07 ms with the cache off and lost on non-RT).
+  - Next: the probe (0.43-0.45 ms on both paths), and on non-RT the query points of new cells (0.34 ms), gathers (0.22 ms) and their visibility rays (0.14 ms).
+  - Not built: a half-resolution lookup with geometry-aware upsampling (a separate pass would take the lookup's registers out of the shading shader), level hysteresis, and an on-screen-first cut gather order.
+- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 23 frames (RT) and 93 frames, about 1.5 s (non-RT), not 8 frames (GC1: gathers whose hits are all final stop early, a fifth fewer cut gathers; G2b read 28 frames and 2-4 s). While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
 - **Crevice mouths.** Dark streaks and pinholes at crevice mouths remain (TR1x64 pinholes on the merged TR1b default: RT 142 and non-RT 128, against cache-off's 74). Measured fix: 2 px cells (pinholes at the cache-off level, every quarry population better), opt-in only: it speckles flat surfaces on SV and needs a 448 MiB table, over the non-RT device's 256 MiB buffer limit. No per-pixel short-ray check was built.
 - **Enclosed cavities.** A coarse per-cell mottle shows in cavities lit through narrow openings (the quarry's cave and hollow) where the reference is smooth. The hollow is also about 5.5 codes too dark: es1open beats the cache there by 3.6-4.5 codes. More gathers (up to 7) do not change it. It needs a fixed-weight cell-space filter or more directions per cell.
 - **Other losses kept from G2.** On isolated rocks and background-centre the cache loses to cache-off at TR1x64. Against ES1's unoccluded diagnostic it loses on 10-16 populations by 0.1-0.6 codes. It loses to Lumen HW on edge and multi-surface.
@@ -262,16 +275,16 @@ G2c ([m7-g2c.md](m7-g2c.md)) fixed API1's game-scene ground speckles (glossy and
 
 ## Lights
 
-LC1 ([m7-lc1.md](m7-lc1.md)): clustered culling of point and spot lights, plus shadows for the 4 most important local lights (rays where the frame binds an acceleration structure, pooled PCF maps otherwise), on by default on both paths. The soft sun now renders with any number of further lights. Measured on the quarry at night with 260 lights; no Unreal or path-traced comparison was run tonight.
+LC1 ([m7-lc1.md](m7-lc1.md)), extended by LC2 ([m7-lc2.md](m7-lc2.md)): clustered culling of point and spot lights, plus shadows for the 4 most important local lights (rays where the frame binds an acceleration structure, pooled PCF maps otherwise), on by default on both paths. The soft sun now renders with any number of further lights. Measured on the quarry at night with 260 lights; no Unreal or path-traced comparison was run tonight.
 
-- **Raster RT default cost.** Forward raster shading runs the light loop for every rasterized fragment. The quarry's overdraw and quad overshading on 13 M scan triangles make 256 lights cost +24.7 ms there (16.8 to 41.5 ms), against about +1.2-1.8 ms on the deferred traced and VB paths. The fix is a depth prepass or deferred primaries on the RT default. RTDEF kept raster + Exact as the RT default.
+- **Forward raster cost.** RTDEF2 now defaults capable RT frames to traced primaries with TR1. Explicit forward raster still shades every rasterized fragment; LC2's diagnostic 261-light quarry costs 43.94 ms with hard local maps and 67.45 ms with soft maps, versus 11.93/12.27 ms traced and 17.55/18.08 ms non-RT VB. This is one contended drained-frame run, not a comparative performance certification.
 - **Only N lights are shadowed** (default 4, at most 16). All other local lights leak light through geometry. Unreal's VSM shadows every movable local light, with page caching.
 - **Selection by illuminance at the camera** (candela / d², d >= 1 m, frustum-tested, 25 % hysteresis). It is not screen-coverage weighted: in the test it picked two dim lights near the camera over the two bright points. Selection changes pop shadows on and off with no fade.
-- **Hard local shadows.** The Light API has no source radius. Rays give point-source hard shadows, and map PCF gives a fixed 3x3-texel softening, not a physical penumbra. Unreal has source-radius soft shadows on both paths.
-- **Maps draw full-detail meshes** (no cluster-LOD raster) and only regular draws. Virtual-geometry casters are missing from local maps. Moving shadowed lights redraw every frame: +5.7 ms for 4 spot faces on the quarry, more for cube lights. PCF clamps at cube-face edges (no cross-face filtering). The 0.02 m near plane drops casters closer to the light (rays have no near plane).
+- **Local penumbra limits (LC2).** Point/spot `source_radius` now enables four disk-sampled RT rays integrated by TR1, or PCSS blocker search and variable PCF. Radius zero preserves hard visibility. Maps cap support at 96 texels and use 12 blocker-search taps; sparse blockers can be missed. RT visibility uses centre incidence and retains four-ray grain without TR1. No new local-shadow reference or motion campaign certifies the Unreal floor.
+- **Maps draw full-detail meshes** (no cluster-LOD raster) and only regular draws. Virtual-geometry casters are missing from local maps. Moving shadowed lights redraw every frame: +5.7 ms for 4 spot faces on the quarry, more for cube lights. Radius-zero PCF clamps at cube-face edges; LC2's positive-radius PCSS reprojects cross-face taps. The 0.02 m near plane drops casters closer to the light (rays have no near plane).
 - **Unclassified map/ray differences.** Fine speckle on the gravel pile with maps (pebble shadows or acne), and one region behind the large rock that rays shadow and maps don't. Neither was classified tonight.
-- **GI bounce takes only the first 32 lights** in the lighting vector: the cache's per-cell light bits. Later lights add direct light only; in the test scene that includes the four bright ones. Importance-ordered GI lights would need cache-stable reindexing.
-- **Unculled stages walk every light:** R1 reflection hits, which run before the cluster is prepared; film accumulation (Temporal soft mode, opt-in); and cell shading. Their cost grows with the total light count on reflective content. Reflection hits shadow unselected local lights not at all (R1's hit shadow skips lights without shadow views).
+- **GI light-list scaling (LC2).** Every light now reaches bounce through a dynamically sized per-cell bitset, with range/cone/hemisphere rejection. Both deferred paths record 171 contributing lights after the first 32 in the night quarry. At 261 lights the default table grows by 16 MiB to 128 MiB plus its header. Work is bounded by queued cells times light count, without a separate ray budget; dense overlap remains expensive. Bounce visibility still uses hard centre rays. The explicit forward-raster control has no GI-cache pass.
+- **Unculled stages walk every light:** R1 reflection hits, which run before the cluster is prepared; film accumulation (Temporal soft mode, opt-in); and GI visibility selection. Cell shading walks the recorded visible-light bits. Their cost grows with the total light count on reflective content. Reflection hits shadow unselected local lights not at all (R1's hit shadow skips lights without shadow views).
 - **Cluster capacity.** 128 lights per cluster (the test's longest was 99); beyond that, a cluster drops its highest-indexed lights, and the dropped count is recorded in the list. Sets above 65,535 lights walk every light.
 - **Programmability constraints:** implicit-derivative sampling inside the light loop is rejected (per-receiver loop bound), and fixed-index light addressing now means "the cluster's i-th light".
 - **Memory:** pooled maps take 96 MB at the default 4 slots x 6 faces x 1024² Depth32Float, allocated on the first map frame (cube layers are reserved even for spot slots), plus 3.6 MB of lists and a 6 KB uniform.
@@ -291,3 +304,30 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 8. **Unverified:** mixed frames with streamed textures (`TextureResidency` other than `Full`; composed and naga-checked, never rendered), mixed frames with RT1d's visibility filter, motion and disocclusion across program boundaries under TR1 (only static frames and the example's fly path were inspected), and Hard (inline-ray) shading in mixed frames (the gates use Interactive and Virtual).
 9. **Memory with many photoreal programs.** The eight-standard-program quarry run took available memory below the lease guard's 2 GiB twice (32 GB machine, other units running), where the toon-program run bottomed at 5.1 GiB. Not diagnosed: concurrent list-pipeline compiles, per-program GI cell pipelines and per-switch material churn are candidates.
 10. **No Unreal comparison** of per-object materials: Unreal assigns materials per mesh natively; the 2x speed gate on matched workloads was not measured for mixed frames.
+
+
+## Startup
+
+PC1 ([m7-pc1.md](m7-pc1.md)) persists engine and program Vulkan pipeline caches before
+initialization. Full-image identity passes on game/quarry, RT/non-RT, dev/release.
+The shared-machine release RT game sample falls from 48.771 s with an empty application
+cache to 0.745 s with a populated one. These are single diagnostic samples with an
+uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window claim.
+
+- Cold startup remains expensive: release RT game was 48.771 s empty-cache versus
+  37.497 s with persistence off. A real unseen program edit still took 31.335 s to
+  readback; 95.7 ms of module work was followed by a 31.081 s first-use mixed-program
+  list pipeline compile. Background/prewarmed creation of unseen variants remains open.
+- A driver-private-cache hit can already make startup fast. The dev matrix shows no
+  consistent extra benefit from persistence, and one non-RT warm sample is slower.
+- Warm quarry preparation remains 9.479/27.306 s in dev and 4.415/15.236 s in release
+  (RT/non-RT); resource/geometry/ray preparation and upload dominate non-RT. This unit
+  changes no GI, acceleration-structure or asset-cooking algorithms.
+- The timed quarry is the engine example with the complete registered scan asset and
+  game props, using its game camera. Startup of the low-level viewer/quarry walk was
+  not measured; its legacy program-only cache setter does not persist all startup kernels.
+- The program edit check uses the API, without GI/TR1, on RT. File-watch debounce,
+  physical scanout, a separate non-RT reload timing and native-only driver/SPIR-V
+  attribution were not measured. Corrupt-file/key tests pass on CPU; GPU replay after
+  corruption or an actual driver update remains untested. Cache files are bounded to
+  64 MiB and concurrent writers retain the last complete snapshot.

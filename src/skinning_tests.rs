@@ -263,6 +263,7 @@ fn gpu_skinned_streams_history_and_paths() {
                         position: Vec3::new(3., 4., 3.),
                         candela: [500.; 3],
                         range: None,
+                        source_radius: 0.0,
                     },
                     ShadowRequest::Point {
                         near: 0.05,
@@ -277,6 +278,7 @@ fn gpu_skinned_streams_history_and_paths() {
                         range: None,
                         inner: 0.4,
                         outer: 0.7,
+                        source_radius: 0.0,
                     },
                     ShadowRequest::Spot {
                         near: 0.05,

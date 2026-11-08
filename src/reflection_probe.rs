@@ -92,6 +92,8 @@ fn shader() -> String {
         source.push_str(&function(api, name));
         source.push('\n');
     }
+    // TP2: this isolated reference adapter has no transparent casters.
+    source.push_str("fn transparent_sun_transmission(world:vec3<f32>, direction:vec3<f32>)->vec3<f32> { return vec3<f32>(1.0); }\n");
     let standard = crate::STANDARD_PROGRAM
         .replace("Surface", "StdSurface")
         .replace("StdSurfaceInput", "SurfaceInput")

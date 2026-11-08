@@ -138,6 +138,10 @@ pub struct Settings {
     /// On by default with a subtle 0.001/m haze. Sun visibility uses hardware rays or
     /// the non-RT path's cached shadow depth; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
+    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
+    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
+    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
+    pub reflections: crate::ReflectionSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -150,12 +154,14 @@ impl Default for Settings {
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
             volumetric_fog: Some(VolumetricFog::default()),
+            reflections: crate::ReflectionSettings::default(),
         }
     }
 }
 
 /// The renderer's light vector and shadow requests for a sun and local lights.
-/// The sun, when present, is light 0 and the only shadowed light.
+/// The sun, when present, is light 0 and the only explicit shadow request. Local lights
+/// use the automatic local-shadow pool; their source radii pass through unchanged.
 pub(crate) fn lighting(
     sun: Option<Sun>,
     lights: &[Light],
@@ -260,6 +266,7 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
     } else {
         Reconstruction::off()
     })?;
+    r.set_reflections(settings.reflections)?;
     match path {
         RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {
             Quality::Realtime => SoftShadows::Interactive,
@@ -304,11 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn sun_is_light_zero_and_the_only_shadowed_light() {
+    fn sun_is_light_zero_and_the_only_explicit_shadow_request() {
         let lamp = Light::Point {
             position: Vec3::Y,
             candela: [100.0; 3],
             range: Some(5.0),
+            source_radius: 0.125,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.
@@ -328,6 +336,10 @@ mod tests {
         .unwrap();
         assert!(matches!(lighting.lights[0], Light::Directional { .. }));
         assert_eq!(lighting.lights.len(), 3);
+        assert_eq!(
+            lighting.lights[1], lamp,
+            "source radius survives the engine facade"
+        );
         assert_eq!(lighting.environment, [1.0, 2.0, 3.0]);
         assert_eq!(lighting.exposure_stops, -3.0);
         assert!(matches!(
@@ -341,7 +353,7 @@ mod tests {
         );
         assert_eq!(shadows.directional_disk_angle, sun.angular_radius);
 
-        // No sun: an empty request vector disables shadows for every light.
+        // No sun: no explicit shadow requests; the automatic local pool still shadows lamps.
         let (lighting, shadows) =
             super::lighting(None, &[lamp], Sky::default(), Exposure::default()).unwrap();
         assert_eq!(lighting.lights.len(), 1);

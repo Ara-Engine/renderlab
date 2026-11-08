@@ -14,6 +14,7 @@ fn lighting_validation_and_packing() {
                 position: Vec3::ONE,
                 candela: [20.; 3],
                 range: Some(2.),
+                source_radius: 0.0,
             },
             Light::Spot {
                 position: Vec3::Y,
@@ -22,17 +23,18 @@ fn lighting_validation_and_packing() {
                 range: None,
                 inner: 0.25,
                 outer: 0.5,
+                source_radius: 0.0,
             },
         ],
         ..Default::default()
     };
     let packed = PackedLighting::new(&value, 3).unwrap();
-    assert_eq!(packed.records.len(), 192);
+    assert_eq!(packed.records.len(), 240);
     let word = |index| f32::from_ne_bytes(packed.records[index..index + 4].try_into().unwrap());
     assert_eq!(word(24), -1.);
-    assert_eq!(word(64 + 12), 2.);
+    assert_eq!(word(80 + 12), 2.);
     assert_eq!(
-        u32::from_ne_bytes(packed.records[128 + 48..128 + 52].try_into().unwrap()),
+        u32::from_ne_bytes(packed.records[160 + 48..160 + 52].try_into().unwrap()),
         2
     );
     assert!(dirty_span(&packed.records, &packed.records).is_none());
@@ -40,10 +42,11 @@ fn lighting_validation_and_packing() {
         position: Vec3::X,
         candela: [22.; 3],
         range: Some(3.),
+        source_radius: 0.0,
     };
     let edit = PackedLighting::new(&value, 3).unwrap();
     let span = dirty_span(&packed.records, &edit.records).unwrap();
-    assert!(span.start >= 64 && span.end <= 128);
+    assert!(span.start >= 80 && span.end <= 160);
     assert_eq!(span.start % 4, 0);
     assert_eq!(span.end % 4, 0);
     assert!(PackedLighting::new(&value, 2).is_err());
@@ -65,11 +68,13 @@ fn lighting_validation_and_packing() {
             position: Vec3::NAN,
             candela: [1.; 3],
             range: None,
+            source_radius: 0.0,
         },
         Light::Point {
             position: Vec3::ZERO,
             candela: [1.; 3],
             range: Some(0.),
+            source_radius: 0.0,
         },
         Light::Spot {
             position: Vec3::ZERO,
@@ -78,10 +83,45 @@ fn lighting_validation_and_packing() {
             range: None,
             inner: 0.5,
             outer: 0.5,
+            source_radius: 0.0,
         },
     ] {
         value.lights = vec![light];
         assert!(PackedLighting::new(&value, 3).is_err());
+    }
+    for radius in [-0.01, f32::NAN, f32::INFINITY] {
+        value.lights = vec![Light::Point {
+            position: Vec3::ZERO,
+            candela: [1.; 3],
+            range: None,
+            source_radius: radius,
+        }];
+        assert!(PackedLighting::new(&value, 3).is_err());
+    }
+    for point in [true, false] {
+        value.lights = vec![if point {
+            Light::Point {
+                position: Vec3::ZERO,
+                candela: [1.; 3],
+                range: None,
+                source_radius: 0.25,
+            }
+        } else {
+            Light::Spot {
+                position: Vec3::ZERO,
+                travel: Vec3::Z,
+                candela: [1.; 3],
+                range: None,
+                inner: 0.2,
+                outer: 0.5,
+                source_radius: 0.25,
+            }
+        }];
+        let p = PackedLighting::new(&value, 3).unwrap();
+        assert_eq!(
+            f32::from_ne_bytes(p.records[64..68].try_into().unwrap()),
+            0.25
+        );
     }
     value.lights.clear();
     value.environment = [f32::INFINITY; 3];
@@ -287,7 +327,8 @@ fn gpu_lit_edits_and_bundle_recovery() {
                 Light::Point {
                     position: Vec3::Z,
                     candela: [1.; 3],
-                    range: None
+                    range: None,
+                    source_radius: 0.0,
                 };
                 count
             ],
@@ -298,7 +339,7 @@ fn gpu_lit_edits_and_bundle_recovery() {
     }
     r.test_drain("light generations");
     assert_eq!(r.lighting_stats().retained_light_generations, 0);
-    assert_eq!(r.stats().ownership.light_bytes.live, 64 * 64 + 48);
+    assert_eq!(r.stats().ownership.light_bytes.live, 64 * 80 + 48);
     let generation = r.lighting_stats().target_generation;
     let other = target(r.device(), 145, 113);
     for color in [&other, &t] {
@@ -385,6 +426,7 @@ fn gpu_lit_edits_and_bundle_recovery() {
                     position: Vec3::new(0., 0., 0.1),
                     candela: [1e5; 3],
                     range: None,
+                    source_radius: 0.0,
                 },
             ],
             environment: [1.; 3],
@@ -528,16 +570,19 @@ fn gpu_lit_photometry_1x_4x() {
                     position: Vec3::Z,
                     candela: [100.; 3],
                     range: None,
+                    source_radius: 0.0,
                 },
                 Light::Point {
                     position: Vec3::Z * 2.,
                     candela: [100.; 3],
                     range: None,
+                    source_radius: 0.0,
                 },
                 Light::Point {
                     position: Vec3::Z,
                     candela: [100.; 3],
                     range: Some(0.9),
+                    source_radius: 0.0,
                 },
                 Light::Spot {
                     position: Vec3::Z * 2.,
@@ -546,6 +591,7 @@ fn gpu_lit_photometry_1x_4x() {
                     range: Some(4.),
                     inner: 0.25,
                     outer: 0.5,
+                    source_radius: 0.0,
                 },
             ];
             for light in lights {
@@ -580,6 +626,7 @@ fn gpu_lit_photometry_1x_4x() {
                                 position,
                                 candela,
                                 range,
+                                ..
                             }
                             | Light::Spot {
                                 position,
