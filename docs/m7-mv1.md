@@ -8,8 +8,8 @@ by TR1 and PP1. MQ1 retains ownership of TR1's filtering/history policy.
 2026-11-09 integration follow-up: merged main `622db4d` (MQ1) and then
 `1ad5e29` (PC1/GC1) and `4c8ef7d` (R1n). The acceptance results below initially describe the earlier
 delivery; the integration results are recorded separately below.
-Final main sync: `dc3fa11` (ARA1 prep), which adds docs/new examples/tools and
-changes none of the tested library, shaders or `game_scene` sources.
+Final main sync: `577b4aa` (ARA1 prep, API1b and MQ2), merged at `6e21081` and
+re-verified below. The earlier accepted screen is retained as evidence before MQ2.
 
 **Core motion verified on both paths; full quarry follow-through is incomplete.**
 The quarry load hit the shared memory guard. Retrying with more launch headroom
@@ -249,7 +249,7 @@ Quarry manifests still require at least 8 GiB; none is loaded by this batch.
 Leases are capped at 15 minutes. Attempt releases do not end the coordinator's hold;
 the unit writes an explicit `m7-mv1 FINAL release` after verification.
 
-### Final integration verification
+### Integration verification before MQ2
 
 `integration-n-1` passed the complete batch in **209.123 seconds**, with no guard
 failures. All eight processes ran serially inside the owned n8 lease. Actual
@@ -331,6 +331,56 @@ D:/Coding/renderlab-work/m7-mv1/target -Recurse -Force` request, stating only
 "blocked by policy". No alternate deletion was attempted. The new target remains;
 staged executables and inspected PNG/JSON/log evidence remain under the unit's D:
 directory. No new raw image dump larger than 5 MB was produced.
+
+### Final verification with current main's MQ2/API1b
+
+Main advanced while the final merge was being prepared. Merge `6e21081` includes
+main **`577b4aa`**, retaining API1b's fog/TLAS generation fix and MQ2's
+program-declared view dependence, default 0.25 px view budget and skinned-pose box
+clamp. Conflict resolution changes only the motion source: MQ2's surface/view
+fields and filtering stay, while rigid reprojection still reads MV1's shared
+submitted transforms. The obsolete TR1_MOVED bit and duplicate model history stay
+removed; the box event now covers rigid motion or MQ2's changed skinned pose.
+
+**`integration-p-1` passed all eight steps in 290.545 seconds**, with no guard
+failures: **194 lib tests**, the original MQ1 motion test on both paths, exact MQ1
+HDR identity for the view-independent static control on both paths and both camera
+cases, both MV1 motion cases, both updated 48-frame flights, and SK1. Every process
+started with **10,014–10,708 MiB available**. Strict MV1 and SK1 validation again
+reported **zero errors**. Formatting and diff checks passed after the merge.
+The new `m7-mv1 FINAL release` marker is written after this batch; no owned build,
+GPU process or waiter remains.
+
+All **16 motion-fixture PNGs are byte-identical** to the inspected `integration-n`
+sequences. Motion errors, continued-history counts, zero cleared-background trail,
+stopping and diagnostic-resumption results are unchanged. Both new flight contact
+sheets were inspected: the moving hero/crate, new scene details, lighting, foliage
+and shadows remain present. MQ2 intentionally changes view-dependent reflection
+history; the static identity control uses a view-independent program and isolates
+the motion-source change.
+
+- [Current non-RT flight](D:/Coding/renderlab-work/m7-mv1/integration-p/example-nonrt/inspect.png)
+- [Current RT flight](D:/Coding/renderlab-work/m7-mv1/integration-p/example-rt/inspect.png)
+- [Current motion images, oracles and timing](D:/Coding/renderlab-work/m7-mv1/integration-p/summary.json)
+- [Fixture PNG identity](D:/Coding/renderlab-work/m7-mv1/integration-p/inspected-fixture-identity.json)
+
+Same hardware, quality, validation and diagnostic protocol as the prior table;
+eight moving-frame samples per cell, no comparative speed claim:
+
+| Path / post | Renderer `render_span` ms | Post/present interval ms |
+|---|---:|---:|
+| Non-RT / blur off | 1.260 | 0.031 |
+| Non-RT / blur on | 1.885 | 0.644 |
+| RT / blur off | 0.719 | 0.032 |
+| RT / blur on | 1.347 | 0.651 |
+
+The combined-source rebuild took 70 s (tests) / 30.39 s (example), outside the GPU
+lease. Final test binary SHA-256:
+`7ac95d6cdad0e006f7aca2c13b64b7673cee66b2883162cc949f3c3c09cb6b53`.
+Final example binary SHA-256:
+`e87185f8ae5fcfd862bc9ed00d2e3e51aaa39597da613fcb1338049ddcfdfc53`.
+The target-cleanup rejection above still applies to this same owned target; it
+remains. The real-quarry moving-caster check remains the recorded resource miss.
 
 ## Gaps
 
