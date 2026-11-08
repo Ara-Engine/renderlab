@@ -6,7 +6,8 @@ Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses]
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
 the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
 The full **76/76 Unreal bench matrix**, **88/88 unit motion-reference states** and all
-**19 synchronized static floors** are retained; the expanded motion floor table remains incomplete.
+**19 synchronized static floors** and all **four Q-walk floors** are retained; the 15-mode
+alternation floor table remains incomplete.
 The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
 or integrated quality-pass claim is made.
 
@@ -565,6 +566,84 @@ The variants trade errors across populations; no common quality ordering is assu
 sheets of all 19 native images and their differences were inspected at both exposures.
 Contact/crease discrepancies and broad colour differences remain, especially in the brighter
 diagnostic. Both Epic full-frame comparison strips were also inspected.
+
+### Q-walk physical floors
+
+All four main Lumen presets capture the exact 161-frame Q-walk, zero shutter, fixed
+1/60-second timestep and capture-only render-thread lag 0. Camera and measured exposure
+checks pass on every frame. All 70 selected reference witnesses score, with no missing
+references, and 33 consecutive selected-frame pairs provide residuals at each exposure.
+The remaining native frames are captured but have no quality-score claim here.
+
+Image RMS is pixel-weighted across those witnesses. The residual is the candidate's
+consecutive image step minus the physical-reference step, on common covered placements.
+It has no internal reconstruction-age filter or motion-vector warp; this is combined
+material/lighting/reconstruction error, not the isolated T1b or TSR estimand. Reusing an
+identical held reference cancels its split-half residual noise. Per-frame tails and bias
+remain in `walk/lumen/*/physical-floor.json`; the summary retains worst-frame RMS and p99,
+maximum absolute component and weighted bias. A worst-frame p99 is not a pooled percentile.
+
+The CPU scorer retains at most two references' transformed displays and reuses each current
+display as the previous frame. The implementation edit takes under a minute; verification
+uses four focused CPU tests (**0.217 seconds**) and one paired replay of three actual saved
+1080p alternation frames (**10.08 / 7.73 seconds**, shared CPU load). Every numeric JSON value
+and generated PNG byte matches. This is a verification-latency diagnostic, not renderer frame
+time or a GPU speed claim. The controller restarts outside a GPU lease and retains all native
+captures; pending CPU scoring replays without duplicate GPU captures. Evidence is under
+`cpu-tests/score-reuse/proof.json`.
+
+### Motion image
+
+RMS F0 codes at registered exposure / +4 stops.
+
+| Population | SW High | SW Epic | HW High | HW Epic |
+|---|---:|---:|---:|---:|
+| all-covered | 10.617/16.140 | 9.903/15.123 | 9.846/14.093 | 8.922/12.657 |
+| background-centre | 0.447/1.355 | 0.409/1.253 | 0.444/1.345 | 0.403/1.237 |
+| backlit | 16.041/28.603 | 13.336/24.325 | 14.584/25.496 | 11.703/20.700 |
+| contact | 17.486/30.263 | 15.448/26.896 | 16.959/28.974 | 14.756/25.252 |
+| edge | 14.951/29.000 | 14.633/27.858 | 12.947/24.897 | 12.144/22.815 |
+| faint | 12.448/17.548 | 11.642/16.286 | 12.031/16.214 | 10.946/14.330 |
+| image | 4.365/6.720 | 4.070/6.294 | 4.050/5.897 | 3.670/5.302 |
+| isolated | 10.077/12.331 | 9.351/11.378 | 9.926/11.863 | 9.159/10.827 |
+| lit | 8.687/11.581 | 8.007/10.726 | 8.539/11.036 | 7.809/10.049 |
+| multi-surface | 15.725/26.715 | 15.104/25.448 | 13.866/22.670 | 12.857/20.539 |
+| narrow | 15.334/24.156 | 14.107/21.732 | 14.834/22.817 | 13.371/19.844 |
+| occluded | 23.616/44.858 | 23.305/43.738 | 16.773/31.496 | 15.218/28.667 |
+| partial | 13.667/21.005 | 12.415/18.969 | 13.205/19.668 | 11.701/17.058 |
+| silhouette | 21.454/42.116 | 21.184/41.690 | 15.735/31.906 | 13.974/28.681 |
+| single-surface | 10.486/15.848 | 9.767/14.835 | 9.746/13.860 | 8.822/12.442 |
+| solid | 9.990/15.130 | 9.396/14.346 | 9.134/12.874 | 8.342/11.720 |
+| solid-lit | 8.626/11.455 | 7.948/10.604 | 8.493/10.945 | 7.768/9.972 |
+| solid-occluded | 23.428/44.386 | 23.126/43.305 | 16.489/30.789 | 14.929/28.022 |
+| wide | 13.343/20.383 | 12.083/18.425 | 12.888/19.043 | 11.373/16.503 |
+| wide6 | 12.877/19.440 | 11.582/17.567 | 12.530/18.340 | 11.055/16.035 |
+
+### Motion residual
+
+RMS F0 codes at registered exposure / +4 stops.
+
+| Population | SW High | SW Epic | HW High | HW Epic |
+|---|---:|---:|---:|---:|
+| all-covered | 3.608/4.335 | 3.513/4.175 | 3.605/4.325 | 3.508/4.158 |
+| backlit | 4.370/6.795 | 4.066/6.336 | 4.362/6.782 | 4.055/6.314 |
+| contact | 4.929/8.091 | 4.635/7.686 | 4.930/8.090 | 4.633/7.679 |
+| edge | 4.557/6.550 | 4.384/6.261 | 4.467/6.313 | 4.243/5.892 |
+| faint | 4.842/5.997 | 4.677/5.759 | 4.835/5.976 | 4.667/5.731 |
+| image | 3.608/4.335 | 3.513/4.175 | 3.605/4.325 | 3.508/4.158 |
+| isolated | 5.951/6.173 | 5.854/6.019 | 5.943/6.152 | 5.844/5.989 |
+| lit | 3.346/3.651 | 3.290/3.548 | 3.345/3.647 | 3.288/3.541 |
+| multi-surface | 5.111/7.876 | 4.918/7.533 | 4.981/7.534 | 4.714/7.012 |
+| narrow | 4.957/7.790 | 4.625/7.329 | 4.941/7.756 | 4.604/7.281 |
+| occluded | 3.758/5.925 | 3.512/5.591 | 3.739/5.869 | 3.469/5.471 |
+| partial | 4.753/6.609 | 4.537/6.301 | 4.746/6.592 | 4.527/6.276 |
+| silhouette | 4.252/8.257 | 4.228/8.258 | 3.657/7.079 | 3.394/6.633 |
+| single-surface | 3.575/4.244 | 3.483/4.090 | 3.576/4.245 | 3.482/4.089 |
+| solid | 3.368/3.800 | 3.302/3.679 | 3.366/3.791 | 3.297/3.664 |
+| solid-lit | 3.328/3.606 | 3.274/3.510 | 3.329/3.606 | 3.274/3.510 |
+| solid-occluded | 3.604/5.435 | 3.345/5.078 | 3.612/5.460 | 3.347/5.084 |
+| wide | 4.715/6.371 | 4.520/6.096 | 4.710/6.358 | 4.513/6.076 |
+| wide6 | 4.920/6.475 | 4.731/6.209 | 4.915/6.462 | 4.724/6.192 |
 
 ## Temporal reference interface
 

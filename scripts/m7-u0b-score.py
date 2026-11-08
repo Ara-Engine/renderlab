@@ -277,7 +277,10 @@ def floor(args):
             halves=[reference[k] for k in ("L0","L1")]
             populations={k[4:]:reference[k] for k in reference.files if k.startswith("pop_")}
             hit=reference["hit"][...,0]
-        return halves,(halves[0]+halves[1])/2,populations,hit
+        mean=(halves[0]+halves[1])/2
+        display={offset:(codes(mean,args.stops+offset),
+            [codes(h,args.stops+offset) for h in halves]) for offset in (0,4)}
+        return display,mean.shape,populations,hit
     for directory in sorted(args.root.iterdir()):
         if not directory.is_dir() or not (directory/"native.json").exists():continue
         recipe=json.loads((directory/"recipe.json").read_text())
@@ -303,14 +306,15 @@ def floor(args):
                 exposure=float(candidate["pre_exposure"])
                 if exposure!=capture["pre_exposure"] or exposure!=2.**args.stops:raise ValueError("pre-exposure drift")
                 hdr=candidate["hdr"][...,:3]/exposure
-            halves,mean,populations,hit=reference_arrays(reference_path)
-            if mean.shape!=hdr.shape or not np.isfinite(hdr).all():raise ValueError("invalid native HDR")
+            reference_display,shape,populations,hit=reference_arrays(reference_path)
+            if shape!=hdr.shape or not np.isfinite(hdr).all():raise ValueError("invalid native HDR")
             row=dict(frame=index,phase=pose.get("phase"),reference=str(reference_path),
                      reference_sha256=meta["archive_sha256"],samples=meta["samples"],
                      candidate_sha256=capture["archive_sha256"],measures={})
+            display={}
             for offset in (0,4):
-                ref=codes(mean,args.stops+offset);estimate=codes(hdr,args.stops+offset)
-                split=[codes(h,args.stops+offset) for h in halves]
+                ref,split=reference_display[offset];estimate=codes(hdr,args.stops+offset)
+                display[offset]=(estimate,ref,split)
                 row["measures"][str(offset)]=measures(estimate-ref,(split[0]-split[1])/2,populations)
                 if previous is not None and previous["frame"]==index-1:
                     old=previous["display"][offset]
@@ -326,8 +330,7 @@ def floor(args):
                     suffix="" if offset==0 else "-L4"
                     Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/f"physical-{index:03}{suffix}.png")
             previous=dict(frame=index,covered=populations["all-covered"],hit=hit,
-                          display={o:(codes(hdr,args.stops+o),codes(mean,args.stops+o),
-                              [codes(h,args.stops+o) for h in halves]) for o in (0,4)})
+                          display=display)
             rows.append(row)
         result=dict(config=recipe["config"],effective_mode=runtime["effective_mode"],
             statistics_definitions=dict(rms="RGB component RMS over the population",p99="p99 of per-pixel RGB RMS",maximum="maximum absolute RGB component"),
