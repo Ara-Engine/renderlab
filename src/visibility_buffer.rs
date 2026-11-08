@@ -56,6 +56,8 @@ pub(crate) struct Clusters {
 /// Accumulates clusters and their data words. `add` fills the open cluster; `finish`
 /// closes it with its LOD links.
 pub(crate) struct ClusterBuilder {
+    // SK1: exact source vertex for each duplicated cluster position.
+    pub source_map: Vec<[u32; 2]>,
     pub clusters: Vec<Cluster>,
     pub words: Vec<u32>,
     mark: Vec<u32>,
@@ -67,6 +69,7 @@ pub(crate) struct ClusterBuilder {
 impl ClusterBuilder {
     pub fn new(vertex_count: usize) -> Self {
         Self {
+            source_map: vec![],
             clusters: vec![],
             words: vec![],
             mark: vec![0; vertex_count],
@@ -110,6 +113,7 @@ impl ClusterBuilder {
         let contiguous = self.primitives.windows(2).all(|w| w[1] == w[0] + 1);
         let vertex_offset = self.words.len() as u32;
         for &v in &self.vertices {
+            self.source_map.push([self.words.len() as u32, v]);
             self.words
                 .extend(vertices[v as usize].position.map(f32::to_bits));
         }
@@ -488,14 +492,19 @@ impl ClusterInstances {
             }
             for _ in 0..d.instances.len() {
                 for c in &mesh.clusters {
+                    let bounds = if d.mesh.skin.is_some() {
+                        d.mesh.bounds
+                    } else {
+                        c.bounds
+                    };
                     let refined = if c.refined == NONE {
                         NONE
                     } else {
                         c.refined + base
                     };
-                    records.extend(c.bounds.min.map(f32::to_bits));
+                    records.extend(bounds.min.map(f32::to_bits));
                     records.push(c.vertices);
-                    records.extend(c.bounds.max.map(f32::to_bits));
+                    records.extend(bounds.max.map(f32::to_bits));
                     records.push(c.triangles);
                     records.extend([
                         c.owner + base,
@@ -562,6 +571,71 @@ impl ClusterInstances {
             groups,
         })
     }
+}
+
+// SK1: update only the deforming draws' records in the table shared by primary
+// visibility and shadow casters. Rebuilding consumers/pipelines for each pose would
+// both be expensive and leave already-cached consumers holding stale bounds.
+pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -> UploadBytes {
+    let mut uploads = UploadBytes::default();
+    if !draws.iter().any(|d| d.mesh.skin.is_some()) {
+        return uploads;
+    }
+    let cache = r.cluster_instances.0.lock().unwrap();
+    let Some(cache) = cache.as_ref() else {
+        return uploads;
+    };
+    if cache.key.len() != draws.len()
+        || !cache.key.iter().zip(draws).all(|((data, count), d)| {
+            d.mesh.clusters.as_ref().is_some_and(|c| {
+                std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
+            })
+        })
+    {
+        return uploads;
+    }
+    let Some(buffer) = cache.clusters.upgrade() else {
+        return uploads;
+    };
+    let (mut record, mut group, mut placement) = (0u64, 0u32, 0u32);
+    for d in draws {
+        let mesh = d.mesh.clusters.as_ref().unwrap();
+        if d.mesh.skin.is_some() && !d.instances.is_empty() {
+            let b = d.mesh.bounds;
+            let mut data = Vec::with_capacity(mesh.clusters.len() * d.instances.len() * 16);
+            for instance in 0..d.instances.len() {
+                for c in &mesh.clusters {
+                    data.extend(b.min.map(f32::to_bits));
+                    data.push(c.vertices);
+                    data.extend(b.max.map(f32::to_bits));
+                    data.push(c.triangles);
+                    data.extend([
+                        c.owner + group,
+                        if c.refined == NONE {
+                            NONE
+                        } else {
+                            c.refined + group
+                        },
+                        c.primitives,
+                        c.counts,
+                        placement + instance as u32,
+                        0,
+                        0,
+                        0,
+                    ]);
+                }
+            }
+            let bytes = words(data.into_iter());
+            r.queue
+                .write_buffer(&buffer.value, record * CLUSTER_BYTES, &bytes);
+            uploads.skinning += bytes.len() as u64;
+            uploads.write_calls += 1;
+        }
+        record += mesh.clusters.len() as u64 * d.instances.len() as u64;
+        group += mesh.groups.len() as u32;
+        placement += d.instances.len() as u32;
+    }
+    uploads
 }
 /// One read-only storage binding per draw slot: each draw's cluster data words, padded
 /// with `absent` (`data_entry`'s layout at binding 8).

@@ -1485,6 +1485,7 @@ dependencies = [
  "pollster",
  "rayon",
  "renderlab-asset",
+ "renderlab-cook",
  "serde",
  "serde_json",
  "sha2",

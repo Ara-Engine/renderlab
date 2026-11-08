@@ -65,13 +65,15 @@ fn rl_sky(d:vec3<f32>,alpha:f32)->vec3<f32> {
 
 // One hard shadow ray toward the light from a reflection hit, on the frame's TLAS.
 fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {
+    // SK1 integration: function-scope queries avoid Naga 30 emitting an illegal
+    // OpConstantNull for a query declared after conditional control flow.
+    var query:ray_query;
     if light.kind.z==0u {return 1.0;}
     let side=select(-receiver.geometric,receiver.geometric,dot(receiver.geometric,l)>=0.0);
     let origin=fma(side,vec3<f32>(receiver.epsilon),receiver.world);
     var tmax=RL_FAR;
     if light.kind.x!=0u {tmax=max(distance(light.position_range.xyz,origin)-receiver.epsilon,0.0);}
     if tmax<=receiver.epsilon {return 1.0;}
-    var query:ray_query;
     rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));
     while rayQueryProceed(&query) {}
     return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);
@@ -121,6 +123,7 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
 // prepared (src/program.rs); hits read the open environment state (`rl_indirect_open`: the
 // cache-off values, no cache lookup per hit). Restores the receiver's parameters.
 fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,size:vec2<u32>) {
+    var query:ray_query;
     rl_specular=vec4<f32>(0.0);
     let lobe=reflection_lobe(s,input);
     let alpha=clamp(lobe.alpha,0.0,1.0);
@@ -161,7 +164,6 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
-        var query:ray_query;
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);

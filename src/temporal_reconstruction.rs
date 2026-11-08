@@ -156,9 +156,10 @@ impl Reconstruction {
     }
 }
 
-/// WGSL Tr1Frame's fixed words. The previous frame's placement transforms follow them (64
-/// bytes per placement, at least one), so moving placements reproject without a new binding.
-const FRAME_BYTES: usize = 304;
+/// WGSL Tr1Frame.
+const FRAME_BYTES: usize = 336;
+/// The previous frame's placement transforms follow the fixed frame words (64 bytes per
+/// placement, at least one), so moved placements reproject without a new binding (MQ1).
 const MODEL_BYTES: usize = 64;
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
@@ -362,10 +363,9 @@ struct Previous {
     /// Directional lights' travel directions.
     suns: Vec<Vec3>,
     key: [u8; 32],
-    /// The primary frame bindings' targets (hit record, HDR, fresh world), if bound.
-    bound: Option<BoundTargets>,
+    skin_bounds: Option<crate::shadow_plan::Bounds>,
+    skin_revisions: Vec<u64>,
 }
-type BoundTargets = (wgpu::Texture, wgpu::Texture, Option<wgpu::Texture>);
 
 /// Per-pixel history at the HDR size, ping-ponged by frame: exposed mean and weight
 /// (Rgba32Float) and anchors (Rg32Uint), plus the copy of the frame's shaded samples.
@@ -378,7 +378,7 @@ pub(in crate::renderer) struct ReconstructionState {
     /// The frame words, then the previous frame's placement transforms.
     frame: Buffer,
     /// The previous reconstructed frame's placement transforms (the primary tables' bytes),
-    /// which moved placements reproject through.
+    /// which moved placements reproject through (MQ1).
     models: Vec<u8>,
     /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
     groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
@@ -567,12 +567,12 @@ impl Renderer {
     }
 
     /// Identity of every input a reconstructed frame depends on besides the camera, the
-    /// eye, exposure, directional-light directions and placement transforms, which TR1
-    /// follows: a change restarts every pixel. Programs, prelude, geometry, bindings,
-    /// materials, textures, new placements, light colours and kinds, the environment and every
-    /// shadow and visibility setting. Transform edits of existing placements reproject through
-    /// their previous transforms (MQ1); before MQ1 they restarted every pixel, so a scene with
-    /// any animated object never accumulated.
+    /// eye, exposure, directional-light directions, skinned poses (SK1) and placement
+    /// transforms (MQ1), which TR1 follows: a change restarts every pixel. Programs, prelude,
+    /// geometry, bindings, materials, textures, new placements, light colours and kinds, the
+    /// environment and every shadow and visibility setting. Before MQ1 transform edits of
+    /// existing placements restarted every pixel, so a scene with any animated rigid object
+    /// never accumulated; they now reproject through their previous transforms.
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
@@ -589,8 +589,7 @@ impl Renderer {
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
             .chain_update(state.geometry_generation.to_ne_bytes())
-            // Not `bindings_generation`: an RT transform edit rebuilds the TLAS, which rebinds
-            // the frame (MQ1). The bound targets themselves are compared (`Previous::bound`).
+            .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.shadows.settings).as_bytes())
             .chain_update(format!("{:?}", self.virtual_settings).as_bytes())
             .chain_update(format!("{:?} {:?}", self.soft_mode, self.primary_mode).as_bytes())
@@ -607,8 +606,6 @@ impl Renderer {
             .chain_update([u8::from(self.environment.visible)])
             // AT1: the atmosphere sky on misses (atmosphere_gpu.rs).
             .chain_update([u8::from(self.atmosphere_sky_visible())]);
-        // Not `models` or `normals`: transform edits of existing placements (the primary
-        // tables are kept, so placement slots are stable; `geometry_generation` covers new ones).
         for v in [
             u.environment,
             u.geometry,
@@ -619,11 +616,13 @@ impl Renderer {
         ] {
             hash.update(v.to_ne_bytes());
         }
+        // Not `models` or `normals` (MQ1): transform edits of existing placements keep the
+        // primary tables, so placement slots are stable; new placements change `instances`
+        // and `geometry_generation`.
         // MQ1 SCREEN (temporary, removed before delivery): main's restart on transform edits.
         if mq1_screen("restart") {
             hash.update(u.models.to_ne_bytes());
             hash.update(u.normals.to_ne_bytes());
-            hash.update(state.bindings_generation.to_ne_bytes());
         }
         hash.finalize().into()
     }
@@ -679,8 +678,12 @@ impl Renderer {
     /// buffer's): allocates history at the HDR size, decides restarts and window caps from
     /// engine state, writes the frame words and binds the frame's targets. `camera` is the
     /// frame's jittered camera; `index` its sample.
-    pub(in crate::renderer) fn prepare_reconstruction(&mut self, camera: &Camera, index: u64) {
-        // Samples at the frame's (internal) size; history and output at the target's.
+    pub(in crate::renderer) fn prepare_reconstruction(
+        &mut self,
+        camera: &Camera,
+        index: u64,
+        draws: &[PreparedDraw<'_>],
+    ) {
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
         let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
         if self
@@ -712,16 +715,83 @@ impl Renderer {
         let visible_sky = (self.environment.visible && self.environment.selected.is_some())
             || self.atmosphere_sky_visible();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
-        let bound: Option<BoundTargets> =
-            self.primary.as_ref().unwrap().bindings.as_ref().map(|b| {
-                let (hit, hdr, world, _) = &b.key;
-                (hit.clone(), hdr.clone(), world.clone())
-            });
+        // SK1: vertex motion reprojects the character, but its changing shadow also
+        // changes otherwise-static receivers. Reject those receivers' lighting history
+        // in a conservative world-space swept shadow volume, never a screen-space
+        // lighting approximation. This leaves unrelated static pixels accumulating.
+        let union = |a: Option<crate::shadow_plan::Bounds>, b: crate::shadow_plan::Bounds| {
+            a.map_or(b, |a| crate::shadow_plan::Bounds {
+                min: a.min.min(b.min),
+                max: a.max.max(b.max),
+            })
+        };
+        let mut scene_bounds = None;
+        let mut skin_bounds = None;
+        let mut skin_revisions = vec![];
+        for d in draws {
+            if let Some(s) = &d.mesh.skin {
+                skin_revisions.push(s.revision);
+            }
+            for &model in &d.instances.state.models {
+                if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
+                    scene_bounds = Some(union(scene_bounds, b));
+                    if d.mesh.skin.is_some() {
+                        skin_bounds = Some(union(skin_bounds, b));
+                    }
+                }
+            }
+        }
+        let mut shadow_bounds = None;
+        if let (Some(current), Some(previous)) = (
+            skin_bounds,
+            self.reconstruction_state
+                .as_ref()
+                .and_then(|s| s.previous.as_ref()),
+        ) && previous.skin_revisions != skin_revisions
+        {
+            let swept = union(previous.skin_bounds, current);
+            let mut affected = swept;
+            let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
+                (b.max - b.min).length().max(1.)
+            }) * 2.;
+            for (light, request) in self
+                .lighting
+                .source_lights
+                .iter()
+                .zip(&self.shadows.settings.requests)
+            {
+                if matches!(request, ShadowRequest::None) {
+                    continue;
+                }
+                if let Light::Directional { travel, .. } = light {
+                    affected = union(
+                        Some(affected),
+                        crate::shadow_plan::Bounds {
+                            min: swept.min + travel.normalize() * distance,
+                            max: swept.max + travel.normalize() * distance,
+                        },
+                    );
+                } else if let Some(scene) = scene_bounds {
+                    affected = union(Some(affected), scene);
+                }
+            }
+            // Sky occlusion/bounce can change outside a directional shadow. The first
+            // dynamic-GI base conservatively refreshes receiver history scene-wide.
+            if self.gi.settings.enabled
+                && let Some(scene) = scene_bounds
+            {
+                affected = union(Some(affected), scene);
+            }
+            let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
+            affected.min -= margin;
+            affected.max += margin;
+            shadow_bounds = Some(affected);
+        }
         let state = self.reconstruction_state.as_mut().unwrap();
         let continued = state
             .previous
             .as_ref()
-            .filter(|p| p.key == key && p.bound == bound && p.suns.len() == suns.len())
+            .filter(|p| p.key == key && p.suns.len() == suns.len())
             .map(|p| {
                 // The largest directional-light turn since the previous frame.
                 let turn = p
@@ -744,8 +814,8 @@ impl Renderer {
         };
         state.reset = continued.is_none() || state.cut || event_window < 1.0;
         state.cut = false;
-        // This frame's placement transforms: the models half of the primary tables' bytes,
-        // in placement order (primary_ray_gpu.rs).
+        // MQ1: this frame's placement transforms, the models half of the primary tables'
+        // bytes in placement order (primary_ray_gpu.rs).
         let models = self
             .primary
             .as_ref()
@@ -819,9 +889,8 @@ impl Renderer {
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // The camera did not move: the unjittered view-projection is bit-equal. Moved
-        // placements are not still where they show (the resolve compares their transforms);
-        // every other scene edit restarts through the key.
+        // The camera did not move: the unjittered view-projection is bit-equal. Surfaces whose
+        // vertices or placement moved are not still (the resolve compares them).
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
@@ -832,6 +901,11 @@ impl Renderer {
             index as u32,
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        for value in shadow_bounds.map_or([0.; 8], |b| {
+            [b.min.x, b.min.y, b.min.z, 1., b.max.x, b.max.y, b.max.z, 0.]
+        }) {
+            bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
         self.queue.write_buffer(&state.frame.value, 0, &bytes);
@@ -844,7 +918,8 @@ impl Renderer {
             exposure,
             suns,
             key,
-            bound,
+            skin_bounds,
+            skin_revisions,
         });
         // The resolve writes the frame's HDR target, or the upscaled output.
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;

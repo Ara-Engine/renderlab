@@ -131,6 +131,8 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     // values are live.
     rl_indirect_prepare(surface_input);
     let surface_output=surface(surface_input);
+    // LC1: after `surface` and any reflection hits, which walk every light.
+    rl_lights_prepare(surface_input.world);
     // Unreachable: traced frames cull the source-back faces of single-sided draws.
     if material.double_sided==0u && !lit_front {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}
     // AT1: the program's exposed output through the camera's fog and aerial perspective.
