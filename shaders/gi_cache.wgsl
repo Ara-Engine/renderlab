@@ -622,10 +622,17 @@ fn gi_probe_line(c:GiCell, j:u32) -> GiLineHits {
     return out;
 }
 // The line's candidate: its first when it is not inside a solid, else its second when
-// that is not; otherwise its first, marked inside (n.w 1), or none.
+// that is not; otherwise its first, marked inside (n.w 1), or none. One inside-test site in
+// a loop: every inlined ray query adds to gi_setup's registers (G1c measured each extra
+// site costing setup time even where it never ran).
 fn gi_line_candidate(h:GiLineHits, edge:f32) -> GiCandidate {
-    if h.a.q.w==0.0 || !gi_probe_inside(h.a,edge) { return h.a; }
-    if h.b.q.w!=0.0 && !gi_probe_inside(h.b,edge) { return h.b; }
+    if h.a.q.w==0.0 { return h.a; }
+    for(var k=0u;k<2u;k+=1u) {
+        var r=h.a;
+        if k==1u { r=h.b; }
+        if r.q.w==0.0 { break; }
+        if !gi_probe_inside(r,edge) { return r; }
+    }
     var r=h.a;
     r.n.w=1.0;
     return r;
@@ -645,15 +652,14 @@ fn gi_probe_inside(r:GiCandidate, edge:f32) -> bool {
     let q=r.q.xyz;
     let n=r.n.xyz;
     let o=q+n*gi_origin_offset(q,edge);
-    let up=gi_closest(o,n,0.0,1e20);
-    if !up.hit || dot(up.normal,n)<=0.0 { return false; }
-    if (r.tri.w&0x80000000u)!=0u || up.t<=edge { return true; }
     let f=gi_basis(n);
-    for(var i=0u;i<4u;i+=1u) {
+    // Ray 0 along the normal, rays 1-4 at 80 degrees off it, through one query site.
+    for(var i=0u;i<5u;i+=1u) {
         let a=f32(i)*1.5707963267948966;
-        let d=f*vec3<f32>(0.9848078*cos(a),0.9848078*sin(a),0.17364818);
+        let d=select(f*vec3<f32>(0.9848078*cos(a),0.9848078*sin(a),0.17364818),n,i==0u);
         let h=gi_closest(o,d,0.0,1e20);
         if !h.hit || dot(h.normal,d)<=0.0 { return false; }
+        if i==0u && ((r.tri.w&0x80000000u)!=0u || h.t<=edge) { return true; }
     }
     return true;
 }
@@ -728,10 +734,9 @@ fn gi_point(cold:u32) -> vec3<f32> {
 /// Eight lanes per queued cell, eight cells per workgroup: the canonical query point
 // when the cell has none, its near-field mask bits, then one ray item per direction to trace
 // (gi_rays), contiguous per cell in direction order. A fresh cell's lanes 0-4 walk the
-// five probe lines together (every line decides the split); lane 0 resolves line 0's
-// candidate at once, and only when it gives no point do lanes 1-4 resolve theirs, each
-// with its own inside tests. Lane 0 takes the first point in line order (the same point as
-// trying them in turn). A point on an instance with cooked near-field masks then has each
+// five probe lines and resolve their candidates together, each with its own inside tests
+// (every line also decides the split). Lane 0 takes the first point in line order (the same
+// point as trying them in turn). A point on an instance with cooked near-field masks then has each
 // lane mark the directions the masks block. The lanes then write the items, or past the item
 // capacity trace the cell's directions themselves: the same rays and bits either way.
 const GI_SETUP_LANES:u32=8u;
@@ -743,7 +748,6 @@ const GI_SETUP_NONE:u32=0u;
 const GI_SETUP_PROBE:u32=1u;
 const GI_SETUP_ITEMS:u32=2u;
 const GI_SETUP_TRACE:u32=3u;
-const GI_SETUP_POINT:u32=4u;
 const GI_SETUP_NEAR:u32=5u;
 var<workgroup> gi_wg_state:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_base:array<u32,GI_SETUP_CELLS>;
@@ -773,36 +777,24 @@ const GI_SETUP_CHOSEN:u32=7u;
         // A fresh cell (nothing known) has no query point yet.
         var fresh=live;
         for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[cold+GI_C_KNOWN+w]==0u; }
-        // Stage 1: lines 0-4 walk their cube; lane 0 resolves line 0's candidate.
-        var line=GiLineHits(gi_no_candidate(),gi_no_candidate(),false);
+        // Stage 1: lines 0-4 walk their cube and resolve their candidates together.
         if fresh && lane<GI_PROBES {
-            line=gi_probe_line(c,lane);
+            let line=gi_probe_line(c,lane);
             if line.split { atomicOr(&gi_wg_split[cell],1u); }
+            gi_wg_candidates[index]=gi_line_candidate(line,c.edge);
         }
         if live && lane==0u {
-            var state=GI_SETUP_ITEMS;
-            if fresh {
-                let r=gi_line_candidate(line,c.edge);
-                gi_wg_candidates[index]=r;
-                state=select(GI_SETUP_PROBE,GI_SETUP_POINT,r.q.w!=0.0 && r.n.w==0.0);
-            }
-            gi_wg_state[cell]=state;
-        }
-        workgroupBarrier();
-        // Stage 2: lines 1-4 resolve theirs, only for cells whose line 0 gave no point.
-        if live && lane>=1u && lane<GI_PROBES && gi_wg_state[cell]==GI_SETUP_PROBE {
-            gi_wg_candidates[index]=gi_line_candidate(line,c.edge);
+            gi_wg_state[cell]=select(GI_SETUP_ITEMS,GI_SETUP_PROBE,fresh);
         }
         workgroupBarrier();
         // Stage 3: lane 0 takes the first point in line order, or marks an orphan.
         if live && lane==0u {
             var state=gi_wg_state[cell];
-            if state==GI_SETUP_POINT || state==GI_SETUP_PROBE {
+            if state==GI_SETUP_PROBE {
                 let split=atomicLoad(&gi_wg_split[cell])!=0u;
-                let lines=select(GI_PROBES,1u,state==GI_SETUP_POINT);
                 var qualified=false;
                 state=GI_SETUP_NONE;
-                for(var j=0u;j<lines;j+=1u) {
+                for(var j=0u;j<GI_PROBES;j+=1u) {
                     let r=gi_wg_candidates[cell*GI_SETUP_LANES+j];
                     qualified=qualified || r.q.w!=0.0;
                     if r.q.w==0.0 || r.n.w!=0.0 { continue; }
