@@ -485,6 +485,9 @@ def pack_tsr(args):
     checked), then the loose frames removed; scripts/m7-tr1-score.py reads either form."""
     frames = REFS / "tsr/runs" / args.label / "frames"
     loose = sorted(frames.glob("f*.rgba16f"))
+    if not loose:
+        print(args.label, "already packed", flush=True)
+        return
     arrays = {f.stem: np.frombuffer(f.read_bytes(), "<f2").reshape(1080, 1920, 4) for f in loose}
     np.savez_compressed(frames / "frames.npz", **arrays)
     with np.load(frames / "frames.npz") as z:
