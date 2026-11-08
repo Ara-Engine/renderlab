@@ -140,6 +140,8 @@ pub struct GpuSample {
     pub visibility_compute: Option<Duration>,
     /// Separate HDR presentation pass boundaries; excludes acquire/present and uploads.
     pub present_pass: Option<Duration>,
+    /// Temporal reconstruction's sample copy and resolve pass (TR1 frames).
+    pub reconstruction_pass: Option<Duration>,
     /// First shadow pass begin through final shadow pass end. No CPU wait per frame.
     pub shadow_generation: Option<Duration>,
     /// First rendered pass begin through last pass end, measured directly, not a sum.

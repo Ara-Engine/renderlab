@@ -15,6 +15,8 @@ mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
+pub use primary_ray_gpu::temporal_reconstruction::Reconstruction;
+use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -475,6 +477,8 @@ struct Slot {
     flight: Option<Flight>,
     /// The frame in flight timed traced receivers without a visibility compute pass.
     traced_receivers: bool,
+    /// The frame in flight timed a temporal reconstruction pass (timestamps 4 and 5).
+    reconstructed: bool,
 }
 struct Timing {
     queries: Owned<wgpu::QuerySet>,
@@ -576,6 +580,13 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// TR1 temporal reconstruction settings, its history (created by its first frame), the
+    /// next frame's sample index, and the index of the frame being prepared while that frame
+    /// reconstructs (`temporal_reconstruction.rs`).
+    reconstruction: Reconstruction,
+    reconstruction_state: Option<ReconstructionState>,
+    reconstruction_index: u64,
+    reconstruction_frame: Option<u64>,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -921,6 +932,7 @@ impl Renderer {
             residency: None,
             flight: None,
             traced_receivers: false,
+            reconstructed: false,
         });
         if let Some(error) = scopes.finish() {
             return Err(Error::Fault(Fault(error.to_string())));
@@ -1012,6 +1024,10 @@ impl Renderer {
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
             gi,
+            reconstruction: Reconstruction::default(),
+            reconstruction_state: None,
+            reconstruction_index: 0,
+            reconstruction_frame: None,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2254,6 +2270,20 @@ impl Renderer {
         self.check_fault()?;
         let preparation_start = Instant::now();
         self.validate_color(color)?;
+        // Temporal reconstruction samples traced and visibility-buffer lit frames at the
+        // next lattice offset: every matrix of this frame comes from the jittered camera.
+        self.reconstruction_frame = (self.reconstruction.enabled
+            && view_mode == ViewMode::Lit
+            && self.primary_mode != PrimaryVisibility::Raster)
+            .then_some(self.reconstruction_index);
+        let jittered;
+        let camera = match self.reconstruction_frame {
+            Some(k) => {
+                jittered = camera.jittered(temporal_reconstruction::sample_offset(k));
+                &jittered
+            }
+            None => camera,
+        };
         if self.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
             fresh_shadow_gpu::admit_targets(&self.shadows.settings, color.width(), color.height())?;
         }
@@ -2716,6 +2746,11 @@ impl Renderer {
             temporal,
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
+        // Lit traced frames only; raster frames of a reconstructing renderer keep no history.
+        let reconstructed = traced && !temporal && self.reconstruction_frame.is_some();
+        if !reconstructed {
+            self.reconstruction_frame = None;
+        }
         // Streamed textures (texture_residency.rs): traced and visibility-buffer frames
         // that bind any outside Full mode shade with pipelines that request their levels.
         // Raster and temporal passes sample without requests, so the textures they bind
@@ -2748,8 +2783,10 @@ impl Renderer {
             && !temporal
             && !interactive
             && self.soft_mode == crate::SoftShadows::Virtual;
+        // Reconstructed frames move every receiver by the jitter while Virtual's still-frame
+        // key (view and field of view) is unchanged: they look up their own receivers too.
         if soft
-            && !virtual_frame
+            && (!virtual_frame || self.reconstruction_frame.is_some())
             && let Some(state) = self.virtual_shadows.as_mut()
         {
             state.rolling = false;
@@ -2877,6 +2914,10 @@ impl Renderer {
                 let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
                 self.prepare_film(key);
             }
+            if let Some(index) = self.reconstruction_frame {
+                self.ensure_reconstruction()?;
+                self.prepare_reconstruction(camera, index);
+            }
         }
         if lit {
             // Traced and visibility-buffer frames feed the cache; every other lit frame
@@ -2939,7 +2980,13 @@ impl Renderer {
             if temporal {
                 self.encode_film(&mut encoder, stamps(6), stamps(0));
             } else {
-                if interactive {
+                if interactive
+                    && reconstructed
+                    && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
+                    && self.reconstruction.rotate_directions
+                {
+                    self.encode_reconstruction_interactive(&mut encoder, stamps(6));
+                } else if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
                 } else if soft && self.soft_mode == crate::SoftShadows::Virtual {
@@ -2970,6 +3017,9 @@ impl Renderer {
                 }
                 self.gi.encode(&mut encoder, self.lighting.kernel_bind());
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
+            }
+            if reconstructed {
+                self.encode_reconstruction(&mut encoder, stamps(4));
             }
         }
         let residency = streaming.then(|| self.encode_residency_readback(&mut encoder, slot));
@@ -3125,7 +3175,7 @@ impl Renderer {
                 &timing.queries,
                 slot as u32 * 10
                     ..slot as u32 * 10
-                        + if shadow_frame.is_some() && !hardware_shadowed {
+                        + if (shadow_frame.is_some() && !hardware_shadowed) || reconstructed {
                             6
                         } else if lit {
                             4
@@ -3140,7 +3190,7 @@ impl Renderer {
                 offset,
                 readback,
                 0,
-                if shadow_frame.is_some() && !hardware_shadowed {
+                if (shadow_frame.is_some() && !hardware_shadowed) || reconstructed {
                     48
                 } else if lit {
                     32
@@ -3211,6 +3261,11 @@ impl Renderer {
             },
         );
         self.slots[slot].traced_receivers = traced && (!soft || interactive || temporal);
+        self.slots[slot].reconstructed = reconstructed;
+        if reconstructed {
+            self.reconstruction_index += 1;
+            self.reconstruction_frame = None;
+        }
         self.slots[slot].residency = residency;
         self.check_fault()?;
         if let Some(frame) = shadow_frame {
@@ -3279,6 +3334,7 @@ impl Renderer {
             }
             let flight = slot.flight.take().unwrap();
             let traced_receivers = std::mem::take(&mut slot.traced_receivers);
+            let reconstructed = std::mem::take(&mut slot.reconstructed);
             if let Some((mapped, ids)) = slot.residency.take()
                 && let Some(Ok(())) = mapped.get()
             {
@@ -3303,14 +3359,16 @@ impl Renderer {
                             } else {
                                 None
                             };
-                            let shadow = if flight.shadowed {
+                            let words = || {
                                 Some((
                                     u64::from_ne_bytes(view[32..40].try_into().unwrap()),
                                     u64::from_ne_bytes(view[40..48].try_into().unwrap()),
                                 ))
-                            } else {
-                                None
                             };
+                            let shadow = if flight.shadowed { words() } else { None };
+                            // Traced frames have no raster shadow pass: the same words then
+                            // time temporal reconstruction, after shading, before present.
+                            let reconstruction = if reconstructed { words() } else { None };
                             let stamp = |i: usize| {
                                 u64::from_ne_bytes(view[48 + i * 8..56 + i * 8].try_into().unwrap())
                             };
@@ -3318,20 +3376,36 @@ impl Renderer {
                             let receivers =
                                 (flight.fresh || traced_receivers).then(|| (stamp(0), stamp(1)));
                             let compute = flight.fresh.then(|| (stamp(2), stamp(3)));
-                            (begin, end, present, shadow, receivers, compute)
+                            (
+                                begin,
+                                end,
+                                present,
+                                shadow,
+                                receivers,
+                                compute,
+                                reconstruction,
+                            )
                         });
                         readback.unmap();
                         match result {
-                            Ok((begin, end, present, shadow, receivers, compute))
-                                if end >= begin
-                                    && present.is_none_or(|(a, b)| b >= a && a >= end)
-                                    && shadow.is_none_or(|(a, b)| b >= a && b <= begin)
-                                    && receivers.is_none_or(|(a, b)| b >= a && begin >= b)
-                                    && compute.is_none_or(|(c, d)| {
-                                        receivers.is_some_and(|(_, b)| c >= b)
-                                            && d >= c
-                                            && begin >= d
-                                    }) =>
+                            Ok((
+                                begin,
+                                end,
+                                present,
+                                shadow,
+                                receivers,
+                                compute,
+                                reconstruction,
+                            )) if end >= begin
+                                && present.is_none_or(|(a, b)| b >= a && a >= end)
+                                && shadow.is_none_or(|(a, b)| b >= a && b <= begin)
+                                && receivers.is_none_or(|(a, b)| b >= a && begin >= b)
+                                && compute.is_none_or(|(c, d)| {
+                                    receivers.is_some_and(|(_, b)| c >= b) && d >= c && begin >= d
+                                })
+                                && reconstruction.is_none_or(|(a, b)| {
+                                    a >= end && b >= a && present.is_none_or(|(c, _)| c >= b)
+                                }) =>
                             {
                                 let seconds = (end - begin) as f64
                                     * f64::from(self.timing.as_ref().unwrap().period)
@@ -3356,6 +3430,7 @@ impl Renderer {
                                             present.map_or(end, |(_, b)| b),
                                         )),
                                         present_pass: present.map(span),
+                                        reconstruction_pass: reconstruction.map(span),
                                     });
                                 } else {
                                     self.timing_status = TimingStatus::Disabled {
