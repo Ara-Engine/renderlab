@@ -2,7 +2,7 @@
 
 Measurements began 2026-11-07; updated 2026-11-08 UTC. Base `708e87c`, branch `t3/m7-tr0`. Measurement tooling only; no renderer or default changes. Contract: [M7](milestone-7.md), [design §6–8](m7-design.md), [U0](m7-u0.md) and [the recorded T1b experiment](m6-temporal-gpu.md#s2-t1b-camera-motion).
 
-**Status: Q-walk scoring and quiet costs complete; S2G reference scoring in progress.** All 60 original T1b checkpoints have new black-primary physical-target comparisons, and all eight paired S2G native captures are complete. The 0.25- and 0.5-pixel S2G tracks are fully scored on both paths (640 native frames); the other tracks' reference campaign remains in progress. Missing scores are unknown, not zero or passes. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. A cheap temporal pass or a good hold image alone cannot establish this.
+**Status: Q-walk scoring and quiet costs complete; S2G Sun-reference scoring in progress.** All 60 original T1b checkpoints have new black-primary physical-target comparisons, and all eight paired S2G native captures are complete. All three S2G camera tracks are fully scored on both paths (960 native frames); the Sun track's reference campaign remains in progress. Missing scores are unknown, not zero or passes. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. A cheap temporal pass or a good hold image alone cannot establish this.
 
 ## What is actually registered
 
@@ -216,6 +216,32 @@ F2 covered pools contain **141,140 / 136,609** age-3 / age-7 pixels, and the age
 
 Full-frame/error sheets at 64 and 95, L0 and L4, have been inspected. The metal and front-edge/shadow discrepancies are visible above split-half noise; they are combined final-colour errors. The zero-frame self-final proxy is again not a film-settle pass. Both native raw inputs are summarized and deleted (**2,654,208,000 bytes**), with hashes and inspected sheets retained.
 
+## S2G one-pixel track: complete physical-target scores
+
+`g1-e-n-s1` and `g1-e-r-s1` each score **160/160 frames**, with no missing reference, using the same D8 target and age protocol. The earlier five-frame held control remains separate; these are the complete registered-track results.
+
+| Measure | TSR Epic, no RT | TSR Epic, HRT |
+|---|---:|---:|
+| All-frame covered L0 RMS, p50 / p95 | 5.6913 / 6.7391 | 11.6893 / 12.8485 |
+| Frame 64 covered L0 / L4 RMS | 5.3973 / 5.9376 | 11.0541 / 7.6861 |
+| Frame 64 metal L0 / L4 RMS | 8.4665 / 3.0837 | 21.0718 / 8.0058 |
+| Frame 64 dielectric L0 / L4 RMS | 3.7619 / 0.4706 | 5.1650 / 0.6644 |
+| Frame 64 edge L0 / L4 RMS | 13.5744 / 19.7313 | 16.7100 / 20.3561 |
+| Frame 64 background-centre L0 / L4 RMS | 0.7571 / 1.5058 | 0.7584 / 1.5063 |
+| Revealed covered L0, age 3 / 7 | 8.6503 / 7.0314 | 11.5759 / 10.4674 |
+| Revealed background-centre L0, age 7 | 3.0963 | 3.1008 |
+| +8 changed-mask L0 / L4 RMS, frame 72 | 10.5768 / 6.1822 | 22.9400 / 10.7277 |
+| +8 changed-mask L0 signed mean / SE | -5.6837 / 0.02522 | -11.4270 / 0.05618 |
+| Moving F6 L0 residual, p50 / p95 | 1.4028 / 1.4464 | 2.3049 / 2.3987 |
+| Hold 80→81 covered/same-instance, age ≥8 L0 / L4 step | 0.18719 / 0.09613 | 0.37629 / 0.15589 |
+| Frame 64 metal / dielectric highlight energy ratio | 0.15903 / 0.67460 | 0.59444 / 0.62308 |
+| Frame 95 metal / dielectric highlight energy ratio | 0.12012 / 0.77321 | 0.58781 / 0.67826 |
+| Full-image self-final settle proxy, frames | 1 | 1 |
+
+F2 covered pools contain **98,629 / 95,359** age-3 / age-7 pixels; the age-7 background pool contains **30,937**. The 56→64 changed mask has **124,345** pixels, and hold 80→81 uses **1,337,758** shared covered pixels. At frame 64, age-32 background error over 1/4/8 L0 codes occupies 0/0/0 pixels on both paths; L4 occupies 102/11/6. These extents and material drift diagnostics are exported without treating them as connected-trail widths.
+
+The four full-frame/error sheets at 64 and 95 have been inspected. Reference-half noise is much smaller than the visible metal/front-edge discrepancies. The one-frame self-final proxy is not an independent film-settle result. Both native raw inputs are summarized and deleted (**2,654,208,000 bytes**); readbacks, hashes and inspected sheets remain.
+
 ## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
@@ -296,7 +322,7 @@ A three-state saved-replay batching experiment timed out at 120 seconds after it
 
 The subsequent 600-second f55 attempt **passes strict replay and exits 0**, with every RGB/half/geometry byte identical. The harness reports 166.23 seconds; the owned process records 166.65 seconds and minimum available RAM 12.979 GiB. These wall durations do not supply GPU cost claims. Both earlier first outputs match this accepted output exactly; their rejected raw/staging copies (678,265,893 bytes) were hash-recorded and deleted. No shader, material or equality threshold changed. Subsequent production states continue through the same one-state guard.
 
-Targeted scores of the synchronized 1-pixel captures against **D8 f64** retain the whole-image difference between paths. At frame 64, noise-subtracted all-covered L0 RMS is **5.3973 no-RT / 11.0541 HRT**. The fixed physical-reference highlight energy ratios are **0.15903 / 0.59444** on metal and **0.67460 / 0.62308** on dielectric. By frame 95 those ratios are **0.12012 / 0.58781** and **0.77321 / 0.67826**. Hold 80→81 covered/same-instance L0 step RMS is **0.18719 / 0.37629**, before external age filtering. These are combined final-colour errors, not an attribution to TSR alone. Full-frame/error sheets at 64 and 95 are retained for inspection; final age-filtered/full-track results remain pending.
+Targeted scores of the synchronized 1-pixel captures against **D8 f64** retain the whole-image difference between paths. At frame 64, noise-subtracted all-covered L0 RMS is **5.3973 no-RT / 11.0541 HRT**. The fixed physical-reference highlight energy ratios are **0.15903 / 0.59444** on metal and **0.67460 / 0.62308** on dielectric. By frame 95 those ratios are **0.12012 / 0.58781** and **0.77321 / 0.67826**. Hold 80→81 covered/same-instance L0 step RMS is **0.18719 / 0.37629**, before external age filtering. These are combined final-colour errors, not an attribution to TSR alone. These early targeted rows remain in `physical-batches/held-control.json`; the complete age-filtered track is now scored and tabled above.
 
 `scripts/m7-tr0-s2g.py plan` registers all 640 S2G frames, deduplicated only by exact f32 effective camera/light inputs into 129 primary-centre geometries and 288 physical states. Shared offline age masks use same instance and 2% forward-depth acceptance, with explicit pure-translation infinity handling; exact static-view identity increments the same deterministic centre pixels directly. These are scoring masks, never renderer inputs. Analytic static, placement/depth rejection and newly revealed boundary controls pass, as does the qualified full-resolution static age control. Completed tracks can publish ages incrementally; the protocol lists every generated frame and explicitly remains incomplete until all 640 exist. Camera physical references also supply the centre geometry, avoiding a duplicate geometry render campaign. A controller handoff during incremental publication skipped one geometry copy at camera-0.25px frame 52. Its 1024-spp colour archive stayed hash-identical; a separate two-sample strict replay recovered only deterministic centre world/hit/depth. Its radiance is excluded from film scoring, and `geometry/frame-052-recovery.json` records the repair. The BF/D8 f64 world/hit/depth arrays used for ages also compare byte-identical. Lossless scoring archives omit redundant geometry copies and verify SHA256 for every retained NPY payload; the f64 CPU control retains all scored arrays exactly while reducing 82.85 MB to 53.00 MB.
 
@@ -315,7 +341,7 @@ TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding i
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
-- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. All four completed quarter-/half-pixel S2G inputs are deleted; the other four native inputs remain until scoring and inspection finish.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. All six completed S2G camera inputs are deleted; the two Sun inputs remain until scoring and inspection finish.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
