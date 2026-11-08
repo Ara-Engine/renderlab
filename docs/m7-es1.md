@@ -1,6 +1,6 @@
 # M7-ES1: accurate environment specular with cache occlusion
 
-Branch `t3/m7-es1`, from main `50c35da` (MAT1's diagnosis), main `4e65cd1` merged. Builds on [MAT1](mat1-quarry-material.md), [G1c](m7-g1c.md), the design's `indirect_radiance` input ([m7-design.md](m7-design.md) 3.2) and P0's cache constraints ([m7-p0-claims.md](m7-p0-claims.md)). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
+Branch `t3/m7-es1`, from main `50c35da` (MAT1's diagnosis); main merged at `4e65cd1` (R0a, R0b) and `4560fc4` (G1d). Every measurement in sections 3 and 4 is from the merged code (binary `es1-l`, run `final2`); section 6 from the same code. Builds on [MAT1](mat1-quarry-material.md), [G1c](m7-g1c.md), the design's `indirect_radiance` input ([m7-design.md](m7-design.md) 3.2) and P0's cache constraints ([m7-p0-claims.md](m7-p0-claims.md)). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
 
 ## Status
 
@@ -9,9 +9,9 @@ Branch `t3/m7-es1`, from main `50c35da` (MAT1's diagnosis), main `4e65cd1` merge
 | 1. Accurate environment specular, no per-pixel quadrature | The RLE2 map's dominant lobes are fitted at upload and evaluated against the program's own GGX BRDF; their N=V prefiltered share is subtracted from the prefiltered field. Sky-lit plane against the path tracer: median ratio **0.804 → 0.998**, 10 → 70 of 96 cases within 1% + 4 SE. Quarry open ground: 0.72-0.89 → **0.84-0.99** with the cache on (MAT1's numerical probe, cache off: 0.94-1.00). | **Pass** where the cache runs: dielectrics at every tested roughness (0.89-1.01), metals at r ≥ 0.85; **miss** on glossy metals (r 0.3-0.5: 0.60-1.02) |
 | 2. Sky specular occlusion through `indirect_radiance` | The cache's occluded-over-open irradiance at the receiver scales the prefiltered radiance and every lobe; computed once per receiver; no cache-file change. Quarry occluded **20.71 → 18.29**, silhouette **20.20 → 17.87** (RT, -14 stops, against G1c's cache-on image); both far below the cache-off 28.26 / 27.02. | **Pass** against both baselines on those populations |
 | 3. Default image | The cache is off by default (`IndirectSettings::enabled`). Without it the standard program takes exactly its old arithmetic: **RT bit-identical** at both poses; non-RT equal to a repeated baseline within one pixel (section 4.5). | **Unchanged** (no population could improve or regress) |
-| 4. Every population, cache on | ES1 equals or beats G1c's cache-on image on **all 20 populations at both exposures, both poses, both paths**, static. Moving (U0b's pan, four witnesses pooled): every population except `isolated` at -10 stops (RT 34.40 → 35.68, non-RT 31.96 → 32.87; -14 improves). Against the cache-off default, the cache-on image still loses lit and partial populations: G1c's open-ground bias and the missing bounce (section 5). | **Cache-on mode improved; not a default candidate yet** |
-| 5. Cost | Quiet paired run: **+0.20-0.25 ms** of shading with the cache on (both paths), **+0.02-0.03 ms** on the cache-off default. One cache lookup per receiver, shared by every ES1 input; the lobe evaluation itself costs nothing measurable. | **Miss** against Lumen's 0.07 ms reflection pass; the default's +0.02 is recorded |
-| 6. Gates | `cargo test -p renderlab --lib` exits 0 on the merged code (141 passed, 141 ignored); every retained M5 environment and photometry gate passes on both suites with active validation; fmt and clippy clean in ES1's files. | **Pass** |
+| 4. Every population, cache on | ES1 equals or beats the cache-on image of main's cache (G1c, with G1d's cost changes) on **all 20 populations at both exposures, both poses, both paths**, static. Moving (U0b's pan, four witnesses pooled): every population except `isolated` at -10 stops (RT 34.29 → 35.57, non-RT 32.00 → 32.85; -14 improves). Against the cache-off default, the cache-on image still loses lit and partial populations: G1c's open-ground bias and the missing bounce (section 5). | **Cache-on mode improved; not a default candidate yet** |
+| 5. Cost | Quiet paired run on the merged code: **+0.19-0.25 ms** of shading with the cache on (both paths), **+0.02-0.03 ms** on the cache-off default. One cache lookup per receiver, shared by every ES1 input; the lobe evaluation itself costs nothing measurable. | **Miss** against Lumen's 0.07 ms reflection pass; the default's +0.02 is recorded |
+| 6. Gates | `cargo test -p renderlab --lib` exits 0 on the merged code, inside an m7-es1 lease (142 passed, 141 ignored); every retained M5 environment and photometry gate passes on both suites with active validation; fmt and clippy clean in ES1's files. | **Pass** |
 
 ## 1. Method
 
@@ -80,7 +80,7 @@ The engine inputs (each composed only for programs that call one of them):
 
 ## 3. Sky-lit plane against the path tracer (both paths, M)
 
-The M5-style material fixture: an open 200 m plane under `sun128` only, 17 x 17 pixels at a 0.01 rad field of view, scored at its centre against a 16,384-spp depth-2 reference (the reference tracer, RT process; the non-RT process reads the same references). Dielectric (base 0.1) and metal (base 0.9), roughness 0.3/0.5/0.85/1.0, N.V 0.15/0.3/0.6/0.95, three azimuths (beside the sun, toward its glint, sun behind): 96 cases. Final binary `es1-i`, run `final`. Luminance ratio to the reference:
+The M5-style material fixture: an open 200 m plane under `sun128` only, 17 x 17 pixels at a 0.01 rad field of view, scored at its centre against a 16,384-spp depth-2 reference (the reference tracer, RT process; the non-RT process reads the same references). Dielectric (base 0.1) and metal (base 0.9), roughness 0.3/0.5/0.85/1.0, N.V 0.15/0.3/0.6/0.95, three azimuths (beside the sun, toward its glint, sun behind): 96 cases. Binary `es1-l` (merged code), run `final2`; identical to the earlier run `final`. Luminance ratio to the reference:
 
 | Material | Roughness | Default (cache off): range (median) | ES1, cache on: range (median) | ES1 within 1% + 4 SE |
 |---|---:|---|---|---:|
@@ -99,113 +99,113 @@ RT and non-RT read identically (the plane is open, so visibility is 1 on both). 
 
 ### 4.1 Protocol
 
-U0b's full-radiance protocol, as MAT1 and G1c: RTX 4070 SUPER, NVIDIA 617.14, Vulkan; quarry RLA `1ce53c38...` (13,034,903 triangles, twelve 4K textures), poses 0 and 1, 1920x1080, 1x, `sun128.rle2` (`3ccd61b1...`), the separate 0.04 rad sun on the 4/12/40 m splits, black camera background, exposure -14. RT: traced primaries and Interactive shadows; non-RT: the visibility buffer and its Virtual shadows, with G1c's cooked 1 cm near field (`743a2fce...`). Cache on means a reset and eight settle frames. One process per path renders the baseline standard source (main `50c35da`), ES1 and the baseline again (`--repeat`). Scores: U0b's 4,096-spp `quarry-p0/p1` archives (`fd2152fa...` for pose 0) and 256-spp pan witnesses, every nonempty registered population, unrounded RGB RMS in F0 codes at -14 / -10 stops (`scripts/m7-es1-score.py`, U0b's frozen transform). Lumen columns are U0b's static Epic floors (pose 0) and its Q-walk motion floors (70 witnesses; a different frame set from the pan, so indicative only). Final binary `es1-i`, run `final`; functional leases, not timing.
+U0b's full-radiance protocol, as MAT1 and G1c: RTX 4070 SUPER, NVIDIA 617.14, Vulkan; quarry RLA `1ce53c38...` (13,034,903 triangles, twelve 4K textures), poses 0 and 1, 1920x1080, 1x, `sun128.rle2` (`3ccd61b1...`), the separate 0.04 rad sun on the 4/12/40 m splits, black camera background, exposure -14. RT: traced primaries and Interactive shadows; non-RT: the visibility buffer and its Virtual shadows, with G1c's cooked 1 cm near field (`743a2fce...`). Cache on means a reset and eight settle frames. One process per path renders the baseline standard source (main `50c35da`), ES1 and the baseline again (`--repeat`). Scores: U0b's 4,096-spp `quarry-p0/p1` archives (`fd2152fa...` for pose 0) and 256-spp pan witnesses, every nonempty registered population, unrounded RGB RMS in F0 codes at -14 / -10 stops (`scripts/m7-es1-score.py`, U0b's frozen transform). Lumen columns are U0b's static Epic floors (pose 0) and its Q-walk motion floors (70 witnesses; a different frame set from the pan, so indicative only). Binary `es1-l` (main with G1d merged), run `final2`; functional leases, not timing. A run on the code before G1d's merge (`final`) read the same within 0.04 codes everywhere, inside the cache-on mode's run-to-run spread.
 
-Bold marks an ES1 cell worse than G1c's cache-on image at either exposure.
+"Cache on, before ES1" is main's standard program (`50c35da`) with main's cache. Bold marks an ES1 cell worse than it at either exposure.
 
 ### 4.2 Static: RT
 
 **Pose 0.**
 
-| Population | Pixels | Default (cache off) | G1c cache on | ES1 cache on | Lumen HW Epic | Lumen SW Epic |
+| Population | Pixels | Default (cache off) | Cache on, before ES1 | ES1 cache on | Lumen HW Epic | Lumen SW Epic |
 |---|---|---|---|---|---|---|
-| all-covered | 346,517 | 11.63/18.40 | 14.22/22.03 | 12.17/18.82 | 8.41/11.65 | 9.32/13.99 |
+| all-covered | 346,517 | 11.63/18.40 | 14.23/22.03 | 12.17/18.82 | 8.41/11.65 | 9.32/13.99 |
 | background-centre | 1,727,083 | 1.28/3.84 | 1.28/3.84 | 1.28/3.84 | 0.33/1.01 | 0.33/1.03 |
 | backlit | 11,824 | 18.46/36.25 | 22.79/46.33 | 19.07/39.23 | 9.93/17.08 | 11.40/20.62 |
 | contact | 14,438 | 19.02/34.07 | 21.90/42.25 | 19.56/38.07 | 13.42/22.17 | 14.02/23.59 |
-| edge | 14,929 | 22.60/50.57 | 24.32/53.82 | 23.34/52.60 | 11.28/20.20 | 13.83/25.54 |
+| edge | 14,929 | 22.60/50.57 | 24.34/53.83 | 23.35/52.59 | 11.28/20.20 | 13.83/25.54 |
 | faint | 24,549 | 13.68/20.42 | 19.31/28.41 | 18.33/27.26 | 9.90/12.29 | 10.39/13.65 |
 | image | 2,073,600 | 4.90/8.30 | 5.93/9.66 | 5.11/8.45 | 3.45/4.85 | 3.82/5.79 |
 | isolated | 1,290 | 14.33/22.02 | 21.51/32.40 | 20.38/31.10 | 8.11/9.38 | 8.08/9.40 |
 | lit | 275,725 | 8.89/12.97 | 12.36/17.28 | 10.16/13.79 | 7.39/9.39 | 7.49/9.78 |
-| multi-surface | 7,153 | 20.10/32.00 | 24.79/42.70 | 23.50/40.45 | 11.95/18.55 | 14.24/23.67 |
-| narrow | 8,076 | 16.65/29.82 | 20.71/38.30 | 18.71/34.72 | 12.09/17.39 | 12.66/18.87 |
-| occluded | 15,508 | 28.26/48.75 | 20.71/42.07 | 18.29/37.48 | 14.53/26.40 | 22.38/41.75 |
-| partial | 55,284 | 15.16/24.82 | 19.65/32.50 | 17.87/29.61 | 10.59/14.66 | 11.14/16.14 |
+| multi-surface | 7,153 | 20.10/32.00 | 24.82/42.72 | 23.53/40.49 | 11.95/18.55 | 14.24/23.67 |
+| narrow | 8,076 | 16.65/29.82 | 20.74/38.33 | 18.75/34.76 | 12.09/17.39 | 12.66/18.87 |
+| occluded | 15,508 | 28.26/48.75 | 20.71/42.07 | 18.28/37.45 | 14.53/26.40 | 22.38/41.75 |
+| partial | 55,284 | 15.16/24.82 | 19.65/32.50 | 17.88/29.61 | 10.59/14.66 | 11.14/16.14 |
 | silhouette | 621 | 27.02/48.06 | 20.20/42.00 | 17.87/37.70 | 13.21/26.80 | 20.72/40.36 |
-| single-surface | 339,364 | 11.38/18.00 | 13.91/21.38 | 11.81/18.08 | 8.32/11.46 | 9.18/13.71 |
-| solid | 291,233 | 10.83/16.91 | 12.94/19.42 | 10.75/15.97 | 7.93/10.99 | 8.93/13.54 |
+| single-surface | 339,364 | 11.38/18.00 | 13.92/21.38 | 11.81/18.08 | 8.32/11.46 | 9.18/13.71 |
+| solid | 291,233 | 10.83/16.91 | 12.94/19.42 | 10.75/15.96 | 7.93/10.99 | 8.93/13.54 |
 | solid-lit | 271,806 | 8.77/12.78 | 12.20/17.00 | 9.97/13.44 | 7.35/9.33 | 7.43/9.66 |
-| solid-occluded | 14,612 | 27.69/47.99 | 19.86/40.39 | 17.30/35.47 | 14.25/25.84 | 22.18/41.36 |
-| wide | 47,208 | 14.88/23.86 | 19.46/31.40 | 17.72/28.64 | 10.31/14.14 | 10.86/15.63 |
-| wide6 | 33,148 | 14.62/23.17 | 19.80/31.44 | 18.22/29.02 | 9.92/13.64 | 10.24/14.60 |
+| solid-occluded | 14,612 | 27.69/47.99 | 19.86/40.39 | 17.30/35.44 | 14.25/25.84 | 22.18/41.36 |
+| wide | 47,208 | 14.88/23.86 | 19.46/31.40 | 17.73/28.64 | 10.31/14.14 | 10.86/15.63 |
+| wide6 | 33,148 | 14.62/23.17 | 19.80/31.44 | 18.23/29.02 | 9.92/13.64 | 10.24/14.60 |
 
 **Pose 1.**
 
-| Population | Pixels | Default (cache off) | G1c cache on | ES1 cache on |
+| Population | Pixels | Default (cache off) | Cache on, before ES1 | ES1 cache on |
 |---|---|---|---|---|
 | all-covered | 345,882 | 11.69/18.55 | 14.26/22.07 | 12.20/18.86 |
 | background-centre | 1,727,718 | 1.25/3.74 | 1.25/3.74 | 1.25/3.74 |
-| backlit | 11,825 | 18.67/36.91 | 23.00/46.89 | 19.35/39.92 |
-| contact | 14,420 | 18.99/34.29 | 22.36/43.21 | 20.13/39.19 |
+| backlit | 11,825 | 18.67/36.91 | 23.02/46.98 | 19.37/40.03 |
+| contact | 14,420 | 18.99/34.29 | 22.36/43.21 | 20.12/39.19 |
 | edge | 14,850 | 22.32/49.72 | 24.03/52.68 | 23.03/51.47 |
-| faint | 24,414 | 13.87/20.88 | 19.24/28.30 | 18.20/27.19 |
-| image | 2,073,600 | 4.91/8.31 | 5.93/9.64 | 5.11/8.42 |
+| faint | 24,414 | 13.87/20.88 | 19.23/28.28 | 18.19/27.17 |
+| image | 2,073,600 | 4.91/8.31 | 5.93/9.64 | 5.11/8.43 |
 | isolated | 1,312 | 13.82/19.77 | 20.60/30.00 | 19.64/29.13 |
 | lit | 275,262 | 8.95/13.10 | 12.38/17.33 | 10.19/13.82 |
-| multi-surface | 7,184 | 20.72/32.95 | 24.72/42.42 | 23.30/39.98 |
-| narrow | 7,882 | 16.20/29.05 | 21.01/38.74 | 19.08/35.26 |
-| occluded | 15,454 | 28.24/48.68 | 20.44/41.32 | 18.05/36.95 |
-| partial | 55,166 | 15.29/25.23 | 19.80/32.80 | 18.01/29.90 |
+| multi-surface | 7,184 | 20.72/32.95 | 24.72/42.42 | 23.30/39.97 |
+| narrow | 7,882 | 16.20/29.05 | 21.01/38.74 | 19.08/35.25 |
+| occluded | 15,454 | 28.24/48.68 | 20.43/41.30 | 18.04/36.92 |
+| partial | 55,166 | 15.29/25.23 | 19.81/32.82 | 18.02/29.92 |
 | silhouette | 628 | 27.55/48.59 | 19.64/40.90 | 17.08/36.22 |
 | single-surface | 338,698 | 11.42/18.12 | 13.95/21.43 | 11.86/18.15 |
 | solid | 290,716 | 10.87/16.99 | 12.94/19.37 | 10.75/15.92 |
 | solid-lit | 271,305 | 8.83/12.93 | 12.22/17.04 | 9.99/13.47 |
-| solid-occluded | 14,555 | 27.62/47.88 | 19.74/39.79 | 17.25/35.16 |
-| wide | 47,284 | 15.13/24.53 | 19.60/31.71 | 17.83/28.91 |
-| wide6 | 33,140 | 14.83/23.70 | 19.91/31.58 | 18.29/29.16 |
+| solid-occluded | 14,555 | 27.62/47.88 | 19.73/39.76 | 17.24/35.13 |
+| wide | 47,284 | 15.13/24.53 | 19.60/31.73 | 17.83/28.94 |
+| wide6 | 33,140 | 14.83/23.70 | 19.91/31.61 | 18.30/29.20 |
 
 ### 4.3 Static: non-RT
 
 **Pose 0.**
 
-| Population | Pixels | Default (cache off) | G1c cache on | ES1 cache on | Lumen HW Epic | Lumen SW Epic |
+| Population | Pixels | Default (cache off) | Cache on, before ES1 | ES1 cache on | Lumen HW Epic | Lumen SW Epic |
 |---|---|---|---|---|---|---|
-| all-covered | 346,517 | 11.64/18.43 | 13.35/21.07 | 11.38/18.08 | 8.41/11.65 | 9.32/13.99 |
+| all-covered | 346,517 | 11.64/18.43 | 13.35/21.08 | 11.38/18.09 | 8.41/11.65 | 9.32/13.99 |
 | background-centre | 1,727,083 | 1.28/3.83 | 1.28/3.83 | 1.28/3.83 | 0.33/1.01 | 0.33/1.03 |
-| backlit | 11,824 | 18.45/36.27 | 22.25/45.23 | 18.52/38.22 | 9.93/17.08 | 11.40/20.62 |
-| contact | 14,438 | 19.03/34.12 | 21.85/42.01 | 19.60/38.09 | 13.42/22.17 | 14.02/23.59 |
-| edge | 14,929 | 22.55/50.46 | 23.81/53.29 | 22.85/52.06 | 11.28/20.20 | 13.83/25.54 |
-| faint | 24,549 | 13.69/20.43 | 18.42/27.63 | 17.51/26.70 | 9.90/12.29 | 10.39/13.65 |
+| backlit | 11,824 | 18.45/36.27 | 22.24/45.22 | 18.51/38.21 | 9.93/17.08 | 11.40/20.62 |
+| contact | 14,438 | 19.03/34.12 | 21.84/42.00 | 19.59/38.08 | 13.42/22.17 | 14.02/23.59 |
+| edge | 14,929 | 22.55/50.46 | 23.81/53.29 | 22.85/52.05 | 11.28/20.20 | 13.83/25.54 |
+| faint | 24,549 | 13.69/20.43 | 18.44/27.67 | 17.53/26.73 | 9.90/12.29 | 10.39/13.65 |
 | image | 2,073,600 | 4.90/8.30 | 5.58/9.30 | 4.80/8.18 | 3.45/4.85 | 3.82/5.79 |
 | isolated | 1,290 | 14.33/22.02 | 18.34/28.12 | 17.38/27.07 | 8.11/9.38 | 8.08/9.40 |
-| lit | 275,725 | 8.90/13.01 | 11.27/16.08 | 9.15/12.82 | 7.39/9.39 | 7.49/9.78 |
+| lit | 275,725 | 8.90/13.01 | 11.27/16.08 | 9.15/12.83 | 7.39/9.39 | 7.49/9.78 |
 | multi-surface | 7,153 | 20.11/32.02 | 24.23/41.85 | 23.00/39.59 | 11.95/18.55 | 14.24/23.67 |
 | narrow | 8,076 | 16.72/29.98 | 20.70/37.91 | 18.76/34.39 | 12.09/17.39 | 12.66/18.87 |
-| occluded | 15,508 | 28.26/48.78 | 20.58/41.28 | 18.19/36.70 | 14.53/26.40 | 22.38/41.75 |
-| partial | 55,284 | 15.17/24.85 | 19.09/31.87 | 17.36/29.19 | 10.59/14.66 | 11.14/16.14 |
+| occluded | 15,508 | 28.26/48.78 | 20.58/41.27 | 18.18/36.67 | 14.53/26.40 | 22.38/41.75 |
+| partial | 55,284 | 15.17/24.85 | 19.10/31.89 | 17.37/29.21 | 10.59/14.66 | 11.14/16.14 |
 | silhouette | 621 | 27.03/48.10 | 19.98/41.63 | 17.52/37.48 | 13.21/26.80 | 20.72/40.36 |
-| single-surface | 339,364 | 11.39/18.03 | 13.02/20.41 | 11.00/17.35 | 8.32/11.46 | 9.18/13.71 |
+| single-surface | 339,364 | 11.39/18.03 | 13.03/20.41 | 11.01/17.36 | 8.32/11.46 | 9.18/13.71 |
 | solid | 291,233 | 10.84/16.94 | 11.95/18.32 | 9.84/15.08 | 7.93/10.99 | 8.93/13.54 |
-| solid-lit | 271,806 | 8.78/12.82 | 11.10/15.80 | 8.93/12.47 | 7.35/9.33 | 7.43/9.66 |
-| solid-occluded | 14,612 | 27.69/48.01 | 19.83/39.70 | 17.33/34.90 | 14.25/25.84 | 22.18/41.36 |
-| wide | 47,208 | 14.88/23.86 | 18.80/30.72 | 17.11/28.20 | 10.31/14.14 | 10.86/15.63 |
-| wide6 | 33,148 | 14.62/23.15 | 18.97/30.53 | 17.45/28.43 | 9.92/13.64 | 10.24/14.60 |
+| solid-lit | 271,806 | 8.78/12.82 | 11.11/15.80 | 8.94/12.48 | 7.35/9.33 | 7.43/9.66 |
+| solid-occluded | 14,612 | 27.69/48.01 | 19.83/39.69 | 17.32/34.86 | 14.25/25.84 | 22.18/41.36 |
+| wide | 47,208 | 14.88/23.86 | 18.81/30.74 | 17.12/28.23 | 10.31/14.14 | 10.86/15.63 |
+| wide6 | 33,148 | 14.62/23.15 | 18.98/30.55 | 17.46/28.45 | 9.92/13.64 | 10.24/14.60 |
 
 **Pose 1.**
 
-| Population | Pixels | Default (cache off) | G1c cache on | ES1 cache on |
+| Population | Pixels | Default (cache off) | Cache on, before ES1 | ES1 cache on |
 |---|---|---|---|---|
-| all-covered | 345,882 | 11.69/18.56 | 13.36/21.11 | 11.39/18.13 |
+| all-covered | 345,882 | 11.69/18.56 | 13.36/21.11 | 11.39/18.14 |
 | background-centre | 1,727,718 | 1.25/3.73 | 1.25/3.73 | 1.25/3.73 |
-| backlit | 11,825 | 18.65/36.87 | 22.50/46.07 | 18.85/39.24 |
-| contact | 14,420 | 19.00/34.28 | 22.32/43.26 | 20.15/39.43 |
+| backlit | 11,825 | 18.65/36.87 | 22.50/46.08 | 18.85/39.24 |
+| contact | 14,420 | 19.00/34.28 | 22.33/43.26 | 20.15/39.41 |
 | edge | 14,850 | 22.33/49.72 | 23.51/52.24 | 22.56/51.07 |
-| faint | 24,414 | 13.88/20.91 | 18.28/27.35 | 17.36/26.53 |
+| faint | 24,414 | 13.88/20.91 | 18.31/27.39 | 17.38/26.57 |
 | image | 2,073,600 | 4.91/8.31 | 5.57/9.27 | 4.79/8.15 |
 | isolated | 1,312 | 13.98/20.15 | 17.74/26.17 | 17.06/26.10 |
-| lit | 275,262 | 8.95/13.12 | 11.27/16.09 | 9.13/12.80 |
-| multi-surface | 7,184 | 20.73/33.00 | 24.19/41.91 | 22.84/39.55 |
-| narrow | 7,882 | 16.25/29.12 | 21.00/38.86 | 19.14/35.51 |
-| occluded | 15,454 | 28.24/48.69 | 20.50/40.82 | 18.19/36.50 |
-| partial | 55,166 | 15.30/25.24 | 19.17/32.16 | 17.43/29.50 |
+| lit | 275,262 | 8.95/13.12 | 11.27/16.09 | 9.14/12.80 |
+| multi-surface | 7,184 | 20.73/33.00 | 24.18/41.90 | 22.84/39.54 |
+| narrow | 7,882 | 16.25/29.12 | 21.01/38.84 | 19.14/35.48 |
+| occluded | 15,454 | 28.24/48.69 | 20.51/40.83 | 18.19/36.50 |
+| partial | 55,166 | 15.30/25.24 | 19.18/32.19 | 17.45/29.53 |
 | silhouette | 628 | 27.54/48.59 | 19.44/40.64 | 16.63/35.67 |
-| single-surface | 338,698 | 11.42/18.13 | 13.03/20.44 | 11.02/17.39 |
+| single-surface | 338,698 | 11.42/18.13 | 13.04/20.44 | 11.02/17.40 |
 | solid | 290,716 | 10.87/17.00 | 11.94/18.27 | 9.83/15.03 |
-| solid-lit | 271,305 | 8.84/12.94 | 11.10/15.80 | 8.93/12.45 |
-| solid-occluded | 14,555 | 27.62/47.88 | 19.78/39.23 | 17.39/34.72 |
-| wide | 47,284 | 15.13/24.53 | 18.84/30.90 | 17.13/28.38 |
-| wide6 | 33,140 | 14.82/23.68 | 18.87/30.36 | 17.29/28.21 |
+| solid-lit | 271,305 | 8.84/12.94 | 11.10/15.81 | 8.93/12.45 |
+| solid-occluded | 14,555 | 27.62/47.88 | 19.79/39.24 | 17.39/34.72 |
+| wide | 47,284 | 15.13/24.53 | 18.86/30.94 | 17.15/28.42 |
+| wide6 | 33,140 | 14.82/23.68 | 18.89/30.40 | 17.32/28.27 |
 
 ### 4.4 In motion: U0b's pan
 
@@ -213,53 +213,53 @@ The camera settles at pose 0, then moves 2 cm a frame as U0b's pan; captures at 
 
 **RT.**
 
-| Population | Pixels | G1c cache on | ES1 cache on | Lumen HW Epic Q-walk | Lumen SW Epic Q-walk |
+| Population | Pixels | Cache on, before ES1 | ES1 cache on | Lumen HW Epic Q-walk | Lumen SW Epic Q-walk |
 |---|---|---|---|---|---|
-| all-covered | 1,252,164 | 14.43/22.50 | 12.48/19.49 | 8.92/12.66 | 9.90/15.12 |
+| all-covered | 1,252,164 | 14.43/22.50 | 12.48/19.50 | 8.92/12.66 | 9.90/15.12 |
 | background-centre | 7,042,236 | 1.23/3.66 | 1.23/3.66 | 0.40/1.24 | 0.41/1.25 |
-| backlit | 41,054 | 23.41/48.01 | 19.88/41.44 | 11.70/20.70 | 13.34/24.33 |
-| contact | 53,165 | 22.40/43.55 | 20.19/39.74 | 14.76/25.25 | 15.45/26.90 |
-| edge | 56,203 | 24.00/53.03 | 23.09/51.92 | 12.14/22.82 | 14.63/27.86 |
-| faint | 71,787 | 18.97/28.87 | 17.96/27.72 | 10.95/14.33 | 11.64/16.29 |
+| backlit | 41,054 | 23.43/48.04 | 19.90/41.47 | 11.70/20.70 | 13.34/24.33 |
+| contact | 53,165 | 22.41/43.57 | 20.20/39.77 | 14.76/25.25 | 15.45/26.90 |
+| edge | 56,203 | 24.01/53.05 | 23.11/51.96 | 12.14/22.82 | 14.63/27.86 |
+| faint | 71,787 | 18.97/28.86 | 17.96/27.71 | 10.95/14.33 | 11.64/16.29 |
 | image | 8,294,400 | 5.72/9.37 | 4.98/8.29 | 3.67/5.30 | 4.07/6.29 |
-| isolated | 3,997 | 22.54/34.40 | **22.52/35.68** | 9.16/10.83 | 9.35/11.38 |
-| lit | 1,015,911 | 12.77/17.92 | 10.75/14.80 | 7.81/10.05 | 8.01/10.73 |
-| multi-surface | 25,657 | 24.53/42.27 | 23.36/40.38 | 12.86/20.54 | 15.10/25.45 |
+| isolated | 3,997 | 22.51/34.29 | **22.49/35.57** | 9.16/10.83 | 9.35/11.38 |
+| lit | 1,015,911 | 12.77/17.93 | 10.76/14.81 | 7.81/10.05 | 8.01/10.73 |
+| multi-surface | 25,657 | 24.52/42.27 | 23.36/40.39 | 12.86/20.54 | 15.10/25.45 |
 | narrow | 30,680 | 21.16/38.70 | 19.42/35.68 | 13.37/19.84 | 14.11/21.73 |
-| occluded | 55,183 | 20.72/42.79 | 18.32/38.07 | 15.22/28.67 | 23.31/43.74 |
+| occluded | 55,183 | 20.72/42.81 | 18.33/38.09 | 15.22/28.67 | 23.31/43.74 |
 | partial | 181,070 | 19.85/33.77 | 18.06/30.92 | 11.70/17.06 | 12.41/18.97 |
-| silhouette | 2,125 | 19.82/40.12 | 17.77/36.11 | 13.97/28.68 | 21.18/41.69 |
-| single-surface | 1,226,507 | 14.14/21.89 | 12.15/18.81 | 8.82/12.44 | 9.77/14.83 |
-| solid | 1,071,094 | 13.30/19.97 | 11.27/16.81 | 8.34/11.72 | 9.40/14.35 |
-| solid-lit | 1,000,501 | 12.60/17.59 | 10.54/14.40 | 7.77/9.97 | 7.95/10.60 |
-| solid-occluded | 52,014 | 19.99/41.22 | 17.47/36.18 | 14.93/28.02 | 23.13/43.30 |
-| wide | 150,390 | 19.57/32.67 | 17.76/29.86 | 11.37/16.50 | 12.08/18.42 |
-| wide6 | 101,352 | 19.73/32.59 | 18.04/30.01 | 11.05/16.03 | 11.58/17.57 |
+| silhouette | 2,125 | 19.78/39.96 | 17.73/35.95 | 13.97/28.68 | 21.18/41.69 |
+| single-surface | 1,226,507 | 14.14/21.90 | 12.15/18.82 | 8.82/12.44 | 9.77/14.83 |
+| solid | 1,071,094 | 13.30/19.98 | 11.27/16.82 | 8.34/11.72 | 9.40/14.35 |
+| solid-lit | 1,000,501 | 12.60/17.60 | 10.54/14.41 | 7.77/9.97 | 7.95/10.60 |
+| solid-occluded | 52,014 | 19.99/41.24 | 17.47/36.20 | 14.93/28.02 | 23.13/43.30 |
+| wide | 150,390 | 19.57/32.67 | 17.77/29.86 | 11.37/16.50 | 12.08/18.42 |
+| wide6 | 101,352 | 19.73/32.59 | 18.05/30.02 | 11.05/16.03 | 11.58/17.57 |
 
 **Non-RT.**
 
-| Population | Pixels | G1c cache on | ES1 cache on | Lumen HW Epic Q-walk | Lumen SW Epic Q-walk |
+| Population | Pixels | Cache on, before ES1 | ES1 cache on | Lumen HW Epic Q-walk | Lumen SW Epic Q-walk |
 |---|---|---|---|---|---|
 | all-covered | 1,252,164 | 13.59/21.64 | 11.73/18.88 | 8.92/12.66 | 9.90/15.12 |
 | background-centre | 7,042,236 | 1.22/3.66 | 1.22/3.66 | 0.40/1.24 | 0.41/1.25 |
-| backlit | 41,054 | 23.05/47.28 | 19.56/40.84 | 11.70/20.70 | 13.34/24.33 |
-| contact | 53,165 | 22.50/43.71 | 20.37/40.02 | 14.76/25.25 | 15.45/26.90 |
-| edge | 56,203 | 23.60/52.81 | 22.75/51.75 | 12.14/22.82 | 14.63/27.86 |
-| faint | 71,787 | 18.52/28.51 | 17.67/27.77 | 10.95/14.33 | 11.64/16.29 |
-| image | 8,294,400 | 5.40/9.06 | 4.70/8.07 | 3.67/5.30 | 4.07/6.29 |
-| isolated | 3,997 | 20.62/31.96 | **20.54/32.87** | 9.16/10.83 | 9.35/11.38 |
+| backlit | 41,054 | 23.05/47.27 | 19.56/40.84 | 11.70/20.70 | 13.34/24.33 |
+| contact | 53,165 | 22.49/43.69 | 20.37/40.01 | 14.76/25.25 | 15.45/26.90 |
+| edge | 56,203 | 23.61/52.81 | 22.76/51.76 | 12.14/22.82 | 14.63/27.86 |
+| faint | 71,787 | 18.52/28.51 | 17.66/27.76 | 10.95/14.33 | 11.64/16.29 |
+| image | 8,294,400 | 5.40/9.06 | 4.69/8.07 | 3.67/5.30 | 4.07/6.29 |
+| isolated | 3,997 | 20.59/32.00 | **20.49/32.85** | 9.16/10.83 | 9.35/11.38 |
 | lit | 1,015,911 | 11.68/16.75 | 9.73/13.87 | 7.81/10.05 | 8.01/10.73 |
-| multi-surface | 25,657 | 24.21/41.94 | 23.12/40.05 | 12.86/20.54 | 15.10/25.45 |
-| narrow | 30,680 | 21.21/38.82 | 19.54/35.94 | 13.37/19.84 | 14.11/21.73 |
+| multi-surface | 25,657 | 24.21/41.93 | 23.12/40.05 | 12.86/20.54 | 15.10/25.45 |
+| narrow | 30,680 | 21.20/38.78 | 19.54/35.91 | 13.37/19.84 | 14.11/21.73 |
 | occluded | 55,183 | 20.73/42.30 | 18.38/37.68 | 15.22/28.67 | 23.31/43.74 |
-| partial | 181,070 | 19.52/33.44 | 17.82/30.87 | 11.70/17.06 | 12.41/18.97 |
-| silhouette | 2,125 | 20.00/41.02 | 17.85/36.99 | 13.97/28.68 | 21.18/41.69 |
-| single-surface | 1,226,507 | 13.28/21.01 | 11.37/18.18 | 8.82/12.44 | 9.77/14.83 |
+| partial | 181,070 | 19.51/33.42 | 17.81/30.85 | 11.70/17.06 | 12.41/18.97 |
+| silhouette | 2,125 | 19.95/40.88 | 17.79/36.83 | 13.97/28.68 | 21.18/41.69 |
+| single-surface | 1,226,507 | 13.27/21.00 | 11.37/18.17 | 8.82/12.44 | 9.77/14.83 |
 | solid | 1,071,094 | 12.31/18.93 | 10.35/15.99 | 8.34/11.72 | 9.40/14.35 |
-| solid-lit | 1,000,501 | 11.49/16.41 | 9.49/13.45 | 7.77/9.97 | 7.95/10.60 |
-| solid-occluded | 52,014 | 20.06/40.83 | 17.61/36.00 | 14.93/28.02 | 23.13/43.30 |
-| wide | 150,390 | 19.15/32.23 | 17.45/29.73 | 11.37/16.50 | 12.08/18.42 |
-| wide6 | 101,352 | 19.19/31.93 | 17.62/29.74 | 11.05/16.03 | 11.58/17.57 |
+| solid-lit | 1,000,501 | 11.48/16.41 | 9.49/13.45 | 7.77/9.97 | 7.95/10.60 |
+| solid-occluded | 52,014 | 20.06/40.82 | 17.61/35.99 | 14.93/28.02 | 23.13/43.30 |
+| wide | 150,390 | 19.15/32.22 | 17.44/29.71 | 11.37/16.50 | 12.08/18.42 |
+| wide6 | 101,352 | 19.18/31.93 | 17.61/29.73 | 11.05/16.03 | 11.58/17.57 |
 
 `isolated` (about 1,000 pixels a frame) is the one regression: ES1 halves its bias toward zero (RT pose 0 -12.6 → -8.7 codes, pan -12.8 → -9.8) but adds pixel variance on small rocks, where the cache's cell-level visibility is coarse; against 256-spp references the variance wins at -10 stops.
 
@@ -274,7 +274,7 @@ Median luminance ratio to the reference on open, up-facing, lit ground per place
 
 MAT1's numerical probe (cache off, unoccluded) read 0.94-1.00 on the same placements. ES1's residual darkness on placements 1, 3 and 4 is the cache's own open-ground bias (G1c section 5.3: -7% RT, -5% non-RT), which now reaches specular through the shared visibility; non-RT reads closer for the same reason as in G1c.
 
-**The default is unchanged.** Cache off, ES1's quarry images equal the baseline's bit for bit on RT (both poses, and a repeated baseline). On non-RT, ES1 equals a repeated baseline rendered after it to within one pixel, while the first-rendered baseline differs from its own repeat by 58 / 32 pixels: run-order state of the non-RT path, present without ES1 (M, runs `a3` and `final`). The cache-on mode differs between processes by 3-98 pixels for every program (G1's cache), so its tables carry that noise.
+**The default is unchanged.** Cache off, ES1's quarry images equal the baseline's bit for bit on RT (both poses, and a repeated baseline). On non-RT, ES1 equals a repeated baseline rendered after it to within one pixel, while the first-rendered baseline differs from its own repeat by 58 / 32 pixels: run-order state of the non-RT path, present without ES1 (M, runs `a3`, `final` and `final2`). The cache-on mode differs between processes by 3-98 pixels for every program (G1's cache), so its tables carry that noise.
 
 ## 5. Why the cache-on image still loses to the default on lit populations (M)
 
@@ -288,47 +288,47 @@ Against the cache-off default, ES1's cache-on image wins occluded, solid-occlude
 | background-centre | 1.28/3.84 | 1.28/3.84 | 1.28/3.84 |
 | backlit | 18.46/36.25 | 19.07/39.23 | 16.35/30.58 |
 | contact | 19.02/34.07 | 19.56/38.07 | 16.47/28.93 |
-| edge | 22.60/50.57 | 23.34/52.60 | 20.77/47.56 |
-| faint | 13.68/20.42 | 18.33/27.26 | 15.24/19.20 |
+| edge | 22.60/50.57 | 23.35/52.59 | 20.78/47.57 |
+| faint | 13.68/20.42 | 18.33/27.26 | 15.23/19.20 |
 | image | 4.90/8.30 | 5.11/8.45 | 4.37/6.74 |
 | isolated | 14.33/22.02 | 20.38/31.10 | 17.04/22.63 |
 | lit | 8.89/12.97 | 10.16/13.79 | 8.58/9.82 |
-| multi-surface | 20.10/32.00 | 23.50/40.45 | 19.15/27.98 |
-| narrow | 16.65/29.82 | 18.71/34.72 | 15.73/26.54 |
-| occluded | 28.26/48.75 | 18.29/37.48 | 16.36/32.10 |
-| partial | 15.16/24.82 | 17.87/29.61 | 14.97/21.74 |
+| multi-surface | 20.10/32.00 | 23.53/40.49 | 19.18/28.00 |
+| narrow | 16.65/29.82 | 18.75/34.76 | 15.75/26.56 |
+| occluded | 28.26/48.75 | 18.28/37.45 | 16.36/32.10 |
+| partial | 15.16/24.82 | 17.88/29.61 | 14.97/21.74 |
 | silhouette | 27.02/48.06 | 17.87/37.70 | 16.60/34.84 |
 | single-surface | 11.38/18.00 | 11.81/18.08 | 10.04/13.64 |
-| solid | 10.83/16.91 | 10.75/15.97 | 9.16/12.09 |
+| solid | 10.83/16.91 | 10.75/15.96 | 9.16/12.09 |
 | solid-lit | 8.77/12.78 | 9.97/13.44 | 8.42/9.57 |
-| solid-occluded | 27.69/47.99 | 17.30/35.47 | 15.71/31.24 |
-| wide | 14.88/23.86 | 17.72/28.64 | 14.83/20.81 |
-| wide6 | 14.62/23.17 | 18.22/29.02 | 15.14/20.70 |
+| solid-occluded | 27.69/47.99 | 17.30/35.44 | 15.72/31.24 |
+| wide | 14.88/23.86 | 17.73/28.64 | 14.83/20.81 |
+| wide6 | 14.62/23.17 | 18.23/29.02 | 15.14/20.70 |
 
 **Non-RT, pose 0.**
 
 | Population | Default (cache off) | ES1 cache on | Open specular, cache on |
 |---|---|---|---|
-| all-covered | 11.64/18.43 | 11.38/18.08 | 9.68/13.66 |
+| all-covered | 11.64/18.43 | 11.38/18.09 | 9.68/13.66 |
 | background-centre | 1.28/3.83 | 1.28/3.83 | 1.28/3.83 |
-| backlit | 18.45/36.27 | 18.52/38.22 | 15.98/29.86 |
-| contact | 19.03/34.12 | 19.60/38.09 | 16.52/28.81 |
-| edge | 22.55/50.46 | 22.85/52.06 | 20.48/47.37 |
-| faint | 13.69/20.43 | 17.51/26.70 | 14.52/18.66 |
+| backlit | 18.45/36.27 | 18.51/38.21 | 15.97/29.85 |
+| contact | 19.03/34.12 | 19.59/38.08 | 16.51/28.80 |
+| edge | 22.55/50.46 | 22.85/52.05 | 20.47/47.36 |
+| faint | 13.69/20.43 | 17.53/26.73 | 14.53/18.68 |
 | image | 4.90/8.30 | 4.80/8.18 | 4.13/6.59 |
 | isolated | 14.33/22.02 | 17.38/27.07 | 14.84/20.43 |
-| lit | 8.90/13.01 | 9.15/12.82 | 7.73/9.10 |
+| lit | 8.90/13.01 | 9.15/12.83 | 7.73/9.10 |
 | multi-surface | 20.11/32.02 | 23.00/39.59 | 18.88/27.69 |
-| narrow | 16.72/29.98 | 18.76/34.39 | 15.85/26.39 |
-| occluded | 28.26/48.78 | 18.19/36.70 | 16.63/32.65 |
-| partial | 15.17/24.85 | 17.36/29.19 | 14.56/21.38 |
+| narrow | 16.72/29.98 | 18.76/34.39 | 15.84/26.38 |
+| occluded | 28.26/48.78 | 18.18/36.67 | 16.63/32.64 |
+| partial | 15.17/24.85 | 17.37/29.21 | 14.56/21.39 |
 | silhouette | 27.03/48.10 | 17.52/37.48 | 16.67/35.04 |
-| single-surface | 11.39/18.03 | 11.00/17.35 | 9.39/13.20 |
-| solid | 10.84/16.94 | 9.84/15.08 | 8.44/11.63 |
-| solid-lit | 8.78/12.82 | 8.93/12.47 | 7.55/8.83 |
-| solid-occluded | 27.69/48.01 | 17.33/34.90 | 16.07/31.87 |
-| wide | 14.88/23.86 | 17.11/28.20 | 14.33/20.40 |
-| wide6 | 14.62/23.15 | 17.45/28.43 | 14.49/20.16 |
+| single-surface | 11.39/18.03 | 11.01/17.36 | 9.39/13.20 |
+| solid | 10.84/16.94 | 9.84/15.08 | 8.45/11.63 |
+| solid-lit | 8.78/12.82 | 8.94/12.48 | 7.55/8.83 |
+| solid-occluded | 27.69/48.01 | 17.32/34.86 | 16.07/31.87 |
+| wide | 14.88/23.86 | 17.12/28.23 | 14.33/20.41 |
+| wide6 | 14.62/23.15 | 17.46/28.45 | 14.50/20.17 |
 
 Unoccluded sky specular reads better than occluded on **every** population, occluded and silhouette included (RT 18.29 → 16.36, 17.87 → 16.60). The occluded population's bias is **-8.9 codes** with ES1 (too dark), against +6.1 with the cache off (too bright). The reference's occluded pixels see sunlit rock in the occluded directions: bounce, which the cache does not carry yet (G2). Occluding the sky without adding that radiance undershoots, exactly as G1c's cache-on diffuse does. ES1 keeps the occluded form because it is the physical estimand and because its visibility is the cache's incident-over-open ratio: once G2 puts bounce into the cache's incident radiance, the same ratio scales specular by incident light rather than by sky visibility alone (I). The open variant is a diagnostic, not a candidate: it would double-count once bounce arrives.
 
@@ -336,27 +336,27 @@ Even the open variant does not beat the default everywhere (faint, isolated and 
 
 ## 6. Cost (quarry)
 
-**Quiet window `es1-q2`** (2026-11-08, 120 s without a foreign stillkit compiler before it, **no stillkit sample inside**; announced in the schedule; binary `es1-k`, the pushed code). One process per path, the quarry loaded once; baseline, ES1 and the in-shade placement variant interleaved in each of four visits per cache state, so intermittent foreign GPU load falls on all alike. Per visit: a cut (reset, ten frames at pose 0), then 24 frames moving 1 cm a frame. Ranges over visits 2-4 (visit 1 follows the first program reload and warms the driver's shader cache); one non-RT cache-off visit was contended and is excluded from its range. Shading is the traced deferred shading pass (RT) or the visibility-buffer shading pass (non-RT), `GpuSample::mesh_pass`; span is the whole frame, `render_span`. Milliseconds:
+**Quiet window `es1-q3`** (2026-11-08, after main's G1d merge; 120 s without a foreign stillkit compiler before it, **no stillkit sample inside**; announced in the schedule; binary `es1-l`, the pushed code). One process per path, the quarry loaded once; the baseline standard program and ES1 interleaved in each of four visits per cache state, so intermittent foreign GPU load falls on both alike. Per visit: a cut (reset, ten frames at pose 0), then 24 frames moving 1 cm a frame. Ranges over visits 2-4 (visit 1 follows the first program reload and warms the driver's shader cache); one baseline visit per row with an isolated outlier frame (a 0.59 ms cut frame, a 360 ms non-RT cut span) is left out. Shading is the traced deferred shading pass (RT) or the visibility-buffer shading pass (non-RT), `GpuSample::mesh_pass`; frame is the whole frame, `render_span` (camera-moving p50 per visit). Milliseconds:
 
 | Path | Cache | Phase | Baseline shading | ES1 shading | Increment | Baseline frame | ES1 frame |
 |---|---|---|---:|---:|---:|---:|---:|
-| RT | off (default) | camera moving | 0.329-0.331 | 0.352-0.360 | **+0.02-0.03** | 0.883-0.888 | 0.868-0.912 |
-| RT | off | cut, frame 1 | 0.335-0.342 | 0.366-0.377 | +0.03 | 0.91-0.92 | 0.89-0.95 |
-| RT | on | camera moving | 0.415-0.421 | 0.618-0.621 | **+0.20** | 2.04-2.12 | 2.26-2.27 |
-| RT | on | cut, frame 1 | 0.492-0.516 | 0.727-0.731 | +0.22-0.24 | 5.11-5.21 | 5.31-5.37 |
-| RT | on | after a cut, settled | 0.423-0.426 | 0.618-0.620 | +0.19-0.20 | | |
-| Non-RT | off (default) | camera moving | 0.331-0.333 | 0.353-0.358 | **+0.02** | 2.06-2.15 | 2.07-2.11 |
-| Non-RT | on | camera moving | 0.418-0.420 | 0.628-0.632 | **+0.21** | 3.93-4.10 | 4.17-4.28 |
-| Non-RT | on | cut, frame 1 | 0.499-0.502 | 0.753-0.758 | +0.25 | 25.2-25.5 | 25.7 |
-| Non-RT | on | after a cut, settled | 0.423-0.425 | 0.635-0.638 | +0.21 | | |
+| RT | off (default) | camera moving | 0.332-0.333 | 0.361 | **+0.03** | 0.880-0.883 | 0.908-0.910 |
+| RT | off | cut, frame 1 | 0.339-0.348 | 0.366-0.378 | +0.03 | 0.92-0.93 | 0.94-0.95 |
+| RT | on | camera moving | 0.417-0.425 | 0.616-0.618 | **+0.19-0.20** | 1.54-1.55 | 1.73-1.74 |
+| RT | on | cut, frame 1 | 0.493-0.494 | 0.723-0.727 | +0.23 | 5.01-5.02 | 5.24-5.29 |
+| RT | on | after a cut, settled | 0.417-0.418 | 0.613-0.614 | +0.20 | | |
+| Non-RT | off (default) | camera moving | 0.334-0.336 | 0.357-0.358 | **+0.02** | 2.09-2.11 | 2.12-2.16 |
+| Non-RT | on | camera moving | 0.425-0.432 | 0.633-0.634 | **+0.21** | 3.39-3.43 | 3.67-3.86 |
+| Non-RT | on | cut, frame 1 | 0.506-0.516 | 0.753-0.758 | +0.24-0.25 | 21.5-26.5 | 21.6-24.1 |
+| Non-RT | on | after a cut, settled | 0.424-0.425 | 0.633-0.636 | +0.21 | | |
 
-The in-shade placement (the lookup inside `shade`) reads the same within 0.01 ms (RT on 0.611-0.614, off 0.346-0.355; non-RT on 0.623-0.625, off 0.349), so the entry hook costs nothing over it.
+An earlier quiet run on the code before G1d's merge (`es1-q2`, clean) read the same increments (RT +0.20 / +0.02-0.03, non-RT +0.21 / +0.02) with the cache-on RT frame at 2.04-2.12 ms before ES1; G1d halved the cache, not ES1's share. In `es1-q2` the in-shade placement (the lookup inside `shade`) read the same as the entry hook within 0.01 ms (RT on 0.611-0.614 against 0.618-0.621, off 0.346-0.355 against 0.352-0.360), so the hook costs nothing over it.
 
 **Where it goes** (functional screens, `a4`, paired against the same baseline; RT shading with the cache on): lobes with no visibility **+0.00 ms**; the visibility lookup alone **+0.14 ms**; both, one lookup site, **+0.19 ms**; the first version with a lookup at each of three call sites +0.53 ms. The increment is the second cache lookup, the one `indirect_irradiance(n)` already performs for diffuse at the same receiver; open item 4 proposes sharing it.
 
 **Against the budget.**
 - The cache-off default pays **+0.02-0.03 ms** of shading (about 7% of the pass, within the whole-frame noise here) for code it does not execute: a recorded cost of the default. Specializing the shading pipelines on the cache state (a WGSL `override`) would remove it; not done.
-- With the cache on, ES1 adds **+0.20-0.25 ms** a frame on both paths, on top of G1c's measured +1.3-1.6 ms (RT) and +1.8-2.4 ms (non-RT), which already miss every reading of Lumen's budget (G1c section 3.2).
+- With the cache on, ES1 adds **+0.19-0.25 ms** a frame on both paths, on top of the cache's own +0.54-0.63 ms (RT) and +0.63-0.84 ms (non-RT) after G1d, which meets the design readings (0.88 and 1.17 ms) but misses the stricter 0.45 / 0.46 ([M7-G1d](m7-g1d.md)). Cache plus ES1: about +0.74-0.83 (RT) and +0.84-1.05 ms (non-RT), still within the design readings and over the strict ones.
 - Lumen's own reflection pass on the quarry costs **0.07 ms** at Epic (0.22 ms with hit lighting; [M7-U0](m7-u0.md)), because few quarry pixels fall below its trace roughness; its rough specular comes through the GI gather. Half of it, the 2x line, is 0.035 ms: ES1's rough-specular increment **misses** it by about 6x. Against Lumen GI plus reflections (1.28-1.31 ms) halved, 0.64-0.66 ms, the cache and ES1 together miss as well. Speed misses are recorded; quality is not reduced to meet them.
 
 ## 7. Memory (M)
@@ -382,7 +382,7 @@ The in-shade placement (the lookup inside `shade`) reads the same within 0.01 ms
 
 | Gate | Result |
 |---|---|
-| `cargo test -p renderlab --lib` (merged code, staged binary `es1-k`, inside lease `merged`) | **exit 0: 141 passed, 0 failed, 141 ignored**. Includes ES1's three CPU tests (lobe fit on sun, constant, smooth and two-sun fields; shares against a dense quadrature within 1%; table layout), G1's composition test (the standard program composes and validates on raster and traced stages; toon composes no cache) and R0b's probe validation with ES1's stubs |
+| `cargo test -p renderlab --lib` (main with G1d merged, staged binary `es1-l`, inside m7-es1 lease `final2`; earlier `es1-k` in `merged`: 141 passed) | **exit 0: 142 passed, 0 failed, 141 ignored**. Includes ES1's three CPU tests (lobe fit on sun, constant, smooth and two-sun fields; shares against a dense quadrature within 1%; table layout), G1's composition test (the standard program composes and validates on raster and traced stages; toon composes no cache) and R0b's probe validation with ES1's stubs |
 | M5 environment gates, RT suite, Khronos validation | constant photometry and compatibility, independent banks without float filtering, registered runtime reconstruction (538 references), axes/yaw/poles/seams/mips, refined sun angular and convolution reference, ownership/admission/reload, lit photometry 1x/4x: **all pass, 0 validation errors, 0 missing layers** (`m5-a` 0-5, `m5-b` 0). The two regular/virtual image gates cannot run on the traced suite ("hardware shadows do not yet support virtual geometry"), as before ES1 |
 | Same gates, raster suite | all nine, including both regular/virtual normal-shadow image gates: **pass, 0 validation errors** (`m5-b` 1-9) |
 | Sky-lit plane, both paths | section 3: 70/96 within 1% + 4 SE with the cache on; no case worse than the default |
@@ -397,7 +397,7 @@ Timing of the checks: the lib suite runs in 3 s of tests after an incremental bu
 Evidence root `E:/renderlab-work/m7-es1/` (target `D:/Coding/renderlab-work/m7-es1/target`, deleted at close):
 
 - `cpu/`: the CPU replays and grid (`quarry_replay.py`, `lobe_model.py`, `lobe_grid.py`, `lobe_split.py`, `blend.py`, `conv.py`, `cv.py`, `lobe-grid.json`).
-- `runs/final/`: plane JSONs and summary, quarry `score.json` per path and the diagnostic, `doc-tables.md`; `runs/a2`-`a6`, `m5-a`, `m5-b`, `merged`, `q2`: earlier functional runs, M5 gate logs, cost rows.
+- `runs/final2/` (merged code, quoted here) and `runs/final/` (before G1d): plane JSONs and summary, quarry `score.json` per path and the diagnostic, `doc-tables.md`; `runs/q3` and `q2`: the quiet cost rows; `runs/a2`-`a6`, `m5-a`, `m5-b`, `merged`: earlier functional runs, M5 gate logs, cost screens.
 - `baseline-standard.wgsl` (the standard program at `50c35da`), `variants/` (screened shader variants), `quarry-manifest.json`.
 - Raw f32 captures were deleted after scoring.
 
