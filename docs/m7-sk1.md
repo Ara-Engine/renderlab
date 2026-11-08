@@ -1,7 +1,8 @@
 # M7 SK1: animated meshes
 
 Implementation branch: `t3/m7-sk1`, based on `984a18b`, updated with main's
-`ae95d3a` (TR1b and DC1). This is the 2026-11-08 overnight base, with the remaining limits listed
+`f159fcd` (default GI/bounce, TR1b, R1 and AT1), then `c7855a5` before the final
+checks. This is the 2026-11-08 overnight base, with the remaining limits listed
 below. It makes no Unreal quality or performance claim.
 
 ## Asset and cache contract
@@ -84,6 +85,8 @@ Busy/rejected frame admission does not advance pose history.
   Static receivers reject lighting history inside a swept caster shadow volume.
   With dynamic GI enabled this rejection is conservatively scene-wide; refining
   that region and retaining more stable shadow samples remain performance/quality work.
+  TLAS-only rebinding preserves reconstruction history; target texture changes
+  still invalidate it. Both devices test continuity after the first frame.
 - **Non-RT visibility:** full-detail original clusters retain their topology and
   primitive IDs. A second compute dispatch updates their duplicated positions.
   Conservative mesh bounds cover every skinned cluster; LOD attachment is rejected.
@@ -103,13 +106,16 @@ Busy/rejected frame admission does not advance pose history.
 - **GI:** swept caster boxes include deforming meshes, and pose revisions prevent
   idle-cache reuse. Non-RT software geometry is refreshed from the admitted pose
   when its revision changes. This CPU BVH rebuild is a correctness base, not the
-  final scalable dynamic-GI implementation.
+  final scalable dynamic-GI implementation. The current software-scene packer
+  also recopies static scene geometry on each replacement: this dominates the
+  quarry CPU frame cost and needs a persistent dynamic geometry range.
 
 ## Example, attribution and reproduction
 
 `examples/skinned-mesh.rs` is a headless clip-player example. It cooks the source,
-renders 32 walk frames with TR1, and writes five poses per path and scene. The
-fixture also exercises GI caster invalidation. An optional prepared quarry argument
+renders 32 walk frames with the product's default GI/bounce, TR1, reflection and
+atmosphere settings, and writes five poses per path and scene. Both scenes check
+GI caster invalidation. An optional prepared quarry argument
 adds the same walk to the real quarry. The quarry asset is local and is not bundled.
 
 The redistributable Fox source is unchanged, pinned by commit and SHA-256; the
@@ -125,6 +131,7 @@ $env:N8_OWNER = 'm7-sk1'
 $env:N8_OUT = 'D:/Coding/renderlab-work/m7-sk1'
 py -3 -B scripts/n8-run.py --label sk1-check --minutes 25 --fast-check -- `
   py -3 -B scripts/m7-sk1-check.py
+py -3 -B scripts/m7-sk1-report.py
 ```
 
 Every renderer test binary and GPU run is inside the shared `gpu-slot.lock` lease.
@@ -145,7 +152,9 @@ to 64. The retained image/timing run is recorded below once completed.
 - Actual incremental BLAS/TLAS refit requires backend support beyond wgpu 30's
   current rebuild implementation.
 - Non-RT dynamic GI rebuilds the software BVH on the CPU for every changed pose.
-  Cluster bounds use the mesh-wide box, and shadow invalidation is conservative.
+  Its scene packer also recopies static geometry; full-quarry pose preparation is
+  currently too expensive for game frame rates. Cluster bounds use the mesh-wide
+  box, and shadow invalidation is conservative.
 - Dynamic-GI receiver-history rejection is scene-wide, and independent skins
   currently own their compute pipelines. Crowds and dynamic-GI temporal stability
   need further work; this is a correctness base rather than a crowd renderer.

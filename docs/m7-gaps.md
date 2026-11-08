@@ -8,7 +8,10 @@ One section per feature. Each lists the measured or inspected gaps that remain a
   wgpu 30 currently rebuilds both. Actual incremental refit remains open.
 - The non-RT path skins full-detail source clusters. Skinned cluster LOD is
   unavailable; bounds are conservative mesh-wide bounds. CPU software-GI BVHs
-  rebuild for changed poses, and caster invalidation is conservative.
+  rebuild for changed poses, and caster invalidation is conservative. Replacing
+  animated geometry also repacks the static software scene each pose: the default
+  GI quarry run is currently too expensive for game frame rates. Persistent
+  dynamic geometry ranges are needed; see SK1's measured frame cost.
 - RLS v1 supports four influences, TRS nodes and one active sampled clip. Matrix
   nodes, additional influence sets and morph targets are explicitly rejected.
   Clip blending, events, dual-quaternion skinning and automatic root motion remain
