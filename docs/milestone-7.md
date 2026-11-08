@@ -151,3 +151,14 @@ Default anti-aliasing ruling (Islam, delegated, 2026-11-08). TR1 becomes the def
 4. Cost tails above the half-TSR ceiling stay recorded as a miss.
 5. Earlier quality gates are re-scored on the new default image, noting which numbers moved.
 IQ1 also found the RT-device code default is still raster primaries, which TR1 doesn't reconstruct. A TR1 default helps RT users only once traced primaries are the RT default (RT1d).
+
+TR1 visible-sky gate result and ruling (Islam, delegated, 2026-11-08). TR1b's 40-frame visible-sky quarry walk failed condition 3, so TR1 stays opt-in.
+- Against the path-traced reference, TR1 is worse than no-AA in 149 of 256 rows on both paths. Most of that comes from the lighting error both images share (unoccluded sky in shadow), not from AA.
+- Against each path's own 64-spp integrated image, TR1 wins 219 of 256 rows and loses 31. The losses are the cold first frame, revealed-pixel pockets at ages 2-4, rare single-pixel maxima while moving, and a still-frame settle step.
+
+Ruling:
+- Judge the AA change against each path's own 64-spp integral, because the shared lighting error isn't TR1's.
+- Flip only when no row is worse than no-AA, on both paths, static and moving.
+- Keep the path-traced comparison in the record, and re-score it once G2's sky occlusion and bounce make the cache the default, so the lighting gap shows separately.
+- Fix the losses in order of size, recording each fix's effect. If a row can't be fixed without hurting others, report it back; never relax the gate.
+- Build an Unreal quarry level with the sky visible as a separate short unit, with its package and captures on D:, then delete Unreal's derived data and build cache once the cook is verified.
