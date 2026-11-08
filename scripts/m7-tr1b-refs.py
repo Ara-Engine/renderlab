@@ -544,7 +544,20 @@ def sky_identity(args):
             shutil.copyfile(BIN / "u0b-997151eb.exe", D_BIN / "u0b-997151eb.exe")
         manifest = root / binary / "manifest.json"
         manifest.write_text(json.dumps(dict(base, frames=[entry]), indent=1))
-        if not (data / "q-disocclusion-000.npz").exists():
+        # The replay policy rejects an attempt whose fixed-resource control differs (an
+        # intermittent ≤2 ULP repeat), as it did one S2G state; retry in fresh leases. Bit
+        # identity is judged on a strict attempt (its own independent replay bit-identical):
+        # a bounded-as attempt is kept aside as attempt-N and traced again.
+        for attempt in range(6):
+            archive = data / "q-disocclusion-000.npz"
+            if archive.exists():
+                label = json.loads(archive.with_suffix(".json").read_text())["replay_qualification"]["label"]
+                if label == "strict":
+                    break
+                kept = root / binary / f"attempt-{attempt}"
+                kept.mkdir(exist_ok=True)
+                for f in data.glob("q-disocclusion-000.*"):
+                    shutil.move(str(f), str(kept / f.name))
             quarry_trace(binary, manifest, data, f"skyid-{binary}-{uuid.uuid4().hex[:6]}", 1,
                          "TR1b reference identity check, functional")
         with np.load(data / "q-disocclusion-000.npz") as z:

@@ -17,6 +17,10 @@ TR0's external geometry ages (`--ages`), with the sun in the reference key on mo
 tracks and S2G's material populations and highlight rows. A candidate directory holding
 `exposure.json` is a native TSR capture (scripts/m7-tr1b-refs.py tsr); `compare --against`
 then compares a Renderlab score with that TSR score row by row.
+
+  pooled   a candidate score against a baseline score of the same track (the visible-sky
+           default gate: TR1 against no-AA), every row pooled over the hold and moving
+           segments
 """
 import argparse
 import csv
@@ -403,6 +407,102 @@ def compare(args):
     Path(args.out).write_text(json.dumps(result, indent=1) + "\n")
 
 
+def pooled_rows(score, segments):
+    """One score's rows pooled over frame segments, {segment: {(population, channel,
+    measure): value}}: RMS rows pool their squares weighted by pixels (noise subtraction
+    pools error and reference noise separately), signed means pool by pixels, maxima take
+    the maximum and pixel counts sum. TR0's aged transient pools are already pooled."""
+    out = {}
+    for segment, frames in segments.items():
+        sums = {}
+
+        def add(key, kind, value, n=1):
+            if value is None:
+                return
+            s = sums.setdefault(key, dict(kind=kind, n=0, a=0.0, b=0.0))
+            if kind == "max":
+                s["a"] = max(s["a"], value)
+            elif kind == "count":
+                s["a"] += value
+            else:
+                s["n"] += n
+                s["a"] += n * (value[0] if kind == "ns" else value) ** (1 if kind == "mean" else 2)
+                if kind == "ns":
+                    s["b"] += n * value[1] ** 2
+        for row in score["rows"]:
+            if row["frame"] not in frames:
+                continue
+            for channel, populations in row["measures"].items():
+                for population, v in populations.items():
+                    add((population, channel, "rms"), "rms", v["rms"], v["n"])
+                    add((population, channel, "rms_noise_subtracted"), "ns", (v["rms"], v["reference_noise_rms"]), v["n"])
+                    add((population, channel, "absolute_signed_mean"), "mean", v["signed_mean"], v["n"])
+                    add((population, channel, "maximum"), "max", v["maximum"])
+                    shared = v.get("shared_age32")
+                    if shared:
+                        add((population + "/age32", channel, "rms_noise_subtracted"), "rms", shared["rms_noise_subtracted"], shared["n"])
+                        add((population + "/age32", channel, "absolute_signed_mean"), "mean", shared["signed_mean"], shared["n"])
+            for channel, bands in row["background_distance_bands"].items():
+                for band, v in bands.items():
+                    add(("background-distance/" + band, channel, "rms"), "rms", v["rms"], v["n"])
+            for channel, extent in row["background_error_extent"].items():
+                for threshold, v in extent["values"].items():
+                    add(("background-error-over-" + threshold, channel, "pixels"), "count", v["pixels"])
+            for channel, v in row.get("changed", {}).get("measures", {}).items():
+                add(("changed/8-frame-input", channel, "rms"), "rms", v["rms"], row["changed"]["pixels"])
+        for r in score["motion_residuals"]:
+            if r["frames"][1] in frames and r["pixels"]:
+                add(("covered/same-instance/age8", r["channel"], "reference_subtracted_flicker_rms"), "rms", r["rms"], r["pixels"])
+                add(("covered/same-instance/age8", r["channel"], "frame_step_rms"), "rms", r["step_rms"], r["pixels"])
+        values = {}
+        for key, s in sums.items():
+            if s["kind"] in ("max", "count"):
+                values[key] = s["a"]
+            elif s["kind"] == "mean":
+                values[key] = abs(s["a"] / s["n"])
+            elif s["kind"] == "ns":
+                values[key] = math.sqrt(max(0.0, (s["a"] - s["b"]) / s["n"]))
+            else:
+                values[key] = math.sqrt(s["a"] / s["n"])
+        out[segment] = values
+    pools = {}
+    for name, v in score["transient_pools"].items():
+        event, age, population, channel = name.split("/")
+        pools[(f"{population}/{event}/age-{age}", channel, "rms_noise_subtracted")] = v["rms_noise_subtracted"]
+    out["aged-transients"] = pools
+    return out
+
+
+def pooled(args):
+    """Candidate against a baseline score of the same track (the visible-sky gate: TR1 against
+    no-AA), every population, channel and measure pooled per segment. A row is worse when the
+    candidate's pooled value exceeds the baseline's; rows present in only one score are listed."""
+    sequence = json.loads(Path(args.sequence).read_text())["frames"]
+    key = lambda p: np.asarray(p["eye"] + p["target"], "<f4").tobytes()
+    moving = [i for i in range(len(sequence)) if i > 0 and key(sequence[i]) != key(sequence[i - 1])]
+    first, last = min(moving), max(moving)
+    segments = {"all": set(range(len(sequence))), "hold-start": set(range(first)),
+                "moving": set(range(first, last + 1)), "hold-end": set(range(last + 1, len(sequence)))}
+    mine = pooled_rows(json.loads(Path(args.score).read_text()), segments)
+    theirs = pooled_rows(json.loads(Path(args.baseline).read_text()), segments)
+    result = dict(score=args.score, baseline=args.baseline, script_sha256=SCRIPT_SHA,
+                  segments={k: sorted(v) for k, v in segments.items()}, verdict={}, segments_detail={})
+    for segment in mine:
+        a, b = mine[segment], theirs[segment]
+        worse = sorted(([list(k), a[k], b[k]] for k in a.keys() & b.keys() if a[k] > b[k]),
+                       key=lambda x: -(x[1] / x[2] if x[2] > 0 else math.inf))
+        better = sum(a[k] < b[k] for k in a.keys() & b.keys())
+        result["segments_detail"][segment] = dict(rows=len(a.keys() & b.keys()), better=better, worse=len(worse),
+            ties=len(a.keys() & b.keys()) - better - len(worse), worse_rows=worse,
+            only_candidate=[list(k) for k in sorted(a.keys() - b.keys())], only_baseline=[list(k) for k in sorted(b.keys() - a.keys())],
+            values={"|".join(k): [a[k], b[k]] for k in sorted(a.keys() & b.keys())})
+        result["verdict"][segment] = "no worse" if not worse else f"worse in {len(worse)} rows"
+        print(f"{segment}: rows {len(a.keys() & b.keys())} better {better} worse {len(worse)}")
+        for row in worse[:12]:
+            print("   worse", row)
+    Path(args.out).write_text(json.dumps(result, indent=1) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -419,8 +519,13 @@ def main():
     p.add_argument("score")
     p.add_argument("--out", required=True)
     p.add_argument("--against", help="a TSR score from this script instead of TR0's bar rows")
+    p = sub.add_parser("pooled")
+    p.add_argument("score")
+    p.add_argument("baseline")
+    p.add_argument("--sequence", required=True, help="the track's input timeline, for its hold and moving segments")
+    p.add_argument("--out", required=True)
     args = parser.parse_args()
-    dict(score=score, compare=compare)[args.command](args)
+    dict(score=score, compare=compare, pooled=pooled)[args.command](args)
 
 
 if __name__ == "__main__":

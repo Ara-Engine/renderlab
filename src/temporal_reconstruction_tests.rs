@@ -18,6 +18,8 @@
 //! A sequence frame's `to_light` (Q-sun, S2G) sets the sun direction before that frame.
 //! `scene` replaces the quarry with a U0b bench scene.json (S2G): its meshes, materials,
 //! sun and constant sky, black primary misses, identity instances.
+//! `visible_environment` shows the bound RLE2 map at primary misses (the visible-sky walk);
+//! `integrate: n` writes each listed frame's n x n jittered no-AA mean instead of variants.
 use super::*;
 
 /// A loaded bench scene's draw inputs; placement i + 1 is the scene's mesh i, as the
@@ -307,6 +309,58 @@ fn gpu_tr1_sequence() {
     let write_frames = m["write_frames"].as_bool().unwrap_or(true);
     let color = target(&r, 1920, 1080);
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    // `integrate: n`: each listed frame's pixel integral of the renderer's own shading, the
+    // mean of n x n stratified sub-pixel offsets with TR1 off, as raw f32 RGB
+    // `integrated/fNNN.f32` (exposed). The visible-sky gate's lighting-matched control
+    // scores TR1 and no-AA against it; no variants run.
+    if let Some(n) = m["integrate"].as_u64().map(|n| n as u32) {
+        assert!(
+            suns.iter().all(Option::is_none),
+            "integrate: fixed-sun tracks only"
+        );
+        r.set_reconstruction(Reconstruction {
+            enabled: false,
+            ..Reconstruction::default()
+        })
+        .unwrap();
+        let dir = out.join("integrated");
+        fs::create_dir_all(&dir).unwrap();
+        for &f in &written {
+            let mut sum = vec![0.0f64; 1920 * 1080 * 3];
+            for j in 0..n * n {
+                let offset = [j % n, j / n].map(|k| (k as f32 + 0.5) / n as f32 - 0.5);
+                render(
+                    &mut r,
+                    &color,
+                    &path_cameras[f].jittered(offset),
+                    &mut content.draws(),
+                );
+                r.test_drain("TR1 integrate");
+                let hdr = capture(&mut r);
+                let rgb = hdr.chunks_exact(8).flat_map(|p| {
+                    (0..3).map(move |k| {
+                        crate::decode_f16(u16::from_le_bytes([p[2 * k], p[2 * k + 1]]))
+                    })
+                });
+                for (s, v) in sum.iter_mut().zip(rgb) {
+                    *s += f64::from(v);
+                }
+            }
+            let mean: Vec<u8> = sum
+                .iter()
+                .flat_map(|s| ((s / f64::from(n * n)) as f32).to_le_bytes())
+                .collect();
+            fs::write(dir.join(format!("f{f:03}.f32")), mean).unwrap();
+        }
+        fs::write(
+            out.join("integrated.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"path": path, "n": n, "frames": written,
+                "seconds": started.elapsed().as_secs_f64()}))
+            .unwrap(),
+        )
+        .unwrap();
+        return;
+    }
     // One complete track from cold: frame hashes, the requested HDRs, and per-frame spans.
     let run = |r: &mut Renderer,
                content: &mut Content,
