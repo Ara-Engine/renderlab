@@ -42,6 +42,68 @@ fn cube(
     }
 }
 
+/// The environment lobe table texture (`texels` rows of `width`), lighting group 3
+/// binding 10. Its bytes count as a lookup table, beside the DFG, not as cube bytes.
+fn lobe_table(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    ledger: &Ledger,
+    texels: &[[f32; 4]],
+    width: u32,
+) -> EnvironmentCube {
+    let height = texels.len() as u32 / width;
+    let texture = ledger.own(
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("environment lobe table"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        }),
+        ResourceKind::Texture,
+    );
+    let bytes: Vec<u8> = texels
+        .iter()
+        .flatten()
+        .flat_map(|v| v.to_ne_bytes())
+        .collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 16),
+            rows_per_image: Some(height),
+        },
+        texture.size(),
+    );
+    let view = ledger.own(
+        texture.create_view(&Default::default()),
+        ResourceKind::TextureView,
+    );
+    EnvironmentCube {
+        view,
+        _texture: texture,
+        _allocation: ledger.allocate(AllocationKind::Lut, bytes.len() as u64),
+    }
+}
+
+/// The empty lobe table: row 0's count texel (8) reads zero lobes.
+pub(super) fn dummy_lobes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    ledger: &Ledger,
+) -> EnvironmentCube {
+    lobe_table(device, queue, ledger, &[[0.0; 4]; 9], 9)
+}
+
 pub(super) fn dummy_cube(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -272,11 +334,37 @@ impl Renderer {
         hash.update(data.diffuse_irradiance().size().to_ne_bytes());
         hash.update(data.specular_radiance()[0].size().to_ne_bytes());
         hash.update([u8::from(independent)]);
+        // RLE2 fields separate their dominant lobes (M7-ES1). Legacy mip chains keep
+        // the plain prefiltered lookup.
+        let lobes = match data.specular_layout() {
+            SpecularLayout::IndependentRoughness { knots, .. } => {
+                let fitted = crate::environment_lobes::fit(&data.specular_radiance()[0]);
+                (!fitted.is_empty()).then(|| {
+                    let texels = crate::environment_lobes::table(&fitted, knots);
+                    for texel in &texels {
+                        for v in texel {
+                            hash.update(v.to_ne_bytes());
+                        }
+                    }
+                    self.uploads.texture_writes += 1;
+                    self.uploads.write_calls += 1;
+                    lobe_table(
+                        &self.device,
+                        &self.queue,
+                        &self.ledger,
+                        &texels,
+                        crate::environment_lobes::SHARE_BINS as u32,
+                    )
+                })
+            }
+            SpecularLayout::LegacyMipChain => None,
+        };
         let map = EnvironmentMap(Arc::new(EnvironmentInner {
             renderer: self.identity.clone(),
             diffuse,
             specular,
             specular_second,
+            lobes,
             independent,
             levels,
             yaw: data.metadata().rotation_y_radians,

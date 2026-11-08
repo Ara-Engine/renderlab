@@ -35,6 +35,8 @@ pub(super) struct LightingGpu {
     _dfg_allocation: Allocation,
     sampler: Owned<wgpu::Sampler>,
     dummy_environment: crate::environment::EnvironmentCube,
+    /// The empty environment lobe table, bound when the selected map has none.
+    dummy_lobes: crate::environment::EnvironmentCube,
     active: Option<LightBuffer>,
     retired: Vec<(u64, LightBuffer)>,
     pub retired_hdr: Vec<(u64, Hdr)>,
@@ -92,6 +94,9 @@ impl LightingGpu {
                     computed(cube_entry(6)),
                     computed(cube_entry(7)),
                     computed(cube_entry(9)),
+                    // The selected map's environment lobe table, read by the M7-ES1
+                    // inputs (shaders/environment_lobes.wgsl).
+                    computed(lobe_entry(10)),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
@@ -204,6 +209,7 @@ impl LightingGpu {
             ResourceKind::Sampler,
         );
         let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
+        let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
         Self {
             bindings,
@@ -217,6 +223,7 @@ impl LightingGpu {
             _dfg_allocation: ledger.allocate(AllocationKind::Lut, DFG.len() as u64),
             sampler,
             dummy_environment,
+            dummy_lobes,
             active: None,
             retired: vec![],
             retired_hdr: vec![],
@@ -435,6 +442,16 @@ impl Renderer {
                                 ),
                             },
                             wgpu::BindGroupEntry {
+                                binding: 10,
+                                resource: wgpu::BindingResource::TextureView(
+                                    self.environment
+                                        .selected
+                                        .as_ref()
+                                        .and_then(|map| map.0.lobes.as_ref())
+                                        .map_or(&state.dummy_lobes.view, |table| &table.view),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
                                 binding: 0,
                                 resource: state.uniform.as_entire_binding(),
                             },
@@ -615,6 +632,15 @@ impl Renderer {
     }
 }
 
+fn lobe_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    let mut entry = texture_entry(binding);
+    entry.ty = wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    };
+    entry
+}
 fn cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     let mut entry = texture_entry(binding);
     entry.ty = wgpu::BindingType::Texture {

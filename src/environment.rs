@@ -13,6 +13,9 @@ pub(crate) struct EnvironmentInner {
     pub diffuse: EnvironmentCube,
     pub specular: EnvironmentCube,
     pub specular_second: Option<EnvironmentCube>,
+    /// The fitted lobe table (src/environment_lobes.rs) of an RLE2 field with dominant
+    /// lobes; None binds the renderer's empty table.
+    pub lobes: Option<EnvironmentCube>,
     pub independent: bool,
     pub yaw: f32,
     pub levels: u32,

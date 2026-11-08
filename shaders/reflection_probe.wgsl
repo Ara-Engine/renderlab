@@ -47,6 +47,13 @@ fn indirect_irradiance(input:SurfaceInput,n:vec3<f32>)->vec3<f32> {return ambien
 fn environment_enabled()->bool {return false;}
 fn environment_constant()->vec3<f32> {return select(frame.sky.rgb,vec3<f32>(0.0),suppress_specular);}
 fn environment_reflection(d:vec3<f32>,rough:f32)->vec3<f32> {return environment_constant();}
+// M7-ES1's inputs as the open environment above: the probe has no world radiance cache,
+// so radiance is unoccluded and no environment lobes are separated (docs/m7-es1.md).
+fn indirect_radiance(input:SurfaceInput,d:vec3<f32>,rough:f32)->vec3<f32> {return environment_constant();}
+struct EnvironmentLobe { direction:vec3<f32>, sharpness:f32, illuminance:vec3<f32> };
+fn environment_lobe_count()->u32 {return 0u;}
+fn environment_lobe(input:SurfaceInput,i:u32)->EnvironmentLobe {return EnvironmentLobe(vec3<f32>(0.0,0.0,1.0),1.0,vec3<f32>(0.0));}
+fn environment_lobe_reflection(input:SurfaceInput,i:u32,d:vec3<f32>,rough:f32)->vec3<f32> {return vec3<f32>(0.0);}
 fn environment_product(a:vec3<f32>,b:vec3<f32>)->vec3<f32> {return exposed_product(a,b);}
 fn environment_dfg(nv:f32,rough:f32)->vec2<f32> {
     let p=vec2<f32>(clamp(nv,0.0,1.0),rough)*127.0;

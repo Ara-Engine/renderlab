@@ -3,6 +3,10 @@ use crate::asset::environment::{
     self as env, CubeFace, CubeLevel, Metadata, PreparedEnvironment, RadianceUnits,
 };
 
+// M7-ES1: dominant environment lobes and occluded environment specular.
+#[path = "environment_specular_tests.rs"]
+mod specular;
+
 fn level(size: u32, value: impl Fn([f64; 3]) -> [f32; 3]) -> CubeLevel {
     let mut pixels = vec![];
     for face in CubeFace::ALL {

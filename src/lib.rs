@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate self as renderlab;
 mod environment;
+mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
 mod instances;
