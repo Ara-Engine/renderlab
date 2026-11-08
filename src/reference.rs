@@ -128,8 +128,17 @@ pub enum Smith {
     Separable,
 }
 
+/// Reference-only acceleration-structure build preference. Each resulting image
+/// still requires the same independent-AS replay qualification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccelerationBuild {
+    FastTrace,
+    FastBuild,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
+    pub acceleration_build: AccelerationBuild,
     pub samples: u32,
     /// Samples per pixel per dispatch; keep each dispatch well under the driver timeout.
     pub samples_per_dispatch: u32,
@@ -150,6 +159,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            acceleration_build: AccelerationBuild::FastTrace,
             samples: 1024,
             samples_per_dispatch: 16,
             max_depth: 1024,
@@ -500,7 +510,10 @@ fn render_repeats(
         mapped_at_creation: false,
     });
 
-    let flags = wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE;
+    let flags = match settings.acceleration_build {
+        AccelerationBuild::FastTrace => wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+        AccelerationBuild::FastBuild => wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD,
+    };
     let sizes: Vec<_> = scene
         .meshes
         .iter()
@@ -804,3 +817,12 @@ mod tests;
 #[cfg(test)]
 #[path = "reference_quarry_tests.rs"]
 mod quarry_tests;
+
+#[cfg(test)]
+#[path = "reference_r0a_tests.rs"]
+mod r0a_tests;
+
+// R0b is an isolated measurement probe, compiled only by the library test binary.
+#[cfg(test)]
+#[path = "reflection_probe.rs"]
+mod reflection_probe;
