@@ -1,9 +1,15 @@
+// AT1: atmosphere LUTs, camera volume and raster sky (docs/m7-at1.md).
+#[path = "atmosphere_gpu.rs"]
+mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
+// DC1: one storage binding beside lighting; no separate render pass.
+#[path = "decal_gpu.rs"]
+mod decal_gpu;
 use lighting_gpu::LightingGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
@@ -17,8 +23,8 @@ mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
-pub use primary_ray_gpu::temporal_reconstruction::Reconstruction;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
+pub use primary_ray_gpu::temporal_reconstruction::{Reconstruction, RenderScale};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -583,6 +589,8 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// AT1 sky, aerial perspective and fog (`atmosphere_gpu.rs`).
+    atmosphere: atmosphere_gpu::AtmosphereGpu,
     /// TR1 temporal reconstruction settings, its history (created by its first frame), the
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
@@ -590,6 +598,8 @@ pub struct Renderer {
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
+    /// TR1b upscaling: the scaled frame's internal colour target and output HDR.
+    upscale: Option<temporal_reconstruction::Upscale>,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -867,6 +877,7 @@ impl Renderer {
         );
         let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
         let gi = gi_cache::GiState::new(&device, &ledger);
+        let atmosphere = atmosphere_gpu::AtmosphereGpu::new(&device, &ledger);
         // Traced visibility reads hit-triangle positions back from the shared AS.
         let traced = hardware.is_some()
             && options.samples == SampleCount::One
@@ -1026,11 +1037,13 @@ impl Renderer {
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
+            atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,
+            upscale: None,
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2232,7 +2245,9 @@ impl Renderer {
             ..Default::default()
         });
         pass.set_pipeline(&self.pipeline.present);
-        pass.set_bind_group(0, &*hdr.bind, &[]);
+        // TR1b upscaling: a scaled frame presents the reconstruction's target-size output.
+        let bind = self.upscale.as_ref().map_or(&*hdr.bind, |u| &*u.present);
+        pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2275,9 +2290,12 @@ impl Renderer {
         self.validate_color(color)?;
         // Temporal reconstruction samples traced and visibility-buffer lit frames at the
         // next lattice offset: every matrix of this frame comes from the jittered camera.
+        // TR1b (default on): Temporal soft shadows keep their own film history and are never
+        // reconstructed, so their frames are not jittered either.
         self.reconstruction_frame = (self.reconstruction.enabled
             && view_mode == ViewMode::Lit
-            && self.primary_mode != PrimaryVisibility::Raster)
+            && self.primary_mode != PrimaryVisibility::Raster
+            && self.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.reconstruction_index);
         let jittered;
         let camera = match self.reconstruction_frame {
@@ -2287,6 +2305,11 @@ impl Renderer {
             }
             None => camera,
         };
+        // TR1b upscaling (temporal_reconstruction.rs RenderScale): a scaled reconstructed
+        // frame renders every pass into an internal target; the reconstruction resolves to
+        // the caller's size and present writes the caller's target.
+        let internal = self.upscale_target(color);
+        let color = internal.as_ref().unwrap_or(color);
         if self.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
             fresh_shadow_gpu::admit_targets(&self.shadows.settings, color.width(), color.height())?;
         }
@@ -2810,6 +2833,8 @@ impl Renderer {
                 maps,
                 &mut uploads,
             ));
+            // AT1: the camera volume and uniform the lighting group binds.
+            self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
         cpu.upload += start.elapsed() - cpu.shadow_upload;
@@ -2978,6 +3003,10 @@ impl Renderer {
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
         }
+        // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
+        if lit {
+            self.encode_atmosphere(&mut encoder);
+        }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
@@ -3101,6 +3130,12 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
+            // AT1: the sky first, on every sample, without depth; surfaces then cover it.
+            if let Some(sky) = self.atmosphere.raster_sky().filter(|_| lit) {
+                pass.set_pipeline(sky);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                pass.draw(0..3, 0..1);
+            }
             // Each lit draw uses its material's program; pipelines switch in submission
             // order, which defines equal-depth winners.
             let default = self.default_material.as_ref().unwrap();
@@ -3177,10 +3212,15 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
+        // TR1b upscaling: present writes the caller's target, not the internal one.
+        let output_view = self.upscale.as_ref().map(|u| {
+            self.ledger
+                .attachment(u.output.create_view(&Default::default()))
+        });
         if hdr.is_some() {
             self.encode_hdr_present(
                 &mut encoder,
-                &view,
+                output_view.as_ref().unwrap_or(&view),
                 self.timing
                     .as_ref()
                     .filter(|_| timed)
@@ -3260,6 +3300,9 @@ impl Renderer {
         let index = self.queue.submit([commands]);
         let submit = submitted_at.elapsed();
         self.submissions += 1;
+        if lit {
+            self.atmosphere_submitted(camera, [color.width(), color.height()]);
+        }
         if hardware_build {
             self.hardware_shadows.as_mut().unwrap().scene_submitted(
                 &self.device,
@@ -3499,6 +3542,7 @@ impl Renderer {
         }
         self.residency.prune();
         self.lighting.collect(self.completed_submission);
+        self.atmosphere.collect(self.completed_submission);
         self.gi.collect(self.completed_submission);
         self.environment
             .uploading

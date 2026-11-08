@@ -11,12 +11,13 @@
     let face=-geometric;
     let source_geometric=select(-face,face,source_front);
     let pixel=vec2<i32>(input.position.xy);
-    let surface_input=SurfaceInput(input.world,dpdx(input.world),dpdy(input.world),source_geometric,input.normal,dpdx(input.normal),dpdy(input.normal),input.tangent,input.handedness,
+    let surface_input=decal_prepare(SurfaceInput(input.world,dpdx(input.world),dpdy(input.world),source_geometric,input.normal,dpdx(input.normal),dpdy(input.normal),input.tangent,input.handedness,
         input.uv,dpdx(input.uv),dpdy(input.uv),input.color,source_front,lighting.eye,vec2<u32>(pixel),material,
-        raster_receiver(input.world,triangle,pixel,material.thin!=0u));
+        raster_receiver(input.world,triangle,pixel,material.thin!=0u),decal_none()));
     let surface_output=surface(surface_input);
     if material.double_sided==0u && !source_front { discard; }
     rl_indirect_prepare(surface_input);
     rl_lights_prepare(surface_input.world);
-    return vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0);
+    // AT1: the program's exposed output through the camera's fog and aerial perspective.
+    return vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),1.0);
 }

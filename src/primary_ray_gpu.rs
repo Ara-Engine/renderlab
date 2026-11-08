@@ -904,6 +904,9 @@ impl PrimaryState {
                     23,
                     wgpu::TextureSampleType::Float { filterable: false },
                 ));
+            } else {
+                // M7-R1: Soft shading traces reflection rays on the shared TLAS.
+                entries.push(scene(2));
             }
             group("primary shading", &entries)
         });
@@ -1476,6 +1479,9 @@ impl Renderer {
             .filter(|_| self.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
+        // Visible sky (Renderer::set_visible_environment): misses sample the selected map.
+        let visible = self.environment.visible && self.environment.selected.is_some();
+        bytes[92..96].copy_from_slice(&u32::from(visible).to_ne_bytes());
         // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
         let filter = self.primary_mode == PrimaryVisibility::Traced
             && self.soft_mode == SoftShadows::Interactive
@@ -1794,6 +1800,7 @@ impl Renderer {
                     )
                 }),
             ];
+            let reflection_scene = scene.clone();
             let shade = |shading: Shading, visibility: (u32, R<'_>)| {
                 let mut entries = vec![
                     camera.clone(),
@@ -1806,6 +1813,9 @@ impl Renderer {
                 ];
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
+                } else {
+                    // M7-R1: reflection rays (shaders/reflections.wgsl).
+                    entries.push(reflection_scene.clone());
                 }
                 Some(group(&state.shade_bindings[shading as usize], &entries))
             };

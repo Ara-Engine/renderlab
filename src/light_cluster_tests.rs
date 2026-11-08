@@ -554,11 +554,12 @@ fn gpu_lc1_quarry_night() {
         let bytes: Vec<u8> = image.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(out.join(format!("{path}-{name}.f32")), bytes).unwrap();
     };
-    // 1. The default: clustered, four shadowed lights.
-    render(&mut r, &mut asset, &camera);
-    render(&mut r, &mut asset, &camera);
-    let clustered = capture(&mut r);
-    save("night", &clustered);
+    // 1. The shipped defaults (GI, TR1 on traced and visibility-buffer frames, atmosphere),
+    // clustered, four shadowed local lights, after the cache and history settle.
+    for _ in 0..12 {
+        render(&mut r, &mut asset, &camera);
+    }
+    save("night", &capture(&mut r));
     let stats = r.light_cluster_stats();
     log["selection"] = serde_json::json!({"shadowed": stats.shadowed, "maps": stats.maps,
         "faces_drawn_total": stats.total_faces_drawn, "clustered": stats.clustered});
@@ -573,12 +574,12 @@ fn gpu_lc1_quarry_night() {
             .map(|i| (words[base + 1 + (i / 2) as usize] >> ((i & 1) * 16)) & 0xffff)
             .collect();
         let cpu = lc::reference_cluster(&all, &camera, viewport, c);
-        let cpu_stored: Vec<u32> = cpu
+        let stored: Vec<u32> = cpu
             .iter()
             .copied()
             .take(lc::MAX_PER_CLUSTER as usize)
             .collect();
-        if gpu != cpu_stored || wanted as usize != cpu.len() {
+        if gpu != stored || wanted as usize != cpu.len() {
             mismatched += 1;
         }
         overflowed += u32::from(wanted > n);
@@ -587,30 +588,21 @@ fn gpu_lc1_quarry_night() {
     }
     log["clusters"] = serde_json::json!({"mismatched_vs_cpu": mismatched, "overflowed": overflowed,
         "longest": longest, "mean": total as f64 / f64::from(lc::CLUSTERS)});
-    // 2. Clusters off: every receiver walks all lights. The sum must be bit-identical.
+    // 2. Timings in the shipped configuration.
+    log["time_default"] = time(&mut r, &mut asset, &mut |_, _| {});
     r.set_light_clusters(false);
-    render(&mut r, &mut asset, &camera);
-    let unclustered = capture(&mut r);
-    let differing = clustered
-        .iter()
-        .zip(&unclustered)
-        .filter(|(a, b)| a.to_bits() != b.to_bits())
-        .count();
-    log["unclustered_differing_channels"] = serde_json::json!(differing);
     log["time_unclustered"] = time(&mut r, &mut asset, &mut |_, _| {});
     r.set_light_clusters(true);
-    log["time_default"] = time(&mut r, &mut asset, &mut |_, _| {});
-    // 3. No local shadows.
     r.set_local_shadows(LocalShadows {
         count: 0,
         ..Default::default()
     })
     .unwrap();
     render(&mut r, &mut asset, &camera);
-    save("night-noshadow", &capture(&mut r));
     log["time_no_local_shadows"] = time(&mut r, &mut asset, &mut |_, _| {});
+    save("night-noshadow", &capture(&mut r));
     r.set_local_shadows(LocalShadows::default()).unwrap();
-    // 4. Moving shadowed lights: every frame redraws their maps (where maps are used).
+    // Moving shadowed lights: every frame redraws their maps (where maps are used).
     let moving = |r: &mut Renderer, k: usize| {
         let mut lights = all.clone();
         let n = lights.len();
@@ -623,12 +615,64 @@ fn gpu_lc1_quarry_night() {
     };
     log["time_moving_shadowed_lights"] = time(&mut r, &mut asset, &mut |r, k| moving(r, k));
     r.set_lighting(&lighting(&all)).unwrap();
-    // 5. The moon alone, the scene's cost before LC1's lights.
     r.set_lighting_and_shadows(&lighting(&all[..1]), &shadows(1))
         .unwrap();
-    render(&mut r, &mut asset, &camera);
-    save("moon-only", &capture(&mut r));
     log["time_moon_only"] = time(&mut r, &mut asset, &mut |_, _| {});
+    save("moon-only", &capture(&mut r));
+    // 3. Clustered against walking every light, without the temporal state (GI cache, TR1
+    // history) that changes between frames: the sums must be bit-identical.
+    r.set_lighting_and_shadows(&lighting(&all), &shadows(all.len()))
+        .unwrap();
+    r.set_indirect(IndirectSettings::off()).unwrap();
+    r.set_reconstruction(Reconstruction::off()).unwrap();
+    render(&mut r, &mut asset, &camera);
+    render(&mut r, &mut asset, &camera);
+    let clustered = capture(&mut r);
+    save("night-gi-off", &clustered);
+    r.set_light_clusters(false);
+    render(&mut r, &mut asset, &camera);
+    let unclustered = capture(&mut r);
+    r.set_light_clusters(true);
+    let differing = clustered
+        .iter()
+        .zip(&unclustered)
+        .filter(|(a, b)| a.to_bits() != b.to_bits())
+        .count();
+    log["unclustered_differing_channels"] = serde_json::json!(differing);
+    r.set_indirect(IndirectSettings::default()).unwrap();
+    r.set_reconstruction(Reconstruction::default()).unwrap();
+    // 4. The quarry's soft sun (G1c's lighting, 0.04 rad disk) with every local light: at
+    // the day exposure, and at dusk (sun at 1/500, +9.5 stops) where both read.
+    let sun: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
+    let v3 = |v: &serde_json::Value| -> [f32; 3] {
+        std::array::from_fn(|k| v[k].as_f64().unwrap() as f32)
+    };
+    let travel = Vec3::from_array(v3(&sun["lights"][0]["travel"]));
+    let lux = v3(&sun["lights"][0]["lux"]);
+    let day = manifest["exposure_stops"].as_f64().unwrap() as f32;
+    for (name, scale, exposure) in [("sun-day", 1.0, day), ("sun-dusk", 0.002, day + 9.5)] {
+        let mut lights = all.clone();
+        lights[0] = Light::Directional {
+            travel,
+            lux: lux.map(|l| l * scale),
+        };
+        r.set_lighting_and_shadows(
+            &Lighting {
+                lights,
+                environment: [0.0; 3],
+                exposure_stops: exposure,
+            },
+            &shadows(all.len()),
+        )
+        .unwrap();
+        for _ in 0..12 {
+            render(&mut r, &mut asset, &camera);
+        }
+        save(name, &capture(&mut r));
+        log[name] = serde_json::json!({"shadowed": r.light_cluster_stats().shadowed,
+            "maps": r.light_cluster_stats().maps});
+    }
     let file = out.join(format!("lc1-{path}.json"));
     std::fs::write(&file, serde_json::to_string_pretty(&log).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&log).unwrap());

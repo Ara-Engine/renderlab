@@ -12,6 +12,9 @@ use crate::reference;
 use glam::Vec2;
 use serde_json::{Value as Json, json};
 use std::path::{Path, PathBuf};
+// DC1 reuses the existing headless devices, quarry loader and image/timing helpers.
+#[path = "decal_gpu_tests.rs"]
+mod decal_tests;
 
 struct BenchMesh {
     name: String,
@@ -403,6 +406,9 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
             .collect::<Vec<_>>()
     });
     r.set_indirect_profiling(true);
+    // TR1 is the default since TR1b; the SV gates (exact repeats, staleness, settle curves) are
+    // defined on single-sample frames, so the rig renders without it.
+    r.set_reconstruction(Reconstruction::off()).unwrap();
     Rig {
         r,
         target,
@@ -1232,11 +1238,7 @@ fn gpu_gi_sky_visibility_sv() {
             let mut rows = json!({});
             // Before any map exists: the cache's ordinary cost on a still camera.
             for (label, cache) in [("before-upload", true), ("before-upload-cache-off", false)] {
-                rig.settings(if cache {
-                    on
-                } else {
-                    IndirectSettings::default()
-                });
+                rig.settings(if cache { on } else { IndirectSettings::off() });
                 rig.r.reset_indirect();
                 rows[label] = sequence(&mut rig, &sv, &materials, 32, |_, _| (eye, target));
             }
@@ -1255,11 +1257,7 @@ fn gpu_gi_sky_visibility_sv() {
                 ("map-still-cache-off", false, true, false),
                 ("no-map-cache-off", false, false, false),
             ] {
-                rig.settings(if cache {
-                    on
-                } else {
-                    IndirectSettings::default()
-                });
+                rig.settings(if cache { on } else { IndirectSettings::off() });
                 rig.r.reset_indirect();
                 rig.r
                     .set_environment(selected.then_some(&map), Default::default())
@@ -1293,10 +1291,7 @@ fn gpu_gi_sky_visibility_sv() {
             ..Default::default()
         };
         // Configurations: GI off (the pre-M7 image), then the W3 lookups and cell sizes.
-        let mut configs = vec![
-            ("off", IndirectSettings::default()),
-            ("trilinear-4px", base),
-        ];
+        let mut configs = vec![("off", IndirectSettings::off()), ("trilinear-4px", base)];
         if !quick {
             configs.extend([
                 (
@@ -1499,32 +1494,42 @@ fn gpu_gi_sky_visibility_sv() {
         if section("bounce") {
             let bounce = std::mem::take(&mut rig.bounce);
             let mut rows = json!({});
-            for (config, s) in [
-                ("off", IndirectSettings::default()),
+            // RENDERLAB_G2B_SV_BOUNCE (G2b): the bounce configurations, G2 quarry variant names
+            // (default "bounce", the default settings); RENDERLAB_G2B_SV_FRAMES the frame the
+            // scored image is taken at (default 12).
+            let mut configs: Vec<(String, IndirectSettings)> = vec![
+                ("off".into(), IndirectSettings::off()),
                 (
-                    "sky",
+                    "sky".into(),
                     IndirectSettings {
                         enabled: true,
                         bounce: false,
                         ..Default::default()
                     },
                 ),
-                (
-                    "bounce",
-                    IndirectSettings {
-                        enabled: true,
-                        ..Default::default()
-                    },
-                ),
-            ] {
+            ];
+            for name in env("RENDERLAB_G2B_SV_BOUNCE")
+                .unwrap_or_else(|| "bounce".into())
+                .split(',')
+            {
+                let s = if name == "bounce" {
+                    IndirectSettings::default()
+                } else {
+                    g2_variant(name)
+                };
+                configs.push((name.to_string(), s));
+            }
+            let last: usize = env("RENDERLAB_G2B_SV_FRAMES").map_or(12, |f| f.parse().unwrap());
+            for (config, s) in configs {
+                let config = config.as_str();
                 let mut config_json = json!({});
                 for ((pose, eye, target), reference) in poses.iter().zip(&bounce_refs) {
                     rig.settings(s);
                     rig.r.reset_indirect();
                     let mut frames = vec![];
-                    for f in 1..=12 {
+                    for f in 1..=last {
                         rig.frame(&sv, *eye, *target, &bounce);
-                        if [1, 2, 4, 8, 12].contains(&f) {
+                        if [1, 2, 4, 8, 12, 24, 48, 96].contains(&f) || f == last {
                             frames.push((f, rig.radiance(&sv)));
                         }
                     }
@@ -1582,7 +1587,7 @@ fn gpu_gi_sky_visibility_sv() {
         // A program that never calls the cache runs no cache pass and draws the same bytes.
         if section("gates") {
             let (_, eye, target) = &poses[0];
-            rig.settings(IndirectSettings::default());
+            rig.settings(IndirectSettings::off());
             rig.frame(&sv, *eye, *target, &toon);
             let off = hash_image(&rig.radiance(&sv));
             rig.settings(base);
@@ -1647,7 +1652,7 @@ fn gpu_gi_sky_visibility_sv() {
             ("spread-4px", spread),
             ("rotated-4px-warm", rotated),
             ("spread-4px-warm", spread),
-            ("off", IndirectSettings::default()),
+            ("off", IndirectSettings::off()),
             ("trilinear-4px", base),
             (
                 "rotated-4px",
@@ -1830,7 +1835,7 @@ fn gpu_gi_sky_visibility_sv() {
                 }
                 let fresh = rig.radiance(&sv);
                 let open = {
-                    rig.settings(IndirectSettings::default());
+                    rig.settings(IndirectSettings::off());
                     rig.frame(&sv, eye, target, &materials);
                     let open = rig.radiance(&sv);
                     rig.settings(IndirectSettings {
@@ -1915,7 +1920,7 @@ fn gpu_gi_sky_visibility_sv() {
             let (_, eye, target) = poses[0].clone();
             let mut breakdown = json!({"step_m": 0.01});
             for (state, s) in [
-                ("off", IndirectSettings::default()),
+                ("off", IndirectSettings::off()),
                 (
                     "on",
                     IndirectSettings {
@@ -1963,7 +1968,7 @@ fn gpu_gi_sky_visibility_sv() {
                 ..base
             };
             let order = [
-                ("off", IndirectSettings::default()),
+                ("off", IndirectSettings::off()),
                 ("on", base),
                 (
                     "rotated",
@@ -2814,7 +2819,7 @@ fn gpu_gi_quarry() {
                 }
             };
             // Cache off: the unoccluded sky, for scale.
-            r.set_indirect(IndirectSettings::default()).unwrap();
+            r.set_indirect(IndirectSettings::off()).unwrap();
             render(&mut r);
             let open = capture_radiance(&mut r, exposure);
             r.set_indirect(IndirectSettings {
@@ -3385,17 +3390,56 @@ fn g2_nonrt() -> bool {
 /// settings in a process whose shaders hold ES1's unoccluded diagnostic). The names are the
 /// capture prefixes scripts/m7-g2-score.py reads.
 fn g2_variant(name: &str) -> IndirectSettings {
+    // G2's own settings (4 px cells, 2^19 slots, every blocked direction, three gathers, no
+    // gather cap): its default candidate and ES1's comparators keep their G2 meaning now that
+    // the defaults changed (G2b).
+    let g2 = IndirectSettings {
+        enabled: true,
+        cell_pixels: 4.0,
+        slots_log2: 19,
+        gathers: 3,
+        gather_stride: 1,
+        gather_cells: u32::MAX,
+        claim_cells: u32::MAX,
+        ..Default::default()
+    };
     match name {
-        "off" => IndirectSettings::default(),
-        "g2" => IndirectSettings {
-            enabled: true,
-            ..Default::default()
-        },
+        "off" => IndirectSettings::off(),
+        "g2" => g2,
         "es1" | "es1open" => IndirectSettings {
-            enabled: true,
             bounce: false,
-            ..Default::default()
+            ..g2
         },
+        // G2b's default: the cache as it now ships.
+        "g2b" => IndirectSettings::default(),
+        // G2b screens: the cache with bounce, changed by '+'-joined tokens: pxF (cell edge in
+        // pixels of footprint), sN (log2 slots), capN (cells gathered a frame), gN (gathers an
+        // event schedules). "c2" and "c3" are 2 and 3 px cells in a table of 2^21 slots, to see
+        // how much of the crevice-mouth darkness cell size alone explains (docs/m7-g2b.md).
+        "c2" => g2_variant("g2+px2+s21"),
+        "c3" => g2_variant("g2+px3+s21"),
+        other if other.starts_with("g2+") || other.starts_with("g2b+") => {
+            let mut s = g2_variant(other.split('+').next().unwrap());
+            for token in other.split('+').skip(1) {
+                if token == "nocap" {
+                    s.gather_cells = u32::MAX;
+                    s.claim_cells = u32::MAX;
+                    continue;
+                }
+                let (tag, value) =
+                    token.split_at(token.find(|c: char| c.is_ascii_digit()).unwrap_or(0));
+                match tag {
+                    "px" => s.cell_pixels = value.parse().unwrap(),
+                    "s" => s.slots_log2 = value.parse().unwrap(),
+                    "cap" => s.gather_cells = value.parse().unwrap(),
+                    "g" => s.gathers = value.parse().unwrap(),
+                    "gs" => s.gather_stride = value.parse().unwrap(),
+                    "cc" => s.claim_cells = value.parse().unwrap(),
+                    _ => panic!("unknown G2b variant token {token}"),
+                }
+            }
+            s
+        }
         other => panic!("unknown G2 variant {other}"),
     }
 }
@@ -3581,7 +3625,9 @@ fn gpu_g2_quarry() {
                 "bounce_queued": c.bounce_queued, "orphans": c.orphans, "full": c.full,
                 "miss_overflow": c.miss_overflow, "lost": c.lost, "gather_absent": c.gather_absent,
                 "gather_unshaded": c.gather_unshaded, "gather_orphans": c.gather_orphans,
-                "misses": c.misses})
+                "gather_deferred": c.gather_deferred, "claim_deferred": c.claim_deferred,
+                "misses": c.misses, "splits": c.splits,
+                "local_overflow": c.local_overflow, "items": c.ray_items})
         })
     };
     let tr1: Vec<u32> = env("RENDERLAB_G2_TR1")
@@ -3591,6 +3637,9 @@ fn gpu_g2_quarry() {
         .map(|s| s.parse().unwrap())
         .collect();
     let mut results = json!({"path": path, "variants": variants, "sections": sections, "tr1": tr1});
+    // One file per process, named by its sections, so the steps of one lease that share a
+    // path's directory keep their results apart.
+    let json_out = out.join(format!("quarry-{}.json", sections.join("_")));
     for section in &sections {
         match section.as_str() {
             "static" => {
@@ -3622,6 +3671,7 @@ fn gpu_g2_quarry() {
                         // TR1's measured settings over N still frames of the settled cache,
                         // as IQ1's tr1xN (RENDERLAB_G2_TR1, default 8 and 64; empty: none).
                         for n in &tr1 {
+                            r.set_reconstruction(Reconstruction::off()).unwrap();
                             r.set_reconstruction(Reconstruction::identity()).unwrap();
                             for _ in 0..*n {
                                 draw(&mut r, &camera);
@@ -3630,7 +3680,7 @@ fn gpu_g2_quarry() {
                                 &format!("{v}-tr1x{n}-p{pose}"),
                                 &capture_radiance(&mut r, exposure),
                             );
-                            r.set_reconstruction(Reconstruction::default()).unwrap();
+                            r.set_reconstruction(Reconstruction::off()).unwrap();
                         }
                     }
                 }
@@ -3643,6 +3693,7 @@ fn gpu_g2_quarry() {
                 for v in &variants {
                     r.set_indirect(g2_variant(v)).unwrap();
                     if tr1_on {
+                        r.set_reconstruction(Reconstruction::off()).unwrap();
                         r.set_reconstruction(Reconstruction::identity()).unwrap();
                     }
                     r.reset_indirect();
@@ -3658,7 +3709,7 @@ fn gpu_g2_quarry() {
                             );
                         }
                     }
-                    r.set_reconstruction(Reconstruction::default()).unwrap();
+                    r.set_reconstruction(Reconstruction::off()).unwrap();
                 }
             }
             "determinism" => {
@@ -3766,6 +3817,13 @@ fn gpu_g2_quarry() {
                         }
                         r.test_drain("G2 cut frames");
                         let cut = g2_frame_times(&mut r, 12, 0);
+                        // RENDERLAB_G2_COST_SETTLE (G2b): still frames before the motion, so a
+                        // gather cap's spread cut work has drained out of the moving frames.
+                        let settle: usize =
+                            env("RENDERLAB_G2_COST_SETTLE").map_or(0, |n| n.parse().unwrap());
+                        for _ in 0..settle {
+                            draw(&mut r, &camera_at(0, 0.0));
+                        }
                         for t in 0..24 {
                             draw(&mut r, &camera_at(0, 0.01 * t as f32));
                         }
@@ -3798,21 +3856,99 @@ fn gpu_g2_quarry() {
                 r.set_indirect_profiling(false);
                 results["cost"] = timing;
             }
+            "trace" => {
+                // G2b: an Nsight GPU Trace window inside camera motion. The first variant settles
+                // at pose 0, then RENDERLAB_G2_TRACE frames (default 30,000) move back and forth
+                // 1 cm a frame over sweeps of RENDERLAB_G2_SWEEP frames (default 24: existing
+                // cells revisited, so the probe, gathers of new cells and the lookup), unprofiled.
+                // The motion's start is printed in process seconds, for ngfx --start-after-ms.
+                let frames: usize =
+                    env("RENDERLAB_G2_TRACE").map_or(30_000, |f| f.parse().unwrap());
+                let sweep: usize = env("RENDERLAB_G2_SWEEP").map_or(24, |f| f.parse().unwrap());
+                r.set_indirect(g2_variant(&variants[0])).unwrap();
+                r.set_indirect_profiling(false);
+                r.reset_indirect();
+                for _ in 0..12 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                }
+                eprintln!(
+                    "G2b trace motion starts at {:.1} s",
+                    start.elapsed().as_secs_f64()
+                );
+                for t in 0..frames {
+                    let k = t % (2 * sweep);
+                    draw(&mut r, &camera_at(0, 0.01 * k.min(2 * sweep - k) as f32));
+                    if t % 256 == 0 {
+                        r.collect().unwrap();
+                        r.poll().unwrap();
+                    }
+                }
+                eprintln!(
+                    "G2b trace motion ends at {:.1} s",
+                    start.elapsed().as_secs_f64()
+                );
+            }
+            "cutprofile" => {
+                // G2b: each variant's cut at pose 0, profiled: per frame (1-N, N from
+                // RENDERLAB_G2_CUT_FRAMES, default 24) the pass times, the frame span and the
+                // kernels' counters. The counter readback after each frame waits for the GPU, so
+                // spans here are per-frame GPU spans, not a pipelined frame rate.
+                let frames: usize =
+                    env("RENDERLAB_G2_CUT_FRAMES").map_or(24, |f| f.parse().unwrap());
+                let mut rows = json!({});
+                r.set_indirect_profiling(true);
+                for v in &variants {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    // A settled cache first, so the cut's frame 1 runs warm (G1d section 5).
+                    r.reset_indirect();
+                    for _ in 0..12 {
+                        draw(&mut r, &camera_at(1, 0.0));
+                    }
+                    r.test_drain("G2b cut warm-up");
+                    // A fresh profile ring, so its entries are the cut's frames (idle frames add
+                    // none: the passes stop 16 identical frames after the cut).
+                    r.set_indirect_profiling(false);
+                    r.set_indirect_profiling(true);
+                    r.reset_indirect();
+                    let mut counts = vec![];
+                    let mut span_ms = vec![];
+                    let mut shading_ms = vec![];
+                    for _ in 0..frames {
+                        draw(&mut r, &camera_at(0, 0.0));
+                        counts.push(counters(&mut r));
+                        // The counter readback waited for this frame: its GPU sample is the
+                        // newest (the renderer keeps only the last few).
+                        let gpu = r.poll().unwrap().gpu;
+                        span_ms.push(
+                            gpu.last()
+                                .map_or(f64::NAN, |g| g.render_span.as_secs_f64() * 1e3),
+                        );
+                        shading_ms.push(
+                            gpu.last()
+                                .map_or(f64::NAN, |g| g.mesh_pass.as_secs_f64() * 1e3),
+                        );
+                    }
+                    let spans = json!({"span_ms": span_ms, "shading_ms": shading_ms});
+                    let profiles = r.indirect_profiles().unwrap();
+                    let passes: Vec<_> = profiles
+                        .iter()
+                        .map(|p| json!({"total": p.total(), "probe": p.probe, "claim": p.claim + p.resolve,
+                            "scan": p.scan, "setup": p.setup, "rays": p.rays, "finish": p.finish,
+                            "gather": p.gather, "light": p.light, "shade": p.shade}))
+                        .collect();
+                    rows[v.as_str()] =
+                        json!({"spans": spans, "passes_us": passes, "counters": counts});
+                }
+                r.set_indirect_profiling(false);
+                results["cutprofile"] = rows;
+            }
             other => panic!("unknown G2 section {other}"),
         }
         results["stats"] = json!(format!("{:?}", r.indirect_stats()));
-        std::fs::write(
-            out.join("quarry.json"),
-            serde_json::to_vec_pretty(&results).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&json_out, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
     }
     results["seconds"] = json!(start.elapsed().as_secs_f64());
-    std::fs::write(
-        out.join("quarry.json"),
-        serde_json::to_vec_pretty(&results).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&json_out, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
 }
 /// The last `frames` GPU samples after skipping `skip`: per frame, the render span and the
 /// shading pass in milliseconds.

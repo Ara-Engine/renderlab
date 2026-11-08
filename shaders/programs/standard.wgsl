@@ -5,6 +5,8 @@
 // their prefiltered share (M7-ES1, docs/m7-es1.md). Indirect light (sky and bounce) comes
 // from the engine's inputs; `scatter` gives the world radiance cache this surface's own
 // response, so the light it reflects reaches others as bounce light (M7-G2, docs/m7-g2.md).
+// Its `reflection_lobe` asks the engine to trace mirror and glossy reflections on traced
+// frames, which replace the untraced sky specular there (M7-R1, docs/m7-r1.md).
 // Opt-in: the 256-sample filter passes quality, but misses the speed floor.
 const SPECULAR_AA:bool=false;
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
@@ -17,7 +19,10 @@ fn surface(input:SurfaceInput) -> Surface {
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
     let rough=clamp(material.roughness*mr.g,0.0,1.0);
-    return Surface(n,base,metal,rough);
+    // DC1: apply overlays to resolved inputs, before any BRDF or user shading.
+    let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
+    let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));
+    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its
@@ -47,6 +52,13 @@ fn lobe_specular(n:vec3<f32>, v:vec3<f32>, lobe:EnvironmentLobe, f0:vec3<f32>, r
 fn lobe_weight(sharpness:f32, rough:f32) -> f32 {
     let alpha=max(rough*rough,1e-4);
     return clamp(0.4+0.12041*log2(max(sharpness*alpha*alpha,1e-30)),0.0,1.0);
+}
+
+// Traced reflections (M7-R1, docs/m7-r1.md): the engine traces this GGX lobe from each
+// traced primary hit and shades every hit with its own program; `specular_incident` returns
+// their mean exposed radiance, with the traced fraction in w.
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    return SpecularLobe(s.n,s.rough*s.rough,1.0);
 }
 
 // The radiance this surface sends toward wo per unit radiance arriving from wi: the same
@@ -85,6 +97,12 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
                 -environment_product(share,reflectance));
         }
         specular=max(specular,vec3<f32>(0.0));
+    }
+    // Where the engine traced the lobe (mirror and glossy bands on traced frames), its
+    // incident radiance replaces the untraced estimate, faded across the rough cutoff.
+    let traced=specular_incident(input);
+    if traced.w>0.0 {
+        specular=mix(specular,min(traced.rgb*reflectance,vec3<f32>(65504.0)),traced.w);
     }
     var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {

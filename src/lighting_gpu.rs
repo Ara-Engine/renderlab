@@ -7,6 +7,9 @@ pub(super) struct LightBuffer {
     cluster_generation: u64,
     environment_generation: u64,
     indirect_generation: u64,
+    atmosphere_generation: u64,
+    // DC1: rebind only when an admitted frame publishes a new decal table.
+    decal_generation: u64,
     _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
@@ -26,6 +29,7 @@ pub(super) struct Hdr {
     pub lighting_hash: [u8; 32],
 }
 pub(super) struct LightingGpu {
+    pub(super) decals: super::decal_gpu::DecalState,
     pub bindings: Owned<wgpu::BindGroupLayout>,
     pub layout: Owned<wgpu::PipelineLayout>,
     pub present_bindings: Owned<wgpu::BindGroupLayout>,
@@ -74,6 +78,7 @@ impl LightingGpu {
                 label: Some("lighting group 3"),
                 // Compute visibility serves fresh visibility and traced deferred shading.
                 entries: &[
+                    super::decal_gpu::layout_entry(),
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
@@ -126,6 +131,32 @@ impl LightingGpu {
                             min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
                         },
                         count: None,
+                    },
+                    // AT1 (shaders/atmosphere_api.wgsl): the atmosphere uniform, the
+                    // transmittance LUT (with its fog-ambient row), the sky-view LUT and the
+                    // camera volume. No storage buffer: the Virtual lookup uses all 11.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 50,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                super::atmosphere_gpu::UNIFORM_BYTES,
+                            ),
+                        },
+                        count: None,
+                    },
+                    computed(texture_entry(51)),
+                    computed(texture_entry(52)),
+                    {
+                        let mut entry = computed(texture_entry(53));
+                        entry.ty = wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        };
+                        entry
                     },
                     // The world radiance cache table, read by `indirect_irradiance`
                     // (shaders/gi_api.wgsl); only modules whose program calls it use it.
@@ -253,6 +284,7 @@ impl LightingGpu {
         let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
             clusters,
+            decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
             layout,
             present_bindings,
@@ -293,6 +325,7 @@ impl LightingGpu {
         &self.active.as_ref().unwrap().buffer
     }
     pub fn collect(&mut self, completed: u64) {
+        self.decals.collect(completed);
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
         self.clusters.collect(completed);
@@ -427,14 +460,24 @@ impl Renderer {
         }
     }
     pub(super) fn upload_lighting(&mut self, eye: Vec3, uploads: &mut UploadBytes) {
+        // AT1: directional lux through the atmosphere's transmittance, when it applies.
+        let scaled = self
+            .sun_scale(eye)
+            .map(|t| crate::atmosphere::scale_directional(&self.lighting.pending.records, t));
         let state = &mut self.lighting;
-        let needed = state.pending.records.len().max(64) as u64;
+        state
+            .decals
+            .publish(&self.device, &self.ledger, self.submissions, uploads);
+        let records = scaled.as_ref().unwrap_or(&state.pending.records);
+        let needed = records.len().max(64) as u64;
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
                 || active.cluster_generation != state.clusters.generation
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
+                || active.atmosphere_generation != self.atmosphere.generation
+                || active.decal_generation != state.decals.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -452,6 +495,10 @@ impl Renderer {
                         label: Some(label),
                         layout: &state.bindings,
                         entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 21,
+                                resource: state.decals.active.buffer.as_entire_binding(),
+                            },
                             wgpu::BindGroupEntry {
                                 binding: 20,
                                 resource: table.as_entire_binding(),
@@ -538,6 +585,28 @@ impl Renderer {
                                     &state.clusters.atlas.view,
                                 ),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 50,
+                                resource: self.atmosphere.uniform().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 51,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.transmittance.view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 52,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.skyview.view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 53,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.volume.camera.view,
+                                ),
+                            },
                         ],
                     }),
                     ResourceKind::BindGroup,
@@ -550,6 +619,8 @@ impl Renderer {
                 cluster_generation: state.clusters.generation,
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
+                atmosphere_generation: self.atmosphere.generation,
+                decal_generation: state.decals.generation,
                 _environment: self.environment.selected.clone(),
                 buffer,
                 bind,
@@ -562,18 +633,18 @@ impl Renderer {
             state.generation += 1;
             state.published.clear();
         }
-        if let Some(span) = dirty_span(&state.published, &state.pending.records) {
+        if let Some(span) = dirty_span(&state.published, records) {
             self.queue.write_buffer(
                 &state.active.as_ref().unwrap().buffer,
                 span.start as u64,
-                &state.pending.records[span.clone()],
+                &records[span.clone()],
             );
             uploads.lights += (span.end - span.start) as u64;
             uploads.light_writes += 1;
             uploads.write_calls += 1;
         }
-        if state.published != state.pending.records {
-            state.published.clone_from(&state.pending.records);
+        if state.published != *records {
+            state.published.clone_from(records);
         }
         let mut uniform = [0; 48];
         uniform[..32].copy_from_slice(&state.pending.uniform(eye));
@@ -683,6 +754,7 @@ impl Renderer {
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));
             hash.update(self.environment.uniform());
+            hash.update(self.lighting.decals.hash);
             if let Some(map) = &self.environment.selected {
                 hash.update(map.0.hash);
             }

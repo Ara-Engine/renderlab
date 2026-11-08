@@ -54,6 +54,9 @@ struct EnvironmentLobe { direction:vec3<f32>, sharpness:f32, illuminance:vec3<f3
 fn environment_lobe_count()->u32 {return 0u;}
 fn environment_lobe(input:SurfaceInput,i:u32)->EnvironmentLobe {return EnvironmentLobe(vec3<f32>(0.0,0.0,1.0),1.0,vec3<f32>(0.0));}
 fn environment_lobe_reflection(input:SurfaceInput,i:u32,d:vec3<f32>,rough:f32)->vec3<f32> {return vec3<f32>(0.0);}
+// M7-R1's inputs untraced: the probe traces its own rays (docs/m7-r1.md).
+struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };
+fn specular_incident(input:SurfaceInput)->vec4<f32> {return vec4<f32>(0.0);}
 fn environment_product(a:vec3<f32>,b:vec3<f32>)->vec3<f32> {return exposed_product(a,b);}
 fn environment_dfg(nv:f32,rough:f32)->vec2<f32> {
     let p=vec2<f32>(clamp(nv,0.0,1.0),rough)*127.0;
@@ -86,7 +89,7 @@ fn input_at(r:ProbeRecord,id:vec2<u32>)->SurfaceInput {
     return SurfaceInput(r.world.xyz,vec3<f32>(0.0),vec3<f32>(0.0),r.geometric.xyz*r.geometric.w,
         r.normal.xyz*r.geometric.w,vec3<f32>(0.0),vec3<f32>(0.0),basis(r.normal.xyz)[0],1.0,
         r.uv.xy,vec2<f32>(0.0),vec2<f32>(0.0),r.color,r.geometric.w>0.0,r.world.xyz-r.direction.xyz,id,
-        material,Receiver(r.world.xyz,r.geometric.xyz,vec2<i32>(id),r.identity.z,1e-4,false));
+        material,Receiver(r.world.xyz,r.geometric.xyz,vec2<i32>(id),r.identity.z,1e-4,false),decal_none());
 }
 fn own_program(r:ProbeRecord,id:vec2<u32>)->vec3<f32> {
     let input=input_at(r,id);

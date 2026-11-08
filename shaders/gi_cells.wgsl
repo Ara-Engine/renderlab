@@ -64,6 +64,19 @@ const GI_H_NEAR_BINS:u32=16u;
 const GI_H_BOUNCE:u32=17u;
 const GI_H_SHADE_QUEUE:u32=18u;
 const GI_H_GATHERS:u32=19u;
+// The most cells a frame gathers (G2b; 0: every queued cell). More wait by fixed slot groups
+// (gi_gather), so a cut's gather rays spread over frames instead of one frame taking them all.
+const GI_H_GATHER_CELLS:u32=20u;
+// Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k with k % S == 0,
+// each weighted S times a direction's solid angle: a fixed subset of the fixed directions.
+const GI_H_GATHER_STRIDE:u32=21u;
+// The most cells a frame creates (G2b; 0: every listed miss). When more are listed (a cut lists
+// every visible cell), a frame claims those whose key phase gi_mix(key a) % P matches the
+// frame, P the smallest power of two (up to 64) that brings the list under it on average; the
+// others stay missing (pixels read coarser cells, which a cut's first frames create: src/
+// gi_cache.rs COARSE_CUT_FRAMES) and are listed again next frame. A fixed rotation by key, never
+// a ranking (W2).
+const GI_H_CLAIM_CELLS:u32=22u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
 // last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly
@@ -274,12 +287,19 @@ fn gi_key(level:u32, bin:u32, cell:vec3<i32>) -> vec2<u32> {
 // use (it takes at most 21 low bits), so a lookup hashes key a alone (measured 21 us
 // cheaper in shading than starting from key b). Key b stays the cell's rotation.
 fn gi_start(key:vec2<u32>) -> u32 { return key.x>>28u; }
+// An empty slot ends a search (G2b): a key is inserted in the first free or reusable slot from
+// its start (gi_claim), and a slot is never emptied again except by clearing the whole table,
+// so no key lies past an empty slot in its probe order. A missing key then costs about two
+// loads instead of the whole bucket's eight (Nsight: the bucket walk was the quarry shading
+// pass's largest hotspot, docs/m7-g2b.md). The result is the same.
 fn gi_find(key:vec2<u32>) -> u32 {
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
     for(var i=0u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
-        if (gi_word(gi_hot(slot))&GI_KEY_BITS)==key.x { return slot; }
+        let word=gi_word(gi_hot(slot));
+        if (word&GI_KEY_BITS)==key.x { return slot; }
+        if word==0u { break; }
     }
     return 0xffffffffu;
 }

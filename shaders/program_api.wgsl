@@ -40,6 +40,9 @@ struct SurfaceInput {
     material:Material,
     // Engine-private: pass `input` to the services below, never read it.
     receiver:Receiver,
+    // DC1: authored world-space overlays, evaluated before surface(). Programs may
+    // consume these directly or through material_base_color/metallic_roughness/normal.
+    decals:DecalInput,
 };
 
 // One light's unshadowed incidence. `direction` points toward the light; `index` is the
@@ -86,9 +89,8 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
 // engine computes it at its own receiver, so it is identical for every program. Shadowed
 // point and spot lights (the frame's most important, LC1) use one ray or pooled PCF maps.
 fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
-    let light=lights[s.index];
-    if light.kind.w!=0u { return rl_local_shadow(light,input.receiver,s.direction); }
-    return hard_shadow(light,input.receiver,s.direction);
+    if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
+    return hard_shadow(lights[s.index],input.receiver,s.direction);
 }
 
 // Unexposed environment irradiance (lux) around n: the prepared diffuse field, or pi
@@ -146,7 +148,9 @@ fn material_normal(input:SurfaceInput) -> vec3<f32> {
     }
     // A source-back surface reverses the entire perturbed frame.
     if material.double_sided!=0u && !input.source_front { n=-n; }
-    return n;
+    if input.decals.normal_multiply==1.0 { return n; }
+    let decaled=unit_normal(n*input.decals.normal_multiply+input.decals.normal_add);
+    return select(n,decaled,dot(decaled,decaled)>0.5);
 }
 
 // Isotropic GGX lobe filtering. roughness is perceptual (alpha = roughness^2),
