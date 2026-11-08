@@ -186,6 +186,10 @@ fn texture(
     }
 }
 impl PostGpu {
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_surface(&self) -> &wgpu::Texture {
+        &self.aux.texture
+    }
     fn new(r: &Renderer, size: wgpu::Extent3d) -> Result<Self, Error> {
         use wgpu::{TextureFormat as F, TextureSampleType as T};
         let float = T::Float { filterable: false };
@@ -239,7 +243,9 @@ impl PostGpu {
                 r,
                 "post primary surface",
                 &[&bindings, primary.array_layout()],
-                &(head + include_str!("../shaders/post_surface.wgsl")),
+                &(head
+                    + include_str!("../shaders/object_motion.wgsl")
+                    + include_str!("../shaders/post_surface.wgsl")),
                 "post_primary_surface",
             );
             (Some(bindings), Some(pipe))
@@ -778,6 +784,7 @@ mod tests {
         let primary = primary_ray_gpu::non_rt_heads(include_str!("../shaders/scene.wgsl")).unwrap()
             [0]
         .clone()
+            + include_str!("../shaders/object_motion.wgsl")
             + include_str!("../shaders/post_surface.wgsl");
         for source in [
             include_str!("../shaders/post.wgsl"),

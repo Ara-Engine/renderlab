@@ -232,7 +232,11 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
 }
 pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
-    Ok(format!("{head}\n{RESOLVE}"))
+    // MV1 motion-source seam; history/resolve policy belongs to MQ1.
+    Ok(format!(
+        "{head}\n{}\n{RESOLVE}",
+        include_str!("../shaders/object_motion.wgsl")
+    ))
 }
 
 impl PrimaryState {
@@ -433,6 +437,10 @@ pub(in crate::renderer) struct Upscale {
 }
 
 impl ReconstructionState {
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
+        &self.colour[self.parity].texture
+    }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
     fn new(r: &Renderer, size: wgpu::Extent3d, output: wgpu::Extent3d) -> Self {
@@ -575,8 +583,8 @@ impl Renderer {
             u.lut,
             u.textures,
             u.materials,
-            u.normals,
-            u.models,
+            // MV1: transform/derived-normal uploads move surfaces; they no longer
+            // reset all history. Placement identity/topology stays in the key above.
             u.instances,
         ] {
             hash.update(v.to_ne_bytes());
@@ -685,15 +693,28 @@ impl Renderer {
         let mut scene_bounds = None;
         let mut skin_bounds = None;
         let mut skin_revisions = vec![];
+        let mut rigid_motion = false;
         for d in draws {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
             }
-            for &model in &d.instances.state.models {
+            for (&model, &previous_model) in d
+                .instances
+                .state
+                .models
+                .iter()
+                .zip(d.instances.state.previous_models())
+            {
+                let moved = model != previous_model;
+                rigid_motion |= moved;
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
-                    if d.mesh.skin.is_some() {
+                    // MV1: a rigid caster changes lighting history just as SK1 does.
+                    if d.mesh.skin.is_some() || moved {
                         skin_bounds = Some(union(skin_bounds, b));
+                        if let Ok(old) = shadow_gpu::world_bounds(d.mesh.bounds, previous_model) {
+                            skin_bounds = Some(union(skin_bounds, old));
+                        }
                     }
                 }
             }
@@ -704,7 +725,7 @@ impl Renderer {
             self.reconstruction_state
                 .as_ref()
                 .and_then(|s| s.previous.as_ref()),
-        ) && previous.skin_revisions != skin_revisions
+        ) && (rigid_motion || previous.skin_revisions != skin_revisions)
         {
             let swept = union(previous.skin_bounds, current);
             let mut affected = swept;
@@ -813,8 +834,7 @@ impl Renderer {
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // Nothing moved: the unjittered view-projection is bit-equal (moved placements and
-        // every other scene edit restart through the key).
+        // Camera stillness; MV1/SK1's surface source handles moving placements/vertices.
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);

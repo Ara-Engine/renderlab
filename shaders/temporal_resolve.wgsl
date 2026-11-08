@@ -75,10 +75,13 @@ struct Tr1U32s { data:array<u32> };
 @group(1) @binding(3) var<storage,read> tr1_indices:binding_array<Tr1U32s,PRIMARY_BATCHES>;
 // SK1: previous submitted vertices. Static draws alias the current stream; a
 // skinned previous stream has one padding vec4, preserving placement/material bits.
-@group(1) @binding(6) var<storage,read> tr1_previous_vertices:binding_array<Tr1Vec4s,PRIMARY_BATCHES>;
 var<private> tr1_near_skin:bool;
 fn tr1_skinned(batch:u32)->bool {
-    return arrayLength(&tr1_previous_vertices[batch].data)>arrayLength(&tr1_vertices[batch].data);
+    return motion_skinned(batch,arrayLength(&tr1_vertices[batch].data));
+}
+// MV1: only the motion source changes; moving rigid silhouettes follow SK1's path.
+fn tr1_moving(slot:u32)->bool {
+    return motion_rigid(slot)||tr1_skinned(primary_placements[slot]&0x1fffffffu);
 }
 
 const TR1_ID:u32=0x7fffffu;
@@ -89,7 +92,7 @@ fn tr1_position(batch:u32,index:u32)->vec3<f32> {
     return tr1_vertices[batch].data[tr1_indices[batch].data[index]*3u].xyz;
 }
 fn tr1_previous_position(batch:u32,index:u32)->vec3<f32> {
-    return tr1_previous_vertices[batch].data[tr1_indices[batch].data[index]*3u].xyz;
+    return motion_previous_vertex(batch,tr1_indices[batch].data[index]);
 }
 fn tr1_dot(a:vec3<f32>,b:vec3<f32>)->f32 {return fma(a.x,b.x,fma(a.y,b.y,a.z*b.z));}
 fn tr1_inside(t:vec2<i32>,size:vec2<u32>)->bool {
@@ -168,8 +171,8 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let uv=bitcast<vec2<f32>>(record.zw);
     var pa=a;var pb=b;var pc=c;
     if tr1_skinned(batch) {pa=tr1_previous_position(batch,i);pb=tr1_previous_position(batch,i+1u);pc=tr1_previous_position(batch,i+2u);}
-    let px=world_position(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
-    let pn=cross(world_position(pb,slot).xyz-world_position(pa,slot).xyz,world_position(pc,slot).xyz-world_position(pa,slot).xyz);
+    let px=motion_previous_world(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
+    let pn=cross(motion_previous_world(pb,slot).xyz-motion_previous_world(pa,slot).xyz,motion_previous_world(pc,slot).xyz-motion_previous_world(pa,slot).xyz);
     let x=world_position(receiver_point(a,b,c,vec3<f32>(1.0-uv.x-uv.y,uv)),slot).xyz;
     let wa=world_position(a,slot).xyz;
     let n=cross(world_position(b,slot).xyz-wa,world_position(c,slot).xyz-wa);
@@ -177,7 +180,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let distance=sqrt(tr1_dot(view,view));
     let facing=tr1_dot(n,view);
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
-    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),any(a!=pa)||any(b!=pb)||any(c!=pc));
+    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),motion_rigid(slot)||any(a!=pa)||any(b!=pb)||any(c!=pc));
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -261,7 +264,7 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 // box). `window` is the window the fetch allows.
 struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
-    if s.id!=0u && tr1.shadow_lo.w!=0.0 && !tr1_skinned(primary_placements[s.id-1u]&0x1fffffffu)
+    if s.id!=0u && tr1.shadow_lo.w!=0.0 && !tr1_moving(s.id-1u)
         && all(s.point.xyz>=tr1.shadow_lo.xyz) && all(s.point.xyz<=tr1.shadow_hi.xyz) {
         var rejected:Tr1History;return rejected;
     }
@@ -514,7 +517,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     var other=-1;
     for(var i=0;i<9;i+=1) {
         let v=tr1_ring(i);
-        if v!=0u {tr1_near_skin=tr1_near_skin || tr1_skinned(primary_placements[v-1u]&0x1fffffffu);}
+        if v!=0u {tr1_near_skin=tr1_near_skin || tr1_moving(v-1u);}
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
@@ -525,8 +528,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     if tr1.flags.x==0u && tr1.flags.z!=0u {
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         let second=tr1_second(p).id;
-        if first!=0u {tr1_near_skin=tr1_near_skin || tr1_skinned(primary_placements[first-1u]&0x1fffffffu);}
-        if second!=0u && second!=TR1_NONE {tr1_near_skin=tr1_near_skin || tr1_skinned(primary_placements[second-1u]&0x1fffffffu);}
+        if first!=0u {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
+        if second!=0u && second!=TR1_NONE {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
     if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin {
         // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether
