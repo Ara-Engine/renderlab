@@ -328,6 +328,8 @@ Targeted scores of the synchronized 1-pixel captures against **D8 f64** retain t
 
 All **129 canonical camera references** are now strict-replay accepted, covering every one of the 480 registered camera frames through exact aliases. The final one-pixel age pass extends the protocol to **640/640 frames**, including the static-camera Sun geometry. Hash-checked geometry cleanup removed **1,276,597,727 bytes**; per-frame masks, geometry identities and deletion hashes remain. `s2g/camera-completion.json` records this milestone. The 159 missing Sun radiance states are being acquired separately, one state per process.
 
+After all six camera captures were scored and inspected, every related alias on both paths was checked against its reference hash, then the archive bytes were hashed before cleanup. **128 summarized camera archives, 6,793,920,757 bytes**, are deleted under the raw-retention policy. The shared frame-zero archive remains for Sun frame 0. Metadata, per-array/archive identities, recipes, scores and `s2g/camera-retention-plan.json` remain; re-scoring those camera inputs requires regenerating the deleted raw data. Provider-owned qualification archives are untouched.
+
 TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding its 45-second contention cutoff with only 3.117 GiB available RAM, and continued CPU scoring. Short native captures resumed after headroom improved. The **game hold was released at 15:36:21Z**. TR0 explicitly reserved the second quiet window after rt1c, before dl3 and U0b's long timings. The queued `tq1` cost matrix uses one exclusive lease; old screens and any game-time timings remain separate and cannot supply the final speed denominator.
 
 ## Safety, provenance and retention
