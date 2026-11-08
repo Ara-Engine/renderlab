@@ -56,6 +56,44 @@ const INDIRECT_INPUTS: [&str; 5] = [
     "environment_lobe_reflection",
 ];
 
+// ---- M7-R1 reflections (docs/m7-r1.md) ----
+/// Traced reflections for programs that declare the optional
+/// `fn reflection_lobe(s: Surface, input: SurfaceInput) -> SpecularLobe` and read
+/// `specular_incident(input) -> vec4<f32>` (shaders/reflections.wgsl). `RL_SCENE` names the
+/// head's shadow TLAS.
+const REFLECTION_API: &str = include_str!("../shaders/reflections.wgsl");
+/// Every other composition of such a program: raster, cell and non-RT traced stages, and
+/// programs that use only one half of the pair. Its untraced estimate stays the answer.
+const REFLECTION_STUB: &str = "struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };\nfn specular_incident(input:SurfaceInput)->vec4<f32> { return vec4<f32>(0.0); }\n";
+/// The traced entry traces the lobe after the receiver's `surface`, before `shade` reads it.
+const REFLECTION_ENTRY_SEAM: &str = "    let surface_output=surface(surface_input);\n";
+const REFLECTION_ENTRY_CALL: &str = "    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n";
+/// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
+const REFLECTION_VISIBILITY_SEAM: &str =
+    "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
+const REFLECTION_VISIBILITY: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
+
+/// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
+/// for programs that name neither hook nor input, so their modules are unchanged.
+fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
+    let names = tokens(program);
+    let lobe = names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
+    let reads = names.contains(&"specular_incident");
+    if !lobe && !reads {
+        return (String::new(), false);
+    }
+    // Hardware heads declare their shadow TLAS at binding 2; non-RT heads have none.
+    let scene = ["hardware_scene", "fresh_scene"]
+        .into_iter()
+        .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
+    match scene.filter(|_| lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed))
+    {
+        Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+        None => (REFLECTION_STUB.to_owned(), false),
+    }
+}
+// ---- end of M7-R1 reflections ----
+
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
 /// shader variants on one binary, one process per variant (docs/m7-g1b.md).
@@ -370,8 +408,19 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
-    let mut source =
-        format!("{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{binding}// ---- program ----\n");
+    let (reflection, traces) = reflection_api(head, program, stage);
+    let mut source = format!(
+        "{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{reflection}{binding}// ---- program ----\n"
+    );
+    if traces {
+        // M7-R1: hits trace their own light visibility.
+        assert_eq!(source.matches(REFLECTION_VISIBILITY_SEAM).count(), 1);
+        source = source.replacen(
+            REFLECTION_VISIBILITY_SEAM,
+            &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
+            1,
+        );
+    }
     let start = source.len();
     source.push_str(program);
     let program_range = start..source.len();
@@ -382,7 +431,17 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             source.push_str(traced_hit_helpers());
         }
     }
-    source.push_str(entry);
+    if traces {
+        // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
+        assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
+        source.push_str(&entry.replacen(
+            REFLECTION_ENTRY_SEAM,
+            &format!("{REFLECTION_ENTRY_SEAM}{REFLECTION_ENTRY_CALL}"),
+            1,
+        ));
+    } else {
+        source.push_str(entry);
+    }
     Composed {
         source,
         program: program_range,

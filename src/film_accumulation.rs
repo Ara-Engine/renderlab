@@ -212,6 +212,8 @@ impl FilmLayouts {
             image(28, F::Rg32Uint),
             texture(29, uint),
             texture(30, uint),
+            // M7-R1: reflection rays (shaders/reflections.wgsl).
+            scene(2),
         ];
         shade.extend(film);
         let trace_bindings = group("temporal film trace", &trace);
@@ -534,6 +536,8 @@ impl Renderer {
                 (28, R::TextureView(&film.anchor[written].view)),
                 (29, R::TextureView(&film.tiles[read].view)),
                 (30, R::TextureView(&film.tiles[written].view)),
+                // M7-R1: reflection rays.
+                (2, hardware.scene().as_binding()),
             ];
             shade.extend(film_entries);
             let init = [

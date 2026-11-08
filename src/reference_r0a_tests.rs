@@ -163,6 +163,7 @@ fn gpu_r0a_current() {
     let paths = std::env::var("RENDERLAB_M7_R0A_SCENES").unwrap();
     let output = super::tests::output();
     let rt = std::env::var("RENDERLAB_M7_R0A_PATH").as_deref() == Ok("rt");
+    let tr1 = std::env::var("RENDERLAB_R1_TR1").as_deref() == Ok("1");
     let (device, queue) = device(rt);
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let source = include_str!("../shaders/scene.wgsl");
@@ -233,6 +234,13 @@ fn gpu_r0a_current() {
         } else {
             SoftShadows::Virtual
         });
+        // M7-R1 (docs/m7-r1.md): RENDERLAB_R1_TR1=1 captures each pose after 32 TR1 frames
+        // from a cut, TR1's measured settings, so its rotated glossy strata integrate.
+        if tr1 {
+            renderer
+                .set_reconstruction(crate::Reconstruction::identity())
+                .unwrap();
+        }
         assert!(!renderer.indirect().enabled);
         let toon = renderer
             .try_create_program(&ProgramDescriptor {
@@ -310,7 +318,10 @@ fn gpu_r0a_current() {
                 100.0,
             )
             .unwrap();
-            for _ in 0..8 {
+            if tr1 {
+                renderer.cut_reconstruction();
+            }
+            for _ in 0..if tr1 { 32 } else { 8 } {
                 let mut draws: Vec<_> = meshes
                     .iter()
                     .zip(instances.iter_mut())
