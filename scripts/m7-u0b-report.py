@@ -164,13 +164,18 @@ def floors(args):
             n=sum(v["n"] for v in values)
             result[key]=dict(n=n,observations=len(values),**{
                 metric:math.sqrt(sum(v["n"]*v[metric]**2 for v in values)/n)
-                for metric in ("rms","rms_noise_subtracted","reference_noise_rms")})
+                for metric in ("rms","rms_noise_subtracted","reference_noise_rms")},
+                worst_frame_rms=max(v["rms"] for v in values),
+                worst_frame_p99=max(v["p99"] for v in values),
+                maximum_absolute_component=max(v["maximum"] for v in values),
+                signed_mean=sum(v["n"]*v["signed_mean"] for v in values)/n)
         return result
     motion={c:dict(frames=len(w["frames"]),missing=w["missing_frames"],complete=w["complete"],
         error={o:aggregate(w["frames"],o) for o in ("0","4")},
         residual={o:aggregate([dict(measures={o:r["measures"]}) for r in w["motion"] if str(r["offset"])==o],o) for o in ("0","4")})
         for c,w in walks.items()}
     result=dict(scope="physical combined error; registered F0 and +4 stops; pixel-weighted RMS across retained native frames; no gain fit",
+                motion_tail_definition="worst_frame_p99 is the maximum of per-frame per-pixel RGB-RMS p99 values, not a pooled p99; maximum_absolute_component is the largest component error in any retained frame",
                 static=statics,motion=motion)
     save(args.out,result)
     lines=[]

@@ -5,8 +5,8 @@ Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses]
 
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
 the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
-The full **76/76 Unreal bench matrix** and **88/88 unit motion-reference states** are retained;
-the expanded physical floor table remains incomplete.
+The full **76/76 Unreal bench matrix**, **88/88 unit motion-reference states** and all
+**19 synchronized static floors** are retained; the expanded motion floor table remains incomplete.
 The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
 or integrated quality-pass claim is made.
 
@@ -490,7 +490,7 @@ The exposure control therefore preserves the physical input beyond agreement of 
 
 ## Physical quarry floor
 
-The eight final static captures retain the actual Tonemap HDR consumer, not a display PNG.
+All 19 synchronized static configurations retain the actual Tonemap HDR consumer. Quality captures use the fixed 1/60-second timestep and render-thread lag 0; they are not cost measurements.
 Camera readback matches p0, manual pre-exposure is **2^-14** on every capture, local exposure
 is 1 and the colour scale is unit RGB. The native decoder follows resource versions and checks
 the archive hash. AA0 consumes `PostDOFTranslucency.SceneColor`; these U0 TSR presets consume
@@ -501,39 +501,70 @@ p0 reference. All registered geometric populations are retained; masks are defin
 reference, never selected from candidate error. Covered-reference split-half display noise is
 **0.209/0.302 codes**, edge noise **0.371/0.818**. Noise-subtracted RMS, p99, maximum, signed
 mean, population size, archive hashes and exact per-capture settings remain in
-`study/quiet-s/physical-static-floor.json` and `physical-floor-summary.json`.
+`study/floor-static/physical-static-floor.json` and `physical-floor-summary.json`. The earlier eight timing snapshots remain separately under `study/quiet-s`.
 
 | Population | SW High | SW Epic | HW High | HW Epic |
 |---|---:|---:|---:|---:|
-| all-covered | 9.949/15.039 | 9.318/13.990 | 9.182/13.081 | 8.411/11.649 |
+| all-covered | 9.948/15.039 | 9.316/13.988 | 9.182/13.080 | 8.410/11.650 |
 | background-centre | 0.400/1.173 | 0.333/1.028 | 0.399/1.171 | 0.326/1.010 |
-| backlit | 13.670/24.908 | 11.401/20.620 | 12.362/22.061 | 9.931/17.075 |
-| contact | 15.626/26.854 | 14.018/23.592 | 15.146/25.712 | 13.425/22.178 |
-| edge | 14.281/27.020 | 13.835/25.549 | 12.144/22.740 | 11.285/20.201 |
-| faint | 11.028/14.918 | 10.400/13.661 | 10.723/13.923 | 9.902/12.278 |
-| image | 4.084/6.240 | 3.821/5.796 | 3.771/5.453 | 3.451/4.851 |
-| isolated | 8.713/10.406 | 8.123/9.419 | 8.636/10.215 | 8.076/9.356 |
-| lit | 8.063/10.595 | 7.487/9.780 | 7.948/10.191 | 7.385/9.395 |
-| multi-surface | 14.729/24.959 | 14.241/23.673 | 12.737/20.760 | 11.947/18.546 |
-| narrow | 13.527/21.324 | 12.664/18.878 | 13.107/20.218 | 12.086/17.386 |
-| occluded | 23.011/43.379 | 22.382/41.754 | 16.326/30.656 | 14.528/26.402 |
-| partial | 12.153/18.164 | 11.143/16.148 | 11.774/17.055 | 10.592/14.659 |
-| silhouette | 21.319/41.567 | 20.765/40.416 | 14.582/29.567 | 13.213/26.812 |
-| single-surface | 9.824/14.759 | 9.186/13.713 | 9.093/12.870 | 8.320/11.460 |
-| solid | 9.473/14.370 | 8.930/13.542 | 8.603/12.181 | 7.929/10.985 |
-| solid-lit | 8.006/10.469 | 7.432/9.661 | 7.909/10.108 | 7.351/9.328 |
-| solid-occluded | 22.828/42.991 | 22.190/41.369 | 16.070/30.098 | 14.246/25.842 |
-| wide | 11.902/17.566 | 10.861/15.633 | 11.530/16.453 | 10.315/14.140 |
-| wide6 | 11.351/16.467 | 10.247/14.608 | 11.140/15.707 | 9.926/13.639 |
+| backlit | 13.672/24.912 | 11.396/20.616 | 12.367/22.070 | 9.931/17.078 |
+| contact | 15.627/26.856 | 14.016/23.591 | 15.150/25.717 | 13.421/22.171 |
+| edge | 14.278/27.022 | 13.827/25.544 | 12.141/22.733 | 11.282/20.200 |
+| faint | 11.025/14.917 | 10.394/13.654 | 10.725/13.928 | 9.900/12.285 |
+| image | 4.083/6.240 | 3.820/5.794 | 3.771/5.453 | 3.451/4.851 |
+| isolated | 8.715/10.412 | 8.079/9.397 | 8.637/10.227 | 8.113/9.381 |
+| lit | 8.063/10.596 | 7.486/9.778 | 7.950/10.193 | 7.385/9.395 |
+| multi-surface | 14.732/24.967 | 14.236/23.671 | 12.736/20.764 | 11.945/18.547 |
+| narrow | 13.526/21.324 | 12.658/18.872 | 13.109/20.220 | 12.087/17.386 |
+| occluded | 23.008/43.376 | 22.375/41.749 | 16.312/30.629 | 14.527/26.402 |
+| partial | 12.151/18.163 | 11.138/16.142 | 11.775/17.060 | 10.591/14.662 |
+| silhouette | 21.306/41.562 | 20.716/40.364 | 14.590/29.589 | 13.206/26.800 |
+| single-surface | 9.822/14.758 | 9.184/13.710 | 9.093/12.869 | 8.320/11.460 |
+| solid | 9.473/14.370 | 8.928/13.540 | 8.602/12.179 | 7.929/10.985 |
+| solid-lit | 8.006/10.470 | 7.431/9.659 | 7.910/10.109 | 7.351/9.328 |
+| solid-occluded | 22.824/42.986 | 22.183/41.363 | 16.057/30.071 | 14.246/25.844 |
+| wide | 11.900/17.566 | 10.857/15.628 | 11.532/16.458 | 10.313/14.143 |
+| wide6 | 11.347/16.464 | 10.244/14.604 | 11.142/15.712 | 9.923/13.642 |
 
 The corresponding covered-pixel AA0 and TSR-only VSM baselines are **11.986/16.504** and
 **10.615/15.205**; HRT baselines agree within 0.002 codes. These are physical combined
 foreground/material/lighting/reconstruction errors. They do not isolate a Lumen or TSR defect.
-Hardware Epic is best on these static populations, but no Renderlab quality pass is implied.
+Hardware Epic has the lowest covered RMS among the four main presets; per-population tradeoffs remain. No Renderlab quality pass is implied.
 Full-frame reference/native/8x-difference sheets for both Epic paths were inspected, including
 edges, contact shadows and the black background. Bright contact/occlusion discrepancies and
 fine texture differences remain visible. Black-centre error includes mixed-edge pixels;
 visible-sky silhouette behaviour is outside this protocol.
+
+### Static configuration curve
+
+All U0 presets, same p0 reference and 20 registered populations. Covered RMS is shown here; every population, tail, bias and noise estimate is retained in the per-configuration JSON. Values are L0/L4 F0 codes.
+
+| Configuration | Covered RMS L0/L4 |
+|---|---:|
+| ue-0 | 11.986/16.504 |
+| ue-0-hrt | 11.986/16.505 |
+| ue-tsr | 10.615/15.205 |
+| ue-tsr-hrt | 10.615/15.204 |
+| ue-sw-h | 9.948/15.039 |
+| ue-sw-e | 9.316/13.988 |
+| ue-sw-c | 9.627/14.612 |
+| ue-sw-e-sdf1 | 9.437/14.165 |
+| ue-sw-e-gi | 10.051/14.161 |
+| ue-sw-e-noscreen | 9.179/14.049 |
+| ue-hw-h | 9.182/13.080 |
+| ue-hw-e | 8.410/11.650 |
+| ue-hw-e-hit | 8.411/11.652 |
+| ue-hw-e-hit1 | 8.411/11.696 |
+| ue-hw-c | 8.510/12.089 |
+| ue-hw-c-hit | 8.510/12.089 |
+| ue-hw-e-vsm | 8.413/11.656 |
+| ue-hw-e-gi | 9.543/13.153 |
+| ue-hw-e-nodf | 8.411/11.650 |
+
+The variants trade errors across populations; no common quality ordering is assumed. Contact
+sheets of all 19 native images and their differences were inspected at both exposures.
+Contact/crease discrepancies and broad colour differences remain, especially in the brighter
+diagnostic. Both Epic full-frame comparison strips were also inspected.
 
 ## Temporal reference interface
 
