@@ -120,7 +120,7 @@ pub(crate) const KERNEL: &str = include_str!("../shaders/light_cluster.wgsl");
 const API: &str = include_str!("../shaders/light_cluster_api.wgsl");
 /// Local-light visibility: hard at radius zero, four disk rays otherwise (LC2).
 const RAY: &str = include_str!("../shaders/local_light_ray.wgsl");
-const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { let slot=(light.kind.w&0xffffu)-1u; if slot>=LC_SLOTS { return 1.0; } return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w); }\n";
+const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { let slot=(light.kind.w&0xffffu)-1u; if slot>=LC_SLOTS { return 1.0; } if rl_light_frame.tiles[slot].z<=0.0 { return 1.0; } return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w); }\n";
 
 /// The acceleration structure a composed head binds for shading, if any: the hardware
 /// head's on every stage, the fresh head's only on traced stages (its raster layout has
@@ -326,12 +326,19 @@ pub(crate) struct Tile {
     pub size: u32,
 }
 
+pub(crate) fn atlas_extent(maximum: u32) -> u32 {
+    (maximum * 4).max(16)
+}
+
 /// A small aligned square allocator. Existing tiles never move when the camera moves.
 /// Resolution falls back by halves when larger squares cannot fit; no silent eviction.
 pub(crate) fn allocate_tile(existing: &[Option<Tile>], maximum: u32, desired: u32) -> Option<Tile> {
-    let extent = maximum * 4;
     let minimum = (maximum / 8).max(1);
-    let mut size = desired.min(maximum).max(minimum);
+    // Quantize to a shared grid even for non-power-of-two maxima. Otherwise a
+    // 1001-square tile can strand thin strips and invalidate the reserved-area bound.
+    let extent = atlas_extent(maximum) / minimum * minimum;
+    let units = (desired.min(maximum).max(minimum) / minimum).max(1);
+    let mut size = minimum * (1 << (31 - units.leading_zeros()));
     let occupied: u64 = existing
         .iter()
         .flatten()

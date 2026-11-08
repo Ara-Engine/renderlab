@@ -30,7 +30,7 @@ impl Atlas {
         let (size, layers) = if slots == 0 {
             (1, 1)
         } else {
-            (resolution * 4, 6)
+            (lc::atlas_extent(resolution), 6)
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
@@ -426,7 +426,8 @@ impl Renderer {
             state.tiles.fill(None);
         }
         for slot in 0..count as usize {
-            if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot) {
+            if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot)
+            {
                 state.tiles[slot] = None;
             }
         }
@@ -574,7 +575,22 @@ impl Renderer {
                     );
                     uploads.shadows += 64;
                     uploads.write_calls += 1;
-                    redraw.push((layer, casters.clone()));
+                    // LC3: a cube face needs only casters that reach its own clip
+                    // volume. Reuse M2's conservative rounding envelope; never LOD or
+                    // shorten the caster set to meet a timing budget.
+                    let volume = crate::visibility::ClipVolume::new(&layers[layer as usize]);
+                    let face_casters: Vec<_> = casters
+                        .iter()
+                        .copied()
+                        .filter(|&(d, i)| {
+                            let draw = &draws[d];
+                            volume.may_be_visible(&crate::visibility::HomogeneousWorldBounds::new(
+                                &draw.instances.state.models[i as usize],
+                                &draw.mesh.bounds,
+                            ))
+                        })
+                        .collect();
+                    redraw.push((layer, face_casters));
                 }
             }
         } else {
@@ -607,7 +623,7 @@ impl Renderer {
             vec![1.0; stats.shadowed.len()]
         };
         stats.atlas_bytes = if maps {
-            6 * 4 * u64::from(state.atlas.resolution * 4).pow(2)
+            6 * 4 * u64::from(lc::atlas_extent(state.atlas.resolution)).pow(2)
         } else {
             0
         };

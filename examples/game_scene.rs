@@ -49,6 +49,7 @@ struct Args {
     still: bool,
     timing_frames: u32,
     night_lanterns: bool,
+    local_shadow_count: Option<u32>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -70,6 +71,7 @@ impl Args {
             still: false,
             timing_frames: 0,
             night_lanterns: false,
+            local_shadow_count: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -111,6 +113,7 @@ impl Args {
                 "--still" => a.still = true,
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
                 "--night-lanterns" => a.night_lanterns = true,
+                "--local-shadow-count" => a.local_shadow_count = Some(value()?.parse()?),
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
                         "native" => RenderScale::Native,
@@ -206,6 +209,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     engine.resize(args.size[0], args.size[1])?;
+    // LC3 diagnostic control: retain all authored lights while changing map coverage.
+    if let Some(count) = args.local_shadow_count {
+        engine
+            .renderer_mut()
+            .set_local_shadows(renderlab::LocalShadows {
+                count,
+                ..Default::default()
+            })?;
+    }
     eprintln!(
         "game_scene adapter={:?} path={path:?} capabilities=(rt {}, nonrt {}) size={}x{} debug_build={}",
         engine.adapter_info().name,
@@ -522,6 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
+        "local_shadow_count":engine.renderer().local_shadows().count,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "gpu_render_span_ms": spans, "frames": frames, "timing":timing,
         "note": "shared-GPU diagnostic timings; debug_build records the build profile; not a performance claim",

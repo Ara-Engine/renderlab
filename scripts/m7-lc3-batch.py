@@ -52,6 +52,7 @@ def main():
         if latest_order() != order:
             raise SystemExit("DEFERRED: root order changed between steps")
         for path in ([None] if step == "lib" else os.environ.get("LC3_PATHS", "traced,nonrt").split(",")):
+            if step == "game-control" and path != "nonrt": continue
             if latest_order() != order or helper.runner.quiet_active(u, any_lease=False) or helper.runner.hold_state(u) == "hold":
                 raise SystemExit("DEFERRED: root order, QUIET or game hold changed")
             target = root / (step if path is None else f"{step}-{path}")
@@ -66,10 +67,12 @@ def main():
                     "gpu_lc2_penumbra" if step == "fixture" else "gpu_lc1_quarry_night"),
                 "--ignored", "--exact", "--nocapture", "--test-threads=1"]
             if step.startswith("game"):
+                still = step in ("game-still", "game-control")
                 command = [os.environ["LC3_GAME_BINARY"], "--path", "rt" if path == "traced" else "nonrt",
-                    "--out", str(target), "--frames", "16" if step == "game-still" else "32",
+                    "--out", str(target), "--frames", "16" if still else "32",
                     "--every", "8", "--night-lanterns", "--timing-frames", "8"]
-                if step == "game-still": command.append("--still")
+                if still: command.append("--still")
+                if step == "game-control": command += ["--local-shadow-count", "4"]
             start = time.monotonic()
             with (target / "run.log").open("w") as output:
                 result = subprocess.run(command, cwd=REPO, env=env, stdout=output, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)

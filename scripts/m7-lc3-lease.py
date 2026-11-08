@@ -37,6 +37,12 @@ def main():
         # requires the agent to inspect its dependencies, never automatic approval.
         if latest_order() != reviewed:
             raise SystemExit("DEFERRED: latest root order changed; review it before another lease")
+        marker = os.environ.get("LC3_WAIT_MARKER")
+        marker_lines = SCHEDULE.read_text(encoding="utf-8").splitlines()
+        marker_lines = marker_lines[marker_lines.index(reviewed) + 1:]
+        if marker and not any(line == marker or line.startswith(marker + " ") for line in marker_lines):
+            time.sleep(1)
+            continue
         # Optional dependencies from the reviewed directive, e.g. an owner's two
         # requested dry runs. Count only releases after that exact directive.
         owner = os.environ.get("LC3_WAIT_RELEASE_OWNER")
@@ -45,11 +51,11 @@ def main():
             later = lines[lines.index(reviewed) + 1:]
             count = sum(line.startswith(owner + " ") and "window released" in line for line in later)
             if count < int(os.environ.get("LC3_WAIT_RELEASE_COUNT", "1")):
-                time.sleep(10)
+                time.sleep(1)
                 continue
         floor = float(os.environ.get("LC3_PREFLIGHT_MB", "4096"))
         if resources.resource_sample()["available_mbytes"] < floor:
-            time.sleep(10)
+            time.sleep(1)
             continue
         attempt += 1
         result = subprocess.run([sys.executable, "-B", "scripts/n8-run.py", "--label",
@@ -57,7 +63,7 @@ def main():
             cwd=REPO, env=env, creationflags=subprocess.CREATE_NO_WINDOW)
         if result.returncode != 3:
             raise SystemExit(result.returncode)
-        time.sleep(10)
+        time.sleep(1)
     raise SystemExit("DEFERRED: bounded lease queue expired")
 
 

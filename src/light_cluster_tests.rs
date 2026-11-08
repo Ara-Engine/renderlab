@@ -217,13 +217,18 @@ fn shadowed_lights_rank_by_screen_influence_and_keep_their_slots() {
 
 #[test]
 fn local_shadow_tiles_stay_disjoint_and_fades_release_before_reuse() {
-    let mut tiles = vec![None; lc::MAX_SLOTS as usize];
-    for i in 0..lc::MAX_SLOTS as usize {
-        let tile = lc::allocate_tile(&tiles, 1024, 1024).expect("every slot fits");
-        tiles[i] = Some(tile);
+    for maximum in [1, 2, 7, 768, 1001, 1024] {
+        let mut tiles = vec![None; lc::MAX_SLOTS as usize];
+        for i in 0..lc::MAX_SLOTS as usize {
+            let tile = lc::allocate_tile(&tiles, maximum, maximum).expect("every slot fits");
+            assert!(tile.size <= maximum);
+            tiles[i] = Some(tile);
+        }
+        assert_eq!(tiles.len(), 128);
+        if maximum >= 8 {
+            assert!(tiles.iter().flatten().any(|t| t.size < maximum));
+        }
     }
-    assert_eq!(tiles.len(), 128);
-    assert!(tiles.iter().flatten().any(|t| t.size < 1024));
     let mut slots = vec![Some(1)];
     let mut strengths = vec![1.0];
     for frame in 1..=8 {
@@ -1305,6 +1310,86 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 (visibility - expected).abs() < 0.01,
                 "{name}: visibility {visibility}, expected {expected}"
             );
+        }
+        if path == "nonrt" {
+            // Force a real map-slot replacement; the quarry walk can keep its same
+            // 128 lights, so motion images alone do not exercise the fade boundary.
+            let lights = |swapped: bool| {
+                vec![
+                    Light::Directional {
+                        travel: -Vec3::Z,
+                        lux: [0.1; 3],
+                    },
+                    Light::Point {
+                        position: Vec3::new(1.0, 0.6, 3.0),
+                        candela: [if swapped { 1.0 } else { 100.0 }; 3],
+                        range: Some(10.0),
+                        source_radius: 0.0,
+                    },
+                    Light::Point {
+                        position: Vec3::new(-1.0, 0.6, 3.0),
+                        candela: [if swapped { 100.0 } else { 1.0 }; 3],
+                        range: Some(10.0),
+                        source_radius: 0.0,
+                    },
+                ]
+            };
+            let lighting = |swapped| Lighting {
+                lights: lights(swapped),
+                ..Default::default()
+            };
+            r.set_local_shadows(LocalShadows {
+                count: 1,
+                ..Default::default()
+            })
+            .unwrap();
+            r.lighting.clusters.test_reset_selection();
+            r.set_lighting_and_shadows(
+                &lighting(false),
+                &Shadows {
+                    directional_disk_angle: 0.04,
+                    requests: vec![
+                        ShadowRequest::Directional {
+                            split_ends: vec![4., 12., 40.],
+                        },
+                        ShadowRequest::None,
+                        ShadowRequest::None,
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for _ in 0..16 {
+                render(&mut r, &mut placements);
+            }
+            let sample =
+                ((292usize * size[0] as usize + 195) * 3).min((size[0] * size[1] * 3 - 3) as usize);
+            let mut curve = vec![capture(&mut r)[sample]];
+            r.set_lighting(&lighting(true)).unwrap();
+            for frame in 0..16 {
+                render(&mut r, &mut placements);
+                let image = capture(&mut r);
+                curve.push(image[sample]);
+                if [0, 3, 7, 15].contains(&frame) {
+                    write_png(
+                        &out.join(format!("nonrt-fade-{frame:02}.png")),
+                        &image,
+                        size[0],
+                        size[1],
+                    );
+                }
+            }
+            let maximum_step = curve
+                .windows(2)
+                .map(|p| (p[1] - p[0]).abs())
+                .fold(0.0f32, f32::max);
+            log["map_replacement"] =
+                serde_json::json!({"receiver_visibility":curve,"maximum_step":maximum_step});
+            assert!(
+                curve[0] < 0.01 && curve[16] > 0.99,
+                "shadow never replaced: {curve:?}"
+            );
+            assert!(maximum_step <= 0.126, "shadow popped: {curve:?}");
         }
     }
     std::fs::write(
