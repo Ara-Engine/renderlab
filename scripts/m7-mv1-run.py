@@ -20,6 +20,8 @@ g1.OUT = OUT
 g1.TARGET = OUT / "target"
 g1.BINARY = OUT / "bin/mv1-tests.exe"
 OUT.mkdir(parents=True, exist_ok=True)
+# Root permits 6 GiB for the quarry-free integration batch; default remains 8.
+ADMISSION_MB = max(6144, int(os.environ.get("M7_MV1_MIN_AVAILABLE_MB", "8192")))
 
 class MemoryStatus(ctypes.Structure):
     _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32),
@@ -78,7 +80,7 @@ def main():
     deadline = time.monotonic() + 75 * 60
     attempt = 0
     while time.monotonic() < deadline:
-        if not turn_ready(u) or available_mb() < 8192 or Path("D:/Coding/renderlab-work/gpu-slot.lock").exists():
+        if not turn_ready(u) or available_mb() < ADMISSION_MB:
             time.sleep(2)
             continue
         reservation = g1.window_open(u)
@@ -88,7 +90,7 @@ def main():
             continue
         attempt += 1
         result = subprocess.call([sys.executable, "-B", str(ROOT / "scripts/n8-run.py"),
-            "--label", f"{label}-{attempt}", "--minutes", "15", "--wait-seconds", "0", "--fast-check", "--", *command],
+            "--label", f"{label}-{attempt}", "--minutes", "15", "--wait-seconds", "45", "--fast-check", "--", *command],
             cwd=ROOT, env=dict(os.environ, N8_OWNER="m7-mv1", N8_OUT=str(OUT)))
         if result != 3:
             raise SystemExit(result)

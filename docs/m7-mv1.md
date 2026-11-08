@@ -6,8 +6,10 @@
 by TR1 and PP1. MQ1 retains ownership of TR1's filtering/history policy.
 
 2026-11-09 integration follow-up: merged main `622db4d` (MQ1) and then
-`1ad5e29` (PC1/GC1). The acceptance results below initially describe the earlier
+`1ad5e29` (PC1/GC1) and `4c8ef7d` (R1n). The acceptance results below initially describe the earlier
 delivery; the integration results are recorded separately below.
+Final main sync: `dc3fa11` (ARA1 prep), which adds docs/new examples/tools and
+changes none of the tested library, shaders or `game_scene` sources.
 
 **Core motion verified on both paths; full quarry follow-through is incomplete.**
 The quarry load hit the shared memory guard. Retrying with more launch headroom
@@ -190,6 +192,145 @@ using the retained `screen-b/nonrt.json` as the quarry template, a new output
 directory and the staged example executable. The batch includes lib/SK1 checks,
 both motion/quarry paths and both example flights. Do not call it accepted on the
 quarry merely because the small-scene checks passed.
+
+## MQ1 integration (2026-11-09)
+
+MQ1 independently fixed rigid reprojection while MV1 was being implemented. The
+merged renderer has **one transform history**, owned by `InstanceState` and
+published in the shared primary placement buffer. TR1 no longer caches another
+copy of transforms or appends it to its frame-state buffer. Both TR1 and PP1 read
+`object_motion.wgsl`; it combines the previous submitted placement and SK1's
+previous vertex stream on traced and visibility-buffer hits.
+
+MQ1's moved-surface classification, still-silhouette guards and ordinary min/max
+clamp over all nine current samples remain. The `motion_box` setting remains on
+by default. Its event bit comes from the same bitwise current/previous transform
+comparison as the shared shader source. MQ1's original
+`gpu_mq1_moving_placement` test is unchanged byte for byte. The rigid-only swept
+receiver reset from the first MV1 delivery is removed so MQ1's static-ground
+history continues; SK1's deformation reset still applies. Diagnostic-camera
+resumption and the shared primary-frame ABI size remain fixed by MV1. That ABI is
+now 144 bytes after R1n, so PP1 follows the owning constant automatically.
+
+R1n introduced another reset source: its transform-only software-reflection record
+writes were charged to `uploads.geometry`, which TR1's topology key hashes. MQ2
+reported the regression while this integration was queued. MV1 changes that one
+charge to `uploads.models`; real geometry repacks still count as geometry. RQ1
+also carries that accounting correction. This keeps non-RT rigid motion from
+restarting all histories after the R1n merge.
+
+`reflections.wgsl` has exactly one `var query:ray_query` in `rl_hit_shadow` and one
+in `rl_reflection_prepare`, both outside repeated execution scopes. Lib shader
+validation also exercises the composed modules and SPIR-V opaque-query check.
+
+The focused static-identity control reads the immutable resolve shader from main
+`622db4d`, SHA-256
+`3ac3d5e68ef9fc3f7c5a67de2319e0cf09b9073dbb3e0b6782a014f0343986be`.
+For each path it swaps only that resolve versus the merged resolve, resets TR1's
+sequence, and compares HDR bytes after 32 frames, with both a stationary and a
+moving camera viewing a stationary translated/rotated striped object. Test-only
+frame storage includes one unused matrix so the old shader's runtime-array ABI
+can compile; production's fixed frame words contain no duplicate transform history.
+This complements MQ1's recorded RF/quarry identity evidence; it does not repeat
+those large-scene campaigns.
+
+Integration evidence and build identities live in
+`D:/Coding/renderlab-work/m7-mv1/integration-n/` and `integration-build.json`.
+The target was freshly created under this unit's D: directory, with two Cargo jobs.
+The wrapper acknowledges the exact latest `[root order]` and checks its required
+subsequent releases before requesting a lease. It checks again inside the lease
+and before every test/example process. An initial attempt yielded before lib tests
+at 8,187 MiB available, 5 MiB below the original floor; no test ran. The coordinator
+then explicitly authorized **6 GiB admission for this quarry-free batch**, with a
+bounded 45-second recovery wait. The shared **2 GiB runtime guard** remains intact.
+Simulations run serially and completed steps persist across resource deferrals.
+Each step records its actual available memory and admission floor in `starts.json`.
+Quarry manifests still require at least 8 GiB; none is loaded by this batch.
+Leases are capped at 15 minutes. Attempt releases do not end the coordinator's hold;
+the unit writes an explicit `m7-mv1 FINAL release` after verification.
+
+### Final integration verification
+
+`integration-n-1` passed the complete batch in **209.123 seconds**, with no guard
+failures. All eight processes ran serially inside the owned n8 lease. Actual
+available memory at their starts was **9,613–10,395 MiB**. Its results supersede
+the earlier `integration-i` harness stops (a missing manifest environment variable,
+then reconstruction not explicitly enabled in the new static control).
+
+- **192 lib tests passed**, plus `cargo fmt --all --check` and `git diff --check`.
+- MQ1's unchanged moving-placement test passed both paths: moved card weight **16**,
+  static ground weight **24**. Transform changes did not restart history.
+- The immutable MQ1 resolve and merged resolve produced **byte-identical HDR** on
+  each path, after 32 frames for each still/moving-camera case. Full hashes are in
+  `static.log`; comparisons are within each path, not between RT and non-RT.
+- Both MV1 motion tests passed. Maximum half-extent error was **0.00001296 px**
+  (non-RT) and **0.00001151 px** (RT). First-frame velocity and cleared-background
+  HDR trail error were exactly zero. All 6,187 non-RT and 6,189 RT covered movers
+  continued history at frame 23 (maximum weight 16). Stopping left at most
+  0.00000139 px velocity; diagnostic-view resumption reset TR1 and post motion.
+- Both **48-frame, 960×540** example flights passed. All seven retained frames per
+  path were inspected, along with the four-frame blur-off/on fixture sequences.
+  Moving stripes have short motion-aligned blur without a retained silhouette;
+  the flight retains the bobbing hero, rotating crate, shadows and scene geometry.
+- SK1 passed both paths, including deformed-versus-baked maximum byte error **0**.
+  The strict MV1 and SK1 validation guards reported **zero Vulkan errors** and
+  confirmed the active Khronos layer. Both example logs contain no VUID messages.
+
+MQ1's legacy `renderer(false)` startup, unchanged by this merge, prints
+`VUID-StandaloneSpirv-None-10684` diagnostics with the externally forced validation
+layer (Function `Offset` / Workgroup `ArrayStride` decorations). That test does not
+install the strict diagnostic guard. These messages are retained in `mq1.log` and
+reported to the coordinator; they are not presented as a clean-validation result.
+The strict MV1/SK1 constructors and tests above are clean.
+
+Inspected integration evidence:
+
+- [Non-RT blur off](D:/Coding/renderlab-work/m7-mv1/integration-n/nonrt/inspect-fixture-off.png)
+- [Non-RT blur on](D:/Coding/renderlab-work/m7-mv1/integration-n/nonrt/inspect-fixture-on.png)
+- [RT blur off](D:/Coding/renderlab-work/m7-mv1/integration-n/rt/inspect-fixture-off.png)
+- [RT blur on](D:/Coding/renderlab-work/m7-mv1/integration-n/rt/inspect-fixture-on.png)
+- [Non-RT flight](D:/Coding/renderlab-work/m7-mv1/integration-n/example-nonrt/inspect.png)
+- [RT flight](D:/Coding/renderlab-work/m7-mv1/integration-n/example-rt/inspect.png)
+- [Motion data and timing samples](D:/Coding/renderlab-work/m7-mv1/integration-n/summary.json)
+
+RTX 4070 SUPER, NVIDIA 617.14, Vulkan; non-release Cargo test/dev profiles
+(`renderlab` opt-level 1, configured dependencies opt-level 2), validation on.
+Fixture settings match the earlier diagnostic protocol: 320×192, native TR1,
+programmable stripes, no GI, neutral post, 180° shutter and 16 px maximum radius.
+Medians of eight moving frames per cell, **diagnostic functional-lease timings**:
+
+| Path / post | Renderer `render_span` ms | Post/present interval ms |
+|---|---:|---:|
+| Non-RT / blur off | 1.243 | 0.031 |
+| Non-RT / blur on | 1.852 | 0.643 |
+| RT / blur off | 0.713 | 0.033 |
+| RT / blur on | 1.335 | 0.652 |
+
+No quiet window or clock control was used. These are not an overhead comparison
+against the earlier, differently merged/contended screen, and no speed superiority
+is claimed. The real-quarry moving-caster screen remains unrun.
+
+The follow-up began around 21:24 UTC. Fresh compilation/integration reached the
+first ready binaries at 21:45; queue/memory admission delayed GPU work until 22:45.
+The later R1n accounting fix compiled in 46.58 s (tests) / 18.31 s (example); the
+static test setup correction took a 53.24 s test-only rebuild. Admitted integration
+leases, including the resource deferral and harness stops, totaled **5.51 minutes**;
+the final successful screen ended at 22:58:01 UTC. The exact
+`m7-mv1 FINAL release` marker is written; no owned build, GPU job or waiter remains.
+
+Verified test binary SHA-256:
+`dffda2081897f419afc6a8d12d061265620cf398d1612770af2bdbcc7c358f32`.
+Example binary SHA-256:
+`462682be324c6541cb69333485fec95fb97d41f0353489e112eef6bbaf191eae`.
+Production source is `c9ffda5`; `8bbbd36` adds only the static-control test setup fix.
+
+**Fresh-target cleanup remains blocked.** The resolved target was verified as the
+ordinary directory `D:/Coding/renderlab-work/m7-mv1/target` (not a reparse point).
+Automatic execution approval again rejected the native `Remove-Item -LiteralPath
+D:/Coding/renderlab-work/m7-mv1/target -Recurse -Force` request, stating only
+"blocked by policy". No alternate deletion was attempted. The new target remains;
+staged executables and inspected PNG/JSON/log evidence remain under the unit's D:
+directory. No new raw image dump larger than 5 MB was produced.
 
 ## Gaps
 
