@@ -117,3 +117,13 @@ RT shadow floor (Islam, 2026-11-07): the RT path's shadow floor is Unreal's matc
 | Missed film shadows | 9,245 | 23,931 |
 
 So it becomes the RT-device default once its motion gates against HRT are confirmed. The fast setup's gap to VSM on false shadows (27 against 11) stays recorded, but it doesn't block. VSM's low count comes from blurring toward lit: it misses 27,071 film shadows and leaks 5,537.
+
+Unreal packages, update of 2026-11-08 (from M7-U0b). Never mix packages within one measurement.
+
+| Package | Identity | Use |
+|---|---|---|
+| `E:/renderlab-work/m7-u0b/ue-package` | cook/b | SV, S4, S5 and S2G comparisons (R0a, TR1, G1c) |
+| `E:/renderlab-work/m7-u0b/ue-svsky-package` | cook/sv-sky | G1c's diffuse-only SV sky comparator |
+| `E:/renderlab-work/m7-u0/ue-package` | original U0/TR0 | U0 and TR0 measurements |
+
+`m7-u0/ue-project/Saved/StagedBuilds` was a byte-identical copy of ue-svsky-package (proof: `m7-u0b/package-retention-proof.json`) and is deleted, freeing 1.42 GB.
