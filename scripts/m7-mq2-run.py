@@ -6,7 +6,12 @@ RAM and foreign-renderer guards) under owner m7-mq2 and runs one guarded command
 PowerShell batch of game_scene runs and test binaries. Evidence and lease records go under
 D:/Coding/renderlab-work/mq2.
 
-    py -3 -B scripts/m7-mq2-run.py LABEL MINUTES GIVE_UP_MINUTES -- powershell -NoProfile -File batch.ps1
+    py -3 -B scripts/m7-mq2-run.py LABEL MINUTES GIVE_UP_MINUTES [--after UNIT,UNIT] -- powershell -NoProfile -File batch.ps1
+
+Root orders: unlike MQ1's runner, it takes the lock only once every `--after` unit (a release
+line's prefix, e.g. `m7-lc2` or `root root-gate-b6`) has written a release line after the
+latest `[root order]`, and it exits with code 5 if a newer `[root order]` appears while it
+waits, so the caller re-reads it before queuing again.
 """
 import importlib.util
 import os
@@ -25,9 +30,31 @@ def load(name):
     return module
 
 
+SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
+
+
+def root_state(after):
+    """(index of the latest [root order] line, whether every `after` unit released since)."""
+    for _ in range(50):
+        try:
+            lines = SCHEDULE.read_text(encoding="utf-8", errors="replace").splitlines()
+            break
+        except PermissionError:
+            time.sleep(0.2)
+    else:
+        return None, False
+    order = max((i for i, l in enumerate(lines) if l.startswith("[root order]")), default=-1)
+    since = lines[order + 1:]
+    return order, all(any(l.startswith(u) and "window released" in l for l in since) for u in after)
+
+
 def main():
     label, minutes, wait = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
-    command = sys.argv[sys.argv.index("--") + 1:]
+    separator = sys.argv.index("--")
+    options = sys.argv[4:separator]
+    after = options[options.index("--after") + 1].split(",") if "--after" in options else []
+    command = sys.argv[separator + 1:]
+    first_order, _ = root_state(after)
     r1 = load("m7-r1-run")
     r1.OUT, r1.OWNER = OUT, "m7-mq2"
     g = r1.guard()
@@ -49,9 +76,19 @@ def main():
                     f"(game_scene flights and TR1 tests, both paths; headless, functional, no timing claim); "
                     f"takes the lock at the next free moment. {g.utc().isoformat()}")
     deadline = time.time() + wait * 60
+    checked, cleared = 0.0, False
     while time.time() < deadline:
-        if not r1.LOCK.exists() and not r1.schedule_read_retry(runner.quiet_active, g, any_lease=True) \
-                and r1.schedule_read_retry(runner.hold_state, g) != "hold":
+        if time.time() - checked > 0.5:
+            order, cleared = root_state(after)
+            checked = time.time()
+            if order is not None and order != first_order:
+                print(f"{label}: a newer [root order] appeared; re-read it before queuing", flush=True)
+                g.schedule_line(f"m7-mq2 request {label} withdrawn {g.utc().isoformat()} (a newer "
+                                f"[root order] appeared; no lease taken; re-reading it).")
+                return 5
+        # The root order is read again just before the lease: it may have changed since.
+        if cleared and not r1.LOCK.exists() and not r1.schedule_read_retry(runner.quiet_active, g, any_lease=True) \
+                and r1.schedule_read_retry(runner.hold_state, g) != "hold" and root_state(after) == (first_order, True):
             try:
                 with g.lease(label, minutes) as owner:
                     out = OUT / "lease" / label
