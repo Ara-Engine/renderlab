@@ -54,6 +54,7 @@ struct Args {
     post: bool,
     glass: bool,
     particles: bool,
+    local_shadows: bool,
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
@@ -81,6 +82,7 @@ impl Args {
             post: true,
             glass: true,
             particles: true,
+            local_shadows: true,
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
@@ -135,6 +137,7 @@ impl Args {
                 "--no-post" => a.post = false,
                 "--no-glass" => a.glass = false,
                 "--no-particles" => a.particles = false,
+                "--no-local-shadows" => a.local_shadows = false,
                 "--fox" => a.fox = Some(value()?.into()),
                 "--hour" => a.hour = value()?.parse()?,
                 "--time" => {
@@ -234,6 +237,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         extra_density: 0.0015,
                         ..Default::default()
                     }),
+                },
+                local_shadows: LocalShadows {
+                    count: if args.local_shadows { 4 } else { 0 },
+                    ..Default::default()
                 },
                 post: PostSettings {
                     enabled: args.post,
