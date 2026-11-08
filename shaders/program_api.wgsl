@@ -45,7 +45,8 @@ struct SurfaceInput {
     decals:DecalInput,
 };
 
-// One light's unshadowed incidence. `direction` points toward the light; `index` is the
+// One light's incidence before opaque visibility. TP2 filters its RGB through
+// transparent sun casters. `direction` points toward the light; `index` is the
 // light's position in the renderer's lighting vector.
 struct LightSample { index:u32, direction:vec3<f32>, attenuation:f32, intensity:vec3<f32> };
 
@@ -82,7 +83,7 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
         }
     }
     // TP2: coloured transparent shadows filter sun incidence on both opaque paths.
-    let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(input.world,l),light.kind.x==0u);
+    let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(input.world,l),light.kind.x==0u && light.kind.z!=0u);
     return LightSample(index,l,attenuation,light.rgb_inner.xyz*transmission);
 }
 

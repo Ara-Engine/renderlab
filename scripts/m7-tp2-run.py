@@ -75,7 +75,7 @@ if __name__ == '__main__':
         deadline = time.monotonic() + 45 * 60
         g.schedule_line(f'[m7-tp2 request] owner=m7-tp2 label=tp2-{label} functional headless batch {g.utc().isoformat()}')
         while True:
-            if not runner.quiet_active(g) and runner.hold_state(g) != 'hold' and not tp1.LOCK.exists():
+            if (OUT / 'bin' / (binary + '.exe')).exists() and not runner.quiet_active(g) and runner.hold_state(g) != 'hold' and not tp1.LOCK.exists():
                 env = dict(os.environ, N8_OWNER='m7-tp2', N8_OUT=str(OUT))
                 result = subprocess.run([sys.executable, '-B', REPO / 'scripts/n8-run.py', '--label', 'tp2-' + label,
                     '--minutes', '30', '--fast-check', '--', sys.executable, '-B', __file__, 'batch', label,
@@ -85,6 +85,7 @@ if __name__ == '__main__':
             if time.monotonic() > deadline:
                 g.schedule_line(f'm7-tp2 request tp2-{label} withdrawn {g.utc().isoformat()} (no job remains).')
                 raise SystemExit('lease wait timed out')
-            time.sleep(3)
+            # Match the other functional queues' atomic-lock cadence.
+            time.sleep(0.05)
     else:
         raise SystemExit('expected build/check/gpu/batch')

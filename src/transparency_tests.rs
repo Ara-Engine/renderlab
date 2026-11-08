@@ -727,7 +727,7 @@ fn gpu_tp1_scene() {
         save(&mut r, "full-pan40");
     }
     log["stats"] = serde_json::json!(format!("{:?}", r.transparency_stats()));
-    if sections.contains("timing") {
+    if sections.contains("timing") || sections.contains("glassprofile") {
         // Two phases of 8 interleaved 48-frame blocks, keeping each block's last 16 frames:
         // a changed draw set relights the radiance cache, which goes idle after 16 still
         // frames, so kept frames time TP1, not relighting. With the warmed emitters:
@@ -758,12 +758,22 @@ fn gpu_tp1_scene() {
             }
             rows.map(|mut v| serde_json::json!({"median_ms": median(&mut v), "frames": v.len()}))
         };
-        let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
-        drop((fire_emitter, smoke_emitter));
-        let [opaque, foliage_only] = phase(&mut r, &mut asset, [0, 1]);
-        log["timing"] = serde_json::json!({"opaque": opaque, "foliage": foliage_only,
-            "foliage_particles": particles, "full": full,
-            "note": "GPU render span (first receiver pass to present end) medians over the last 16 frames of 8 interleaved 48-frame blocks"});
+        if sections.contains("glassprofile") {
+            for variant in ["baseline","open","map","openmap","openmapnofog"] {
+                r.transparency.profile=Some(variant.into());
+                let [particles,full]=phase(&mut r,&mut asset,[1,2]);
+                eprintln!("TP2 profile {variant}: particles {particles}, full {full}");
+                log["profile"][variant]=serde_json::json!({"foliage_particles":particles,"full":full});
+            }
+            drop((fire_emitter,smoke_emitter));
+        } else {
+            let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
+            drop((fire_emitter, smoke_emitter));
+            let [opaque, foliage_only] = phase(&mut r, &mut asset, [0, 1]);
+            log["timing"] = serde_json::json!({"opaque": opaque, "foliage": foliage_only,
+                "foliage_particles": particles, "full": full,
+                "note": "GPU render span (first receiver pass to present end) medians over the last 16 frames of 8 interleaved 48-frame blocks"});
+        }
     } else {
         drop((fire_emitter, smoke_emitter));
     }

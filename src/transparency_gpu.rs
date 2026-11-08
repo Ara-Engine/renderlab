@@ -112,7 +112,7 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     // TP2: a material's own lobe is rasterized separately from its final composite.
     let glass = section("TP_GLASS");
     let body = &glass[glass.find("    let source_front=").unwrap()..glass.find("    rl_indirect_prepare(surface_input);").unwrap()];
-    let lobe = if crate::program::declares_reflection(program) { "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha));" } else { "discard; return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0));" };
+    let lobe = if crate::program::declares_reflection(program) { "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha));" } else { "return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0));" };
     let source = format!("{source}\nstruct TpLobeOutput {{ @location(0) position:vec4<f32>, @location(1) normal:vec4<f32> }};\n@fragment fn fs_tp_lobe(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool)->TpLobeOutput {{\n{body}\n{lobe}\n}}\n");
     if crate::program::declares_reflection(program) {
         replace_function(&source,"specular_incident","fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }")
@@ -145,6 +145,8 @@ mod tp1_tests;
 
 #[derive(Default)]
 pub(super) struct TransparencyState {
+    #[cfg(test)]
+    profile: Option<String>,
     pub stats: TransparencyStats,
     /// Particle simulation step per lit frame, seconds.
     pub step: f32,
@@ -655,6 +657,18 @@ impl Renderer {
         let slot = self.program_slot(program);
         let head = if rt { self.hardware_source.as_deref().unwrap() } else { &self.source };
         let source = glass_source(head, rt, &slot.source, slot.layout.is_some());
+        #[cfg(test)]
+        let source = {
+            let mut source = source;
+            if let Some(variant) = &self.transparency.profile {
+                if variant.contains("open") && source.contains("fn gi_prepare(") {
+                    source = replace_function(&source, "gi_prepare", "fn gi_prepare(input:SurfaceInput) { gi_rx_valid=false; }");
+                }
+                if variant.contains("map") {source = replace_function(&source,"hard_shadow",MAP_SHADOW);}
+                if variant.contains("nofog") {source = replace_function(&source,"atmosphere_surface","fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>)->vec3<f32> {return c;}");}
+            }
+            source
+        };
         let key = Sha256::digest(source.as_bytes()).into();
         (source, key)
     }
