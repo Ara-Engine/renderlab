@@ -2059,11 +2059,12 @@ impl Renderer {
             );
         }
         let casters = state.casters.as_ref().unwrap();
+        // Compare the uploaded view-projection's bits on the CPU: projection jitter,
+        // aspect and depth planes can change receivers without changing the view/FOV.
         let mut key: Vec<u64> = camera
-            .view()
+            .matrix(size.width, size.height)
             .to_cols_array()
             .iter()
-            .chain(&[camera.fov_y()])
             .map(|v| u64::from(v.to_bits()))
             .collect();
         key.extend([

@@ -2783,10 +2783,8 @@ impl Renderer {
             && !temporal
             && !interactive
             && self.soft_mode == crate::SoftShadows::Virtual;
-        // Reconstructed frames move every receiver by the jitter while Virtual's still-frame
-        // key (view and field of view) is unchanged: they look up their own receivers too.
         if soft
-            && (!virtual_frame || self.reconstruction_frame.is_some())
+            && !virtual_frame
             && let Some(state) = self.virtual_shadows.as_mut()
         {
             state.rolling = false;
