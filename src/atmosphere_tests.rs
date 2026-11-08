@@ -422,10 +422,15 @@ fn gpu_at1_quarry() {
     }
     // Timing: static frames back to back after a warm-up, every configuration twice.
     let frames: u32 = env("AT1_FRAMES").map_or(60, |s| s.parse().unwrap());
+    // Pairs that change one thing: the atmosphere (off/default), the environment source at
+    // the quarry sun (procedural), the low sun alone (off-low), then the procedural sky and
+    // volumetric fog at the low sun.
     let timing_configs = [
         ("off", Atmosphere::off(), true, quarry_travel, quarry_lux),
         ("default", Atmosphere::default(), true, quarry_travel, quarry_lux),
-        ("procedural", Atmosphere::default(), false, low, space),
+        ("procedural", Atmosphere::default(), false, quarry_travel, space),
+        ("off-low", Atmosphere::off(), true, low, space),
+        ("procedural-low", Atmosphere::default(), false, low, space),
         ("volumetric", volumetric, false, low, space),
     ];
     let mut timing = serde_json::json!({});
