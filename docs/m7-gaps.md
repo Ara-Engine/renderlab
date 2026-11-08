@@ -11,6 +11,8 @@ PP1 provides bloom, camera motion blur, camera-requested near/far gather DOF, to
 - The filmic option is an ACES-like fit, not full ACES; RGB white balance is approximate. Display-linear RGBA8 LUTs have no HDR/log shaper or file importer.
 - Bloom uses a fixed normalized six-level optical approximation. Grain is simple noise; lens dirt/diffraction/anamorphic calibration are absent. Post shader reload is not wired into the editable prelude transaction.
 - No new Unreal/reference campaign tonight; full post quality parity remains unproven. Final effect timings and image findings are in the PP1 report.
+- Optional DOF needs release profiling: the retained contended test-profile run reached 11.219 ms for non-RT quarry near DOF and 5.581 ms for raster far DOF. Camera-requested DOF remains off by default.
+- API1's planned `Settings::post` and engine-module re-exports still need wiring; the typed crate-root API works through `Engine::renderer_mut()`. Native final checks include AT1/GI defaults; upscale-preset evidence predates that merge.
 
 ## RT shadows
 

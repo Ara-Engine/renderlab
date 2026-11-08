@@ -10,6 +10,8 @@ AT1 integration was checked against `f159fcd`: raster sky is drawn first into th
 
 `PostSettings` is exported with `DepthOfField`, `ColourLut` and `Tonemapper`. Defaults: bloom redistributes 3.5% of HDR energy, 180° shutter motion blur with a 16 px maximum half extent, 3.5% edge vignette, Reinhard tone, neutral grading, no DOF/grain/aberration. DOF is requested by supplying camera lens settings in `depth_of_field`. `Renderer::set_post_settings` validates a whole replacement atomically. `PostSettings::disabled()` selects exact legacy presentation. `cut_post_motion()` suppresses motion across an explicit camera cut.
 
+API1 integration uses `Engine::renderer_mut()` today. Its documented `Settings::post` field and engine-module re-exports remain for the API owner to wire after this branch merges; the low-level crate-root types and methods above are available now.
+
 ```rust
 let mut post = renderer.post_settings();
 post.depth_of_field = Some(renderlab::DepthOfField {
@@ -38,50 +40,67 @@ TR1b integration: post reads the target-size reconstructed HDR, including `Rende
 
 Evidence is under `D:/Coding/renderlab-work/m7-pp1/`. `scripts/m7-pp1-run.py` uses the shared schedule/game-hold guards and `scripts/n8-run.py` for every test binary. `scripts/m7-pp1-batch.py` runs the lib suite, then loads the quarry once per path and sweeps all configurations. The screen includes 1920×1080 quarry and a 1280×720 bright-sky fixture with dark near silhouettes, a far surface and a small HDR highlight. Each configuration has a still capture, a moving capture and eight moving-frame timestamp samples. CPU shader validation covers all four modules and the primary composition.
 
+**Final accepted screen: `final-n`, source `ec03a46`.** All 163 lib tests passed. Native non-RT and RT each passed the full quarry plus procedural-sky sweep; native raster passed the sky sweep. All three GPU cases reported zero Vulkan validation errors, and the n8 resource guard reported no failures. Every one of the five scene/path sets has one reconstructed-HDR hash across all thirteen post variants. The retained still/moving images were inspected, including full-size quarry defaults. The atmosphere sky and fog precede TR1/post on both paths. Binary SHA-256: `7BE00E797B20A33ED8281698AAE292FB6D1CC6B88A0F896E4E2126D41167447F`. Lease `final-native-n-1` ran 356.54 seconds, 21:44:43–21:50:39 local, with no games or foreign GPU work accepted by the guard.
+
 The first retained sweep (`retained-a`) passed 149 lib tests and both full path sweeps with zero Vulkan validation errors. The hardware-filter/grain sweep (`retained-c`) also passed 149 tests and both paths. Every post variant produced the same reconstructed-HDR SHA-256 within each of its four scene/path sets. Inspection found and corrected diagonal grain correlation, then a hard inner edge in near bokeh. The corrected near-field fixture (`near-d`) passed on both paths with clean validation; its inspected images soften both sides of the silhouette.
 
-The TR1b/DC1 integration sweep (`integrated-h`, before the `f159fcd` merge) passed 153 lib tests and all seven GPU cases: native RT/non-RT quarry plus fixture; native raster fixture; Quality and Performance fixture on RT and non-RT. All had zero validation errors. Each of its nine scene/path/scale sets had one HDR hash across all thirteen post variants. Its inspected native and upscaled images are in `D:/Coding/renderlab-work/m7-pp1/integrated-h/`. The final `f159fcd` atmosphere-enabled evidence is recorded below.
+The TR1b/DC1 integration sweep (`integrated-h`, before the `f159fcd` merge) passed 153 lib tests and all seven GPU cases: native RT/non-RT quarry plus fixture; native raster fixture; Quality and Performance fixture on RT and non-RT. All had zero validation errors. Each of its nine scene/path/scale sets had one HDR hash across all thirteen post variants. Its inspected native and upscaled images are in `D:/Coding/renderlab-work/m7-pp1/integrated-h/`. The final atmosphere-enabled native evidence is recorded above.
 
-Atmosphere integration screen `atmosphere-i` (`3cbd578`, lease `atmosphere-i-24`, 158.79 seconds): 159 lib tests passed. The RT quarry and procedural-sky fixture rendered all thirteen variants, with one reconstructed-HDR hash per scene and matching off/neutral HDR. Their still/moving contact sheets were inspected. The test then failed its strict validation summary: four `VUID-VkShaderModuleCreateInfo-pCode-08737` errors, invalid `OpConstantNull` types 34/43. The first two occur during the first frame with post **disabled**, before PP1 is instantiated; the second pair occurs on the fixture's material-program reload. This is being isolated in the shared shader path; the atmosphere-enabled final run is not accepted as clean, and the batch stopped before non-RT. Logs: `atmosphere-i/native-rt.log` and `atmosphere-i/lib.log`.
+Atmosphere integration screen `atmosphere-i` (`3cbd578`, lease `atmosphere-i-24`, 158.79 seconds) exposed a shared-shader issue. Its 159 lib tests passed and its RT images rendered, but strict validation reported four `VUID-VkShaderModuleCreateInfo-pCode-08737` errors, invalid `OpConstantNull` types 34/43. The first two occurred while post was disabled, before PP1 was instantiated; the second pair occurred on the fixture's material-program reload. This failed screen is superseded by the clean final run above. Logs: `atmosphere-i/native-rt.log` and `atmosphere-i/lib.log`.
 
 The minimized `spirv-j-19` CPU screen and `spirv-val` identify R1's loop-local `ray_query` as the invalid null's type. Naga's WGSL lowering resets that opaque local at each glossy-ray iteration with `OpConstantNull`, which Vulkan prohibits. The PP1 integration fix hoists only its declaration before the loop; every ray still calls `rayQueryInitialize`. `integrated_reflection_spirv_has_no_ray_query_null` checks both composed standard shading variants after override processing. No validation or safety check is disabled. A separate retained fixture transition checks raster → traced at fixed target size, rebuilding post's primary-surface pipeline when it becomes necessary.
 
 `final-k-3` passed all 163 lib tests, including that regression, on the merged API source plus the two integration fixes. The live resource guard then stopped the first non-RT quarry load below its unchanged 2 GiB available-RAM floor while other units compiled. This is a resource-aborted run, not a GPU correctness result. Its preflight had 5.6 GiB free. Smaller atmosphere fixtures and a quarry retry with more headroom follow.
 
+`final-fixtures-l-2` again passed 163 lib tests, then the native non-RT procedural-sky sweep passed with zero validation errors. RT's raster → traced transition and the raster-only case exposed AT1's unconditional shadow-TLAS lookup: a no-shadow raster frame has no TLAS, although aerial perspective does not need it. The PP1 integration fix moves that lookup below the volumetric-scatter early return. Later cases were stopped by the live foreign-process guard (`build-script-build.exe`); sampled free RAM stayed above 6 GiB. `final-native-m` was withdrawn without acquiring a lease. The accepted `final-native-n-1` used 8 GiB launch admission with the unchanged shared 4/2 GiB n8 guard.
+
 ### Retained integration timings
 
-`integrated-h`: RTX 4070 SUPER (NVIDIA 617.14), Vulkan, Ryzen 7 7800X3D; test profile with validation, runtime commit `ba3496f`. Binary SHA-256 `B0BCBC6BC099070EF6D46E10C9785F1B925CFF7F739AE75C1D74BCD64309032F`. Lease `integrated-h-1` held the shared lock for 303.68 seconds. Timestamp medians below include post auxiliaries, enabled filters and tone; each row enables only its named effect above neutral settings, except Default. Eight moving frames per cell. Quarry is 1920×1080; fixture is 1280×720. These are diagnostic costs under shared CPU/build contention, not an optimized or quiet performance claim. Small tone-only differences and negative deltas are clock/sample noise, not savings.
+`final-n`: RTX 4070 SUPER (NVIDIA 617.14), Vulkan, Ryzen 7 7800X3D; test profile with validation, source `ec03a46`. Timestamp medians below include post auxiliaries, enabled filters and tone; each row enables only its named effect above neutral settings, except Default. Eight moving frames per cell. Quarry is 1920×1080; fixture is 1280×720. These are diagnostic intervals under shared CPU/build contention, not isolated optimized microbenchmarks or a quiet performance claim. Small tone-only differences and negative deltas are clock/sample noise, not savings. The optional near-DOF non-RT quarry result (11.219 ms) and raster DOF costs need a release-profile investigation; they are retained here rather than replaced by the lower earlier-run samples.
 
 | Configuration | RT quarry ms | Non-RT quarry ms | RT sky ms | Non-RT sky ms | Raster sky ms |
 |---|---:|---:|---:|---:|---:|
-| Legacy off | 0.013 | 0.012 | 0.056 | 0.035 | 0.007 |
-| Neutral | 0.092 | 0.080 | 0.089 | 0.066 | 0.013 |
-| Default | 1.427 | 1.050 | 1.261 | 1.259 | 0.433 |
-| Bloom | 0.571 | 0.496 | 0.468 | 0.493 | 0.221 |
-| Motion blur | 0.578 | 0.523 | 0.992 | 0.993 | 0.382 |
-| Far DOF | 2.435 | 1.896 | 2.764 | 2.267 | 1.273 |
-| Near DOF | 1.246 | 2.006 | 1.497 | 2.110 | 1.457 |
-| White balance/grade | 0.026 | 0.058 | 0.068 | 0.073 | 0.013 |
-| Filmic tone | 0.087 | 0.059 | 0.039 | 0.078 | 0.013 |
-| 3D LUT | 0.185 | 0.076 | 0.089 | 0.016 | 0.065 |
-| Vignette | 0.105 | 0.068 | 0.059 | 0.065 | 0.013 |
-| Grain | 0.120 | 0.077 | 0.065 | 0.015 | 0.032 |
-| Chromatic aberration | 0.224 | 0.090 | 0.095 | 0.018 | 0.061 |
+| Legacy off | 0.022 | 0.051 | 0.009 | 0.027 | 0.009 |
+| Neutral | 0.065 | 0.193 | 0.037 | 0.059 | 0.037 |
+| Default | 0.868 | 0.748 | 0.331 | 0.732 | 0.804 |
+| Bloom | 0.241 | 0.370 | 0.217 | 0.361 | 0.436 |
+| Motion blur | 0.581 | 1.637 | 0.373 | 0.571 | 0.456 |
+| Far DOF | 1.715 | 1.399 | 1.855 | 2.410 | 5.581 |
+| Near DOF | 1.642 | 11.219 | 2.404 | 2.037 | 4.336 |
+| White balance/grade | 0.075 | 0.218 | 0.068 | 0.058 | 0.089 |
+| Filmic tone | 0.061 | 0.265 | 0.075 | 0.082 | 0.082 |
+| 3D LUT | 0.106 | 0.110 | 0.121 | 0.017 | 0.120 |
+| Vignette | 0.076 | 0.181 | 0.084 | 0.074 | 0.112 |
+| Grain | 0.130 | 0.037 | 0.234 | 0.069 | 0.126 |
+| Chromatic aberration | 0.111 | 0.099 | 0.130 | 0.085 | 0.121 |
 
 ### Inspected images
 
 Images and JSON remain ignored on D:. Contact sheets compare all thirteen settings. Native quarry inspection retained rock detail, texture and silhouettes with a subtle default finish. The bright-sky silhouettes expose bloom, near/far bokeh and edge colour shifts. Grain was checked in a flat crop: adjacent/diagonal noise correlations below 0.01 after replacing the correlated sine hash. Quality and Performance output dimensions and post radii are correct; nearest internal depth makes reduced-resolution depth edges coarser.
 
-- [RT quarry still contact sheet](D:/Coding/renderlab-work/m7-pp1/integrated-h/native/rt/quarry/inspect-still.png)
-- [Non-RT quarry moving contact sheet](D:/Coding/renderlab-work/m7-pp1/integrated-h/native/nonrt/quarry/inspect-moving.png)
-- [RT bright-sky moving contact sheet](D:/Coding/renderlab-work/m7-pp1/integrated-h/native/rt/bright-sky/inspect-moving.png)
-- [Raster bright-sky still contact sheet](D:/Coding/renderlab-work/m7-pp1/integrated-h/native/raster/bright-sky/inspect-still.png)
+- [RT quarry still contact sheet](D:/Coding/renderlab-work/m7-pp1/final-n/native/rt/quarry/inspect-still.png)
+- [Non-RT quarry moving contact sheet](D:/Coding/renderlab-work/m7-pp1/final-n/native/nonrt/quarry/inspect-moving.png)
+- [RT bright-sky moving contact sheet](D:/Coding/renderlab-work/m7-pp1/final-n/native/rt/bright-sky/inspect-moving.png)
+- [Non-RT bright-sky still contact sheet](D:/Coding/renderlab-work/m7-pp1/final-n/native/nonrt/bright-sky/inspect-still.png)
+- [Raster bright-sky moving contact sheet](D:/Coding/renderlab-work/m7-pp1/final-n/native/raster/bright-sky/inspect-moving.png)
 - [Quality RT default, moving](D:/Coding/renderlab-work/m7-pp1/integrated-h/quality/rt/bright-sky/default-moving.png)
 - [Performance non-RT default, moving](D:/Coding/renderlab-work/m7-pp1/integrated-h/performance/nonrt/bright-sky/default-moving.png)
 - [Quality non-RT near bokeh](D:/Coding/renderlab-work/m7-pp1/integrated-h/quality/nonrt/bright-sky/dof-near-still.png)
 - [Performance RT all effects, moving](D:/Coding/renderlab-work/m7-pp1/integrated-h/performance/rt/bright-sky/inspect-moving.png)
 
 These local evidence links require this machine; no private quarry asset or generated bulk output is committed.
+
+Final RT quarry, default post, moving:
+
+![RT quarry default post](D:/Coding/renderlab-work/m7-pp1/final-n/native/rt/quarry/default-moving.png)
+
+Final non-RT procedural sky, default post, still:
+
+![Non-RT sky default post](D:/Coding/renderlab-work/m7-pp1/final-n/native/nonrt/bright-sky/default-still.png)
+
+Implementation/refinement occupied approximately 19:00–19:59 local; integration, queueing and verification followed through 21:51. Owned verification leases total 24.32 minutes, including lib tests, startup and captures; this is separate from frame time and excludes queue waits. Final report/handoff remained inside the three-hour box. No owned GPU lease or build remains active.
+
+Cleanup blocker: automatic execution approval rejected recursive deletion of the verified own target `D:/Coding/renderlab-work/m7-pp1/target`, including a standalone `Remove-Item -LiteralPath ... -Recurse -Force` attempt. Its only stated reason was “blocked by policy.” The Cargo target and copied binaries therefore remain on D: for the root/user to remove; no recursive-delete workaround was attempted. Logs/JSON and inspected PNGs remain on D: as required. No raw HDR dump was written by these sweeps.
 
 ## Gaps and limits
 
@@ -91,4 +110,7 @@ These local evidence links require this machine; no private quarry asset or gene
 - White balance is a bounded RGB camera adaptation, not a full chromatic-adaptation transform; the optional filmic fit can oversaturate highlights. The LUT is SDR/display-linear RGBA8, without HDR/log shapers or `.cube` file import.
 - Bloom is a normalized pyramidal optical approximation with a fixed six-level shape. Lens dirt, diffraction, anamorphic profiles and lens calibration are absent. Grain is lightweight noise, not a scanned film model.
 - Post shaders are compiled library stages, not part of the existing editable prelude reload transaction. Upscaled post depth comes from nearest current internal hits; there is no separate reconstructed depth or multi-layer attachment, so reduced-resolution depth edges can remain coarse.
+- Optional DOF has unresolved cost spikes in the retained test-profile run (11.219 ms non-RT quarry near DOF; 5.581 ms raster far DOF). DOF remains camera-requested and off by default. Release profiling is still needed.
+- Final native checks include AT1/GI defaults. Quality/Performance evidence is the clean earlier TR1b/DC1 screen; these presets were not rerun with AT1 defaults after the resource-aborted fixture batch.
+- API1 still needs its planned `Settings::post` field/re-exports. Use `Engine::renderer_mut()` in the meantime. AT1 hardware raster volumetric fog still requires a prepared TLAS; this unit verified default aerial/height fog with volumetric fog off.
 - No claim of Unreal-equivalent post quality, speed superiority, or film-accurate DOF/motion is established by this overnight unit.
