@@ -83,6 +83,9 @@ pub struct MaterialDescriptor<'a> {
     /// Named values for the program's `struct Parameters`, checked by name and type.
     /// Omitted members use the program's DEFAULT_PARAMETERS (zero when absent).
     pub parameters: &'a [(&'a str, Value)],
+    /// TP1: Some draws this material in the transparent pass instead of the opaque paths
+    /// (`crate::Transparency`). None is opaque.
+    pub transparency: Option<crate::Transparency>,
 }
 impl Default for MaterialDescriptor<'_> {
     fn default() -> Self {
@@ -98,6 +101,7 @@ impl Default for MaterialDescriptor<'_> {
             thin: false,
             program: None,
             parameters: &[],
+            transparency: None,
         }
     }
 }
@@ -107,6 +111,8 @@ pub struct Material {
     pub(crate) normal_mapped: bool,
     pub(crate) double_sided: bool,
     pub(crate) thin: bool,
+    /// TP1: transparent materials draw only in the transparent pass.
+    pub(crate) transparency: Option<crate::Transparency>,
     /// Raster group 2. Streamed textures bind the renderer's 1x1 defaults here, so this
     /// group never retains their levels; passes that sample build a group of the current
     /// levels instead (`Renderer::sampling_group`).
@@ -138,6 +144,11 @@ impl MaterialDescriptor<'_> {
         }
         if !self.normal_scale.is_finite() {
             return Err(Error::InvalidInput("normal scale must be finite"));
+        }
+        if self.transparency.is_some_and(|t| !t.valid()) {
+            return Err(Error::InvalidInput(
+                "transparency needs opacity in [0,1], IOR in [1,3] and thickness in [0,1] m",
+            ));
         }
         for (binding, role) in [
             (self.normal_texture, TextureRole::NormalLinear),
@@ -181,6 +192,10 @@ impl MaterialDescriptor<'_> {
                 _ => 0,
             });
         bytes[40..44].copy_from_slice(&variance.to_ne_bytes());
+        // TP1: the last word, zero for opaque materials (WGSL `transparent_opacity`).
+        bytes[44..48].copy_from_slice(
+            &crate::Transparency::word(self.transparency.as_ref()).to_ne_bytes(),
+        );
         bytes
     }
 }
