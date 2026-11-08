@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--no-replay", action="store_true")
     parser.add_argument("--no-write", action="store_true", help="hash the frames without writing them")
     parser.add_argument("--track", default="q-walk", help="q-walk, or a TR0 input track (q-disocclusion, q-sun-fast, s2g-*)")
+    parser.add_argument("--sequence", help="a quarry sequence file instead of the track's (the visible-sky walk)")
+    parser.add_argument("--sky", action="store_true", help="primary misses show the bound RLE2 map")
     args = parser.parse_args()
     text = args.variants
     variants = json.loads(Path(text).read_text() if not text.lstrip().startswith("{") else text)
@@ -70,6 +72,10 @@ def main():
             if args.track.startswith("s2g-"):
                 manifest = {k: v for k, v in manifest.items() if k not in QUARRY or k == "sequence"}
                 manifest["scene"] = S2G_SCENE
+        if args.sequence:
+            manifest["sequence"] = args.sequence
+        if args.sky:
+            manifest["visible_environment"] = True
         if frames is not None:
             manifest["frames"] = frames
         target = plan_dir / f"manifest-{step}.json"

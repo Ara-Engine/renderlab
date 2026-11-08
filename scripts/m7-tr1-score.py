@@ -70,7 +70,8 @@ def score(args):
     if args.track == "q-walk":
         recipe = json.loads((TR0 / "runs" / args.case / "recipe.json").read_text())
     else:
-        recipe = dict(json.loads((TR0 / "inputs" / (args.track + ".json")).read_text()), track=args.track)
+        source = Path(args.sequence) if args.sequence else TR0 / "inputs" / (args.track + ".json")
+        recipe = dict(json.loads(source.read_text()), track=args.track)
     prefix = "L"
     candidate_dir = Path(args.candidate)
     exposure = json.loads((candidate_dir / "exposure.json").read_text())["factors"] \
@@ -95,7 +96,8 @@ def score(args):
             continue
         archive = path.with_suffix(".npz")
         if archive.exists():
-            if meta.get("camera_background") != [0., 0., 0.]:
+            # The visible-sky walk's references integrate the environment at primary misses.
+            if meta.get("camera_background") != (None if args.sky else [0., 0., 0.]):
                 raise ValueError("reference must apply black to primary misses before integration")
             if moving_light and "to_light" not in frame:
                 raise ValueError("a moving-light track needs references that record their sun")
@@ -411,6 +413,8 @@ def main():
     p.add_argument("--track", default="q-walk", help="registered track (TR0 inputs/<track>.json)")
     p.add_argument("--references", help="reference directory (default U0b quarry-final)")
     p.add_argument("--ages", help="external geometry ages: <dir>/<track>/fNNN.npz")
+    p.add_argument("--sequence", help="the track's input timeline when it is not one of TR0's")
+    p.add_argument("--sky", action="store_true", help="references with the environment visible (camera_background null)")
     p = sub.add_parser("compare")
     p.add_argument("score")
     p.add_argument("--out", required=True)

@@ -13,6 +13,11 @@ retention correction 2026-11-08; docs/m7-tr1b.md).
                  then the static camera's fixed ages.
   tsr            Unreal. TSR Epic on a quarry track (TR0's `run`, U0's original package),
                  kept as lossless native frames plus TR0's exposure factors.
+  sky            GPU. The visible-sky walk's references (D:/Coding/renderlab-work/m7-refs-sky):
+                 quarry-final's protocol with the backdrop on the environment, this branch's
+                 pinned test binary, ages first, then compacted.
+  sky-identity   GPU. One existing quarry manifest traced by quarry-final's binary and this
+                 branch's: every array equal (the null-backdrop change touches nothing else).
   compact-check  CPU. One archive: compact size and the mean-code/noise change it causes.
 
 Compact format (m7-refs-compact-v1): L0, L1, D0, D1 as float16 already exposed at the
@@ -500,6 +505,141 @@ def pack_tsr(args):
     print(args.label, "packed", len(loose), (frames / "frames.npz").stat().st_size, flush=True)
 
 
+SKY = Path("D:/Coding/renderlab-work/m7-refs-sky")
+D_BIN = Path("D:/Coding/renderlab-work/m7-tr1/bin")
+
+
+def quarry_trace(binary, manifest, data, label, batch, note):
+    """One lease of U0b's quarry tracer over `manifest` (bounded-as-v1 replay, deferred
+    compaction), then every pending state compacted with U0b's compactor."""
+    plan = dict(steps=[dict(name="trace", binary=binary, test_name="reference::quarry_tests::gpu_reference_quarry",
+                            env={"RENDERLAB_M7_QUARRY_MANIFEST": str(manifest), "RENDERLAB_M7_REFERENCE_OUT": str(data),
+                                 "RENDERLAB_M7_QUARRY_REPLAY_POLICY": "bounded-as-v1",
+                                 "RENDERLAB_M7_REFERENCE_BATCH": str(batch), "RENDERLAB_M7_DEFER_REFERENCE_COMPACT": "1"})])
+    plan_path = data.parent / f"plan-{label}.json"
+    plan_path.write_text(json.dumps(plan, indent=1))
+    while available_gib() < 6.5:
+        time.sleep(5)
+    subprocess.run(["py", "-3", "-B", str(REPO / "scripts/m7-tr1-wait.py"), label, str(plan_path), "--minutes", "14",
+                    "--wait-minutes", "150", "--note", note], cwd=REPO)
+    environment = {k: v for k, v in os.environ.items() if k != "RENDERLAB_M7_DEFER_REFERENCE_COMPACT"}
+    for pending in sorted(data.glob("*.compact-pending.json")):
+        name = pending.name.removesuffix(".compact-pending.json")
+        subprocess.run(["py", "-3", "-B", str(REPO / "scripts/m7-u0b-score.py"), "compact", str(data), name],
+                       cwd=REPO, env=environment, check=True)
+
+
+def sky_identity(args):
+    """An existing quarry manifest (quarry-final's q-disocclusion-000, black backdrop) traced
+    by quarry-final's binary and by this branch's binary in one sequence: every scored and
+    geometry array must be equal, and equal to the retained quarry-final archive."""
+    base = json.loads(Path("E:/renderlab-work/m7-u0b/quarry-unit-sequence.json").read_text())
+    entry = next(f for f in base["frames"] if f["name"] == "q-disocclusion-000")
+    root = SKY / "identity"
+    results = {}
+    for binary in ("u0b-997151eb", args.binary):
+        data = root / binary / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        if binary == "u0b-997151eb" and not (D_BIN / "u0b-997151eb.exe").exists():
+            shutil.copyfile(BIN / "u0b-997151eb.exe", D_BIN / "u0b-997151eb.exe")
+        manifest = root / binary / "manifest.json"
+        manifest.write_text(json.dumps(dict(base, frames=[entry]), indent=1))
+        if not (data / "q-disocclusion-000.npz").exists():
+            quarry_trace(binary, manifest, data, f"skyid-{binary}-{uuid.uuid4().hex[:6]}", 1,
+                         "TR1b reference identity check, functional")
+        with np.load(data / "q-disocclusion-000.npz") as z:
+            results[binary] = {k: z[k] for k in z.files}
+        results[binary + ":sha"] = sha(D_BIN / f"{binary}.exe")
+    with np.load(QUARRY / "q-disocclusion-000.npz") as z:
+        retained = {k: z[k] for k in z.files}
+    new, old = results[args.binary], results["u0b-997151eb"]
+    report = dict(binaries={b: results[b + ":sha"] for b in ("u0b-997151eb", args.binary)},
+                  arrays=sorted(new), new_equals_old={k: bool(np.array_equal(new[k], old[k])) for k in sorted(new)},
+                  new_equals_quarry_final={k: bool(np.array_equal(new[k], retained[k])) for k in sorted(new) if k in retained},
+                  old_equals_quarry_final={k: bool(np.array_equal(old[k], retained[k])) for k in sorted(old) if k in retained})
+    for name in ("new_equals_old", "new_equals_quarry_final", "old_equals_quarry_final"):
+        report[name + "_all"] = all(report[name].values())
+    save(root / "identity.json", report)
+    print(json.dumps({k: v for k, v in report.items() if k.endswith("_all") or k == "binaries"}, indent=1))
+
+
+def sky(args):
+    """The visible-sky walk's references: quarry-final's protocol (quarry tracer, 1024 spp,
+    bounded-as-v1 replay, zero shutter, the quarry's sun and RLE2 environment) with the camera
+    backdrop left on the environment (`camera_background`: null), traced by this branch's test
+    binary (pinned by hash). Geometry ages come from the full archives first, then each state
+    is compacted into m7-refs-sky."""
+    binary = D_BIN / f"{args.binary}.exe"
+    pin = sha(binary)
+    base = json.loads(Path("E:/renderlab-work/m7-u0b/quarry-unit-sequence.json").read_text())
+    sequence = SKY / "sky-walk.json"
+    frames = json.loads(sequence.read_text())["frames"]
+    key = lambda p: np.asarray(p["eye"] + p["target"], "<f4").tobytes()
+    states = {}
+    for i, p in enumerate(frames):
+        states.setdefault(key(p), (i, p))
+    names = {k: f"sky-walk-{i:03}" for k, (i, _) in states.items()}
+    work = SKY / "work"
+    data = work / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    manifest = work / "manifest.json"
+    manifest.write_text(json.dumps(dict(base, camera_background=None, frames=[
+        dict(name=names[k], open={c: p[c] for c in ("eye", "target")}, close={c: p[c] for c in ("eye", "target")},
+             fov_y=p["fov_y_radians"], width=1920, height=1080, samples=1024, sky_only=False)
+        for k, (i, p) in states.items()]), indent=1))
+    stalls = 0
+    while True:
+        missing = [n for n in names.values() if not (data / (n + ".npz")).exists() and not (SKY / (n + ".npz")).exists()]
+        if not missing:
+            break
+        quarry_trace(args.binary, manifest, data, f"sky-{uuid.uuid4().hex[:8]}", args.batch,
+                     "TR1b visible-sky walk references, functional, no timing claim")
+        now = [n for n in names.values() if not (data / (n + ".npz")).exists() and not (SKY / (n + ".npz")).exists()]
+        stalls = stalls + 1 if len(now) == len(missing) else 0
+        if stalls >= 4:
+            raise SystemExit("four leases rendered no sky-walk state")
+        print("sky references", len(names) - len(now), "of", len(names), flush=True)
+    if not all((SKY / (n + ".npz")).exists() for n in names.values()):
+        # Ages from the full archives, frame by frame: TR0's rule (+1 on an identical view,
+        # else nearest previous centre / same instance / 2 % depth).
+        s2g = load("m7-tr0-s2g")
+        ages_dir = SKY / "ages/sky-walk"
+        ages_dir.mkdir(parents=True, exist_ok=True)
+        previous, previous_key, age, records = None, None, None, []
+        for i, p in enumerate(frames):
+            with np.load(data / (names[key(p)] + ".npz")) as z:
+                current = {c: z[c] for c in ("world", "hit", "depth")}
+            if i == 0:
+                age = np.zeros(current["depth"].shape, "u1")
+            elif key(p) == previous_key:
+                age = np.minimum(age.astype("u2") + 1, 255).astype("u1")
+            else:
+                age = s2g.advance_age(previous, current, frames[i - 1], p, age)
+            np.savez_compressed(ages_dir / f"f{i:03}.npz", age=age)
+            records.append(dict(frame=i, state=names[key(p)], age0=int((age == 0).sum()), age32=int((age >= 32).sum())))
+            previous, previous_key = current, key(p)
+        save(SKY / "ages/protocol.json", dict(records=records, source_sequences={"sky-walk": sha(sequence)},
+             definition="TR0's fixed external ages (m7-tr0-s2g.py): +1 on an identical view; else nearest previous centre, "
+                        "same instance, 2 % depth, age 0 on rejection; misses keep age only where the previous pixel also missed."))
+        removed = []
+        for k, (i, p) in states.items():
+            name = names[k]
+            meta = json.loads((data / (name + ".json")).read_text())
+            if meta.get("accepted_for_scoring") is not True or meta.get("camera_background") is not None:
+                raise ValueError(name + ": not accepted, or the backdrop was not the environment")
+            meta.update(reference_binary_sha256=pin, source_inputs=str(sequence), source_inputs_sha256=sha(sequence),
+                        manifest=str(manifest), visible_sky="primary misses integrate the RLE2 environment (camera_background null)")
+            with np.load(data / (name + ".npz")) as z:
+                arrays = {c: z[c] for c in z.files}
+            write_compact(SKY / (name + ".npz"), arrays, meta, -14.0, data / (name + ".npz"))
+            for f in sorted(data.glob(name + "*")):
+                if f.suffix in (".npz", ".f32", ".bin", ".png"):
+                    removed.append(dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)))
+                    f.unlink()
+        save(work / "removed.json", removed)
+    print("sky-walk references complete", len(names), flush=True)
+
+
 def compact_check(args):
     with np.load(args.archive) as z:
         arrays = {k: z[k] for k in z.files}
@@ -527,12 +667,17 @@ def main():
     p.add_argument("--wait-seconds", type=int, default=5400)
     p = sub.add_parser("pack-tsr")
     p.add_argument("label")
+    p = sub.add_parser("sky")
+    p.add_argument("--binary", required=True, help="staged test binary under D:/Coding/renderlab-work/m7-tr1/bin")
+    p.add_argument("--batch", type=int, default=6)
+    p = sub.add_parser("sky-identity")
+    p.add_argument("--binary", required=True)
     p = sub.add_parser("compact-check")
     p.add_argument("archive")
     p.add_argument("--exposure", type=float, default=-14.0)
     args = parser.parse_args()
-    {"disocclusion": disocclusion, "s2g": s2g, "qsun": qsun, "tsr": tsr, "pack-tsr": pack_tsr,
-     "compact-check": compact_check}[args.command](args)
+    {"disocclusion": disocclusion, "s2g": s2g, "qsun": qsun, "tsr": tsr, "pack-tsr": pack_tsr, "sky": sky,
+     "sky-identity": sky_identity, "compact-check": compact_check}[args.command](args)
 
 
 if __name__ == "__main__":
