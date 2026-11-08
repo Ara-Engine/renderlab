@@ -80,6 +80,8 @@ const GI_F_TRILINEAR:u32=1u;
 const GI_F_FIELD:u32=2u;
 // Rotate each cell's directions about its normal by an angle its key fixes.
 const GI_F_ROTATE:u32=4u;
+// Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
+const GI_F_STATS:u32=8u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and

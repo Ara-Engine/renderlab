@@ -19,7 +19,8 @@ use crate::primary_ray::{TRACED_DRAWS, placement_table};
 const HEADER_WORDS: u64 = 64;
 /// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
 const SLOT_WORDS: u64 = 16 + 28;
-const COUNTER_WORDS: u64 = 16;
+/// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
+const COUNTER_WORDS: u64 = 32;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
 const FRAME_BYTES: usize = 64 + 64 * 16;
@@ -238,6 +239,30 @@ pub struct IndirectCounters {
     /// Cells probed this frame whose fixed probe lines each met two surface layers
     /// (shaders/gi_cache.wgsl gi_probe_line); their pixels read finer levels.
     pub splits: u32,
+    /// The probe's work, counted on profiled frames only (zero otherwise).
+    pub probe: ProbeCounters,
+}
+
+/// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
+/// covered pixel, covered pixels, tile-table insert calls and their probe steps, unique cells
+/// from pixels, added for orphans' parents and by refinement, table finds and how many found
+/// a cell, refinement walks (pixel, bin and level), tiles that refined, the most unique cells
+/// in one tile, and tiles by unique cells (< 128, < 256, < 512, full).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProbeCounters {
+    pub tiles: u32,
+    pub pixels: u32,
+    pub inserts: u32,
+    pub steps: u32,
+    pub cells: u32,
+    pub parents: u32,
+    pub refined: u32,
+    pub finds: u32,
+    pub found: u32,
+    pub walks: u32,
+    pub refine_tiles: u32,
+    pub max_cells: u32,
+    pub tiles_by_cells: [u32; 4],
 }
 
 struct Resources {
@@ -849,6 +874,21 @@ impl Renderer {
             orphans_no_surface: w[13],
             orphans_inside: w[14],
             splits: w[15],
+            probe: ProbeCounters {
+                tiles: w[16],
+                pixels: w[17],
+                inserts: w[18],
+                steps: w[19],
+                cells: w[20],
+                parents: w[21],
+                refined: w[22],
+                finds: w[23],
+                found: w[24],
+                walks: w[25],
+                refine_tiles: w[26],
+                max_cells: w[27],
+                tiles_by_cells: [w[28], w[29], w[30], w[31]],
+            },
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1264,9 +1304,11 @@ impl Renderer {
         header[0] = u32::from(run);
         header[1] = r.slots - 1;
         let field = self.environment.selected.is_some();
+        // Probe statistics (GI_F_STATS) on profiled frames only.
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
-            | (u32::from(s.rotate_directions) << 2);
+            | (u32::from(s.rotate_directions) << 2)
+            | (u32::from(self.gi.profile.is_some()) << 3);
         header[3] = self.gi.frame;
         let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32 * s.cell_pixels;
         header[4] = footprint.to_bits();
