@@ -110,7 +110,7 @@ impl Default for Reconstruction {
             spatial_start: true,
             rotate_directions: true,
             motion_box: true,
-            view_budget: 0.5,
+            view_budget: 0.25,
             scale: RenderScale::Native,
         }
     }
@@ -964,8 +964,7 @@ impl Renderer {
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from(moved) << 2
-            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3
-            | u32::from(std::env::var_os("RENDERLAB_MQ2_START").is_some()) << 4;
+            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -996,7 +995,7 @@ impl Renderer {
             settings.sharp_window,
             settings.start_window,
             settings.start_radius,
-            screen_view_budget(settings.view_budget),
+            settings.view_budget,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
@@ -1303,9 +1302,14 @@ mod tests {
             assert!(!other.contains("ViewDependence"));
             assert_eq!(standard.contains("let d=view_dependence(s,input);"), traced);
             for source in [&standard, &other] {
-                assert_eq!(source.matches("fn tr1_view_hint(").count(), usize::from(traced));
                 assert_eq!(
-                    source.matches("tr1_view_hint(surface_output,surface_input,id,size)").count(),
+                    source.matches("fn tr1_view_hint(").count(),
+                    usize::from(traced)
+                );
+                assert_eq!(
+                    source
+                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .count(),
                     usize::from(traced)
                 );
             }
@@ -1339,12 +1343,4 @@ mod tests {
             );
         }
     }
-}
-
-/// MQ2 screen hook (removed before delivery): RENDERLAB_MQ2_VIEW overrides the view budget.
-fn screen_view_budget(budget: f32) -> f32 {
-    std::env::var("RENDERLAB_MQ2_VIEW")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(budget)
 }

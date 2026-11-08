@@ -60,10 +60,6 @@ const TR1_SPATIAL_START:u32=2u;
 // nine samples, no mean or variance: P0's box, docs/m7-p0-claims.md).
 const TR1_MOVED:u32=4u;
 const TR1_BOX:u32=8u;
-// MQ2: where the view budget caps a history's window, this frame's observation is the
-// surface's spatial start (its 3x3 samples interpolated to the pixel centre) rather than the
-// pixel's own jittered sample.
-const TR1_VIEW_START:u32=16u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -312,7 +308,7 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 // bilinear weighted sum of their weights; Catmull-Rom over 4x4 when every tap shows it,
 // limited to the inner taps' range (history only: the undershoot fix, not a current-frame
 // box). `window` is the window the fetch allows.
-struct Tr1History { colour:vec3<f32>, weight:f32, window:f32, viewed:bool };
+struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     if s.id!=0u && tr1.shadow_lo.w!=0.0 && !tr1_skinned(primary_placements[s.id-1u]&0x1fffffffu)
         && all(s.point.xyz>=tr1.shadow_lo.xyz) && all(s.point.xyz<=tr1.shadow_hi.xyz) {
@@ -387,7 +383,7 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         let drift=s.view*tr1_view_turn(s);
         if drift>0.0 {
             let cap=1.0+tr1.starts.w/drift;
-            if cap<h.window {h.window=cap;h.viewed=true;}
+            h.window=min(h.window,cap);
         }
     }
     // MQ1: while placements move, light they change on other surfaces (moving shadows,
@@ -542,13 +538,8 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
         // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
         let w=tr1_weight(p);
         let n=clamp(h.weight+w,1.0,max(h.window,1.0));
-        var x=sample;
-        if h.viewed && (tr1.flags.y&TR1_VIEW_START)!=0u {
-            let start=tr1_spatial(p,s.id,size);
-            if start.w>0.0 {x=start.xyz;}
-        }
         // m' = m + w (x - m) / n', with the multiply-add pinned so replays are bit-identical.
-        return vec4<f32>(fma(x-h.colour,vec3<f32>(w/n),h.colour),n);
+        return vec4<f32>(fma(sample-h.colour,vec3<f32>(w/n),h.colour),n);
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
         let start=tr1_spatial(p,s.id,size);
