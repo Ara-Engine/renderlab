@@ -6,8 +6,8 @@ One section per feature. Each lists the measured or inspected gaps that remain a
 
 [RTDEF](rtdef.md) compares raster + Exact with traced + Interactive + the latest
 default TR1b on main `ae95d3a`. The quarry improves, but **the RT default is not
-promoted**: S2's cold and moving disk penumbrae are visibly grainier than raster
-+ Exact, including at ordinary exposure and at the registered +4-stop stress.
+promoted**: S2's cold and moving disk penumbrae are visibly grainier than
+raster + Exact, including at ordinary exposure and at the registered +4-stop stress.
 The cold disk witness is 14.0832 display codes RMS versus raster + Exact's
 12.6000 and retained HRT1's 13.6655. Settled TR1 substantially improves it.
 

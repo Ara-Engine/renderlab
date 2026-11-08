@@ -5,7 +5,6 @@ scores only the registered still poses; the short motion loop is inspected, not 
 a fabricated moving reference. No Unreal or reference renderer runs here.
 """
 import csv
-import hashlib
 import importlib.util
 import json
 import os
@@ -155,6 +154,82 @@ def witness():
     save(ROOT / 's2-grain-diagnostic.json', rows)
 
 
+def comparison():
+    rows = json.loads((ROOT / 's2-per-frame.json').read_text())
+    index = {(r['case'], r['frame'], r['mode']): r for r in rows}
+    results = {}
+    for metric in ('linear_hdr', 'display_+0_codes', 'display_+4_codes'):
+        misses = {'HRT1': [], 'Raster-Exact': []}
+        for (case, frame, mode), row in index.items():
+            if mode != 'TR1':
+                continue
+            candidate = row['radiance'][metric]['rms']
+            for comparator in misses:
+                baseline = index[(case, frame, comparator)]['radiance'][metric]['rms']
+                if candidate > baseline:
+                    misses[comparator].append(dict(case=case, frame=frame, candidate=candidate, baseline=baseline))
+        results[metric] = dict(frames=1280, misses=misses)
+    save(ROOT / 's2-comparison.json', results)
+
+
+def timing():
+    data = json.loads((ROOT / 'timing/tr1.json').read_text())
+    configurations = {}
+    for name, variant in data['variants'].items():
+        visits = [[r for f, r in enumerate(visit) if f % 32 >= 16] for visit in variant['visits'][1:]]
+        assert len(visits) == 8 and all(len(v) == 32 and all(r and r['span_ms'] > 0 for r in v) for v in visits)
+        metrics = {}
+        for metric in ('span_ms', 'receiver_ms', 'shading_ms', 'reconstruction_ms', 'present_ms'):
+            values = [r[metric] for visit in visits for r in visit if r[metric] is not None]
+            metrics[metric] = (dict(n=len(values), **dict(zip(('p50', 'p95', 'p99'),
+                                                         np.quantile(values, [.5, .95, .99]).tolist())))
+                               if values else None)
+        configurations[name] = dict(metrics=metrics, visit_span_medians=[float(np.median([r['span_ms'] for r in v])) for v in visits])
+    run = next(p for p in (ROOT / 'runs').glob('timing-*.json') if not p.name.endswith(('preflight.json', 'deferred.json')))
+    guard = json.loads(run.read_text())
+    pre = json.loads(run.with_name(run.stem + '-preflight.json').read_text())
+    identity = json.loads((ROOT / 'input-identities.json').read_text())[str(ROOT / 'bin/rtdef-tests.exe')]
+    save(ROOT / 'timing-summary.json', dict(configurations=configurations, guard=str(run),
+         guard_seconds=guard['seconds'], gpu=pre['gpu'], binary_sha256=identity['sha256'],
+         minimum_available_mbytes=min(r['available_mbytes'] for r in guard['resource_samples']),
+         max_rustc=max(r['rustc_count'] for r in guard['resource_samples']),
+         guard_foreign_builds=sum(len(r['builds']) for r in guard['samples']),
+         guard_games=sum(len(r['games']) for r in guard['samples'])))
+
+
+def chart():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    rows = json.loads((ROOT / 's2-grain-diagnostic.json').read_text())
+    data = {(r['frame'], r['mode']): r['grain_display_plus4']['rms'] for r in rows if r['case'] == 'camera-0.25px-r0.04'}
+    cost = json.loads((ROOT / 'timing-summary.json').read_text())['configurations']
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), layout='constrained')
+    x = np.arange(3)
+    for mode, offset, colour in [('Raster-Exact', -.18, '#707983'), ('TR1', .18, '#137a70')]:
+        values = [data[(f, mode)] for f in (0, 31, 95)]
+        bars = axes[0].bar(x + offset, values, width=.36, label=mode, color=colour)
+        axes[0].bar_label(bars, fmt='%.2f', padding=3)
+    axes[0].set(xticks=x, xticklabels=['Cold 0', 'Moving 31', 'Hold 95'], ylabel='+4-stop display RMS (codes)',
+                title='S2 single-surface floor penumbra', ylim=(0, 26))
+    axes[0].legend(frameon=False)
+    names = ['raster-exact', 'traced', 'tr1']
+    p50 = [cost[n]['metrics']['span_ms']['p50'] for n in names]
+    p95 = [cost[n]['metrics']['span_ms']['p95'] for n in names]
+    bars = axes[1].bar(x, p50, color=['#707983', '#a98637', '#137a70'],
+                       yerr=[np.zeros(3), np.array(p95) - p50], capsize=4)
+    axes[1].bar_label(bars, fmt='%.2f', padding=3)
+    axes[1].set(xticks=x, xticklabels=['Raster Exact', 'Traced 8', 'Traced 8 + TR1'],
+                ylabel='GPU rendered span (ms)', title='Quarry static p50; whisker p95', ylim=(0, 25))
+    for ax in axes:
+        ax.spines[['top', 'right']].set_visible(False)
+        ax.set_axisbelow(True)
+        ax.grid(axis='y', alpha=.18)
+    fig.suptitle('RTDEF: held views improve; cold and moving grain block promotion', fontsize=14)
+    fig.savefig(ROOT / 'comparison.png', dpi=150)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
     import sys
     start = time.monotonic()
@@ -165,4 +240,10 @@ if __name__ == '__main__':
         s2()
     if action in ('witness', 'all'):
         witness()
+    if action in ('comparison', 'all'):
+        comparison()
+    if action in ('timing', 'all'):
+        timing()
+    if action in ('chart', 'all'):
+        chart()
     print('CPU score seconds', time.monotonic() - start)

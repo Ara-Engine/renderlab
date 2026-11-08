@@ -17,7 +17,6 @@ ROOT = Path('D:/Coding/renderlab-work/rtdef')
 REPO = Path(__file__).resolve().parents[1]
 OWNER = 'rtdef'
 TR1 = 'renderer::fresh_shadow_tests::primary_ray_gpu_tests::visibility_buffer_tests::temporal_reconstruction_tests::gpu_tr1_sequence'
-MOTION = 'renderer::fresh_shadow_tests::primary_ray_gpu_tests::film_reference_tests::contact_fold_tests::motion_bench_tests::gpu_motion_bench_batch'
 
 
 def load(name):

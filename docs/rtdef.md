@@ -1,8 +1,9 @@
 # RTDEF: the RT device default with TR1
 
 2026-11-08, branch `t3/rtdef`, base main `976a952`, merged main `ae95d3a`
-(TR1b `fa6f8c1`). The main merge changes no production Rust/WGSL relative to
-the capture binary.
+(TR1b `fa6f8c1`). That main merge changes no production Rust/WGSL relative to
+the capture binary. Main's subsequent R1 checkpoint `ffdaee9` is also merged;
+its final library integration check is separate from the measurements below.
 This unit applies Islam's overnight promotion rule: visibly improve the quarry
 and S2 without a visible regression in the inspected images. The retained HRT
 and film comparisons are recorded; they are not tonight's promotion gate.
@@ -18,6 +19,8 @@ explicit settings. Historical RT measurements retain their non-default label:
 calling them default measurements would be inaccurate, and their TR1-off
 timings do not price reconstruction. No historical gate needs a new pin when
 the settings it records have not changed.
+
+![RTDEF measured grain and quiet cost](D:/Coding/renderlab-work/rtdef/comparison.png)
 
 ## Comparison
 
@@ -152,8 +155,8 @@ all 1,280 frames × four configurations, without dropping cold/revealed frames.
 
 The per-frame HRT audit loses +4 RMS on **10/1,280 frames**: every case's cold
 frame 0, .25 px camera/point frame 1 and 1 px camera/point frame 122
-(return/reveal). Linear HDR and +0 RMS win on all 1,280 frames. Against raster
-+ Exact, TR1 loses on 70 linear-HDR frames and 37 frames at each display
+(return/reveal). Linear HDR and +0 RMS win on all 1,280 frames. Against
+raster + Exact, TR1 loses on 70 linear-HDR frames and 37 frames at each display
 exposure. The cold disk witness still loses +4 RMS to HRT1 (14.0832 versus
 13.6655). The Interactive control reproduces the retained rows to within
 0.000070 display codes RMS (linear-HDR RMS within 3.5e-9); no new Unreal run
@@ -198,6 +201,10 @@ host memory. All samples and tails are retained in `timing/tr1.json` and
 
 - The release library suite ran under its own n8 lock: **151 passed, zero
   failed, 145 ignored**, 4.45 s in the test harness / 7.638 s guarded command.
+  After merging R1/main `ffdaee9`, the final suite passed **152 tests, zero
+  failed, 146 ignored**, 5.01 s / 8.588 s guarded. Its separate binary is
+  `63d9d6a7d04df15faa0e315e2b77f2e6b87d01fafa2cd6490f45e18f4f9c26ac`;
+  `final-integration.json` pins the merge and both library lease records.
 - Quality capture used one successful 235.455 s guarded command. Both quarry
   poses' cold/held/moving images, film crops, S2 full images at ordinary
   exposure, point/disk +4 crops and moving-blocker crops were inspected.
@@ -216,7 +223,8 @@ host memory. All samples and tails are retained in `timing/tr1.json` and
 - Implementation was measurement instrumentation, not a runtime optimization.
   Initial Rust harness edits and build preparation took approximately four
   wall-clock minutes, with scoring/report script work overlapping the leases.
-  Compilation took 202 s; CPU quarry/S2 scoring took 42.393 / 257.778 s;
+  Initial compilation took 202 s; the post-R1 incremental compile took 131 s.
+  CPU quarry/S2 scoring took 42.393 / 257.778 s;
   the diagnostic population scoring took 1.636 s. GPU queue waits, library
   checks and the 20.280 s timing lease are separate from implementation time.
 
@@ -225,3 +233,10 @@ Evidence root: `D:/Coding/renderlab-work/rtdef/`. Retained summaries include
 `s2-comparison.json`, `s2-grain-diagnostic.json`, `timing-summary.json`,
 the manifests, per-track `tr1.json`, lease/resource logs and inspected PNGs.
 Source/reference/capture identities and cleanup are recorded alongside them.
+
+Retention cleanup removed **6,997 raw/uninspected captures / 14,139,314,859
+bytes**, retaining **18 inspected PNGs** and the summaries. `cleanup.json`
+pins every removed path, byte count and SHA-256; `reference-identities.json`
+pins all 1,280 read-only S2 film archives. The owned Cargo target was cleaned
+(1,066 files / 536.0 MiB) and the staged test binary removed after its hashes
+were recorded. No owned GPU/test/build process or lease remains.
