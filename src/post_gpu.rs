@@ -440,15 +440,14 @@ impl PostGpu {
         self.retired_luts
             .retain(|(last, _)| *last > r.completed_submission);
         let s = r.post_settings;
-        let current = camera
-            .unjittered()
-            .matrix(self.size.width, self.size.height);
+        let internal = r.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let current = camera.unjittered().matrix(internal.width, internal.height);
         let previous = self.previous.unwrap_or(current);
         let mut frame = Vec::with_capacity(272);
         for m in [
             previous,
             current,
-            camera.matrix(self.size.width, self.size.height).inverse(),
+            camera.matrix(internal.width, internal.height).inverse(),
             camera.view(),
         ] {
             frame.extend_from_slice(&matrix_bytes(m));
@@ -502,7 +501,7 @@ impl PostGpu {
         let bytes: Vec<_> = values.into_iter().flat_map(f32::to_ne_bytes).collect();
         r.queue.write_buffer(&self.settings.value, 0, &bytes);
         use wgpu::BindingResource as R;
-        let hdr = &r.lighting.hdr.as_ref().unwrap().resolved;
+        let hdr = r.post_hdr();
         let hit = primary.then(|| {
             (*r.primary
                 .as_ref()
@@ -694,6 +693,12 @@ impl PostGpu {
     }
 }
 impl Renderer {
+    /// The image after reconstruction: native HDR, or TR1b's target-size output.
+    fn post_hdr(&self) -> &Depth {
+        self.upscale
+            .as_ref()
+            .map_or(&self.lighting.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
+    }
     pub fn post_settings(&self) -> PostSettings {
         self.post_settings
     }
@@ -739,7 +744,7 @@ impl Renderer {
         if !self.post_settings.enabled {
             return Ok(());
         }
-        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let size = self.post_hdr().texture.size();
         let mut post = match self.post.take() {
             Some(p) if p.size == size => p,
             old => {

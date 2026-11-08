@@ -122,8 +122,17 @@ fn sweep(
             None
         };
         r.set_colour_lut(lut).unwrap();
-        r.set_reconstruction(Reconstruction::default()).unwrap();
-        r.set_reconstruction(Reconstruction::identity()).unwrap();
+        r.set_reconstruction(Reconstruction::off()).unwrap();
+        let scale = match manifest()["render_scale"].as_str() {
+            Some("quality") => RenderScale::Quality,
+            Some("performance") => RenderScale::Performance,
+            _ => RenderScale::Native,
+        };
+        r.set_reconstruction(Reconstruction {
+            scale,
+            ..Reconstruction::identity()
+        })
+        .unwrap();
         r.reset_virtual_shadow_cache();
         r.cut_post_motion();
         r.cut_reconstruction();
@@ -169,10 +178,10 @@ fn gpu_post_sweep() {
     let out = PathBuf::from(m["output"].as_str().unwrap());
     let path = m["path"].as_str().unwrap_or("nonrt");
     let _validation = validation::begin(true);
-    let mut r = if path == "rt" {
-        rt_renderer_11()
+    let mut r = if path == "rt" || path == "raster" {
+        renderer(true)
     } else {
-        no_rt_renderer_11()
+        no_rt_renderer()
     };
     if path == "rt" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();

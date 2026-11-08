@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 
 os.environ["M7_G1_UNIT"] = "m7-tr1"
+# TR1b: new bulk output on D: (milestone-7.md, 2026-11-08); E:/renderlab-work/m7-tr1 keeps the earlier evidence.
+os.environ.setdefault("M7_G1_ROOT", "D:/Coding/renderlab-work")
 spec = importlib.util.spec_from_file_location("m7_g1_run", Path(__file__).with_name("m7-g1-run.py"))
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)

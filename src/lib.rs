@@ -4,6 +4,8 @@
 #[cfg(test)]
 extern crate self as renderlab;
 mod environment;
+// DC1: owned projected decals and the programmable surface-input API.
+mod decal;
 mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
@@ -29,6 +31,9 @@ mod shadows;
 pub mod virtual_geometry;
 mod visibility;
 
+pub use decal::{
+    Decal, DecalBlend, DecalSettings, DecalStats, DecalTexture, DecalTextureKind, DecalTextures,
+};
 pub use environment::{EnvironmentLimits, EnvironmentMap, EnvironmentParameters};
 pub use glam::{Mat4, Vec3};
 pub use hardware_shadows::{HardwareShadowOptions, HardwareShadowStats};
@@ -52,7 +57,7 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, Renderer};
+pub use renderer::{Reconstruction, RenderScale, Renderer};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,

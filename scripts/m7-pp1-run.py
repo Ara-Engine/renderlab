@@ -24,7 +24,7 @@ g1.BINARY = OUT / "bin/pp1-tests.exe"
 OUT.mkdir(parents=True, exist_ok=True)
 
 if sys.argv[1] == "build":
-    g1.build(SimpleNamespace(release=False, beside_leases=True, name="pp1-tests"))
+    g1.build(SimpleNamespace(release=False, beside_leases=True, name=sys.argv[2] if len(sys.argv)>2 else "pp1-tests"))
 else:
     label = sys.argv[2]
     u = g1.ue()

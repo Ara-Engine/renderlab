@@ -24,10 +24,13 @@ fn post_store(p:vec2<u32>,point:vec4<f32>,depth:f32) {
 }
 @compute @workgroup_size(8,8) fn post_primary_surface(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(post_surface);if any(id.xy>=size) {return;}
+    // Reconstruction can output more pixels than the current hit/depth samples.
+    let internal=textureDimensions(primary_hit);
+    let sample_pixel=min(vec2<u32>((vec2<f32>(id.xy)+0.5)*vec2<f32>(internal)/vec2<f32>(size)),internal-1u);
     var record=vec4<u32>(0u);
-    if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x!=0u {record=textureLoad(primary_hit,id.xy,0);}
+    if textureLoad(primary_tiles,sample_pixel/PRIMARY_TILE,0).x!=0u {record=textureLoad(primary_hit,sample_pixel,0);}
     if record.x==0u {
-        let ray=primary_ray(id.xy,size);let direction=normalize(ray.far-ray.near);
+        let ray=primary_ray(sample_pixel,internal);let direction=normalize(ray.far-ray.near);
         post_store(id.xy,vec4<f32>(direction,0.0),1e8);return;
     }
     let slot=record.x-1u;let batch=primary_placements[slot]&0x1fffffffu;let i=record.y*3u;

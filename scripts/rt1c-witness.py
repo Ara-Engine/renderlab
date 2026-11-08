@@ -27,11 +27,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('directory', type=Path, help='current witness case directory')
     p.add_argument('--recorded-root', type=Path, default=Path('E:/renderlab-work/motion-benches/S2'))
+    p.add_argument('--mode', default='Interactive', help='candidate mode directory (TR1b: TR1, TR1-warm)')
     a = p.parse_args()
     case = a.directory.name
     rect = (704, 480, 1216, 768)
     shape = (288, 512)
-    candidate_path = a.directory/'Interactive/0000.rgba16f'
+    candidate_path = a.directory/a.mode/'0000.rgba16f'
     film_path = a.directory/'reference/pose-0.film.bin'
     dtype = np.dtype([('counts','<u4',4),('moments','<f4',4),('radiance','<f4',4)])
     film = np.fromfile(film_path, dtype=dtype).reshape(shape)['radiance'][...,:3].astype(float)/256
@@ -59,9 +60,11 @@ def main():
         for i,(name,pixels) in enumerate(panels):
             x,y=i%3*512,i//3*312
             draw.text((x+5,y+4),name,fill='white');sheet.paste(Image.fromarray(pixels),(x,y+24))
-        sheet.save(a.directory/f'witness{suffix}.png')
+        tag = '' if a.mode == 'Interactive' else '-' + a.mode
+        sheet.save(a.directory/f'witness{tag}{suffix}.png')
     result['inputs']={str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
-    (a.directory/'witness-score.json').write_text(json.dumps(result,indent=2))
+    result['mode'] = a.mode
+    (a.directory/f'witness-score{tag}.json').write_text(json.dumps(result,indent=2))
     print(json.dumps(result,indent=2))
 
 
