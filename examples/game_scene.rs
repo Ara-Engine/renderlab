@@ -51,6 +51,8 @@ struct Args {
     uniform_sky: bool,
     volumetric_fog: Option<bool>,
     post: bool,
+    glass: bool,
+    particles: bool,
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
@@ -74,6 +76,8 @@ impl Args {
             uniform_sky: false,
             volumetric_fog: None,
             post: true,
+            glass: true,
+            particles: true,
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
@@ -117,6 +121,8 @@ impl Args {
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
                 "--no-post" => a.post = false,
+                "--no-glass" => a.glass = false,
+                "--no-particles" => a.particles = false,
                 "--fox" => a.fox = Some(value()?.into()),
                 "--hour" => a.hour = value()?.parse()?,
                 "--time" => {
@@ -194,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quarry
             .as_ref()
             .and_then(|m| m["exposure_stops"].as_f64())
-            .map_or(if args.hour < 16.0 { -14.5 } else { -10.5 }, |s| s as f32)
+            .map_or(if args.hour < 16.0 { -14.5 } else { -11.0 }, |s| s as f32)
     });
 
     let mut engine = Engine::new(
@@ -206,11 +212,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
                 render_scale: args.scale,
-                // A dusk haze (0.004 per metre over the first 128 m) for shafts and glows.
+                // A light dusk haze (0.0015 per metre over the first 128 m) for shafts.
                 volumetric_fog: match args.volumetric_fog {
                     Some(false) => None,
                     _ => Some(VolumetricFog {
-                        extra_density: 0.004,
+                        extra_density: 0.0015,
                         ..Default::default()
                     }),
                 },
@@ -373,14 +379,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
-    // A glass pane in front of the crates (TP1 forward glass: refracts and tints).
-    engine.spawn(
-        cube,
-        glass,
-        Mat4::from_translation(at(5.4, 0.8, 3.6))
-            * Mat4::from_rotation_y(0.8)
-            * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
-    )?;
+    if args.glass {
+        // A glass pane in front of the crates (TP1 forward glass: refracts and tints).
+        engine.spawn(
+            cube,
+            glass,
+            Mat4::from_translation(at(5.4, 0.8, 3.6))
+                * Mat4::from_rotation_y(0.8)
+                * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
+        )?;
+    }
     // Bushes: three crossed cutout cards each.
     for (x, z) in [(-4.0, -2.2), (3.6, -3.8), (6.2, -0.6)] {
         for k in 0..3 {
@@ -445,47 +453,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fire and smoke over the brazier (TP1 GPU particles), simulated at the frame rate.
     engine.set_particle_step(1.0 / FPS)?;
     let flame = brazier + Vec3::new(0.0, 0.65, 0.0);
-    engine.create_emitter(
-        &EmitterDescriptor {
-            position: flame,
-            spawn_radius: 0.18,
-            spawn_rate: 140.0,
-            lifetime: [0.45, 0.9],
-            velocity: Vec3::new(0.0, 0.9, 0.0),
-            velocity_spread: 0.35,
-            acceleration: Vec3::new(0.0, 1.6, 0.0),
-            drag: 0.6,
-            size: [0.32, 0.08],
-            color: [[1.0, 0.55, 0.15, 0.85], [0.4, 0.1, 0.02, 0.0]],
-            emission: [[9000.0, 3800.0, 900.0], [1200.0, 250.0, 40.0]],
-            fade: [0.1, 0.4],
-            soft_distance: 0.15,
-            capacity: 128,
-            seed: 7,
-            ..Default::default()
-        },
-        None,
-    )?;
-    engine.create_emitter(
-        &EmitterDescriptor {
-            position: flame + Vec3::new(0.0, 0.6, 0.0),
-            spawn_radius: 0.15,
-            spawn_rate: 24.0,
-            lifetime: [2.0, 3.0],
-            velocity: Vec3::new(0.15, 0.6, 0.0),
-            velocity_spread: 0.15,
-            acceleration: Vec3::new(0.25, 0.2, 0.0),
-            drag: 0.3,
-            size: [0.35, 1.2],
-            color: [[0.3, 0.3, 0.32, 0.35], [0.5, 0.5, 0.52, 0.0]],
-            fade: [0.2, 0.6],
-            soft_distance: 0.3,
-            capacity: 80,
-            seed: 11,
-            ..Default::default()
-        },
-        None,
-    )?;
+    if args.particles {
+        engine.create_emitter(
+            &EmitterDescriptor {
+                position: flame,
+                spawn_radius: 0.18,
+                spawn_rate: 140.0,
+                lifetime: [0.45, 0.9],
+                velocity: Vec3::new(0.0, 0.9, 0.0),
+                velocity_spread: 0.35,
+                acceleration: Vec3::new(0.0, 1.6, 0.0),
+                drag: 0.6,
+                size: [0.32, 0.08],
+                color: [[1.0, 0.55, 0.15, 0.85], [0.4, 0.1, 0.02, 0.0]],
+                emission: [[9000.0, 3800.0, 900.0], [1200.0, 250.0, 40.0]],
+                fade: [0.1, 0.4],
+                soft_distance: 0.15,
+                capacity: 128,
+                seed: 7,
+                ..Default::default()
+            },
+            None,
+        )?;
+        engine.create_emitter(
+            &EmitterDescriptor {
+                position: flame + Vec3::new(0.0, 0.6, 0.0),
+                spawn_radius: 0.15,
+                spawn_rate: 24.0,
+                lifetime: [2.0, 3.0],
+                velocity: Vec3::new(0.15, 0.6, 0.0),
+                velocity_spread: 0.15,
+                acceleration: Vec3::new(0.25, 0.2, 0.0),
+                drag: 0.3,
+                size: [0.35, 1.2],
+                color: [[0.3, 0.3, 0.32, 0.35], [0.5, 0.5, 0.52, 0.0]],
+                fade: [0.2, 0.6],
+                soft_distance: 0.3,
+                capacity: 80,
+                seed: 11,
+                ..Default::default()
+            },
+            None,
+        )?;
+    }
     // Lanterns (LC1, LC2): a warm bulb under the arch, a cool spot over the crates and the
     // fire's flickering light, all shadowed (`Settings::local_shadows`, 4 by default) with
     // soft penumbrae from their source radii.

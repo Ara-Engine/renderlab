@@ -4,8 +4,10 @@
 // pipeline (MP1, docs/m7-mp1.md).
 // Materials request traced mirror and glossy reflections (M7-R1) through
 // `reflection_lobe` unless they set `reflect` to 0. `glow` is emitted radiance (cd/m²,
-// unexposed), as for lantern bulbs: it adds to the shaded colour and, through `emission`,
-// reaches other surfaces as GI bounce light.
+// unexposed), as for lantern bulbs: it adds to the shaded colour only. The bulbs' light
+// reaches other surfaces through the scene's point and spot lights; feeding a small, very
+// bright emitter to the GI cache through the `emission` hook as well would double its
+// light and turn it into fireflies (each cache cell traces a few fixed directions).
 struct Parameters { glow:vec3<f32>, reflect:f32 };
 const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),1.0);
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
@@ -28,10 +30,6 @@ fn surface(input:SurfaceInput) -> Surface {
 // asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
     return SpecularLobe(s.n,s.rough*s.rough,params.reflect);
-}
-
-fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {
-    return max(params.glow,vec3<f32>(0.0));
 }
 
 fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
