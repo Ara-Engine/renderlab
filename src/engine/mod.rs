@@ -24,8 +24,9 @@ pub use crate::asset::{
 };
 pub use crate::{
     AtmosphereMedium, Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
-    Error, Events, FrameId, FrameReport, HeightFog, Light, Limits, Mat4, MeshData, ReloadError,
-    ReloadReport, RenderScale, Renderer, Value, Vec3, Vertex, VolumetricFog,
+    Error, Events, FrameId, FrameReport, HeightFog, Light, Limits, Mat4, MeshData,
+    ReflectionSettings, ReloadError, ReloadReport, RenderScale, Renderer, Value, Vec3, Vertex,
+    VolumetricFog,
 };
 
 use crate::{

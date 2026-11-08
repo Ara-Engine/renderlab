@@ -8,6 +8,7 @@ Overnight unit (Islam's complete-base push, 2026-11-08; rules in AGENTS.md). Bra
 |---|---|
 | Non-RT path | **On by default** on visibility-buffer frames whose drawn meshes all carry software geometry. R1's reflection block runs unchanged except for its two ray queries, which become a software traversal of per-mesh BVHs over the drawn triangles. Each hit is shaded by the frame's program with R1's contract, including `decal_prepare`. |
 | Quality, RF1-RF9 static (M) | Equal to R1's RT scores within 0.04 codes on every fixture. Every registered population better than environment-only, none worse. Beats UE SW Epic on RF1-RF7 and RF9; misses it on RF8 (7.96 vs 5.24). Beats UE HW-Hit Epic on RF1-RF6 and RF9; misses RF7 and RF8, as R1 does. |
+| Acceptance view (Islam): `examples/game_scene.rs` on non-RT (M) | **Pass.** The chrome sphere shows the red wall, the blue cube, the gold sphere, the arch and the toon hero, as on RT (section 2.3). Before R1n it showed only the sky. |
 | Mirror-camera identity, non-RT (M) | **Pass**: 0 of 110,592 channels over 0.002 cd/m² + 0.5%; max error 0.0078; means 9.04852 / 9.04828 (R1's RT run read 9.04852 / 9.04827). |
 | TR1 (default on) | Its frame rotation turns the glossy strata as on RT. RF2's 0.3/0.4 sparkle is integrated (section 2.2). |
 | Quarry | QUARRY_STATUS |
@@ -67,7 +68,10 @@ New files: `src/reflection_software.rs`, `src/reflection_software_tests.rs`, `sh
 - `src/program.rs`: the software branch of `reflection_api` and its seams;
 - `src/primary_ray_gpu.rs`: the head declaration, binding 36 in the non-RT shade layouts and bind groups, the bindings key's generation word, `SoftwareReflections` and its preparation;
 - `src/mesh.rs`, `src/renderer.rs`, `src/virtual_gpu.rs`: the mesh's `reflection` field and its upload-time build;
-- `src/reference_r0a_tests.rs`: opt-in `RENDERLAB_R1N_PROGRAM` (environment-only baseline) and `RENDERLAB_R1N_TIMES` (timed frames) for the RF A/B.
+- `src/reference_r0a_tests.rs`: opt-in `RENDERLAB_R1N_PROGRAM` (environment-only baseline) and `RENDERLAB_R1N_TIMES` (timed frames, with GPU timestamps) for the RF A/B;
+- `src/environment_specular_tests.rs`: opt-in `RENDERLAB_ES1_TR1=0` for ES1's quarry protocol (section 4);
+- `src/reflections.rs` (new), `shaders/primary_rays.wgsl`, `shaders/reflections.wgsl`, `src/lib.rs`: `ReflectionSettings` (section 1.5);
+- `src/engine/settings.rs`, `src/engine/mod.rs`, `docs/api.md`: API1's planned R1n slot, `Settings::reflections`.
 
 The GI cache (G2b's) is not touched.
 
@@ -85,6 +89,8 @@ ReflectionSettings::off()
 - Disabled, the bands are zero: nothing is traced on either path, and every program keeps its untraced estimate (`specular_incident` w = 0).
 - Both paths read the bands from one new `vec4` at the end of `PrimaryFrame` (`primary_frame.reflection`; `FRAME_BYTES` 112 → 128). The non-RT coverage rule writes zero bands for frames with uncovered meshes.
 - Programs still opt in per program by declaring `reflection_lobe` and reading `specular_incident`; the setting bounds what any program gets.
+- **API1:** `Settings::reflections: ReflectionSettings`, re-exported from the engine and applied with the other settings (API1's planned R1n row in docs/api.md, now wired).
+- **One composite hook for both paths.** R1n's signal is R1's: `rl_reflection_prepare` fills `rl_specular`, the program reads it through `specular_incident` and composites it in its own `shade`. MQ1's reflection filter and TR1 history fixes, placed on that hook, apply to both paths; R1n replaces only the two ray-query blocks inside it.
 - **Hit shading still goes through the program interface R1 uses** (`rl_load_parameters`, then the composed program's `surface` and `shade` at the hit). When MP1's per-program dispatch arrives, R1n's hits follow it with R1's: the software path changes only how the hit record is found.
 
 ## 2. RF1-RF10 static (M)
@@ -139,6 +145,15 @@ Run `b1`, 32 still TR1 frames from a cut (`RENDERLAB_R1_TR1=1`):
 | RF9 pitch30 | 7.556 | 7.071 | 7.053 |
 
 Against environment-only at −14 and −10 stops, the TR1 rows are better in 17-76 populations per case and worse in at most three: directly viewed objects at −10 (+0.05 to +0.12 codes, TR1's own resolve, not reflections) and RF9's shell (6.57 → 6.70), which R1 recorded on RT too.
+
+### 2.3 Acceptance view: `examples/game_scene.rs` (M)
+
+Islam's report: "in the no rt version I see no reflections other than the skybox". Run `e1`, binary `e-game` (this branch with main `f870cb4`, the API1 engine and its example program), 48 frames of the fly path at 1280x720, the example's defaults (GI, TR1, physical sky, fog), one process per path in my lease.
+
+- `D:/Coding/renderlab-work/m7-r1n/runs/e1/frame-047-nonrt-vs-rt.png`: the last frame, non-RT (left) beside RT (right).
+- `D:/Coding/renderlab-work/m7-r1n/runs/e1/chrome-047-nonrt-vs-rt.png`: the chrome sphere at 4x, non-RT (left) and RT (right).
+
+The non-RT chrome sphere reflects the red wall, the blue cube, the gold sphere, the arch, the toon hero, the ground with its shadows, and the sun. It matches RT's closely: the same objects at the same places, at the same sharpness. The gold sphere's glossy reflection carries the same scene colours on both paths. Frames 000-040 are beside it in `game-nonrt/` and `game-rt/`. The scene's meshes are all small procedural meshes, so the coverage rule never applies here.
 
 ## 3. Cost (M)
 

@@ -138,6 +138,10 @@ pub struct Settings {
     /// Off by default. Its sun visibility is traced on `HardwareRt`; on `NonRt` it is
     /// unshadowed at this revision.
     pub volumetric_fog: Option<VolumetricFog>,
+    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
+    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
+    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
+    pub reflections: crate::ReflectionSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -150,6 +154,7 @@ impl Default for Settings {
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
             volumetric_fog: None,
+            reflections: crate::ReflectionSettings::default(),
         }
     }
 }
@@ -265,6 +270,7 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
     } else {
         Reconstruction::off()
     })?;
+    r.set_reflections(settings.reflections)?;
     match path {
         RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {
             Quality::Realtime => SoftShadows::Interactive,

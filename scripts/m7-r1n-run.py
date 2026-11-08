@@ -16,6 +16,9 @@ guards (m7-u0-ue.py through m7-u0b.py). No window opens.
                          rfbase    rf with the environment-only standard program (ae95d3a)
                                    on every non-toon material (RENDERLAB_R1N_PROGRAM)
                          rf/rftr1/rfbase take SECTIONS = N: N more timed frames per pose
+                         game      examples/game_scene.rs (API1's acceptance scene) on PATH,
+                                   PNG frames into RUN/game-PATH; SECTIONS = extra
+                                   arguments, comma-separated
                          quarry    ES1's quarry protocol: main's standard program (the
                                    baseline) then this build's; SECTIONS as ES1's
                          or an exact test name.
@@ -109,6 +112,16 @@ def build(args):
     staged = OUT / "bin" / (args.label + ".exe")
     staged.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(exe, staged)
+    # The acceptance scene's example binary, staged beside the test binary.
+    example = ["cargo", "build", "-p", "renderlab", "--example", "game_scene", "-j", "2",
+               "--target-dir", str(TARGET), "--message-format=json"]
+    with (OUT / "build-example.jsonl").open("w") as log, (OUT / "build-example.err").open("w") as err:
+        if subprocess.run(example, cwd=REPO, stdout=log, stderr=err, text=True).returncode:
+            raise SystemExit((OUT / "build-example.err").read_text()[-4000:])
+    artifacts = [json.loads(l) for l in (OUT / "build-example.jsonl").read_text().splitlines() if l.startswith("{")]
+    game = next(a["executable"] for a in reversed(artifacts) if a.get("reason") == "compiler-artifact"
+                and a.get("executable") and a["target"]["name"] == "game_scene")
+    shutil.copy2(game, OUT / "bin" / (args.label + "-game.exe"))
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO, text=True)
     (OUT / "bin" / (args.label + ".json")).write_text(json.dumps(dict(head=head, dirty=dirty.splitlines()), indent=2))
@@ -152,7 +165,7 @@ def run_steps(g, out, binary, baseline, args):
                 VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
     base.pop("VK_INSTANCE_LAYERS", None)
     with g.lease("r1n-" + args.label, args.minutes) as owner:
-        out.mkdir(parents=True)
+        out.mkdir(parents=True, exist_ok=True)
         for index, step in enumerate(args.steps):
             path, test, *extra = step.replace("::", "@").split(":")
             test = test.replace("@", "::")
@@ -182,6 +195,11 @@ def run_steps(g, out, binary, baseline, args):
             name = TESTS.get(test, test)
             command = ([binary, "--test-threads=2"] if test == "lib" else
                        [binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
+            if test == "game":
+                env.pop("RENDERLAB_ES1_SECTIONS", None)
+                name = "game_scene"
+                command = [binary.with_name(binary.stem + "-game.exe"), "--path", path,
+                           "--out", str(out / f"game-{path}")] + (extra[0].split(",") if extra and extra[0] else [])
             g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
                       timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
 
