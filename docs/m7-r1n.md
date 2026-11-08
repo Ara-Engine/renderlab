@@ -11,9 +11,9 @@ Overnight unit (Islam's complete-base push, 2026-11-08; rules in AGENTS.md). Bra
 | Acceptance view (Islam): `examples/game_scene.rs` on non-RT (M) | **Pass.** The chrome sphere shows the red wall, the blue cube, the gold sphere, the arch and the toon hero, as on RT (section 2.3). Before R1n it showed only the sky. |
 | Mirror-camera identity, non-RT (M) | **Pass**: 0 of 110,592 channels over 0.002 cd/m² + 0.5%; max error 0.0078; means 9.04852 / 9.04828 (R1's RT run read 9.04852 / 9.04827). |
 | TR1 (default on) | Its frame rotation turns the glossy strata as on RT. RF2's 0.3/0.4 sparkle is integrated (section 2.2). |
-| Quarry | QUARRY_STATUS |
-| Cost on reflective content | TIMING_STATUS |
-| Default ruling (overnight rule 1) | Clearly better than environment-only on every RF fixture, not visibly worse in any inspected image, and the quarry is untouched (coverage rule). **On by default.** |
+| Quarry | No reflection geometry (every scan is over the cap), so nothing is traced. With TR1 off: cache off, 3 pixels under 0.35 codes (the non-RT run-order state R1 recorded); cache on (the default), **bit-identical**. Cost: none with the cache off; **+0.30 to +0.52 ms of shading with the cache on**, with nothing traced (section 4). |
+| Cost on reflective content | **+1.6 to +3.5 ms** of shading at 1080p on the mirror and puddle fixtures, **+6.7 ms** on RF8's glossy rocks (functional, contended timings). Far over Lumen's 0.07/0.22 ms reflection pass: recorded gap. |
+| Default ruling (overnight rule 1) | Clearly better than environment-only on every RF fixture, not visibly worse in any inspected image, and the quarry image is unchanged (coverage rule), at a recorded cache-on shading cost of +0.30 to +0.52 ms. Islam asked for it as the non-RT default once it worked; the game scene's acceptance view passes. **On by default.** |
 | `ReflectionSettings` (root's request) | `Renderer::set_reflections(ReflectionSettings { enabled, max_roughness })`, default on at 0.5 (R1's bands bit for bit). Honoured by R1's traced reflections and by R1n, through one word group in the frame uniform (section 1.5). |
 | Patents | Design-around tier (P0 §4.11, C1/C7, W8); no fallback used (section 5). |
 
@@ -95,7 +95,7 @@ ReflectionSettings::off()
 
 ## 2. RF1-RF10 static (M)
 
-Run `d1` (binary `d`: main `f159fcd` merged, the shipped code), cross-checked against `b1` (binary `b`, before the merge): all scores identical. Non-RT: visibility-buffer primaries, Virtual disk shadows, on a device without ray queries; 1920x1080, 1x, TR1 off, eight warm frames, GI cache off (R0a's protocol). Scored by R1's `scripts/m7-r1-score.py` against `reference/final`. "Environment-only" is the same build with main's pre-R1 standard program (`ae95d3a`) on every non-toon material (`RENDERLAB_R1N_PROGRAM`); it reproduces R0a's current-renderer row (to within 0.001 codes in a few RF1-pitch20 populations, the non-RT run-order state R1 recorded).
+Run `e3` (binary `e`: main `f870cb4` merged, the shipped code), cross-checked against `d1` (main `f159fcd`) and `b1` (before either merge): all three give identical scores. Non-RT: visibility-buffer primaries, Virtual disk shadows, on a device without ray queries; 1920x1080, 1x, TR1 off, eight warm frames, GI cache off (R0a's protocol). Scored by R1's `scripts/m7-r1-score.py` against `reference/final`. "Environment-only" is the same build with main's pre-R1 standard program (`ae95d3a`) on every non-toon material (`RENDERLAB_R1N_PROGRAM`); it reproduces R0a's current-renderer row (to within 0.001 codes in a few RF1-pitch20 populations, the non-RT run-order state R1 recorded).
 
 Whole-reflector display RMS at −14 stops, 8-bit F0 codes (lower is better):
 
@@ -157,11 +157,56 @@ The non-RT chrome sphere reflects the red wall, the blue cube, the gold sphere, 
 
 ## 3. Cost (M)
 
-TIMING_SECTION
+Run `e3` (binary `e`), non-RT, one process per program in one lease: R1n (`rf:16`) and environment-only (`rfbase:16`), each pose captured as in section 2 and then 16 more frames timed with GPU timestamps; medians of frames 5-16. Shading is the traced/visibility-buffer shading pass, which on non-RT now contains the software rays and the hit shading; span is the frame's GPU span. 1920x1080, RTX 4070 SUPER, NVIDIA driver as installed, test binary built in the dev profile (shaders are the same as release). **Functional, not QUIET:** other units' builds and leases were active.
+
+| Fixture / pose | Shading, environment-only | Shading, R1n | Increment | Frame span, environment-only | Frame span, R1n |
+|---|---:|---:|---:|---:|---:|
+| RF1 pitch20 | 0.798 | 2.477 | +1.680 | 1.355 | 3.041 |
+| RF1 pitch30 | 0.807 | 3.382 | +2.575 | 1.386 | 4.509 |
+| RF1 pitch40 | 0.804 | 2.785 | +1.981 | 1.413 | 3.385 |
+| RF2 sweep | 0.774 | 4.249 | +3.474 | 1.340 | 4.902 |
+| RF3 pitch30 | 0.798 | 2.806 | +2.008 | 1.390 | 3.384 |
+| RF4 pitch30 | 1.311 | 3.899 | +2.589 | 2.185 | 4.481 |
+| RF5 pitch30 | 1.441 | 3.040 | +1.599 | 2.312 | 3.700 |
+| RF6 grazing10 | 1.286 | 1.639 | +0.353 | 2.100 | 2.168 |
+| RF6 grazing5 | 1.576 | 1.191 | −0.385 | 2.410 | 1.733 |
+| RF7 between panels | 1.197 | 4.046 | +2.849 | 2.001 | 4.576 |
+| RF8 pitch30 | 1.310 | 7.972 | +6.662 | 2.312 | 8.884 |
+| RF9 pitch30 | 1.225 | 3.527 | +2.301 | 2.089 | 4.183 |
+
+- The RF6 rows are inside contention noise (the environment-only process read slower there); their reflectors are small.
+- RF8 is the most expensive: its glossy 0.3/0.4 rocks take four rays a pixel over its larger rock meshes.
+- **Against Lumen** (U0, A): its reflection pass is 0.07/0.22 ms. R1n is one to two orders of magnitude slower on reflective content. Likely causes (I, not profiled): the flat instance loop per ray, a 32-entry stack held in the shading kernel's registers or local memory, and hit shading inlined beside the traversal. Levers: a separate trace pass writing hit records, then hit shading as its own dispatch; a two-level tree; wider (R0c-style BVH4) nodes; fewer glossy rays where TR1 integrates.
+- RT's R1 cost on reflective content is still unmeasured (R1 §4), so no RT/non-RT cost comparison is made.
+- Memory: the software geometry is 61.5 bytes a triangle, only for meshes up to 2^19 triangles: at most about 32 MB per mesh, 0.09 MB for the largest RF mesh, nothing on the quarry. The packed buffer adds 96 bytes per traced placement.
 
 ## 4. Quarry (M)
 
-QUARRY_SECTION
+ES1's quarry protocol (`gpu_es1_quarry`, U0b's full-radiance quarry, 1920x1080, Virtual shadows and G1c's near field), environment-only standard program (`ae95d3a`) against this build's, in one process.
+
+- **No reflection geometry.** All twelve scans are 0.99-2.0 M triangles, over the 2^19 cap, so the coverage rule zeroes the frame's bands and nothing is traced.
+- **TR1 must be off for this A/B.** The first run (`b1`) used ES1's harness unchanged and differed in 348k pixels, balanced (5% brighter, 5% darker, mean ratio 0.99993). That was TR1 (the default since TR1b; ES1's harness never sets it), which jitters the two programs' captures differently. `RENDERLAB_ES1_TR1=0` now captures with TR1 off.
+
+Images, run `e3` (TR1 off):
+
+| Cache | Pose 0 | Pose 1 |
+|---|---|---|
+| off | 3 pixels, each under 0.35 codes | 3 pixels, each under 0.35 codes |
+| on (the default since G2b) | bit-identical | bit-identical |
+
+The 3 cache-off pixels are the non-RT run-order state that ES1 and R1 recorded.
+
+Cost (`abcost`: per cache state four visits, programs interleaved, medians over visits 2-4; ms, range of visit medians; functional, not QUIET):
+
+| Cache | Phase | Shading, environment-only | Shading, R1n | Span, environment-only | Span, R1n |
+|---|---|---:|---:|---:|---:|
+| off | camera moving | 0.516-0.519 | 0.520-0.521 | 2.30-2.41 | 2.32-2.38 |
+| off | cut | 0.540-0.543 | 0.543-0.653 | 1.25 | 1.24-1.66 |
+| on | camera moving | 1.415-1.425 | **1.716-1.948** | 8.26-8.62 | 8.73-9.52 |
+| on | cut | 1.333-1.354 | **1.598-1.619** | 9.73-11.60 | 9.86-11.13 |
+
+- **Cache off:** no measurable increment.
+- **Cache on: +0.30 to +0.52 ms of shading although nothing is traced.** This is the effect R1 recorded on RT (+0.29 ms in one build, +0.04 ms in the next): the reflecting module's composed hit shading changes the kernel's code generation while the cache's prepared state is live. Now that the cache is the default, it is a default cost on both paths. Candidate fixes are R1's: hit shading as a separate pass, or a second composition with open-only indirect inputs (gap).
 
 ## 5. Claim notes (engineering reading, not clearance)
 
@@ -177,19 +222,19 @@ P0 §4.11 reads the R1n tier as clear of US 12,051,145 and US 10,380,785 on its 
 
 | Check | Result |
 |---|---|
-| `cargo test -p renderlab --lib` inside R1n leases | `a1` (binary `a`): 155 passed, 0 failed, 147 ignored. `d1` (binary `d`, the shipped code): **161 passed, 0 failed, 148 ignored**. Includes `reflection_bvh_keeps_primitive_identity` (a CPU replay of the traversal: every triangle of a 23x23 grid found by its centroid ray with its own primitive and barycentrics; rebuilds word-identical), `reflection_instance_records`, `software_reflection_composition` (both non-RT heads: hook once, no ray query, naga-valid, SPIR-V; toon composes nothing; RT heads keep R1's ray queries; both read the bands) and `reflection_settings_bands` |
-| Non-RT mirror identity | `a1`: failed (90 channels; a shared-edge seam, fixed by the edge slack). `b1`: **pass**. RT_CHECKS |
+| `cargo test -p renderlab --lib` inside R1n leases | `a1` (binary `a`): 155 passed, 0 failed, 147 ignored. `d1` (binary `d`): 161 passed, 0 failed, 148 ignored. `e3` (binary `e`, the shipped code, main `f870cb4` merged): **164 passed, 0 failed, 148 ignored**. Includes `reflection_bvh_keeps_primitive_identity` (a CPU replay of the traversal: every triangle of a 23x23 grid found by its centroid ray with its own primitive and barycentrics; rebuilds word-identical), `reflection_instance_records`, `software_reflection_composition` (both non-RT heads: hook once, no ray query, naga-valid, SPIR-V; toon composes nothing; RT heads keep R1's ray queries; both read the bands) and `reflection_settings_bands` |
+| Non-RT mirror identity | `a1`: failed (90 channels; a shared-edge seam, fixed by the edge slack). `b1`: **pass**. `e3` (the shipped code): **pass**, and with `ReflectionSettings::off()` all 110,592 channels change (the reflection is gone). RT's `gpu_r1_mirror_identity` on the same binary: **pass** (0 failed channels, ratio 0.186), so the frame-uniform change keeps R1 intact. RT RF1-RF10 in `e3`: identical to R1's recorded scores on every fixture. |
 | RF1-RF10 non-RT | `b1` and `d1` scores identical |
-| Quarry | QUARRY_VERIFY |
-| `cargo fmt`, `clippy` | FMT_CLIPPY |
+| Quarry | `e3`: TR1 off, cache off 3 pixels < 0.35 codes, cache on bit-identical; cost table in section 4 |
+| `cargo fmt`, `clippy` | `cargo fmt --all -- --check` clean. `cargo clippy -p renderlab --lib --tests`: no warnings in R1n's files; 16 remain in other units' files (`atmosphere_gpu.rs`, `atmosphere_tests.rs`, `decal_gpu_tests.rs`, `material_response_tests.rs`, `reference_inputs.rs`, `reference_tests.rs`, `virtual_shadow_gpu.rs`, `visibility_buffer.rs`) |
 
-**Process.** Every GPU process ran inside an R1n lease holding `D:/Coding/renderlab-work/gpu-slot.lock` (`scripts/m7-r1n-run.py`: R1's runner with its own owner, output and Cargo target on D:). The guard stopped lease `d1` when another unit's renderlab build script started; its finished steps are kept and the rest reran as `d2`. Builds ran outside QUIET windows and never during my own lease. Implementation took about 2 h and verification about 1 h, overlapping (a 15-minute cold build, then about 2 minutes per incremental build, plus lock waits).
+**Process.** Every GPU process ran inside an R1n lease holding `D:/Coding/renderlab-work/gpu-slot.lock` (`scripts/m7-r1n-run.py`: R1's runner with its own owner, output and Cargo target on D:). The guard stopped two leases partway: `d1` when another unit's renderlab build script started, and `e1` (after its game-scene renders) when system memory fell below 2 GiB. Their finished steps are kept. `d2` was withdrawn before it took the lock (schedule note), and `e2` hit a runner bug (a deferred lease could not reuse its run directory; fixed) before running anything; `e3` ran the remaining checks. Builds ran outside QUIET windows and never during my own lease. Implementation took about 2 h and verification about 1 h, overlapping (a 15-minute cold build, then about 2 minutes per incremental build, plus lock waits).
 
-**Evidence** in `D:/Coding/renderlab-work/m7-r1n/runs/`: `a1` (lib, the failed identity), `b1` (RF A/B, TR1, the first quarry run, identity; sheets), `d1` (lib, RF on the shipped code), `d2` (timed environment-only RF, TR1, quarry A/B with TR1 off, RT checks, identity with the off switch). Raw `.f32` captures are deleted once scored; scores, sheets, JSON and logs stay.
+**Evidence** in `D:/Coding/renderlab-work/m7-r1n/runs/`: `a1` (lib, the failed identity), `b1` (RF A/B, TR1, the first quarry run, identity; sheets), `d1` (lib, RF after the `f159fcd` merge), `e1` (the game scene on both paths; comparison crops), `e3` (lib, both identities with the off switch, timed RF A/B, RT RF, quarry A/B with TR1 off; `times-summary.json`, `quarry-summary.json`). Raw `.f32` captures are deleted once scored; scores, sheets, JSON and logs stay.
 
 ```powershell
 py -3 -B scripts/m7-r1n-run.py build LABEL
-py -3 -B scripts/m7-r1n-run.py gpu RUN nonrt:lib nonrt:rf:16 nonrt:rfbase:16 nonrt:rftr1 nonrt:quarry:static,abcost rt:rf rt:identity nonrt:nrtidentity --binary LABEL
+py -3 -B scripts/m7-r1n-run.py gpu RUN nonrt:game rt:game nonrt:lib nonrt:nrtidentity rt:identity nonrt:rf:16 nonrt:rfbase:16 nonrt:rftr1 rt:rf nonrt:quarry:static,abcost --binary LABEL
 py -3 -B scripts/m7-r1-score.py D:/Coding/renderlab-work/m7-r1n/runs/RUN
 py -3 -B scripts/m7-r1-quarry.py D:/Coding/renderlab-work/m7-r1n/runs/RUN
 ```
