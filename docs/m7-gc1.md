@@ -4,7 +4,7 @@ Unit GC1, branch `t3/m7-gc1` (from main `fa3b74b`; main merged at `9f98869` (PP1
 
 ## 1. Status
 
-Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b5`: `b3` plus the slot clamp of section 3.1, merged with main at `e5c4623` (G2c's cell shading and lookup fill): lease `f5`, the lib suite. Then `b6`: main at `2d1c084` (MP1's mixed-program cell shading, MQ1) merged, with the mark moved after MP1's store seam: lease `f6`, the lib suite, images and a timing check. Main's code is lease `a4` (binary `b1` with main's shaders). Functional leases on the shared GPU, not quiet windows: ranges, not certified timings. The cache-off frame in `f1` is 0.65-0.85 ms heavier than in `a4` because main gained PP1's post-processing between them, so the increments are what compare.
+Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b5`: `b3` plus the slot clamp of section 3.1, merged with main at `e5c4623` (G2c's cell shading and lookup fill): lease `f5`, the lib suite. Then `b6`: main at `2d1c084` (MP1's mixed-program cell shading, MQ1) merged, with the mark moved after MP1's store seam. Lease `f6` ran the lib suite and naga checks on `b6`; another unit's build script stopped its image step, and lease `f7` retried the images, a timing check and the traces (section 4). Main's code is lease `a4` (binary `b1` with main's shaders). Functional leases on the shared GPU, not quiet windows: ranges, not certified timings. The cache-off frame in `f1` is 0.5-1.1 ms heavier than in `a4` because main gained PP1's post-processing between them, so the increments are what compare.
 
 | Camera moving, quarry pose 0, over the cache-off frame of the same visit | Main (`a4`) | **GC1** (`f1`) |
 |---|---:|---:|
@@ -20,9 +20,9 @@ Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b5`
 
 **Against Lumen** (A, [M7-U0](m7-u0.md): Lumen Epic's GI pass on the quarry is 1.24 ms HW and 1.21 ms SW). The 2x target needs 0.62 / 0.61 ms. GC1 still misses by about 2.6-3.2x on RT and 3.1-4.9x on non-RT (G2b's reading: 2.2-2.6x and 4.3-4.7x, on frames that still carried the cut's drain). Section 2 explains why main's moving cost read higher than G2b's.
 
-**Verdict.** About −0.4 ms (RT) and −0.3 ms (non-RT) a moving frame, and cuts settle about a fifth sooner, at the same quarry and SV image. **The GI budget is still missed.** The largest remaining stage is the shading pass's +1.0 ms (RT) / +0.8 ms (non-RT) increment.
+**Verdict.** About −0.4 ms (RT) and −0.3 ms (non-RT) a moving frame, and cuts settle about a fifth sooner. The quarry image is the same (one 55 x 40 px RT population moves 0.05 codes) and the RT SV image is smooth; non-RT SV is unmeasured on the final code (section 4). **The GI budget is still missed.** The largest remaining stage is the shading pass's +1.0 ms (RT) / +0.8 ms (non-RT) increment.
 
-**Kept (quality-neutral on the quarry and SV, section 4):**
+**Kept (section 4 has the images):**
 1. **2^20 table slots** (was 2^19). On the quarry, buckets had filled. About 280 claims a moving frame failed on RT (1,100 on non-RT), those cells were requested again every frame, and lookups walked crowded buckets, which was the shading pass's largest hotspot in G2b's trace. The table is 224 MiB. A device whose storage-binding limit is wgpu's default 128 MiB gets 2^19 (section 3.1).
 2. **Gathers stop once every hit value they read is final** (`gstop2`). A cell's next gather would re-trace the same fixed rays against the same values and replace its value with itself.
 3. **Binned-SAH runtime software BVHs** (the non-RT merged world and full-detail meshes): the same hits, fewer node and triangle tests (section 3.3).
@@ -166,7 +166,18 @@ Lease `f1` (M, binary `b3`, the variant's shaders in their own process; cache-on
   - Not visible: `analysis/f2-rt-hollow.png` shows reference | main | GC1 at −10 stops, 5x.
 - **Inspected:** `analysis/f2-{rt,nonrt}-crop.png` (reference | main | GC1 | cache off, Islam's crop at −14 stops) are indistinguishable from main.
 
-SV_RESULT
+**SV test scene** (G1's harness, `bounce` section, frame 48 after a reset, frame-relative RMS against G2's multi-bounce 4,096-spp references; lease `f2`, binary `b3`):
+
+| RT, frame RMS gaps / overview pose | Cache off | Sky only | **GC1 default** | Gather stride 2 |
+|---|---:|---:|---:|---:|
+| Frame 48 | 98.12 / 46.19% | 20.61 / 11.93% | **2.86 / 1.54%** | 2.97 / 1.66% |
+
+G2 read 2.62 / 1.59% without a gather cap, and G2b's cap made SV settle more slowly. The default here is smooth on both poses (`runs-sv/f2/rt-bounce-bounce-*.png`).
+- **No main-code SV number to compare in this window.** The base-shader SV step never ran: `f3` was stopped by another unit's build script and `f4` was withdrawn for the merge.
+- **Non-RT SV is not measured on the final code.**
+  - In `f2` it found the 2^20 table over the SV rig's 128 MiB binding limit. That found the bug `gi_slots` now handles: such a device gets 2^19 slots, G2b's table and SV image (A: G2c's non-RT gaps-pose RMS at frame 48 is 6.10%).
+  - In `f5`, on main merged at `e5c4623`, the SV rig's non-RT device failed earlier, at main's `post primary surface` pipeline: a group-0 binding-10 struct of 128 bytes against a 112-byte `min_binding_size`. That is outside GC1's files and was reported to root.
+  - The slot clamp is therefore exercised on a default-limit device only by construction (I), not by a run.
 
 ## 5. Memory
 
@@ -194,6 +205,13 @@ Lease `f2` (M), `memory` section: the allocator after a settled pose 0, with the
 - `src/program.rs`: the cell entry is read through `gi_shader`, so a lease can screen it. This is the same two-line change G2c made.
 - `scripts/m7-g2-run.py`: a deferred lease attempt (exit 3) now retries into its existing run directory instead of crashing, and `RENDERLAB_G2_TRACE_MS` sets the Nsight window.
 - `IndirectSettings::default().slots_log2` is 20. Harnesses that name G2's settings (`g2_variant("g2")`) keep 19.
+
+## 8. Housekeeping (M)
+
+- **Lib suite**, `cargo test -p renderlab --lib` inside GC1 leases, exit 0. `f5` (main `e5c4623` + GC1): 182 passed, 0 failed, 153 ignored. `f6` (main `2d1c084` + GC1, the final code): **185 passed, 0 failed, 155 ignored**. Both include the new `sah_build_partitions_every_triangle` and MP1's seam assertion in `cell_shading_composes_for_reflecting_programs`.
+- **Naga:** `kernels_validate_on_both_ray_sources` and the cell-shading composition pass on the final code and on every screened variant.
+- **fmt** is clean. **clippy** is clean in GC1's files; the warnings that remain are in other units' files.
+- **Lease discipline.** `f1` was cut at its root-ordered 15-minute cap (step 9 stopped at its start, lock released with its line). `f3` and `f6` were stopped by other units' `build-script-build.exe`, which the shared guard counts as foreign renderers. Later leases ran under `tools/order_guard.py`, which withdraws a waiting launcher when a newer `[root order]` appears.
 
 ## Evidence
 
