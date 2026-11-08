@@ -690,7 +690,8 @@ fn gi_resolve_miss(index:u32) {
     gi_table[cold+GI_C_MATERIAL]=0u;
     gi_table[cold+GI_C_PRIMITIVE]=GI_NO_PRIMITIVE;
     gi_table[cold+GI_C_BARY]=0u;
-    gi_table[cold+GI_C_LIGHTS]=0u;
+    // LC2: a new cell has no light visibility until gi_light writes all words.
+    for(var k=GI_C_LIGHTS;k<gi_word(GI_H_COLD_WORDS);k+=1u) { gi_table[cold+k]=0u; }
     gi_queue_trace(slot);
     atomicAdd(&gi_work[GI_W_CREATED],1u);
 }
@@ -1553,18 +1554,31 @@ fn gi_light_reached(slot:u32) -> bool {
     let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
     let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
     let origin=q+n*gi_origin_offset(q,edge);
-    let lights_n=min(lighting.count,32u);
+    let lights_n=lighting.count;
     for(var b=0u;b<gi_frame.counts.x;b+=1u) {
         let pad=vec3<f32>(1e-3*edge+1e-4);
         let lo=gi_frame.boxes[b*2u].xyz-pad;let hi=gi_frame.boxes[b*2u+1u].xyz+pad;
         for(var l=0u;l<lights_n;l+=1u) {
+            if !gi_light_affects(l,q,n) { continue; }
             if gi_box_hit(origin,gi_light_direction(l,q).xyz,lo,hi) { return true; }
         }
     }
     return false;
 }
-// One thread per cell queued for shading: one visibility ray per light (up to 32) from its
-// query point, as bits for cell shading; clears its shading flag for the next frame.
+// LC2 light-list plumbing: exact range/cone/hemisphere rejection before visibility.
+// This is world-space, including off-camera cells. No froxel truncation or light-order cap.
+fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
+    let light=lights[index];
+    if all(light.rgb_inner.xyz==vec3<f32>(0.0)) { return false; }
+    let d=gi_light_direction(index,q);
+    if dot(n,d.xyz)<=0.0 { return false; }
+    if light.kind.x==0u { return true; }
+    if light.position_range.w>0.0 && d.w>=light.position_range.w { return false; }
+    return light.kind.x!=2u || dot(-d.xyz,light.travel_outer.xyz)>light.travel_outer.w;
+}
+// One thread per queued cell. The dynamically sized bitset holds every light, with no
+// first-N cutoff. Cost: scans every light, traces only those that can illuminate the cell;
+// at most lighting.count rays per shaded cell. GI's existing cell budgets are unchanged.
 @compute @workgroup_size(64) fn gi_light(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
     for(var i=id.x;i<count;i+=groups.x*64u) {
@@ -1575,15 +1589,18 @@ fn gi_light_reached(slot:u32) -> bool {
         let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
         let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
         let origin=q+n*gi_origin_offset(q,edge);
-        var bits=0u;
-        let lights_n=min(lighting.count,32u);
-        for(var l=0u;l<lights_n;l+=1u) {
-            let d=gi_light_direction(l,q);
-            if dot(n,d.xyz)<=0.0 { continue; }
-            if gi_visible_within(origin,d.xyz,d.w) { bits|=1u<<l; }
+        var traced=0u;
+        for(var first=0u;first<lighting.count;first+=32u) {
+            var bits=0u;
+            for(var l=first;l<min(first+32u,lighting.count);l+=1u) {
+                if !gi_light_affects(l,q,n) { continue; }
+                let d=gi_light_direction(l,q);
+                traced+=1u;
+                if gi_visible_within(origin,d.xyz,d.w) { bits|=1u<<(l-first); }
+            }
+            gi_table[cold+GI_C_LIGHTS+(first>>5u)]=bits;
         }
-        atomicAdd(&gi_work[GI_W_LIGHT_RAYS],lights_n);
-        gi_table[cold+GI_C_LIGHTS]=bits;
+        atomicAdd(&gi_work[GI_W_LIGHT_RAYS],traced);
     }
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a

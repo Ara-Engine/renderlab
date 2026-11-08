@@ -710,7 +710,8 @@ impl Engine {
     pub fn sun(&self) -> Option<Sun> {
         self.sun
     }
-    /// Replaces the local lights (point and spot; unshadowed at this revision).
+    /// Replaces the local lights (point and spot). The most important lights shadow
+    /// automatically; `source_radius` sets their penumbra size (zero keeps hard shadows).
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
         let previous = std::mem::replace(&mut self.lights, lights.to_vec());
         self.apply_lighting()

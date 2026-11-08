@@ -22,7 +22,10 @@ impl ShadowFrame {
         &self.records
     }
     pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
-        for (light, &[first, count]) in light_records.chunks_exact(64).zip(&self.light_ranges) {
+        for (light, &[first, count]) in light_records
+            .chunks_exact(crate::lighting::LIGHT_BYTES)
+            .zip(&self.light_ranges)
+        {
             let sun = Vec3::from_array(std::array::from_fn(|i| {
                 -f32::from_ne_bytes(light[16 + i * 4..20 + i * 4].try_into().unwrap())
             }));
@@ -654,7 +657,7 @@ impl Renderer {
             .lighting
             .pending
             .records
-            .chunks_exact_mut(64)
+            .chunks_exact_mut(crate::lighting::LIGHT_BYTES)
             .enumerate()
         {
             let range = frame.map_or([0, 0], |f| f.light_ranges[index]);

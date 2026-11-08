@@ -17,7 +17,8 @@
 // Header words, then every hot record, then every cold record.
 const GI_HEADER:u32=64u;
 const GI_HOT_WORDS:u32=24u;
-const GI_COLD_WORDS:u32=32u;
+// LC2: header word 23 is the cold stride, including every light visibility word.
+const GI_H_COLD_WORDS:u32=23u;
 // Hot words 16-22 (G2): the bounce SH's f32 scale (0: no bounce), then its 12 halves (L1,
 // coefficient i*3+c for band index i, channel c), divided by the scale. Word 23: the packed
 // query normal (as GI_C_NORMAL), which shading's agreement weight reads in the same load.
@@ -171,7 +172,7 @@ const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY
 // shading a vec4 array (gi_api.wgsl) so records load whole.
 fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_word(i)); }
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
-fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*GI_COLD_WORDS; }
+fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*max(32u,gi_word(GI_H_COLD_WORDS)); }
 
 // Level whose edge is the smallest power-of-two multiple of the minimum edge at least
 // `footprint` times the eye distance. The kernels request both levels near a boundary,

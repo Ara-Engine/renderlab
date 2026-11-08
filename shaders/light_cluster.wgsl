@@ -7,7 +7,7 @@
 // low 16 bits and the count the cluster wanted (before LC_MAX truncation) in its high 16.
 // Lists live in an R32Uint texture (no storage buffer in the shading stages): cluster c's
 // word k is texel (c % LC_ROW * LC_STRIDE + k, c / LC_ROW).
-struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32> };
+struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32>, source:vec4<f32> };
 @group(0) @binding(0) var<storage,read> lights:array<Light>;
 @group(0) @binding(1) var clusters:texture_storage_2d<r32uint,write>;
 @group(0) @binding(2) var<uniform> frame:LcFrame;

@@ -258,7 +258,8 @@ mod tests {
                 &[Light::Point {
                     position: Vec3::ZERO,
                     candela: [1.; 3],
-                    range: None
+                    range: None,
+                    source_radius: 0.0,
                 }],
                 limits()
             )
@@ -280,6 +281,7 @@ mod tests {
             range: None,
             inner: 0.1,
             outer: std::f32::consts::FRAC_PI_2,
+            source_radius: 0.0,
         };
         assert!(Shadows::default().validate(&[light], limits()).is_ok());
         let s = Shadows {

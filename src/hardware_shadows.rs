@@ -254,6 +254,7 @@ mod tests {
             position: crate::Vec3::ZERO,
             candela: [1.; 3],
             range: None,
+            source_radius: 0.0,
         };
         assert!(
             validate_requests(

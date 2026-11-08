@@ -52,6 +52,7 @@ impl Fixture {
                     position: Vec3::new(3., 3., 2.),
                     candela: [3500., 2000., 1000.],
                     range: Some(15.),
+                    source_radius: 0.0,
                 },
                 Light::Spot {
                     position: Vec3::new(-3., 4.5, 3.),
@@ -60,6 +61,7 @@ impl Fixture {
                     range: Some(18.),
                     inner: 0.3,
                     outer: 0.65,
+                    source_radius: 0.0,
                 },
             ],
             environment: [4.; 3],

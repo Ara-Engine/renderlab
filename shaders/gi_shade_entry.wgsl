@@ -132,11 +132,15 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     rl_load_parameters(input.receiver.slot);
     let s=surface(input);
     var out=rl_emission(s,input);
-    let bits=gi_word(cold+GI_C_LIGHTS);
-    for(var i=0u;i<min(light_count(),32u);i+=1u) {
-        if (bits&(1u<<i))==0u { continue; }
-        let light=light_sample(i,input);
-        out+=rl_scatter(s,input,light.direction,nc)*light.intensity*light.attenuation;
+    // LC2 light-list plumbing only: every light's visibility, in lighting-vector order.
+    for(var first=0u;first<light_count();first+=32u) {
+        var bits=gi_word(cold+GI_C_LIGHTS+(first>>5u));
+        while bits!=0u {
+            let i=first+firstTrailingBit(bits);
+            bits&=bits-1u;
+            let light=light_sample(i,input);
+            out+=rl_scatter(s,input,light.direction,nc)*light.intensity*light.attenuation;
+        }
     }
     let frame=gi_basis(nc);
     var albedo=vec3<f32>(0.0);

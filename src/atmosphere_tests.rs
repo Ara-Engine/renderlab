@@ -76,6 +76,7 @@ fn only_directional_records_scale() {
                 position: Vec3::ZERO,
                 candela: [1.0; 3],
                 range: None,
+                source_radius: 0.0,
             },
         ],
         ..Default::default()
@@ -84,7 +85,7 @@ fn only_directional_records_scale() {
     let scaled = scale_directional(&packed.records, [0.5, 0.25, 0.125]);
     let rgb = |r: &[u8], i: usize| -> [f32; 3] {
         std::array::from_fn(|k| {
-            let at = i * 64 + 32 + 4 * k;
+            let at = i * crate::lighting::LIGHT_BYTES + 32 + 4 * k;
             f32::from_ne_bytes(r[at..at + 4].try_into().unwrap())
         })
     };

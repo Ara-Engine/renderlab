@@ -82,7 +82,7 @@ fn vsm_light(world:vec3<f32>)->vec3<f32> {
 }
 fn vsm_texel(level:u32)->f32 {return vsm.levels[level].origin.z;}
 fn vsm_extent(level:u32)->f32 {return f32(vsm.counts.y*VSM_PAGE)*vsm_texel(level);}
-// The light-space height a level's march can serve with its ±1-page neighbourhood marked:
+// The light-space height a level's march can serve with its Â±1-page neighbourhood marked:
 // the disk's drift over it stays within one page.
 fn vsm_cap(level:u32)->f32 {return f32(VSM_PAGE-4u)*vsm_texel(level)/max(vsm.params.z,1e-3);}
 fn vsm_reach(level:u32,height:f32)->f32 {return max(0.0,min(vsm_cap(level),vsm.depth.w-height));}
@@ -425,7 +425,7 @@ struct VsmU32s {data:array<u32>};
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
 
 struct LightingUniform {eye:vec3<f32>,count:u32,environment:vec3<f32>,exposure:f32,map:vec4<f32>};
-struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>};
+struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>, source:vec4<f32>};
 struct ShadowView {world_to_clip:mat4x4<f32>,coverage_bias:vec4<f32>,camera_depth:vec4<f32>,texel:vec4<f32>};
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
 @group(3) @binding(1) var<storage,read> lights:array<Light>;

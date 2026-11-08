@@ -280,11 +280,11 @@ fn sphere(p: glam::DVec3, d: glam::DVec3, radius: f64) -> Option<f64> {
     [-b - s, -b + s].into_iter().find(|t| *t >= 0.0)
 }
 
-/// Each directional light record's lux scaled by `scale` (lighting.rs packs 64-byte records:
+/// Each directional light record's lux scaled by `scale` (lighting.rs packs 80-byte records:
 /// rgb at bytes 32..44, kind 0 = directional at 48..52).
 pub(crate) fn scale_directional(records: &[u8], scale: [f32; 3]) -> Vec<u8> {
     let mut out = records.to_vec();
-    for record in out.chunks_exact_mut(64) {
+    for record in out.chunks_exact_mut(crate::lighting::LIGHT_BYTES) {
         if u32::from_ne_bytes(record[48..52].try_into().unwrap()) != 0 {
             continue;
         }

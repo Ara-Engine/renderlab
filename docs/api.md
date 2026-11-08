@@ -128,7 +128,7 @@ engine.set_decals(&[Decal {
 ## Lighting and exposure
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster, and the most important 4 are shadowed each frame (LC1, [m7-lc1.md](m7-lc1.md); `Renderer::set_local_shadows`); the rest are unshadowed. They combine with a soft sun. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster, and the most important 4 are shadowed each frame (LC1, [m7-lc1.md](m7-lc1.md); `Renderer::set_local_shadows`); the rest are unshadowed. They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Sky, atmosphere and fog

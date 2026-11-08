@@ -223,7 +223,7 @@ fn vmap_hybrid()->bool {return (vsm.misc.w&256u)!=0u;}
 @group(0) @binding(18) var vsm_level_in:texture_2d<u32>;
 @group(0) @binding(35) var<storage,read> vsm_mips:array<f32>;
 struct LightingUniform {eye:vec3<f32>,count:u32,environment:vec3<f32>,exposure:f32,map:vec4<f32>};
-struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>};
+struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>, source:vec4<f32>};
 struct ShadowView {world_to_clip:mat4x4<f32>,coverage_bias:vec4<f32>,camera_depth:vec4<f32>,texel:vec4<f32>};
 @group(3) @binding(0) var<uniform> lighting:LightingUniform;
 @group(3) @binding(1) var<storage,read> lights:array<Light>;

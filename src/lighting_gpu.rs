@@ -95,7 +95,9 @@ impl LightingGpu {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(64),
+                            min_binding_size: wgpu::BufferSize::new(
+                                crate::lighting::LIGHT_BYTES as u64,
+                            ),
                         },
                         count: None,
                     },
@@ -308,7 +310,7 @@ impl LightingGpu {
             max: (limits
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size)
-                / 64)
+                / crate::lighting::LIGHT_BYTES as u64)
                 .min(u64::from(u32::MAX)) as u32,
             generation: 0,
             target_generation: 0,
@@ -469,7 +471,7 @@ impl Renderer {
             .decals
             .publish(&self.device, &self.ledger, self.submissions, uploads);
         let records = scaled.as_ref().unwrap_or(&state.pending.records);
-        let needed = records.len().max(64) as u64;
+        let needed = records.len().max(crate::lighting::LIGHT_BYTES) as u64;
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
