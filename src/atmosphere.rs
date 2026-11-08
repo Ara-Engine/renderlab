@@ -156,7 +156,10 @@ impl Atmosphere {
     }
     /// Whether any part runs on a lit frame.
     pub fn active(&self) -> bool {
-        self.sky || self.aerial_perspective || self.height_fog.is_some() || self.volumetric_fog.is_some()
+        self.sky
+            || self.aerial_perspective
+            || self.height_fog.is_some()
+            || self.volumetric_fog.is_some()
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let m = &self.medium;
@@ -247,7 +250,8 @@ impl Atmosphere {
 pub(crate) fn api_source() -> String {
     format!(
         "{}{}",
-        include_str!("../shaders/atmosphere_common.wgsl").replace("atmosphere_sampler", "dfg_sampler"),
+        include_str!("../shaders/atmosphere_common.wgsl")
+            .replace("atmosphere_sampler", "dfg_sampler"),
         include_str!("../shaders/atmosphere_api.wgsl")
     )
 }

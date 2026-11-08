@@ -18,6 +18,12 @@ const VOLUME_SLICES: u32 = 96;
 /// Screen pixels per camera-volume column.
 pub(super) const FROXEL_TILE: u32 = 16;
 pub(super) const UNIFORM_BYTES: u64 = 432;
+/// The procedural environment's specular chain (shaders/atmosphere.wgsl must match): the
+/// smallest level stays 8 texels (7 levels from 64 down to 1 texel cost 0.47 ms more quarry
+/// shading than a captured map; rough lookups there are mostly cross-face corner taps).
+/// Roughness steps 0.25 between levels.
+const ENVIRONMENT_SIZE: u32 = 128;
+const ENVIRONMENT_LEVELS: u32 = 5;
 const FLAG_SKY: u32 = 1;
 const FLAG_SUN_DISK: u32 = 2;
 const FLAG_AERIAL: u32 = 4;
@@ -132,7 +138,7 @@ struct Kernels {
 }
 
 /// The procedural environment (`Atmosphere::environment`): the inputs it was generated
-/// from, the map, its kernel groups (seven specular levels, then diffuse), and whether a
+/// from, the map, its kernel groups (the specular levels, then diffuse), and whether a
 /// frame has written it yet.
 struct Procedural {
     key: String,
@@ -238,7 +244,9 @@ impl AtmosphereGpu {
     }
     /// The raster sky draw for this lit frame, when the sky is on.
     pub fn raster_sky(&self) -> Option<&wgpu::RenderPipeline> {
-        self.sky.as_deref().filter(|_| self.active && self.settings.sky)
+        self.sky
+            .as_deref()
+            .filter(|_| self.active && self.settings.sky)
     }
 }
 
@@ -315,10 +323,13 @@ impl Renderer {
     }
     /// The first directional light: its unit direction toward the sun and its lux.
     fn atmosphere_sun(&self) -> Option<(Vec3, [f32; 3])> {
-        self.lighting.source_lights.iter().find_map(|light| match *light {
-            Light::Directional { travel, lux } => Some((-travel.normalize(), lux)),
-            _ => None,
-        })
+        self.lighting
+            .source_lights
+            .iter()
+            .find_map(|light| match *light {
+                Light::Directional { travel, lux } => Some((-travel.normalize(), lux)),
+                _ => None,
+            })
     }
     /// The factor directional lux takes this frame (`Atmosphere::sun_transmittance`), or
     /// None to upload the lights as given.
@@ -356,8 +367,17 @@ impl Renderer {
             return;
         }
         let sun = self.atmosphere_sun();
-        let key = format!("{sun:?} {:?} {}", s.medium, self.environment.parameters.rotation_y_radians);
-        if mine && self.atmosphere.procedural.as_ref().is_some_and(|p| p.key == key) {
+        let key = format!(
+            "{sun:?} {:?} {}",
+            s.medium, self.environment.parameters.rotation_y_radians
+        );
+        if mine
+            && self
+                .atmosphere
+                .procedural
+                .as_ref()
+                .is_some_and(|p| p.key == key)
+        {
             return;
         }
         let (device, ledger) = (&self.device, &self.ledger);
@@ -374,7 +394,8 @@ impl Renderer {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba32Float,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
@@ -386,7 +407,9 @@ impl Renderer {
                 }),
                 ResourceKind::TextureView,
             );
-            let bytes = (0..levels).map(|l| u64::from((size >> l).max(1)).pow(2) * 6 * 16).sum();
+            let bytes = (0..levels)
+                .map(|l| u64::from((size >> l).max(1)).pow(2) * 6 * 16)
+                .sum();
             let levels: Vec<_> = (0..levels)
                 .map(|l| {
                     ledger.own(
@@ -409,7 +432,11 @@ impl Renderer {
                 levels,
             )
         };
-        let (specular, specular_levels) = cube("AT1 procedural specular", 64, 7);
+        let (specular, specular_levels) = cube(
+            "AT1 procedural specular",
+            ENVIRONMENT_SIZE,
+            ENVIRONMENT_LEVELS,
+        );
         let (diffuse, diffuse_levels) = cube("AT1 procedural diffuse", 16, 1);
         let a = &self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -417,19 +444,25 @@ impl Renderer {
             .iter()
             .map(|v| group(device, ledger, &k.specular, &environment_entries(a, 16, v)))
             .collect();
-        groups.push(group(device, ledger, &k.diffuse, &environment_entries(a, 17, &diffuse_levels[0])));
-        let map = crate::environment::EnvironmentMap(Arc::new(crate::environment::EnvironmentInner {
-            renderer: self.identity.clone(),
-            diffuse,
-            specular,
-            specular_second: None,
-            lobes: None,
-            independent: false,
-            levels: 7,
-            // World axes: cancel the caller's yaw.
-            yaw: -self.environment.parameters.rotation_y_radians,
-            hash: Sha256::digest(key.as_bytes()).into(),
-        }));
+        groups.push(group(
+            device,
+            ledger,
+            &k.diffuse,
+            &environment_entries(a, 17, &diffuse_levels[0]),
+        ));
+        let map =
+            crate::environment::EnvironmentMap(Arc::new(crate::environment::EnvironmentInner {
+                renderer: self.identity.clone(),
+                diffuse,
+                specular,
+                specular_second: None,
+                lobes: None,
+                independent: false,
+                levels: ENVIRONMENT_LEVELS,
+                // World axes: cancel the caller's yaw.
+                yaw: -self.environment.parameters.rotation_y_radians,
+                hash: Sha256::digest(key.as_bytes()).into(),
+            }));
         self.environment.selected = Some(map.clone());
         self.environment.generation += 1;
         self.atmosphere.procedural = Some(Procedural {
@@ -528,10 +561,20 @@ impl Renderer {
         f.push(exposure as f32);
         f.extend(eye.to_array());
         f.push(altitude);
-        f.extend([fog.density, fog.falloff, fog.base_height, fog.start_distance]);
+        f.extend([
+            fog.density,
+            fog.falloff,
+            fog.base_height,
+            fog.start_distance,
+        ]);
         f.extend(fog.albedo);
         f.push(fog.anisotropy);
-        f.extend([volume.distance, volume.extra_density, volume.history_weight, 0.0]);
+        f.extend([
+            volume.distance,
+            volume.extra_density,
+            volume.history_weight,
+            0.0,
+        ]);
         f.extend(previous_eye.to_array());
         f.push(valid);
         f.extend(matrix.to_cols_array());
@@ -811,13 +854,13 @@ impl Renderer {
         pass.dispatch_workgroups(1, 1, 1);
         if let Some(p) = a.procedural.as_mut().filter(|p| !p.written) {
             pass.set_pipeline(&k.specular);
-            for (level, group) in p.groups[..7].iter().enumerate() {
+            for (level, group) in p.groups[..ENVIRONMENT_LEVELS as usize].iter().enumerate() {
                 pass.set_bind_group(0, &**group, &[]);
-                let n = (64u32 >> level).div_ceil(8);
+                let n = (ENVIRONMENT_SIZE >> level).div_ceil(8);
                 pass.dispatch_workgroups(n, n, 6);
             }
             pass.set_pipeline(&k.diffuse);
-            pass.set_bind_group(0, &*p.groups[7], &[]);
+            pass.set_bind_group(0, &*p.groups[ENVIRONMENT_LEVELS as usize], &[]);
             pass.dispatch_workgroups(2, 2, 6);
             p.written = true;
         }

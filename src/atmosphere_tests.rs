@@ -22,7 +22,8 @@ fn zenith_transmittance_matches_closed_form() {
     // cut-off is negligible) and the ozone tent to its half width.
     let expected: Vec<f32> = (0..3)
         .map(|k| {
-            let depth = m.rayleigh_scattering[k] * m.rayleigh_scale_height_km
+            let depth = m.rayleigh_scattering[k]
+                * m.rayleigh_scale_height_km
                 * (1.0 - (-100.0f32 / m.rayleigh_scale_height_km).exp())
                 + (m.mie_scattering[k] + m.mie_absorption[k]) * m.mie_scale_height_km
                 + m.ozone_absorption[k] * m.ozone_half_width_km;
@@ -273,8 +274,7 @@ fn gpu_at1_quarry() {
     let options = RendererOptions::default();
     let mut r = if path == "nonrt" {
         let (device, queue) = no_rt_device();
-        Renderer::new_with_options(device, queue, FORMAT, renderer_limits, options, SOURCE)
-            .unwrap()
+        Renderer::new_with_options(device, queue, FORMAT, renderer_limits, options, SOURCE).unwrap()
     } else {
         let (device, queue) = rt_device();
         Renderer::new_with_hardware_shadows(
@@ -339,8 +339,7 @@ fn gpu_at1_quarry() {
         r.test_drain("AT1 environment");
     };
     drop(map);
-    let mut asset =
-        quarry_prepared::Prepared::new_with_limits(source, limits, 1_000_000).unwrap();
+    let mut asset = quarry_prepared::Prepared::new_with_limits(source, limits, 1_000_000).unwrap();
     while !asset.ready() {
         asset.advance(&mut r).unwrap();
         r.collect().unwrap();
@@ -387,20 +386,35 @@ fn gpu_at1_quarry() {
     };
     // (name, atmosphere, captured sky, sun travel, lux, frames)
     let configs = [
-        ("pre-at1", Atmosphere::off(), true, quarry_travel, quarry_lux, 3),
-        ("default", Atmosphere::default(), true, quarry_travel, quarry_lux, 3),
+        (
+            "pre-at1",
+            Atmosphere::off(),
+            true,
+            quarry_travel,
+            quarry_lux,
+            3,
+        ),
+        (
+            "default",
+            Atmosphere::default(),
+            true,
+            quarry_travel,
+            quarry_lux,
+            3,
+        ),
         ("noon", Atmosphere::default(), false, noon, space, 3),
         ("low", Atmosphere::default(), false, low, space, 3),
         ("low-volumetric", volumetric, false, low, space, 24),
     ];
     let mut log = serde_json::json!({"path": path,
         "size": size, "exposure_stops": exposure, "configs": {}});
-    let apply = |r: &mut Renderer, atmosphere: Atmosphere, captured: bool, travel: Vec3, lux: [f32; 3]| {
-        r.set_atmosphere(atmosphere).unwrap();
-        r.set_environment(captured.then_some(&sky), Default::default())
-            .unwrap();
-        set_sun(r, travel, lux);
-    };
+    let apply =
+        |r: &mut Renderer, atmosphere: Atmosphere, captured: bool, travel: Vec3, lux: [f32; 3]| {
+            r.set_atmosphere(atmosphere).unwrap();
+            r.set_environment(captured.then_some(&sky), Default::default())
+                .unwrap();
+            set_sun(r, travel, lux);
+        };
     for (name, atmosphere, captured, travel, lux, frames) in configs {
         apply(&mut r, atmosphere, captured, travel, lux);
         for _ in 0..frames {
@@ -427,8 +441,20 @@ fn gpu_at1_quarry() {
     // volumetric fog at the low sun.
     let timing_configs = [
         ("off", Atmosphere::off(), true, quarry_travel, quarry_lux),
-        ("default", Atmosphere::default(), true, quarry_travel, quarry_lux),
-        ("procedural", Atmosphere::default(), false, quarry_travel, space),
+        (
+            "default",
+            Atmosphere::default(),
+            true,
+            quarry_travel,
+            quarry_lux,
+        ),
+        (
+            "procedural",
+            Atmosphere::default(),
+            false,
+            quarry_travel,
+            space,
+        ),
         ("off-low", Atmosphere::off(), true, low, space),
         ("procedural-low", Atmosphere::default(), false, low, space),
         ("volumetric", volumetric, false, low, space),

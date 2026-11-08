@@ -59,7 +59,28 @@ Lib tests construct renderers with `Atmosphere::off()`, since they predate AT1 a
 
 ## Verification
 
-RESULTS-PLACEHOLDER
+All runs were headless, inside m7-at1's GPU leases, with an optimized test binary and evidence on `D:/Coding/renderlab-work/at1/`.
+- Host: RTX 4070 SUPER, Vulkan.
+- Scene: the quarry (G1c's manifest), pose 0, 1920x1080, 1x.
+- Contention: other overnight units' leases interleaved with ours; the wallpaper load was not controlled.
+- Paths:
+  - `raster`: the RT device's code default, raster primaries with Exact shadows;
+  - `nonrt`: the visibility buffer with Virtual shadows;
+  - `traced`: traced primaries with Interactive shadows.
+
+**Lib tests** (inside the lease): `cargo test --lib`, 155 passed, 0 failed (146 GPU tests ignored), exit 0. AT1's own CPU tests cover:
+- the CPU transmittance against the medium's closed form;
+- validation;
+- directional-only scaling;
+- naga validation of the kernels, the raster sky module and the composed standard program.
+
+**Images** (`gpu_at1_quarry`, `runs-out/<run>/<path>/<path>-<config>.png` plus raw exposed HDR `.f32`). Configurations:
+- `pre-at1`: `Atmosphere::off()` with the quarry's captured RLE2 sky and 1000 lux sun, the old default image;
+- `default`: `Atmosphere::default()` with the same captured sky;
+- `noon` and `low`: the procedural sky and environment, a 120 klux sun at 65 and 4 degrees;
+- `low-volumetric`: `low` plus 0.01/m volumetric fog.
+
+RUN-B-PLACEHOLDER
 
 ## Gaps
 

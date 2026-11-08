@@ -278,8 +278,9 @@ fn at_jitter(k:u32) -> vec3<f32> {
 // environment_face_direction.
 @group(0) @binding(16) var at_specular_out:texture_storage_2d_array<rgba32float,write>;
 @group(0) @binding(17) var at_diffuse_out:texture_storage_2d_array<rgba32float,write>;
-const AT_ENVIRONMENT_SIZE:u32=64u;
-const AT_ENVIRONMENT_LEVELS:u32=7u;
+// src/atmosphere_gpu.rs ENVIRONMENT_SIZE and ENVIRONMENT_LEVELS must match.
+const AT_ENVIRONMENT_SIZE:u32=128u;
+const AT_ENVIRONMENT_LEVELS:u32=5u;
 fn at_face_direction(face:u32, uv:vec2<f32>) -> vec3<f32> {
     switch face {
         case 0u: { return vec3<f32>(1.0,-uv.y,-uv.x); }
