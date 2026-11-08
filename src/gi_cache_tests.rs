@@ -1235,11 +1235,7 @@ fn gpu_gi_sky_visibility_sv() {
             let mut rows = json!({});
             // Before any map exists: the cache's ordinary cost on a still camera.
             for (label, cache) in [("before-upload", true), ("before-upload-cache-off", false)] {
-                rig.settings(if cache {
-                    on
-                } else {
-                    IndirectSettings::off()
-                });
+                rig.settings(if cache { on } else { IndirectSettings::off() });
                 rig.r.reset_indirect();
                 rows[label] = sequence(&mut rig, &sv, &materials, 32, |_, _| (eye, target));
             }
@@ -1258,11 +1254,7 @@ fn gpu_gi_sky_visibility_sv() {
                 ("map-still-cache-off", false, true, false),
                 ("no-map-cache-off", false, false, false),
             ] {
-                rig.settings(if cache {
-                    on
-                } else {
-                    IndirectSettings::off()
-                });
+                rig.settings(if cache { on } else { IndirectSettings::off() });
                 rig.r.reset_indirect();
                 rig.r
                     .set_environment(selected.then_some(&map), Default::default())
@@ -1296,10 +1288,7 @@ fn gpu_gi_sky_visibility_sv() {
             ..Default::default()
         };
         // Configurations: GI off (the pre-M7 image), then the W3 lookups and cell sizes.
-        let mut configs = vec![
-            ("off", IndirectSettings::off()),
-            ("trilinear-4px", base),
-        ];
+        let mut configs = vec![("off", IndirectSettings::off()), ("trilinear-4px", base)];
         if !quick {
             configs.extend([
                 (
@@ -3414,7 +3403,10 @@ fn g2_variant(name: &str) -> IndirectSettings {
     match name {
         "off" => IndirectSettings::off(),
         "g2" => g2,
-        "es1" | "es1open" => IndirectSettings { bounce: false, ..g2 },
+        "es1" | "es1open" => IndirectSettings {
+            bounce: false,
+            ..g2
+        },
         // G2b's default: the cache as it now ships.
         "g2b" => IndirectSettings::default(),
         // G2b screens: the cache with bounce, changed by '+'-joined tokens: pxF (cell edge in
@@ -3431,7 +3423,8 @@ fn g2_variant(name: &str) -> IndirectSettings {
                     s.claim_cells = u32::MAX;
                     continue;
                 }
-                let (tag, value) = token.split_at(token.find(|c: char| c.is_ascii_digit()).unwrap_or(0));
+                let (tag, value) =
+                    token.split_at(token.find(|c: char| c.is_ascii_digit()).unwrap_or(0));
                 match tag {
                     "px" => s.cell_pixels = value.parse().unwrap(),
                     "s" => s.slots_log2 = value.parse().unwrap(),
@@ -3864,7 +3857,8 @@ fn gpu_g2_quarry() {
                 // 1 cm a frame over sweeps of RENDERLAB_G2_SWEEP frames (default 24: existing
                 // cells revisited, so the probe, gathers of new cells and the lookup), unprofiled.
                 // The motion's start is printed in process seconds, for ngfx --start-after-ms.
-                let frames: usize = env("RENDERLAB_G2_TRACE").map_or(30_000, |f| f.parse().unwrap());
+                let frames: usize =
+                    env("RENDERLAB_G2_TRACE").map_or(30_000, |f| f.parse().unwrap());
                 let sweep: usize = env("RENDERLAB_G2_SWEEP").map_or(24, |f| f.parse().unwrap());
                 r.set_indirect(g2_variant(&variants[0])).unwrap();
                 r.set_indirect_profiling(false);
@@ -3872,7 +3866,10 @@ fn gpu_g2_quarry() {
                 for _ in 0..12 {
                     draw(&mut r, &camera_at(0, 0.0));
                 }
-                eprintln!("G2b trace motion starts at {:.1} s", start.elapsed().as_secs_f64());
+                eprintln!(
+                    "G2b trace motion starts at {:.1} s",
+                    start.elapsed().as_secs_f64()
+                );
                 for t in 0..frames {
                     let k = t % (2 * sweep);
                     draw(&mut r, &camera_at(0, 0.01 * k.min(2 * sweep - k) as f32));
@@ -3881,14 +3878,18 @@ fn gpu_g2_quarry() {
                         r.poll().unwrap();
                     }
                 }
-                eprintln!("G2b trace motion ends at {:.1} s", start.elapsed().as_secs_f64());
+                eprintln!(
+                    "G2b trace motion ends at {:.1} s",
+                    start.elapsed().as_secs_f64()
+                );
             }
             "cutprofile" => {
                 // G2b: each variant's cut at pose 0, profiled: per frame (1-N, N from
                 // RENDERLAB_G2_CUT_FRAMES, default 24) the pass times, the frame span and the
                 // kernels' counters. The counter readback after each frame waits for the GPU, so
                 // spans here are per-frame GPU spans, not a pipelined frame rate.
-                let frames: usize = env("RENDERLAB_G2_CUT_FRAMES").map_or(24, |f| f.parse().unwrap());
+                let frames: usize =
+                    env("RENDERLAB_G2_CUT_FRAMES").map_or(24, |f| f.parse().unwrap());
                 let mut rows = json!({});
                 r.set_indirect_profiling(true);
                 for v in &variants {
@@ -3913,8 +3914,14 @@ fn gpu_g2_quarry() {
                         // The counter readback waited for this frame: its GPU sample is the
                         // newest (the renderer keeps only the last few).
                         let gpu = r.poll().unwrap().gpu;
-                        span_ms.push(gpu.last().map_or(f64::NAN, |g| g.render_span.as_secs_f64() * 1e3));
-                        shading_ms.push(gpu.last().map_or(f64::NAN, |g| g.mesh_pass.as_secs_f64() * 1e3));
+                        span_ms.push(
+                            gpu.last()
+                                .map_or(f64::NAN, |g| g.render_span.as_secs_f64() * 1e3),
+                        );
+                        shading_ms.push(
+                            gpu.last()
+                                .map_or(f64::NAN, |g| g.mesh_pass.as_secs_f64() * 1e3),
+                        );
                     }
                     let spans = json!({"span_ms": span_ms, "shading_ms": shading_ms});
                     let profiles = r.indirect_profiles().unwrap();
@@ -3924,7 +3931,8 @@ fn gpu_g2_quarry() {
                             "scan": p.scan, "setup": p.setup, "rays": p.rays, "finish": p.finish,
                             "gather": p.gather, "light": p.light, "shade": p.shade}))
                         .collect();
-                    rows[v.as_str()] = json!({"spans": spans, "passes_us": passes, "counters": counts});
+                    rows[v.as_str()] =
+                        json!({"spans": spans, "passes_us": passes, "counters": counts});
                 }
                 r.set_indirect_profiling(false);
                 results["cutprofile"] = rows;
