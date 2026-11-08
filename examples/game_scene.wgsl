@@ -4,15 +4,19 @@
 // material parameters of one program (docs/api.md, "Programs"). The toon branch reads
 // the engine's sky irradiance for its fill, so it is occluded by GI like everything else,
 // and its `scatter` is flat Lambert, so toon objects still bounce their colour.
+// Photoreal materials request traced mirror and glossy reflections (M7-R1) through
+// `reflection_lobe` unless they set `reflect` to 0; toon materials never do.
 struct Parameters {
     shadow_tint:vec3<f32>, bands:f32,
     rim_color:vec3<f32>, rim_power:f32,
     thresholds:vec2<f32>, fill:f32, style:u32,
+    reflect:f32,
 };
 const DEFAULT_PARAMETERS:Parameters = Parameters(
     vec3<f32>(0.12,0.08,0.24),4.0,
     vec3<f32>(0.12,0.2,0.3),4.0,
-    vec2<f32>(0.12,0.9),1.0,0u
+    vec2<f32>(0.12,0.9),1.0,0u,
+    1.0
 );
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
@@ -28,6 +32,13 @@ fn surface(input:SurfaceInput) -> Surface {
     let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
     let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
+}
+
+// The GGX lobe the engine traces on RT traced frames (roughness below 0.5); weight 0
+// asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    let weight=select(params.reflect,0.0,params.style==1u);
+    return SpecularLobe(s.n,s.rough*s.rough,weight);
 }
 
 fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
@@ -104,6 +115,12 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
                 -environment_product(share,reflectance));
         }
         specular=max(specular,vec3<f32>(0.0));
+    }
+    // Traced reflections replace the untraced sky specular by their traced fraction w,
+    // which fades out across roughness 0.35-0.5 (and is 0 off the RT traced path).
+    let traced=specular_incident(input);
+    if traced.w>0.0 {
+        specular=mix(specular,min(traced.rgb*reflectance,vec3<f32>(65504.0)),traced.w);
     }
     var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {

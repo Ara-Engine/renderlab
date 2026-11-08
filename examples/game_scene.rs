@@ -1,13 +1,13 @@
 //! A small game-like scene through the engine API (docs/api.md), offscreen.
 //!
-//! Procedural ground, an arch, crates, a red wall (colour bleeding), a gold sphere, a
-//! spinning crate and a bobbing toon-styled hero, lit by a sun with soft shadows, a
-//! uniform sky, GI, temporal reconstruction and two ground decals, seen from a camera fly
-//! path. Every
-//! `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the ground with the
-//! registered quarry scans and its RLE2 sky (manifest keys `asset`, `limits`,
-//! `environment`, `exposure_stops`), shown as a visible sky. `--render-scale` picks a TR1
-//! upscaling preset.
+//! Procedural ground, an arch, crates, a red wall (colour bleeding), a glossy gold sphere,
+//! a mirror chrome sphere, a spinning crate and a bobbing toon-styled hero, with an emblem
+//! decal and a wet puddle decal on the ground. A sun with soft shadows, a uniform sky, GI,
+//! traced reflections (RT) and temporal reconstruction light it, seen from a camera fly
+//! path. Every `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the
+//! ground with the registered quarry scans and its RLE2 sky (manifest keys `asset`,
+//! `limits`, `environment`, `exposure_stops`), shown as a visible sky. `--render-scale`
+//! picks a TR1 upscaling preset.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -182,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let red = material(&mut engine, [0.8, 0.09, 0.06], 0.0, 0.6)?;
     let gold = material(&mut engine, [1.0, 0.78, 0.34], 1.0, 0.25)?;
     let paint = material(&mut engine, [0.1, 0.3, 0.85], 0.0, 0.35)?;
+    let chrome = material(&mut engine, [0.95, 0.95, 0.97], 1.0, 0.02)?;
     let hero_style = [
         ("style", Value::U32(1)),
         ("bands", Value::F32(3.0)),
@@ -273,6 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
+    // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
+    engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
     let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
     let hero_body = engine.spawn(sphere, toon, Mat4::IDENTITY)?;
     let hero_head = engine.spawn(sphere, toon, Mat4::IDENTITY)?;

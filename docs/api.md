@@ -2,7 +2,7 @@
 
 The engine-facing API is `renderlab::engine`. A game owns one `Engine`. It creates resources and objects through typed handles, sets lights, sky and settings, and calls `render` once per frame. Everything else in the crate root is the low-level renderer the engine wraps. That renderer's tuning surface changes as features are measured; the engine module is the part that stays stable (see [Stability](#stability-and-freeze-notes)).
 
-Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1 (main `976a952`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
+Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1, TR1b and R1 (main `ffdaee9`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
 
 ## Principles
 
@@ -129,7 +129,7 @@ engine.set_decals(&[Decal {
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels; `illuminance` is lux per channel (clear midday is about 100,000); `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths. 0 gives hard shadows.
 - `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are unshadowed at this revision, and a soft sun must currently be the only light (see [Current limits](#current-limits)); many-light sampling and shadows arrive with LC1. Directional lights go in the sun.
-- `set_sky(Sky)`: `Sky::Uniform(radiance)` in cd/m², which is also the background colour; or `Sky::Map { map, rotation_y, intensity, backdrop }`, where the map lights the scene and `backdrop` fills the background. The visible-sky background and the physical atmosphere arrive with TR1b and AT1.
+- `set_sky(Sky)`: `Sky::Uniform(radiance)` in cd/m², which is also the background colour; or `Sky::Map { map, rotation_y, intensity, background }`, where the map lights the scene and `background` is `Background::Color(radiance)` or `Background::Sky`. `Background::Sky` is TR1b's visible sky: misses show the map along each pixel's ray, exposed like the light it gives. The renderer keeps it opt-in, so choose it explicitly. The physical atmosphere arrives with AT1.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Settings and quality presets
@@ -139,17 +139,38 @@ pub struct Settings {
     pub quality: Quality,                 // Realtime (default) | Reference
     pub global_illumination: bool,        // world radiance cache: sky visibility and bounce
     pub temporal_reconstruction: bool,    // TR1 jittered accumulation and antialiasing
+    pub render_scale: RenderScale,        // Native | Quality (2/3 per axis) | Performance (1/2)
     pub exposure: Exposure,
 }
 ```
 
 - `Quality::Realtime` is each path's measured real-time configuration (the table above).
 - `Quality::Reference` integrates sun visibility exactly: all 256 disk directions per pixel on RT, and the exact triangle-tested map lookup without RT. It is for stills, captures and A/B checks, not real-time play.
-- `set_settings` applies a change atomically and only when something changed. It overwrites any overlapping tuning made through `renderer_mut()`.
+- `render_scale` is TR1b's upscaling preset: with temporal reconstruction on, every pass renders at the scale's internal size and TR1 reconstructs the target. It needs `temporal_reconstruction`; a scale below `Native` without it is rejected.
+- `set_settings` applies a change only when something changed, and validates before touching the renderer. It overwrites any overlapping tuning made through `renderer_mut()`.
 
-Defaults follow each feature unit's default ruling, not the facade's opinion. At `984a18b`, GI is off by default (the M7-G2 ruling keeps the cache opt-in until G2b passes its gates) and temporal reconstruction is off (TR1b's visible-sky gate failed). The example turns both on. Phase 2 updates these defaults as G2b and TR1b rule.
+Defaults follow each feature unit's default ruling, not the facade's opinion. At main `ffdaee9`: temporal reconstruction is **on** at native scale (TR1b's overnight ruling; its remaining losses to no-AA and TSR are in [m7-gaps.md](m7-gaps.md)); GI is **off** (the M7-G2 ruling keeps the cache opt-in until G2b rules); traced reflections are on wherever a program asks for them (R1, see [Reflections](#reflections)). The example turns GI on.
 
 Rendering is single-sample on both quality paths. Temporal reconstruction is the antialiasing; MSAA belongs to the low-level raster path only.
+
+## Reflections
+
+Reflections are a property of the shading program, not a setting. A program asks for them with the optional hook
+
+```wgsl
+fn reflection_lobe(s: Surface, input: SurfaceInput) -> SpecularLobe  // SpecularLobe { normal, alpha, weight }
+```
+
+and reads the result with the engine input `specular_incident(input) -> vec4<f32>`. Its rgb is the mean exposed radiance over the lobe, and w is the traced fraction, so the program blends it over its own untraced estimate: `mix(untraced, traced.rgb * reflectance, traced.w)`. `alpha` is perceptual roughness squared, and `weight > 0` requests rays.
+
+| Path | What a requesting program gets (M7-R1, [m7-r1.md](m7-r1.md)) |
+|---|---|
+| `HardwareRt` | One mirror ray below roughness 0.05, and four fixed GGX strata up to 0.35, fading to the untraced estimate by 0.5 (w falls from 1 to 0 over 0.35-0.5). Hits are shaded by the frame's program, with the hit's own material, decals and a hard shadow ray. TR1 integrates the glossy strata over frames. One bounce. |
+| `NonRt` | w = 0 everywhere, so the program's untraced estimate stands: `indirect_radiance`, the environment, occluded and with bounce when GI runs. Software-traced non-RT reflections (R1n) are in progress and need no API change. |
+
+The standard program requests them for every material. The example's program shows per-material control: its `reflect` parameter is the lobe weight, so a material with `reflect: 0` asks for no rays. The renderer has no global reflection switch at this revision.
+
+R1 records three constraints. The hook is GGX-shaped, so a non-GGX style gives its nearest GGX lobe or weight 0. Hits read the open environment, not the GI cache. A program that declares the hook but not the input, or the reverse, traces nothing.
 
 ## Frames
 
@@ -180,7 +201,7 @@ fn scatter(s: Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec
 fn emission(s: Surface, input: SurfaceInput) -> vec3<f32> { ... }
 ```
 
-Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `brdf`, `expose` and `exposed_product`. shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
+Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` hook joins `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
 
 **One program per frame (current limit).** Both quality paths shade every pixel of a frame with one program: traced RT primaries and the non-RT visibility buffer reject frames whose materials use different programs. Per-program dispatch is planned (M7 design, R1). Until it lands, give per-object styles to materials of one program through a `Parameters` member, as the example does: examples/game_scene.wgsl is the standard program plus a toon branch selected by `style`, so the hero is toon-shaded and the props photoreal in the same frame. When per-program dispatch lands, separate programs per material will work with no API change.
 
@@ -198,11 +219,12 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 ```
 renderlab::engine            Engine, EngineDescriptor, Capabilities, RenderPath, ExperimentalRayQuery,
                              MaterialDesc, TextureRef, AssetHandles, Image, headless_adapter
-renderlab::engine (settings) Settings, Quality, Exposure, Sky, Sun
+renderlab::engine (settings) Settings, Quality, Exposure, Sky, Background, Sun
 renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId
 renderlab::engine re-exports Camera, Light, Decal, DecalBlend, DecalTexture, DecalTextureKind,
                              DecalTextures, MeshData, Vertex, Value, Limits, Mat4, Vec3, Error,
-                             ReloadError, ReloadReport, FrameReport, Events, FrameId, Sampler,
+                             RenderScale, ReloadError, ReloadReport, FrameReport, Events, FrameId,
+                             Sampler,
                              TextureData, TangentStream, PreparedEnvironment, Renderer
 renderlab::*                 the low-level renderer (expert API, not frozen)
 ```
@@ -211,9 +233,9 @@ Each overnight unit lands in a named slot. The shapes below are the intended API
 
 | Unit | Feature | Planned engine API |
 |---|---|---|
-| TR1b | TR1 default, upscaling presets | `Settings::temporal_reconstruction` default; a `Settings::upscaling` render-scale preset (native, quality, balanced, performance); visible sky on misses |
+| TR1b | TR1 default, upscaling presets | **Wired**: `Settings::temporal_reconstruction` on by default; `Settings::render_scale` (`RenderScale::{Native, Quality, Performance}`); `Background::Sky` for the visible sky |
 | G2b | GI default | `Settings::global_illumination` default; no new calls |
-| R1 | reflections | a `Settings` field if reflections are switchable; programs read them through `indirect_radiance`/`reflection_lobe()` |
+| R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). No setting, because the renderer has no switch. R1n's non-RT traced reflections need no API change. |
 | TP1 | transparency, particles | `MaterialDesc` blend/transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles` |
 | AT1 | atmosphere, fog | new `Sky::Atmosphere { .. }` variant (`Sky` is `#[non_exhaustive]`); `Settings::fog` |
 | SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])` |
@@ -231,10 +253,11 @@ Draft, to be finalised in phase 2 once the feature units have merged.
 
 - `Engine` method names and signatures above; `EngineDescriptor`, `Capabilities`, `RenderPath`, `ExperimentalRayQuery`.
 - Handle semantics: `Copy` typed `Id<T>`, stale handles rejected, the batching of objects by mesh and material.
-- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Uniform`/`Sky::Map`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, and the meaning of each `Settings` field.
-- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, and the documented engine inputs.
+- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Uniform`/`Sky::Map`, `Background::Color`/`Sky`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
+- `set_decals(&[Decal])` and the re-exported decal types.
+- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, and the documented engine inputs.
 
-**May grow** (additive only): new `Settings` fields with defaults, new variants of the `#[non_exhaustive]` enums (`Sky`, `Exposure`, `Quality`), new engine calls and handle kinds, new engine inputs for programs.
+**May grow** (additive only): new `Settings` fields with defaults, new variants of the `#[non_exhaustive]` enums (`Sky`, `Background`, `Exposure`, `Quality`), new engine calls and handle kinds, new engine inputs for programs.
 
 **May change**: `FrameReport`, `Events` and the other diagnostic counters; defaults that a unit's ruling flips; every low-level crate-root type and `renderer_mut()` tuning; the current limits listed above, which should only loosen.
 
@@ -246,4 +269,4 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
     cargo run --example game_scene -- --path rt --out D:/Coding/renderlab-work/api1/rt
 ```
 
-Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
+Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, `--render-scale native|quality|performance`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
