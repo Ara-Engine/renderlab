@@ -21,7 +21,11 @@ fn tone(x:vec3<f32>)->vec3<f32> {
     }
     return x/(1.0+x);
 }
-fn hash(p:vec2<f32>)->f32 {return fract(sin(dot(p,vec2<f32>(12.9898,78.233)))*43758.5453);}
+fn hash(p:vec2<u32>,frame:u32)->f32 {
+    var h=p.x*0x9e3779b9u ^ p.y*0x85ebca6bu ^ frame*0xc2b2ae35u;
+    h=(h^(h>>16u))*0x7feb352du;h=(h^(h>>15u))*0x846ca68bu;
+    return f32((h^(h>>16u))>>8u)/16777216.0;
+}
 @fragment fn fs(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32> {
     let size=vec2<f32>(textureDimensions(colour));let uv=p.xy/size;
     let radial=uv*2.0-1.0;
@@ -40,7 +44,8 @@ fn hash(p:vec2<f32>)->f32 {return fract(sin(dot(p,vec2<f32>(12.9898,78.233)))*43
     let edge=smoothstep(0.15,1.8,dot(radial,radial));
     x*=1.0-settings.grade.z*edge;
     if settings.grade.w>0.0 {
-        x+=(hash(p.xy+vec2<f32>(settings.bloom_motion.w*17.0,settings.bloom_motion.w*31.0))-0.5)*settings.grade.w;
+        let signal=sqrt(clamp(dot(x,vec3<f32>(0.2126,0.7152,0.0722))*4.0,0.0,1.0));
+        x+=(hash(vec2<u32>(p.xy),u32(settings.bloom_motion.w))-0.5)*settings.grade.w*signal;
     }
     return vec4<f32>(clamp(x,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
 }

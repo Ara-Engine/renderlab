@@ -35,6 +35,17 @@ fn variants() -> Vec<(&'static str, PostSettings)> {
             },
         ),
         (
+            "dof-near",
+            PostSettings {
+                depth_of_field: Some(DepthOfField {
+                    focus_distance_m: 6.0,
+                    f_number: 0.8,
+                    ..Default::default()
+                }),
+                ..n
+            },
+        ),
+        (
             "grade",
             PostSettings {
                 white_balance_kelvin: 5800.0,

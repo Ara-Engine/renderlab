@@ -18,8 +18,9 @@ for path in ("rt", "nonrt"):
         summary[f"{path}/{scene}"] = {name: {"post_tone_median_ms": v,
             "delta_to_neutral_ms": v-values["neutral"],"frames":len(data[name]["frames"])} for name,v in values.items()}
         for state in ("still", "moving"):
-            names = ["off", "default", "bloom", "motion", "dof", "filmic", "grade", "lut", "vignette", "grain", "aberration", "neutral"]
-            sheet = Image.new("RGB", (960, 6*296), "#121519")
+            names = ["off", "default", "bloom", "motion", "dof", "dof-near", "filmic", "grade", "lut", "vignette", "grain", "aberration", "neutral"]
+            names = [n for n in names if (directory / f"{n}-{state}.png").exists()]
+            sheet = Image.new("RGB", (960, ((len(names)+1)//2)*296), "#121519")
             draw = ImageDraw.Draw(sheet)
             for i, name in enumerate(names):
                 im = Image.open(directory / f"{name}-{state}.png").convert("RGB")

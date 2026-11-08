@@ -12,15 +12,13 @@ struct Settings {
 @group(0) @binding(3) var velocity_tiles:texture_2d<f32>;
 @group(0) @binding(4) var output_colour:texture_storage_2d<rgba16float,write>;
 @group(0) @binding(5) var<uniform> settings:Settings;
+@group(0) @binding(6) var linear_sampler:sampler;
 
 fn load(t:texture_2d<f32>,p:vec2<i32>)->vec4<f32> {
     return textureLoad(t,clamp(p,vec2<i32>(0),vec2<i32>(textureDimensions(t))-1),0);
 }
 fn bilinear(t:texture_2d<f32>,uv:vec2<f32>)->vec4<f32> {
-    let p=uv*vec2<f32>(textureDimensions(t))-0.5;
-    let q=vec2<i32>(floor(p));let f=fract(p);
-    return mix(mix(load(t,q),load(t,q+vec2<i32>(1,0)),f.x),
-        mix(load(t,q+vec2<i32>(0,1)),load(t,q+vec2<i32>(1,1)),f.x),f.y);
+    return textureSampleLevel(t,linear_sampler,uv,0.0);
 }
 fn tent(t:texture_2d<f32>,uv:vec2<f32>)->vec4<f32> {
     let d=1.0/vec2<f32>(textureDimensions(t));
@@ -89,11 +87,15 @@ fn coc(z:f32)->f32 {
     let size=textureDimensions(output_colour);if any(id.xy>=size) {return;}
     let p=vec2<i32>(id.xy);let z=load(auxiliary,p).z;let c=coc(z);
     let centre=load(input_colour,p);
-    var far_sum=centre.rgb;var far_w=1.0;var near_sum=vec3<f32>(0.0);var near_w=0.0;
+    let foreground=c< -0.5;
+    var far_sum=select(centre.rgb,vec3<f32>(0.0),foreground);
+    var far_w=select(1.0,0.0,foreground);
+    var near_sum=vec3<f32>(0.0);var near_w=0.0;
+    let gather_radius=select(settings.lens.z,-c,foreground);
     // A fixed disc gathers both fields, including foreground bokeh beyond its silhouette.
     // Separate near/far weights stop an in-focus foreground from accepting far colour.
     for(var i=0;i<48;i++) {
-        let r=sqrt((f32(i)+0.5)/48.0)*settings.lens.z;
+        let r=sqrt((f32(i)+0.5)/48.0)*gather_radius;
         let angle=f32(i)*2.39996323;
         let q=vec2<f32>(p)+0.5+vec2<f32>(cos(angle),sin(angle))*r;
         let nz=load(auxiliary,vec2<i32>(q)).z;let nc=coc(nz);
@@ -105,8 +107,14 @@ fn coc(z:f32)->f32 {
         if c>0.5 && nc>0.0 && nz>=z-max(0.02,z*0.02) {
             let w=cylinder(r,min(c,nc));far_sum+=colour*w;far_w+=w;
         }
+        if foreground && nc>= -0.5 {
+            // Estimate the background under a blurred foreground boundary. Keeping
+            // the sharp foreground centre as background would leave a hard inner edge.
+            let w=cylinder(r,-c);far_sum+=colour*w;far_w+=w;
+        }
     }
-    let far_colour=far_sum/far_w;
-    let coverage=clamp(near_w*settings.lens.z*settings.lens.z/48.0,0.0,1.0);
+    var far_colour=centre.rgb;
+    if far_w>1e-5 {far_colour=far_sum/far_w;}
+    let coverage=clamp(near_w*gather_radius*gather_radius/48.0,0.0,1.0);
     textureStore(output_colour,p,vec4<f32>(mix(far_colour,near_sum/max(near_w,1e-6),coverage),centre.a));
 }

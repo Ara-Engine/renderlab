@@ -34,7 +34,7 @@ else:
     while g1.window_open(u) or g1.quiet_active(u, any_lease=False) or g1.hold_state(u) == "hold":
         if time.monotonic() > deadline:
             raise SystemExit("PP1 timed out waiting for schedule/game hold")
-        time.sleep(5)
+        time.sleep(1)
     command = sys.argv[3:]
     if command[:1] == ["--"]:
         command = command[1:]

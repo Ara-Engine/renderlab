@@ -9,9 +9,10 @@ binary, root, template = sys.argv[1:]
 root = Path(root)
 root.mkdir(parents=True, exist_ok=True)
 commands = [("lib", [binary, "--test-threads=1"], {})]
+template_data = json.loads(Path(template).read_text(encoding="utf-8-sig"))
 for path in ("rt", "nonrt"):
-    m = json.loads(Path(template).read_text(encoding="utf-8-sig"))
-    m.update(path=path, output=str(root / path), fixture_only=False)
+    m = dict(template_data)
+    m.update(path=path, output=str(root / path))
     manifest = root / f"{path}.json"
     manifest.write_text(json.dumps(m, indent=2))
     commands.append((path, [binary, "gpu_post_sweep", "--ignored", "--nocapture", "--test-threads=1"],

@@ -199,7 +199,10 @@ impl PostGpu {
                 sampled(3, float),
                 storage(4, F::Rgba16Float),
                 uniform(5, 80),
-                entry(6, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(
+                    6,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
             ],
         );
         let kernels = [
@@ -478,7 +481,7 @@ impl PostGpu {
             s.bloom,
             s.shutter_angle_degrees / 720.0,
             s.max_motion_radius_px,
-            self.serial as f32,
+            (self.serial & 0x00ff_ffff) as f32,
             d.focus_distance_m,
             scale,
             d.max_radius_px,
@@ -744,7 +747,9 @@ impl Renderer {
                     self.retired_post.push((self.submissions, old));
                 }
                 let post = PostGpu::new(self, size)?;
-                self.pipelines.created += if self.primary.is_some() { 9 } else { 8 };
+                self.pipelines.created += post.kernels.len() as u64
+                    + 2 // raster auxiliary and tone
+                    + u64::from(post.primary_pipeline.is_some());
                 post
             }
         };
@@ -776,4 +781,13 @@ mod tests {
             &primary,
         ] {
             let module = naga::front::wgsl::parse_str(source)
-                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(so
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
+}
