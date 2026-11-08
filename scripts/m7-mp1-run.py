@@ -10,6 +10,7 @@ lines and game/RAM/foreign-renderer guards. No window opens.
                        lock polled in-process). STEP is PATH:TEST[:SECTIONS[:BINARY]], PATH
                        rt or nonrt, BINARY a staged label replacing --binary, TEST one of:
                          mp1       MP1's mixed-program identity and function gate
+                         example   API1's game_scene example exe (BINARY), PNG frames
                          lib       the non-ignored lib suite
                          identity  the production mirror-camera identity (rt only)
                          rf        R0a's RF1-RF10 current-renderer capture with this build
@@ -172,6 +173,9 @@ def run_steps(g, out, binary, baseline, args):
             name = TESTS.get(test, test)
             command = ([step_binary, "--test-threads=2"] if test == "lib" else
                        [step_binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
+            if test == "example":
+                # API1's game_scene example (BINARY: its staged exe), PNG frames per path.
+                command = [step_binary, "--path", path, "--out", str(out / f"example-{path}")]
             g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
                       timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
 
