@@ -235,11 +235,17 @@ def s2g(args):
                                      "RENDERLAB_M7_CAPTURE_GEOMETRY": "1", "RAYON_NUM_THREADS": "2"})])
         (work / "plan.json").write_text(json.dumps(plan, indent=1))
         for attempt in range(6):
+            # The lease guard defers below 4 GiB available and stops below 2: start with room.
+            while available_gib() < 6:
+                time.sleep(5)
             subprocess.run(["py", "-3", "-B", str(REPO / "scripts/m7-tr1-wait.py"), f"{label}-{attempt}",
                             str(work / "plan.json"), "--minutes", "10", "--wait-minutes", "120",
                             "--note", "U0b D8 S2G reference batch, functional, no timing claim"], cwd=REPO)
             if (data / "replay.json").exists():
                 break
+        else:
+            print("batch", label, "not rendered; its states stay pending", flush=True)
+            return None
         replay = json.loads((data / "replay.json").read_text())
         # The bench replays its first case from an independent rebuild. D8 differs there by a
         # few ULP on some runs (bounded-AS); the bench then stops, so later cases were not
@@ -294,7 +300,7 @@ def s2g(args):
         save(work / "removed.json", removed)
         return mismatched
 
-    done = 0
+    done, failures = 0, 0
     while done < args.limit:
         pending = [c for c in registration["physical"] if not (out / f"{c['track']}-{c['frame']:03}.npz").exists()]
         if not pending:
@@ -304,9 +310,16 @@ def s2g(args):
         if shutil.disk_usage(REFS).free < args.batch * 0.35 * 1024 ** 3 + 5.5 * 1024 ** 3:
             raise SystemExit("deferred: disk headroom below the batch's raw output plus 5.5 GiB")
         batch = pending[:min(args.batch, args.limit - done)]
-        for c in trace(batch, f"s2g-{uuid.uuid4().hex[:8]}"):
+        mismatched = trace(batch, f"s2g-{uuid.uuid4().hex[:8]}")
+        if mismatched is None:
+            failures += 1
+            if failures >= 5:
+                raise SystemExit("five consecutive batches were not rendered")
+            continue
+        failures = 0
+        for c in mismatched:
             for attempt in range(3):
-                if not trace([c], f"s2g1-{uuid.uuid4().hex[:8]}"):
+                if trace([c], f"s2g1-{uuid.uuid4().hex[:8]}") == []:
                     break
             else:
                 raise ValueError(f"{c['track']}-{c['frame']:03}: neither TR0's bytes nor a bit-identical replay in 3 tries")
