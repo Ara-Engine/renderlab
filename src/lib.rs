@@ -31,6 +31,8 @@ mod observe;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;
+// PC1: shared pipeline caching and startup instrumentation.
+pub mod pipeline_compilation;
 mod program;
 pub mod program_watch;
 mod receiver_adjacency;

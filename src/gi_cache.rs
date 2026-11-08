@@ -167,7 +167,8 @@ pub struct IndirectSettings {
     /// Edge of level 0 in metres; each level doubles it.
     pub min_edge: f32,
     pub levels: u32,
-    /// log2 of the slot count (each slot is 160 bytes).
+    /// log2 of the slot count (each slot is 224 bytes in the table, plus 16 of outgoing
+    /// radiance and 4 of claim word).
     pub slots_log2: u32,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
@@ -238,6 +239,11 @@ impl Default for IndirectSettings {
     /// 2 px cells fix the quarry's crevice mouths but speckle flat test-scene surfaces and need a
     /// 448 MiB table, over the non-RT device's 256 MiB buffer limit: an opt-in setting
     /// (`cell_pixels` 2, `slots_log2` 21) where the device allows it.
+    /// 2^20 slots since GC1 (224 MiB): at 2^19 the quarry's cells filled buckets, so claims
+    /// failed (about 280 a moving frame on RT, 1,100 on non-RT) and lookups walked long buckets;
+    /// the larger table cut the quarry's moving GI cost by 0.3-0.5 ms (RT) at the same image. A
+    /// device whose storage-binding limit is wgpu's default 128 MiB gets 2^19 (`gi_slots`;
+    /// docs/m7-gc1.md).
     fn default() -> Self {
         Self {
             enabled: true,
@@ -245,7 +251,7 @@ impl Default for IndirectSettings {
             cell_pixels: 4.0,
             min_edge: 1.0 / 512.0,
             levels: 14,
-            slots_log2: 19,
+            slots_log2: 20,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,
@@ -920,7 +926,7 @@ impl Renderer {
     pub fn set_indirect(&mut self, settings: IndirectSettings) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate()?;
-        let slots = 1u32 << settings.slots_log2;
+        let slots = self.gi_slots(settings.slots_log2);
         let reallocate =
             settings.enabled && self.gi.resources.as_ref().is_none_or(|r| r.slots != slots);
         if reallocate {
@@ -943,6 +949,22 @@ impl Renderer {
         }
         self.gi.settings = settings;
         Ok(())
+    }
+    /// The slots a table of 2^`slots_log2` gets on this device: that many, or the most (a power
+    /// of two) whose table fits the device's storage-binding and buffer limits, since shading
+    /// binds the whole table. wgpu's default binding limit, 128 MiB, holds 2^19 slots; the
+    /// default 2^20 (224 MiB, GC1) needs a device created with a higher limit, as the quarry
+    /// harness's are (docs/m7-gc1.md).
+    fn gi_slots(&self, slots_log2: u32) -> u32 {
+        let limits = self.device.limits();
+        let fits = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
+        let mut log2 = slots_log2;
+        while log2 > 10 && (HEADER_WORDS + (1u64 << log2) * SLOT_WORDS) * 4 > fits {
+            log2 -= 1;
+        }
+        1 << log2
     }
     /// Allocates the table and work buffers for `slots` (all slots empty), replacing any
     /// earlier ones. The cache is on by default (G2b) and allocates on the first frame whose
@@ -2004,7 +2026,7 @@ impl Renderer {
             if !(self.gi.settings.enabled && eligible && self.gi_callers(draws)) {
                 return Ok(());
             }
-            self.allocate_gi(1 << self.gi.settings.slots_log2)?;
+            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
         }
         // LC2: changing light count may outgrow the bitset. Existing in-flight tables
         // retire normally; scheduling and cache lookup are otherwise unchanged.
@@ -2015,7 +2037,7 @@ impl Renderer {
                 .as_ref()
                 .is_some_and(|r| r.cold_words < light_cold_words(self.lighting.pending.count))
         {
-            self.allocate_gi(1 << self.gi.settings.slots_log2)?;
+            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
         }
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);

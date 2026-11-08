@@ -1626,33 +1626,56 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
 // The outgoing radiance a gather ray meets at its hit: the containing cell of the hit's
 // point, bin and level (the same cell a pixel there reads first), or else the first of the
 // next coarser levels' containing cells with a value (a deterministic coarser fallback, as
-// the lookup's, W3). w is 1 for the hit level's own value, 0.5 for a coarser level's (the
-// gather is then repeated once the hit level's cell has one), 0 for none (the ray adds
-// nothing). A hit level without a cell is requested in generation band `band` when that is
-// nonzero, for the claim rounds that follow this pass.
-fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32) -> vec4<f32> {
+// the lookup's, W3). A hit level without a cell is requested in generation band `band` when
+// that is nonzero, for the claim rounds that follow this pass. w says what another gather
+// could change (GC1, docs/m7-gc1.md):
+// - GI_HIT_FINAL (1): a final value, the hit level's own or, where the hit level's cell is an
+//   orphan (it never gets a value), a coarser one: cell shading wrote it with no gathers left
+//   (gi_shade_entry.wgsl marks values still changing below 1);
+// - GI_HIT_CHANGING (0.75): the same, but the cell still has gathers scheduled;
+// - GI_HIT_MISSING (0.5): a coarser level's value while the hit level's cell is absent or not
+//   shaded yet, which a later gather reads instead (the gather is then repeated once);
+// - GI_HIT_NONE (0.25): no value, and none can come: the hit level's cell is an orphan, or
+//   absent and not requested by this gather, and no coarser level has one (the ray adds
+//   nothing, finally);
+// - 0: no value yet (the ray adds nothing; counted as missing too).
+// An absent hit cell a tertiary cell's gather meets (tertiary cells request none) counts as an
+// orphan does: the coarser value it reads is the one a repeated gather would read.
+const GI_HIT_FINAL:f32=1.0;
+const GI_HIT_CHANGING:f32=0.75;
+const GI_HIT_MISSING:f32=0.5;
+const GI_HIT_NONE:f32=0.25;
+fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
     let levels=gi_word(GI_H_LEVELS);
     let base=gi_level(world);
     var cause=0u;
+    // The hit level's cell is an orphan: the levels above it are its final fallback.
+    var orphan=false;
     for(var l=base;l<min(base+1u+GI_PARENT_ROUNDS,levels);l+=1u) {
         let cell=vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)));
         let slot=gi_find(gi_key(l,bin,cell));
         if slot==0xffffffffu {
             if l==base && band!=0u { gi_request_one(l,bin,cell,band); }
-            if l==base { cause=GI_W_GATHER_ABSENT; }
+            if l==base { cause=GI_W_GATHER_ABSENT; orphan=tertiary; }
             continue;
         }
         // A gather keeps the cells it reads alive, like a pixel (the race is benign).
         gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
         let o=gi_outgoing[slot];
-        if o.w>0.0 { return vec4<f32>(o.rgb,select(0.5,1.0,l==base)); }
-        if l==base && (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)==0u { cause=GI_W_GATHER_UNSHADED; }
+        if o.w>0.0 {
+            let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
+            return vec4<f32>(o.rgb,select(GI_HIT_MISSING,settled,l==base || orphan));
+        }
+        if l==base {
+            orphan=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u;
+            if !orphan { cause=GI_W_GATHER_UNSHADED; }
+        }
     }
     atomicAdd(&gi_work[select(GI_W_GATHER_ORPHANS,cause,cause!=0u)],1u);
-    return vec4<f32>(0.0);
+    return vec4<f32>(0.0,0.0,0.0,select(0.0,GI_HIT_NONE,orphan));
 }
 // One workgroup per queued cell and one lane per fixed direction (k = lane, and lane + 64 with
 // 128 directions): each lane traces its direction when it is blocked, with a closest-hit ray,
@@ -1671,6 +1694,7 @@ const GI_GATHER_LANES:u32=64u;
 const GI_GATHER_PERIOD_MAX:u32=64u;
 var<workgroup> gi_wg_bounce:array<f32,12u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
+var<workgroup> gi_wg_changing:atomic<u32>;
 var<workgroup> gi_wg_rays:atomic<u32>;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
@@ -1690,6 +1714,7 @@ fn gi_gather_period(count:u32) -> u32 {
     for(var at=group.x;at<count;at+=groups.x) {
         if lane==0u {
             atomicStore(&gi_wg_missing,0u);
+            atomicStore(&gi_wg_changing,0u);
             atomicStore(&gi_wg_rays,0u);
         }
         let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
@@ -1713,6 +1738,7 @@ fn gi_gather_period(count:u32) -> u32 {
             let tertiary=(state&GI_TERTIARY)!=0u;
             let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             var missing=0u;
+            var changing=0u;
             var rays=0u;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
@@ -1721,14 +1747,16 @@ fn gi_gather_period(count:u32) -> u32 {
                 let h=gi_closest(origin,d,0.0,1e20);
                 rays+=1u;
                 if !h.hit { continue; }
-                let o=gi_hit_radiance(origin,d,h,band);
-                if o.w<1.0 { missing+=1u; }
-                if o.w==0.0 { continue; }
+                let o=gi_hit_radiance(origin,d,h,band,tertiary);
+                if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
+                if o.w==GI_HIT_CHANGING { changing+=1u; }
+                if o.w<=GI_HIT_NONE { continue; }
                 gi_sh_basis(d);
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
+            if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }
         }
         // The lanes' sums into lane 0 in a fixed tree order (no atomics on values).
@@ -1768,6 +1796,13 @@ fn gi_gather_period(count:u32) -> u32 {
             // (new this frame, or requested now) is repeated once more.
             var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
             left=select(0u,left-1u,left>0u);
+            // GC1: a gather whose every hit value was final ends the schedule. The cell's fixed
+            // rays meet the same cells, whose values no longer change, so a further gather would
+            // replace this value with itself (W1 form 1); an event that changes them schedules
+            // its cells again. Cells reached while their hits still change keep the G gathers.
+            // Moving cameras create cells among settled ones, which then gather once, not G
+            // times (docs/m7-gc1.md).
+            if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
             var retry=state&GI_RETRY;
             if missing!=0u {
                 if left==0u && retry==0u { left=1u; retry=GI_RETRY; }

@@ -1,5 +1,7 @@
+// PC1: pass the shared pipeline compiler to cluster kernel creation.
 use super::*;
 use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
+use crate::pipeline_compilation::PipelineDevice;
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
@@ -63,7 +65,7 @@ pub(super) struct LightingGpu {
 }
 impl LightingGpu {
     pub fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         queue: &wgpu::Queue,
         ledger: &Ledger,
         groups: [&wgpu::BindGroupLayout; 3],
