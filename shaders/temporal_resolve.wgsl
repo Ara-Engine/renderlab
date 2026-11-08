@@ -40,7 +40,7 @@ struct Tr1Frame {
     // budget.
     windows:vec4<f32>,
     // x: Catmull-Rom motion window; y: spatial-start window cap; z: spatial-start tent radius
-    // (0: the pixel's own sample).
+    // (0: the pixel's own sample); w: MQ2's view budget (0: off).
     starts:vec4<f32>,
     // x: nonzero restarts every pixel (cut, first frame, reset events); y: TR1_* options;
     // z: nonzero when the camera did not move (bit-equal unjittered view-projections),
@@ -60,6 +60,10 @@ const TR1_SPATIAL_START:u32=2u;
 // nine samples, no mean or variance: P0's box, docs/m7-p0-claims.md).
 const TR1_MOVED:u32=4u;
 const TR1_BOX:u32=8u;
+// MQ2: where the view budget caps a history's window, this frame's observation is the
+// surface's spatial start (its 3x3 samples interpolated to the pixel centre) rather than the
+// pixel's own jittered sample.
+const TR1_VIEW_START:u32=16u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -146,8 +150,9 @@ fn tr1_id(p:vec2<i32>)->u32 {
 // A sample's surface: world point (w = 1) or background direction (w = 0), its identity,
 // view distance and unit geometric normal; the same point and plane in the previous frame
 // (skinned vertices' previous positions, SK1; a moved placement's previous transform, MQ1),
-// and whether either moved it.
-struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool };
+// whether either moved it, and its program's view dependence (MQ2: the sample's alpha
+// minus 1, shaders/temporal_view.wgsl; 0 when view-independent).
+struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32 };
 // MQ1: placement `slot`'s transform changed since the previous frame (bit for bit).
 fn tr1_slot_moved(slot:u32)->bool {
     if (tr1.flags.y&TR1_MOVED)==0u {return false;}
@@ -160,6 +165,16 @@ fn tr1_moved(id:u32)->bool {return id!=0u && id!=TR1_NONE && tr1_slot_moved((id-
 // A local position through placement `slot`'s previous transform.
 fn tr1_previous_world(position:vec3<f32>,slot:u32)->vec4<f32> {
     return tr1.previous_models[slot]*vec4<f32>(position,1.0);
+}
+// MQ2: the angle (radians) the reflected view direction turned at a surface since the
+// previous frame: the view direction's turn from the eye, plus twice its plane's turn
+// (moved placements and skinned vertices). Zero for a still camera and a still surface.
+fn tr1_view_turn(s:Tr1Surface)->f32 {
+    let a=tr1.previous_eye.xyz-s.previous_point.xyz;
+    let b=tr1.current_eye.xyz-s.point.xyz;
+    let turn=a*inverseSqrt(max(tr1_dot(a,a),1e-30))-b*inverseSqrt(max(tr1_dot(b,b),1e-30));
+    let plane=s.normal-s.previous_normal;
+    return sqrt(tr1_dot(turn,turn))+2.0*sqrt(tr1_dot(plane,plane));
 }
 // The surface neither the camera nor its vertices or placement moved: its history is its
 // own pixel's.
@@ -187,7 +202,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
         let ray=primary_ray(vec2<u32>(q),textureDimensions(tr1_sample));
         let d=ray.far-ray.near;
         let point=vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0);
-        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false);
+        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false,0.0);
     }
     let record=textureLoad(primary_hit,q,0);
     let slot=id-1u;
@@ -215,7 +230,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let facing=tr1_dot(n,view);
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
     return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),
-        placed||any(a!=pa)||any(b!=pb)||any(c!=pc));
+        placed||any(a!=pa)||any(b!=pb)||any(c!=pc),max(textureLoad(tr1_sample,q,0).w-1.0,0.0));
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -297,7 +312,7 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 // bilinear weighted sum of their weights; Catmull-Rom over 4x4 when every tap shows it,
 // limited to the inner taps' range (history only: the undershoot fix, not a current-frame
 // box). `window` is the window the fetch allows.
-struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
+struct Tr1History { colour:vec3<f32>, weight:f32, window:f32, viewed:bool };
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     if s.id!=0u && tr1.shadow_lo.w!=0.0 && !tr1_skinned(primary_placements[s.id-1u]&0x1fffffffu)
         && all(s.point.xyz>=tr1.shadow_lo.xyz) && all(s.point.xyz<=tr1.shadow_hi.xyz) {
@@ -364,6 +379,17 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         }
     }
     h.window=min(h.window,tr1.windows.y);
+    // MQ2: view-dependent output (reflections) moves across its surface as the view
+    // direction turns, so surface-identity history lags it. Cap the window so the lag, in
+    // pixels of the reflected image weighted by the program's declared share, stays within
+    // the view budget: 1 + budget / drift, as the blur budget above.
+    if s.view>0.0 && tr1.starts.w>0.0 {
+        let drift=s.view*tr1_view_turn(s);
+        if drift>0.0 {
+            let cap=1.0+tr1.starts.w/drift;
+            if cap<h.window {h.window=cap;h.viewed=true;}
+        }
+    }
     // MQ1: while placements move, light they change on other surfaces (moving shadows,
     // reflections of moving objects) is held to this frame's 3x3 range.
     if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
@@ -516,8 +542,13 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
         // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
         let w=tr1_weight(p);
         let n=clamp(h.weight+w,1.0,max(h.window,1.0));
+        var x=sample;
+        if h.viewed && (tr1.flags.y&TR1_VIEW_START)!=0u {
+            let start=tr1_spatial(p,s.id,size);
+            if start.w>0.0 {x=start.xyz;}
+        }
         // m' = m + w (x - m) / n', with the multiply-add pinned so replays are bit-identical.
-        return vec4<f32>(fma(sample-h.colour,vec3<f32>(w/n),h.colour),n);
+        return vec4<f32>(fma(x-h.colour,vec3<f32>(w/n),h.colour),n);
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
         let start=tr1_spatial(p,s.id,size);
@@ -629,7 +660,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // The occluder: never the background; between two hits, the nearer.
         occluder_is_s=u.id==0u || (s.id!=0u && s.distance<=u.distance);
     } else {
-        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved);
+        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved,0.0);
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         occluder_is_s=select(!kept.first_occludes,kept.first_occludes,first==s.id);
     }

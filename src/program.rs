@@ -101,6 +101,19 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
 }
 // ---- end of M7-R1 reflections ----
 
+// ---- MQ2 view dependence (docs/m7-mq2.md) ----
+/// Programs may declare `fn view_dependence(s: Surface, input: SurfaceInput) ->
+/// ViewDependence`: the share (0-1) of `shade`'s output that moves with the view direction
+/// like a GGX reflection of `alpha` (any style declares its own; a view-independent style
+/// declares nothing). TR1 shortens such pixels' history while their view direction turns,
+/// so reflections do not trail across their surfaces. The struct is composed on every stage
+/// of a declaring program; only traced shading entries call the hook.
+const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
+const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
+/// The traced entry's hint for programs that declare nothing: view-independent.
+const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 { return 1.0; }\n";
+// ---- end of MQ2 view dependence ----
+
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
 /// shader variants on one binary, one process per variant (docs/m7-g1b.md).
@@ -441,8 +454,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             _ => "fn rl_indirect_open() {}\n",
         });
     }
+    let view = declares(program, "fn", "view_dependence");
+    let view_api = if view { VIEW_API } else { "" };
     let mut source = format!(
-        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}{view_api}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
@@ -457,6 +472,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     source.push_str(program);
     let program_range = start..source.len();
     source.push_str("\n// ---- end of program ----\n");
+    // MQ2: the traced entry stores the program's view dependence for TR1.
+    if matches!(stage, Stage::Traced | Stage::TracedStreamed) {
+        source.push_str(if view { VIEW_HINT } else { VIEW_STUB });
+    }
     if stage == Stage::Cell {
         source.push_str(&reflection_wrappers(program));
         if head.contains("primary_decode(") {

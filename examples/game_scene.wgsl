@@ -28,6 +28,18 @@ fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
     return SpecularLobe(s.n,s.rough*s.rough,params.reflect);
 }
 
+// TR1's history hint (docs/m7-mq2.md), as the standard program's: the specular share under
+// uniform light, which moves with the view like the lobe above.
+fn view_dependence(s:Surface, input:SurfaceInput) -> ViewDependence {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let ab=environment_dfg(dot(s.n,v),s.rough);
+    let f0=vec3<f32>(0.04)*(1.0-s.metal)+s.base*s.metal;
+    let specular=dot(f0*ab.x+vec3<f32>(ab.y),vec3<f32>(1.0));
+    let diffuse=dot(s.base,vec3<f32>(1.0-s.metal));
+    return ViewDependence(s.rough*s.rough,specular/max(specular+diffuse,1e-6));
+}
+
 fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
     return brdf(s.n,wo,wi,s.base,s.metal,s.rough);
 }
