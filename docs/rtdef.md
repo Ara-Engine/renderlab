@@ -1,5 +1,7 @@
 # RTDEF: the RT device default with TR1
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-08, branch `t3/rtdef`, base main `976a952`, merged main `ae95d3a`
 (TR1b `fa6f8c1`). That main merge changes no production Rust/WGSL relative to
 the capture binary. Main's subsequent R1 checkpoint `ffdaee9` is also merged;

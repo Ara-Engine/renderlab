@@ -15,7 +15,7 @@ in an ignored GPU test and its shader helper; the CPU replay is reusable.
 
 The RT-device default remains raster primaries plus 256-direction Exact. Traced
 primaries plus Interactive are explicit settings. Historical RT speed claims are
-**measured on the non-default fast setup (traced + Interactive)**, including the
+**measured on the historical eight-ray setup with TR1 off (traced + Interactive)**, including the
 0.276 ms shadow increment and 2.3x comparison with Unreal HRT. The diagnostic
 timings below do not replace that optimized measurement.
 
@@ -406,5 +406,5 @@ only after Cargo has finished and outside any game. The saved `batch.json` and
   only; see this report.
 - **RT default retained:** raster primaries plus Exact remain the RT-device
   default; traced + Interactive remain settings. Historical RT speed is
-  **measured on the non-default fast setup (traced + Interactive)**. No below-floor
+  **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. No below-floor
   mode is promoted and no new superiority claim is made.

@@ -89,7 +89,7 @@ impl Renderer {
                         vertex_return: false,
                     },
                 ),
-                entry(10, COMPUTE, uniform(false, 112)),
+                entry(10, COMPUTE, uniform(false, primary.frame_buffer().size())),
                 entry(
                     18,
                     COMPUTE,

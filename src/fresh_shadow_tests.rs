@@ -236,6 +236,21 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
     // on this renderer (M6 film, RT1, N8, the quarry frame loop, primary-ray identity) need
     // repeatable single frames, so they run with it off; TR1 harnesses enable it themselves.
     let mut renderer = renderer;
+    // These historical gates compare raster receivers and Exact's recorded output.
+    // RTDEF2 changes the device default; each traced/Interactive variant opts in below.
+    renderer
+        .set_primary_visibility(PrimaryVisibility::Raster)
+        .unwrap();
+    renderer.set_soft_shadows(crate::SoftShadows::Exact);
+    renderer
+        .set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+            cold_rays: 8,
+            reset_rays: 8,
+            active_rays: 8,
+            held_rays: 8,
+            settle_frames: 16,
+        })
+        .unwrap();
     renderer
         .set_reconstruction(crate::Reconstruction::off())
         .unwrap();

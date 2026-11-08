@@ -28,7 +28,9 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
-pub use primary_ray_gpu::temporal_reconstruction::{Reconstruction, RenderScale};
+pub use primary_ray_gpu::temporal_reconstruction::{
+    Reconstruction, ReconstructionShadowBudget, RenderScale,
+};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -608,6 +610,7 @@ pub struct Renderer {
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
     reconstruction: Reconstruction,
+    reconstruction_shadow_budget: ReconstructionShadowBudget,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
@@ -1059,6 +1062,7 @@ impl Renderer {
             atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
+            reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,
@@ -1150,7 +1154,12 @@ impl Renderer {
         renderer.submit_upload(renderer.free_slot().unwrap());
         renderer.default_material = Some(material);
         renderer.check_fault()?;
-        if hardware.is_none()
+        if traced {
+            // RTDEF2: traced visibility enables TR1 and traced reflections. TR1's
+            // 256/64/32/8 engine budget keeps cold/moving disk shadows at the retained floor.
+            renderer.set_primary_visibility(PrimaryVisibility::Traced)?;
+            renderer.set_soft_shadows(crate::SoftShadows::Interactive);
+        } else if hardware.is_none()
             && raster_primary
             && renderer.device.features().contains(VIRTUAL_FEATURES)
         {
@@ -2497,8 +2506,11 @@ impl Renderer {
             Duration::ZERO
         };
         let acceleration_start = Instant::now();
-        // Traced frames need the TLAS for camera rays even without shadows.
-        let hardware_build = if shadow_frame.is_some() || traced {
+        // Camera rays and RT volume injection need a TLAS even without surface shadows.
+        let hardware_scene = shadow_frame.is_some()
+            || traced
+            || (view_mode == ViewMode::Lit && self.atmosphere.settings.volumetric_fog.is_some());
+        let hardware_build = if hardware_scene {
             if let Some(hardware) = &mut self.hardware_shadows {
                 let scopes = OperationScopes::new(&self.device);
                 let result = hardware.prepare_scene(
@@ -2519,7 +2531,7 @@ impl Renderer {
         } else {
             false
         };
-        if (shadow_frame.is_some() || traced) && self.hardware_shadows.is_some() {
+        if hardware_scene && self.hardware_shadows.is_some() {
             shadow_preparation += acceleration_start.elapsed();
         }
         // The frame's program pipeline sets, created now if missing: after every admission

@@ -350,14 +350,29 @@ fn gpu_iq1_quarry() {
         )
         .unwrap()
     };
-    if path == "traced" {
-        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    if path != "nonrt" {
+        // Registered IQ1 rows keep their named primary/Exact baseline after RTDEF2.
+        r.set_primary_visibility(if path == "traced" {
+            PrimaryVisibility::Traced
+        } else {
+            PrimaryVisibility::Raster
+        })
+        .unwrap();
+        r.set_soft_shadows(SoftShadows::Exact);
     }
     // IQ1's 1x rows stay unreconstructed now that TR1 is the default (TR1b); its TR1 rows
     // enable it explicitly.
     // The GI cache is on by default since G2b; IQ1's 1x rows keep it off.
     r.set_indirect(IndirectSettings::off()).unwrap();
     r.set_reconstruction(Reconstruction::off()).unwrap();
+    r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+        cold_rays: 8,
+        reset_rays: 8,
+        active_rays: 8,
+        held_rays: 8,
+        settle_frames: 16,
+    })
+    .unwrap();
     let lighting: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
     let v3 = |v: &serde_json::Value| -> [f32; 3] {

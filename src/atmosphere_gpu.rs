@@ -789,7 +789,8 @@ impl Renderer {
         let Some(scatter) = &v.scatter else {
             return;
         };
-        // PP1 integration: aerial perspective alone needs no shadow TLAS.
+        // Aerial perspective needs no TLAS. In particular, an unshadowed raster
+        // frame on an RT device may never have built one. Only volume injection does.
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
         let key = tlas.map_or(0, |t| t as *const wgpu::Tlas as usize);
         if v.integrate.is_none() {

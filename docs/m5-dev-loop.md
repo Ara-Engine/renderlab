@@ -1,5 +1,7 @@
 # M5-DL: development latency and optimized runtime
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC. Branch `t3/m5-dev-loop`, measured main **`0981fda8278580912aba8ddd64767b7208810558`**, including N8p. **Surface is the non-RT default measured here.** No rendering algorithm or quality setting was changed. The retained code changes are opt-in measurement instrumentation and an explicit M1 harness lookup option.
 
 The requested development-loop and release-runtime observations are now recorded. Fresh standard/user program edits still take about **1.1 s**, missing the historical 100 ms target. Quarry process startup takes about **8.4 s**. No-RT camera/caster work remains expensive. These measurements do **not** close combined Unreal fidelity/2x acceptance; numerical, scope and unresolved timing limits are below.
@@ -7,7 +9,7 @@ The requested development-loop and release-runtime observations are now recorded
 ## Host, profiles and workload
 
 **RT scope:** every RT runtime timing, speed ratio and memory row in this record is
-**measured on the non-default fast setup (traced + Interactive)**. The library and
+**measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. The library and
 viewer's RT-device default remains raster + 256-ray Exact; [RT1](rt1-interactive.md)
 keeps the fast setup opt-in while its film false-shadow gate fails.
 
@@ -80,7 +82,7 @@ The earlier [independent integration](m5-independent-integration.md) recorded on
 
 ## Release runtime: complete rendered-pass span and per-pass cost
 
-RT runtime figures are **measured on the non-default fast setup (traced + Interactive)**.
+RT runtime figures are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 
 `scripts/memory-m1.py --visits 8 --lookup surface --cpu-timing`, one asset load per device/path, two registered poses. Each pose/visit has 32 warm frames, 8 measured static frames, 16 turning-sun frames (0.5 mrad about Y each), 48 moving-camera frames (1 mm along source X each), and 48 moving-caster frames (placement 0, 1 mm each). Static/turn/camera/caster contribute **128/256/768/768 GPU samples per path**. Warm samples are excluded. GPU results join to CPU records by actual frame ID.
 
@@ -151,7 +153,7 @@ Reused native GPUTime and longest native critical-field proxy from the [matched 
 
 The Unreal camera workload alternates the registered 1 cm poses every frame; its sun alternates by 1 degree. This M1 motion sequence advances camera/caster by 1 mm and sun by 0.5 mrad each frame. Dynamic workloads are therefore **not exactly matched**; no numerical dynamic speedup certificate follows. The CPU proxies have different engine/thread/wait boundaries. Radiance, geometry/receiver representation, shadow estimator/filtering and quality parity also retain the cited report’s limits.
 
-As a descriptive ratio of GPU medians only, static VSM / no-RT is about **2.19x**, whereas camera VSM / no-RT is about **0.89x** and sun about **1.56x** (motion mismatch applies). Static HRT / clean RT is about **2.02x**, but only **1.97x** against the slowest qualifying static visit, and much less against excluded slow visits; these RT ratios are **measured on the non-default fast setup (traced + Interactive)**. The full-quality/robust 2x floor is **not demonstrated**. Caster comparison is missing. Surface’s carried quality evidence is in [N8p](non-rt-n8p.md); film/reference and complete Unreal acceptance are not newly certified here.
+As a descriptive ratio of GPU medians only, static VSM / no-RT is about **2.19x**, whereas camera VSM / no-RT is about **0.89x** and sun about **1.56x** (motion mismatch applies). Static HRT / clean RT is about **2.02x**, but only **1.97x** against the slowest qualifying static visit, and much less against excluded slow visits; these RT ratios are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. The full-quality/robust 2x floor is **not demonstrated**. Caster comparison is missing. Surface’s carried quality evidence is in [N8p](non-rt-n8p.md); film/reference and complete Unreal acceptance are not newly certified here.
 
 ## Unreal development-loop equivalents: cited, not measured
 
