@@ -134,9 +134,9 @@ pub struct Settings {
     /// mean (AT1). On by default (`HeightFog::default()`: about 2 % extinction per 100 m
     /// near y = 0); None turns it off.
     pub height_fog: Option<HeightFog>,
-    /// Froxel volumetric fog over the first `distance` metres, with sun shafts (AT1).
-    /// Off by default. Its sun visibility is traced on `HardwareRt`; on `NonRt` it is
-    /// unshadowed at this revision.
+    /// Froxel volumetric fog over the first `distance` metres, with sun shafts (VF1).
+    /// On by default with a subtle 0.001/m haze. Sun visibility uses hardware rays or
+    /// the non-RT path's cached shadow depth; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
 }
 impl Default for Settings {
@@ -149,7 +149,7 @@ impl Default for Settings {
             exposure: Exposure::default(),
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
-            volumetric_fog: None,
+            volumetric_fog: Some(VolumetricFog::default()),
         }
     }
 }
@@ -292,6 +292,7 @@ mod tests {
         assert!(physical.sky && physical.sun_disk && physical.environment);
         assert!(physical.sun_transmittance && physical.aerial_perspective);
         assert_eq!(physical.height_fog, settings.height_fog);
+        assert_eq!(physical.volumetric_fog, Some(VolumetricFog::default()));
         let uniform = atmosphere(Sky::Uniform([1.0; 3]), &settings);
         assert!(!uniform.sky && !uniform.sun_disk && !uniform.environment);
         assert!(!uniform.sun_transmittance);
@@ -300,6 +301,7 @@ mod tests {
         let clear = Settings {
             aerial_perspective: false,
             height_fog: None,
+            volumetric_fog: None,
             ..settings
         };
         let uniform = atmosphere(Sky::Uniform([1.0; 3]), &clear);

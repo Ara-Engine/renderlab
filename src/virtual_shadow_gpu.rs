@@ -27,6 +27,9 @@ use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 #[path = "virtual_shadow_cache.rs"]
 mod surface_cache;
 use surface_cache::SurfaceCache;
+// VF1: a read-only fog accessor; cache internals and page work stay owned here.
+#[path = "atmosphere_shadow.rs"]
+pub(super) mod atmosphere_shadow;
 
 /// Levels a frame can use; also the WGSL `VSM_MAX_LEVELS`.
 pub(super) const MAX_LEVELS: usize = 8;
