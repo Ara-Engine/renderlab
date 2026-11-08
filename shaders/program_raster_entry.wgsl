@@ -17,5 +17,6 @@
     let surface_output=surface(surface_input);
     if material.double_sided==0u && !source_front { discard; }
     rl_indirect_prepare(surface_input);
+    rl_lights_prepare(surface_input.world);
     return vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0);
 }

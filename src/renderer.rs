@@ -2,6 +2,8 @@
 mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
+#[path = "light_cluster_gpu.rs"]
+mod light_cluster_gpu;
 use lighting_gpu::LightingGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
@@ -2790,12 +2792,24 @@ impl Renderer {
         {
             state.rolling = false;
         }
+        let mut local_lights = None;
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
             if shadow_frame.is_some() {
                 cpu.shadow_upload = shadow_start.elapsed();
             }
+            // LC1: shadowed local lights trace where the shading module binds rays
+            // (light_cluster::ray_scene), else use pooled maps.
+            let maps = !(self.hardware_shadows.is_some()
+                && (traced || (hardware_shadowed && !fresh)));
+            local_lights = Some(self.prepare_light_clusters(
+                camera,
+                [color.width(), color.height()],
+                draws,
+                maps,
+                &mut uploads,
+            ));
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
         cpu.upload += start.elapsed() - cpu.shadow_upload;
@@ -2948,6 +2962,9 @@ impl Renderer {
                 label: Some("mesh frame"),
             });
         let timed = self.timing_status == TimingStatus::Enabled;
+        if let Some(frame) = &local_lights {
+            self.encode_light_clusters(&mut encoder, frame, draws);
+        }
         if hardware_build {
             let start = Instant::now();
             self.hardware_shadows
@@ -3580,3 +3597,7 @@ mod specular_aa_tests;
 #[cfg(test)]
 #[path = "iq1_tests.rs"]
 mod iq1_tests;
+
+#[cfg(test)]
+#[path = "light_cluster_tests.rs"]
+mod light_cluster_tests;
