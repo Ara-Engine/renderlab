@@ -11,8 +11,10 @@ import argparse
 import json
 from pathlib import Path
 
-ROOT = Path("E:/renderlab-work/m7-tr1")
+# Plans and runs on D: since TR1b (bulk output; milestone-7.md). Earlier evidence stays in E:/renderlab-work/m7-tr1.
+ROOT = Path("D:/Coding/renderlab-work/m7-tr1")
 TR0 = Path("E:/renderlab-work/m7-tr0")
+S2G_SCENE = "E:/renderlab-work/m7-u0b/scenes/S2G/scene.json"
 TEST = ("renderer::fresh_shadow_tests::primary_ray_gpu_tests::visibility_buffer_tests::"
         "temporal_reconstruction_tests::gpu_tr1_sequence")
 QUARRY = {
@@ -43,6 +45,9 @@ def main():
     parser.add_argument("--frames", default="reference")
     parser.add_argument("--no-replay", action="store_true")
     parser.add_argument("--no-write", action="store_true", help="hash the frames without writing them")
+    parser.add_argument("--track", default="q-walk", help="q-walk, or a TR0 input track (q-disocclusion, q-sun-fast, s2g-*)")
+    parser.add_argument("--sequence", help="a quarry sequence file instead of the track's (the visible-sky walk)")
+    parser.add_argument("--sky", action="store_true", help="primary misses show the bound RLE2 map")
     args = parser.parse_args()
     text = args.variants
     variants = json.loads(Path(text).read_text() if not text.lstrip().startswith("{") else text)
@@ -53,7 +58,7 @@ def main():
     # capture (cost runs).
     frames = {"reference": reference_frames,
               "checkpoints": lambda: json.loads((TR0 / "runs/t1b-black-b/manifest.json").read_text())["scored"],
-              "all": lambda: None, "none": lambda: []}[args.frames]()
+              "all": lambda: None, "none": lambda: []}.get(args.frames, lambda: [int(f) for f in args.frames.split(",")])()
     steps = []
     for step in args.paths.split(","):
         # A step is a path, optionally with a repeat suffix (rt-b) for cross-process identity.
@@ -61,6 +66,16 @@ def main():
         manifest = dict(QUARRY, path=path, output=str(ROOT / "runs" / args.label / step / "data"),
                         variants=variants, visits=args.visits, replay=not args.no_replay, validate=False,
                         write_frames=not (args.no_write or step.endswith("-b") or path == "nonrt-on-rt"))
+        if args.track != "q-walk":
+            # TR0's registered input timelines; S2G replaces the quarry with its bench scene.
+            manifest["sequence"] = str(TR0 / "inputs" / (args.track + ".json"))
+            if args.track.startswith("s2g-"):
+                manifest = {k: v for k, v in manifest.items() if k not in QUARRY or k == "sequence"}
+                manifest["scene"] = S2G_SCENE
+        if args.sequence:
+            manifest["sequence"] = args.sequence
+        if args.sky:
+            manifest["visible_environment"] = True
         if frames is not None:
             manifest["frames"] = frames
         target = plan_dir / f"manifest-{step}.json"
