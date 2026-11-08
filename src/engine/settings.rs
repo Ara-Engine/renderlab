@@ -194,13 +194,8 @@ pub(crate) fn lighting(
                 "sun angular_radius must be in [0, 0.1]",
             ));
         }
-        // Current renderer limit (shadow_gpu.rs validate_shadow_settings): soft sun
-        // visibility needs the sun to be the only light. Many-light shading (LC1) lifts it.
-        if sun.angular_radius > 0.0 && !lights.is_empty() {
-            return Err(Error::InvalidInput(
-                "a soft sun (angular_radius > 0) cannot be combined with local lights yet; use angular_radius 0 or no local lights",
-            ));
-        }
+        // The soft sun is light 0 and the only shadow request; local lights follow it
+        // unrequested and LC1 shadows the most important of them (docs/m7-lc1.md).
         all.push(Light::Directional {
             travel: sun.travel,
             lux: sun.illuminance,
@@ -320,7 +315,10 @@ mod tests {
             range: Some(5.0),
         };
         let soft = Sun::default();
-        assert!(super::lighting(Some(soft), &[lamp], Sky::default(), Exposure::default()).is_err());
+        // LC1: a soft sun renders with local lights.
+        let (_, soft_shadows) =
+            super::lighting(Some(soft), &[lamp], Sky::default(), Exposure::default()).unwrap();
+        assert_eq!(soft_shadows.requests[1..], [ShadowRequest::None]);
         let sun = Sun {
             angular_radius: 0.0,
             ..soft

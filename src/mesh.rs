@@ -49,8 +49,11 @@ impl Limits {
     }
 }
 
-/// Immutable geometry. Drop releases caller ownership; wgpu retains submitted uses.
+/// Static geometry, or the owned output of a SkinnedMeshInstance. Drop releases
+/// caller ownership; wgpu retains submitted uses.
 pub struct Mesh {
+    // SK1: present only for a deforming instance, automatically dispatched each frame.
+    pub(crate) skin: Option<crate::renderer::skinning::SkinGpu>,
     /// Visibility-buffer clusters: original geometry, or an attached clusterLOD hierarchy.
     pub(crate) clusters: Option<crate::renderer::visibility_buffer::Clusters>,
     pub(crate) repair_scan: bool,
@@ -214,6 +217,10 @@ impl Camera {
     }
     pub fn near(self) -> f32 {
         self.near
+    }
+    /// The far plane, from the depth coefficients (LC1's depth slices end there).
+    pub fn far(self) -> f32 {
+        self.depth[1] / self.depth[0]
     }
     /// Actual world-to-clip matrix uploaded by both main raster paths.
     /// After division by W, near maps to 1 and far to 0 in WebGPU's clip volume.

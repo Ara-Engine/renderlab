@@ -128,7 +128,7 @@ engine.set_decals(&[Decal {
 ## Lighting and exposure
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are unshadowed at this revision, and a soft sun must currently be the only light (see [Current limits](#current-limits)); many-light sampling and shadows arrive with LC1. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster, and the most important 4 are shadowed each frame (LC1, [m7-lc1.md](m7-lc1.md); `Renderer::set_local_shadows`); the rest are unshadowed. They combine with a soft sun. Directional lights go in the sun.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Sky, atmosphere and fog
@@ -239,7 +239,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - One shading program per frame on both quality paths (above). MP1 lifts it, with no API change.
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
-- Local lights are unshadowed, and a soft sun (`angular_radius > 0`) must be the only light: the renderer accepts soft sun visibility only for a light list of exactly one directional light. `set_lights` with a soft sun returns `InvalidInput`. Use `angular_radius: 0.0` (hard sun) to combine the sun with local lights. Many-light shading (LC1) is expected to lift this.
+- Only the 4 most important local lights cast shadows (LC1); the rest are unshadowed. See the Lights section of [m7-gaps.md](m7-gaps.md#lights).
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
 - On `NonRt`, reflections are traced only in frames whose meshes all have software geometry (none over 2^19 triangles, no streamed cluster meshes), and volumetric fog is unshadowed (no sun shafts).
 - The GI cache shows bright speckles near metallic objects and faceted streaks on some flat faces, on both paths. G2c owns the fix.
@@ -306,7 +306,7 @@ These notes are final for everything wired above. Rows still marked planned beco
 | `Sun::default().illuminance` is 120,000 lux (outside the atmosphere) | AT1 | under `Uniform`/`Map` skies, set the illuminance that reaches the ground |
 | `Settings::default()`: GI and TR1 on, aerial perspective and height fog on | G2b, TR1b, AT1 | set the fields off explicitly to reproduce older frames |
 | `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
-| Soft sun plus local lights is rejected | phase 1 | hard sun (`angular_radius: 0.0`) until LC1 |
+| Soft sun plus local lights renders (was rejected) | LC1 | none |
 
 ## Example
 

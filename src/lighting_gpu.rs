@@ -3,6 +3,8 @@ use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
+    /// LC1: the local shadow maps bound at binding 22 (light_cluster_gpu.rs).
+    cluster_generation: u64,
     environment_generation: u64,
     indirect_generation: u64,
     atmosphere_generation: u64,
@@ -52,6 +54,8 @@ pub(super) struct LightingGpu {
     pub max: u32,
     pub generation: u64,
     pub target_generation: u64,
+    /// LC1 clustered lights and local shadow maps (light_cluster_gpu.rs).
+    pub clusters: super::light_cluster_gpu::LightClusters,
 }
 impl LightingGpu {
     pub fn new(
@@ -166,6 +170,41 @@ impl LightingGpu {
                         },
                         count: None,
                     },
+                    // LC1 (shaders/light_cluster_api.wgsl): the cluster grid's frame
+                    // uniform, its u32 list texture and the pooled local shadow maps. No
+                    // storage buffer, so the per-stage storage budget is unchanged.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 23,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                crate::light_cluster::FRAME_BYTES as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 24,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 25,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             }),
             ResourceKind::BindGroupLayout,
@@ -242,7 +281,9 @@ impl LightingGpu {
         let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
+        let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
+            clusters,
             decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
             layout,
@@ -279,10 +320,15 @@ impl LightingGpu {
     pub fn kernel_bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().kernel
     }
+    /// The light records the bind groups hold (LC1's culling kernel reads them too).
+    pub fn light_buffer(&self) -> &wgpu::Buffer {
+        &self.active.as_ref().unwrap().buffer
+    }
     pub fn collect(&mut self, completed: u64) {
         self.decals.collect(completed);
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
+        self.clusters.collect(completed);
     }
 }
 fn computed(mut entry: wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupLayoutEntry {
@@ -427,6 +473,7 @@ impl Renderer {
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
+                || active.cluster_generation != state.clusters.generation
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
                 || active.atmosphere_generation != self.atmosphere.generation
@@ -525,6 +572,20 @@ impl Renderer {
                                 resource: self.shadows.records().as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
+                                binding: 23,
+                                resource: state.clusters.frame.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 24,
+                                resource: wgpu::BindingResource::TextureView(&state.clusters.lists),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 25,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &state.clusters.atlas.view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
                                 binding: 50,
                                 resource: self.atmosphere.uniform().as_entire_binding(),
                             },
@@ -555,6 +616,7 @@ impl Renderer {
             let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
             let next = LightBuffer {
                 shadow_generation: self.shadows.stats.resource_generation,
+                cluster_generation: state.clusters.generation,
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
                 atmosphere_generation: self.atmosphere.generation,
