@@ -7,6 +7,7 @@ pub(super) struct GlassReflections {
     pub normal: Depth,
     pub geometric: Depth,
     pub radiance: Depth,
+    pub program_slots: Owned<wgpu::Buffer>,
     pub layout: Owned<wgpu::BindGroupLayout>,
     pub pipeline: Owned<wgpu::ComputePipeline>,
     pub key: [u8; 32],
@@ -30,12 +31,22 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
             "fn rl_reflection_prepare(lobe:SpecularLobe,",
         )
         .replace("    let lobe=reflection_lobe(s,input);\n", "")
+        // MP1 integration: a foreign program's parameter block has another layout.
+        // Match MP1's response fallback, with slot zero's own parameter block.
+        .replace(
+            "rl_load_parameters(h.batch);",
+            "rl_load_parameters(rl_glass_parameter_batch(h.batch));",
+        )
         // Glass draws after TR1: fixed glossy strata avoid unfiltered frame rotation.
         .replace("let frame=primary_frame.sided.y;", "let frame=0u;");
     s.push_str(r#"
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
 @group(0) @binding(33) var tp_reflection_geometric:texture_2d<f32>;
+@group(0) @binding(38) var<uniform> rl_glass_programs:array<vec4<u32>,16>;
+fn rl_glass_parameter_batch(batch:u32)->u32 {
+    return select(0u,batch,rl_glass_programs[batch>>2u][batch&3u]==0u);
+}
 @compute @workgroup_size(8,8) fn tp_reflect(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(primary_hdr);
     if any(id.xy>=size) {return;}
@@ -67,6 +78,15 @@ impl Renderer {
         let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
         let source = source(&head, &program.source, program.layout.is_some());
         let key = key(&self.source, &program.source, program.layout.is_some());
+        let program_slots = self.ledger.own(
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TP2 reflected hit program slots"),
+                size: 256,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
         let position = self.tp_target(
             "TP2 glass world position",
             size,
@@ -119,6 +139,7 @@ impl Renderer {
                 entry(31, COMPUTE, texture(UNFILTERED)),
                 entry(32, COMPUTE, texture(UNFILTERED)),
                 entry(33, COMPUTE, texture(UNFILTERED)),
+                entry(38, COMPUTE, uniform(false, 256)),
             ],
         );
         let pipeline_layout = self.tp_pipeline_layout(
@@ -142,6 +163,7 @@ impl Renderer {
             normal,
             geometric,
             radiance,
+            program_slots,
             layout,
             pipeline,
             key,

@@ -1402,6 +1402,24 @@ impl Renderer {
             {
                 self.transparency.reflections = Some(self.tp_reflections(size)?);
             }
+            // MP1 integration: R1 shades foreign-program hits with the first opaque
+            // program's response and parameters, as MP1's existing fallback does.
+            let mut slots = [0u32; crate::TRACED_DRAWS as usize];
+            for (slot, draw) in opaque.iter().enumerate() {
+                let id = draw.material.map_or(self.standard.id(), |m| m.program.id());
+                slots[slot] = u32::from(id != primary.program);
+            }
+            let bytes: Vec<u8> = slots.iter().flat_map(|s| s.to_ne_bytes()).collect();
+            self.queue.write_buffer(
+                &self
+                    .transparency
+                    .reflections
+                    .as_ref()
+                    .unwrap()
+                    .program_slots,
+                0,
+                &bytes,
+            );
         }
         let default_program = self.standard.id();
         // Sources are composed once per program and frame; pipelines only when they change
@@ -1775,6 +1793,10 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 33,
                         resource: wgpu::BindingResource::TextureView(&reflection.geometric.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 38,
+                        resource: reflection.program_slots.as_entire_binding(),
                     },
                 ],
             })
