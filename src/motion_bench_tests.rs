@@ -814,6 +814,8 @@ fn gpu_motion_bench_batch() {
             for (name, mode) in [
                 ("hard", SoftShadows::Exact),
                 ("Exact", SoftShadows::Exact),
+                // RTDEF's historical RT-device default, measured in the same scene load.
+                ("Raster-Exact", SoftShadows::Exact),
                 ("Interactive", SoftShadows::Interactive),
                 ("Temporal", SoftShadows::Temporal),
                 ("Virtual", SoftShadows::Virtual),
@@ -832,6 +834,12 @@ fn gpu_motion_bench_batch() {
                     ..Default::default()
                 };
                 r.set_reconstruction(reconstruction).unwrap();
+                r.set_primary_visibility(if name == "Raster-Exact" {
+                    PrimaryVisibility::Raster
+                } else {
+                    PrimaryVisibility::Traced
+                })
+                .unwrap();
                 let path = directory.join(name);
                 fs::create_dir_all(&path).unwrap();
                 r.set_soft_shadows(mode);
@@ -972,7 +980,7 @@ fn gpu_motion_bench_batch() {
                             crop_hit(&r, b.crop),
                         )
                         .unwrap();
-                    } else {
+                    } else if name != "Raster-Exact" {
                         let mut e = r.device.create_command_encoder(&Default::default());
                         r.encode_primary_shade(
                             &mut e,
