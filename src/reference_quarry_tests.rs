@@ -145,6 +145,29 @@ fn gpu_reference_quarry() {
             mode == "independent" || policy == "strict",
             "diagnostic modes keep the strict gate"
         );
+        // Persist comparisons before optional GPU controls or large image writes.
+        // A later device/guard failure must not erase an already available report;
+        // unique directories also preserve rejected attempts across retries.
+        let replay_dir = dir.join("replay-reports").join(format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&replay_dir).unwrap();
+        let retain = |stage: &str, report: serde_json::Value| {
+            std::fs::write(
+                replay_dir.join(format!("{name}-{stage}.json")),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+        };
+        retain(
+            "base",
+            serde_json::json!({"policy":policy,"mode":mode,"reports":replay_reports}),
+        );
         let noise_rms = (image
             .standard_error
             .iter()
@@ -164,6 +187,10 @@ fn gpu_reference_quarry() {
                 render_repeats(&device, &queue, &scene, &view, &settings, 2, false).unwrap();
             fixed_report = Some(super::tests::replay_report(&control[0], &control[1]));
             replay_reports.push(super::tests::replay_report(image, &control[0]));
+            retain(
+                "fixed",
+                serde_json::json!({"fixed_resource_replay":fixed_report,"reports":replay_reports}),
+            );
         }
         let fixed_exact = fixed_report
             .as_ref()
@@ -191,7 +218,10 @@ fn gpu_reference_quarry() {
             replay_reports
                 .iter()
                 .flat_map(|r| {
-                    ["mean", "half0", "half1"].map(move |k| r[k][field].as_f64().unwrap())
+                    // Nonfinite rejected statistics serialize as null. Keep the raw
+                    // report instead of panicking before save can retain it.
+                    ["mean", "half0", "half1"]
+                        .map(move |k| r[k][field].as_f64().unwrap_or(f64::MAX))
                 })
                 .fold(0.0f64, f64::max)
         };
@@ -210,6 +240,7 @@ fn gpu_reference_quarry() {
             serde_json::json!({"frame":frame,"content":info,"seconds":render_seconds,"qualification_seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,"camera_background":scene.camera_background,
                 "accepted_for_scoring":accepted,"strict_replay":representative,"replay_reports":replay_reports,
                 "fixed_resource_replay":fixed_report,"replay_qualification":qualification,
+                "raw_replay_reports_directory":replay_dir,
                 "replay_mode":mode,"replay_count":repeats,
                 "seconds_scope":"mean base-render wall time; fixed resource setup amortized; not GPU time",
                 "replay_scope":"same seed and dispatch layout; mode records independent AS/pipeline, fixed resources, or fixed AS with rebuilt pipelines; every HDR-half and geometry byte"}),

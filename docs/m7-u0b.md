@@ -119,7 +119,7 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **13 tests** after the telemetry-routing and
+are unchanged. The focused Python suite passes **14 tests** after the telemetry-routing and
 bounded static-matrix handoff checks.
 
 ## Independent-AS replay policy
@@ -179,6 +179,16 @@ Diagnostics and the original rejected reports are retained under
 on the CPU within the approved bounds, using the separately retained fixed-resource evidence.
 This does not retroactively accept that process. Superseded raw diagnostic image/geometry
 buffers are deleted with hashes; every original comparison JSON and inspected PNG remains.
+
+The final reporting-only harness writes raw comparisons into unique `replay-reports/`
+directories **before** optional fixed-resource controls or large image-buffer writes.
+Retries cannot overwrite an earlier attempt's report. Null rejected statistics also remain
+serializable rather than panicking during summary construction. The coordinated build gap
+is **01:37:09.140Z–01:37:48.401Z**; the warm build takes **36.53 seconds**, with **126 passed,
+120 ignored**, and `cargo fmt --all -- --check` exits 0. Binary SHA256 is
+`03dd6ee0f000a8bc83ed8ce7406f0cde2ea0afc0a50e50c5eab1d53dac386bc6`.
+The remaining production states use this harness; `q-disocclusion-037` passes strict and
+retains its early raw report. D8 shader and rendering math are unchanged.
 
 ## Retained quarry references
 
@@ -676,7 +686,7 @@ has left sufficient RAM headroom. Timing rows also require 60 compiler-free seco
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
-inventory and the PDH memory guard remain mandatory and fail closed. Nine focused CPU
+inventory and the PDH memory guard remain mandatory and fail closed. Ten focused CPU
 guard tests cover this routing, native memory, failed inventory after a successful child
 exit, ordinary monitor failure, the atomic-acquisition race and requeuing every unfinished
 static configuration after a short lease. The floor scorer also rejects process failures

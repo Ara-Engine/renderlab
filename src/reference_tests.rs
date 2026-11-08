@@ -955,6 +955,7 @@ fn bounded_as_replay_keeps_strict_invariants_and_hard_numeric_limits() {
             ("max_ulp", serde_json::json!(5)),
             ("rms_relative", serde_json::json!(1.01e-5)),
             ("rms_absolute", serde_json::json!(1.01e-4)),
+            ("rms_absolute", serde_json::Value::Null),
         ] {
             let mut bad = bounded.clone();
             bad[key][field] = value;
