@@ -2,7 +2,7 @@
 
 The engine-facing API is `renderlab::engine`. A game owns one `Engine`. It creates resources and objects through typed handles, sets lights, sky and settings, and calls `render` once per frame. Everything else in the crate root is the low-level renderer the engine wraps. That renderer's tuning surface changes as features are measured; the engine module is the part that stays stable (see [Stability](#stability-and-freeze-notes)).
 
-Status: phase 1 of unit API1 (2026-11-08), over main `984a18b`. Phase 2 wires in the overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
+Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1 (main `976a952`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
 
 ## Principles
 
@@ -107,6 +107,24 @@ loop {
 
 Objects that share a mesh and a material are drawn together as one instanced draw. Moving an object is a transform write on the next frame. Spawning or despawning re-uploads that group's transforms on the next frame. One group holds at most `limits.max_instances` objects (raise it in the descriptor for large crowds or forests).
 
+## Decals
+
+`set_decals(&[Decal])` replaces the scene's projected box decals atomically; an empty slice removes them (DC1, [m7-dc1.md](m7-dc1.md)). A `Decal`'s `transform` maps the local cube [-0.5, 0.5]³ to world space. Local XY carries its UVs, local +Z is the receiving surface's preferred normal, and the Z scale is the projection depth. A ground decal therefore rotates local +Z to world +Y:
+
+```rust
+let emblem = DecalTexture::from_rgba8(DecalTextureKind::BaseColorSrgb, [256, 256], &rgba8)?;
+engine.set_decals(&[Decal {
+    transform: Mat4::from_translation(position)
+        * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+        * Mat4::from_scale(Vec3::new(2.0, 2.0, 0.6)),
+    textures: DecalTextures { base_color: Some(emblem), ..Default::default() },
+    channels: [1.0, 0.0, 0.0, 0.0], // base colour, roughness, metallic, normal strengths
+    ..Default::default()
+}])?;
+```
+
+`DecalBlend::{Alpha, Multiply, Add}` composites base colour; roughness, metallic and normal blend by their own `channels` strengths. Decals edit material inputs before a program's `surface` reads them, on both paths, and GI bounce sees them. A program opts in by calling `decal_base_color(input, base)` and `decal_metallic_roughness(input, vec2(rough, metal))` on its resolved inputs (`material_normal` already includes the normal overlay), as standard.wgsl and the example's program do; a program that ignores them is unaffected. Textures are copied when `set_decals` is called, so the caller may drop its handles. The decal grid's resolution stays on `renderer_mut().set_decals_with_settings`.
+
 ## Lighting, sky and exposure
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels; `illuminance` is lux per channel (clear midday is about 100,000); `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths. 0 gives hard shadows.
@@ -182,7 +200,8 @@ renderlab::engine            Engine, EngineDescriptor, Capabilities, RenderPath,
                              MaterialDesc, TextureRef, AssetHandles, Image, headless_adapter
 renderlab::engine (settings) Settings, Quality, Exposure, Sky, Sun
 renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId
-renderlab::engine re-exports Camera, Light, MeshData, Vertex, Value, Limits, Mat4, Vec3, Error,
+renderlab::engine re-exports Camera, Light, Decal, DecalBlend, DecalTexture, DecalTextureKind,
+                             DecalTextures, MeshData, Vertex, Value, Limits, Mat4, Vec3, Error,
                              ReloadError, ReloadReport, FrameReport, Events, FrameId, Sampler,
                              TextureData, TangentStream, PreparedEnvironment, Renderer
 renderlab::*                 the low-level renderer (expert API, not frozen)
@@ -199,7 +218,7 @@ Each overnight unit lands in a named slot. The shapes below are the intended API
 | AT1 | atmosphere, fog | new `Sky::Atmosphere { .. }` variant (`Sky` is `#[non_exhaustive]`); `Settings::fog` |
 | SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])` |
 | LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper |
-| DC1 | decals | `set_decals(&[Decal])`, a whole-list replacement like `set_lights`, with `Decal`, `DecalTextures` and `DecalTexture::from_rgba8` re-exported (DC1's branch already has this shape on `Renderer`) |
+| DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
 | PP1 | post-processing | `Settings::post` (bloom, tone mapper, colour grading); `Exposure::Auto { .. }` variant |
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.

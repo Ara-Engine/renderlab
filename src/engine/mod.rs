@@ -23,8 +23,9 @@ pub use crate::asset::{
     Sampler, TangentStream, Texture as TextureData, environment::PreparedEnvironment,
 };
 pub use crate::{
-    Camera, Error, Events, FrameId, FrameReport, Light, Limits, Mat4, MeshData, ReloadError,
-    ReloadReport, Renderer, Value, Vec3, Vertex,
+    Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures, Error, Events,
+    FrameId, FrameReport, Light, Limits, Mat4, MeshData, ReloadError, ReloadReport, Renderer,
+    Value, Vec3, Vertex,
 };
 
 use crate::{
@@ -684,6 +685,19 @@ impl Engine {
     }
     pub fn object_count(&self) -> usize {
         self.objects.len()
+    }
+
+    // ---- Decals ----
+
+    /// Replaces the scene's projected box decals atomically; empty removes them
+    /// (DC1, docs/m7-dc1.md). Each `Decal` maps the local cube [-0.5, 0.5]³ to world
+    /// space: local XY carries its UVs, local +Z is the receiving surface's preferred
+    /// normal, and the Z scale is the projection depth. Decals edit material inputs before
+    /// a program's `surface` reads them, on both paths, and GI bounce sees them. Their
+    /// textures are copied at this call. The decal grid's resolution stays on
+    /// `renderer_mut().set_decals_with_settings`; this call uses its default.
+    pub fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
+        self.renderer.set_decals(decals)
     }
 
     // ---- Lighting, sky and settings ----

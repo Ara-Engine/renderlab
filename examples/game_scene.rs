@@ -267,6 +267,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A warm lantern under the arch arrives with many-light shading (LC1): at this
     // revision a soft sun must be the only light (docs/api.md, "Current limits").
 
+    // Decals on the ground: an emblem in front of the arch, and a wet puddle that darkens
+    // the ground and makes it glossy. Ground decals turn local +Z (their receiver normal)
+    // to world +Y; the Z scale is the projection depth.
+    let ground_decal = |center: Vec3, width: f32, depth: f32, turn: f32| {
+        Mat4::from_translation(center)
+            * Mat4::from_rotation_y(turn)
+            * Mat4::from_rotation_x(-PI / 2.0)
+            * Mat4::from_scale(Vec3::new(width, width * depth, 0.6))
+    };
+    let emblem = DecalTexture::from_rgba8(
+        DecalTextureKind::BaseColorSrgb,
+        [256; 2],
+        &emblem_rgba8(256),
+    )?;
+    let puddle = DecalTexture::from_rgba8(
+        DecalTextureKind::BaseColorSrgb,
+        [256; 2],
+        &puddle_rgba8(256),
+    )?;
+    engine.set_decals(&[
+        Decal {
+            transform: ground_decal(at(0.0, 0.0, -0.6), 2.6, 1.0, 0.3),
+            textures: DecalTextures {
+                base_color: Some(emblem),
+                ..Default::default()
+            },
+            channels: [1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        Decal {
+            transform: ground_decal(at(1.5, 0.0, 4.6), 4.0, 0.7, -0.4),
+            textures: DecalTextures {
+                base_color: Some(puddle),
+                ..Default::default()
+            },
+            base_color: [0.55, 0.57, 0.62, 1.0],
+            roughness: 0.04,
+            channels: [1.0, 1.0, 0.0, 0.0],
+            blend: DecalBlend::Multiply,
+            ..Default::default()
+        },
+    ])?;
+
     fs::create_dir_all(&args.out)?;
     let ready = start.elapsed();
     let mut frames = Vec::new();
@@ -446,6 +489,49 @@ fn plane_geometry(size: f32, cells: u32) -> Geometry {
         }
     }
     g
+}
+/// An orange ring around a five-pointed star on a transparent background, sRGB RGBA8.
+fn emblem_rgba8(size: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let p = [
+                (x as f32 + 0.5) / size as f32 * 2.0 - 1.0,
+                (y as f32 + 0.5) / size as f32 * 2.0 - 1.0,
+            ];
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            // Star: radius between 0.3 and 0.62 by angle, five points.
+            let angle = p[1].atan2(p[0]);
+            let star = 0.3 + 0.32 * (0.5 + 0.5 * (5.0 * angle + PI / 2.0).cos()).powf(3.0);
+            let ring = (0.78..0.9).contains(&r);
+            let inside = r < star;
+            let (color, alpha) = match (ring, inside) {
+                (true, _) => ([235, 120, 30], 230),
+                (false, true) => ([250, 215, 60], 220),
+                _ => ([0, 0, 0], 0),
+            };
+            rgba.extend_from_slice(&[color[0], color[1], color[2], alpha]);
+        }
+    }
+    rgba
+}
+/// A soft-edged blob, white with alpha falling off toward its wavy rim (a puddle mask).
+fn puddle_rgba8(size: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let p = [
+                (x as f32 + 0.5) / size as f32 * 2.0 - 1.0,
+                (y as f32 + 0.5) / size as f32 * 2.0 - 1.0,
+            ];
+            let angle = p[1].atan2(p[0]);
+            let rim = 0.8 + 0.08 * (3.0 * angle).sin() + 0.05 * (7.0 * angle + 1.0).sin();
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt() / rim;
+            let alpha = ((1.0 - r) / 0.15).clamp(0.0, 1.0);
+            rgba.extend_from_slice(&[255, 255, 255, (alpha * 255.0).round() as u8]);
+        }
+    }
+    rgba
 }
 fn write_png(path: &std::path::Path, image: &Image) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = png::Encoder::new(fs::File::create(path)?, image.width, image.height);
