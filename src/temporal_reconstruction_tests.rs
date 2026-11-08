@@ -11,7 +11,192 @@
 //! for the frames in `frames` and every frame's SHA-256; `visits` further alternating
 //! visits (order reversed on odd visits) record per-frame GPU spans for the paired cost.
 //! `replay` renders the first variant again and compares every frame hash (F8).
+//!
+//! A sequence frame's `to_light` (Q-sun, S2G) sets the sun direction before that frame.
+//! `scene` replaces the quarry with a U0b bench scene.json (S2G): its meshes, materials,
+//! sun and constant sky, black primary misses, identity instances.
 use super::*;
+
+/// A loaded bench scene's draw inputs; placement i + 1 is the scene's mesh i, as the
+/// reference's hit IDs number them.
+struct Bench {
+    meshes: Vec<crate::Mesh>,
+    instances: Vec<Instances>,
+    materials: Vec<Material>,
+    material_of: Vec<usize>,
+}
+
+enum Content {
+    Quarry(prepared::Prepared),
+    Bench(Bench),
+}
+
+impl Content {
+    fn draws(&mut self) -> Vec<Draw<'_>> {
+        match self {
+            Content::Quarry(asset) => asset.draws(Visibility::Frustum),
+            Content::Bench(b) => b
+                .meshes
+                .iter()
+                .zip(b.instances.iter_mut())
+                .zip(&b.material_of)
+                .map(|((m, i), &k)| Draw::new(m, i).with_material(&b.materials[k]))
+                .collect(),
+        }
+    }
+}
+
+/// A constant sky of `sky` cd/m^2 as a prepared environment: its irradiance is pi times it.
+fn constant_sky(sky: [f32; 3]) -> crate::asset::environment::PreparedEnvironment {
+    use crate::asset::environment::{
+        self as env, CubeLevel, Metadata, PreparedEnvironment, RadianceUnits,
+    };
+    let level = |size: u32, value: [f32; 3]| {
+        CubeLevel::new(
+            size,
+            vec![value; (6 * size * size) as usize],
+            env::Limits::default(),
+        )
+        .unwrap()
+    };
+    PreparedEnvironment::new(
+        Metadata {
+            units: RadianceUnits::CandelasPerSquareMetre,
+            source_radiance_scale: 1.0,
+            rotation_y_radians: 0.0,
+            generator_hash: [0x5c; 32],
+        },
+        level(8, sky.map(|v| v * std::f32::consts::PI)),
+        [16, 8, 4, 2, 1]
+            .into_iter()
+            .map(|size| level(size, sky))
+            .collect(),
+        env::Limits::default(),
+    )
+    .unwrap()
+}
+
+/// Loads a bench scene.json (U0b schema 2) into `r`: lighting with its sun (disk radius as the
+/// shadow disk), a black visible environment, its constant sky as the bound environment.
+fn load_bench(path: &std::path::Path, r: &mut Renderer) -> (Bench, Lighting) {
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let f = |x: &serde_json::Value| x.as_f64().unwrap() as f32;
+    let v3 = |x: &serde_json::Value| [f(&x[0]), f(&x[1]), f(&x[2])];
+    assert_eq!(v["camera_background"], serde_json::json!([0.0, 0.0, 0.0]));
+    let sun = &v["sun"];
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: -Vec3::from(v3(&sun["to_light"])),
+            lux: v3(&sun["lux"]),
+        }],
+        environment: [0.0; 3],
+        exposure_stops: f(&v["exposure_stops"]),
+    };
+    let shadows = Shadows {
+        directional_disk_angle: f(&sun["angular_radius"]),
+        requests: vec![ShadowRequest::Directional {
+            split_ends: vec![1., 3., 10.],
+        }],
+        ..Default::default()
+    };
+    r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
+    let env = r
+        .try_upload_environment(&constant_sky(v3(&v["sky"]["constant"])))
+        .unwrap()
+        .unwrap();
+    r.set_environment(Some(&env), EnvironmentParameters::default())
+        .unwrap();
+    r.test_drain("TR1 bench environment");
+    let materials = v["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert_eq!(f(&m["specular"]), 1.0, "Renderlab's dielectric F0 is 0.04");
+            let b = v3(&m["base_color"]);
+            loop {
+                let descriptor = MaterialDescriptor {
+                    base_color: [b[0], b[1], b[2], 1.0],
+                    metallic: f(&m["metallic"]),
+                    roughness: f(&m["roughness"]),
+                    double_sided: m["double_sided"].as_bool().unwrap_or(false),
+                    ..Default::default()
+                };
+                if let Some(material) = r.try_create_material(&descriptor).unwrap() {
+                    break material;
+                }
+                r.test_drain("TR1 bench material");
+            }
+        })
+        .collect();
+    let mut bench = Bench {
+        meshes: vec![],
+        instances: vec![],
+        materials,
+        material_of: vec![],
+    };
+    for m in v["meshes"].as_array().unwrap() {
+        let list = |k: &str| m[k].as_array().unwrap().iter().map(v3).collect::<Vec<_>>();
+        let vertices: Vec<Vertex> = list("positions")
+            .into_iter()
+            .zip(list("normals"))
+            .map(|(position, normal)| Vertex {
+                position,
+                normal,
+                uv: [0.0; 2],
+                color: [1.0; 4],
+            })
+            .collect();
+        let indices: Vec<u32> = m["indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as u32)
+            .collect();
+        let mesh = loop {
+            let data = MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            };
+            if let Some(mesh) = r.try_upload_mesh(&data).unwrap() {
+                break mesh;
+            }
+            r.test_drain("TR1 bench mesh");
+        };
+        let instances = loop {
+            if let Some(i) = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap() {
+                break i;
+            }
+            r.test_drain("TR1 bench instances");
+        };
+        bench.meshes.push(mesh);
+        bench.instances.push(instances);
+        bench
+            .material_of
+            .push(m["material"].as_u64().unwrap() as usize);
+    }
+    r.test_drain("TR1 bench upload");
+    (bench, lighting)
+}
+
+/// Each sequence frame's `to_light`, if it has one.
+fn sequence_suns(path: &std::path::Path) -> Vec<Option<Vec3>> {
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    v["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            f["to_light"].as_array().map(|d| {
+                Vec3::new(
+                    d[0].as_f64().unwrap() as f32,
+                    d[1].as_f64().unwrap() as f32,
+                    d[2].as_f64().unwrap() as f32,
+                )
+            })
+        })
+        .collect()
+}
 
 fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     let mut s = Reconstruction::identity();
@@ -36,8 +221,6 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
-    b("reverse_search", &mut s.reverse_search);
-    b("coverage_share", &mut s.coverage_share);
     s
 }
 
@@ -58,33 +241,44 @@ fn gpu_tr1_sequence() {
     let path = m["path"].as_str().unwrap_or("rt").to_owned();
     let validate = m["validate"].as_bool().unwrap_or(false);
     let _validation = validation::begin(validate);
-    let (mut r, mut asset) = match path.as_str() {
-        "rt" => {
-            let mut r = renderer(validate);
-            let (asset, _) = load_quarry(&m, &mut r);
-            r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
-            r.set_soft_shadows(SoftShadows::Interactive);
-            (r, asset)
-        }
-        "nonrt" | "nonrt-on-rt" => {
-            let mut r = if path == "nonrt" {
-                no_rt_renderer()
-            } else {
-                renderer_with_features(
-                    validate,
-                    crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
-                )
-            };
-            let (asset, _, _) = load_quarry_lod(&m, &mut r);
-            if path == "nonrt-on-rt" {
-                r.set_primary_visibility(PrimaryVisibility::VisibilityBuffer)
-                    .unwrap();
-            }
-            r.set_soft_shadows(SoftShadows::Virtual);
-            (r, asset)
-        }
+    let mut r = match path.as_str() {
+        "rt" => renderer(validate),
+        "nonrt" => no_rt_renderer(),
+        "nonrt-on-rt" => renderer_with_features(
+            validate,
+            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+        ),
         other => panic!("unknown TR1 path {other}"),
     };
+    let quarry_lighting = || {
+        lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
+            .unwrap()
+    };
+    let (mut content, base_lighting) = match m["scene"].as_str() {
+        Some(scene) => {
+            let (bench, lighting) = load_bench(std::path::Path::new(scene), &mut r);
+            (Content::Bench(bench), lighting)
+        }
+        None if path == "rt" => (
+            Content::Quarry(load_quarry(&m, &mut r).0),
+            quarry_lighting(),
+        ),
+        None => (
+            Content::Quarry(load_quarry_lod(&m, &mut r).0),
+            quarry_lighting(),
+        ),
+    };
+    if path == "rt" {
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        r.set_soft_shadows(SoftShadows::Interactive);
+    } else {
+        if path == "nonrt-on-rt" {
+            r.set_primary_visibility(PrimaryVisibility::VisibilityBuffer)
+                .unwrap();
+        }
+        r.set_soft_shadows(SoftShadows::Virtual);
+    }
+    let suns = sequence_suns(&PathBuf::from(m["sequence"].as_str().unwrap()));
     let load_seconds = started.elapsed().as_secs_f64();
     let path_cameras: Vec<Camera> =
         cameras::Cameras::load(&PathBuf::from(m["sequence"].as_str().unwrap()))
@@ -110,7 +304,7 @@ fn gpu_tr1_sequence() {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     // One complete track from cold: frame hashes, the requested HDRs, and per-frame spans.
     let run = |r: &mut Renderer,
-               asset: &mut prepared::Prepared,
+               content: &mut Content,
                name: &str,
                settings: Reconstruction,
                write: bool| {
@@ -137,8 +331,19 @@ fn gpu_tr1_sequence() {
                 }
             }
         };
+        let mut sun = None;
         for (f, camera) in path_cameras.iter().enumerate() {
-            let report = render(r, &color, camera, &mut asset.draws(Visibility::Frustum));
+            if let Some(d) = suns[f]
+                && sun != Some(d)
+            {
+                let mut lighting = base_lighting.clone();
+                if let Light::Directional { travel, .. } = &mut lighting.lights[0] {
+                    *travel = -d;
+                }
+                r.set_lighting(&lighting).unwrap();
+                sun = Some(d);
+            }
+            let report = render(r, &color, camera, &mut content.draws());
             pending.insert(report.frame.0, f);
             if written.contains(&f) {
                 // Frames between captures fill every flight; a capture needs a free one.
@@ -158,7 +363,7 @@ fn gpu_tr1_sequence() {
     let mut records = serde_json::Map::new();
     let mut first: Option<Vec<String>> = None;
     for (name, settings) in &variants {
-        let (hashes, spans) = run(&mut r, &mut asset, name, *settings, write_frames);
+        let (hashes, spans) = run(&mut r, &mut content, name, *settings, write_frames);
         r.test_drain("TR1 memory");
         memory_report(&r, &out, name);
         if first.is_none() {
@@ -177,7 +382,7 @@ fn gpu_tr1_sequence() {
             order.reverse();
         }
         for (name, settings) in order {
-            let (_, spans) = run(&mut r, &mut asset, name, *settings, false);
+            let (_, spans) = run(&mut r, &mut content, name, *settings, false);
             records[name.as_str()]["visits"]
                 .as_array_mut()
                 .unwrap()
@@ -187,7 +392,7 @@ fn gpu_tr1_sequence() {
     let mut replay_hashes = vec![];
     let replay = if m["replay"].as_bool().unwrap_or(true) {
         let (name, settings) = &variants[0];
-        let (hashes, _) = run(&mut r, &mut asset, name, *settings, false);
+        let (hashes, _) = run(&mut r, &mut content, name, *settings, false);
         replay_hashes = hashes;
         Some(Some(&replay_hashes) == first.as_ref())
     } else {

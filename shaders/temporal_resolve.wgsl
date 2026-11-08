@@ -47,8 +47,6 @@ struct Tr1Frame {
 };
 const TR1_CATMULL_ROM:u32=1u;
 const TR1_SPATIAL_START:u32=2u;
-const TR1_REVERSE_SEARCH:u32=4u;
-const TR1_COVERAGE_SHARE:u32=8u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -93,8 +91,18 @@ fn tr1_id(p:vec2<i32>)->u32 {
 // A sample's surface: world point (w = 1) or background direction (w = 0), its identity,
 // view distance and unit geometric normal.
 struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32> };
-// Placement + 1 of each 3x3 sample of this frame (set once per pixel by tr1_resolve).
-var<private> tr1_ring:array<u32,9>;
+// Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
+// border (TR1_NONE outside the image), loaded once per workgroup by tr1_resolve.
+var<workgroup> tr1_tile:array<u32,100>;
+// This invocation's tile coordinates and its own sample's placement + 1.
+var<private> tr1_local:vec2<i32>;
+var<private> tr1_self:u32;
+// Placement + 1 of 3x3 sample i (row-major from the top left); outside the image, the
+// pixel's own.
+fn tr1_ring(i:i32)->u32 {
+    let v=tr1_tile[(tr1_local.y+i/3)*10+tr1_local.x+i%3];
+    return select(v,tr1_self,v==TR1_NONE);
+}
 fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let id=tr1_id(p);
     if id==0u {
@@ -210,43 +218,21 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     var lo=vec3<f32>(3.4e38);
     var hi=vec3<f32>(-3.4e38);
     var shown=0u;
+    // The four bilinear taps' colours, for Catmull-Rom's inner taps.
+    var inner=array<vec3<f32>,4>();
     for(var i=0;i<4;i+=1) {
         let o=vec2<i32>(i&1,i>>1u);
         let x=tr1_tap(base+o,s,expected,size);
         if x.w>0.0 {
             let w=select(1.0-f.x,f.x,o.x!=0)*select(1.0-f.y,f.y,o.y!=0);
             let c=x.xyz*scale;
+            inner[i]=c;
             total+=w;
             colour=fma(c,vec3<f32>(w),colour);
             h.weight=fma(x.w,w,h.weight);
             lo=min(lo,c);hi=max(hi,c);
             shown+=1u;
         }
-    }
-    if (shown==0u || total<=0.0) && (tr1.flags.y&TR1_REVERSE_SEARCH)!=0u && tr1.flags.z==0u {
-        // The +-1 px search: no bilinear tap shows the surface, but a tap of the 4x4 ring
-        // around them may (a revealed pixel beside where it was hidden). Tent-weighted by
-        // distance from the fetch point, at half their weight, with the bilinear window.
-        var near=vec3<f32>(0.0);
-        var nw=0.0;
-        var nn=0.0;
-        for(var i=0;i<16;i+=1) {
-            let o=vec2<i32>(i&3,i>>2u)-vec2<i32>(1);
-            if all(o>=vec2<i32>(0)) && all(o<=vec2<i32>(1)) {continue;}
-            let x=tr1_tap(base+o,s,expected,size);
-            if x.w>0.0 {
-                let d=abs(vec2<f32>(o)-f);
-                let w=max(1.0-0.5*d.x,0.0)*max(1.0-0.5*d.y,0.0);
-                near=fma(x.xyz*scale,vec3<f32>(w),near);nw+=w;nn=fma(x.w,w,nn);
-            }
-        }
-        if nw>0.0 {
-            h.colour=near/nw;
-            h.weight=0.5*nn/nw;
-            h.window=min(tr1.windows.x,1.0+tr1.windows.w/max(fma(f.x,1.0-f.x,f.y*(1.0-f.y)),0.25));
-            h.window=min(h.window,tr1.windows.y);
-        }
-        return h;
     }
     if shown==0u || total<=0.0 {return h;}
     h.colour=colour/total;
@@ -262,9 +248,15 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         var outer=true;
         for(var i=0;i<16 && outer;i+=1) {
             let o=vec2<i32>(i&3,i>>2u)-vec2<i32>(1);
-            let x=tr1_tap(base+o,s,expected,size);
-            outer=x.w>0.0;
-            sharp=fma(x.xyz*scale,vec3<f32>(wx[i&3]*wy[i>>2u]),sharp);
+            var c=vec3<f32>(0.0);
+            if all(o>=vec2<i32>(0)) && all(o<=vec2<i32>(1)) {
+                c=inner[o.y*2+o.x];
+            } else {
+                let x=tr1_tap(base+o,s,expected,size);
+                outer=x.w>0.0;
+                c=x.xyz*scale;
+            }
+            sharp=fma(c,vec3<f32>(wx[i&3]*wy[i>>2u]),sharp);
         }
         if outer {
             h.colour=clamp(sharp,lo,hi);
@@ -275,15 +267,43 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     return h;
 }
 
+// The area of a unit pixel box on the occluder side of a straight edge, n the edge's unit
+// normal into the occluder and s the box centre's signed distance from the edge (positive
+// inside), and its inverse.
+fn tr1_box_area(s:f32,n:vec2<f32>)->f32 {
+    let a=max(abs(n.x),abs(n.y));let b=min(abs(n.x),abs(n.y));
+    let hi=0.5*(a+b);let lo=0.5*(a-b);
+    if s>=hi {return 1.0;}
+    if s<=-hi {return 0.0;}
+    if abs(s)<=lo || b<1e-4 {return clamp(0.5+s/a,0.0,1.0);}
+    let r=hi-abs(s);
+    let corner=r*r/(2.0*a*b);
+    return select(corner,1.0-corner,s>0.0);
+}
+fn tr1_box_distance(c:f32,n:vec2<f32>)->f32 {
+    let a=max(abs(n.x),abs(n.y));let b=min(abs(n.x),abs(n.y));
+    let hi=0.5*(a+b);
+    let corner=0.5*b/a;
+    if b<1e-4 || (c>=corner && c<=1.0-corner) {return (c-0.5)*a;}
+    let k=2.0*a*b;
+    if c<corner {return sqrt(k*max(c,0.0))-hi;}
+    return hi-sqrt(k*max(1.0-c,0.0));
+}
+
 // The occluder's coverage of this pixel's footprint in the previous frame, fetched where the
 // occluder's point was (the edge moves with the occluder): (coverage, weight), weight zero
 // when no tap holds the pair. A tap of one surface alone covers 1 or 0; a silhouette tap
-// reports its stored coverage. Also the window its resampling allows.
+// reports its stored coverage. Also the window its resampling allows. Under motion the
+// partly covered taps' coverages are carried as a straight edge (its normal from the 2x2
+// taps' coverage gradient): each tap's edge distance is moved to the fetch point and the box
+// area taken there, so a moving straight edge is not resampled (its window is then the
+// coverage window at any sub-pixel offset).
 fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
     let q=tr1_fetch_position(p,o,vec2<f32>(size));
     let base=vec2<i32>(floor(q));
     let f=q-floor(q);
     var total=0.0;var coverage=0.0;var weight=0.0;
+    var taps=vec4<f32>(-1.0);
     for(var i=0;i<4;i+=1) {
         let d=vec2<i32>(i&1,i>>1u);
         let t=base+d;
@@ -301,12 +321,38 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
         if c>=0.0 && n>0.0 {
             let w=select(1.0-f.x,f.x,d.x!=0)*select(1.0-f.y,f.y,d.y!=0);
             total+=w;coverage=fma(c,w,coverage);weight=fma(n,w,weight);
+            taps[i]=c;
         }
     }
     if total<=0.0 {return vec3<f32>(0.0);}
     let blur=fma(f.x,1.0-f.x,f.y*(1.0-f.y));
     var window=tr1.windows.x;
     if blur>0.0 {window=min(min(window,1.0+tr1.windows.w/blur),tr1.windows.z);}
+    if blur>0.0 {
+        // The edge normal: the coverage gradient over the rows and columns of valid taps.
+        var g=vec2<f32>(0.0);
+        if taps.x>=0.0 && taps.y>=0.0 {g.x+=taps.y-taps.x;}
+        if taps.z>=0.0 && taps.w>=0.0 {g.x+=taps.w-taps.z;}
+        if taps.x>=0.0 && taps.z>=0.0 {g.y+=taps.z-taps.x;}
+        if taps.y>=0.0 && taps.w>=0.0 {g.y+=taps.w-taps.y;}
+        let gg=tr1_dot(vec3<f32>(g,0.0),vec3<f32>(g,0.0));
+        if gg>=0.0025 {
+            let n=g*inverseSqrt(gg);
+            var sd=0.0;var sw=0.0;
+            for(var i=0;i<4;i+=1) {
+                let c=taps[i];
+                if c<=0.001 || c>=0.999 {continue;}
+                let d=vec2<i32>(i&1,i>>1u);
+                let w=max(select(1.0-f.x,f.x,d.x!=0)*select(1.0-f.y,f.y,d.y!=0),1e-6);
+                // This tap's edge distance at its centre, moved to the fetch point.
+                sd=fma(tr1_box_distance(c,n)+tr1_dot(vec3<f32>(n,0.0),vec3<f32>(f-vec2<f32>(d),0.0)),w,sd);
+                sw+=w;
+            }
+            if sw>0.0 {
+                return vec3<f32>(tr1_box_area(sd/sw,n),weight,min(min(tr1.windows.x,tr1.windows.z),tr1.windows.y));
+            }
+        }
+    }
     return vec3<f32>(coverage/total,weight,min(window,tr1.windows.y));
 }
 
@@ -321,7 +367,7 @@ fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
     for(var i=0;i<9;i+=1) {
         let o=vec2<i32>(i%3,i/3)-vec2<i32>(1);
         let t=p+o;
-        if !tr1_inside(t,size) || tr1_ring[i]!=id {continue;}
+        if !tr1_inside(t,size) || tr1_ring(i)!=id {continue;}
         // At radius 2 and zero jitter, the 3x3 [1,2,1] filter.
         let d=abs(vec2<f32>(o)+tr1.jitter.xy)/max(radius,2.0);
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
@@ -339,7 +385,7 @@ fn tr1_share(id:u32)->f32 {
         let d=abs(vec2<f32>(vec2<i32>(i%3,i/3)-vec2<i32>(1))+tr1.jitter.xy);
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         all+=w;
-        if tr1_ring[i]==id {hit+=w;}
+        if tr1_ring(i)==id {hit+=w;}
     }
     return hit/max(all,1e-6);
 }
@@ -369,37 +415,61 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
 }
 
-@compute @workgroup_size(8,8) fn tr1_resolve(@builtin(global_invocation_id) id:vec3<u32>) {
+@compute @workgroup_size(8,8) fn tr1_resolve(@builtin(global_invocation_id) id:vec3<u32>,
+        @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) group:vec3<u32>) {
     let size=textureDimensions(tr1_output);
+    // This frame's placements over the 10x10 tile, two loads per invocation at most.
+    let corner=vec2<i32>(group.xy*8u)-vec2<i32>(1);
+    for(var k=lane;k<100u;k+=64u) {
+        let t=corner+vec2<i32>(i32(k%10u),i32(k/10u));
+        tr1_tile[k]=select(TR1_NONE,tr1_id(t),tr1_inside(t,size));
+    }
+    workgroupBarrier();
     if any(id.xy>=size) {return;}
     let p=vec2<i32>(id.xy);
+    tr1_local=p-corner-vec2<i32>(1);
     let s=tr1_surface(p,size);
+    tr1_self=s.id;
     // A silhouette pixel: some 3x3 sample of this frame shows another surface. The other
     // surface is the nearest such sample's (edge neighbours before corners).
     var other=-1;
     for(var i=0;i<9;i+=1) {
-        let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
-        tr1_ring[i]=s.id;
-        if tr1_inside(t,size) {
-            tr1_ring[i]=tr1_id(t);
-            if tr1_ring[i]!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
-        }
+        let v=tr1_ring(i);
+        if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
     let sample=textureLoad(tr1_sample,p,0).xyz;
-    // On a still view a silhouette stays one while its own pixel holds the other surface:
-    // whether this frame's 3x3 shows it depends on the jitter, not on the footprint.
     var kept:Tr1Second;
     kept.id=TR1_NONE;
-    if other<0 && tr1.flags.z!=0u && tr1.flags.x==0u {
+    if tr1.flags.z!=0u && tr1.flags.x==0u {
+        // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether
+        // the jittered 3x3 shows the other one depends on the jitter, not on the footprint,
+        // and at a corner of three surfaces the jitter alternates which other one it shows;
+        // replacing the second slot would discard that surface's history and the coverage.
         let own=tr1_second(p);
-        let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
-        // Kept only while this sample shows one of the two stored surfaces.
-        if own.id!=TR1_NONE && (first==s.id || own.id==s.id) {
-            kept=own;
-            if own.id==s.id {
-                // Last frame's sample showed the other surface: the first slot is the other.
-                kept.id=first;
-                kept.side=(textureLoad(tr1_anchor_in,p,0).x>>23u)&1u;
+        let a=textureLoad(tr1_anchor_in,p,0).xy;
+        let first=a.x&TR1_ID;
+        if own.id!=TR1_NONE {
+            if first==s.id || own.id==s.id {
+                kept=own;
+                if own.id==s.id {
+                    // Last frame's sample showed the other surface: the first slot is the other.
+                    kept.id=first;
+                    kept.side=(a.x>>23u)&1u;
+                }
+                other=-1;
+            } else {
+                // This sample shows a third surface: the pixel carries its two surfaces'
+                // state unchanged (the two-layer limit; docs/m7-tr1b.md).
+                let scale=tr1.jitter.z;
+                let c0=textureLoad(tr1_colour_in,p,0);
+                let mine=vec4<f32>(c0.xyz*scale,c0.w);
+                let theirs=own.colour*scale;
+                textureStore(tr1_anchor_out,p,vec4<u32>(a,0u,0u));
+                textureStore(tr1_colour_out,p,mine);
+                let l=textureLoad(tr1_layer_in,p,0);
+                textureStore(tr1_layer_out,p,vec4<u32>(l.x,pack2x16float(theirs.xy),pack2x16float(vec2<f32>(theirs.z,own.weight)),l.w));
+                textureStore(tr1_output,p,vec4<f32>(mix(theirs,mine.xyz,own.coverage),1.0));
+                return;
             }
         }
     }
@@ -434,6 +504,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if tr1.flags.x==0u {h=tr1_history(p,u,size);}
         if h.weight>0.0 {
             theirs=vec4<f32>(h.colour,min(h.weight,max(h.window,1.0)));
+            // A hidden surface's history gets no sample: under motion it is only resampled,
+            // so it carries at most the start window once revealed.
+            if tr1.flags.z==0u {theirs.w=min(theirs.w,max(tr1.starts.y,1.0));}
         } else {
             let start=tr1_spatial(p,u.id,size);
             theirs=vec4<f32>(start.xyz,clamp(start.w,1.0,max(tr1.starts.y,1.0)));
@@ -448,9 +521,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     var coverage_weight=1.0;
     if c.y>0.0 {
         coverage_weight=clamp(c.y+1.0,1.0,max(c.z,1.0));
-        var observed=select(0.0,1.0,occluder_is_s);
-        if (tr1.flags.y&TR1_COVERAGE_SHARE)!=0u {observed=tr1_share(o.id);}
-        coverage=fma(observed-c.x,1.0/coverage_weight,c.x);
+        coverage=fma(select(0.0,1.0,occluder_is_s)-c.x,1.0/coverage_weight,c.x);
     }
     var front=theirs.xyz;var back=mine.xyz;
     if occluder_is_s {front=mine.xyz;back=theirs.xyz;}

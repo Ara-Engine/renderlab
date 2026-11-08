@@ -49,12 +49,6 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
-    /// When no bilinear tap shows a surface, continue it from the 4x4 ring's taps that do
-    /// (the design's +-1 px reverse search), at half weight.
-    pub reverse_search: bool,
-    /// A moving silhouette observes the occluder's coverage as this frame's tent-weighted
-    /// 3x3 share instead of its own sample's hit.
-    pub coverage_share: bool,
 }
 impl Default for Reconstruction {
     fn default() -> Self {
@@ -70,8 +64,6 @@ impl Default for Reconstruction {
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
-            reverse_search: false,
-            coverage_share: false,
         }
     }
 }
@@ -528,10 +520,7 @@ impl Renderer {
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let options = u32::from(settings.catmull_rom)
-            | u32::from(settings.spatial_start) << 1
-            | u32::from(settings.reverse_search) << 2
-            | u32::from(settings.coverage_share) << 3;
+        let options = u32::from(settings.catmull_rom) | u32::from(settings.spatial_start) << 1;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
