@@ -1,6 +1,8 @@
 // Standard: the photoreal glTF metallic-roughness program, and the engine default. Its
-// direct-light BRDF optionally uses single-frame footprint integration (U1b). Environment
-// filtering is unchanged. Custom programs opt in through the same helper.
+// direct-light BRDF optionally uses single-frame footprint integration (U1b). Custom
+// programs opt in through the same helper. Sky specular is the occluded prefiltered
+// radiance, with the environment's dominant lobes evaluated against this BRDF in place of
+// their prefiltered share (M7-ES1, docs/m7-es1.md).
 // Opt-in: the 256-sample filter passes quality, but misses the speed floor.
 const SPECULAR_AA:bool=false;
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
@@ -16,6 +18,35 @@ fn surface(input:SurfaceInput) -> Surface {
     return Surface(n,base,metal,rough);
 }
 
+// One environment lobe's GGX specular response, with exact Fresnel and visibility at its
+// axis. The lobe's angular spread widens the NDF by 1/(2 sharpness v.h) in alpha^2: its
+// variance mapped to half-vector slopes.
+fn lobe_specular(n:vec3<f32>, v:vec3<f32>, lobe:EnvironmentLobe, f0:vec3<f32>, rough:f32) -> vec3<f32> {
+    let l=lobe.direction;
+    let nl=max(dot(n,l),0.0);
+    if nl<=0.0 || dot(l+v,l+v)<1e-20 { return vec3<f32>(0.0); }
+    let nv=max(dot(n,v),1e-7);
+    let h=unit_normal(l+v);
+    let nh=max(dot(n,h),0.0);
+    let vh=clamp(dot(v,h),0.0,1.0);
+    let alpha=max(rough*rough,1e-4);
+    let a2=alpha*alpha;
+    let wide=min(a2+0.5/(lobe.sharpness*max(vh,1e-4)),1.0);
+    let c=cross(n,h);
+    let denom=max(dot(c,c)+wide*nh*nh,1e-20);
+    let d=wide/(PI*denom*denom);
+    let visibility=0.5/max(nl*sqrt(a2+(1.0-a2)*nv*nv)+nv*sqrt(a2+(1.0-a2)*nl*nl),1e-20);
+    return d*visibility*(f0+(vec3<f32>(1.0)-f0)*pow(1.0-vh,5.0))*nl;
+}
+// How much of a lobe's prefiltered share its own evaluation replaces: all of it once the
+// specular lobe is much wider than the light's (sharpness alpha^2 >= 31.6), none once it is
+// much narrower (<= 0.1), where the N=V prefilter is the better estimate. Fitted on ES1's
+// lobe grid.
+fn lobe_weight(sharpness:f32, rough:f32) -> f32 {
+    let alpha=max(rough*rough,1e-4);
+    return clamp(0.4+0.12041*log2(max(sharpness*alpha*alpha,1e-30)),0.0,1.0);
+}
+
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let n=s.n;
     let base=s.base;
@@ -28,12 +59,26 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     // Sky diffuse is the engine's incident irradiance at this receiver: occluded by the
     // world radiance cache when it runs, the open environment otherwise.
     let diffuse=exposed_product(indirect_irradiance(input,n),base*((1.0-metal)/PI));
-    var exposed=min(diffuse+exposed_product(environment_constant(),f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
+    // Sky specular likewise: the occluded prefiltered radiance about the reflection, then
+    // each dominant lobe the engine separates (only where it can occlude them) evaluated
+    // against this BRDF in place of its share of that radiance.
+    let reflected=reflect(-v,n);
+    let radiance=indirect_radiance(input,reflected,rough);
+    let reflectance=f0*ab.x+vec3<f32>(ab.y);
+    var specular=exposed_product(radiance,reflectance);
     if environment_enabled() {
-        let reflected=reflect(-v,n);
-        let radiance=environment_reflection(reflected,rough);
-        exposed=min(diffuse+environment_product(radiance,f0*ab.x+vec3<f32>(ab.y)),vec3<f32>(65504.0));
+        specular=environment_product(radiance,reflectance);
+        for(var i=0u;i<environment_lobe_count();i+=1u) {
+            let lobe=environment_lobe(input,i);
+            let w=lobe_weight(lobe.sharpness,rough);
+            if w<=0.0 { continue; }
+            let share=environment_lobe_reflection(input,i,reflected,rough);
+            specular+=w*(environment_product(lobe.illuminance,lobe_specular(n,v,lobe,f0,rough))
+                -environment_product(share,reflectance));
+        }
+        specular=max(specular,vec3<f32>(0.0));
     }
+    var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);
         let attenuation=light.attenuation*light_visibility(input,light);
