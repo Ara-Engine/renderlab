@@ -30,7 +30,7 @@ fn no_rt_renderer() -> Renderer {
     assert!(!device.features().intersects(
         wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN
     ));
-    let r = Renderer::new_with_options(
+    let mut r = Renderer::new_with_options(
         device,
         queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -49,6 +49,9 @@ fn no_rt_renderer() -> Renderer {
     assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
     assert_eq!(r.soft_shadows(), SoftShadows::Virtual);
     assert!(r.hardware_shadows.is_none());
+    // TR1b made temporal reconstruction the default; this device's exact-repeat and N8
+    // identity tests need repeatable single frames. TR1 harnesses enable it themselves.
+    r.set_reconstruction(crate::Reconstruction::off()).unwrap();
     r
 }
 fn geometry(r: &mut Renderer, positions: &[[f32; 3]], indices: &[u32]) -> (Mesh, Instances) {

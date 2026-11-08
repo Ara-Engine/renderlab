@@ -17,13 +17,19 @@ fn gpu_reference_quarry() {
         renderlab_asset::decode(&asset_bytes, renderlab_asset::Limits::unlimited()).unwrap();
     drop(asset_bytes);
     let mut scene = Scene::from_prepared(asset);
-    scene.camera_background = Some(
-        manifest["camera_background"]
-            .as_array()
-            .map_or([0.0; 3], |v| {
-                std::array::from_fn(|i| v[i].as_f64().unwrap() as f32)
-            }),
-    );
+    // An explicit `"camera_background": null` leaves primary misses on the environment (the
+    // visible-sky walk, docs/m7-tr1b.md); a missing key or an array keeps a constant backdrop
+    // (black when missing), exactly as before.
+    scene.camera_background = match manifest.get("camera_background") {
+        Some(serde_json::Value::Null) => None,
+        value => Some(
+            value
+                .and_then(serde_json::Value::as_array)
+                .map_or([0.0; 3], |v| {
+                    std::array::from_fn(|i| v[i].as_f64().unwrap() as f32)
+                }),
+        ),
+    };
     let env_bytes = read("environment");
     let environment_sha = format!("{:x}", sha2::Sha256::digest(&env_bytes));
     let env = renderlab_asset::environment::decode(
