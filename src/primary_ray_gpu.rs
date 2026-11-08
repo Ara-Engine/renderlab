@@ -2596,7 +2596,10 @@ impl Renderer {
             if words != r.records {
                 let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
                 self.queue.write_buffer(&r.buffer.value, 0, &bytes);
-                uploads.geometry += (words.len() * 4) as u64;
+                // MQ2: same meshes and slots, so only placement transforms changed. Count
+                // them as transform edits, which TR1 reprojects (MQ1); `geometry` is in
+                // TR1's restart key and restarted every non-RT pixel on every animated frame.
+                uploads.models += (words.len() * 4) as u64;
                 uploads.write_calls += 1;
                 self.primary
                     .as_mut()
