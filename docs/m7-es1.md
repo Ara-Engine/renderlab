@@ -412,3 +412,5 @@ py -3 -B scripts/m7-es1-plane.py E:/renderlab-work/m7-es1/runs/RUN
 ```
 
 **Process.** Every GPU process ran inside an m7-es1 lease holding `gpu-slot.lock`, polled in-process. Two process faults are recorded in the schedule: m7-es1's CPU-only renderlab test binaries, run outside a lease (announced, but test binaries count as renderers), stopped m7-g1d's leases b12, b13 and g3 and its QUIET window q2-1; and m7-es1 stopped its own quiet launcher q1 by mistake, leaving its lock for about a minute before releasing it by token. Every later test binary ran inside m7-es1's own lease.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's gates rendered 1x with TR1 off and anisotropy 1, the shipping default (un-anti-aliased).

@@ -79,6 +79,8 @@ fn no_rt_renderer_11() -> Renderer {
             max_texture_bytes: 134217728,
             ..Default::default()
         },
+        // AA state (docs/iq1-quarry-image.md): 1x with TR1 per variant (the shipping
+        // default is TR1 off) and anisotropy 16 (the shipping default is 1).
         RendererOptions {
             samples: SampleCount::One,
             anisotropy_clamp: 16,
@@ -137,6 +139,8 @@ fn rt_renderer_11() -> Renderer {
             max_texture_bytes: 134217728,
             ..Default::default()
         },
+        // AA state (docs/iq1-quarry-image.md): 1x with TR1 per variant (the shipping
+        // default is TR1 off) and anisotropy 16 (the shipping default is 1).
         RendererOptions {
             samples: SampleCount::One,
             anisotropy_clamp: 16,

@@ -275,3 +275,5 @@ Against Unreal, as G1c: RT 2,641 + 122.3 = 2,763 MiB against Lumen HW Epic's 6,4
 - Every GPU executable ran inside a g1d lease holding `gpu-slot.lock`; CPU-only tools (naga checks, unit tests, trace analysis) were announced in `gpu-schedule.md`. No game hold was in force.
 - Five functional leases were stopped by the shared guard and rerun: available RAM fell below 2 GiB under other owners' release builds and processes (b4, b6, b8, g2, g4), and m7-es1's CPU-only renderlab test binaries counted as foreign renderers (b12, b13, g3; a note asks them to run outside leases).
 - Functional leases overlapped foreign compilers and GPU work: cut frames there varied up to 13x between processes of the same code, and non-RT visits by 0.25 ms. Every cost claim comes from the quiet window, classified step by step.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's quarry runs rendered 1x with TR1 off and anisotropy 1, the shipping default (un-anti-aliased).

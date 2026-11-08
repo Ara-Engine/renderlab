@@ -229,6 +229,8 @@ fn gpu_quarry_material_response() {
         max_texture_bytes: 134217728,
         ..Default::default()
     };
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off; anisotropy from the manifest,
+    // where 1 (the default) is the shipping value.
     let options = RendererOptions {
         samples: SampleCount::One,
         anisotropy_clamp: manifest["anisotropy"].as_u64().unwrap_or(1) as u16,

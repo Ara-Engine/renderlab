@@ -136,3 +136,10 @@ ES1 occlusion ruling (Islam, delegated, 2026-11-08): keep sky specular occlusion
 - ES1's record keeps the unoccluded diagnostic variant's quarry numbers as a comparison point.
 - The cache, with bounce light and ES1, may become the default only if it equals or beats both the cache-off image and that unoccluded variant on every quarry population, on both paths, static and in motion.
 - If it doesn't, record the miss and bring the trade-off back to Islam. Never switch to unoccluded quietly.
+
+Shipped anti-aliasing (IQ1, 2026-11-08, [iq1-quarry-image.md](iq1-quarry-image.md)): **the default has no anti-aliasing on either path.**
+- Both paths ship at 1x with TR1 off and anisotropy 1. The RT device's code default is raster primaries with Exact shadows; non-RT selects the visibility buffer with Virtual shadows.
+- Every M7 gate except TR1's own therefore scores single-sample, un-anti-aliased images against pixel-integrated references. That covers the edge, silhouette and interior populations alike.
+- On the quarry (13 M triangles, no covered pixel's 3x3 block on one triangle), the missing pixel integration causes Islam's black pinholes (about 1,300 per frame) and the grain.
+- TR1 removes them: 1,290 → 40 pinholes still, 10–34 per Q-walk frame, every population better at both exposures on both paths.
+- IQ1 proposes TR1 as the default on traced and visibility-buffer frames. The switch is TR1b's gate.

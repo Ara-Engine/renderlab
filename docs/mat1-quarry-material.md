@@ -298,3 +298,5 @@ as a regression too; the large occluded/silhouette misses already reject promoti
 | solid-occluded | 14,555 | 27.624/47.884 | **28.136/47.594** | 27.624/47.884 | **28.136/47.594** |
 | wide | 47,284 | 15.132/24.529 | 13.183/20.581 | 15.135/24.531 | 13.192/20.606 |
 | wide6 | 33,140 | 14.826/23.700 | 12.705/19.466 | 14.824/23.687 | 12.710/19.486 |
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit rendered 1x with TR1 off; anisotropy 1 is the shipping default, and the 16x rows are labelled.
