@@ -62,6 +62,13 @@ pub struct Reconstruction {
     /// statistic), so light that moving objects change on other surfaces (shadows, reflections,
     /// bounce) is not carried as a trail. Frames where nothing moved never clamp.
     pub motion_box: bool,
+    /// MQ2 (docs/m7-mq2.md): view budget, in pixels of a reflected image weighted by the
+    /// program's declared view-dependent share (`fn view_dependence`, src/program.rs). While a
+    /// surface's view direction turns, its reflections slide across it; its window is capped
+    /// at `1 + view_budget / drift`, drift being that share-weighted slide per frame, so
+    /// surface-identity history does not trail them. Zero turns the cap off. Programs that
+    /// declare nothing are unaffected.
+    pub view_budget: f32,
     /// Internal resolution of reconstructed frames: every pass renders at this fraction of
     /// the target size and TR1 reconstructs the target from the jittered samples.
     pub scale: RenderScale,
@@ -105,6 +112,7 @@ impl Default for Reconstruction {
             spatial_start: true,
             rotate_directions: true,
             motion_box: true,
+            view_budget: 0.25,
             scale: RenderScale::Native,
         }
     }
@@ -147,12 +155,13 @@ impl Reconstruction {
         let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
             && (0.0..=f32::MAX).contains(&self.blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
+            && (0.0..=f32::MAX).contains(&self.view_budget)
             && (0.0..=2.0).contains(&self.start_radius);
         if valid {
             Ok(())
         } else {
             Err(Error::InvalidInput(
-                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radius in [0, 2]",
+                "reconstruction windows in [1, 65536]; blur budget, turn angle and view budget finite and nonnegative; start radius in [0, 2]",
             ))
         }
     }
@@ -887,6 +896,8 @@ impl Renderer {
             }
         }
         let mut shadow_bounds = None;
+        // MQ2: some skinned pose changed since the previous frame.
+        let mut posed = false;
         if let (Some(current), Some(previous)) = (
             skin_bounds,
             self.reconstruction_state
@@ -894,6 +905,7 @@ impl Renderer {
                 .and_then(|s| s.previous.as_ref()),
         ) && previous.skin_revisions != skin_revisions
         {
+            posed = true;
             let swept = union(previous.skin_bounds, current);
             let mut affected = swept;
             let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
@@ -920,13 +932,10 @@ impl Renderer {
                     affected = union(Some(affected), scene);
                 }
             }
-            // Sky occlusion/bounce can change outside a directional shadow. The first
-            // dynamic-GI base conservatively refreshes receiver history scene-wide.
-            if self.gi.settings.enabled
-                && let Some(scene) = scene_bounds
-            {
-                affected = union(Some(affected), scene);
-            }
+            // Sky occlusion and bounce the character changes outside its direct shadow are
+            // held to this frame's 3x3 box (MQ2: skinned frames set TR1_BOX), as MQ1 holds
+            // rigid motion's; SK1 rejected every receiver's history scene-wide while GI was
+            // on, so an animated character restarted the whole image on every frame.
             let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
             affected.min -= margin;
             affected.max += margin;
@@ -970,10 +979,10 @@ impl Renderer {
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        // MQ1: retain its plain nine-sample min/max clamp on moved-placement frames.
+        // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from(moved && settings.motion_box) << 3;
+            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -1004,7 +1013,7 @@ impl Renderer {
             settings.sharp_window,
             settings.start_window,
             settings.start_radius,
-            0.0,
+            settings.view_budget,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
@@ -1285,8 +1294,45 @@ mod tests {
                 turn_angle: -1.0,
                 ..Default::default()
             },
+            Reconstruction {
+                view_budget: f32::INFINITY,
+                ..Default::default()
+            },
         ] {
             assert!(bad.validate().is_err());
+        }
+    }
+
+    /// MQ2: a program declaring `view_dependence` gets its struct on every stage and the hint
+    /// on traced stages; any other program's traced entry stores the view-independent 1.
+    #[test]
+    fn view_dependence_composition() {
+        use crate::program::{Stage, compose};
+        let toon = include_str!("../shaders/programs/toon.wgsl");
+        for stage in [
+            Stage::Raster,
+            Stage::Traced,
+            Stage::TracedStreamed,
+            Stage::Cell,
+        ] {
+            let traced = matches!(stage, Stage::Traced | Stage::TracedStreamed);
+            let standard = compose("", crate::STANDARD_PROGRAM, stage, false).source;
+            let other = compose("", toon, stage, true).source;
+            assert!(standard.contains("struct ViewDependence {"));
+            assert!(!other.contains("ViewDependence"));
+            assert_eq!(standard.contains("let d=view_dependence(s,input);"), traced);
+            for source in [&standard, &other] {
+                assert_eq!(
+                    source.matches("fn tr1_view_hint(").count(),
+                    usize::from(traced)
+                );
+                assert_eq!(
+                    source
+                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .count(),
+                    usize::from(traced)
+                );
+            }
         }
     }
 

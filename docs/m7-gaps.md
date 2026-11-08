@@ -17,13 +17,20 @@ One section per feature. Each lists the measured or inspected gaps that remain a
   nodes, additional influence sets and morph targets are explicitly rejected.
   Clip blending, events, dual-quaternion skinning and automatic root motion remain
   outside the overnight base.
-- Existing TR1 model-transform edits still reset history. SK1 supplies previous
-  deformed vertex positions; its walk example puts translation in the palette.
+- TR1 reprojects model-transform edits (MQ1) and deformed vertices (SK1); SK1's
+  walk example puts translation in the palette.
 - SK1 exposes typed renderer upload/palette APIs and a clip player. API1's planned
   `Engine` facade adapter (`MeshId`/`ObjectId` pose ownership) remains to be wired.
 - Moving-caster shadow regions reject old receiver lighting history to avoid
-  trailing shadows. With dynamic GI enabled the region is conservatively
-  scene-wide; finer rejection and stable shadow sampling remain open.
+  trailing shadows. Since MQ2 ([m7-mq2.md](m7-mq2.md)) GI no longer widens the
+  region scene-wide: animated frames clamp history to MQ1's 3x3 box instead.
+  Shadowed point and spot lights still widen it scene-wide; finer rejection and
+  stable shadow sampling remain open.
+- **Main regression (found by MQ2, 2026-11-08, main `4c8ef7d`):** the fox walk's
+  RT half fails after frame 0 with wgpu validation "Blas … is newer than the
+  containing Tlas" at `Queue::submit` (message and reproducer in
+  [m7-mq2.md](m7-mq2.md) §3.4; API1b is fixing it). RT skinned evidence is blocked
+  until then.
 - Hardware shadows retain the existing opaque, double-sided caster contract. The
   example enables double-sided materials explicitly.
 - No new Unreal or path-traced comparison was run for this overnight unit. Its
@@ -187,7 +194,7 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
    - the indirect inputs read the open environment, never the world radiance cache's occlusion or bounce. A cache lookup per hit cost +0.62 ms of quarry shading with the cache on (m7-r1.md §4);
    - footprints are an isotropic ray cone only;
    - decals (DC1) project onto hits through `decal_prepare`, as onto camera receivers.
-9. **Motion is unmeasured.** RF3/RF5 motion, trails and settle against R0a's continuous Unreal runs: no new campaign tonight.
+9. **Motion against Unreal is unmeasured.** RF3/RF5 motion, trails and settle against R0a's continuous Unreal runs: no new campaign tonight. In the example flight, MQ2's view cap stops TR1's history from trailing reflections on both paths (chrome sphere 5.68 → 4.19 codes RMS against a 2×2 supersampled control, flicker 8.11 → 6.21; [m7-mq2.md](m7-mq2.md)). Mirrors under fast camera motion then get little temporal anti-aliasing of their reflected content; virtual-image reprojection (a per-pixel reflection depth from shading) is the open fix.
 10. **Primary-miss background** (environment where the references are black) is R0a's registered renderer item, not a reflection error, but it dominates the full-image difference panels.
 11. **Cost.**
    - On reflective content the cost is unmeasured; no comparison with Lumen's 0.07/0.22 ms reflection pass has been made.
@@ -202,8 +209,13 @@ TR1 is the default on traced and visibility-buffer lit frames, both paths, from 
 **Reach.** RTDEF2 makes traced primaries and TR1 the capable 1x RT default; the viewer negotiates that path. Raster/4x and unsupported-capability fallbacks still do not reconstruct. Temporal soft-shadow frames keep their own film history and are not reconstructed.
 
 **Animated scenes (MQ1, [m7-mq1.md](m7-mq1.md)).** Before MQ1, any transform edit restarted every pixel, so the example scene (and any game with a moving object) got no anti-aliasing and no glossy integration. Moved placements now reproject through their previous transforms, and frames where something moved clamp history to a plain 3x3 min/max box. Remaining gaps, measured on the example flight against a 2x2 supersampled TR1-off control:
-- **RT mirror and glossy reflections lag under camera motion**: chrome sphere 3.07 → 6.44 codes RMS and flicker 4.05 → 9.05 versus main's restart; gold sphere static 4.34 → 4.84, although its grain falls 62 %. Surface-identity history follows the surface, not the reflected image. The fix needs a program-declared view sensitivity (window capped by lobe width) or reflection hit distances. Static scenes under camera motion have the same lag without the box (TR1b's U1b failure).
-- **Skinned characters with GI on still restart every static pixel's history** on animated frames (SK1's scene-wide swept-volume widening). Recommended: set MQ1's box for skinned motion and keep the swept volume for direct shadows only.
+- **Mirror and glossy reflections under camera motion (MQ2, [m7-mq2.md](m7-mq2.md)).** Programs declare their view-dependent share (`view_dependence`), and TR1 caps those pixels' history while the view turns (quarter-pixel budget). On the example flight against the 2×2 control: RT chrome 5.68 → 4.19, gold 4.40 → 3.48, every population better or level; non-RT chrome 4.19 against main's no-history 4.35. Remaining:
+  - the cap trades history for no lag, so fast-moving mirrors get little anti-aliasing of their reflected content. Virtual-image reprojection needs a per-pixel reflection depth from shading;
+  - budgets below 0.25 are unscreened;
+  - the standard program's share is a uniform-light estimate, so dielectrics reflecting much brighter surroundings keep some lag;
+  - a static scene under a moving camera now has its view-dependent lag capped too, but still no box (TR1b's U1b case).
+- **Non-RT animated scenes restarted every pixel on every frame on main `4c8ef7d`** (R1n's per-frame instance-record rewrite counted as a geometry upload, which TR1's key hashes). Found and measured by MQ2; the fix ships in RQ1. Since TR1 works there again, non-RT static edge RMS shows MQ1's moving-edge history lag: 10.87 → 11.40 codes against the lag-free control, with flicker lower everywhere and edges visibly anti-aliased where main stair-stepped.
+- **Skinned characters with GI on** no longer restart every static pixel (MQ2): animated skinned frames use MQ1's box. Evidence is non-RT only (the fixture's ground is flat, so it shows no difference on static pixels); the RT fox walk is blocked by main's BLAS/TLAS validation regression (Skinning, above).
 - Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.
 - The example's `--quarry` mode fails on both paths (mixed programs, MP1).
 

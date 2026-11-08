@@ -53,6 +53,7 @@ pub mod kind {
     pub enum Material {}
     pub enum Environment {}
     pub enum Object {}
+    pub enum Emitter {}
     /// The engine's internal mesh-material draw groups.
     pub(crate) enum Batch {}
 }
@@ -62,6 +63,7 @@ pub type ProgramId = Id<kind::Program>;
 pub type MaterialId = Id<kind::Material>;
 pub type EnvironmentId = Id<kind::Environment>;
 pub type ObjectId = Id<kind::Object>;
+pub type EmitterId = Id<kind::Emitter>;
 
 /// Dense storage with a free list; each reuse of a slot bumps its generation.
 pub(crate) struct Slots<K, V> {
