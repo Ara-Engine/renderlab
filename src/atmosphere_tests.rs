@@ -392,7 +392,7 @@ fn gpu_at1_quarry() {
             true,
             quarry_travel,
             quarry_lux,
-            3,
+            8,
         ),
         (
             "default",
@@ -400,7 +400,7 @@ fn gpu_at1_quarry() {
             true,
             quarry_travel,
             quarry_lux,
-            3,
+            8,
         ),
         ("noon", Atmosphere::default(), false, noon, space, 8),
         ("low", Atmosphere::default(), false, low, space, 8),
