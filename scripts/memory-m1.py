@@ -101,7 +101,7 @@ def inventory(directory):
             writer.writerows(rows)
 
 
-def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="exact", cpu_timing=False, rt1c=False):
+def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="exact", cpu_timing=False, rt1c=False, shadow_filter=False):
     out = root / name
     out.mkdir(parents=True, exist_ok=True)
     m = json.loads(QUARRY.read_text())
@@ -118,6 +118,7 @@ def run(binary, root, name, memory_only, memory_hints, poses, visits, lookup="ex
         m["soft_shadows"] = "interactive"
     if rt1c:
         m.update(rt1c_path=name, visits=visits)
+        m["shadow_filter"] = shadow_filter
     manifest = out / "manifest.json"
     manifest.write_text(json.dumps(m, indent=2))
     stop = out / "stop"
@@ -173,7 +174,10 @@ def main():
     parser.add_argument("--lookup", choices=("exact", "surface"), default="exact", help="explicit lookup; historical M1 baseline stays Exact")
     parser.add_argument("--cpu-timing", action="store_true", help="record caller-thread admission wall and renderer CPU sections")
     parser.add_argument("--rt1c", action="store_true", help="quiet four-phase M1 comparison: explicit rt and rt-raster-exact paths")
+    parser.add_argument("--shadow-filter", action="store_true", help="RT1d fixed geometric visibility gather (requires --rt1c)")
     args = parser.parse_args()
+    if args.shadow_filter and not args.rt1c:
+        parser.error("--shadow-filter requires --rt1c")
     if args.rt1c and (args.memory_only or args.cpu_timing or args.poses != [0, 1]):
         parser.error("--rt1c requires both poses and all four GPU phases; memory-only and CPU timing are unsupported")
     for name in args.paths or PATHS:
@@ -183,7 +187,7 @@ def main():
             parser.error(f"unknown path: {name}")
         if args.visits < 1:
             parser.error("visits must be positive")
-        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits, args.lookup, args.cpu_timing, args.rt1c)
+        run(args.binary, args.output, name, args.memory_only, args.memory_hints, args.poses, args.visits, args.lookup, args.cpu_timing, args.rt1c, args.shadow_filter)
 
 
 if __name__ == "__main__":

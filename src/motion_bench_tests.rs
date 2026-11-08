@@ -1,6 +1,9 @@
 //! S2/S3: native-size production tracks and the S1 film estimator on registered crops.
 use super::*;
 
+#[path = "shadow_filter_gpu_tests.rs"]
+mod shadow_filter_gpu_tests;
+
 #[derive(serde::Deserialize)]
 struct Bench {
     size: [u32; 2],
@@ -765,6 +768,8 @@ fn gpu_motion_bench_batch() {
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    r.set_interactive_shadow_filter(m["shadow_filter"].as_bool().unwrap_or(false))
+        .unwrap();
     r.set_virtual_shadow_settings(exact_virtual_settings(&m))
         .unwrap();
     let selected = |key: &str, name: &str| {
