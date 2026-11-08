@@ -13,7 +13,10 @@ use crate::{
     MaterialDescriptor, MeshData, Program, ProgramDescriptor, Renderer, RendererOptions,
     ShadowRequest, Shadows, Vec3, Vertex, ViewMode,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    f32::consts::TAU,
+    path::{Path, PathBuf},
+};
 
 // 1080p: slot 0's list then outgrows one dispatch row (65,535 workgroups).
 const WIDTH: u32 = 1920;
@@ -194,9 +197,9 @@ impl Scene {
         for i in 0..8 {
             let hue = i as f32 / 8.0;
             let color = [
-                0.5 + 0.45 * (6.283 * hue).cos(),
-                0.5 + 0.45 * (6.283 * (hue + 0.33)).cos(),
-                0.5 + 0.45 * (6.283 * (hue + 0.67)).cos(),
+                0.5 + 0.45 * (TAU * hue).cos(),
+                0.5 + 0.45 * (TAU * (hue + 0.33)).cos(),
+                0.5 + 0.45 * (TAU * (hue + 0.67)).cos(),
                 1.0,
             ];
             shapes.push(cube([-3.5 + i as f32, 0.4, 0.0], 0.35, color));
@@ -318,14 +321,13 @@ fn read_rgba(r: &Renderer, texture: &wgpu::Texture) -> Vec<u8> {
     r.queue.submit([encoder.finish()]);
     buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     r.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let bytes = buffer
+    buffer
         .slice(..)
         .get_mapped_range()
         .unwrap()
         .chunks_exact(row as usize)
         .flat_map(|r| r[..tight as usize].to_vec())
-        .collect();
-    bytes
+        .collect()
 }
 
 fn save_png(path: &Path, rgba: &[u8]) {
