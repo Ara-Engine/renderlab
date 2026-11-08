@@ -22,13 +22,18 @@ fn gi_hot_start(key:vec2<u32>) -> u32 {
 // insert found its own start slot free) costs one memory round trip; otherwise the rest
 // of the bucket is searched in the order gi_find uses.
 fn gi_hot_settle(first:GiHot, key:vec2<u32>) -> GiHot {
+    let none=GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
     if (first.r0.x&GI_KEY_BITS)==key.x { return first; }
+    // An empty slot ends the search, as in gi_find.
+    if first.r0.x==0u { return none; }
     let bucket=(key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u);
     for(var i=1u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
-        if (gi_word(gi_hot(slot))&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }
+        let word=gi_word(gi_hot(slot));
+        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }
+        if word==0u { break; }
     }
-    return GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
+    return none;
 }
 fn gi_hot_find(key:vec2<u32>) -> GiHot {
     return gi_hot_settle(gi_hot_load(gi_hot_start(key)),key);
