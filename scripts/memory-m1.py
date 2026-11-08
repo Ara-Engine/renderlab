@@ -50,6 +50,8 @@ def resource(name):
         return "MAP_READ/COPY_DST request counters", "Renderer flight ring slot or one verification (M3)"
     if name == "immutable environment cube":
         return "sampled environment array; COPY_DST", "EnvironmentMap handle (two renderer fallback cubes persist)"
+    if name == "environment lobe table":
+        return "sampled RGBA32F lobe table; COPY_DST", "EnvironmentMap or LightingGpu dummy_lobes (environment_gpu.rs)"
     if name == "prepared DFG RG16F":
         return "sampled BRDF integration LUT", "Renderer"
     if name in ("instance transforms", "normal transforms", "visible instance IDs"):
@@ -78,6 +80,8 @@ def resource(name):
         return "Depth32Float raster depth attachment; test COPY_SRC at 1x", "Renderer target-size generation; retired after last submission"
     if name in ("camera", "light records", "lighting eye/count/environment/exposure"):
         return "uniform/storage frame lighting", "Renderer/LightingState"
+    if name == "indirect cache header (off)":
+        return "STORAGE/COPY_DST; disabled-cache header, no radiance entries", "GiState renderer lifetime (gi_cache.rs)"
     if name in ("shadow sampling records", "disjoint shadow raster matrices", "redrawn hard shadow depth array"):
         return "uniform/storage/sampled depth shadow resources (fallback in these paths)", "ShadowState generation; retired after last submission"
     if name in ("aligned timestamp resolve", "flight timestamps"):

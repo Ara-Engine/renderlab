@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import zipfile
 
 
 def load(name):
@@ -80,6 +81,14 @@ def motion_score(args):
     os.environ.update(OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
     scorer = load('bench-motion-score')
     audit = load('rt1c-hrt-audit')
+    # Keep every numeric reference bit, spending less CPU on disposable compression
+    # effort. This remains an ordinary np.load-compatible NPZ archive.
+    def fast_archive(file, **values):
+        with zipfile.ZipFile(file, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            for name, value in values.items():
+                with archive.open(name+'.npy', 'w', force_zip64=True) as stream:
+                    scorer.np.lib.format.write_array(stream, scorer.np.asanyarray(value), allow_pickle=False)
+    scorer.np.savez_compressed = fast_archive
     root = args.root/'motion'/args.bench
     fresh = []
     for directory in sorted((root/'renderlab').iterdir()):
@@ -237,10 +246,62 @@ def cost_score(args):
             wddm_warm_mib=run['wddm_warm_max_bytes']/2**20,
             wddm_process_mib=run['wddm_max_bytes']/2**20,
             wddm_warm_samples=run['wddm_warm_samples']))
-    result['recorded_hrt_ms'] = dict(static=[1.743,1.753],camera=[1.764,1.766],sun=[1.738,1.751],caster=[1.776,1.778])
-    result['scope'] = 'All individual frames; p50/p95, no clean-visit exclusion. HRT frame medians are retained, not new p95 values.'
+    native = load('ue-shadow-motion')
+    hrt, identities = {}, {}
+    for phase in ('static','camera','sun','caster'):
+        values = []
+        for directory in Path('E:/renderlab-work/m6-close/ue/s1').glob(f'*-hrt-{phase}'):
+            path = sorted(directory.glob('Profile*.csv'))[-1]
+            header, data = native.read_csv(path)
+            excluded = {f for p in native.PROFILE_FRAMES for f in (p,p+1)}
+            selected = [f for f in native.BLOCK if f<len(data) and f not in excluded]
+            values += [float(data[f][header.index('GPUTime')]) for f in selected]
+            identities[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        hrt[phase] = dict(p50=float(np.quantile(values,.5)),p95=float(np.quantile(values,.95)),samples=len(values))
+    result['recorded_hrt_ms'] = hrt
+    result['hrt_input_sha256'] = identities
+    result['scope'] = 'Renderlab: all individual frames, no clean-visit exclusion. HRT: retained M6-close CSV frames using the original BLOCK and ProfileGPU-exclusion rule; not a new paired run. GPU boundaries differ.'
     save(args.root/'cost/summary.json',result)
     print(json.dumps(result,indent=2))
+
+
+def quality_tables(args):
+    gates = {name:json.loads(path.read_text()) for name,path in (
+        ('S2',args.root/'motion/S2/gate.json'),('S3',args.root/'motion/S3/gate.json'),('S1',args.root/'S1/gate.json'))}
+    def number(v):
+        return '—' if v is None else f'{v:.6f}' if isinstance(v,float) else str(v)
+    def passes(rows):
+        rows = [r for r in rows if r['passes'] is not None]
+        if not rows:return '—'
+        old = sum(r['previous']<=r['hrt1']+1e-12 for r in rows)
+        new = sum(r['passes'] for r in rows)
+        return f'{old}/{len(rows)} → {new}/{len(rows)}'
+    lines = ['## Every retained measure against HRT', '',
+        'Each cell counts passing configurations/phases: **previous fast setup → filtered**. Ties pass the unchanged no-worse floor. The CSV/JSON artifacts retain every paired value, population count, sum and maximum. No missing measure is counted as a pass.', '',
+        '| Measure | S2 (24 phases) | S3 (6 phases) | S1 (4 configurations) |', '|---|---:|---:|---:|']
+    for measure in dict.fromkeys(r['measure'] for r in gates['S2']['comparisons']):
+        cells = [passes([r for r in gates[name]['comparisons'] if r['measure']==measure]) for name in ('S2','S3','S1')]
+        lines.append('| '+measure+' | '+' | '.join(cells)+' |')
+    lines += ['', '## All S2/S3 phases', '',
+        'Each value is **previous / filtered / HRT1**. Display RMS is in 8-bit codes. Flicker is mean visibility residual change, using the original screen-coordinate, film-relative metric; it is not a final-HDR flicker certificate.', '',
+        '| Case / phase | Partial RMS | +0 display RMS | +4 display RMS | Visibility flicker |', '|---|---:|---:|---:|---:|']
+    for bench in ('S2','S3'):
+        for row in gates[bench]['phases']:
+            cells = [' / '.join(number(row[name][key]) for name in ('previous','filtered','hrt1'))
+                     for key in ('partial_rms','display_+0_codes_rms','display_+4_codes_rms','visibility_flicker_mean')]
+            lines.append(f'| {bench} {row["case"]} / {row["phase"]} | '+' | '.join(cells)+' |')
+    lines += ['', '## S1 static values', '',
+        '| Configuration | Partial RMS (previous / filtered / HRT) | +0 display RMS | +4 display RMS | Strict-solid defects |', '|---|---:|---:|---:|---:|']
+    audit = load('rt1c-hrt-audit')
+    old = json.loads(Path('E:/renderlab-work/contact-fold/scores.json').read_text())
+    for case,filtered in gates['S1']['rows'].items():
+        rows = [old[case]['modes']['RL Interactive'],filtered,old[case]['modes']['UE HRT1']]
+        values = list(map(lambda r:audit.phase_values([r]),rows))
+        cells = [' / '.join(number(r[key]) for r in values) for key in
+                 ('partial_rms','display_+0_codes_rms','display_+4_codes_rms','solid_error_gt_002_max')]
+        lines.append(f'| {case} | '+' | '.join(cells)+' |')
+    (args.root/'quality-tables.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    print({name:dict(comparisons=len(g['comparisons']),misses=len(g['misses'])) for name,g in gates.items()})
 
 
 def score(args):
@@ -313,13 +374,14 @@ def cost(args):
     leased()
     memory = load('memory-m1')
     for name, filtered in (('previous', False), ('filtered', True)):
+        leased()
         memory.run(args.binary, args.root/'cost'/name, 'rt', False, 'default', [0, 1], 8,
                    rt1c=True, shadow_filter=filtered)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'pilot', 'score', 'cost', 'quality', 'motion_score', 'static_score', 'quarry_score', 'quarry_crops', 'cost_score'))
+    parser.add_argument('action', choices=('prepare', 'pilot', 'score', 'cost', 'quality', 'motion_score', 'static_score', 'quarry_score', 'quarry_crops', 'cost_score', 'quality_tables'))
     parser.add_argument('--root', type=Path, default=Path('D:/Coding/renderlab-work/rt1d'))
     parser.add_argument('--binary', type=Path)
     parser.add_argument('--bench', choices=('S1', 'S2', 'S3', 'quarry'))
