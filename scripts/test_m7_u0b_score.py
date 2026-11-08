@@ -40,12 +40,18 @@ class PhysicalFloorTests(unittest.TestCase):
         strict=dict(accepted_for_scoring=True,strict_replay=dict(invariant,bit_identical=True),
             replay_qualification=dict(label="strict"))
         self.assertTrue(score.qualified_replay(strict))
+        for field in invariant:
+            bad=json.loads(json.dumps(strict));del bad["strict_replay"][field]
+            self.assertFalse(score.qualified_replay(bad),field)
 
     def test_strict_raw_data_can_defer_archival_until_lease_release(self):
         scratch=Path("E:/renderlab-work/m7-u0b/cpu-tests");scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as temporary:
             root=Path(temporary);name="fixture";path=root/(name+".json")
-            meta=dict(width=2,height=2,samples=2,accepted_for_scoring=True,strict_replay=dict(bit_identical=True))
+            meta=dict(width=2,height=2,samples=2,accepted_for_scoring=True,strict_replay=dict(
+                bit_identical=True,geometry_captured=True,all_geometry_bytes_identical=True,
+                centre_geometry_identical=True,accepted_counts_identical=True,
+                visibility_sums_identical=True,invalid_pixels=[0,0]))
             score.save(path,meta)
             for suffix,value in (("mean",10),("se",1),("half0",11),("half1",9)):
                 np.full((2,2,3),value,"<f4").tofile(root/(name+"-"+suffix+".f32"))

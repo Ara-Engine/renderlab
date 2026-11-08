@@ -49,8 +49,9 @@ def qualified_replay(meta):
     if meta.get("accepted_for_scoring") is not True:return False
     reports=meta.get("replay_reports") or [meta.get("strict_replay",{})]
     invariant=("all_geometry_bytes_identical","centre_geometry_identical","accepted_counts_identical","visibility_sums_identical")
-    if all(r.get("bit_identical") is True and all(r.get(k,True) is True for k in invariant)
-           and r.get("invalid_pixels",[0,0])==[0,0] for r in reports):
+    if all(r.get("bit_identical") is True and r.get("geometry_captured") is True
+           and all(r.get(k) is True for k in invariant)
+           and r.get("invalid_pixels")==[0,0] for r in reports):
         return meta.get("replay_qualification",{}).get("label","strict")=="strict"
     q=meta.get("replay_qualification",{});fixed=meta.get("fixed_resource_replay") or {}
     if (q.get("policy")!="bounded-as-v1" or q.get("label")!="bounded-as" or q.get("accepted") is not True

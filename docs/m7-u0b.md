@@ -111,7 +111,7 @@ as recorded below. The quarter-second memory/hold checks and fail-closed policy 
 active. A monitor error that
 arrives after a child exits also rejects the run; exit 0 alone is insufficient.
 
-Canonical production defers only archival, after strict GPU validation. The compactor writes
+Canonical production defers only archival, after GPU replay qualification. The compactor writes
 a pending receipt bound to the raw metadata hash; the GPU child exits and releases its lease
 before the controller computes populations/noise and publishes the lossless archive. No NPZ
 is visible before that work finishes. CPU tests cover changed-metadata rejection and actual
@@ -168,13 +168,17 @@ geometry/count/visibility/invalid flags and failed fixed repeats. The policy har
 passes **126 library tests, 120 ignored**; its SHA256 is
 `997151eba494045297288b3fcfb445efc1fdd0291963d83def23b4e0fb426306`.
 The default shader remains D8 (`eac6a57e…c086`), so the retained independent controls apply.
-The final CPU gap ends **00:37:29.992Z** with no Cargo left running.
+The policy build gap ends **00:37:29.992Z** with no Cargo left running.
 
 `q-disocclusion-001` requalifies in a clean process with eight exact cross-AS renders, so
 its published label remains **strict**, not bounded. Its archive SHA256 is
 `de9b3da68249fb77ef4489a2f3605f6de0a77db4edd3d012ddbf48bca704351f`.
 Diagnostics and the original rejected reports are retained under
 `reference/replay-diagnostics/q-disocc001`; they are not substituted for canonical data.
+`policy-evidence.json` independently reclassifies all seven unchanged diagnostic comparisons
+on the CPU within the approved bounds, using the separately retained fixed-resource evidence.
+This does not retroactively accept that process. Superseded raw diagnostic image/geometry
+buffers are deleted with hashes; every original comparison JSON and inspected PNG remains.
 
 ## Retained quarry references
 
@@ -668,7 +672,7 @@ seconds without stillkit Cargo/rustc. No foreign process is paused or killed. Th
 quarry quiet campaign ended before this load and is unaffected. Functional references and
 captures retain strict validation, longer process guards and the normal memory abort guard;
 near the start threshold the controller waits outside the GPU lock until the foreign build
-is gone for 60 seconds.
+has left sufficient RAM headroom. Timing rows also require 60 compiler-free seconds.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
@@ -684,7 +688,7 @@ not a reason to weaken process checks.
 
 **Compiler-load policy update, 22:43Z.** Root authorizes correctness-only reference states
 under stillkit's continuing CPU load. They no longer require a Cargo-free interval, including
-after a failed monitor attempt. Every accepted state still requires strict independent replay,
+after a failed monitor attempt. Every accepted state still requires independent-AS replay qualification,
 zero invalid pixels, the 600-second guard, fail-closed game/renderer/RAM monitoring and
 4/2-GiB RAM plus 5/2-GiB disk guards. Their elapsed times remain ineligible for performance
 claims. The 60-second compiler-free valve and an exclusive quiet window are retained for
