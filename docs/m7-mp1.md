@@ -14,7 +14,7 @@ Overnight unit (Islam's complete-base push, 2026-11-08; rules in AGENTS.md). Bra
 | Reflection hits (R1) | A hit on the receiver's own program is shaded exactly as before. A hit on another program's object uses the documented fallback (section 1.4): RF10's reflected toon sphere scores 22.92 against UE HW-Hit Epic's 10.42. |
 | GI cell shading (G2) | Per program: each reflecting program's cell pipeline shades its own objects' cells; cells of programs without `scatter`/`emission` reflect nothing, as in a single-program frame of that program. |
 | API1 example (M) | The toon hero is now its own program, `examples/game_toon.wgsl`, beside the photoreal props' `examples/game_scene.wgsl`; the `style` workaround is gone. Renders on both paths (section 2.3). |
-| Cost (M) | Q-STATUS |
+| Cost (M) | One program: the shading pass equals main's within noise. Quarry with 2 and 8 programs (standard plus toon variants), cache off: shading +0.06-0.11 ms (2) and +0.05-0.07 ms (8) over one program; with the cache on (the default) mixed frames are cheaper, because toon pixels make no GI lookups. Pure dispatch overhead (identical-cost programs) was not isolated (section 3). |
 | Temporal film frames | Still one program per frame (`SoftShadows::Temporal`, not a default). |
 
 ## 1. Design
@@ -77,7 +77,7 @@ Windows/Vulkan, RTX 4070 SUPER, NVIDIA 617.14, dev-profile test binaries (`opt-l
 
 `examples/game_scene.rs` now creates two programs: `game_scene.wgsl` (photoreal, with R1's `reflect` parameter) and `game_toon.wgsl` (the hero: banded light, tinted shadow side, rim, GI fill, flat-Lambert `scatter`). The `style` member and branch are gone, and `docs/api.md` lists the new limits (32 programs per frame; Temporal frames one; the reflection fallback).
 
-Run `g4` (code before the row fix, which only affects lists over 65,535 tiles; the 1280x720 example's lists stay below that): 48 frames per path, exit 0. `example-{rt,nonrt}/frame-*.png` show the toon hero (bands, rim) as its own program beside the photoreal props on both paths, and the RT chrome sphere reflects the hero through the fallback. Debug example build, first-frame CPU time (all pipeline compiles): RT 49.0 s and non-RT 24.8 s, against 88.2 s and 37.4 s before section 1.2's trims. API1's one-program runs took 11.6-43.8 s (RT) and 13.3-23.7 s (non-RT). Later frames: 1.6-6.2 ms CPU. EXAMPLE-G6
+Run `g4` (code before the row fix, which only affects lists over 65,535 tiles; the 1280x720 example's lists stay below that): 48 frames per path, exit 0. `example-{rt,nonrt}/frame-*.png` show the toon hero (bands, rim) as its own program beside the photoreal props on both paths, and the RT chrome sphere reflects the hero through the fallback. Debug example build, first-frame CPU time (all pipeline compiles): RT 49.0 s and non-RT 24.8 s, against 88.2 s and 37.4 s before section 1.2's trims. API1's one-program runs took 11.6-43.8 s (RT) and 13.3-23.7 s (non-RT). Later frames: 1.6-6.2 ms CPU. The final code (`d`, run `g10`) renders the same frames on both paths; its 4.0 s RT first frame is not comparable, because a stopped attempt seconds earlier had warmed the driver's cache.
 
 ## 3. Cost (M)
 
@@ -94,11 +94,35 @@ ES1's quarry protocol (`gpu_es1_quarry`): U0b's full-radiance quarry, 13,034,903
 
 The single-program shading pass is unchanged within noise on both paths; the frame span varies with the cache's run-to-run cut work, in both directions.
 
-Q-TABLE
+**2 and 8 programs** (run `g10`, binary `d`: the quarry's twelve materials on program i % K, standard then toon and distinct toon variants; ES1's `mp1` section, the K = 1, 2, 8 rows interleaved in three visits; median and range of visit medians after the first, ms):
+
+| Path | Cache | Shading, K=1 | K=2 | K=8 | Frame span, K=1 | K=2 | K=8 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| RT | off | 0.521-1.379 (one contended visit) | 0.613-0.654 | 0.575-0.609 | 1.47-3.48 | 1.56-1.66 | 1.52-1.61 |
+| RT | on (default) | 1.749-1.766 | 1.376-1.387 | 0.781-0.793 | 7.21-7.34 | 6.57-6.97 | 5.90-6.58 |
+| non-RT | off | 0.521-0.559 | 0.619-0.624 | 0.612-0.617 | 2.75-2.88 | 2.85-2.86 | 2.82-3.12 |
+| non-RT | on (default) | 1.408-1.419 | 1.221-1.245 | 0.764-0.770 | 8.87-9.36 | 9.50-10.57 | 9.30-9.80 |
+
+- **Cache off:** two programs add about 0.06-0.11 ms of shading over one (RT against the clean K=1 visits and the `g3` one-program rows, 0.518-0.521), and eight about 0.05-0.07 ms. Eight is no dearer than two: the per-slot dispatch is cheap, and toon pixels cost slightly less than standard ones, offsetting it. The design estimated 0.03-0.05 ms for two programs; its stop rule (screen finer tiles and an uber-switch for mixed tiles above 0.06 ms) is not met cleanly, because these rows mix the program's own cost with the overhead.
+- **Cache on (the default):** mixed frames are cheaper (1.38 and 0.79 ms against 1.76 on RT), because toon materials make no GI lookups. That is the programs' cost, not MP1's.
+- **Not isolated:** the `mp1std` section (eight copies of the standard program, so only the dispatch differs) was stopped in every attempt: other units' build scripts tripped the lease guard (runs `g8`-`g10`, six attempts), and in `g5` and `g9` available memory fell below the guard's 2 GiB during the eight-photoreal-program run (`g3`'s toon rows bottomed at 5.1 GiB). Recorded as a gap.
+- **The first `g3` and `g4` multi-program rows are void**: they timed skipped work (section 1.1).
 
 ## 4. Process and evidence
 
-PROCESS
+Every GPU process ran inside an m7-mp1 lease holding `D:/Coding/renderlab-work/gpu-slot.lock` (`scripts/m7-mp1-run.py`, R1's runner with per-step binaries, an `example` step and retries of steps stopped by other units' builds). Leases: `g3` (18:07-18:19 UTC, all steps), `g4` (18:33-18:39, stopped by a foreign build in the quarry step), `g5` (18:51-18:55, stopped by the memory guard in the quarry step), `g6`-`g9` (quarry steps stopped by foreign builds or memory; `g7` and `g8` before any test ran), `g10` (19:31-19:39). Two requests (`g1`, `g2`) were withdrawn before taking the lock. Builds ran outside my leases, with one lapse: a 40 s example build ran inside rtdef2's QUIET window after my test build had correctly stopped for it, recorded in the schedule.
+
+Binaries (`D:/Coding/renderlab-work/m7-mp1/bin/`): `main` (main `f159fcd`, the one-program baseline), `a` (first MP1), `c` (compile trims), `d` (row fix, final code; `dstd` and `dtoon` are copies so each quarry section writes its own directory), and `game_scene_*` (the example).
+
+Evidence under `D:/Coding/renderlab-work/m7-mp1/runs/`: `g3` (one-program quarry A/B, RF1-RF9 baseline scores, first example run), `g4` (example after the trims, the RF10 toon-as-standard diagnostic), `g5` (final gates at 1080p, RF scores), `g10` (2- and 8-program quarry rows, final example), and `inspect/` (RF10 crops). Raw `.f32` captures are deleted once scored; scores, summaries, sheets and inspected PNGs remain.
+
+```text
+py -3 -B scripts/m7-mp1-run.py build LABEL
+py -3 -B scripts/m7-mp1-run.py gpu RUN rt:lib rt:mp1 nonrt:mp1 rt:rf nonrt:rf rt:quarry:mp1:BIN rt:example:-:EXAMPLE --binary LABEL
+py -3 -B scripts/m7-r1-score.py D:/Coding/renderlab-work/m7-mp1/runs/RUN
+```
+
+The unit took about 2.5 hours, inside the 2-3 hour box: about 1.5 hours of reading, design and code (including the row fix the RF10 check found), and verification interleaved with it, mostly waiting for the shared lease and retrying stopped steps (about 25 minutes of GPU held in all).
 
 ## 5. Gaps
 
