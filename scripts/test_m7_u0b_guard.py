@@ -16,6 +16,31 @@ host=importlib.util.module_from_spec(spec);spec.loader.exec_module(host)
 
 
 class LeaseTests(unittest.TestCase):
+    def test_quiet_cost_requires_compiler_free_start_and_clean_process(self):
+        sv=host.load("m7-u0b-sv")
+        scratch=host.OUT/"cpu-tests";scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            root=Path(temporary);window=root/"window";window.mkdir()
+            recipe=dict(capture_only=False,quiet_window=str(window),foreign_cpu_readiness=dict(
+                cargo_free_required=True,waiting=False,compiler_free_seconds=60.,foreign_compilers=[]))
+            initial=dict(utc="2026-11-08T01:00:00+00:00",game_protocol="released",
+                games=[],foreign_renderers=[],builds=[],gpu="GPU, driver, 0")
+            end=dict(utc="2026-11-08T01:00:03+00:00",game_protocol="released")
+            process=dict(start_utc="2026-11-08T01:00:01+00:00",end_utc="2026-11-08T01:00:02+00:00",
+                exit_code=0,failures=[])
+            def record():
+                sv.save(window/"quiet-start.json",[initial]);sv.save(window/"quiet-end.json",end)
+                sv.save(root/"process.json",process)
+            record();self.assertIsNotNone(sv.quiet_cost_proof(root,recipe))
+            for target,key,bad in ((recipe["foreign_cpu_readiness"],"compiler_free_seconds",59.),
+                    (initial,"builds",["cargo"]),(end,"game_protocol","relaxed"),
+                    (process,"failures",["late monitor failure"]),(process,"end_utc","2026-11-08T01:00:04+00:00")):
+                old=target[key];target[key]=bad;record()
+                with self.assertRaisesRegex(ValueError,"quiet SV cost controls failed"):
+                    sv.quiet_cost_proof(root,recipe)
+                target[key]=old
+            self.assertIsNone(sv.quiet_cost_proof(root,dict(capture_only=True)))
+
     def test_path_query_exit_race_keeps_process_but_live_failure_rejects(self):
         exit_code=0
         def first(snapshot,pointer):

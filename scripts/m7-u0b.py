@@ -116,6 +116,7 @@ def cpu_readiness(u,timing=False):
         waiting=not inventory_ok or ram<u.START_GIB or (timing and (processes or now-clear_since<60))
         record=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),foreign_compilers=processes,
             available_gib=ram,timing_eligible_for_claim=False if processes else None,
+            compiler_free_seconds=0 if clear_since is None else now-clear_since,
             timing_requested=timing,cargo_free_required=timing,paused_for_memory=ram<u.START_GIB,
             waiting=bool(waiting),seconds=now-started)
         if not waiting:

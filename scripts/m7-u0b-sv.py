@@ -105,7 +105,8 @@ def capture(args):
             save(case/"recipe.json",dict(config=config,poses=expected,start=start,cut_to=other,
                 capture_only=not args.timing,async_compute=not args.async_off,fixed_delta_seconds=1/60,primary_background=[4000]*3,
                 static_csv=96,cut_csv=97,pan_csv=list(range(196,205)),source_scene_sha256=u.sha(SOURCE),
-                package_sha256=u.sha(u.PACKAGE),settings=u.CONFIGS[config],quiet_window=str(quiet_window) if quiet_window else None))
+                package_sha256=u.sha(u.PACKAGE),settings=u.CONFIGS[config],quiet_window=str(quiet_window) if quiet_window else None,
+                foreign_cpu_readiness=owner.get("foreign_cpu_readiness")))
             if not args.timing:
                 for stage in ("cut","pan"):
                     with (case/("decode-"+stage+".log")).open("w") as log:
@@ -266,6 +267,26 @@ def audit(args):
     print("material audits",list(rows),flush=True)
 
 
+def quiet_cost_proof(case,recipe):
+    """Qualify the observed quiet attribution visit, without claiming a repeated speed ratio."""
+    if recipe["capture_only"] or not recipe.get("quiet_window"):return None
+    root=Path(recipe["quiet_window"]);cpu=recipe.get("foreign_cpu_readiness") or {}
+    initial=json.loads((root/"quiet-start.json").read_text())[-1]
+    end=json.loads((root/"quiet-end.json").read_text())
+    process=json.loads((case/"process.json").read_text())
+    if not (cpu.get("cargo_free_required") is True and cpu.get("waiting") is False
+            and cpu.get("compiler_free_seconds",0)>=60 and cpu.get("foreign_compilers")==[]
+            and initial.get("game_protocol")==end.get("game_protocol")=="released"
+            and not any(initial.get(k) for k in ("games","foreign_renderers","builds","monitor_error"))
+            and float(initial["gpu"].split(",")[2])<=3
+            and initial["utc"]<=process["start_utc"]<=process["end_utc"]<=end["utc"]
+            and process["exit_code"]==0 and not process.get("failures")):
+        raise ValueError("quiet SV cost controls failed: "+str(case))
+    return dict(window=str(root),compiler_free_seconds=cpu["compiler_free_seconds"],
+        initial_gpu_utilization_percent=float(initial["gpu"].split(",")[2]),
+        scope="observed quiet single-process attribution; no repeated-process or 2x speed claim")
+
+
 def costs(args):
     """CSV GPU groups at the exact static, first-cut and pan frames, without rebinning."""
     root=OUT/"sv-sky"/args.label;result=[]
@@ -297,9 +318,10 @@ def costs(args):
             actual=[rows[frame]["View/Pos"+axis] for axis in "XYZ"]
             if max(abs(a-b) for a,b in zip(actual,target))>1e-3:
                 raise ValueError(f"GPU CSV camera/frame identity failed at {frame}")
+        quiet=quiet_cost_proof(case,recipe)
         value=dict(config=recipe["config"],start=recipe["start"],capture_instrumented=recipe["capture_only"],one_frame_thread_lag=lag,async_compute=recipe.get("async_compute",True),
-            timing_eligible_for_claim=False,
-            timing_scope="functional exclusive slot, not a quiet-window speed claim; group values separately, no inclusive summation",
+            timing_eligible_for_claim=quiet is not None,quiet_control_proof=quiet,
+            timing_scope=quiet["scope"] if quiet else "functional exclusive slot, not a quiet-window speed claim; group values separately, no inclusive summation",
             static=rows[96],first_cut=rows[97],pan=[rows[i] for i in range(196,205)],
             camera_csv_proof="all selected GPU rows match registered source eye within 0.001 cm",
             absent_csv_groups_reported_as_zero=absent,captured_csv_rows=len(rows),source_csv_sha256=host.ue().sha(case/"profile.csv"),
