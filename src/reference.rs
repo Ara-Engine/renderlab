@@ -821,3 +821,8 @@ mod quarry_tests;
 #[cfg(test)]
 #[path = "reference_r0a_tests.rs"]
 mod r0a_tests;
+
+// R0b is an isolated measurement probe, compiled only by the library test binary.
+#[cfg(test)]
+#[path = "reflection_probe.rs"]
+mod reflection_probe;
