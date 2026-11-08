@@ -22,6 +22,10 @@
 //! `integrate: n` writes each listed frame's n x n jittered no-AA mean instead of variants.
 use super::*;
 
+// PP1 reuses the two path/device helpers and the existing quarry loader only.
+#[path = "post_tests.rs"]
+mod post_tests;
+
 /// A loaded bench scene's draw inputs; placement i + 1 is the scene's mesh i, as the
 /// reference's hit IDs number them.
 struct Bench {
