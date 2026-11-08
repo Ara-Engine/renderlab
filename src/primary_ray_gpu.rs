@@ -11,6 +11,8 @@ use crate::shadow_plan::Bounds;
 #[path = "film_accumulation.rs"]
 pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
+#[path = "shadow_visibility_filter.rs"]
+mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
 pub(super) mod temporal_reconstruction;
 
@@ -199,6 +201,8 @@ pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
         1,
     );
     heads[0].push_str("\n@group(0) @binding(23) var primary_receiver_epsilon:texture_2d<f32>;\n");
+    // RT1d integration seam: visibility input only; no hit-record/shading changes.
+    shadow_visibility_filter::compose(&mut heads);
     finish_shading_heads(heads)
 }
 fn finish_shading_heads(heads: [String; 2]) -> Result<[String; 2], Error> {
@@ -1472,6 +1476,14 @@ impl Renderer {
             .filter(|_| self.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
+        // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
+        let filter = self.primary_mode == PrimaryVisibility::Traced
+            && self.soft_mode == SoftShadows::Interactive
+            && self
+                .hardware_shadows
+                .as_ref()
+                .is_some_and(|h| h.visibility_filter);
+        bytes[88..92].copy_from_slice(&u32::from(filter).to_ne_bytes());
         for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }

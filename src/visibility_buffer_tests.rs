@@ -1517,6 +1517,8 @@ fn gpu_rt1c_m1_cost() {
     };
     r.set_primary_visibility(primary).unwrap();
     r.set_soft_shadows(soft);
+    r.set_interactive_shadow_filter(m["shadow_filter"].as_bool().unwrap_or(false))
+        .unwrap();
     let color = target(&r, 1920, 1080);
     let lighting =
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())

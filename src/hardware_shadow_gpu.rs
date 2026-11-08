@@ -67,6 +67,8 @@ struct PendingBuild {
 
 pub(super) struct HardwareState {
     pub options: HardwareShadowOptions,
+    /// RT1d's opt-in current-frame visibility gather; read through the frame ABI.
+    pub visibility_filter: bool,
     /// Every AS this renderer builds allows hit-vertex return (traced visibility).
     flags: wgpu::AccelerationStructureFlags,
     bindings: Owned<wgpu::BindGroupLayout>,
@@ -153,6 +155,7 @@ impl HardwareState {
         );
         Self {
             options,
+            visibility_filter: false,
             flags: if vertex_return {
                 wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE
                     | wgpu::AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN
