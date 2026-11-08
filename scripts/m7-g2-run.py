@@ -185,6 +185,7 @@ def run_steps(g, out, binary, args):
             env = dict(base, RENDERLAB_G2_PATH=path, RENDERLAB_G2_OUT=str(out),
                        RENDERLAB_TEST_PRIMARY="traced" if path == "rt" else "raster",
                        RENDERLAB_M7_G1_PATHS="rt" if path == "rt" else "nonrt",
+                       RENDERLAB_ES1_PATH=path,
                        RENDERLAB_EVIDENCE_DIR=str(out / "fixtures"))
             if extra and extra[0]:
                 env["RENDERLAB_G2_SECTIONS"] = extra[0]

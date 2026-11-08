@@ -1134,7 +1134,9 @@ fn gpu_gi_sky_visibility_sv() {
     let bounce_refs: Vec<_> = poses
         .iter()
         .filter(|_| section("bounce"))
-        .map(|(_, eye, target)| cached_reference(&rt, &sv, &[], 0.0, *eye, *target, &bounce_settings))
+        .map(|(_, eye, target)| {
+            cached_reference(&rt, &sv, &[], 0.0, *eye, *target, &bounce_settings)
+        })
         .collect();
     let bounce_motion: Vec<_> = (0..5)
         .filter(|_| section("bounce"))
@@ -1547,7 +1549,10 @@ fn gpu_gi_sky_visibility_sv() {
                         (sv.exposure).exp2(),
                     );
                     config_json[pose] = json!({"scores": scores, "settle": settle, "image_hash": hash_image(&image)});
-                    eprintln!("G2 SV {label} {config} {pose}: frame rms {}", scores["frame"]["rms"]);
+                    eprintln!(
+                        "G2 SV {label} {config} {pose}: frame rms {}",
+                        scores["frame"]["rms"]
+                    );
                 }
                 if !bounce_motion.is_empty() {
                     rig.settings(s);
@@ -3400,15 +3405,19 @@ fn g2_variant(name: &str) -> IndirectSettings {
 /// Virtual shadows and the visibility buffer with G1c's cooked near field on non-RT. One
 /// path per process. RENDERLAB_G2_QUARRY: ES1's manifest (asset, cameras, environment,
 /// lighting, near). RENDERLAB_G2_SECTIONS, in order (default static,pan):
-/// - static: poses 0 and 1 per variant, a reset and twelve frames;
+/// - static: poses 0 and 1 per variant, a reset and twelve frames, then TR1 over 8 and 64
+///   still frames (RENDERLAB_G2_TR1);
 /// - pan: per variant, settled at pose 0, then U0b's pan at 2 cm a frame, captured at its
-///   witness frames 97, 112, 128 and 159;
+///   witness frames 97, 112, 128 and 159; pan-tr1 the same with TR1 on from the cut;
+/// - determinism: the first variant's reset sequence twice, images and tables by process id;
 /// - settle: the first variant after a reset at pose 0, captured at frames 1-8 and 12;
 /// - sun: settled at pose 0, the sun turned 10 degrees, captured at frames 1, 2, 4 and 8 after
 ///   the step, then a reset under the new sun settled (the fresh image);
+/// - memory: per variant after a settled pose 0, the allocator, HAL and ownership totals;
 /// - cost: every variant in each of five visits (the last profiled): a cut of twelve frames,
 ///   then 24 frames moving 1 cm a frame; frame and shading spans, the profiled visit's
 ///   passes and the kernels' counters.
+///
 /// Captures are raw little-endian f32 radiance (VARIANT-pP, VARIANT-pan-FFF, ...) for the CPU
 /// scorer; nothing is scored here. Timing here is functional unless the lease is quiet.
 #[test]
@@ -3599,11 +3608,13 @@ fn gpu_g2_quarry() {
                         // (diagnostics; tens of MB, deleted once summarized).
                         if pose == 0 && env("RENDERLAB_G2_DUMP").as_deref() == Some("1") {
                             if let Some(words) = r.indirect_table().unwrap() {
-                                let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                                let raw: Vec<u8> =
+                                    words.iter().flat_map(|w| w.to_le_bytes()).collect();
                                 std::fs::write(out.join(format!("{v}-table.u32")), raw).unwrap();
                             }
                             if let Some(o) = r.indirect_outgoing().unwrap() {
-                                let raw: Vec<u8> = o.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                                let raw: Vec<u8> =
+                                    o.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
                                 std::fs::write(out.join(format!("{v}-outgoing.f32")), raw).unwrap();
                             }
                         }
@@ -3615,7 +3626,10 @@ fn gpu_g2_quarry() {
                             for _ in 0..*n {
                                 draw(&mut r, &camera);
                             }
-                            write(&format!("{v}-tr1x{n}-p{pose}"), &capture_radiance(&mut r, exposure));
+                            write(
+                                &format!("{v}-tr1x{n}-p{pose}"),
+                                &capture_radiance(&mut r, exposure),
+                            );
                             r.set_reconstruction(Reconstruction::default()).unwrap();
                         }
                     }
@@ -3638,7 +3652,10 @@ fn gpu_g2_quarry() {
                     for f in 97..=159 {
                         draw(&mut r, &camera_at(0, 0.02 * (f - 96) as f32));
                         if [97, 112, 128, 159].contains(&f) {
-                            write(&format!("{v}-{tag}-{f:03}"), &capture_radiance(&mut r, exposure));
+                            write(
+                                &format!("{v}-{tag}-{f:03}"),
+                                &capture_radiance(&mut r, exposure),
+                            );
                         }
                     }
                     r.set_reconstruction(Reconstruction::default()).unwrap();
@@ -3675,7 +3692,10 @@ fn gpu_g2_quarry() {
                 for f in 1..=12 {
                     draw(&mut r, &camera_at(0, 0.0));
                     if f <= 8 || f == 12 {
-                        write(&format!("{v}-settle-{f:02}"), &capture_radiance(&mut r, exposure));
+                        write(
+                            &format!("{v}-settle-{f:02}"),
+                            &capture_radiance(&mut r, exposure),
+                        );
                         rows.push(json!({"frame": f, "counters": counters(&mut r)}));
                     }
                 }
@@ -3694,15 +3714,41 @@ fn gpu_g2_quarry() {
                 for f in 1..=8 {
                     draw(&mut r, &camera_at(0, 0.0));
                     if [1, 2, 4, 8].contains(&f) {
-                        write(&format!("{v}-sun-{f:02}"), &capture_radiance(&mut r, exposure));
+                        write(
+                            &format!("{v}-sun-{f:02}"),
+                            &capture_radiance(&mut r, exposure),
+                        );
                     }
                 }
                 r.reset_indirect();
                 for _ in 0..12 {
                     draw(&mut r, &camera_at(0, 0.0));
                 }
-                write(&format!("{v}-sun-fresh"), &capture_radiance(&mut r, exposure));
+                write(
+                    &format!("{v}-sun-fresh"),
+                    &capture_radiance(&mut r, exposure),
+                );
                 set_sun(&mut r, travel);
+            }
+            "memory" => {
+                // Per variant after a settled pose 0: the allocator's allocated and reserved
+                // bytes, the HAL's buffer and texture bytes, and the ownership ledger.
+                let mut rows = json!({});
+                for v in &variants {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    r.reset_indirect();
+                    for _ in 0..12 {
+                        draw(&mut r, &camera_at(0, 0.0));
+                    }
+                    r.test_drain("G2 memory");
+                    let s = r.stats();
+                    rows[v.as_str()] = json!({
+                        "allocated": s.allocator.as_ref().map(|a| a.allocated_bytes),
+                        "reserved": s.allocator.as_ref().map(|a| a.reserved_bytes),
+                        "hal_buffer_bytes": s.hal.buffer_bytes, "hal_texture_bytes": s.hal.texture_bytes,
+                        "ownership": format!("{:?}", s.ownership)});
+                }
+                results["memory"] = rows;
             }
             "cost" => {
                 let mut timing = json!({});

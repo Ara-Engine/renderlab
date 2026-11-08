@@ -1268,7 +1268,9 @@ impl Renderer {
             .get_mapped_range()
             .map_err(|_| Error::InvalidInput("indirect cache readback map"))?
             .chunks_exact(16)
-            .map(|b| std::array::from_fn(|k| f32::from_le_bytes(b[4 * k..4 * k + 4].try_into().unwrap())))
+            .map(|b| {
+                std::array::from_fn(|k| f32::from_le_bytes(b[4 * k..4 * k + 4].try_into().unwrap()))
+            })
             .collect();
         Ok(Some(values))
     }
@@ -1344,12 +1346,8 @@ impl Renderer {
             super::primary_ray_gpu::non_rt_sources(&self.source)?.1
         };
         let parameters = crate::program::declares_parameters(&source);
-        let composed = crate::program::compose(
-            &heads[1],
-            &source,
-            crate::program::Stage::Cell,
-            parameters,
-        );
+        let composed =
+            crate::program::compose(&heads[1], &source, crate::program::Stage::Cell, parameters);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
@@ -1679,7 +1677,11 @@ impl Renderer {
     /// Packs every draw's software geometry; false when a draw has none.
     /// Packs every draw's software geometry; false when a draw has none. `ids` are the draws'
     /// stable ids (`gi_draw_ids`), which name each instance's material (G2).
-    fn prepare_gi_geometry(&mut self, draws: &[PreparedDraw<'_>], ids: &[u32]) -> Result<bool, Error> {
+    fn prepare_gi_geometry(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        ids: &[u32],
+    ) -> Result<bool, Error> {
         let mut blases = vec![];
         for d in draws {
             let key: &wgpu::Buffer = &d.mesh.vertex;
@@ -2135,7 +2137,11 @@ impl Renderer {
             self.gi.view_frames = 0;
         }
         self.gi.view_key = Some(view_key);
-        let idle_after = if bounce { IDLE_AFTER_BOUNCE } else { IDLE_AFTER };
+        let idle_after = if bounce {
+            IDLE_AFTER_BOUNCE
+        } else {
+            IDLE_AFTER
+        };
         if self.gi.idle_frames >= idle_after && flags == 0 && !busy {
             self.gi.stats.idle_frames += 1;
             return Ok(());
@@ -2417,8 +2423,7 @@ impl GiState {
                 label: Some("indirect cache cell shading"),
                 timestamp_writes: stamps(b + 2),
             });
-            if let (true, Some(shade), Some(pipeline)) = (plan.bounce, shade, self.shade.as_ref())
-            {
+            if let (true, Some(shade), Some(pipeline)) = (plan.bounce, shade, self.shade.as_ref()) {
                 pass.set_pipeline(&pipeline.pipeline);
                 pass.set_bind_group(0, &*g.shade, &[]);
                 pass.set_bind_group(1, shade.arrays, &[]);
@@ -2534,14 +2539,23 @@ mod tests {
             "emissive cell shading",
             &compose(&rt[1], emissive, Stage::Cell, true).source,
         );
-        analyse("emissive", emissive, &compose(PRELUDE, emissive, Stage::Raster, true)).unwrap();
+        analyse(
+            "emissive",
+            emissive,
+            &compose(PRELUDE, emissive, Stage::Raster, true),
+        )
+        .unwrap();
         let wrong = emissive.replace(
             "fn emission(s:Surface,input:SurfaceInput)",
             "fn emission(s:Surface)",
         );
-        let error = analyse("wrong", &wrong, &compose(PRELUDE, &wrong, Stage::Raster, true))
-            .unwrap_err()
-            .to_string();
+        let error = analyse(
+            "wrong",
+            &wrong,
+            &compose(PRELUDE, &wrong, Stage::Raster, true),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("bounce light"), "{error}");
     }
 
@@ -2551,7 +2565,11 @@ mod tests {
     /// sixteen fixed directions give a Lambert program's albedo exactly (sum z_k = Q / 2).
     #[test]
     fn bounce_quadrature_is_exact_for_uniform_light_and_lambert() {
-        for (n, rotation) in [([0.0, 1.0, 0.0], 0.0), ([0.6, 0.0, -0.8], 1.3), ([0.0, 0.0, -1.0], 4.0)] {
+        for (n, rotation) in [
+            ([0.0, 1.0, 0.0], 0.0),
+            ([0.6, 0.0, -0.8], 1.3),
+            ([0.0, 0.0, -1.0], 4.0),
+        ] {
             let mut c = [0.0f64; 4];
             for d in directions(n, rotation) {
                 let y = basis(d);

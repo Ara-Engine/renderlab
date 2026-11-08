@@ -308,6 +308,14 @@ fn traced_streamed_api() -> String {
     )
 }
 
+/// The traced entry's hit-record helpers (`PrimaryHit`, `primary_decode`, `primary_input`),
+/// everything before its `primary_vertex`. A traced head with RT1d's shadow visibility filter
+/// calls them, so a cell module composed on that head defines them too; cell shading itself
+/// never runs the filter (its lights come from the cache's light pass).
+fn traced_hit_helpers() -> &'static str {
+    &TRACED_ENTRY[..TRACED_ENTRY.find("fn primary_vertex(").unwrap()]
+}
+
 /// A composed module and the bytes its program occupies.
 pub(crate) struct Composed {
     pub source: String,
@@ -370,6 +378,9 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     source.push_str("\n// ---- end of program ----\n");
     if stage == Stage::Cell {
         source.push_str(&reflection_wrappers(program));
+        if head.contains("primary_decode(") {
+            source.push_str(traced_hit_helpers());
+        }
     }
     source.push_str(entry);
     Composed {
