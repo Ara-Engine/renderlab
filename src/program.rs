@@ -414,6 +414,7 @@ pub(crate) struct Composed {
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
     let streamed;
+    let cell_entry;
     let (api, binding, entry) = match stage {
         Stage::Raster => (
             RASTER_API,
@@ -433,7 +434,8 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
                 TRACED_NO_PARAMETERS
             },
             if stage == Stage::Cell {
-                CELL_ENTRY
+                cell_entry = gi_shader("gi_shade_entry.wgsl", CELL_ENTRY);
+                &*cell_entry
             } else {
                 TRACED_ENTRY
             },
@@ -586,6 +588,11 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
         .any(|t| INDIRECT_INPUTS.contains(&t))
 }
 /// Whether `program` declares `struct Parameters`, which composition binds as `params`.
+/// TP1: whether `program` declares the transparency hook `fn transmittance(s: Surface,
+/// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
+pub(crate) fn declares_transmittance(program: &str) -> bool {
+    declares(program, "fn", "transmittance")
+}
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")
 }

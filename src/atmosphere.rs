@@ -5,7 +5,7 @@
 //! height fog apply to every camera-path surface after its program shades it, and
 //! volumetric fog adds froxel in-scattering shadowed by world-space sun visibility.
 //! `Renderer::set_atmosphere` replaces the settings; `Atmosphere::default()` is the
-//! product default (everything but volumetric fog on).
+//! product default (including VF1's subtle shadowed volumetric haze).
 use crate::{Error, Vec3};
 
 /// Everything the renderer draws of the atmosphere. Validated by `Renderer::set_atmosphere`.
@@ -31,7 +31,7 @@ pub struct Atmosphere {
     pub medium: AtmosphereMedium,
     /// None disables the analytic height fog.
     pub height_fog: Option<HeightFog>,
-    /// None disables volumetric fog (the default).
+    /// Shadowed volumetric haze on both paths by default; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
 }
 
@@ -121,7 +121,7 @@ impl Default for VolumetricFog {
     fn default() -> Self {
         Self {
             distance: 128.0,
-            extra_density: 0.0,
+            extra_density: 0.001,
             history_weight: 0.9,
         }
     }
@@ -136,7 +136,7 @@ impl Default for Atmosphere {
             environment: true,
             medium: AtmosphereMedium::default(),
             height_fog: Some(HeightFog::default()),
-            volumetric_fog: None,
+            volumetric_fog: Some(VolumetricFog::default()),
         }
     }
 }

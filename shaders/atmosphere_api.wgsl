@@ -33,6 +33,13 @@ fn atmosphere_sky(d:vec3<f32>) -> vec3<f32> {
         let t=exp(-depth);
         exposed=exposed*t+at_exposed(at_fog_source(d))*(1.0-t);
     }
+    if at_on(ATMOSPHERE_VOLUMETRIC) {
+        let clip=atmosphere.view_projection*vec4<f32>(atmosphere.eye.xyz+d,1.0);
+        let ndc=clip.xy/max(clip.w,1e-6);
+        let uv=vec2<f32>(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
+        let v=at_volume(uv,f32(AT_FROXEL_SLICES),0u,AT_FROXEL_SLICES);
+        exposed=exposed*v.a+at_exposed(v.rgb);
+    }
     return exposed;
 }
 // A primary miss: the visible sky when the atmosphere's sky is on, else `fallback`.

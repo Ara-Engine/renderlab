@@ -12,6 +12,8 @@ extern crate self as renderlab;
 pub mod animation;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
+/// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
+pub mod cutout;
 pub mod engine;
 mod environment;
 // DC1: owned projected decals and the programmable surface-input API.
@@ -26,6 +28,8 @@ mod material;
 mod mesh;
 mod normal;
 mod observe;
+// PP1 public camera/display settings; implementation stays in the tone stage.
+mod post;
 mod primary_ray;
 mod program;
 pub mod program_watch;
@@ -39,6 +43,7 @@ mod renderer;
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
+mod transparency;
 pub mod virtual_geometry;
 mod visibility;
 
@@ -57,6 +62,7 @@ pub use material::{
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
+pub use post::{ColourLut, DepthOfField, PostSettings, Tonemapper};
 pub use primary_ray::{
     PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES,
     VISIBILITY_RASTER_FEATURES, traced_limits, visibility_limits,
@@ -71,7 +77,7 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, RenderScale, Renderer};
+pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
@@ -79,6 +85,9 @@ pub use renderer::{
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
+pub use transparency::{
+    Emitter, EmitterDescriptor, MAX_PARTICLES, Transparency, TransparencyStats,
+};
 pub use wgpu;
 
 /// Raster shadow receivers read the actual triangle's world-space vertices.

@@ -201,6 +201,10 @@ fn gpu_r0a_current() {
             PrimaryVisibility::VisibilityBuffer
         })
         .unwrap();
+    if rt {
+        // R0a's recorded reference harness keeps Exact, independent of RTDEF2's default.
+        renderer.set_soft_shadows(crate::SoftShadows::Exact);
+    }
     for path in paths.split(';').filter(|p| !p.is_empty()) {
         let path = Path::new(path);
         let bench = super::tests::load_bench(&path.join("scene.json"));

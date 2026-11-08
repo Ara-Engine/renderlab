@@ -2,7 +2,9 @@
 use crate::Error;
 
 /// How lit 1x regular-geometry frames resolve camera visibility. Raster is the
-/// portable default. A no-RT device requesting visibility-buffer and Virtual-shadow
+/// portable default. A traced-capable hardware-shadow renderer at 1x starts with
+/// `Traced`, Interactive shadows, TR1 and its adaptive 256/64/32/8 shadow-ray budget.
+/// A no-RT device requesting visibility-buffer and Virtual-shadow
 /// capabilities selects `VisibilityBuffer` and `SoftShadows::Virtual` at creation.
 /// Diagnostic views and virtual geometry still rasterize through the forward path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

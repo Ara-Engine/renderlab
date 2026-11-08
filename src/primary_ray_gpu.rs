@@ -17,8 +17,9 @@ mod shadow_visibility_filter;
 pub(super) mod temporal_reconstruction;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
-/// `scene_pixels` rectangle and the reflection bands (`ReflectionSettings::frame_words`).
-const FRAME_BYTES: usize = 128;
+/// `scene_pixels` rectangle, the sampling words and the reflection bands
+/// (`ReflectionSettings::frame_words`).
+pub(super) const FRAME_BYTES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -169,7 +170,7 @@ pub(super) fn edge_check_source(kernels: &str) -> String {
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}\n",
         include_str!("../shaders/primary_edge_queue.wgsl")
     );
-    source.push_str("struct Receiver {world:vec3<f32>,geometric:vec3<f32>,pixel:vec2<i32>,slot:u32,epsilon:f32,thin:bool};\nstruct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};\n@group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;\n@group(1) @binding(1) var<storage,read> normals:array<NormalTransform>;\nstruct PrimaryFrame {inverse:mat4x4<f32>,clear:vec4<f32>,sided:vec4<u32>,scene:vec4<u32>};\n@group(0) @binding(7) var primary_hit:texture_2d<u32>;\n@group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;\n@group(1) @binding(5) var<storage,read> primary_placements:array<u32>;\nstruct PrimaryRay {near:vec3<f32>,far:vec3<f32>,dx_near:vec3<f32>,dy_near:vec3<f32>,dx_far:vec3<f32>,dy_far:vec3<f32>};\n");
+    source.push_str("struct Receiver {world:vec3<f32>,geometric:vec3<f32>,pixel:vec2<i32>,slot:u32,epsilon:f32,thin:bool};\nstruct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};\n@group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;\n@group(1) @binding(1) var<storage,read> normals:array<NormalTransform>;\nstruct PrimaryFrame {inverse:mat4x4<f32>,clear:vec4<f32>,sided:vec4<u32>,scene:vec4<u32>,sampling:vec4<u32>};\n@group(0) @binding(7) var primary_hit:texture_2d<u32>;\n@group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;\n@group(1) @binding(5) var<storage,read> primary_placements:array<u32>;\nstruct PrimaryRay {near:vec3<f32>,far:vec3<f32>,dx_near:vec3<f32>,dy_near:vec3<f32>,dx_far:vec3<f32>,dy_far:vec3<f32>};\n");
     let start = kernels.find("struct PrimaryTrace {").unwrap();
     let end = kernels[start..]
         .find("fn primary_triangle_vertices(")
@@ -326,7 +327,9 @@ pub(super) fn admit_draws(
 }
 
 impl Renderer {
-    /// Chooses disk-shadow sampling for traced lit 1x frames. Exact is the default.
+    /// Chooses disk-shadow sampling for traced lit 1x frames. Traced-capable RT
+    /// renderers start with Interactive and TR1's adaptive ray budget; Exact remains
+    /// the portable selector default and the explicit historical reference setting.
     /// The preference survives primary-path changes and reload; raster, hard and
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
     /// Leaving `Temporal` releases its film history after in-flight frames.
@@ -1503,6 +1506,7 @@ impl Renderer {
             uploads.write_calls += 1;
         }
         let mut bytes = [0; FRAME_BYTES];
+        bytes[112..116].copy_from_slice(&8u32.to_ne_bytes());
         bytes[..64].copy_from_slice(&matrix_bytes(inverse));
         for (dst, value) in bytes[64..80]
             .chunks_exact_mut(4)
@@ -1546,7 +1550,7 @@ impl Renderer {
         } else {
             crate::ReflectionSettings::off().frame_words()
         };
-        for (dst, value) in bytes[112..128].chunks_exact_mut(4).zip(bands) {
+        for (dst, value) in bytes[128..144].chunks_exact_mut(4).zip(bands) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
         if self.primary.as_ref().unwrap().frame.is_none() {

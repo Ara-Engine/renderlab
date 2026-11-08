@@ -726,7 +726,7 @@ fn gpu_reload_edit_to_image() {
                 "program",
                 &program_path,
                 STANDARD.replace(
-                    "return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);",
+                    "return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);",
                     "return Surface(n,base,metal);",
                 ),
                 STANDARD,

@@ -1,9 +1,11 @@
 # M1: GPU memory without changing the image
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC, base `d798200`, branch `t3/m1-memory`.
 
 **RT scope:** all Interactive RT timings, speed claims and memory rows here are
-**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+**measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. The RT-device
 default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
 rows describe a separate explicit opt-in. Allocator-default decisions below do not
 change primary visibility or shadow sampling defaults.
@@ -126,7 +128,7 @@ Measured reserved memory after each step, MiB:
 
 ## Rejected: 4–8 MiB allocator blocks
 
-RT timings here are **measured on the non-default fast setup (traced + Interactive)**.
+RT timings here are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 
 Reports exposed an empty 32 MiB block and partly occupied 32/64 MiB blocks.
 Smaller blocks reduced reserved memory to 3,366.523 / 2,520.684 / 3,179.172 MiB,
@@ -180,7 +182,7 @@ automation was used. `docs/milestones-5-6-decisions.tsv` is unchanged.
 
 ## Frame timing
 
-RT timings and ratios here are **measured on the non-default fast setup (traced + Interactive)**.
+RT timings and ratios here are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 
 RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu 30.0.1, rustc 1.96.0.
 Development/test profile (renderlab opt-level 1), not release-performance data.

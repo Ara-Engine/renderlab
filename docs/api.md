@@ -147,9 +147,9 @@ engine.set_decals(&[Decal {
 |---|---|---|
 | `aerial_perspective: bool` | on | scattering along every camera ray to a surface: distant surfaces fade toward the sky colour (camera volume to 32 km) |
 | `height_fog: Option<HeightFog>` | `Some(HeightFog::default())`: about 2 % extinction per 100 m near y = 0, 50 m scale height | analytic exponential fog, `density * exp(-falloff * (y - base_height))` per metre, lit by the sun (Henyey-Greenstein `anisotropy`) and the sky mean |
-| `volumetric_fog: Option<VolumetricFog>` | `None` | froxel fog over the first `distance` metres with sun shafts: the height fog's medium plus `extra_density`, reprojected over frames by `history_weight` |
+| `volumetric_fog: Option<VolumetricFog>` | `Some(VolumetricFog::default())`: 128 m range, 0.001/m extra density, history weight 0.9 | shadowed froxel fog: the height fog's medium plus `extra_density`; None disables it (VF1) |
 
-Aerial perspective and fog use the physical medium's sky colour under every `Sky`. Every program's output gets the same fog in the generated entry, so custom programs need no changes. Volumetric fog's sun visibility is traced on `HardwareRt`. On `NonRt` it is unshadowed at this revision (a recorded AT1 gap), so shafts appear only on RT.
+Aerial perspective and fog use the physical medium's sky colour under every `Sky`. Every program's output gets the same fog in the generated entry, so custom programs need no changes. Volumetric fog's sun visibility uses rays on `HardwareRt` and a depth test of resident Virtual clipmap pages on `NonRt` (conventional raster frames read their light-space depth maps). Missing Virtual pages fall back to coarser resident levels, then to sunlight. Reprojection rejects changed lighting, media and uploaded casters, clamps old scattering to the medium's lighting range and reduces history during visibility changes. See [VF1](m7-vf1.md).
 
 ## Settings and quality presets
 
@@ -304,7 +304,7 @@ These notes are final for everything wired above. Rows still marked planned beco
 | `Sky::Map { backdrop }` became `Sky::Map { background: Background }` | TR1b | `backdrop: c` becomes `background: Background::Color(c)`; `Background::Sky` shows the map |
 | `Sky::default()` is `Sky::Atmosphere(AtmosphereMedium::default())`, not `Uniform([0; 3])` | AT1 | set `Sky::Uniform(..)` explicitly for the old look |
 | `Sun::default().illuminance` is 120,000 lux (outside the atmosphere) | AT1 | under `Uniform`/`Map` skies, set the illuminance that reaches the ground |
-| `Settings::default()`: GI and TR1 on, aerial perspective and height fog on | G2b, TR1b, AT1 | set the fields off explicitly to reproduce older frames |
+| `Settings::default()`: GI and TR1 on, aerial perspective, height fog and volumetric fog on | G2b, TR1b, AT1, VF1 | set the fields off explicitly to reproduce older frames |
 | `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
 | Soft sun plus local lights renders (was rejected) | LC1 | none |
 

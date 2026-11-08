@@ -5,7 +5,7 @@
 // scene: [x0, y0, x1, y1) pixels whose camera rays can reach a placement (scene_pixels).
 // reflection (M7-R1/R1n, ReflectionSettings::frame_words): x the perceptual roughness where
 // the traced reflection fraction reaches 0 (0: reflections off), y where it starts to fall.
-struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, scene:vec4<u32>, reflection:vec4<f32> };
+struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, scene:vec4<u32>, sampling:vec4<u32>, reflection:vec4<f32> };
 // Hit record: placement+1 (zero is a miss), primitive, then f32 barycentrics.
 @group(0) @binding(7) var primary_hit:texture_2d<u32>;
 @group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;

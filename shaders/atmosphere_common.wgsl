@@ -40,7 +40,7 @@ struct AtmosphereUniform {
     previous_view_projection:mat4x4<f32>,
     // Camera volume froxel columns (x, y), the frame index and the sun-visibility source.
     grid:vec4<u32>,
-    // The target's width and height in pixels.
+    // The target's width and height; conventional-map sun view first/count (VF1).
     viewport:vec4<f32>,
 };
 const ATMOSPHERE_SKY:u32=1u;

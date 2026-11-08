@@ -11,6 +11,10 @@ mod lighting_gpu;
 #[path = "decal_gpu.rs"]
 mod decal_gpu;
 use lighting_gpu::LightingGpu;
+// PP1: presentation-only resources, independent of temporal reconstruction history.
+#[path = "post_gpu.rs"]
+mod post_gpu;
+use post_gpu::PostGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
 use sha2::{Digest, Sha256};
@@ -24,7 +28,9 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
-pub use primary_ray_gpu::temporal_reconstruction::{Reconstruction, RenderScale};
+pub use primary_ray_gpu::temporal_reconstruction::{
+    Reconstruction, ReconstructionShadowBudget, RenderScale,
+};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -47,6 +53,9 @@ pub use texture_residency::{ResidencyStats, TextureResidency};
 mod gi_cache;
 #[path = "skinning.rs"]
 pub(crate) mod skinning;
+// TP1 transparent pass and particles (docs/m7-tp1.md).
+#[path = "transparency_gpu.rs"]
+mod transparency_gpu;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -528,6 +537,10 @@ pub struct Renderer {
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
+    post_settings: PostSettings,
+    post_lut: Option<ColourLut>,
+    post: Option<PostGpu>,
+    retired_post: Vec<(u64, PostGpu)>,
     environment: crate::environment::EnvironmentState,
     shadows: ShadowState,
     hardware_shadows: Option<HardwareState>,
@@ -599,11 +612,14 @@ pub struct Renderer {
     reconstruction: Reconstruction,
     /// M7-R1/R1n global reflection controls (`set_reflections`).
     reflections: crate::ReflectionSettings,
+    reconstruction_shadow_budget: ReconstructionShadowBudget,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
     /// TR1b upscaling: the scaled frame's internal colour target and output HDR.
     upscale: Option<temporal_reconstruction::Upscale>,
+    /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
+    transparency: transparency_gpu::TransparencyState,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -1027,6 +1043,10 @@ impl Renderer {
             pipeline,
             shader_hash: [0; 32],
             lighting,
+            post_settings: PostSettings::default(),
+            post_lut: None,
+            post: None,
+            retired_post: vec![],
             environment: Default::default(),
             shadows,
             hardware_shadows,
@@ -1045,10 +1065,12 @@ impl Renderer {
             gi,
             reconstruction: Reconstruction::default(),
             reflections: crate::ReflectionSettings::default(),
+            reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,
             upscale: None,
+            transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -1135,7 +1157,12 @@ impl Renderer {
         renderer.submit_upload(renderer.free_slot().unwrap());
         renderer.default_material = Some(material);
         renderer.check_fault()?;
-        if hardware.is_none()
+        if traced {
+            // RTDEF2: traced visibility enables TR1 and traced reflections. TR1's
+            // 256/64/32/8 engine budget keeps cold/moving disk shadows at the retained floor.
+            renderer.set_primary_visibility(PrimaryVisibility::Traced)?;
+            renderer.set_soft_shadows(crate::SoftShadows::Interactive);
+        } else if hardware.is_none()
             && raster_primary
             && renderer.device.features().contains(VIRTUAL_FEATURES)
         {
@@ -2194,6 +2221,7 @@ impl Renderer {
             renderer: self.identity.clone(),
             double_sided: data.double_sided,
             thin: data.thin,
+            transparency: data.transparency,
             streamed: textures.iter().any(streamed),
             margins,
             bind,
@@ -2265,6 +2293,21 @@ impl Renderer {
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let hdr = self.lighting.hdr.as_ref().unwrap();
+        // PP1 runs after reconstruction and never modifies its HDR/history targets.
+        let mut timestamp_writes = timestamp_writes;
+        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+            if let Some(stamps) = &mut timestamp_writes {
+                let _start = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("post start timestamp"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: stamps.query_set,
+                        beginning_of_pass_write_index: stamps.beginning_of_pass_write_index.take(),
+                        end_of_pass_write_index: None,
+                    }),
+                });
+            }
+            post.encode(self, encoder);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("HDR present pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2279,10 +2322,14 @@ impl Renderer {
             timestamp_writes,
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline.present);
-        // TR1b upscaling: a scaled frame presents the reconstruction's target-size output.
-        let bind = self.upscale.as_ref().map_or(&*hdr.bind, |u| &*u.present);
-        pass.set_bind_group(0, bind, &[]);
+        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+            post.tone(&mut pass);
+        } else {
+            pass.set_pipeline(&self.pipeline.present);
+            // TR1b presents the target-size reconstruction even when post is disabled.
+            let bind = self.upscale.as_ref().map_or(&*hdr.bind, |u| &*u.present);
+            pass.set_bind_group(0, bind, &[]);
+        }
         pass.draw(0..3, 0..1);
     }
 
@@ -2320,8 +2367,28 @@ impl Renderer {
         draws: &mut [Draw<'_>],
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
+        // TP1: transparent draws leave every opaque path for the transparent pass. The
+        // split is stable and the caller's order comes back afterwards.
+        let (opaque, order) = transparency_gpu::split(draws);
+        let (front, transparent) = draws.split_at_mut(opaque);
+        let result = self.render_view(color, camera, front, transparent, view_mode);
+        if let Some(order) = order {
+            transparency_gpu::restore(draws, &order);
+        }
+        result
+    }
+    fn render_view(
+        &mut self,
+        color: &wgpu::Texture,
+        camera: &Camera,
+        draws: &mut [Draw<'_>],
+        transparent: &mut [Draw<'_>],
+        view_mode: ViewMode,
+    ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
         let preparation_start = Instant::now();
+        // TP1: the transparent pass runs after reconstruction, with the unjittered camera.
+        self.transparency.camera = Some(*camera);
         self.validate_color(color)?;
         // Temporal reconstruction samples traced and visibility-buffer lit frames at the
         // next lattice offset: every matrix of this frame comes from the jittered camera.
@@ -2464,8 +2531,11 @@ impl Renderer {
             Duration::ZERO
         };
         let acceleration_start = Instant::now();
-        // Traced frames need the TLAS for camera rays even without shadows.
-        let hardware_build = if shadow_frame.is_some() || traced {
+        // Camera rays and RT volume injection need a TLAS even without surface shadows.
+        let hardware_scene = shadow_frame.is_some()
+            || traced
+            || (view_mode == ViewMode::Lit && self.atmosphere.settings.volumetric_fog.is_some());
+        let hardware_build = if hardware_scene {
             if let Some(hardware) = &mut self.hardware_shadows {
                 let scopes = OperationScopes::new(&self.device);
                 let result = hardware.prepare_scene(
@@ -2486,7 +2556,7 @@ impl Renderer {
         } else {
             false
         };
-        if (shadow_frame.is_some() || traced) && self.hardware_shadows.is_some() {
+        if hardware_scene && self.hardware_shadows.is_some() {
             shadow_preparation += acceleration_start.elapsed();
         }
         // The frame's program pipeline sets, created now if missing: after every admission
@@ -2539,6 +2609,8 @@ impl Renderer {
             scene.draws += u64::from(visible > 0);
             scene.triangles += visible * u64::from(draw.mesh.index_count / 3);
         }
+        // TP1: transparent draws get the same visibility and ID publication.
+        self.tp_prepare_draws(matrix, transparent, &mut uploads)?;
         // The per-slot oracle intentionally bypasses the production ID publication buffer.
         #[cfg(test)]
         let reference_ids: Vec<_> = if self.reference_draws {
@@ -2627,6 +2699,7 @@ impl Renderer {
             camera,
             view_mode,
             &prepared,
+            transparent,
             shadow_frame,
             &shadow_draws,
             hardware_build,
@@ -2715,6 +2788,7 @@ impl Renderer {
             camera,
             view_mode,
             draws,
+            &[],
             shadow_frame,
             shadow_draws,
             hardware_build,
@@ -2777,6 +2851,7 @@ impl Renderer {
         camera: &Camera,
         view_mode: ViewMode,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
         shadow_frame: Option<ShadowFrame>,
         shadow_draws: &[ShadowDraw<'_>],
         hardware_build: bool,
@@ -2892,7 +2967,9 @@ impl Renderer {
                     sample_count: self.options.samples as u32,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
+                    // TP1: the transparent pass reads 1x raster depth.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
                         | if cfg!(test) && self.options.samples == SampleCount::One {
                             wgpu::TextureUsages::COPY_SRC
                         } else {
@@ -3014,6 +3091,13 @@ impl Renderer {
             }
             result?;
         }
+        if lit {
+            let scopes = OperationScopes::new(&self.device);
+            self.prepare_post(camera, traced)?;
+            if let Some(error) = scopes.finish() {
+                return Err(self.fail(error.to_string()));
+            }
+        }
         self.check_fault()?;
         let view = self
             .ledger
@@ -3045,19 +3129,25 @@ impl Renderer {
             cpu.shadow_encode = shadow_start.elapsed();
         }
         // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
-        if lit {
+        if lit && !virtual_frame {
             self.encode_atmosphere(&mut encoder);
         }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
         if traced {
+            // Own this handle while VF1 updates its history between the Virtual
+            // depth pass and shading; no timestamp borrow crosses that update.
+            let queries = self
+                .timing
+                .as_ref()
+                .filter(|_| timed)
+                .map(|t| (*t.queries).clone());
             let stamps = |first: u32| {
-                self.timing
+                queries
                     .as_ref()
-                    .filter(|_| timed)
-                    .map(|t| wgpu::ComputePassTimestampWrites {
-                        query_set: &t.queries,
+                    .map(|queries| wgpu::ComputePassTimestampWrites {
+                        query_set: queries,
                         beginning_of_pass_write_index: Some(slot as u32 * 10 + first),
                         end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
                     })
@@ -3083,6 +3173,8 @@ impl Renderer {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
                     self.encode_virtual(&mut encoder, stamps(8));
+                    // VF1 samples the freshly generated Virtual depth pages.
+                    self.encode_atmosphere(&mut encoder);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
@@ -3253,12 +3345,17 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
+        // TP1: transparent draws and particles, after opaque shading and reconstruction.
+        // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
+        if lit && self.upscale.is_none() {
+            self.encode_transparency(&mut encoder, draws, transparent, traced)?;
+        }
         // TR1b upscaling: present writes the caller's target, not the internal one.
         let output_view = self.upscale.as_ref().map(|u| {
             self.ledger
                 .attachment(u.output.create_view(&Default::default()))
         });
-        if hdr.is_some() {
+        if lit && self.lighting.hdr.is_some() {
             self.encode_hdr_present(
                 &mut encoder,
                 output_view.as_ref().unwrap_or(&view),
@@ -3598,6 +3695,8 @@ impl Renderer {
         }
         self.residency.prune();
         self.lighting.collect(self.completed_submission);
+        self.retired_post
+            .retain(|(last, _)| *last > self.completed_submission);
         self.atmosphere.collect(self.completed_submission);
         self.gi.collect(self.completed_submission);
         self.environment
