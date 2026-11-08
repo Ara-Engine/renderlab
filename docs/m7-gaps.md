@@ -27,10 +27,10 @@ One section per feature. Each lists the measured or inspected gaps that remain a
   Shadowed point and spot lights still widen it scene-wide; finer rejection and
   stable shadow sampling remain open.
 - **Main regression (found by MQ2, 2026-11-08, main `4c8ef7d`):** the fox walk's
-  RT half fails with wgpu validation "BLAS … is newer than the containing TLAS",
-  and `gpu_skinned_streams_history_and_paths` fails on 8 Vulkan validation errors
-  of the same kind while its image oracles pass. RT skinned evidence is blocked
-  until it is fixed.
+  RT half fails after frame 0 with wgpu validation "Blas … is newer than the
+  containing Tlas" at `Queue::submit` (message and reproducer in
+  [m7-mq2.md](m7-mq2.md) §3.4; API1b is fixing it). RT skinned evidence is blocked
+  until then.
 - Hardware shadows retain the existing opaque, double-sided caster contract. The
   example enables double-sided materials explicitly.
 - No new Unreal or path-traced comparison was run for this overnight unit. Its
@@ -214,7 +214,7 @@ TR1 is the default on traced and visibility-buffer lit frames, both paths, from 
   - budgets below 0.25 are unscreened;
   - the standard program's share is a uniform-light estimate, so dielectrics reflecting much brighter surroundings keep some lag;
   - a static scene under a moving camera now has its view-dependent lag capped too, but still no box (TR1b's U1b case).
-- **Non-RT animated scenes restarted every pixel on every frame on main `4c8ef7d`** (R1n's per-frame instance-record rewrite counted as a geometry upload, which TR1's key hashes). Fixed in MQ2. Since TR1 works there again, non-RT static edge RMS shows MQ1's moving-edge history lag: 10.87 → 11.40 codes against the lag-free control, with flicker lower everywhere and edges visibly anti-aliased where main stair-stepped.
+- **Non-RT animated scenes restarted every pixel on every frame on main `4c8ef7d`** (R1n's per-frame instance-record rewrite counted as a geometry upload, which TR1's key hashes). Found and measured by MQ2; the fix ships in RQ1. Since TR1 works there again, non-RT static edge RMS shows MQ1's moving-edge history lag: 10.87 → 11.40 codes against the lag-free control, with flicker lower everywhere and edges visibly anti-aliased where main stair-stepped.
 - **Skinned characters with GI on** no longer restart every static pixel (MQ2): animated skinned frames use MQ1's box. Evidence is non-RT only (the fixture's ground is flat, so it shows no difference on static pixels); the RT fox walk is blocked by main's BLAS/TLAS validation regression (Skinning, above).
 - Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.
 - The example's `--quarry` mode fails on both paths (mixed programs, MP1).

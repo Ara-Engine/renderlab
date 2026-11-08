@@ -15,7 +15,7 @@
 
 **Skinned characters (MQ1's gap 3).** SK1 rejected every pixel's history scene-wide on each animated frame while GI was on. MQ2 drops that widening; skinned frames clamp continued history to MQ1's 3×3 min/max box, as rigid motion does. SK1's swept volume for direct shadows is kept.
 
-**Found and fixed on the way: non-RT TR1 restarted every pixel on every animated frame.** Since R1n, any frame where a placement moves makes R1n rewrite its software-reflection instance records. That rewrite was counted as a geometry upload, which TR1's restart key hashes. The result was MQ1's original bug, back on non-RT: the example's non-RT flight on main has no anti-aliasing, and MQ1's own GPU test fails on main ("nonrt frame 1: transform edits must not restart"). The rewrite now counts as a transform edit, which TR1 reprojects (one line in `primary_ray_gpu.rs`, marked MQ2). The test passes.
+**Found and fixed on the way: non-RT TR1 restarted every pixel on every animated frame.** Since R1n, any frame where a placement moves makes R1n rewrite its software-reflection instance records. That rewrite was counted as a geometry upload, which TR1's restart key hashes. The result was MQ1's original bug, back on non-RT: the example's non-RT flight on main has no anti-aliasing, and MQ1's own GPU test fails on main ("nonrt frame 1: transform edits must not restart"). The fix counts the rewrite as a transform edit, which TR1 reprojects: one line in `prepare_software_reflections`. MQ2 measured it (binary `final2`), and the test passes with it. **The fix ships in RQ1** (`t3/m7-rq1`, which made the same change, crediting this finding). MQ2's branch reverted its copy at the root's request (`34a2f0f`), so **MQ2 alone still restarts non-RT TR1 on animated frames** until RQ1 merges. §3's non-RT rows are MQ2 plus that line.
 
 **Effect** (the example's 48-frame flight against a 2×2 supersampled TR1-off control, display RMS codes, lower is better):
 - **RT:** chrome sphere 5.68 → 4.19 and its flicker 8.11 → 6.21; gold 4.40 → 3.48, flicker 3.89 → 3.47. Every other population is better or level.
@@ -50,9 +50,9 @@ fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence
 - Frames where a skinned pose changed (`posed`) set `TR1_BOX`, as MQ1's moved placements do: every continued history is clamped to the plain min/max of this frame's nine 3×3 samples. That holds sky occlusion and bounce changed by the character to this frame's range.
 - The swept volume for directional shadows, and SK1's scene-wide fallback for shadowed point and spot lights, are unchanged.
 
-### 1.4 R1n's instance records (`src/primary_ray_gpu.rs`)
+### 1.4 R1n's instance records (measured here, shipped by RQ1)
 
-When the meshes and slot count are unchanged, R1n's per-frame rewrite of instance records only carries placement transforms. It now counts as `uploads.models`, which TR1 has reprojected since MQ1, not `uploads.geometry`. A full repack (new meshes) still counts as geometry and restarts.
+When the meshes and slot count are unchanged, R1n's per-frame rewrite of instance records only carries placement transforms. Counting it as `uploads.models`, which TR1 has reprojected since MQ1, instead of `uploads.geometry` stops the restarts. A full repack (new meshes) still counts as geometry and restarts. MQ2 measured this one-line change (`809c74a`, reverted in `34a2f0f`); RQ1 carries the same edit.
 
 ### 1.5 Tooling
 
@@ -117,17 +117,39 @@ Reading:
 | R0a RF1–RF10, 32 TR1 frames per pose (`gpu_r0a_current`, `RENDERLAB_R1_TR1=1`), main vs MQ2, RT | **13/13 poses byte-identical** (RF10 renders since MP1) |
 | The same, non-RT | **13/13 byte-identical** |
 | TR1's quarry Q-walk (`gpu_tr1_sequence`, native TR1, frames 8/40/64/96), main vs MQ2 (cap on, the default) | **byte-identical, 4/4 on each path**: the cap never binds on the quarry walk. A second in-process variant with the cap off differs on RT and not on non-RT; it runs after the first in the same process (the known run-order effect, I) |
-| `gpu_mq1_moving_placement` (no restart after frame 1, both paths) | **main fails** on non-RT ("transform edits must not restart"); **MQ2 passes** both paths |
-| Library suite, final code | **192 passed, 0 failed, 158 ignored; exit 0** (with and without the R1n fix) |
+| `gpu_mq1_moving_placement` (no restart after frame 1, both paths) | **main fails** on non-RT ("nonrt frame 1: transform edits must not restart"); **MQ2 with the R1n line (`final2`) passes** both paths |
+| Library suite, final code | **192 passed, 0 failed, 158 ignored; exit 0** (with and without the R1n line) |
 | CPU composition checks (naga validation of every program composition, both heads, the resolve; film seams; `view_dependence_composition`) | pass |
 | `cargo fmt --check`; Clippy `--lib --tests` | clean; no warnings in MQ2's files |
 | The example flight, RT, final code with and without the R1n fix | byte-identical, 48/48 (R1n's records exist only on non-RT) |
-| SK1's fox walk (`examples/skinned-mesh.rs`, fixture, default GI and TR1), main vs MQ2 | non-RT half runs on both; **the RT half fails on main's own binary and on MQ2's** with a wgpu validation error ("BLAS … is newer than the containing TLAS"). Main regression; reported to root |
-| `gpu_skinned_streams_history_and_paths`, MQ2 | its oracles pass (deformed vs baked: max byte error 0 on both paths; TR1 continues after frame 0), but it **fails on 8 Vulkan validation errors**, the same BLAS/TLAS ordering as the fox walk (not run with main's binary) |
+| SK1's fox walk (`examples/skinned-mesh.rs`, fixture, default GI and TR1), main vs MQ2 | non-RT half runs on both; **the RT half fails on main's own binary and on MQ2's** after writing frame 0, with a wgpu validation error at `Queue::submit` (§3.4). Main regression; reported to root |
+| `gpu_skinned_streams_history_and_paths`, MQ2 | its oracles pass (deformed vs baked: max byte error 0 on both paths; TR1 continues after frame 0). It reports failure only for 8 Vulkan **loader** messages from the stale PRISM hook registry entry (`loader_get_json: Failed to open JSON file C:\ProgramData\PRISMLiveStudio-hook\obs-vulkan64.json`, and `obs-vulkan32.json`, on two instances): the known environment issue, because this batch did not set `VK_IMPLICIT_LAYER_PATH` to an empty directory. Not the BLAS/TLAS error, and not rerun |
 
 **Skinned history.** In the non-RT fox fixture the static camera sees a flat, untextured ground, where a restarted pixel and a continued one look alike. So that fixture cannot show the restored history; it shows only where MQ2 differs from main. `deliver/fox-nonrt-024.png` (main | MQ2 | 16× difference): the differences are on the fox itself, whose own history MQ2 now clamps to the box as MQ1 does for moving rigid objects, plus faint contours on the ground. There are no trails at the moving shadow. The RT fixture could not run (above).
 
-### 3.4 Timing (not informative)
+### 3.4 The RT skinned BLAS/TLAS failure (reproducer for API1b)
+
+On main `4c8ef7d`'s own debug build (and MQ2's), `examples/skinned-mesh.rs` fails on its RT half. It writes `rt-fixture-00.png`, then fails before frame 8's capture:
+
+```text
+Error: Fault(Fault("Validation Error\n\nCaused by:\n  In Queue::submit\n    Blas ResourceErrorIdent { type: \"Blas\", label: \"renderlab hardware 1 BLAS 1\" } is newer than the containing Tlas ResourceErrorIdent { type: \"Tlas\", label: \"renderlab hardware 1 TLAS 3\" }\n"))
+```
+
+Reproduce (inside a GPU lease; the non-RT half runs first and passes):
+
+```powershell
+git checkout 4c8ef7d
+cargo build --example skinned-mesh --target-dir D:/Coding/renderlab-work/<unit>/target
+$env:RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK = 'I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK'
+$env:VK_LOADER_LAYERS_DISABLE = 'VK_LAYER_KHRONOS_validation'
+D:/Coding/renderlab-work/<unit>/target/debug/examples/skinned-mesh.exe D:/Coding/renderlab-work/m7-sk1/Fox.glb D:/Coding/renderlab-work/<unit>/fox
+```
+
+Logs: `D:/Coding/renderlab-work/mq2/runs/c/fox-{base,final}.log` (`base` is main's binary).
+
+**Inference (I):** a pose change rebuilds the skinned BLAS after the frame's TLAS was built (or without rebuilding it), so the TLAS submitted references an older BLAS build.
+
+### 3.5 Timing (not informative)
 
 GPU render span, frames 8–47, development build, shared GPU. RT main p50 47.6 ms vs MQ2 44.6 ms; non-RT main 51.9 ms vs MQ2 53.0 ms (non-RT with the R1n fix: 107.4 ms, cap off 121.7 ms). The same byte-identical RT flight measured p50 44.6 ms in one lease and 100.5 ms in another, and minima range 8–36 ms: contention dominates. MQ2's added work per pixel is the program's `view_dependence` call (one DFG lookup and a few ALU) in shading, plus two normalizations and a square root in TR1. Not isolated tonight (gap 6).
 
@@ -145,9 +167,9 @@ GPU render span, frames 8–47, development build, shared GPU. RT main p50 47.6 
 2. **Budgets below 0.25 are unscreened.** RMS still improved from 0.5 to 0.25 while grain rose toward the control's. 0.125 might be better or noisier.
 3. **Non-RT static edge RMS +0.5 codes** against the lag-free control (MQ1's moving-edge history trade, now on non-RT too since TR1 works there again). Not visible in inspected crops.
 4. **The standard share is a uniform-light estimate** (§4).
-5. **Skinned history evidence is thin.** The RT fox walk and SK1's GPU test fail on main's BLAS/TLAS validation error. The non-RT fixture's flat ground cannot show restored history. Shadowed point and spot lights still widen SK1's rejection scene-wide.
+5. **Skinned history evidence is thin.** The RT fox walk fails on main's BLAS/TLAS validation error (§3.4); SK1's GPU test was not rerun with the loader workaround. The non-RT fixture's flat ground cannot show restored history. Shadowed point and spot lights still widen SK1's rejection scene-wide.
 6. **No quiet timing.** The hint's shading cost and the cap's TR1 cost are not isolated.
-7. **Upload counters as restart keys are fragile.** A later per-frame buffer rewrite counted as `geometry` would restart TR1 again on that path. `gpu_mq1_moving_placement` now catches it on non-RT; a broader guard would be an explicit "restart reason" rather than byte counters.
+7. **Until RQ1 merges, MQ2 alone restarts non-RT TR1 on every animated frame** (R1n's accounting, §1.4). **Upload counters as restart keys are fragile.** A later per-frame buffer rewrite counted as `geometry` would restart TR1 again on that path. `gpu_mq1_moving_placement` now catches it on non-RT; a broader guard would be an explicit "restart reason" rather than byte counters.
 8. **RQ1's path-traced frame-47 reference** was used only as a check (§3.2); its fog-off settings make it non-discriminating for these flights.
 
 ## 6. Evidence, reproduction and time
