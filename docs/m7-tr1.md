@@ -58,3 +58,182 @@ Not used: variance clipping, SVGF, temporal gradients, own-pixel moments, fast/s
 - Acceptance and weights never read colour, so toon, flat and custom programs converge to the footprint integral of their own output. Two places read output colour: the spatial estimates (a weighted mean of the program's own samples, not a decision), and the optional `box_clamp` (off).
 - Constraint recorded: a program whose output is not a function of the surface point (screen-space patterns, dithering keyed to the pixel, output that depends on the frame) is integrated over the jitter like any other signal; screen-locked patterns blur by the jitter footprint. A program that wants per-frame stochastic effects should key them on the surface, not the screen.
 - Constraint recorded: TR1 needs each pixel's hit record and placement, so it applies to traced and visibility-buffer frames only. Raster frames render unjittered without history.
+
+## 4. How TR1 is measured against the bar
+
+- **Same inputs as TR0's T1b replay:** the registered Q-walk (`E:/renderlab-work/t1-gpu/sequences/q-walk.json`, SHA-256 `db018bb0…`), quarry asset, limits, `sun128.rle2` bound for lighting, black primary background (`t1b-black-b/lighting-black-background.json`: sun travel (−0.4, −0.8, −0.3), 1,000/950/850 lux, exposure −14), 0.04-rad disk, 1920×1080, 1x. **RT** is traced primaries with Interactive (the fast RT setup) on the RT device; **non-RT** is the no-RT device's visibility buffer (LOD 0.35 px, extent 32, lift 1) with Virtual Surface shadows, M6-close's non-RT default.
+- **Same target and arithmetic:** `scripts/m7-tr1-score.py` is TR0's `score` with the native capture replaced by Renderlab's exposed HDR. References are U0b's `quarry-final` lossless zero-shutter archives; populations, split-half noise subtraction, the F0 transform, distance bands, error extents, the +8 changed mask and flicker residuals are TR0's code. Age pools use **the same fixed T1b masks** TR0 used for TSR (`t1b-black-b/data/age-fNNN.u8`), so every pool is the same pixel set for TSR and TR1. A self-check compares every shared row's pixel count with the bar: **all match** (e.g. 19,744 / 19,744 on the first run).
+- **Comparison:** `compare` matches each of TR0's TSR Epic rows (and the recorded T1b rows) by frame, channel, population and measure. Lower is better; a missing TR1 row is a loss. TSR Epic HRT (`w-e-r-c1`) is RT's comparator and TSR Epic globally-no-RT VSM (`w-e-n-c2`) is non-RT's.
+- **Screens** used T1b's 60 scored checkpoints (1 GB per variant); final runs write all 93 reference frames.
+- **Images** were inspected at frame 64, L0 and L4, as full frames and error maps, and per pixel where a pool regressed (`E:/renderlab-work/m7-tr1/inspect/`).
+
+## 5. Results on Q-walk, both paths (M)
+
+Final build `tr1final` (renderer code identical to `tr1final2`, which adds two test-only devices), all 93 frames with physical references, every row of TR0's bar. Frame 0 of each run starts cold.
+
+| Comparison, all bar rows (22,684 per path) | TR1 wins | TR1 losses | ties |
+|---|---:|---:|---:|
+| RT (traced + Interactive) vs TSR Epic HRT | **12,320** | **9,209** | 1,155 |
+| Non-RT (visibility buffer + Virtual Surface) vs TSR Epic no-RT | **12,078** | **9,448** | 1,158 |
+| RT vs the recorded T1b black replay (13,826 rows) | 9,746 | 3,799 | 281 |
+| Non-RT unreconstructed baseline vs TSR Epic no-RT | 4,155 | 17,371 | 1,158 |
+
+**TR1 does not beat TSR Epic on every measure on either path, so it stays opt-in and is not the default.**
+
+### 5.1 Headline rows, RT against TSR Epic HRT (F0 codes; bold: worse than TSR)
+
+Rows are TR0's: noise-subtracted RMS on T1b age ≥ 32 pixels unless named; "Off" is the unreconstructed RT fast setup (Interactive 1x), byte-identical to its scored s1 frames on all 93 frames.
+
+| Measure | Ch | TSR Epic | T1b | Off | TR1 |
+|---|---|---:|---:|---:|---:|
+| All-covered, frame 64 | L0 | 11.24 | 10.91 | **12.05** | 10.88 |
+| All-covered, frame 64 | L4 | 16.67 | 17.59 | **19.67** | **17.14** |
+| Partial, frame 64 | L0 | 13.5 | 13.94 | **16.43** | **13.91** |
+| Partial, frame 64 | L4 | 21 | 22.55 | **28.09** | **21.99** |
+| Occluded, frame 64 | L0 | 31.29 | 28.99 | 29.93 | 29.07 |
+| Occluded, frame 64 | L4 | 51.95 | 49.9 | 51.63 | 49.98 |
+| Edge, frame 64 | L0 | 17.81 | 23.57 | **23.38** | **19.92** |
+| Edge, frame 64 | L4 | 31.88 | 50.5 | **50.33** | **40.83** |
+| Background-centre, frame 64 | L0 | 0.3714 | 1.584 | **1.19** | **0.9005** |
+| Background-centre, frame 64 | L4 | 1.168 | 5.456 | **3.49** | **2.699** |
+| Hold frame 96, all-covered | L0 | 11.19 | 10.4 | **12.04** | 10.4 |
+| Hold frame 96, all-covered | L4 | 16.56 | 16.91 | **19.66** | **16.85** |
+| Return 120, all-covered | L0 | 10.97 | 10.59 | **11.85** | 10.67 |
+| Return 120, all-covered | L4 | 16.04 | 16.85 | **19.16** | **16.66** |
+| Return 128, all-covered | L0 | 10.9 | 10.55 | **11.82** | 10.58 |
+| Return 128, all-covered | L4 | 15.88 | 16.64 | **19.03** | **16.45** |
+| Frame 160, edge | L0 | 16.75 | 22.59 | **22.3** | **19.83** |
+| Frame 160, edge | L4 | 28.94 | 47.98 | **48.87** | **41.15** |
+| Hold 80->81 step | L0 | 0.432 | 0.2774 | 0 | 0.2439 |
+| Hold 80->81 step | L4 | 0.4776 | 0.3314 | 0 | 0.2881 |
+| Return 127->128 flicker | L0 | 3.425 | 4.492 | **7.763** | **4.42** |
+| Return 127->128 flicker | L4 | 4.177 | 6.01 | **11.72** | **5.071** |
+| Frame 64 background 1.5-3 px | L0 | 0.004062 | 11.29 | 0 | 0 |
+| Frame 64 background 1.5-3 px | L4 | 0.06495 | 44.19 | 0 | 0 |
+| Frame 64 background 3-6 px | L0 | 0.006408 | 8.188 | 0 | 0 |
+| Frame 64 background 3-6 px | L4 | 0.1021 | 33.69 | 0 | 0 |
+| Revealed age 3, all-covered | L0 | 7.695 | 22.24 | **12.05** | **10.77** |
+| Revealed age 3, all-covered | L4 | 12.06 | 55.54 | **17.99** | **17.66** |
+| Revealed age 7, all-covered | L0 | 7.76 | 15.97 | **10.73** | **9.708** |
+| Revealed age 7, all-covered | L4 | 12.4 | 32.48 | **17.21** | **16.35** |
+| Revealed age 7, background-centre | L0 | 4.754 | 43.51 | **13.88** | **17.09** |
+| Revealed age 7, background-centre | L4 | 15.93 | 121.5 | **43.66** | **51.68** |
+| Start age 0, all-covered | L0 | 10.61 | 11.56 | **11.56** | **10.61** |
+| Start age 0, all-covered | L4 | 15.2 | 18.48 | **18.48** | **16.18** |
+| Start age 3, all-covered | L0 | 10.62 | 10.56 | **11.6** | 10.35 |
+| Start age 3, all-covered | L4 | 15.28 | 17.08 | **18.65** | **15.94** |
+| Start age 7, all-covered | L0 | 10.67 | 10.42 | **11.61** | 10.32 |
+| Start age 7, all-covered | L4 | 15.38 | 16.5 | **18.62** | **16** |
+| +8 changed mask, frame 72 | L0 | 11.66 | 11.18 | **13.56** | 11.27 |
+| +8 changed mask, frame 72 | L4 | 17.34 | 17.59 | **22.27** | **17.55** |
+| +8 changed |mean|, frame 72 | L0 | 3.751 | 3.165 | **4.256** | 2.961 |
+| +8 changed |mean|, frame 72 | L4 | 5.056 | 3.864 | **6.502** | 3.541 |
+
+### 5.2 Headline rows, non-RT against TSR Epic no-RT
+
+"Off" is the unreconstructed non-RT default (visibility buffer + Virtual Surface).
+
+| Measure | Ch | TSR Epic | T1b | Off | TR1 |
+|---|---|---:|---:|---:|---:|
+| All-covered, frame 64 | L0 | 11.25 | 10.91 | **12.1** | 10.92 |
+| All-covered, frame 64 | L4 | 16.67 | 17.59 | **19.76** | **17.2** |
+| Partial, frame 64 | L0 | 13.51 | 13.94 | **16.48** | **13.94** |
+| Partial, frame 64 | L4 | 21 | 22.55 | **28.17** | **22.04** |
+| Occluded, frame 64 | L0 | 31.29 | 28.99 | 29.95 | 29.05 |
+| Occluded, frame 64 | L4 | 51.95 | 49.9 | 51.81 | 50.03 |
+| Edge, frame 64 | L0 | 17.82 | 23.57 | **23.42** | **19.87** |
+| Edge, frame 64 | L4 | 31.88 | 50.5 | **50.53** | **40.71** |
+| Background-centre, frame 64 | L0 | 0.3711 | 1.584 | **1.185** | **0.8986** |
+| Background-centre, frame 64 | L4 | 1.167 | 5.456 | **3.48** | **2.692** |
+| Hold frame 96, all-covered | L0 | 11.19 | 10.4 | **12.1** | 10.45 |
+| Hold frame 96, all-covered | L4 | 16.56 | 16.91 | **19.76** | **16.92** |
+| Return 120, all-covered | L0 | 10.97 | 10.59 | **11.92** | 10.72 |
+| Return 120, all-covered | L4 | 16.04 | 16.85 | **19.31** | **16.72** |
+| Return 128, all-covered | L0 | 10.9 | 10.55 | **11.89** | 10.62 |
+| Return 128, all-covered | L4 | 15.88 | 16.64 | **19.18** | **16.51** |
+| Frame 160, edge | L0 | 16.75 | 22.59 | **22.38** | **19.8** |
+| Frame 160, edge | L4 | 28.94 | 47.98 | **49.03** | **41.12** |
+| Hold 80->81 step | L0 | 0.4325 | 0.2774 | 0 | 0.2434 |
+| Hold 80->81 step | L4 | 0.4782 | 0.3314 | 0 | 0.2876 |
+| Return 127->128 flicker | L0 | 3.425 | 4.492 | **7.826** | **4.422** |
+| Return 127->128 flicker | L4 | 4.176 | 6.01 | **11.89** | **5.069** |
+| Frame 64 background 1.5-3 px | L0 | 0.004068 | 11.29 | 0 | 0 |
+| Frame 64 background 1.5-3 px | L4 | 0.06504 | 44.19 | 0 | 0 |
+| Frame 64 background 3-6 px | L0 | 0.006413 | 8.188 | 0 | 0 |
+| Frame 64 background 3-6 px | L4 | 0.1022 | 33.69 | 0 | 0 |
+| Revealed age 3, all-covered | L0 | 7.691 | 22.24 | **13.49** | **10.82** |
+| Revealed age 3, all-covered | L4 | 12.05 | 55.54 | **25.91** | **17.8** |
+| Revealed age 7, all-covered | L0 | 7.76 | 15.97 | **12.37** | **9.785** |
+| Revealed age 7, all-covered | L4 | 12.4 | 32.48 | **24.32** | **16.46** |
+| Revealed age 7, background-centre | L0 | 4.753 | 43.51 | **13.83** | **16.98** |
+| Revealed age 7, background-centre | L4 | 15.93 | 121.5 | **43.52** | **51.32** |
+| Start age 0, all-covered | L0 | 10.61 | 11.56 | **11.64** | **10.66** |
+| Start age 0, all-covered | L4 | 15.2 | 18.48 | **18.64** | **16.26** |
+| Start age 3, all-covered | L0 | 10.62 | 10.56 | **11.67** | 10.39 |
+| Start age 3, all-covered | L4 | 15.28 | 17.08 | **18.79** | **16** |
+| Start age 7, all-covered | L0 | 10.67 | 10.42 | **11.69** | 10.36 |
+| Start age 7, all-covered | L4 | 15.38 | 16.5 | **18.78** | **16.06** |
+| +8 changed mask, frame 72 | L0 | 11.66 | 11.18 | **13.61** | 11.31 |
+| +8 changed mask, frame 72 | L4 | 17.35 | 17.59 | **22.39** | **17.6** |
+| +8 changed |mean|, frame 72 | L0 | 3.759 | 3.165 | **4.35** | 3.049 |
+| +8 changed |mean|, frame 72 | L4 | 5.065 | 3.864 | **6.62** | 3.642 |
+
+### 5.3 What TR1 wins and loses
+
+- **Wins on both paths:** converged and moving interiors at registered exposure (all-covered 10.88 / 10.92 vs 11.24 at frame 64; hold 10.40 / 10.45 vs 11.19; return 120/128), occluded at both exposures, the +8 changed mask at L0 and its bias at both exposures, start-age pools at L0, **hold flicker** (80→81 step 0.244 vs 0.432 L0, 0.288 vs 0.478 L4), and **trails**: no background pixel 1.5 px or more from the silhouette exceeds 1 code at any frame or exposure, where TSR has up to 110 such pixels reaching 41 px at L4 (8 over 8 codes at 19 px).
+- **Losses on both paths, by mechanism:**
+  1. **Silhouettes in motion.** Edge 19.9 vs 17.8 (L0), 40.8 vs 31.9 (L4) at frame 64; background-centre 0.90 vs 0.37. A single history value per pixel cannot hold partial coverage as an edge slides; TSR Epic keeps its history at 200% resolution. Moving flicker on the return (4.42 vs 3.43) is the same band.
+  2. **Revealed pixels.** All-covered revealed at age 3/7: 10.8 / 9.7 vs 7.7 / 7.8 (better than T1b's 22.2 / 16.0 and than no reconstruction's 12.1 / 10.7); revealed background-centre at age 7 17.1 vs 4.75. T1b's revealed pools are mostly moving-silhouette pixels (§6.1), so they share mechanism 1.
+  3. **+4-stop populations of converged pixels** (all-covered 17.14 vs 16.67; partial 21.99 vs 21.0; hold frame 96 16.85 vs 16.56). The converged still image itself is above TSR at L4 (hold 96: 16.85 vs 16.56) while below it at L0 (10.40 vs 11.19): this is Renderlab's lighting/shading against the physical target in dark regions, not reconstruction error. TR1 cannot close it.
+- **Settle equivalent (the frozen film bar is deleted):** after the stop at frame 64, at +8 (frame 72) TR1's unaged errors are all-covered 10.51 vs 11.17, partial 13.17 vs 13.33, edge 16.80 vs 16.95, occluded 28.87 vs 31.21 (L0), and 16.85 vs 16.58, 21.30 vs 20.78, 30.88 vs 29.62, background-centre 0.41 vs 0.28 / 1.31 vs 0.90 at L4/L0 where TSR leads. TR1 keeps converging through the hold (edge L0 16.30 vs TSR 17.14 at frame 96); TSR is flat from the stop.
+
+### 5.4 Equivalents for the certifications TR0 could not produce
+
+| TR0 gap | Equivalent used, and how | TSR | TR1 |
+|---|---|---|---|
+| Post-TSR R_F / R_D (visibility, direct) | Not separable from TSR's final colour without new Unreal sun-only and visibility captures (§10). Equivalent: final-colour errors in the shadow-boundary populations TR0 already scores (partial, solid-occluded, contact, solid-lit), same pixels, both engines | rows in the bar | rows above; partial wins at L0, loses at L4 |
+| Frozen-film settle | Error at +8 after the stop, and frames to stay within 2 % of each engine's own frame-96 value (`m7-tr1-settle.py`), on unaged populations (every hold frame has a reference) | flat from the stop | §5.3 |
+| Connected trail width | TR0's thresholded nearest-edge extent of background-centre error over 1/4/8 codes, every frame; zero pixels bounds any connected trail to the 0–1.5 px band | L4: up to 110 px over 1 code, 41 px away | **0 pixels** at every threshold, frame and exposure |
+
+## 6. Screens: what each mechanism did (M, RT unless noted)
+
+Each screen ran the registered track from cold in one process per path and was scored on T1b's 60 checkpoints (s1–s2 on all 93) against the bar. "Off" is the unreconstructed frame. Wins/losses count bar rows on the scored frames (60-frame screens have 6,458 rows without frames).
+
+| Screen | Change | Edge f64 L0 | Revealed age 3 L0 | Revealed bg age 7 L0 | Hold step L0 | Rows won / lost |
+|---|---|---:|---:|---:|---:|---:|
+| Off | no reconstruction | 23.38 | 12.05 | 13.88 | 0 | — |
+| s1 | T1b-style rules + identity, silhouette bit, spatial start | 25.26 | 13.52 | 23.49 | 1.607 | 10,226 / 11,303 (93 f) |
+| s2 | sun-turn angle fix (acos of a rounded unit dot product capped every window near 12), radius-2 start tent | 25.26 | 13.55 | 23.52 | 1.008 | — |
+| s3 | other surfaces' silhouette history refused | 24.78 | 23.50 | 13.64 | 1.252 | — |
+| s3 | + plain min/max box (all 3×3 samples) | 24.76 | 23.51 | 13.55 | 1.258 | no measurable change |
+| s6 | still silhouettes keep own history; radius-1 silhouette start | 24.62 | 23.99 | 12.62 | 1.785 | — |
+| s7 | tangent-plane test replaces the 1/cos distance tolerance | 24.62 | 23.99 | 12.62 | 1.778 | no change |
+| s8 | **still decided on the CPU** (bit-equal matrices) | 24.62 | 23.98 | 12.50 | **0.243** | 7,099 / 8,400 |
+| s8 | + silhouette mixing, window 2 | 24.37 | 14.14 | 16.91 | 0.245 | 7,502 / 7,997 |
+| s9 | **+ moving silhouettes blend this frame's bilinear 3×3 estimate** | **19.92** | **10.77** | 17.09 | 0.244 | **8,266 / 7,233** |
+| s10 | silhouette window 1 | 19.35 | 13.29 | 10.26 | 0.246 | 8,251 / 7,248 |
+| s10 | silhouette start radius 0.75 | 20.22 | 11.95 | 16.35 | 0.245 | 8,053 / 7,446 |
+| s10 | Catmull-Rom window 32 | 19.92 | 10.77 | 17.09 | 0.232 | 8,317 / 7,182 (return flicker 4.52 vs 4.42) |
+| s10 | blur budget 2 | 19.92 | 10.77 | 17.09 | 0.233 | 8,117 / 7,382 |
+
+s9 is the final setting. Non-RT tracked RT within a few hundredths throughout (s6, s7 and the final run).
+
+### 6.1 Diagnoses that changed the design
+
+- **Still frames.** On the hold, 1 % of pixels carried 90 % of the frame-to-frame step energy, all on placement outlines. Hold cameras are bit-identical, but the GPU's two inlined projections of one point did not round alike, so motion was never exactly zero and silhouettes never converged. The still decision moved to the CPU (`flags.z`).
+- **Revealed pixels are moving silhouettes.** T1b's age-3 revealed pool is a few dozen pixels per frame spread over the whole image. Without mixing, rows along the cliff's top edge whose reference is ~65 codes came out exactly 0: a jittered sample just above the edge makes the pixel "background", which continued only background history. Mixing restored ~45–57 codes; the current-frame bilinear estimate (s9) brought the pool from 14.1 to 10.8.
+- **Virtual kept counts on jittered holds** (§7.2), which also broke in-process replay.
+
+### 6.2 Box clamp (the design's last option, B)
+
+Measured in s3 on RT: every headline row within 0.02 of the same build without it, and no change in rows won. Identity rejection already removes what the box would; at silhouettes, where the leak is, the 3×3 contains both surfaces and the box spans them. It stays off. With that record, `Reconstruction::VarianceClip`'s trigger (a population still losing after the named fix and the box) is met on edges, revealed and background-centre pixels; per the design that is **trigger input**, not adoption: the replay of saved TR1 buffers on the standard, toon and flat programs that the fallback requires was not run, and US 10,116,916 stays unbuilt.
+
+## 7. Defects found outside TR1
+
+### 7.1 The non-RT Virtual pass exceeds `visibility_limits` (main, since G1 `714a5a7`)
+
+G1 added the radiance-cache table as storage binding 20 of the lighting group. The `N8 visibility ABI` layout now needs **11** storage buffers per compute stage, while `visibility_limits` requests 10, so a no-RT device created at `visibility_limits(Limits::default())` (as `visibility_buffer_tests::no_rt_renderer` does) fails `create_pipeline_layout` on the first sun-shadowed Virtual frame. G1b's non-RT quarry runs were sky-only and never reached that pass. `primary_ray.rs` is outside TR1's files, so TR1's harness asks for 11 on its own no-RT device (`no_rt_renderer_11`). **Owner fix:** raise `visibility_limits` to 11 (or move binding 20 out of the lighting group).
+
+### 7.2 Virtual's still-frame key ignores the projection (fixed for reconstructed frames)
+
+Virtual Surface keeps a pixel's visibility counts on a frame whose key (camera view and field of view, sun, casters, settings) is unchanged. A jittered still frame has the same view but receivers moved by the jitter, so it kept counts computed at an earlier sub-pixel receiver, and non-RT shadow edges stopped integrating over the footprint on holds. The kept state also made in-process replays diverge on the hold. TR1 now clears Virtual's `rolling` flag on reconstructed frames, the existing mechanism other passes use (one condition in `renderer.rs`; no shadow file is edited). Cost: a still non-RT TR1 frame looks up every receiver, as a moving frame does (§6). **Owner option:** key the still test on the full view-projection.

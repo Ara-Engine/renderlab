@@ -49,10 +49,11 @@ def main():
     plan_dir = ROOT / "plans" / args.label
     plan_dir.mkdir(parents=True, exist_ok=False)
     # reference: every Q-walk frame with a physical reference (93); checkpoints: T1b's 60
-    # scored frames, which carry the fixed age masks (screens); all: every frame.
+    # scored frames, which carry the fixed age masks (screens); all: every frame; none: no
+    # capture (cost runs).
     frames = {"reference": reference_frames,
               "checkpoints": lambda: json.loads((TR0 / "runs/t1b-black-b/manifest.json").read_text())["scored"],
-              "all": lambda: None}[args.frames]()
+              "all": lambda: None, "none": lambda: []}[args.frames]()
     steps = []
     for step in args.paths.split(","):
         # A step is a path, optionally with a repeat suffix (rt-b) for cross-process identity.

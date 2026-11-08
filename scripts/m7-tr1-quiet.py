@@ -6,8 +6,13 @@ Posts a request line, then takes the shared lock at the first free moment that f
 120 s with no foreign `stillkit` compiler (sampled every 3 s), with no other owner's
 reservation, request or QUIET window in force and no game hold. The plan announces its QUIET
 window. Any stillkit sample between lock and release labels that attempt contended and the
-next attempt runs as <prefix>-<n+1>. Never kills or pauses anything.
+next attempt runs as <prefix>-<n+1>. Never kills anything. As TR0's qualified window did
+(scripts/m7-u0b.py `quiet_desktop`), the live wallpaper is paused through its supported
+`config.paused` setting for the window, a GPU use of at most 3 % is required before timing,
+and only that setting is restored afterwards.
 """
+import contextlib
+import datetime as dt
 import argparse
 import importlib.util
 import json
@@ -23,6 +28,40 @@ spec = importlib.util.spec_from_file_location("m7_g1_run", Path(__file__).with_n
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 RUNS = Path("E:/renderlab-work/m7-tr1/runs")
+
+
+@contextlib.contextmanager
+def quiet_desktop(u, root):
+    """scripts/m7-u0b.py's wallpaper pause, recorded under `root`."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = Path(os.environ["APPDATA"]) / "mypaper/config.json"
+    config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else None
+    original = config.get("paused", False) if config is not None else None
+    u.save(root / "wallpaper-state.json", dict(path=str(path), original_paused=original,
+                                              method="supported watched config.paused; restored in finally"))
+    if config is not None:
+        config["paused"] = True
+        path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    try:
+        samples = []
+        for _ in range(15):
+            state = u.E2E.state()
+            samples.append(state)
+            if state["games"]:
+                raise RuntimeError("game present")
+            if float(state["gpu"].split(",")[2]) <= 3:
+                break
+            time.sleep(2)
+        u.save(root / "quiet-start.json", samples)
+        if float(samples[-1]["gpu"].split(",")[2]) > 3:
+            raise RuntimeError("no quiet GPU start after wallpaper pause")
+        yield
+    finally:
+        u.save(root / "quiet-end.json", dict(utc=dt.datetime.now(dt.timezone.utc).isoformat()))
+        if original is not None:
+            current = json.loads(path.read_text(encoding="utf-8-sig"))
+            current["paused"] = original
+            path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
 QUERY = ("@(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(rustc|cargo|clippy-driver|rustdoc)\\.exe$' "
          "-and $_.CommandLine -match 'stillkit' }).Count")
 
@@ -66,7 +105,8 @@ def main():
         plan_args = argparse.Namespace(label=label, plan=args.plan, minutes=args.minutes, spp=2048, paths="rt,nonrt",
                                        after="", check_only=False, quiet=True, force_schedule=False)
         try:
-            runner.plan(plan_args)
+            with quiet_desktop(u, Path("E:/renderlab-work/m7-tr1/quiet") / label):
+                runner.plan(plan_args)
         except SystemExit as stop:
             if stop.code == 3:
                 time.sleep(0.05)
