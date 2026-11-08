@@ -47,11 +47,11 @@ const FILM_TILE_SEAM: (&str, &str) = (
 /// selection before its gradients read the camera ray.
 const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
     (
-        "{textureStore(primary_hdr,vec2<i32>(p),primary_frame.clear);}",
+        "{textureStore(primary_hdr,vec2<i32>(p),primary_miss(p,size,primary_frame.clear));}",
         "{film_store(vec2<i32>(p),film_background(),0u,0.0);}",
     ),
     (
-        "textureStore(primary_hdr,vec2<i32>(id.xy),primary_frame.clear);",
+        "textureStore(primary_hdr,vec2<i32>(id.xy),primary_miss(id.xy,size,primary_frame.clear));",
         "film_store(vec2<i32>(id.xy),film_background(),0u,0.0);",
     ),
     (
@@ -59,7 +59,7 @@ const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
         "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);\n    film_begin(film_index(pixel),id,size.x);",
     ),
     (
-        "if record.x==0u {textureStore(primary_hdr,pixel,primary_frame.clear);return;}",
+        "if record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}",
         "if record.x==0u {film_store(pixel,film_background(),0u,0.0);return;}",
     ),
     (
@@ -212,6 +212,8 @@ impl FilmLayouts {
             image(28, F::Rg32Uint),
             texture(29, uint),
             texture(30, uint),
+            // M7-R1: reflection rays (shaders/reflections.wgsl).
+            scene(2),
         ];
         shade.extend(film);
         let trace_bindings = group("temporal film trace", &trace);
@@ -534,6 +536,8 @@ impl Renderer {
                 (28, R::TextureView(&film.anchor[written].view)),
                 (29, R::TextureView(&film.tiles[read].view)),
                 (30, R::TextureView(&film.tiles[written].view)),
+                // M7-R1: reflection rays.
+                (2, hardware.scene().as_binding()),
             ];
             shade.extend(film_entries);
             let init = [
