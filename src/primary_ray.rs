@@ -35,14 +35,14 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
 /// Deferred material arrays and five resolve storage targets (hits, world, normal,
-/// coverage and receiver epsilon), and twelve storage buffers per stage for the Virtual
-/// shadow lookup, including radiance-cache and DC1 decal tables. No
+/// coverage and receiver epsilon), and thirteen storage buffers per stage for the Virtual
+/// shadow lookup, including SK1 history, radiance-cache and DC1 decal tables. No
 /// acceleration-structure limits are raised. Check these against the adapter limits
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
-        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(12),
+        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(13),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
             .max(12 * TRACED_DRAWS),
@@ -103,10 +103,10 @@ mod tests {
     #[test]
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());
-        assert_eq!(limits.max_storage_buffers_per_shader_stage, 12);
+        assert_eq!(limits.max_storage_buffers_per_shader_stage, 13);
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
-            12
+            13
         );
         let higher = wgpu::Limits {
             max_storage_buffers_per_shader_stage: 16,
