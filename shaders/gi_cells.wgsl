@@ -53,8 +53,10 @@ const GI_H_SPREAD:u32=14u;
 const GI_H_NEAR_BINS:u32=16u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
-// last word carries GI_SPLIT_HOT in the half no SH coefficient uses.
-const GI_REFINE:u32=3u;
+// last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly
+// all of three levels' quality on the quarry (map sky 30.85% against 30.76%) at a third of
+// the probe's walk cost (about 0.9 against 3 ms a frame; docs/m7-g1c.md).
+const GI_REFINE:u32=1u;
 const GI_SPLIT_HOT:u32=0x10000u;
 // The levels a point reads and the weight of the second: one level away from a switch
 // (or with the blend off), two around it. `margin` widens the band for the kernels,

@@ -532,11 +532,26 @@ fn gi_sky(d:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 { return environment_radiance(environment_direction(d),GI_ENV_ROUGHNESS); }
     return vec3<f32>(1.0);
 }
-// One lane's or cell's SH sums (gi_lane_add, gi_lane_reduce).
-var<private> gi_cell_sh:array<vec3<f32>,9>;
+// One lane's or cell's SH sums (gi_lane_add, gi_lane_reduce); entry 9 is the same
+// directions' unoccluded sum, as L2 irradiance at the cell normal.
+var<private> gi_cell_sh:array<vec3<f32>,10>;
 // The sum replaces the slot's SH, stored as halves of one f32 scale: no blend with
 // any earlier value (W1).
+// A map's SH is first scaled per channel so that its unoccluded value at the cell normal is
+// the prepared diffuse irradiance there: 64 hemisphere directions of a map's prefiltered
+// radiance miss or blur a bright sun's lobe (G1c: open quarry ground read 11% dark with every
+// direction visible), while the prepared irradiance is exact. A constant sky needs no
+// scale: the directions integrate the L2 kernel to pi exactly.
 fn gi_store_sh(slot:u32) {
+    if lighting.map.w!=0.0 {
+        let n=gi_unpack_normal(gi_table[gi_cold(slot)+GI_C_NORMAL]);
+        let exact=environment_bilinear(environment_diffuse,environment_direction(n),0,0);
+        let open=gi_cell_sh[9];
+        // Guarded: a near-black or degenerate sum keeps its own value.
+        let s=select(vec3<f32>(1.0),clamp(exact/max(open,vec3<f32>(1e-30)),vec3<f32>(0.25),vec3<f32>(4.0)),
+            open>vec3<f32>(1e-20));
+        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]*=s; }
+    }
     var m=0.0;
     for(var i=0u;i<9u;i+=1u) {
         let c=abs(gi_cell_sh[i]);
@@ -976,23 +991,32 @@ fn gi_ray(index:u32) {
 // and the cell's lane 0 stores the result. The value replaces the stored one (W1).
 const GI_SH_LANES:u32=4u;
 const GI_SH_CELLS:u32=16u;
-// Per cell in the workgroup: 27 components of GI_SH_LANES lanes.
-var<workgroup> gi_wg_sh:array<f32,GI_SH_CELLS*27u*GI_SH_LANES>;
+// Per cell in the workgroup: 30 components (gi_cell_sh) of GI_SH_LANES lanes.
+var<workgroup> gi_wg_sh:array<f32,GI_SH_CELLS*30u*GI_SH_LANES>;
 var<workgroup> gi_wg_bits:array<atomic<u32>,GI_SH_CELLS*GI_MAX_WORDS>;
 var<workgroup> gi_wg_count:u32;
-// Adds direction k's term, when it is open, to this lane's sums (gi_cell_sh).
+// Adds direction k's term to this lane's sums (gi_cell_sh): to the SH when it is open, and
+// with a map, to the unoccluded sum either way.
 fn gi_lane_add(c:GiCell, frame:mat3x3<f32>, k:u32, open:bool) {
-    if !open { return; }
+    let map=lighting.map.w!=0.0;
+    if !open && !map { return; }
     let d=gi_direction(frame,c.key,k);
     let radiance=gi_sky(d)*(6.283185307179586/f32(GI_DIRECTIONS));
+    // The unoccluded L2 irradiance at the cell normal: the clamped-cosine kernel through
+    // band 2 (gi_band_weight's bands) at z = d.n, 3/32 + z/2 + 15z^2/32 (gi_store_sh).
+    if map {
+        let z=1.0-(f32(k)+0.5)/f32(GI_DIRECTIONS);
+        gi_cell_sh[9]+=radiance*(0.09375+0.5*z+0.46875*z*z);
+    }
+    if !open { return; }
     gi_sh_basis(d);
     for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]+=radiance*gi_y[i]; }
 }
 // Sums each cell's lanes' gi_cell_sh into its lane 0, in a fixed tree order.
 // Every invocation of the workgroup calls it (it holds barriers).
 fn gi_lane_reduce(cell:u32, lane:u32) {
-    let at=cell*27u*GI_SH_LANES+lane;
-    for(var i=0u;i<9u;i+=1u) {
+    let at=cell*30u*GI_SH_LANES+lane;
+    for(var i=0u;i<10u;i+=1u) {
         gi_wg_sh[at+(i*3u)*GI_SH_LANES]=gi_cell_sh[i].x;
         gi_wg_sh[at+(i*3u+1u)*GI_SH_LANES]=gi_cell_sh[i].y;
         gi_wg_sh[at+(i*3u+2u)*GI_SH_LANES]=gi_cell_sh[i].z;
@@ -1000,14 +1024,14 @@ fn gi_lane_reduce(cell:u32, lane:u32) {
     workgroupBarrier();
     for(var stride=GI_SH_LANES/2u;stride>0u;stride/=2u) {
         if lane<stride {
-            for(var j=0u;j<27u;j+=1u) {
+            for(var j=0u;j<30u;j+=1u) {
                 gi_wg_sh[at+j*GI_SH_LANES]+=gi_wg_sh[at+j*GI_SH_LANES+stride];
             }
         }
         workgroupBarrier();
     }
     if lane==0u {
-        for(var i=0u;i<9u;i+=1u) {
+        for(var i=0u;i<10u;i+=1u) {
             gi_cell_sh[i]=vec3<f32>(gi_wg_sh[at+(i*3u)*GI_SH_LANES],gi_wg_sh[at+(i*3u+1u)*GI_SH_LANES],gi_wg_sh[at+(i*3u+2u)*GI_SH_LANES]);
         }
     }
@@ -1035,7 +1059,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             live=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)==0u;
         }
         let cold=gi_cold(slot);
-        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<10u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         // The bits first, every direction's, so untraced directions can read them.
         if live {
             let base=gi_table[cold+GI_C_BASE];
@@ -1106,7 +1130,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
         var slot=0u;
         if live { slot=atomicLoad(&gi_work[gi_frame.offsets.w+first+cell]); }
         let cold=gi_cold(slot);
-        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<10u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         if live {
             let c=gi_cell(slot);
             let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
