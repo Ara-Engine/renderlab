@@ -27,7 +27,7 @@ struct Bench {
 }
 
 enum Content {
-    Quarry(prepared::Prepared),
+    Quarry(Box<prepared::Prepared>),
     Bench(Bench),
 }
 
@@ -260,11 +260,11 @@ fn gpu_tr1_sequence() {
             (Content::Bench(bench), lighting)
         }
         None if path == "rt" => (
-            Content::Quarry(load_quarry(&m, &mut r).0),
+            Content::Quarry(Box::new(load_quarry(&m, &mut r).0)),
             quarry_lighting(),
         ),
         None => (
-            Content::Quarry(load_quarry_lod(&m, &mut r).0),
+            Content::Quarry(Box::new(load_quarry_lod(&m, &mut r).0)),
             quarry_lighting(),
         ),
     };

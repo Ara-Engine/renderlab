@@ -4,6 +4,15 @@ retention correction 2026-11-08; docs/m7-tr1b.md).
   disocclusion   CPU. Q-disocclusion: TR0's fixed external geometry ages (m7-tr0-s2g.py's
                  nearest-centre / same-instance / 2% depth protocol) from U0b's accepted
                  references, then each reference compacted.
+  s2g            GPU batches. S2G's 288 physical states with U0b's qualified D8 tracer, each
+                 scene built exactly as TR0's `reference` built it, under m7-tr1's own leases
+                 (scripts/m7-tr1-wait.py); every retained array is checked against TR0's
+                 recorded per-array SHA-256 of its qualified corpus, then compacted.
+  qsun           GPU, one state per lease. Q-sun's distinct sun states with quarry-final's
+                 U0b tracer and replay policy (each state its own lighting file), compacted;
+                 then the static camera's fixed ages.
+  tsr            Unreal. TSR Epic on a quarry track (TR0's `run`, U0's original package),
+                 kept as lossless native frames plus TR0's exposure factors.
   compact-check  CPU. One archive: compact size and the mean-code/noise change it causes.
 
 Compact format (m7-refs-compact-v1): L0, L1, D0, D1 as float16 already exposed at the
@@ -17,6 +26,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import re
+import shutil
+import subprocess
+import uuid
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +41,11 @@ REFS = Path("E:/renderlab-work/m7-refs")
 TR0 = Path("E:/renderlab-work/m7-tr0")
 QUARRY = Path("E:/renderlab-work/m7-u0b/reference/quarry-final")
 FORMAT = "m7-refs-compact-v1"
+D8 = "d8bd9a8e1e1c7b5d39ee04d70c01ed4ee87bb654463db2b40daec1a96f35f139"
+S2G_SCENE = Path("E:/renderlab-work/m7-u0b/scenes/S2G/scene.json")
+TR0_S2G = TR0 / "s2g/physical/d8bd9a8e"
+S2G_TRACKS = ("s2g-camera-0.25px", "s2g-camera-0.5px", "s2g-camera-1px", "s2g-sun-0.25deg")
+BIN = Path("E:/renderlab-work/m7-tr1/bin")
 SCRIPT_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
@@ -144,6 +164,246 @@ def disocclusion(args):
                     "same-pixel for the translation-only track. Offline scoring only."))
 
 
+def member_hashes(path):
+    with zipfile.ZipFile(path) as z:
+        return {i.filename: hashlib.sha256(z.read(i)).hexdigest() for i in z.infolist()}
+
+
+def s2g(args):
+    """Batches of S2G physical states: trace (own lease), U0b compaction, identity, f16 copy."""
+    binary = BIN / "u0b-d8bd9a8e.exe"
+    if not binary.exists():
+        shutil.copyfile(TR0 / "binaries" / (D8 + ".exe"), binary)
+    if sha(binary) != D8:
+        raise ValueError("pin the U0b-qualified D8 binary")
+    first = json.loads(next(TR0_S2G.glob("s2g-*.json")).read_text())
+    if sha(S2G_SCENE) != first["source_scene_sha256"]:
+        raise ValueError("S2G source differs from TR0's qualified corpus")
+    scene = json.loads(S2G_SCENE.read_text())
+    registration = json.loads((TR0 / "s2g/plan.json").read_text())
+    frames = {t: json.loads((TR0 / "inputs" / (t + ".json")).read_text())["frames"] for t in S2G_TRACKS}
+    instances = {name: [i + 1 for i, mesh in enumerate(scene["meshes"]) if mesh["name"] in names]
+                 for name, names in scene["populations"].items()}
+    out = REFS / "s2g"
+    out.mkdir(parents=True, exist_ok=True)
+    compactor = load("m7-u0b-score")
+    done = 0
+    while done < args.limit:
+        pending = [c for c in registration["physical"] if not (out / f"{c['track']}-{c['frame']:03}.npz").exists()]
+        if not pending:
+            break
+        # About 0.35 GiB of raw output per state until it is compacted; the runner's preflight
+        # needs 5 GiB free on the output disk.
+        if shutil.disk_usage(REFS).free < args.batch * 0.35 * 1024 ** 3 + 5.5 * 1024 ** 3:
+            raise SystemExit("deferred: disk headroom below the batch's raw output plus 5.5 GiB")
+        batch = pending[:min(args.batch, args.limit - done)]
+        label = f"s2g-{uuid.uuid4().hex[:8]}"
+        work = REFS / "work" / label
+        data = work / "data"
+        data.mkdir(parents=True)
+        cases, entries = [], []
+        for c in batch:
+            p = frames[c["track"]][c["frame"]]
+            # TR0's `reference` construction, byte for byte (its generated-scene SHA-256 is checked).
+            copy_scene = dict(scene, poses=[dict(name=c["track"].removeprefix("s2g-") + f"-{c['frame']:03}",
+                                                 eye=p["eye"], target=p["target"])])
+            copy_scene["sun"] = dict(scene["sun"], to_light=p["to_light"])
+            destination = work / "inputs" / str(len(cases)) / "s2g" / "scene.json"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(json.dumps(copy_scene, separators=(",", ":")), encoding="utf-8")
+            name = f"{c['track']}-{c['frame']:03}"
+            qualified = TR0_S2G / (name + ".json")
+            expected = json.loads(qualified.read_text()) if qualified.exists() else None
+            # The bench records the hash of the scene file it loaded.
+            if expected and expected["scene_sha256"] != sha(destination):
+                raise ValueError("generated scene differs from TR0's: " + name)
+            cases.append(dict(case=c, name=name, pose=p, input=destination, expected=expected))
+            entries.append(f"{destination.parent}@1024")
+        plan = dict(steps=[dict(name="trace", binary="u0b-d8bd9a8e", test_name="reference::tests::gpu_reference_benches",
+                                env={"RENDERLAB_M7_BENCHES": ";".join(entries), "RENDERLAB_M7_REFERENCE_OUT": str(data),
+                                     "RENDERLAB_M7_CAPTURE_GEOMETRY": "1", "RAYON_NUM_THREADS": "2"})])
+        (work / "plan.json").write_text(json.dumps(plan, indent=1))
+        for attempt in range(6):
+            subprocess.run(["py", "-3", "-B", str(REPO / "scripts/m7-tr1-wait.py"), f"{label}-{attempt}",
+                            str(work / "plan.json"), "--minutes", "10", "--wait-minutes", "120",
+                            "--note", "U0b D8 S2G reference batch, functional, no timing claim"], cwd=REPO)
+            if (data / "replay.json").exists():
+                break
+        replay = json.loads((data / "replay.json").read_text())
+        if not replay["bit_identical"]:
+            raise ValueError("same-seed replay differs in " + label)
+        removed = []
+        for k in cases:
+            name, p, c = k["name"], k["pose"], k["case"]
+            meta_path = data / (name + ".json")
+            meta = json.loads(meta_path.read_text())
+            if meta["scene_sha256"] != sha(k["input"]) or meta["invalid_pixels"]:
+                raise ValueError("scene identity or finite-pixel check failed: " + name)
+            pose = {k2: p[k2] for k2 in ("eye", "target")}
+            frame = dict(name=name, open=pose, close=pose, to_light=p["to_light"], fov_y=p["fov_y_radians"],
+                         width=1920, height=1080, sky_only=False)
+            meta.update(frame=frame, bench="S2G", camera_background=[0., 0., 0.], reference_binary_sha256=D8,
+                        source_scene_sha256=sha(S2G_SCENE), population_instances=instances)
+            save(meta_path, meta)
+            compactor.compact(argparse.Namespace(root=data, name=name))
+            archive = data / (name + ".npz")
+            members = member_hashes(archive)
+            identity = None
+            if k["expected"]:
+                wanted = k["expected"]["retained_array_sha256"]
+                identity = {m: members.get(m) == h for m, h in wanted.items()}
+                if not all(identity.values()):
+                    raise ValueError(f"{name}: arrays differ from TR0's qualified corpus: "
+                                     + ",".join(m for m, ok in identity.items() if not ok))
+            with np.load(archive) as z:
+                arrays = {m: z[m] for m in z.files}
+            meta = json.loads(meta_path.read_text())
+            meta.update(accepted_for_scoring=bool(identity), corpus_key=c["key"], aliases=c["aliases"], batch=label,
+                        batch_replay_bit_identical=True,
+                        identity=(f"all {len(identity)} retained arrays byte-identical to TR0's qualified D8 corpus "
+                                  f"({TR0_S2G / (name + '.json')})") if identity else "no TR0 record; not accepted")
+            write_compact(out / (name + ".npz"), arrays, meta, float(scene["exposure_stops"]), archive)
+            for f in sorted(data.glob(name + "*")):
+                if f.suffix in (".npz", ".f32", ".bin", ".png", ".pending"):
+                    removed.append(dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)))
+                    f.unlink()
+            print(name, "compact", (out / (name + ".npz")).stat().st_size, flush=True)
+        for k in cases:
+            removed.append(dict(path=str(k["input"]), bytes=k["input"].stat().st_size, sha256=sha(k["input"])))
+            k["input"].unlink()
+        save(work / "removed.json", removed)
+        done += len(batch)
+        print("S2G batch", label, "done", done, "remaining", len(pending) - len(batch), flush=True)
+
+
+def qsun(args):
+    """Q-sun physical states with U0b's quarry tracer (997151eb, bounded-as-v1 replay, as
+    quarry-final), one lease and one sun per state; then fixed ages for the static camera."""
+    binary = BIN / "u0b-997151eb.exe"
+    source_binary = Path("E:/renderlab-work/m7-u0b/bin/reference-tests-997151eb.exe")
+    if not binary.exists():
+        shutil.copyfile(source_binary, binary)
+    if not sha(binary).startswith("997151eb"):
+        raise ValueError("pin quarry-final's U0b binary")
+    base = json.loads(Path("E:/renderlab-work/m7-u0b/quarry-unit-sequence.json").read_text())
+    lighting = json.loads(Path(base["lighting"]).read_text())
+    inputs = TR0 / "inputs" / (args.track + ".json")
+    frames = json.loads(inputs.read_text())["frames"]
+    key = lambda p: np.asarray(p["eye"] + p["target"] + p["to_light"], "<f4").tobytes()
+    states = {}
+    for i, p in enumerate(frames):
+        states.setdefault(key(p), (i, p))
+    out = REFS / "quarry"
+    compactor = REPO / "scripts/m7-u0b-score.py"
+    for i, p in states.values():
+        name = f"{args.track}-{i:03}"
+        if (out / (name + ".npz")).exists():
+            continue
+        if shutil.disk_usage(REFS).free < 7 * 1024 ** 3:
+            raise SystemExit("deferred: less than 7 GiB free")
+        label = f"qsun-{uuid.uuid4().hex[:8]}"
+        work = REFS / "work" / label
+        data = work / "data"
+        data.mkdir(parents=True)
+        light = dict(lighting, lights=[dict(lighting["lights"][0], travel=[-x for x in p["to_light"]])])
+        (work / "lighting.json").write_text(json.dumps(light, indent=1))
+        pose = {k: p[k] for k in ("eye", "target")}
+        manifest = dict(base, lighting=str(work / "lighting.json"),
+                        frames=[dict(name=name, open=pose, close=pose, fov_y=p["fov_y_radians"], width=1920, height=1080,
+                                     samples=1024, sky_only=False)])
+        (work / "manifest.json").write_text(json.dumps(manifest, indent=1))
+        plan = dict(steps=[dict(name="trace", binary="u0b-997151eb", test_name="reference::quarry_tests::gpu_reference_quarry",
+                                env={"RENDERLAB_M7_QUARRY_MANIFEST": str(work / "manifest.json"),
+                                     "RENDERLAB_M7_REFERENCE_OUT": str(data), "RENDERLAB_M7_QUARRY_REPLAY_POLICY": "bounded-as-v1",
+                                     "RENDERLAB_M7_REFERENCE_BATCH": "1", "RENDERLAB_M7_DEFER_REFERENCE_COMPACT": "1"})])
+        (work / "plan.json").write_text(json.dumps(plan, indent=1))
+        for attempt in range(6):
+            subprocess.run(["py", "-3", "-B", str(REPO / "scripts/m7-tr1-wait.py"), f"{label}-{attempt}", str(work / "plan.json"),
+                            "--minutes", "8", "--wait-minutes", "120",
+                            "--note", "U0b quarry Q-sun reference state, functional, no timing claim"], cwd=REPO)
+            if (data / (name + ".compact-pending.json")).exists():
+                break
+        environment = {k: v for k, v in os.environ.items() if k != "RENDERLAB_M7_DEFER_REFERENCE_COMPACT"}
+        subprocess.run(["py", "-3", "-B", str(compactor), "compact", str(data), name], cwd=REPO, env=environment, check=True)
+        meta = json.loads((data / (name + ".json")).read_text())
+        if meta.get("accepted_for_scoring") is not True or meta.get("camera_background") != [0., 0., 0.]:
+            raise ValueError(name + ": not accepted or not black-primary")
+        meta["frame"] = dict(meta["frame"], to_light=p["to_light"])
+        meta.update(lighting=light, reference_binary_sha256=sha(binary), source_inputs=str(inputs), source_inputs_sha256=sha(inputs))
+        with np.load(data / (name + ".npz")) as z:
+            arrays = {k: z[k] for k in z.files}
+        write_compact(out / (name + ".npz"), arrays, meta, -14.0, data / (name + ".npz"))
+        removed = []
+        for f in sorted(data.iterdir()):
+            if f.suffix in (".npz", ".f32", ".bin", ".png"):
+                removed.append(dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)))
+                f.unlink()
+        save(work / "removed.json", removed)
+        print(name, "compact", (out / (name + ".npz")).stat().st_size, flush=True)
+    # The camera never moves: TR0's identical-view rule ages every pixel by one per frame.
+    ages_dir = REFS / "ages" / args.track
+    ages_dir.mkdir(parents=True, exist_ok=True)
+    for i, p in enumerate(frames):
+        if np.asarray(p["eye"] + p["target"], "<f4").tobytes() != np.asarray(frames[0]["eye"] + frames[0]["target"], "<f4").tobytes():
+            raise ValueError("Q-sun ages assume a static camera")
+        np.savez_compressed(ages_dir / f"f{i:03}.npz", age=np.full((1080, 1920), min(i, 255), "u1"))
+    save(REFS / "ages" / f"protocol-{args.track}.json", dict(track=args.track, frames=len(frames), source_sequences={args.track: sha(inputs)},
+         definition="Static camera: TR0's identical-view rule, every pixel age + 1 per frame from 0, capped 255; Sun changes do not reset geometric age."))
+
+
+def tsr(args):
+    """TSR Epic on a quarry track with TR0's `run` (U0's original package, the one TR0's Q-walk
+    captures used), rooted in m7-refs/tsr under m7-tr1's leases. The capture is kept as each
+    frame's native TSR output (R11G11B10, exact in float16) plus TR0's exposure factor, which
+    returns it to registered display units without fitting; the raw dump is then deleted."""
+    tr0 = load("m7-tr0")
+    root = REFS / "tsr"
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    for name in (args.track + ".json", "manifest.json"):
+        shutil.copyfile(TR0 / "inputs" / name, root / "inputs" / name)
+    tr0.ROOT = root
+    tr0.U0.OUT, tr0.U0.OWNER = root, "m7-tr1"
+    out = root / "runs" / args.label
+    if not (out / "capture-readback.json").exists():
+        tr0.run(argparse.Namespace(label=args.label, track=args.track, path=args.path, quality=3, capture=True, smoke=False,
+                                   program="full", minutes=args.minutes, wait_seconds=args.wait_seconds, package_dir=None))
+    recipe = json.loads((out / "recipe.json").read_text())
+    capture = json.loads((out / "capture-readback.json").read_text())
+    if tr0.digest(tr0.U0.PACKAGE) != recipe["package_exe_sha256"] or not recipe["package_exe_sha256"].startswith("69d6f88a"):
+        raise ValueError("capture must use TR0's original U0 package")
+    dump = tr0.NATIVE.s1.native.Dump(out / "dump")
+    groups = {}
+    for event in dump.passes:
+        frame = next(int(m.group(1)) for s in event["ParentEventScopes"] if (m := re.match(r"Frame (\d+)", s)))
+        groups.setdefault(frame, []).append(event)
+    if len(groups) != len(recipe["frames"]):
+        raise ValueError("native frame coverage mismatch")
+    frames_dir = out / "frames"
+    frames_dir.mkdir(exist_ok=True)
+    registered = 2 ** recipe.get("registered_exposure_stops", recipe.get("exposure_stops", -14))
+    factors = {}
+    for i, (_, events) in enumerate(sorted(groups.items())):
+        consumer, name = tr0.colour_input(dump, events, recipe)
+        hdr, identity = tr0.NATIVE.resource(dump, name, consumer)
+        if identity["sha256"] != capture["identities"][i]["hdr"]["sha256"]:
+            raise ValueError("candidate bytes changed since capture readback")
+        rgb = hdr[..., :3].astype("f4")
+        if not np.array_equal(rgb.astype("f2").astype("f4"), rgb):
+            raise ValueError("native TSR output is not exact in float16")
+        rgba = np.concatenate([rgb, np.ones(rgb.shape[:2] + (1,), "f4")], -1).astype("<f2")
+        (frames_dir / f"f{i:03}.rgba16f").write_bytes(rgba.tobytes())
+        factors[str(i)] = registered / capture["identities"][i]["exposure"]["values"][0]
+    save(frames_dir / "exposure.json", dict(factors=factors, definition="multiply the native frame by this factor: "
+         "registered 2^stops over the frame's measured pre-exposure (TR0's score)", script_sha256=SCRIPT_SHA))
+    removed = []
+    for f in sorted((out / "dump").rglob("*")):
+        if f.is_file():
+            removed.append(dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)))
+    shutil.rmtree(out / "dump")
+    save(out / "deleted-raw.json", dict(removed=removed, retained="frames/ (lossless native TSR output) and exposure.json"))
+    print("TSR frames", len(factors), frames_dir, flush=True)
+
+
 def compact_check(args):
     with np.load(args.archive) as z:
         arrays = {k: z[k] for k in z.files}
@@ -158,11 +418,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("disocclusion")
+    p = sub.add_parser("s2g")
+    p.add_argument("--batch", type=int, default=10)
+    p.add_argument("--limit", type=int, default=288)
+    p = sub.add_parser("qsun")
+    p.add_argument("--track", default="q-sun-fast")
+    p = sub.add_parser("tsr")
+    p.add_argument("label")
+    p.add_argument("--track", default="q-disocclusion")
+    p.add_argument("--path", choices=("hrt", "vsm-nort"), required=True)
+    p.add_argument("--minutes", type=int, default=10)
+    p.add_argument("--wait-seconds", type=int, default=5400)
     p = sub.add_parser("compact-check")
     p.add_argument("archive")
     p.add_argument("--exposure", type=float, default=-14.0)
     args = parser.parse_args()
-    {"disocclusion": disocclusion, "compact-check": compact_check}[args.command](args)
+    {"disocclusion": disocclusion, "s2g": s2g, "qsun": qsun, "tsr": tsr, "compact-check": compact_check}[args.command](args)
 
 
 if __name__ == "__main__":
