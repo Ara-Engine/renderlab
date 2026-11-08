@@ -80,7 +80,33 @@ All runs were headless, inside m7-at1's GPU leases, with an optimized test binar
 - `noon` and `low`: the procedural sky and environment, a 120 klux sun at 65 and 4 degrees;
 - `low-volumetric`: `low` plus 0.01/m volumetric fog.
 
-RUN-B-PLACEHOLDER
+Inspected (run b, sheet `runs-out/b/sheet.png`):
+- **The default doesn't change the quarry's captured-sky protocol.** On every path, surfaces are 0.2 % darker than `pre-at1` (median ratio 0.998, p1 0.997): aerial perspective and height fog over the scene's 10 m. Misses go from black to the procedural sky, which is dim (at most 0.005 exposed) because that protocol's sun is only 1000 lux. Not visibly worse.
+- **Noon:** a hazy blue sky with the planet's ground below the horizon. Quarry surfaces carry sky light from the procedural environment and a white transmitted sun.
+- **Low sun (4 degrees):** an orange sky graded to blue-grey overhead, a sun disk at the right elevation, and a backlit quarry silhouette lit by the sky.
+- **Paths agree.** Raster misses match the deferred paths to 0.2 % of the sky's peak, except 117 sun-disk rim pixels: the disk edge isn't anti-aliased, and the two direction computations land differently there. Traced and non-RT skies are identical.
+- **Volumetric fog (0.01/m):** a warm haze toward the low sun. Mean surface radiance is 0.064 R on traced, where froxels are shadowed by TLAS rays, and 0.075 R on non-RT, which is unshadowed (gap). Shadowed froxels under the rocks darken on the RT paths.
+
+Run a found one bug, fixed before run b: the raster sky, drawn last with a depth `GreaterEqual` test at the far plane, never landed. The sky is now drawn first in the pass without depth, and the surfaces cover it.
+
+**Timing** (quarry, static camera, 60 frames per configuration, two interleaved rounds; ms per frame wall clock, and shading as the timed mesh/shading pass). Contended by other units' work; development host; not a quiet-window claim.
+
+| Path | Atmosphere off | Default (captured sky) | Volumetric vs procedural-low | Shading, off to default |
+|---|---:|---:|---:|---:|
+| non-RT (VB + Virtual) | 1.63-1.67 | 1.70-1.71 (+0.04-0.08) | +0.05-0.11 | 0.70 to 0.69 |
+| traced + Interactive | 1.35-1.36 | 1.44 (+0.08-0.09) | +0.01-0.04 | 0.65 to 0.67 |
+| raster + Exact (RT code default) | 15.9-16.4 | 16.3-16.7 (about +0.3, noisy) | noisy | 4.0-4.1 to 3.9 |
+
+The sky, aerial perspective and height fog cost under 0.1 ms on the deferred paths. On raster, the full-screen sky draw adds about 0.3 ms inside 16 ms frames that are dominated by Exact shadows.
+
+**The procedural environment's cost, found and fixed:**
+- **Run b, the first form** (a 64-texel specular chain with 7 levels, down to 1x1): +0.47 ms of quarry shading on every path against the captured map at the same sun. Shading went 0.69 to 1.16 ms on non-RT, 0.67 to 1.12 on traced, and 3.9 to 5.2-5.5 on raster. The low sun alone costs nothing (`off-low` equals `off`). Rough lookups into 1-4 texel faces are mostly the environment's cross-face corner taps.
+- **Run c, the shipped form** (128 texels, 5 levels, smallest face 8): shading is within run noise of the captured map. Non-RT measured 0.76-0.83 against 0.70-0.82, traced 0.81-0.91 against 0.70-0.77, raster 4.20-4.27 against 4.24-4.37. Run c's wall clock was noisier (non-RT 2.0-4.3 ms on unchanged configurations), so only the shading-pass deltas are cited from it.
+- **The images barely moved:** surface median ratio c/b 0.999 at noon and 0.995 at the low sun, with p1-p99 of 0.97-1.02 and 0.93-1.12. Roughness steps 0.25 instead of 1/6.
+
+Evidence: `D:/Coding/renderlab-work/at1/runs/{a,b,c}` (lease logs), `runs-out/{a,b,c}/<path>/` (PNGs and `<path>-at1.json` with per-configuration means and timing), and the sheets `runs-out/{b,c}/sheet.png`. Raw `.f32` dumps were deleted after these summaries (D: bulk rule).
+
+Not run: no Unreal or reference comparison (overnight rules), no motion sequence, no MSAA raster image (the sky pipeline takes the renderer's sample count, but only 1x was rendered), and no visible-environment (TR1b option) image.
 
 ## Gaps
 

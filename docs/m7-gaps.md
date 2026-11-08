@@ -20,6 +20,9 @@ AT1, [m7-at1.md](m7-at1.md). The sky, aerial perspective, height fog, sun transm
 - **Transparent surfaces:** `atmosphere_surface` is ready for TP1's transparent entry. It isn't wired there in this unit.
 - **Film accumulation (`SoftShadows::Temporal`)** fogs its hits, but its misses keep `film_background()` (no sky).
 - **Slice resolution:** the aerial perspective's first slice ends at 7.8 m, and froxels are 16 px columns. Neither was screened for banding or aliasing in motion.
+- **The sun disk has a hard, unfiltered edge** (true 0.00465 rad radius, saturating at the HDR ceiling). Its rim aliases, and raster and deferred misses differ on 117 rim pixels. It needs an analytic coverage edge, or TR1 on misses.
+- **The procedural environment uses the legacy mip-chain layout** (no ES1 lobes; the sun is the directional light, so no lobe is lost). Its smallest face is 8 texels: at 1 texel, rough lookups cost +0.47 ms of quarry shading. Roughness is quantized in 0.25 steps between levels.
+- **The planet ground below the horizon** is a flat Lambertian albedo (0.3) lit only by the sun through the atmosphere. Misses below the horizon show that, not terrain.
 
 ## Decals
 
