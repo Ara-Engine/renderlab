@@ -134,6 +134,8 @@ fn sweep(
         })
         .unwrap();
         r.reset_virtual_shadow_cache();
+        // Replay the same bounded GI refill for every post variant.
+        r.reset_indirect();
         r.cut_post_motion();
         r.cut_reconstruction();
         for _ in 0..8 {
@@ -187,6 +189,10 @@ fn gpu_post_sweep() {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
         r.set_soft_shadows(SoftShadows::Interactive);
     }
+    // AT1 is intentionally off in ordinary lib-test constructors. Exercise the
+    // product sky/fog here, including its contribution before TR1 resolves.
+    r.set_atmosphere(Atmosphere::default()).unwrap();
+    r.set_indirect(IndirectSettings::default()).unwrap();
     r.set_reconstruction(Reconstruction::identity()).unwrap();
     if m["fixture_only"].as_bool() != Some(true) {
         let (mut asset, cameras) = if path == "rt" || path == "raster" {
@@ -218,8 +224,12 @@ fn gpu_post_sweep() {
         .unwrap();
     r.set_lighting_and_shadows(
         &Lighting {
+            lights: vec![Light::Directional {
+                travel: -Vec3::new(0.4, 0.8, 0.3).normalize(),
+                lux: [120_000.0; 3],
+            }],
             environment: [5.0, 7.0, 12.0],
-            exposure_stops: 0.0,
+            exposure_stops: -10.0,
             ..Default::default()
         },
         &Shadows::default(),
@@ -244,7 +254,7 @@ fn gpu_post_sweep() {
         .into_iter()
         .enumerate()
         .map(|(i, position)| Vertex {
-            position,
+            position: [position[0], position[1] + 1.5, position[2]],
             normal: [0.0, 0.0, 1.0],
             uv: [0.0; 2],
             color: if i < 4 {
@@ -264,13 +274,22 @@ fn gpu_post_sweep() {
         .unwrap()
         .unwrap();
     r.test_drain("PP1 sky fixture upload");
+    if path == "nonrt" {
+        let world: Vec<_> = vertices.iter().map(|v| v.position).collect();
+        r.set_indirect_geometry(
+            &mesh,
+            &world,
+            &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10],
+        )
+        .unwrap();
+    }
     let mut instances = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
     r.test_drain("PP1 sky fixture placements");
     let poses: Vec<_> = (0..8)
         .map(|i| {
             Camera::look_at(
-                Vec3::new(i as f32 * 0.025, 0.0, 4.0),
-                Vec3::new(i as f32 * 0.025, 0.0, 0.0),
+                Vec3::new(i as f32 * 0.025, 1.5, 4.0),
+                Vec3::new(i as f32 * 0.025, 1.5, 0.0),
                 Vec3::Y,
                 55f32.to_radians(),
                 0.1,
