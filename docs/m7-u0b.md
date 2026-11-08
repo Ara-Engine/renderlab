@@ -3,13 +3,16 @@
 Implementation unit on main `708e87c`, branch `t3/m7-u0b`, 2026-11-07–08.
 Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses](m7-u0.md).
 
-**Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
-the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
-The full **76/76 Unreal bench matrix**, **88/88 unit motion-reference states** and all
-**19 synchronized static floors** and all **four Q-walk floors** are retained; the 15-mode
-alternation floor table remains incomplete.
-The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
-or integrated quality-pass claim is made.
+**Measurement unit complete.** The retained evidence includes 123 canonical quarry
+references representing 162 registered rows, the **76/76 Unreal bench matrix**, all
+**19 static, four Q-walk and 15 camera-alternation floor configurations**, the 80-process
+static/camera/Sun quiet timing campaign, and the 65,536-spp S4 reference. The separate G1
+sky-visibility comparator and its quiet hardware cost replacements are also complete.
+
+The reference now loads the quarry's textures and RLE2 environment. Its S2G interpolation
+bug and small-sun precision error are fixed and qualified. The report records sample counts,
+noise, matched background/exposure controls and failed attempts. It establishes measured
+Unreal floors; **no new 2x or integrated Renderlab quality-pass claim is made**.
 
 ## Reference implementation
 
@@ -38,7 +41,7 @@ introduced. This is plain unidirectional path tracing, NEE and power-heuristic M
 NVIDIA SDK or Mitsuba source code is copied. Generated benches remain our own geometry;
 private scan payloads and captures stay out of Git.
 
-## Validation retained so far
+## Reference validation
 
 - Library tests: **126 passed, 120 ignored**, exit 0. The new CPU checks cover cube-CDF support
   and RGB-correlated uncertainty; Naga validates the complete measurement shader.
@@ -188,7 +191,7 @@ serializable rather than panicking during summary construction. The coordinated 
 is **01:37:09.140Z–01:37:48.401Z**; the warm build takes **36.53 seconds**, with **126 passed,
 120 ignored**, and `cargo fmt --all -- --check` exits 0. Binary SHA256 is
 `03dd6ee0f000a8bc83ed8ce7406f0cde2ea0afc0a50e50c5eab1d53dac386bc6`.
-The remaining production states use this harness; `q-disocclusion-037` passes strict and
+The final eleven production states use this harness; `q-disocclusion-037` passes strict and
 retains its early raw report. D8 shader and rendering math are unchanged.
 
 ## Retained quarry references
@@ -339,8 +342,8 @@ during play counts toward speed, and no new 2x claim is made here.
 
 S4's inherited 4,096-spp interior reference has 5.7% / 15% median/p95 noise. Its approximately
 64k run was deferred during the relaxed game hold because its estimated five-minute continuous
-GPU load exceeded the permitted short screens. After the 15:36 UTC game release it is queued
-behind the ordered quiet windows. The monolithic 65,536-spp attempt then hit the RAM guard:
+GPU load exceeded the permitted short screens. After the 15:36 UTC game release it was
+scheduled behind the ordered quiet windows. The monolithic 65,536-spp attempt then hit the RAM guard:
 **13.295 GiB initially, 1.831 GiB minimum**, stopped after **372.75 seconds**, lease released
 17:54:07Z. It produced no accepted S4 image. A bounded 4,096-spp batch completed in 30.24
 render-call seconds, zero invalid pixels and 14.456 GiB minimum RAM, but the following seed
@@ -364,7 +367,10 @@ archive is `reference/s4-64k-d1/combined/S4-interior.npz`, SHA256
 The S4 production harness adds explicit seed/dispatch controls only. Its executable is
 `40bbee1cc887aaee35c8ed368b781f4080f4a15962cbb670a9916ba0c087daf1`; the reference, input
 and shader source hashes are unchanged from the qualified `bf169ef7` binary retained for
-TR0. That build passed **125/125**, with 119 ignored GPU tests. The two CPU scorer tests
+TR0. Its shader SHA256 is `23fa8860195796371bab2efd9abc098261069a63575d1627b29cc197504303cb`.
+All sixteen process recipes confirm that original production identity; the archive is not
+relabelled as a later D8 or reporting-harness render. That build passed **125/125**, with
+119 ignored GPU tests. The two CPU scorer tests
 verify zero error for matching physical images, correlated-noise cancellation on held cameras,
 exposure/background rejection and independent-half combination with duplicate-seed rejection.
 
@@ -645,6 +651,32 @@ RMS F0 codes at registered exposure / +4 stops.
 | wide | 4.715/6.371 | 4.520/6.096 | 4.710/6.358 | 4.513/6.076 |
 | wide6 | 4.920/6.475 | 4.731/6.209 | 4.915/6.462 | 4.724/6.192 |
 
+### Camera-alternation physical floors
+
+All 15 Lumen configurations capture and score every frame of the 64-frame registered p0/p1 alternation after 96 moving warm-up frames. Both poses use the retained 4,096-spp full-radiance references. Camera, settings, measured exposure and process checks pass; no reference is missing. Each configuration retains 63 adjacent pairs at each exposure, using the same unaged common-covered residual definition above. These are functional quality captures, not timing rows.
+
+The table is L0/L4 F0 codes. Complete 20-population image/residual summaries, worst-frame tails, bias and noise remain in `physical-floor-variants.json` and `walk/variants/*/physical-floor.json`.
+
+| Configuration | Covered image RMS | Covered residual RMS | Edge image RMS | Occluded image RMS |
+|---|---:|---:|---:|---:|
+| ue-sw-h | 10.755/15.986 | 7.053/9.188 | 15.092/28.628 | 23.936/44.771 |
+| ue-sw-e | 9.945/14.750 | 6.718/8.645 | 14.548/27.424 | 22.928/42.819 |
+| ue-sw-c | 10.298/15.428 | 6.658/8.615 | 14.709/27.966 | 24.149/44.357 |
+| ue-sw-e-sdf1 | 10.066/14.931 | 6.719/8.648 | 14.848/27.829 | 23.933/43.984 |
+| ue-sw-e-gi | 9.822/13.821 | 5.873/7.570 | 14.660/26.208 | 22.922/41.961 |
+| ue-sw-e-noscreen | 9.815/14.853 | 6.671/8.614 | 15.048/28.211 | 23.751/44.265 |
+| ue-hw-h | 10.027/14.124 | 7.049/9.165 | 12.982/24.511 | 17.423/32.385 |
+| ue-hw-e | 9.093/12.498 | 6.709/8.607 | 12.115/22.463 | 15.364/27.784 |
+| ue-hw-e-hit | 9.094/12.498 | 6.709/8.606 | 12.116/22.463 | 15.365/27.789 |
+| ue-hw-e-hit1 | 9.090/12.531 | 6.708/8.606 | 12.161/22.614 | 15.385/28.093 |
+| ue-hw-c | 9.256/13.028 | 6.645/8.568 | 11.699/22.382 | 14.975/28.332 |
+| ue-hw-c-hit | 9.257/13.029 | 6.645/8.568 | 11.700/22.382 | 14.975/28.332 |
+| ue-hw-e-vsm | 9.095/12.502 | 6.710/8.608 | 12.118/22.468 | 15.366/27.789 |
+| ue-hw-e-gi | 9.302/12.759 | 5.868/7.571 | 13.471/24.081 | 18.606/35.515 |
+| ue-hw-e-nodf | 9.094/12.498 | 6.709/8.607 | 12.115/22.462 | 15.363/27.784 |
+
+All 15 native/difference rows were inspected at frames 0, 1 and 48 at both exposures, with full-frame worst-edge checks on runtime-RT-disabled mesh-SDF software and hardware Epic. Geometry remains complete; contact, colour and edge discrepancies remain in the floors. No renderer quality pass or 2x result is implied.
+
 ## Temporal reference interface
 
 **Shared primary-background decision (Islam, 2026-11-07): black everywhere.** TR0's
@@ -872,3 +904,58 @@ deleted. Their per-case cleanup ledgers preserve hashes; score JSON, readbacks a
 PNGs remain. The five raw arrays from the rejected `a5f82d7e` state were likewise hashed and
 deleted (265,420,800 bytes). Intentional reference archives retain their actual split halves
 and geometric records for independent rescoring.
+
+## Final verification and retention
+
+The floor audit covers **1,623 native frames**: 19 static, four 161-frame Q-walk captures
+and fifteen 64-frame alternations. **1,259 image frames are scored**: all static and
+alternation frames, plus the 70 registered witnesses in each Q-walk capture. Every scored
+configuration passes process, camera, settings and measured-exposure checks, with no missing
+reference. The four walks retain 33 adjacent witness pairs each; each alternation retains
+63 adjacent pairs, all at both registered exposures. The other 91 frames per walk carry
+no reference-score claim. `physical-floor-summary.json`, `physical-floor-variants.json` and
+the per-case JSON preserve the per-population values and tail definitions.
+
+The final controller exits 0 at **2026-11-08 03:25:49.656Z**, with no owned GPU process or
+lease left. One earlier attempt deferred at preflight on G1c's unclassified live probe,
+before launching Unreal. It resumed after G1c's anchored release; no accepted capture was
+repeated or relaxed. Complete native/reference/difference sheets at both exposures and
+selected worst-frame strips were inspected. Hashes and observations are in the static,
+Q-walk and alternation `visual-audit.json` files; reference sheets have their own audit.
+
+The final Rust source passes `cargo test -p renderlab --lib -j 2` (**126 passed,
+120 ignored, exit 0**) and `cargo fmt --all -- --check` (exit 0). The retained build proof
+records the exact source and binary hashes; these still match at close-out. Four focused
+CPU scorer tests and ten guard tests pass. The final CPU display-cache optimization also
+replays three saved full-resolution frames: numeric score JSON and generated PNG bytes are
+identical to the previous scorer. These checks are CPU diagnostics, not renderer timings.
+
+Raw GPU arrays larger than 5 MB are deleted after compaction or scoring, with hashes in
+cleanup ledgers. Rejected diagnostic comparison reports, process/readback JSON, CSVs, logs
+and inspected PNGs remain. Lossless reference archives intentionally retain actual halves
+and geometry for TR0 rescoring; packaged bench assets and pinned executables also remain.
+`docs/milestones-5-6-decisions.tsv` is unchanged.
+
+Root deleted the unused **1.06-GB Cargo target** at close-out; its absence was independently
+checked, and no Cargo clean or new build was run. The retention scan finds no disposable raw
+or native HDR dump over 5 MB. Pinned reference executables remain available for later units.
+
+Later units must select the package that matches the estimand before starting a capture:
+
+| Comparison | Kept package directory | Maps / content identity |
+|---|---|---|
+| R0a, TR1 and G1c comparisons on the new benches | `E:/renderlab-work/m7-u0b/ue-package` | `/Game/M7U0b/{SV,S4,S5,S2G}/Bench`; `cook/b/identity.json` |
+| G1c diffuse-only SV sky-visibility comparator | `E:/renderlab-work/m7-u0b/ue-svsky-package` | `/Game/M7U0b/SVSky/Bench`; `cook/sv-sky/identity.json` |
+| Original U0 / TR0 measurements with the archived original content identity | `E:/renderlab-work/m7-u0/ue-package` | Preserved original package; do not replace it |
+
+Each kept package contains `Windows/Engine/Binaries/Win64/UnrealGame.exe`; keep its matching
+executable/content layout. Record the selected package hashes with each run; the common
+executable hash alone does not identify the cooked content. `Saved/StagedBuilds` is not a retained run
+path, and packages must not be exchanged partway through a comparison.
+
+The shared `E:/renderlab-work/m7-u0/ue-project/Saved/StagedBuilds` is a redundant **SV-sky**
+staging copy, not the main new-benches archive. A complete SHA256 inventory verifies all
+**47 files / 1,522,376,538 bytes** against the kept `ue-svsky-package`: zero missing or changed
+files. The kept package has only additional runtime Saved/config/log files. The proof is
+`package-retention-proof.json`. After root was notified, the redundant staged directory was
+removed; its absence was independently checked. All three kept package directories remain.
