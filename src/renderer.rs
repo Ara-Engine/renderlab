@@ -2379,6 +2379,7 @@ impl Renderer {
                 matrix,
                 self.shadows.enabled(view_mode),
                 self.standard.id(),
+                self.soft_mode == SoftShadows::Temporal,
             )?;
             #[cfg(test)]
             assert!(
@@ -2784,13 +2785,20 @@ impl Renderer {
             && !temporal
             && !streamed.is_empty()
             && self.residency.mode != TextureResidency::Full;
-        if streaming {
-            // Admission guarantees one program per traced frame: the first draw's.
-            let program = draws
-                .first()
-                .and_then(|d| d.material)
-                .map_or(self.standard.id(), |m| m.program.id());
-            self.ensure_streamed(program)?;
+        // MP1: a frame whose draws use several programs shades each program's tile list
+        // with that program's list pipelines; one program keeps its single dispatch.
+        let (programs, _) = primary_ray_gpu::program_lists::frame_slots(
+            draws
+                .iter()
+                .map(|d| d.material.map_or(self.standard.id(), |m| m.program.id())),
+        );
+        if traced && !temporal && programs.len() > 1 {
+            for &id in &programs {
+                self.ensure_list(id, streaming)?;
+            }
+            self.ensure_bins()?;
+        } else if streaming {
+            self.ensure_streamed(programs.first().copied().unwrap_or(self.standard.id()))?;
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {

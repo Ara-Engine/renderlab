@@ -468,6 +468,39 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     }
 }
 
+// ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
+/// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
+const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
+/// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
+const LIST_HIT_PARAMETERS_SEAM: &str = "            rl_load_parameters(h.batch);\n";
+/// In a mixed frame a reflection hit on another program's draw is shaded by this module's
+/// program with the hit's material inputs and the receiver's own parameter block: the
+/// recorded fallback (docs/m7-gaps.md, Programs), since another program's code is not in
+/// this module.
+const LIST_HIT_PARAMETERS: &str =
+    "            rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));\n";
+
+/// `compose` for the traced stages plus the tile-list entry of mixed-program frames. The
+/// single-program modules are composed by `compose` alone, so their text (and code) is
+/// unchanged by MP1.
+pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    debug_assert!(matches!(stage, Stage::Traced | Stage::TracedStreamed));
+    let Composed {
+        mut source,
+        program: range,
+    } = compose(head, program, stage, parameters);
+    // The reflection block precedes the program; shift the program's range past the edit.
+    let (engine, rest) = source.split_at(range.start);
+    let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
+    let shift = edited.len() - engine.len();
+    source = format!("{edited}{rest}{TRACED_LIST_ENTRY}");
+    Composed {
+        source,
+        program: range.start + shift..range.end + shift,
+    }
+}
+// ---- end of MP1 per-program dispatch ----
+
 /// Whether `program` declares the optional bounce-light hooks (M7 G2): `fn scatter(s:
 /// Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec3<f32>`, the radiance it
 /// sends toward `wo` per unit radiance arriving from `wi` (its BRDF times the cosine at `wi`),

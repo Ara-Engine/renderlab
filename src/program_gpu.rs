@@ -88,6 +88,10 @@ pub(crate) struct ProgramPipelines {
     /// Traced shading whose sampling helpers record texture residency requests
     /// (`Renderer::ensure_streamed`): built only when a frame streams textures.
     pub streamed: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    /// MP1: tile-list shading of mixed-program frames, without and with texture
+    /// streaming (`Renderer::ensure_list`), indexed by `Shading`. Built by the first mixed
+    /// frame that draws with the program.
+    pub list: [Option<[Owned<wgpu::ComputePipeline>; 2]>; 2],
 }
 impl ProgramPipelines {
     pub fn has(&self, variant: Variant) -> bool {
@@ -750,9 +754,10 @@ impl Renderer {
 
     /// The sets a frame draws with: `variant` (None for unlit, diagnostic frames) of each
     /// program its draws' materials use (none: the standard program). A traced frame
-    /// shades with its first draw's program (admission rejects mixed ones); a temporal frame
-    /// also needs that program's traced set, which its reset frames shade with; raster
-    /// frames also bind the standard program first.
+    /// builds its first draw's program's set; mixed traced frames shade with list pipelines
+    /// built in `submit_frame` (`ensure_list`, MP1). A temporal frame (one program, by
+    /// admission) also needs that program's traced set, which its reset frames shade with;
+    /// raster frames also bind the standard program first.
     pub(super) fn frame_sets<'a>(
         &self,
         draws: impl IntoIterator<Item = Option<&'a Material>>,
@@ -972,6 +977,58 @@ impl Renderer {
         let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
         slot.modules.streamed = Some(modules);
         slot.pipelines.streamed = Some(pipelines);
+        Ok(())
+    }
+
+    /// MP1: program `id`'s tile-list shading pair (`program::compose_list`), streamed or
+    /// not, built the first time a mixed-program frame draws with it. Reloads and visibility
+    /// changes drop it, like `streamed`; single-program frames never build it.
+    pub(super) fn ensure_list(&mut self, id: u64, streamed: bool) -> Result<(), Error> {
+        if self.program_slot(id).pipelines.list[usize::from(streamed)].is_some() {
+            return Ok(());
+        }
+        let heads = &self.primary_sources.as_ref().unwrap().1;
+        let slot = self.program_slot(id);
+        let parameters = program::declares_parameters(&slot.source);
+        let stage = if streamed {
+            Stage::TracedStreamed
+        } else {
+            Stage::Traced
+        };
+        let sources =
+            [0, 1].map(|i| program::compose_list(&heads[i], &slot.source, stage, parameters));
+        let abi = self.program_abi();
+        let rejected = |error| match scope_error(&slot.label, error, &sources) {
+            Error::Fault(Fault(message)) => self.fail(message),
+            other => other,
+        };
+        let scopes = OperationScopes::new(&self.device);
+        let modules = sources.each_ref().map(|c| module(&abi, &slot.label, c));
+        if let Some(error) = scopes.finish() {
+            return Err(rejected(error));
+        }
+        let primary = abi.primary.unwrap();
+        let mut built = in_parallel(
+            abi.device,
+            [0, 1].map(|i| {
+                let (abi, module) = (&abi, &modules[i]);
+                move || {
+                    primary.list_pipeline(abi.device, abi.ledger, module, i, streamed, abi.cache)
+                }
+            }),
+        );
+        if let Some(error) = built.iter_mut().find_map(|(_, e)| e.take()) {
+            return Err(rejected(error));
+        }
+        for (composed, module) in sources.iter().zip(&modules) {
+            abi.modules.insert(&composed.source, module.clone());
+        }
+        let mut built = built.into_iter().map(|(p, _)| p);
+        let pipelines = [built.next().unwrap(), built.next().unwrap()];
+        self.pipelines.created += 2;
+        self.program_cache.count(2);
+        let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
+        slot.pipelines.list[usize::from(streamed)] = Some(pipelines);
         Ok(())
     }
 

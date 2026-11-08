@@ -732,6 +732,72 @@ fn gpu_es1_quarry() {
         }
         results["paired"] = paired;
     }
+    // MP1 (docs/m7-mp1.md): the quarry's twelve materials on 1, 2 and 8 programs (material
+    // i on program i % K: standard, toon, then distinct toon variants), interleaved in
+    // each of three visits per cache state, the `abcost` rows. Images at pose 0 for K = 2.
+    if sections.iter().any(|s| s == "mp1") {
+        let toon = include_str!("../shaders/programs/toon.wgsl");
+        let mut programs = vec![r.standard_program().clone()];
+        for k in 0..7 {
+            let source = if k == 0 {
+                toon.to_string()
+            } else {
+                toon.replace(
+                    "struct Surface",
+                    &format!("const VARIANT:f32={k}.0;\nstruct Surface"),
+                )
+            };
+            let label = format!("mp1-{k}");
+            programs.push(
+                r.try_create_program(&crate::ProgramDescriptor {
+                    label: &label,
+                    source: &source,
+                })
+                .unwrap(),
+            );
+        }
+        let mut rows = json!({});
+        for enabled in [false, true] {
+            r.set_indirect(es1_settings(enabled)).unwrap();
+            let cache = if enabled { "on" } else { "off" };
+            for visit in 0..3 {
+                for k in [1usize, 2, 8] {
+                    let set: Vec<&crate::Program> = programs.iter().take(k).collect();
+                    asset.set_programs(&mut r, &set).unwrap();
+                    let mut draw = |r: &mut Renderer, camera: &Camera| {
+                        let mut draws = asset.draws(Visibility::Frustum);
+                        es1_frame(r, &target, camera, &mut draws);
+                    };
+                    r.test_drain("MP1 cut");
+                    r.poll().unwrap();
+                    r.reset_indirect();
+                    for _ in 0..10 {
+                        draw(&mut r, &camera_at(0, 0.0));
+                    }
+                    r.test_drain("MP1 cut frames");
+                    let cut = frame_times(&mut r, 10, 0);
+                    if visit == 0 && k == 2 {
+                        let image = es1_radiance(&mut r, exposure);
+                        write(&format!("mp1-k2-{cache}-p0"), &image);
+                    }
+                    for t in 0..24 {
+                        draw(&mut r, &camera_at(0, 0.01 * t as f32));
+                    }
+                    r.test_drain("MP1 motion frames");
+                    let motion = frame_times(&mut r, 24, 2);
+                    let slot = &mut rows[format!("k{k}")][cache];
+                    if slot.is_null() {
+                        *slot = json!({"cuts": [], "motion": []});
+                    }
+                    slot["cuts"].as_array_mut().unwrap().push(cut);
+                    slot["motion"].as_array_mut().unwrap().push(motion);
+                }
+            }
+        }
+        let set = [&programs[0]];
+        asset.set_programs(&mut r, &set).unwrap();
+        results["mp1"] = rows;
+    }
     for (program, text) in es1_programs() {
         r.test_reload_standard(&text).unwrap();
         let mut row = json!({});
@@ -806,7 +872,7 @@ fn gpu_es1_quarry() {
                     }
                     row["cost"] = timing;
                 }
-                "abcost" => {}
+                "abcost" | "mp1" => {}
                 other => panic!("unknown ES1 section {other}"),
             }
         }
