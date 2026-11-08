@@ -99,9 +99,11 @@ The registered cold/moving disk witnesses no longer show RTDEF's extra grain.
 The viewer negotiates the required RT capabilities; explicit Raster/Exact
 settings and the old recorded gates remain available.
 
-- Global transform/material changes still restart every TR1 pixel. The
-  64-ray restart budget improves grain without fixing that coarse invalidation;
-  local motion histories and broader animated-game coverage remain work.
+- Transform edits of existing placements no longer restart TR1 (MQ1,
+  [m7-mq1.md](m7-mq1.md)): they reproject through the previous transforms and
+  clamp to a 3x3 min/max box. Material changes and new placements still restart
+  every TR1 pixel; the 64-ray restart budget improves their grain without fixing
+  that coarse invalidation. Broader animated-game coverage remains work.
 - The final disk grain diagnostic wins 47/48 sampled checkpoints. The early
   camera-1px frame 1 row is 4.857 versus Exact's 4.103 +4-stop codes, though
   inspected speckle is not visibly worse and whole-crop error is lower.
@@ -188,6 +190,12 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 TR1 is the default on traced and visibility-buffer lit frames, both paths, from TR1b's overnight pass; `Reconstruction::off()` switches it off ([m7-tr1b.md](m7-tr1b.md)). It is never presented as meeting the Unreal bar.
 
 **Reach.** RTDEF2 makes traced primaries and TR1 the capable 1x RT default; the viewer negotiates that path. Raster/4x and unsupported-capability fallbacks still do not reconstruct. Temporal soft-shadow frames keep their own film history and are not reconstructed.
+
+**Animated scenes (MQ1, [m7-mq1.md](m7-mq1.md)).** Before MQ1, any transform edit restarted every pixel, so the example scene (and any game with a moving object) got no anti-aliasing and no glossy integration. Moved placements now reproject through their previous transforms, and frames where something moved clamp history to a plain 3x3 min/max box. Remaining gaps, measured on the example flight against a 2x2 supersampled TR1-off control:
+- **RT mirror and glossy reflections lag under camera motion**: chrome sphere 3.07 → 6.44 codes RMS and flicker 4.05 → 9.05 versus main's restart; gold sphere static 4.34 → 4.84, although its grain falls 62 %. Surface-identity history follows the surface, not the reflected image. The fix needs a program-declared view sensitivity (window capped by lobe width) or reflection hit distances. Static scenes under camera motion have the same lag without the box (TR1b's U1b failure).
+- **Skinned characters with GI on still restart every static pixel's history** on animated frames (SK1's scene-wide swept-volume widening). Recommended: set MQ1's box for skinned motion and keep the swept volume for direct shadows only.
+- Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.
+- The example's `--quarry` mode fails on both paths (mixed programs, MP1).
 
 **Against no-AA, judged on each path's own 64-spp pixel integral** (Islam's ruling; the visible-sky quarry walk, 40 frames, every row pooled per segment). Before tonight TR1b lost 31 of 256 pooled rows on both paths. With the overnight changes (radius-1 spatial start with a radius-2 fallback, point-symmetric jitter pairs, exact single-layer output at whole coverage, sub-1e-3-px fetch snap) it loses 26 on both paths; the cold first frame now equals no-AA bit for bit (all start-age-0 rows tie). What still loses, by kind (RT; non-RT within a few rows of it):
 

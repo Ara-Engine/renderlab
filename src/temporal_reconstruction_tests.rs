@@ -248,6 +248,88 @@ fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// MQ1 (docs/m7-mq1.md): transform edits of existing placements continue TR1's history through
+/// their previous transforms instead of restarting every pixel, on both paths. A card slides
+/// 1 cm per frame over a static ground under a still camera; before MQ1 every frame restarted,
+/// so no history weight exceeded the start window.
+#[test]
+#[ignore = "owned GPU lease; MQ1 moving placement, offscreen (RENDERLAB_PRIMARY_MANIFEST)"]
+fn gpu_mq1_moving_placement() {
+    for path in ["rt", "nonrt"] {
+        let mut r = if path == "rt" {
+            let mut r = renderer(false);
+            r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+            r.set_soft_shadows(SoftShadows::Interactive);
+            r
+        } else {
+            no_rt_renderer()
+        };
+        light(&mut r);
+        r.set_reconstruction(Reconstruction::default()).unwrap();
+        let (ground, mut ground_at) = geometry(
+            &mut r,
+            &[[-2., 0., -2.], [2., 0., -2.], [2., 0., 2.], [-2., 0., 2.]],
+            &[0, 2, 1, 0, 3, 2],
+        );
+        let (card, mut card_at) = geometry(
+            &mut r,
+            &[[-0.4, 0., 0.], [0.4, 0., 0.], [0., 0.8, 0.]],
+            &[0, 1, 2],
+        );
+        let [w, h] = [160u32, 96];
+        let color = target(&r, w, h);
+        let camera = Camera::look_at(
+            Vec3::new(0.2, 1.2, 2.5),
+            Vec3::ZERO,
+            Vec3::Y,
+            45f32.to_radians(),
+            0.01,
+            100.,
+        )
+        .unwrap();
+        let frames = 24;
+        let slide = |f: u32| Vec3::new(0.01 * f as f32, 0., 0.);
+        for f in 0..frames {
+            card_at.set(0, Mat4::from_translation(slide(f))).unwrap();
+            render(
+                &mut r,
+                &color,
+                &camera,
+                &mut [
+                    Draw::new(&ground, &mut ground_at),
+                    Draw::new(&card, &mut card_at),
+                ],
+            );
+            r.test_drain("MQ1 moving placement");
+            let reset = r.reconstruction_state.as_ref().unwrap().reset;
+            assert_eq!(
+                reset,
+                f == 0,
+                "{path} frame {f}: transform edits must not restart"
+            );
+        }
+        let state = r.reconstruction_state.as_ref().unwrap();
+        let history = read_texture(&r, state.written_colour());
+        let weight = |p: Vec3| {
+            let c = camera.matrix(w, h) * p.extend(1.0);
+            let x = ((c.x / c.w + 1.0) * 0.5 * w as f32) as usize;
+            let y = ((1.0 - c.y / c.w) * 0.5 * h as f32) as usize;
+            let i = (y * w as usize + x) * 16 + 12;
+            f32::from_le_bytes(history[i..i + 4].try_into().unwrap())
+        };
+        // The moved card's interior continued its history (Catmull-Rom or bilinear motion
+        // windows, both above the start window of 4); the static ground kept accumulating.
+        let card_weight = weight(slide(frames - 1) + Vec3::new(0., 0.27, 0.));
+        let ground_weight = weight(Vec3::new(-0.8, 0., 0.8));
+        eprintln!("MQ1 {path}: card weight {card_weight}, ground weight {ground_weight}");
+        assert!(card_weight > 4.5, "{path}: card weight {card_weight}");
+        assert!(
+            ground_weight >= 20.0,
+            "{path}: ground weight {ground_weight}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "owned GPU lease; TR1 registered sequences, offscreen (RENDERLAB_PRIMARY_MANIFEST)"]
 fn gpu_tr1_sequence() {
