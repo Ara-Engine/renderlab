@@ -803,7 +803,7 @@ impl Renderer {
                 .state
                 .models
                 .iter()
-                .zip(d.instances.state.previous_models())
+                .zip(d.instances.state.previous_models(self.frames))
             {
                 let moved = model != previous_model;
                 rigid_motion |= moved;
@@ -939,7 +939,9 @@ impl Renderer {
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
-        let sampling_still = still && turn == 0.0;
+        // MV1 motion-source integration: rigid/deforming casters must not enter
+        // RTDEF2's settled shadow budget just because the camera is stationary.
+        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
         state.held_frames = if sampling_still {
             state.held_frames.saturating_add(1)
         } else {

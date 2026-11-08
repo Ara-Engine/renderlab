@@ -18,7 +18,7 @@ pub(super) mod temporal_reconstruction;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
-const FRAME_BYTES: usize = 128;
+pub(super) const FRAME_BYTES: usize = 128;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -1649,7 +1649,7 @@ impl Renderer {
             }
         }
         for d in draws {
-            for model in d.instances.state.previous_models() {
+            for model in d.instances.state.previous_models(self.frames) {
                 instances.extend_from_slice(&matrix_bytes(*model));
             }
         }

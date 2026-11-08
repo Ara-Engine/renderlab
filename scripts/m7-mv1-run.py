@@ -1,6 +1,7 @@
 """MV1 two-job compile or schedule/game-aware n8 lease. Bulk stays on D:."""
 import importlib.util
 import datetime as dt
+import ctypes
 import os
 from pathlib import Path
 import subprocess
@@ -18,6 +19,18 @@ g1.OUT = OUT
 g1.TARGET = OUT / "target"
 g1.BINARY = OUT / "bin/mv1-tests.exe"
 OUT.mkdir(parents=True, exist_ok=True)
+
+class MemoryStatus(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32),
+                ("total", ctypes.c_uint64), ("available", ctypes.c_uint64),
+                ("unused", ctypes.c_uint64 * 5)]
+
+def available_mb():
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise ctypes.WinError()
+    return status.available // (1024 * 1024)
 
 if sys.argv[1] == "build":
     g1.build(SimpleNamespace(release=False, beside_leases=True, name="mv1-tests"))
@@ -46,6 +59,9 @@ else:
     deadline = time.monotonic() + 75 * 60
     attempt = 0
     while time.monotonic() < deadline:
+        if available_mb() < int(os.environ.get("M7_MV1_MIN_AVAILABLE_MB", "4096")):
+            time.sleep(2)
+            continue
         reservation = g1.window_open(u)
         if (g1.quiet_active(u, any_lease=False) or g1.hold_state(u) == "hold"
                 or (reservation and "quiet" in reservation.lower())):

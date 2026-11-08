@@ -123,6 +123,7 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
 // prepared (src/program.rs); hits read the open environment state (`rl_indirect_open`: the
 // cache-off values, no cache lookup per hit). Restores the receiver's parameters.
 fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,size:vec2<u32>) {
+    var query:ray_query;
     rl_specular=vec4<f32>(0.0);
     let lobe=reflection_lobe(s,input);
     let alpha=clamp(lobe.alpha,0.0,1.0);
@@ -158,8 +159,6 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
     // illegal opaque null for loop-local/conditionally initialized query variables.
     rl_reflection_hit=true;
-    // Naga 30 must not emit a loop-local null initializer for this opaque type.
-    var query:ray_query;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
         if !mirror {

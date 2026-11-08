@@ -2694,7 +2694,7 @@ impl Renderer {
         );
         if matches!(&result, Ok(Some(_))) {
             for draw in draws {
-                draw.instances.state.motion_submitted();
+                draw.instances.state.motion_submitted(self.frames);
             }
         }
         result
