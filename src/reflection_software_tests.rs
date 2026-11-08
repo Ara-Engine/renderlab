@@ -23,6 +23,8 @@ fn software_reflection_composition() {
         assert_eq!(source.matches(call).count(), 1);
         assert!(source.contains("fn rs_trace(") && !source.contains("ray_query"));
         assert!(source.contains("if rl_reflection_hit {return rl_hit_shadow("));
+        // Both paths read the global bands (ReflectionSettings).
+        assert!(source.contains("let bands=primary_frame.reflection;"));
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         let info = naga::valid::Validator::new(
@@ -56,6 +58,7 @@ fn software_reflection_composition() {
     for head in shading_heads(SOURCE).unwrap() {
         let source = compose(&head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
         assert!(source.contains("rayQueryInitialize(&query,") && !source.contains("rs_trace"));
+        assert!(source.contains("let bands=primary_frame.reflection;"));
     }
 }
 
@@ -237,8 +240,15 @@ fn gpu_r1n_mirror_identity() {
     // Rough enough to stay untraced in both images (hits never trace further).
     let target = material([0.7, 0.5, 0.3, 1.0], 0.0, 0.6, &mut renderer);
     let fov = 0.7;
-    let above = Camera::look_at(Vec3::new(0.0, 2.0, 0.0), Vec3::ZERO, Vec3::Z, fov, 0.01, 100.0)
-        .unwrap();
+    let above = Camera::look_at(
+        Vec3::new(0.0, 2.0, 0.0),
+        Vec3::ZERO,
+        Vec3::Z,
+        fov,
+        0.01,
+        100.0,
+    )
+    .unwrap();
     let mirrored = Camera::look_at(
         Vec3::new(0.0, -2.0, 0.0),
         Vec3::new(0.0, 3.0, 0.0),
@@ -295,5 +305,34 @@ fn gpu_r1n_mirror_identity() {
     assert_eq!(
         failures, 0,
         "non-RT mirror-camera identity failed, max ratio {worst}"
+    );
+    // ReflectionSettings::off(): no rays, so the mirror keeps the untraced environment
+    // estimate and the target's colours leave it.
+    renderer
+        .set_reflections(crate::ReflectionSettings::off())
+        .unwrap();
+    let untraced = render(
+        &mut renderer,
+        &above,
+        &mut [
+            Draw::new(&mirror_mesh, &mut mirror_instances).with_material(&mirror),
+            Draw::new(&target_mesh, &mut target_instances).with_material(&target),
+        ],
+    );
+    renderer
+        .set_reflections(crate::ReflectionSettings::default())
+        .unwrap();
+    let changed = untraced
+        .iter()
+        .zip(&reflected)
+        .filter(|(a, b)| (*a - *b).abs() > 0.002 + 0.005 * b.abs())
+        .count();
+    eprintln!(
+        "R1n reflections off: {changed} of {} channels changed",
+        untraced.len()
+    );
+    assert!(
+        changed * 2 > untraced.len(),
+        "ReflectionSettings::off() kept the reflection"
     );
 }

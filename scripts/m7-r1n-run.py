@@ -177,6 +177,8 @@ def run_steps(g, out, binary, baseline, args):
                 manifest["out"] = str(out)
                 (out / "quarry-manifest.json").write_text(json.dumps(manifest, indent=2))
                 env["RENDERLAB_ES1_QUARRY"] = str(out / "quarry-manifest.json")
+                # Program A/B images need TR1 off (its jitter differs per capture).
+                env["RENDERLAB_ES1_TR1"] = "0"
             name = TESTS.get(test, test)
             command = ([binary, "--test-threads=2"] if test == "lib" else
                        [binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"])

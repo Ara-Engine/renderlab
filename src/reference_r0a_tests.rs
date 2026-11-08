@@ -118,6 +118,10 @@ fn device(rt: bool) -> (wgpu::Device, wgpu::Queue) {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let a = adapter.limits();
     let mut features = crate::RECEIVER_FEATURES;
+    // M7-R1n: timed frames (RENDERLAB_R1N_TIMES) need GPU timestamps.
+    if std::env::var_os("RENDERLAB_R1N_TIMES").is_some() {
+        features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
     let mut limits = wgpu::Limits {
         max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
         max_buffer_size: a.max_buffer_size,

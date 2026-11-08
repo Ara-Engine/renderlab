@@ -593,6 +593,8 @@ pub struct Renderer {
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
     reconstruction: Reconstruction,
+    /// M7-R1/R1n global reflection controls (`set_reflections`).
+    reflections: crate::ReflectionSettings,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
@@ -1038,6 +1040,7 @@ impl Renderer {
             atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
+            reflections: crate::ReflectionSettings::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,

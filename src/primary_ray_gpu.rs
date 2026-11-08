@@ -16,9 +16,9 @@ mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
 pub(super) mod temporal_reconstruction;
 
-/// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
-/// `scene_pixels` rectangle.
-const FRAME_BYTES: usize = 112;
+/// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
+/// `scene_pixels` rectangle and the reflection bands (`ReflectionSettings::frame_words`).
+const FRAME_BYTES: usize = 128;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -363,6 +363,16 @@ impl Renderer {
     pub fn reconstruction(&self) -> Reconstruction {
         self.reconstruction
     }
+    /// Global reflection controls (src/reflections.rs): R1's traced reflections and R1n's
+    /// software rays trace only while enabled, and only up to `max_roughness`. Default on.
+    pub fn set_reflections(&mut self, settings: crate::ReflectionSettings) -> Result<(), Error> {
+        settings.validate()?;
+        self.reflections = settings;
+        Ok(())
+    }
+    pub fn reflections(&self) -> crate::ReflectionSettings {
+        self.reflections
+    }
     /// The next reconstructed frame restarts every pixel: a camera cut the engine cannot
     /// infer from the camera alone.
     pub fn cut_reconstruction(&mut self) {
@@ -615,7 +625,13 @@ pub(super) struct Targets {
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
     /// The last word is M7-R1n's software reflection geometry generation.
-    key: (wgpu::Texture, wgpu::Texture, Option<wgpu::Texture>, u64, u64),
+    key: (
+        wgpu::Texture,
+        wgpu::Texture,
+        Option<wgpu::Texture>,
+        u64,
+        u64,
+    ),
     trace: [Option<Owned<wgpu::BindGroup>>; 2],
     fresh: Option<Owned<wgpu::BindGroup>>,
     /// Soft frames: the fused Interactive trace and visibility.
@@ -1507,7 +1523,20 @@ impl Renderer {
                 .as_ref()
                 .is_some_and(|h| h.visibility_filter);
         bytes[88..92].copy_from_slice(&u32::from(filter).to_ne_bytes());
-        for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
+        for (dst, value) in bytes[96..112].chunks_exact_mut(4).zip(scene) {
+            dst.copy_from_slice(&value.to_ne_bytes());
+        }
+        // M7-R1/R1n: the global reflection bands, on both paths. A non-RT frame traces only
+        // when every drawn mesh has software geometry: a ray through an uncovered mesh would
+        // show the sky behind it, a leak worse than the untraced estimate.
+        let covered =
+            self.hardware_shadows.is_some() || draws.iter().all(|d| d.mesh.reflection.is_some());
+        let bands = if covered {
+            self.reflections.frame_words()
+        } else {
+            crate::ReflectionSettings::off().frame_words()
+        };
+        for (dst, value) in bytes[112..128].chunks_exact_mut(4).zip(bands) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
         if self.primary.as_ref().unwrap().frame.is_none() {
@@ -2398,16 +2427,23 @@ pub(super) struct SoftwareReflections {
     generation: u64,
 }
 impl Renderer {
-    fn prepare_software_reflections(&mut self, draws: &[PreparedDraw<'_>], uploads: &mut UploadBytes) {
+    fn prepare_software_reflections(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        uploads: &mut UploadBytes,
+    ) {
         let mut meshes: Vec<Arc<crate::reflection_software::Blas>> = vec![];
         let mut traced = vec![];
         let mut slot = 0u32;
         for d in draws {
             let mesh = d.mesh.reflection.as_ref().map(|b| {
-                meshes.iter().position(|m| Arc::ptr_eq(m, b)).unwrap_or_else(|| {
-                    meshes.push(b.clone());
-                    meshes.len() - 1
-                })
+                meshes
+                    .iter()
+                    .position(|m| Arc::ptr_eq(m, b))
+                    .unwrap_or_else(|| {
+                        meshes.push(b.clone());
+                        meshes.len() - 1
+                    })
             });
             for model in &d.instances.state.models {
                 if let Some(mesh) = mesh {
@@ -2446,7 +2482,13 @@ impl Renderer {
                 self.queue.write_buffer(&r.buffer.value, 0, &bytes);
                 uploads.geometry += (words.len() * 4) as u64;
                 uploads.write_calls += 1;
-                self.primary.as_mut().unwrap().reflections.as_mut().unwrap().records = words;
+                self.primary
+                    .as_mut()
+                    .unwrap()
+                    .reflections
+                    .as_mut()
+                    .unwrap()
+                    .records = words;
             }
             return;
         }

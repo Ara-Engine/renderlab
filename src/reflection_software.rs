@@ -48,7 +48,9 @@ impl Blas {
         }
         let corner = |t: usize, k: usize| positions[indices[t * 3 + k] as usize];
         let centroids: Vec<[f32; 3]> = (0..count)
-            .map(|t| std::array::from_fn(|a| (corner(t, 0)[a] + corner(t, 1)[a] + corner(t, 2)[a]) / 3.0))
+            .map(|t| {
+                std::array::from_fn(|a| (corner(t, 0)[a] + corner(t, 1)[a] + corner(t, 2)[a]) / 3.0)
+            })
             .collect();
         let mut builder = Builder {
             positions,
@@ -120,9 +122,8 @@ impl Builder<'_> {
         let first = (self.triangles.len() / TRIANGLE_WORDS) as u32;
         let mut points = Vec::with_capacity(order.len() * 3);
         for &t in order {
-            let [a, b, c] = std::array::from_fn(|k| {
-                self.positions[self.indices[t as usize * 3 + k] as usize]
-            });
+            let [a, b, c] =
+                std::array::from_fn(|k| self.positions[self.indices[t as usize * 3 + k] as usize]);
             let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
             let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);
             self.triangles
@@ -227,7 +228,8 @@ mod tests {
     /// CPU replay of the WGSL traversal (shaders/reflections_software.wgsl): the closest
     /// hit's (primitive, u, v, t) in object space.
     fn closest(b: &Blas, o: [f32; 3], d: [f32; 3]) -> Option<(u32, f32, f32, f32)> {
-        let v = |w: &[u32], i: usize| -> [f32; 3] { std::array::from_fn(|k| f32::from_bits(w[i + k])) };
+        let v =
+            |w: &[u32], i: usize| -> [f32; 3] { std::array::from_fn(|k| f32::from_bits(w[i + k])) };
         let mut best: Option<(u32, f32, f32, f32)> = None;
         let mut stack = vec![b.root];
         while let Some(child) = stack.pop() {
@@ -235,8 +237,18 @@ mod tests {
                 let first = ((child & !LEAF) >> 3) as usize;
                 for k in 0..(child & 7) as usize {
                     let x = (first + k) * TRIANGLE_WORDS;
-                    let (a, e1, e2) = (v(&b.triangles, x), v(&b.triangles, x + 3), v(&b.triangles, x + 6));
-                    let (a, e1, e2, o, d) = (glam::Vec3::from(a), glam::Vec3::from(e1), glam::Vec3::from(e2), glam::Vec3::from(o), glam::Vec3::from(d));
+                    let (a, e1, e2) = (
+                        v(&b.triangles, x),
+                        v(&b.triangles, x + 3),
+                        v(&b.triangles, x + 6),
+                    );
+                    let (a, e1, e2, o, d) = (
+                        glam::Vec3::from(a),
+                        glam::Vec3::from(e1),
+                        glam::Vec3::from(e2),
+                        glam::Vec3::from(o),
+                        glam::Vec3::from(d),
+                    );
                     let p = d.cross(e2);
                     let det = e1.dot(p);
                     if det.abs() < 1e-30 {
@@ -247,7 +259,12 @@ mod tests {
                     let q = s.cross(e1);
                     let w = d.dot(q) / det;
                     let t = e2.dot(q) / det;
-                    if u >= 0.0 && w >= 0.0 && u + w <= 1.0 && t > 0.0 && best.is_none_or(|h| t < h.3) {
+                    if u >= 0.0
+                        && w >= 0.0
+                        && u + w <= 1.0
+                        && t > 0.0
+                        && best.is_none_or(|h| t < h.3)
+                    {
                         best = Some((b.triangles[x + 9], u, w, t));
                     }
                 }
@@ -320,7 +337,10 @@ mod tests {
             glam::Vec3::new(3.0, -1.0, 4.0),
         );
         let packed = pack(&[&b], 1);
-        let words = instance_words(&[(5, model, &b, packed.bases[0]), (6, Mat4::ZERO, &b, packed.bases[0])]);
+        let words = instance_words(&[
+            (5, model, &b, packed.bases[0]),
+            (6, Mat4::ZERO, &b, packed.bases[0]),
+        ]);
         assert_eq!(words.len(), HEADER_WORDS + INSTANCE_WORDS);
         assert_eq!(words[0], 1);
         let r = &words[HEADER_WORDS..];
@@ -335,6 +355,9 @@ mod tests {
         for k in 0..3 {
             assert!(f(12 + k) <= world[k] && world[k] <= f(15 + k));
         }
-        assert_eq!(&r[18..22], &[packed.bases[0][0], packed.bases[0][1], b.root, 5]);
+        assert_eq!(
+            &r[18..22],
+            &[packed.bases[0][0], packed.bases[0][1], b.root, 5]
+        );
     }
 }
