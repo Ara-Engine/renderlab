@@ -70,6 +70,13 @@ const GI_H_GATHER_CELLS:u32=20u;
 // Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k with k % S == 0,
 // each weighted S times a direction's solid angle: a fixed subset of the fixed directions.
 const GI_H_GATHER_STRIDE:u32=21u;
+// The most cells a frame creates (G2b; 0: every listed miss). When more are listed (a cut lists
+// every visible cell), a frame claims those whose key phase gi_mix(key a) % P matches the
+// frame, P the smallest power of two (up to 64) that brings the list under it on average; the
+// others stay missing (pixels read coarser cells, which a cut's first frames create: src/
+// gi_cache.rs COARSE_CUT_FRAMES) and are listed again next frame. A fixed rotation by key, never
+// a ranking (W2).
+const GI_H_CLAIM_CELLS:u32=22u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
 // last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly

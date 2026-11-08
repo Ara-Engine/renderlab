@@ -36,8 +36,24 @@ const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate, then
 /// bounce's gather, light and cell shading (G2).
 const PROFILE_STAMPS: u32 = 2 * (9 + 2 * CLAIM_ROUNDS);
-/// Gather and light workgroups (eight and 64 cells each), fixed grids like the others.
+/// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
+/// others.
 const GATHER_GROUPS: u32 = 4096;
+/// The default per-frame gather budgets (`IndirectSettings::gather_cells` 0), in cells: about
+/// 4 ms of a cut frame's gathers at G2b's measured per-cell costs (4 px cells, every blocked
+/// direction: about 0.13 us a cell with hardware rays and 0.4 us with software rays on the
+/// quarry; docs/m7-g2b.md). Moving frames gather fewer cells than this, so only cuts spread.
+const GATHER_CELLS_HARDWARE: u32 = 32768;
+const GATHER_CELLS_SOFTWARE: u32 = 8192;
+/// The per-path budgets of new cells (`IndirectSettings::claim_cells` 0, opt-in): about 3 ms of
+/// query points and rays a cut frame at G2b's measured costs (2 px cells: about 60 ns a new
+/// cell with hardware rays, 140 ns with software rays; docs/m7-g2b.md).
+const CLAIM_CELLS_HARDWARE: u32 = 49152;
+const CLAIM_CELLS_SOFTWARE: u32 = 20480;
+/// Frames after a cut (a cleared table) whose pixels read cells one level coarser: a quarter of
+/// the cells cover the view within the claim budget, and the finer cells that follow fall back
+/// to them until they exist (G2b).
+const COARSE_CUT_FRAMES: u32 = 4;
 const LIGHT_GROUPS: u32 = 1024;
 /// Slot groups a lighting, environment or caster change spreads relighting over while it
 /// keeps changing (and for as many frames after), as ENVIRONMENT_PERIOD does for the sky.
@@ -194,17 +210,32 @@ pub struct IndirectSettings {
     /// cell), a frame gathers those in one fixed slot group (slot % P == frame % P, P the
     /// smallest power of two up to 64 that brings the queue under this count) and the rest
     /// wait, so the cut's bounce work is bounded per frame rather than finished in the fewest
-    /// frames. 0 gathers every queued cell each frame.
+    /// frames. 0 picks the per-path budget (GATHER_CELLS_HARDWARE, GATHER_CELLS_SOFTWARE);
+    /// u32::MAX gathers every queued cell each frame.
     pub gather_cells: u32,
     /// Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k % S == 0 of
     /// the cell's fixed set, each weighted S times a direction's solid angle, so it costs 1/S of
     /// the rays. Bounce light is smoother than sky visibility; the subset is fixed per cell.
     pub gather_stride: u32,
+    /// The most cells a frame creates (G2b). When more are missing (a cut), a frame creates
+    /// those of one fixed key phase and the rest wait, with the first COARSE_CUT_FRAMES frames
+    /// after a cut reading cells one level coarser, so a cut's query points and rays are bounded
+    /// per frame. 0 picks the per-path budget (CLAIM_CELLS_HARDWARE, CLAIM_CELLS_SOFTWARE);
+    /// u32::MAX (the default) creates every missing cell at once and reads no coarser cut level:
+    /// on the SV test scene the coarse-to-fine handover settled more slowly than it saved
+    /// (docs/m7-g2b.md).
+    pub claim_cells: u32,
 }
 impl Default for IndirectSettings {
+    /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
+    /// measured configuration (bounce and ES1's blocked sky specular, 4 px cells, every blocked
+    /// direction, three gathers an event) with a per-frame gather cap that bounds camera cuts.
+    /// 2 px cells fix the quarry's crevice mouths but speckle flat test-scene surfaces and need a
+    /// 448 MiB table, over the non-RT device's 256 MiB buffer limit: an opt-in setting
+    /// (`cell_pixels` 2, `slots_log2` 21) where the device allows it.
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             lookup: IndirectLookup::Trilinear,
             cell_pixels: 4.0,
             min_edge: 1.0 / 512.0,
@@ -227,10 +258,18 @@ impl Default for IndirectSettings {
             gathers: 3,
             gather_cells: 0,
             gather_stride: 1,
+            claim_cells: u32::MAX,
         }
     }
 }
 impl IndirectSettings {
+    /// The cache off: programs read the unoccluded environment, as before M7.
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
     fn validate(&self) -> Result<(), Error> {
         let valid = self.cell_pixels.is_finite()
             && self.cell_pixels > 0.0
@@ -357,6 +396,8 @@ pub struct IndirectCounters {
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
     pub gather_deferred: u32,
+    /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
+    pub claim_deferred: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -853,7 +894,35 @@ impl Renderer {
         let reallocate =
             settings.enabled && self.gi.resources.as_ref().is_none_or(|r| r.slots != slots);
         if reallocate {
-            let misses = slots;
+            self.allocate_gi(slots);
+        } else if self.gi.settings.lookup != settings.lookup
+            || self.gi.settings.cell_pixels != settings.cell_pixels
+            || self.gi.settings.min_edge != settings.min_edge
+            || self.gi.settings.levels != settings.levels
+            || self.gi.settings.direction_phases != settings.direction_phases
+            || self.gi.settings.directions != settings.directions
+            || self.gi.settings.rotate_directions != settings.rotate_directions
+            // Bounce values left by an earlier setting would still be read.
+            || self.gi.settings.bounce != settings.bounce
+        {
+            // Keys change meaning: start from an empty table.
+            self.gi.pending_clear = true;
+        }
+        if self.gi.settings.force_software != settings.force_software {
+            self.gi.pending_clear = true;
+        }
+        self.gi.settings = settings;
+        Ok(())
+    }
+    /// Allocates the table and work buffers for `slots` (all slots empty), replacing any
+    /// earlier ones. The cache is on by default (G2b) and allocates on the first frame whose
+    /// program calls an indirect input (`prepare_gi`), so a renderer whose programs never do
+    /// holds none of it.
+    fn allocate_gi(&mut self, slots: u32) {
+        {
+            // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
+            // the miss list and request table stay at G2's size with the larger tables.
+            let misses = slots.min(1 << 19);
             let table_bytes = (HEADER_WORDS + u64::from(slots) * SLOT_WORDS) * 4;
             // Counters, claims, misses, trace and integrate queues, ray items and their
             // staged bits, the request table, then bounce's two gather queues (a count, then
@@ -930,24 +999,7 @@ impl Renderer {
             self.gi.generation += 1;
             self.gi.environment = None;
             self.gi.bounds.clear();
-        } else if self.gi.settings.lookup != settings.lookup
-            || self.gi.settings.cell_pixels != settings.cell_pixels
-            || self.gi.settings.min_edge != settings.min_edge
-            || self.gi.settings.levels != settings.levels
-            || self.gi.settings.direction_phases != settings.direction_phases
-            || self.gi.settings.directions != settings.directions
-            || self.gi.settings.rotate_directions != settings.rotate_directions
-            // Bounce values left by an earlier setting would still be read.
-            || self.gi.settings.bounce != settings.bounce
-        {
-            // Keys change meaning: start from an empty table.
-            self.gi.pending_clear = true;
         }
-        if self.gi.settings.force_software != settings.force_software {
-            self.gi.pending_clear = true;
-        }
-        self.gi.settings = settings;
-        Ok(())
     }
     pub fn indirect(&self) -> IndirectSettings {
         self.gi.settings
@@ -1235,6 +1287,7 @@ impl Renderer {
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],
+            claim_deferred: w[43],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1851,7 +1904,12 @@ impl Renderer {
     ) -> Result<(), Error> {
         self.gi.plan = None;
         if self.gi.resources.is_none() {
-            return Ok(());
+            // On by default (G2b): the first eligible frame whose programs call an indirect
+            // input allocates the table.
+            if !(self.gi.settings.enabled && eligible && self.gi_callers(draws)) {
+                return Ok(());
+            }
+            self.allocate_gi(1 << self.gi.settings.slots_log2);
         }
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
@@ -1881,7 +1939,17 @@ impl Renderer {
             | (u32::from(s.rotate_directions) << 2)
             | (u32::from(self.gi.profile.is_some()) << 3);
         header[3] = self.gi.frame;
-        let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32 * s.cell_pixels;
+        // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
+        // are uncapped.
+        let since_clear = if self.gi.pending_clear {
+            0
+        } else {
+            self.gi.since_clear
+        };
+        let coarse = s.claim_cells != u32::MAX && since_clear < COARSE_CUT_FRAMES;
+        let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32
+            * s.cell_pixels
+            * if coarse { 2.0 } else { 1.0 };
         header[4] = footprint.to_bits();
         header[5] = s.min_edge.to_bits();
         header[6] = s.levels;
@@ -1893,11 +1961,6 @@ impl Renderer {
         header[12] = s.level_blend.to_bits();
         header[13] = if s.parallel_rays { RAY_ITEMS } else { 0 };
         // The cut refill: S groups over the S cache frames that start at a reset.
-        let since_clear = if self.gi.pending_clear {
-            0
-        } else {
-            self.gi.since_clear
-        };
         let cut_phases = match s.cut_phases {
             0 if software => 4,
             0 => 1,
@@ -1912,8 +1975,19 @@ impl Renderer {
         header[17] = u32::from(bounce);
         header[18] = layout.shade;
         header[19] = s.gathers;
-        header[20] = s.gather_cells;
+        header[20] = match s.gather_cells {
+            0 if software => GATHER_CELLS_SOFTWARE,
+            0 => GATHER_CELLS_HARDWARE,
+            u32::MAX => 0,
+            cells => cells,
+        };
         header[21] = s.gather_stride;
+        header[22] = match s.claim_cells {
+            0 if software => CLAIM_CELLS_SOFTWARE,
+            0 => CLAIM_CELLS_HARDWARE,
+            u32::MAX => 0,
+            cells => cells,
+        };
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -2162,7 +2236,7 @@ impl Renderer {
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
             (false, _) => IDLE_AFTER,
-            (true, 0) => IDLE_AFTER_BOUNCE,
+            (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
         if self.gi.idle_frames >= idle_after && flags == 0 && !busy {

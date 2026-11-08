@@ -1235,7 +1235,7 @@ fn gpu_gi_sky_visibility_sv() {
                 rig.settings(if cache {
                     on
                 } else {
-                    IndirectSettings::default()
+                    IndirectSettings::off()
                 });
                 rig.r.reset_indirect();
                 rows[label] = sequence(&mut rig, &sv, &materials, 32, |_, _| (eye, target));
@@ -1258,7 +1258,7 @@ fn gpu_gi_sky_visibility_sv() {
                 rig.settings(if cache {
                     on
                 } else {
-                    IndirectSettings::default()
+                    IndirectSettings::off()
                 });
                 rig.r.reset_indirect();
                 rig.r
@@ -1294,7 +1294,7 @@ fn gpu_gi_sky_visibility_sv() {
         };
         // Configurations: GI off (the pre-M7 image), then the W3 lookups and cell sizes.
         let mut configs = vec![
-            ("off", IndirectSettings::default()),
+            ("off", IndirectSettings::off()),
             ("trilinear-4px", base),
         ];
         if !quick {
@@ -1499,32 +1499,42 @@ fn gpu_gi_sky_visibility_sv() {
         if section("bounce") {
             let bounce = std::mem::take(&mut rig.bounce);
             let mut rows = json!({});
-            for (config, s) in [
-                ("off", IndirectSettings::default()),
+            // RENDERLAB_G2B_SV_BOUNCE (G2b): the bounce configurations, G2 quarry variant names
+            // (default "bounce", the default settings); RENDERLAB_G2B_SV_FRAMES the frame the
+            // scored image is taken at (default 12).
+            let mut configs: Vec<(String, IndirectSettings)> = vec![
+                ("off".into(), IndirectSettings::off()),
                 (
-                    "sky",
+                    "sky".into(),
                     IndirectSettings {
                         enabled: true,
                         bounce: false,
                         ..Default::default()
                     },
                 ),
-                (
-                    "bounce",
-                    IndirectSettings {
-                        enabled: true,
-                        ..Default::default()
-                    },
-                ),
-            ] {
+            ];
+            for name in env("RENDERLAB_G2B_SV_BOUNCE")
+                .unwrap_or_else(|| "bounce".into())
+                .split(',')
+            {
+                let s = if name == "bounce" {
+                    IndirectSettings::default()
+                } else {
+                    g2_variant(name)
+                };
+                configs.push((name.to_string(), s));
+            }
+            let last: usize = env("RENDERLAB_G2B_SV_FRAMES").map_or(12, |f| f.parse().unwrap());
+            for (config, s) in configs {
+                let config = config.as_str();
                 let mut config_json = json!({});
                 for ((pose, eye, target), reference) in poses.iter().zip(&bounce_refs) {
                     rig.settings(s);
                     rig.r.reset_indirect();
                     let mut frames = vec![];
-                    for f in 1..=12 {
+                    for f in 1..=last {
                         rig.frame(&sv, *eye, *target, &bounce);
-                        if [1, 2, 4, 8, 12].contains(&f) {
+                        if [1, 2, 4, 8, 12, 24, 48, 96].contains(&f) || f == last {
                             frames.push((f, rig.radiance(&sv)));
                         }
                     }
@@ -1582,7 +1592,7 @@ fn gpu_gi_sky_visibility_sv() {
         // A program that never calls the cache runs no cache pass and draws the same bytes.
         if section("gates") {
             let (_, eye, target) = &poses[0];
-            rig.settings(IndirectSettings::default());
+            rig.settings(IndirectSettings::off());
             rig.frame(&sv, *eye, *target, &toon);
             let off = hash_image(&rig.radiance(&sv));
             rig.settings(base);
@@ -1647,7 +1657,7 @@ fn gpu_gi_sky_visibility_sv() {
             ("spread-4px", spread),
             ("rotated-4px-warm", rotated),
             ("spread-4px-warm", spread),
-            ("off", IndirectSettings::default()),
+            ("off", IndirectSettings::off()),
             ("trilinear-4px", base),
             (
                 "rotated-4px",
@@ -1830,7 +1840,7 @@ fn gpu_gi_sky_visibility_sv() {
                 }
                 let fresh = rig.radiance(&sv);
                 let open = {
-                    rig.settings(IndirectSettings::default());
+                    rig.settings(IndirectSettings::off());
                     rig.frame(&sv, eye, target, &materials);
                     let open = rig.radiance(&sv);
                     rig.settings(IndirectSettings {
@@ -1915,7 +1925,7 @@ fn gpu_gi_sky_visibility_sv() {
             let (_, eye, target) = poses[0].clone();
             let mut breakdown = json!({"step_m": 0.01});
             for (state, s) in [
-                ("off", IndirectSettings::default()),
+                ("off", IndirectSettings::off()),
                 (
                     "on",
                     IndirectSettings {
@@ -1963,7 +1973,7 @@ fn gpu_gi_sky_visibility_sv() {
                 ..base
             };
             let order = [
-                ("off", IndirectSettings::default()),
+                ("off", IndirectSettings::off()),
                 ("on", base),
                 (
                     "rotated",
@@ -2814,7 +2824,7 @@ fn gpu_gi_quarry() {
                 }
             };
             // Cache off: the unoccluded sky, for scale.
-            r.set_indirect(IndirectSettings::default()).unwrap();
+            r.set_indirect(IndirectSettings::off()).unwrap();
             render(&mut r);
             let open = capture_radiance(&mut r, exposure);
             r.set_indirect(IndirectSettings {
@@ -3385,26 +3395,39 @@ fn g2_nonrt() -> bool {
 /// settings in a process whose shaders hold ES1's unoccluded diagnostic). The names are the
 /// capture prefixes scripts/m7-g2-score.py reads.
 fn g2_variant(name: &str) -> IndirectSettings {
+    // G2's own settings (4 px cells, 2^19 slots, every blocked direction, three gathers, no
+    // gather cap): its default candidate and ES1's comparators keep their G2 meaning now that
+    // the defaults changed (G2b).
+    let g2 = IndirectSettings {
+        enabled: true,
+        cell_pixels: 4.0,
+        slots_log2: 19,
+        gathers: 3,
+        gather_stride: 1,
+        gather_cells: u32::MAX,
+        claim_cells: u32::MAX,
+        ..Default::default()
+    };
     match name {
-        "off" => IndirectSettings::default(),
-        "g2" => IndirectSettings {
-            enabled: true,
-            ..Default::default()
-        },
-        "es1" | "es1open" => IndirectSettings {
-            enabled: true,
-            bounce: false,
-            ..Default::default()
-        },
+        "off" => IndirectSettings::off(),
+        "g2" => g2,
+        "es1" | "es1open" => IndirectSettings { bounce: false, ..g2 },
+        // G2b's default: the cache as it now ships.
+        "g2b" => IndirectSettings::default(),
         // G2b screens: the cache with bounce, changed by '+'-joined tokens: pxF (cell edge in
         // pixels of footprint), sN (log2 slots), capN (cells gathered a frame), gN (gathers an
         // event schedules). "c2" and "c3" are 2 and 3 px cells in a table of 2^21 slots, to see
         // how much of the crevice-mouth darkness cell size alone explains (docs/m7-g2b.md).
         "c2" => g2_variant("g2+px2+s21"),
         "c3" => g2_variant("g2+px3+s21"),
-        other if other.starts_with("g2+") => {
-            let mut s = g2_variant("g2");
+        other if other.starts_with("g2+") || other.starts_with("g2b+") => {
+            let mut s = g2_variant(other.split('+').next().unwrap());
             for token in other.split('+').skip(1) {
+                if token == "nocap" {
+                    s.gather_cells = u32::MAX;
+                    s.claim_cells = u32::MAX;
+                    continue;
+                }
                 let (tag, value) = token.split_at(token.find(|c: char| c.is_ascii_digit()).unwrap_or(0));
                 match tag {
                     "px" => s.cell_pixels = value.parse().unwrap(),
@@ -3412,6 +3435,7 @@ fn g2_variant(name: &str) -> IndirectSettings {
                     "cap" => s.gather_cells = value.parse().unwrap(),
                     "g" => s.gathers = value.parse().unwrap(),
                     "gs" => s.gather_stride = value.parse().unwrap(),
+                    "cc" => s.claim_cells = value.parse().unwrap(),
                     _ => panic!("unknown G2b variant token {token}"),
                 }
             }
@@ -3602,7 +3626,8 @@ fn gpu_g2_quarry() {
                 "bounce_queued": c.bounce_queued, "orphans": c.orphans, "full": c.full,
                 "miss_overflow": c.miss_overflow, "lost": c.lost, "gather_absent": c.gather_absent,
                 "gather_unshaded": c.gather_unshaded, "gather_orphans": c.gather_orphans,
-                "gather_deferred": c.gather_deferred, "misses": c.misses, "splits": c.splits,
+                "gather_deferred": c.gather_deferred, "claim_deferred": c.claim_deferred,
+                "misses": c.misses, "splits": c.splits,
                 "local_overflow": c.local_overflow, "items": c.ray_items})
         })
     };
@@ -3791,6 +3816,13 @@ fn gpu_g2_quarry() {
                         }
                         r.test_drain("G2 cut frames");
                         let cut = g2_frame_times(&mut r, 12, 0);
+                        // RENDERLAB_G2_COST_SETTLE (G2b): still frames before the motion, so a
+                        // gather cap's spread cut work has drained out of the moving frames.
+                        let settle: usize =
+                            env("RENDERLAB_G2_COST_SETTLE").map_or(0, |n| n.parse().unwrap());
+                        for _ in 0..settle {
+                            draw(&mut r, &camera_at(0, 0.0));
+                        }
                         for t in 0..24 {
                             draw(&mut r, &camera_at(0, 0.01 * t as f32));
                         }

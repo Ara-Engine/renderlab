@@ -136,6 +136,8 @@ const GI_W_GATHER_UNSHADED:u32=40u;
 const GI_W_GATHER_ORPHANS:u32=41u;
 // Queued cells a capped gather frame left for next frame (gi_gather).
 const GI_W_GATHER_DEFERRED:u32=42u;
+// Listed misses a capped claim left for a later frame (gi_claim, GI_H_CLAIM_CELLS).
+const GI_W_CLAIM_DEFERRED:u32=43u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
@@ -598,9 +600,25 @@ fn gi_miss_count() -> u32 { return min(atomicLoad(&gi_work[GI_W_MISSES]),gi_fram
     let count=gi_miss_count();
     for(var i=id.x;i<count;i+=groups.x*64u) { gi_claim_miss(i); }
 }
+// The claim period P for this frame's listed misses (1 without a cap; gi_claim).
+fn gi_claim_period() -> u32 {
+    let cap=gi_word(GI_H_CLAIM_CELLS);
+    var p=1u;
+    if cap==0u { return p; }
+    let count=gi_miss_count();
+    while p<64u && count>cap*p { p*=2u; }
+    return p;
+}
 fn gi_claim_miss(index:u32) {
     let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     if atomicLoad(&gi_work[base+5u])==GI_CREATED { return; }
+    // Outside this frame's key phase (GI_H_CLAIM_CELLS): left for a later frame.
+    let period=gi_claim_period();
+    if period>1u && gi_mix(gi_miss_key(base).x)%period!=gi_word(GI_H_FRAME)%period {
+        atomicStore(&gi_work[base+5u],GI_CREATED);
+        atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u);
+        return;
+    }
     // A cell another cell with the same key a superseded this frame: never claims.
     if !gi_miss_chosen(base) {
         atomicStore(&gi_work[base+5u],GI_CREATED);
