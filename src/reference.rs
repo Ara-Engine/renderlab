@@ -826,3 +826,8 @@ mod r0a_tests;
 #[cfg(test)]
 #[path = "reflection_probe.rs"]
 mod reflection_probe;
+
+// M7-R1's production reflection gates.
+#[cfg(test)]
+#[path = "reflection_tests.rs"]
+mod reflection_tests;
