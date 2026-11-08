@@ -46,7 +46,8 @@ Lib tests construct renderers with `Atmosphere::off()`, since they predate AT1 a
 - **Application:** the generated entries apply `atmosphere_surface` to each program's exposed output, in both `program_raster_entry.wgsl` and `program_traced_entry.wgsl`. Every program, built-in or user, gets the same fog, so shading stays programmable and no program changes. MSAA, TR1 and transparent surfaces each apply it per surface, which a post pass reading depth could not do. TP1 can call the same `atmosphere_surface(c, world)` from its transparent entry. The world radiance cache's cell shading isn't composed with it: bounce light carries no camera fog.
 - **Misses:**
   - Traced and visibility-buffer frames: TR1b's `primary_miss` is merged verbatim, with one change: its default branch returns `atmosphere_backdrop`. Its seams in `program_traced_entry.wgsl`, `film_accumulation.rs`, `environment*.rs` and `primary_ray_gpu.rs` are applied byte-identically from `origin/t3/m7-tr1b`, so merging both branches conflicts only on that one line.
-  - Raster frames: a full-screen triangle at the reversed-Z far plane is drawn last in the lit mesh pass with depth `GreaterEqual`, so it lands only on uncovered samples, MSAA included.
+  - Raster frames: a full-screen sky triangle is drawn first in the lit mesh pass, without depth test or write. The surfaces drawn after it cover it per sample, so MSAA edges are correct.
+  - TR1, the default since the TR1b merge, reconstructs misses as a visible sky while the atmosphere's sky is on (`Renderer::atmosphere_sky_visible`, one marked line in `temporal_reconstruction.rs`). Without that line, TR1 would treat misses as one constant clear colour and erase the sky.
 - **Procedural environment:** while no captured map is selected, the renderer generates a 64-texel, 7-level GGX-prefiltered specular chain and a 16-texel irradiance cube from the sky-view LUT, without the sun disk. They're in the legacy environment layout, so image-based light, ES1 and the radiance cache read them unchanged. The renderer regenerates them when the sun, the medium or the yaw changes. Each regeneration is a new map, which the GI cache sees as a new sky.
 - **Volumetric fog:**
   1. Injection jitters each froxel's sample per frame (R2 sequence).
@@ -104,7 +105,13 @@ The sky, aerial perspective and height fog cost under 0.1 ms on the deferred pat
 - **Run c, the shipped form** (128 texels, 5 levels, smallest face 8): shading is within run noise of the captured map. Non-RT measured 0.76-0.83 against 0.70-0.82, traced 0.81-0.91 against 0.70-0.77, raster 4.20-4.27 against 4.24-4.37. Run c's wall clock was noisier (non-RT 2.0-4.3 ms on unchanged configurations), so only the shading-pass deltas are cited from it.
 - **The images barely moved:** surface median ratio c/b 0.999 at noon and 0.995 at the low sun, with p1-p99 of 0.97-1.02 and 0.93-1.12. Roughness steps 0.25 instead of 1/6.
 
-Evidence: `D:/Coding/renderlab-work/at1/runs/{a,b,c}` (lease logs), `runs-out/{a,b,c}/<path>/` (PNGs and `<path>-at1.json` with per-configuration means and timing), and the sheets `runs-out/{b,c}/sheet.png`. Raw `.f32` dumps were deleted after these summaries (D: bulk rule).
+**Merged-main check (run d, after TR1b's TR1 default and R1 landed):**
+- Lib suite: 157 passed, 0 failed, exit 0.
+- Images: every path keeps the sky on misses under the TR1 default, with sky values matching runs b and c.
+- Timing keeps the same pattern. Default against off: shading unchanged, wall clock +0.05-0.16 ms on the deferred paths. Procedural: about +0.1 ms of shading. Volumetric: about 0 to +0.03 ms over procedural-low. This run was more contended than b, at 3.3-4.0 ms per non-RT frame.
+- Default against `pre-at1` under TR1: the median surface ratio is still 0.998. The deferred paths show p1-p99 of 0.80-1.34, but 92,003 of the 96,464 pixels that moved more than 5 % are interior, away from any miss. TR1's sky mode only changes pixels with miss samples nearby, so those are TR1 sample-phase differences: each configuration is an unconverged 8-frame TR1 image at a different lattice index. Raster, with the same atmosphere code and no TR1, isolates the atmosphere at p1-p99 of 0.997-0.9985.
+
+Evidence: `D:/Coding/renderlab-work/at1/runs/{a,b,c,d}` (lease logs), `runs-out/{a,b,c,d}/<path>/` (PNGs and `<path>-at1.json` with per-configuration means and timing), and the sheets `runs-out/{b,c,d}/sheet.png`. Raw `.f32` dumps and the Cargo target were deleted after these summaries (D: bulk rule); `bin/at1-d.exe` is the last staged binary.
 
 Not run: no Unreal or reference comparison (overnight rules), no motion sequence, no MSAA raster image (the sky pipeline takes the renderer's sample count, but only 1x was rendered), and no visible-environment (TR1b option) image.
 
