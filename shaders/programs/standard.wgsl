@@ -9,7 +9,8 @@
 // frames, which replace the untraced sky specular there (M7-R1, docs/m7-r1.md).
 // Opt-in: the 256-sample filter passes quality, but misses the speed floor.
 const SPECULAR_AA:bool=false;
-struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
+// alpha: TP1 coverage of transparent materials (docs/m7-tp1.md), exactly 1 for opaque ones.
+struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {
     let material=input.material;
@@ -22,7 +23,19 @@ fn surface(input:SurfaceInput) -> Surface {
     // DC1: apply overlays to resolved inputs, before any BRDF or user shading.
     let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
     let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));
-    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
+    let alpha=transparent_coverage(material,material.base_color.a*sampled.a*input.color.a);
+    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);
+}
+
+// TP1: the share of the light behind a transparent surface that reaches the eye: what
+// its coverage and Fresnel reflectance leave, filtered by the base colour as tint.
+fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let ior=transparent_ior(input.material);
+    let f0=((ior-1.0)/(ior+1.0))*((ior-1.0)/(ior+1.0));
+    let fresnel=f0+(1.0-f0)*pow(1.0-clamp(abs(dot(s.n,v)),0.0,1.0),5.0);
+    return (1.0-s.alpha)*(1.0-fresnel)*s.base;
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its
@@ -69,7 +82,8 @@ fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f3
 
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let n=s.n;
-    let base=s.base;
+    // TP1: a transparent surface reflects diffusely over its coverage only.
+    let base=s.base*s.alpha;
     let metal=s.metal;
     let rough=s.rough;
     var v=unit_normal(input.eye-input.world);

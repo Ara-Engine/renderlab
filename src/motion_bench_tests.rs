@@ -767,6 +767,16 @@ fn gpu_motion_bench_batch() {
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
+    if m["registered_direct"].as_bool().unwrap_or(false) {
+        // RTDEF2's ray-grain gate reuses the registered direct-light films. The
+        // complete quarry comparison separately retains current GI/atmosphere defaults.
+        r.set_indirect(crate::IndirectSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        r.set_atmosphere(crate::Atmosphere::off()).unwrap();
+    }
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     r.set_interactive_shadow_filter(m["shadow_filter"].as_bool().unwrap_or(false))
         .unwrap();
@@ -822,6 +832,13 @@ fn gpu_motion_bench_batch() {
                 // Temporal reconstruction over Interactive (docs/m7-tr1b.md): from cold, and
                 // after `TR1_WARM` still frames at the track's first pose.
                 ("TR1", SoftShadows::Interactive),
+                ("TR1-16", SoftShadows::Interactive),
+                ("TR1-32", SoftShadows::Interactive),
+                ("TR1-64", SoftShadows::Interactive),
+                ("TR1-128", SoftShadows::Interactive),
+                ("TR1-256", SoftShadows::Interactive),
+                ("TR1-Auto16", SoftShadows::Interactive),
+                ("TR1-Auto32", SoftShadows::Interactive),
                 ("TR1-warm", SoftShadows::Interactive),
             ] {
                 // N8 is a disk-light mode; a zero radius takes the hard path.
@@ -834,6 +851,26 @@ fn gpu_motion_bench_batch() {
                     ..Default::default()
                 };
                 r.set_reconstruction(reconstruction).unwrap();
+                let active_rays = name
+                    .strip_prefix("TR1-")
+                    .and_then(|s| s.strip_prefix("Auto").unwrap_or(s).parse().ok())
+                    .unwrap_or(8);
+                r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+                    cold_rays: if name.starts_with("TR1-Auto") {
+                        256
+                    } else {
+                        active_rays
+                    },
+                    reset_rays: if name.starts_with("TR1-Auto") {
+                        64
+                    } else {
+                        active_rays
+                    },
+                    active_rays,
+                    held_rays: 8,
+                    settle_frames: 16,
+                })
+                .unwrap();
                 r.set_primary_visibility(if name == "Raster-Exact" {
                     PrimaryVisibility::Raster
                 } else {
@@ -924,6 +961,11 @@ fn gpu_motion_bench_batch() {
                         &mut scene,
                     );
                     frame(&mut r, &color, &camera, &mut scene);
+                    if m["capture_frames"].as_array().is_some_and(|frames| {
+                        !frames.iter().any(|f| f.as_u64() == Some(p.frame as u64))
+                    }) {
+                        continue;
+                    }
                     let rgb = hdr_rect(&r, b.crop);
                     fs::write(path.join(format!("{:04}.rgba16f", p.frame)), &rgb).unwrap();
                     let reset = mode == SoftShadows::Temporal
@@ -943,15 +985,21 @@ fn gpu_motion_bench_batch() {
                     }
                     fs::write(
                         path.join(format!("{:04}.json", p.frame)),
-                        serde_json::to_vec(&serde_json::json!({"reset":reset,"inputs":inputs}))
-                            .unwrap(),
+                        serde_json::to_vec(&serde_json::json!({"reset":reset,"inputs":inputs,
+                            "shadow_rays":r.reconstruction_shadow_rays()}))
+                        .unwrap(),
                     )
                     .unwrap();
-                    if [
-                        0, 15, 16, 17, 19, 23, 31, 32, 63, 64, 95, 96, 127, 159, 191, 319, 351,
-                        352, 353, 355, 359, 367, 384,
-                    ]
-                    .contains(&p.frame)
+                    if !m["no_full_captures"].as_bool().unwrap_or(false)
+                        && selected("full_cases", &case)
+                        && m["full_frames"].as_array().is_none_or(|frames| {
+                            frames.iter().any(|f| f.as_u64() == Some(p.frame as u64))
+                        })
+                        && [
+                            0, 15, 16, 17, 19, 23, 31, 32, 63, 64, 95, 96, 127, 159, 191, 319, 351,
+                            352, 353, 355, 359, 367, 384,
+                        ]
+                        .contains(&p.frame)
                     {
                         fs::write(
                             path.join(format!("{:04}-full.rgba16f", p.frame)),

@@ -546,6 +546,11 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
         .any(|t| INDIRECT_INPUTS.contains(&t))
 }
 /// Whether `program` declares `struct Parameters`, which composition binds as `params`.
+/// TP1: whether `program` declares the transparency hook `fn transmittance(s: Surface,
+/// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
+pub(crate) fn declares_transmittance(program: &str) -> bool {
+    declares(program, "fn", "transmittance")
+}
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")
 }

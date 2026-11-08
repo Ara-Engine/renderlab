@@ -5,6 +5,8 @@
                             inside a lease. CPU only; no renderlab binary runs.
   build LABEL               cargo test --no-run, two jobs, own target on D:; stops for another
                             owner's QUIET window. Copies the test binary to OUT/bin/LABEL.exe.
+  example LABEL             cargo build --example game_scene (API1's engine-API scene), two jobs,
+                            own target on D:; copies it to OUT/bin/game-LABEL.exe (G2c).
   gpu LABEL STEPS...        one shared GPU lease for the listed steps, taken at the first free
                             moment (the lock polled in-process); STEP is
                             PATH:TEST[:SECTIONS[:VARIANT[:SETTINGS]]], PATH rt or nonrt; TEST quarry
@@ -12,7 +14,9 @@
                             (G1's SV harness), lib (the non-ignored lib suite) or an exact suite test
                             name. VARIANT reads the shaders in OUT/variants/VARIANT
                             (RENDERLAB_GI_SHADERS); SETTINGS, comma-separated, replaces --variants
-                            (RENDERLAB_G2_VARIANTS) for that step.
+                            (RENDERLAB_G2_VARIANTS) for that step. PATH:game:BUILD[:ARGS] runs
+                            OUT/bin/game-BUILD.exe on PATH into the run's game-INDEX-PATH-BUILD,
+                            ARGS comma-separated extra example arguments.
 
 Leases reuse the shared lock, schedule lines and game/RAM/foreign-renderer guards of
 m7-u0-ue.py (through m7-u0b.py), as ES1 does. No window opens. Evidence goes to
@@ -120,6 +124,21 @@ def build(args):
     print("binary", staged)
 
 
+def example(args):
+    command = ["cargo", "build", "-p", "renderlab", "--example", "game_scene", "-j", "2",
+               "--target-dir", str(TARGET), "--message-format=json"]
+    code = cargo(args, command, "example")
+    if code:
+        raise SystemExit((OUT / "example.err").read_text(errors="replace")[-4000:])
+    artifacts = [json.loads(l) for l in (OUT / "example.out").read_text().splitlines() if l.startswith("{")]
+    exe = next(a["executable"] for a in reversed(artifacts) if a.get("reason") == "compiler-artifact"
+               and a.get("executable") and a["target"]["name"] == "game_scene")
+    staged = OUT / "bin" / f"game-{args.label}.exe"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(exe, staged)
+    print("binary", staged)
+
+
 def gpu(args):
     runner = load("m7-g1-run")
     g = guard()
@@ -195,7 +214,7 @@ def run_steps(g, out, binary, args):
             # test name (a::b::c) keeps its '::'. Empty fields are allowed after either.
             path, rest = step.split(":", 1)
             short = rest.split(":")
-            if short[0] in TESTS or short[0] in ("trace", "lib") or short[0].startswith("cpu="):
+            if short[0] in TESTS or short[0] in ("trace", "lib", "game") or short[0].startswith("cpu="):
                 test, extra = short[0], short[1:]
             else:
                 m = re.match(r"(\w+(?:::\w+)*)(?::(.*))?$", rest)
@@ -240,6 +259,13 @@ def run_steps(g, out, binary, args):
                            "--limit-to-submits", "4", "--max-duration-ms", env.get("RENDERLAB_G2_TRACE_MS", "200"),
                            "--set-gpu-clocks", "unaltered", "--collect-screenshot", "0", "--architecture", "Ada",
                            "--metric-set-name", "Top-Level Triage", "--real-time-shader-profiler"]
+            # "game:BUILD[:ARGS]": API1's example scene, built by `example BUILD` (G2c).
+            elif test == "game":
+                name = f"game-{extra[0]}"
+                command = [str(OUT / "bin" / f"{name}.exe"), "--path", path,
+                           "--out", str(out / f"game-{index}-{path}-{extra[0]}")]
+                if len(extra) > 1 and extra[1]:
+                    command += extra[1].split(",")
             # "cpu=FILTER": the non-ignored lib tests whose names contain FILTER (naga checks).
             elif test.startswith("cpu="):
                 name = test[4:]
@@ -269,6 +295,9 @@ def main():
     p = sub.add_parser("build")
     p.add_argument("label")
     p.set_defaults(run=build)
+    p = sub.add_parser("example")
+    p.add_argument("label")
+    p.set_defaults(run=example)
     p = sub.add_parser("gpu")
     p.add_argument("label")
     p.add_argument("steps", nargs="+")

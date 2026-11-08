@@ -1,5 +1,7 @@
 # RT1c: the HRT default gate
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC. Branch `t3/rt1c-rt-default`, from main `dedc068`.
 Labels: **M** measured/replayed here; **R** retained evidence, audited here.
 
@@ -23,7 +25,7 @@ failure. Its cause is not established as an error in the eight shadow directions
 The library and viewer retain raster primaries plus 256-direction Exact on RT
 devices. Traced primaries, Interactive and raster/Exact remain settings. No
 production code, shader or gate setting changed. Every historical RT speed claim
-remains **measured on the non-default fast setup (traced + Interactive)**.
+remains **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 VSM's **27 versus 11** false-shadow gap is recorded and **does not block** this
 decision under Islam's new ruling.
 
@@ -234,7 +236,7 @@ The retained optimized M6-close/M5-DL runs report:
 | Sun | .867 | 1.738-1.751 |
 | Caster | .865 | 1.776-1.778 |
 
-These are **measured on the non-default fast setup (traced + Interactive)**.
+These are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 [M6-close](m6-acceptance.md) preserves the
 scope and clean-visit selection limits: unfiltered visits reached 1.4-2.8 ms,
 and the Vulkan rendered-span and Unreal D3D12 whole-frame boundaries differ.
@@ -337,7 +339,7 @@ witness scorer can run again. Original S1-S3 and native assets are untouched.
   measures pass HRT1, but S2's registered +4-stop final-image RMS loses in every
   phase; current optimized witness 14.0832 versus HRT1 13.6655, with exact display
   reference identity. Retain raster + Exact default; see this report. All RT speed
-  claims remain measured on the non-default fast setup (traced + Interactive).
+  claims remain measured on the historical eight-ray setup with TR1 off (traced + Interactive).
 - **RT1c performance evidence:** quality-only capture during explicitly relaxed
   game hold; timing contended and invalid for speed claims. No new quiet optimized
   cost/memory certificate or missing motion pass is inferred.
@@ -349,7 +351,7 @@ This section supersedes the earlier "quiet rerun not performed" cost/memory stat
 it changes neither the S2 image miss nor any missing quality/flicker gate.
 The prior three raw dumps were deleted by Islam before this unit.
 
-**All fast RT results below are measured on the non-default fast setup
+**All fast RT results below are measured on the historical eight-ray setup with TR1 off
 (traced + Interactive).** The comparator is the actual RT-device default,
 **raster + Exact (256 directions)**, asserted and explicitly pinned in the test.
 Both use full-resident original quarry geometry, both registered poses, native
@@ -420,7 +422,7 @@ desktop VRAM. Warm and whole-process observed peaks agree.
 
 | Configuration | Allocated MiB | Reserved MiB | WDDM warm/process peak MiB | WDDM warm / total samples | Recorded HRT MiB |
 |---|---:|---:|---:|---:|---:|
-| Non-default traced + Interactive | 2,509.556 | 2,641.247 | 2,716.297 | 3 / 11 | 5,407-5,410 |
+| Historical traced + Interactive (TR1 off) | 2,509.556 | 2,641.247 | 2,716.297 | 3 / 11 | 5,407-5,410 |
 | Default raster + Exact | 2,396.351 | 2,506.055 | 2,572.980 | 29 / 32 | 5,407-5,410 |
 
 The fast setup uses **143.316 MiB more WDDM memory** than the current default

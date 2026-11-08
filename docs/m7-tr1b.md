@@ -1,5 +1,8 @@
 # M7-TR1b: moving silhouettes, the resolve pass and the missing tracks
 
+RTDEF2 update: capable 1x RT devices and the viewer now start with traced primaries, TR1 and adaptive shadow sampling; see [RTDEF2](rtdef2.md). Earlier raster-default reach limits below are historical.
+
+
 2026-11-08, branch `t3/m7-tr1b` from main `bc6ba36` (TR1 merged opt-in), main `dc2e3c8` (FIX1) merged. Contract: [M7](milestone-7.md), [TR1](m7-tr1.md), the bar in [TR0](m7-tr0.md) (`E:/renderlab-work/m7-tr0/bar/tr1-bar.json`), [P0](m7-p0-claims.md).
 
 **Status (overnight push, 2026-11-08 evening): TR1 is the default on both paths, with `Reconstruction::off()` as the named switch and quality (2/3) and performance (1/2) upscaling presets (§4.6).** Islam's overnight rules replaced the zero-loss gate below; TR1's remaining losses to no-AA and its gaps to TSR are listed in [m7-gaps.md](m7-gaps.md) under TR1, and the default is never presented as meeting the Unreal bar.
