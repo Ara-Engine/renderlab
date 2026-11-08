@@ -817,11 +817,21 @@ fn gpu_motion_bench_batch() {
                 ("Interactive", SoftShadows::Interactive),
                 ("Temporal", SoftShadows::Temporal),
                 ("Virtual", SoftShadows::Virtual),
+                // Temporal reconstruction over Interactive (docs/m7-tr1b.md): from cold, and
+                // after `TR1_WARM` still frames at the track's first pose.
+                ("TR1", SoftShadows::Interactive),
+                ("TR1-warm", SoftShadows::Interactive),
             ] {
                 // N8 is a disk-light mode; a zero radius takes the hard path.
                 if !selected("modes", name) || (mode == SoftShadows::Virtual && radius == 0.) {
                     continue;
                 }
+                const TR1_WARM: usize = 256;
+                let reconstruction = crate::Reconstruction {
+                    enabled: name.starts_with("TR1"),
+                    ..Default::default()
+                };
+                r.set_reconstruction(reconstruction).unwrap();
                 let path = directory.join(name);
                 fs::create_dir_all(&path).unwrap();
                 r.set_soft_shadows(mode);
@@ -886,6 +896,17 @@ fn gpu_motion_bench_batch() {
                 r.set_soft_shadows(SoftShadows::Interactive);
                 frame(&mut r, &color, &camera, &mut scene);
                 r.set_soft_shadows(mode);
+                if reconstruction.enabled {
+                    // The round-trip frame started a history: restart it.
+                    r.set_reconstruction(crate::Reconstruction::off()).unwrap();
+                    r.set_reconstruction(reconstruction).unwrap();
+                    if name == "TR1-warm" {
+                        let warm = configure(&mut r, &b, p, radius, &mut scene);
+                        for _ in 0..TR1_WARM {
+                            frame(&mut r, &color, &warm, &mut scene);
+                        }
+                    }
+                }
                 for p in &track.frames {
                     let camera = configure(
                         &mut r,
@@ -977,6 +998,7 @@ fn gpu_motion_bench_batch() {
                 fs::rename(pending, out.join("timings.json")).unwrap();
                 eprintln!("MOTION {case} {name} complete");
             }
+            r.set_reconstruction(crate::Reconstruction::off()).unwrap();
             // Candidate-only reruns score against an already generated reference (N8b).
             if m["skip_reference"].as_bool() == Some(true) {
                 continue;

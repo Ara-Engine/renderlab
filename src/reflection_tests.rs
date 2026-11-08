@@ -167,6 +167,11 @@ fn gpu_r1_mirror_identity() {
     renderer
         .set_primary_visibility(PrimaryVisibility::Traced)
         .unwrap();
+    // Exact single frames: TR1 (the default since TR1b) jitters each camera's own lattice,
+    // which the mirrored camera does not share.
+    renderer
+        .set_reconstruction(crate::Reconstruction::off())
+        .unwrap();
     // A sun from above: the target shadows the mirror and its underside faces away, so
     // the reflected and the mirrored-camera images both exercise the light loop's
     // visibility (hit shadow rays against the frame's own) and agree.

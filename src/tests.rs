@@ -108,6 +108,9 @@ pub(super) fn suite_renderer(
             source,
         )?;
         r.set_primary_visibility(PrimaryVisibility::Traced)?;
+        // TR1b made temporal reconstruction the default; the traced suite (U1b's hardware
+        // mode among it) compares exact single frames.
+        r.set_reconstruction(crate::Reconstruction::off())?;
         return Ok(r);
     }
     Renderer::new_with_options(device, queue, format, Limits::default(), options, source)

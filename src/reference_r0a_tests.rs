@@ -235,11 +235,16 @@ fn gpu_r0a_current() {
             SoftShadows::Virtual
         });
         // M7-R1 (docs/m7-r1.md): RENDERLAB_R1_TR1=1 captures each pose after 32 TR1 frames
-        // from a cut, TR1's measured settings, so its rotated glossy strata integrate.
-        if tr1 {
-            renderer
+        // from a cut, TR1's measured settings, so its rotated glossy strata integrate; =0
+        // keeps R0a's single-frame 1x protocol (TR1 off); unset, the renderer default.
+        match std::env::var("RENDERLAB_R1_TR1").as_deref() {
+            Ok("1") => renderer
                 .set_reconstruction(crate::Reconstruction::identity())
-                .unwrap();
+                .unwrap(),
+            Ok("0") => renderer
+                .set_reconstruction(crate::Reconstruction::off())
+                .unwrap(),
+            _ => {}
         }
         assert!(!renderer.indirect().enabled);
         let toon = renderer
