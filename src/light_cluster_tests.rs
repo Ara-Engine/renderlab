@@ -42,7 +42,11 @@ fn night_lights(count: usize) -> Vec<Light> {
         let hue = rng.next() * 6.0;
         let rgb = [0.0f32, 2.0, 4.0].map(|o| (((hue + o) % 6.0 - 3.0).abs() - 1.0).clamp(0.0, 1.0));
         let candela = rng.range(4.0, 16.0);
-        let position = Vec3::new(rng.range(-6.0, 6.0), rng.range(0.4, 2.2), rng.range(-6.0, 6.0));
+        let position = Vec3::new(
+            rng.range(-6.0, 6.0),
+            rng.range(0.4, 2.2),
+            rng.range(-6.0, 6.0),
+        );
         let range = Some(rng.range(1.5, 3.5));
         lights.push(if i % 3 == 0 {
             Light::Spot {
@@ -71,7 +75,11 @@ fn night_lights(count: usize) -> Vec<Light> {
     .into_iter()
     .enumerate()
     {
-        let rgb = if k < 2 { [1.0, 0.72, 0.45] } else { [0.55, 0.75, 1.0] };
+        let rgb = if k < 2 {
+            [1.0, 0.72, 0.45]
+        } else {
+            [0.55, 0.75, 1.0]
+        };
         lights.push(if k < 2 {
             Light::Spot {
                 position,
@@ -119,7 +127,8 @@ fn reaches(light: &Light, p: Vec3) -> bool {
             ..
         } => {
             let d = p - position;
-            range.is_none_or(|r| d.length() < r) && d.normalize().dot(travel.normalize()) > outer.cos()
+            range.is_none_or(|r| d.length() < r)
+                && d.normalize().dot(travel.normalize()) > outer.cos()
         }
     }
 }
@@ -150,7 +159,10 @@ fn cluster_lists_hold_every_light_that_reaches_a_receiver() {
         for (i, light) in lights.iter().enumerate() {
             if reaches(light, p) {
                 reached += 1;
-                assert!(list.contains(&(i as u32)), "light {i} reaches {p} outside cluster {cluster}");
+                assert!(
+                    list.contains(&(i as u32)),
+                    "light {i} reaches {p} outside cluster {cluster}"
+                );
             }
         }
     }
@@ -184,10 +196,16 @@ fn shadowed_lights_rank_by_illuminance_and_keep_their_slots() {
     // Light 2 brightens past 4 by less than the 25 % hysteresis: 4 keeps its slot.
     let mut brighter = lights.clone();
     brighter[2] = point(Vec3::new(1.0, 1.0, 0.0), 70.0);
-    assert_eq!(lc::select(&brighter, vp, eye, &slots, 2), [Some(1), Some(4)]);
+    assert_eq!(
+        lc::select(&brighter, vp, eye, &slots, 2),
+        [Some(1), Some(4)]
+    );
     // Well past it: 2 takes 4's slot, and 1 keeps slot 0.
     brighter[2] = point(Vec3::new(1.0, 1.0, 0.0), 300.0);
-    assert_eq!(lc::select(&brighter, vp, eye, &slots, 2), [Some(1), Some(2)]);
+    assert_eq!(
+        lc::select(&brighter, vp, eye, &slots, 2),
+        [Some(1), Some(2)]
+    );
     assert!(lc::select(&lights, vp, eye, &[], 0).is_empty());
     assert_eq!(lc::matrices(&lights[1], 0.02).len(), 6);
 }
@@ -210,8 +228,7 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     let raster = compose(SOURCE, standard, Stage::Raster, false).source;
     assert!(raster.contains("rl_local_shadow_map(light,receiver,l)"));
     validate("raster", &raster);
-    let hardware =
-        crate::hardware_shadows::shader_source(SOURCE, crate::SampleCount::One).unwrap();
+    let hardware = crate::hardware_shadows::shader_source(SOURCE, crate::SampleCount::One).unwrap();
     let hardware = compose(&hardware, standard, Stage::Raster, false).source;
     assert!(hardware.contains("rayQueryInitialize(&query,hardware_scene"));
     validate("hardware raster", &hardware);
@@ -228,7 +245,10 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;
     for (k, head) in non_rt.iter().enumerate() {
         let module = compose(head, standard, Stage::Traced, false).source;
-        assert!(module.contains("rl_local_shadow_map(light,receiver,l)"), "non-RT {k}");
+        assert!(
+            module.contains("rl_local_shadow_map(light,receiver,l)"),
+            "non-RT {k}"
+        );
         validate(&format!("non-RT {k}"), &module);
     }
 }
@@ -294,7 +314,6 @@ fn no_rt_device() -> (wgpu::Device, wgpu::Queue) {
     .unwrap()
 }
 
-
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -312,7 +331,11 @@ fn write_png(path: &std::path::Path, rgb: &[f32], width: u32, height: u32) {
     let mut encoder = png::Encoder::new(file, width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header().unwrap().write_image_data(&bytes).unwrap();
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&bytes)
+        .unwrap();
 }
 
 fn capture(r: &mut Renderer) -> Vec<f32> {
@@ -388,7 +411,11 @@ impl Renderer {
 fn gpu_lc1_quarry_night() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(env("LC1_QUARRY").unwrap()).unwrap()).unwrap();
-    let out = PathBuf::from(env("LC1_OUT").or_else(|| env("RENDERLAB_M7_G1_OUT")).unwrap());
+    let out = PathBuf::from(
+        env("LC1_OUT")
+            .or_else(|| env("RENDERLAB_M7_G1_OUT"))
+            .unwrap(),
+    );
     std::fs::create_dir_all(&out).unwrap();
     let path_of = |k: &str| PathBuf::from(manifest[k].as_str().unwrap());
     let (policy, _) = quarry_policy::Policy::args(vec![
@@ -448,7 +475,8 @@ fn gpu_lc1_quarry_night() {
         environment: [0.0015, 0.002, 0.004],
         exposure_stops: -1.0,
     };
-    r.set_lighting_and_shadows(&lighting(&all), &shadows(all.len())).unwrap();
+    r.set_lighting_and_shadows(&lighting(&all), &shadows(all.len()))
+        .unwrap();
     if path == "traced" {
         r.set_soft_shadows(SoftShadows::Interactive);
     }
@@ -488,7 +516,9 @@ fn gpu_lc1_quarry_night() {
         }
     };
     // Median drained frame time (submission to GPU idle) over `frames` after 4 warm-ups.
-    let time = |r: &mut Renderer, asset: &mut quarry_prepared::Prepared, step: &mut dyn FnMut(&mut Renderer, usize)| {
+    let time = |r: &mut Renderer,
+                asset: &mut quarry_prepared::Prepared,
+                step: &mut dyn FnMut(&mut Renderer, usize)| {
         let mut samples = vec![];
         for k in 0..frames + 4 {
             step(r, k);
@@ -506,7 +536,12 @@ fn gpu_lc1_quarry_night() {
     let mut log = serde_json::json!({"path": path, "lights": all.len(), "primary": format!("{:?}", r.primary_mode),
         "viewport": viewport, "frames": frames});
     let save = |name: &str, image: &[f32]| {
-        write_png(&out.join(format!("{path}-{name}.png")), image, frame.width, frame.height);
+        write_png(
+            &out.join(format!("{path}-{name}.png")),
+            image,
+            frame.width,
+            frame.height,
+        );
         let bytes: Vec<u8> = image.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(out.join(format!("{path}-{name}.f32")), bytes).unwrap();
     };
@@ -529,7 +564,11 @@ fn gpu_lc1_quarry_night() {
             .map(|i| (words[base + 1 + (i / 2) as usize] >> ((i & 1) * 16)) & 0xffff)
             .collect();
         let cpu = lc::reference_cluster(&all, &camera, viewport, c);
-        let cpu_stored: Vec<u32> = cpu.iter().copied().take(lc::MAX_PER_CLUSTER as usize).collect();
+        let cpu_stored: Vec<u32> = cpu
+            .iter()
+            .copied()
+            .take(lc::MAX_PER_CLUSTER as usize)
+            .collect();
         if gpu != cpu_stored || wanted as usize != cpu.len() {
             mismatched += 1;
         }
@@ -543,13 +582,21 @@ fn gpu_lc1_quarry_night() {
     r.set_light_clusters(false);
     render(&mut r, &mut asset, &camera);
     let unclustered = capture(&mut r);
-    let differing = clustered.iter().zip(&unclustered).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    let differing = clustered
+        .iter()
+        .zip(&unclustered)
+        .filter(|(a, b)| a.to_bits() != b.to_bits())
+        .count();
     log["unclustered_differing_channels"] = serde_json::json!(differing);
     log["time_unclustered"] = time(&mut r, &mut asset, &mut |_, _| {});
     r.set_light_clusters(true);
     log["time_default"] = time(&mut r, &mut asset, &mut |_, _| {});
     // 3. No local shadows.
-    r.set_local_shadows(LocalShadows { count: 0, ..Default::default() }).unwrap();
+    r.set_local_shadows(LocalShadows {
+        count: 0,
+        ..Default::default()
+    })
+    .unwrap();
     render(&mut r, &mut asset, &camera);
     save("night-noshadow", &capture(&mut r));
     log["time_no_local_shadows"] = time(&mut r, &mut asset, &mut |_, _| {});
@@ -568,13 +615,20 @@ fn gpu_lc1_quarry_night() {
     log["time_moving_shadowed_lights"] = time(&mut r, &mut asset, &mut |r, k| moving(r, k));
     r.set_lighting(&lighting(&all)).unwrap();
     // 5. The moon alone, the scene's cost before LC1's lights.
-    r.set_lighting_and_shadows(&lighting(&all[..1]), &shadows(1)).unwrap();
+    r.set_lighting_and_shadows(&lighting(&all[..1]), &shadows(1))
+        .unwrap();
     render(&mut r, &mut asset, &camera);
     save("moon-only", &capture(&mut r));
     log["time_moon_only"] = time(&mut r, &mut asset, &mut |_, _| {});
     let file = out.join(format!("lc1-{path}.json"));
     std::fs::write(&file, serde_json::to_string_pretty(&log).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&log).unwrap());
-    assert_eq!(mismatched, 0, "GPU cluster lists differ from the CPU reference");
-    assert_eq!(differing, 0, "clustered shading differs from walking every light");
+    assert_eq!(
+        mismatched, 0,
+        "GPU cluster lists differ from the CPU reference"
+    );
+    assert_eq!(
+        differing, 0,
+        "clustered shading differs from walking every light"
+    );
 }

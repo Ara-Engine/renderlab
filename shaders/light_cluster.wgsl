@@ -45,7 +45,7 @@ fn lc_depth(slice:u32) -> f32 {
 }
 @compute @workgroup_size(64) fn lc_build(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let c=id.x;
-    let active=c<LC_CLUSTERS;
+    let inside=c<LC_CLUSTERS;
     let tx=c%LC_X;let ty=(c/LC_X)%LC_Y;let tz=c/(LC_X*LC_Y);
     // The tile's NDC rectangle (y down in tiles) and the slice's depth interval.
     let x0=-1.0+2.0*f32(tx)/f32(LC_X);let x1=-1.0+2.0*f32(tx+1u)/f32(LC_X);
@@ -66,7 +66,7 @@ fn lc_depth(slice:u32) -> f32 {
         if first+lane<count { lc_spheres[lane]=lc_sphere(lights[first+lane]); }
         workgroupBarrier();
         // No early `continue` here: the barriers above must stay in uniform control flow.
-        if active {
+        if inside {
             let n=min(64u,count-first);
             for(var k=0u;k<n;k+=1u) {
                 let s=lc_spheres[k];
@@ -88,7 +88,7 @@ fn lc_depth(slice:u32) -> f32 {
             }
         }
     }
-    if !active { return; }
+    if !inside { return; }
     if (stored&1u)==1u { lc_store(c,1u+(stored>>1u),pair); }
     lc_store(c,0u,stored|(min(wanted,0xffffu)<<16u));
 }

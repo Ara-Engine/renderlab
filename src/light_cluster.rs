@@ -151,8 +151,9 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
 fn luminance(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
-/// A local light's position, candela, range and spot (travel, outer) parameters.
-fn local(light: &Light) -> Option<(Vec3, [f32; 3], Option<f32>, Option<(Vec3, f32)>)> {
+/// A local light's position, candela, range and spot (unit travel, outer) parameters.
+type Local = (Vec3, [f32; 3], Option<f32>, Option<(Vec3, f32)>);
+fn local(light: &Light) -> Option<Local> {
     match *light {
         Light::Directional { .. } => None,
         Light::Point {
@@ -212,13 +213,15 @@ pub(crate) fn select(
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    let chosen: Vec<u32> = scored
-        .iter()
-        .take(count as usize)
-        .map(|s| s.1)
-        .collect();
+    let chosen: Vec<u32> = scored.iter().take(count as usize).map(|s| s.1).collect();
     let mut slots: Vec<Option<u32>> = (0..count as usize)
-        .map(|s| previous.get(s).copied().flatten().filter(|l| chosen.contains(l)))
+        .map(|s| {
+            previous
+                .get(s)
+                .copied()
+                .flatten()
+                .filter(|l| chosen.contains(l))
+        })
         .collect();
     for light in chosen {
         if !slots.contains(&Some(light))
@@ -247,7 +250,11 @@ pub(crate) fn matrices(light: &Light, near: f32) -> Vec<glam::Mat4> {
     // Unlimited-range lights shadow out to 1 km.
     let far = range.unwrap_or(1000.0).max(near * 2.0);
     let look = |forward: Vec3| {
-        let up = if forward.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
+        let up = if forward.y.abs() > 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
         glam::Mat4::look_at_rh(position, position + forward, up)
     };
     match spot.filter(|_| !cube(light)) {
@@ -333,7 +340,10 @@ pub(crate) fn reference_cluster(
     let x1 = -1.0 + 2.0 * (tx + 1) as f32 / TILES_X as f32;
     let y1 = 1.0 - 2.0 * ty as f32 / TILES_Y as f32;
     let y0 = 1.0 - 2.0 * (ty + 1) as f32 / TILES_Y as f32;
-    let (d0, d1) = (depth(tz), if tz + 1 >= SLICES { far } else { depth(tz + 1) });
+    let (d0, d1) = (
+        depth(tz),
+        if tz + 1 >= SLICES { far } else { depth(tz + 1) },
+    );
     let xs = [x0 * d0, x0 * d1, x1 * d0, x1 * d1].map(|x| x / px);
     let ys = [y0 * d0, y0 * d1, y1 * d0, y1 * d1].map(|y| y / py);
     let lo = Vec3::new(

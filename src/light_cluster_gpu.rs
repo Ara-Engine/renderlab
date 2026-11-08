@@ -26,7 +26,11 @@ impl Atlas {
         resolution: u32,
         slots: u32,
     ) -> Self {
-        let (size, layers) = if slots == 0 { (1, 1) } else { (resolution, slots * 6) };
+        let (size, layers) = if slots == 0 {
+            (1, 1)
+        } else {
+            (resolution, slots * 6)
+        };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("LC1 local shadow maps"),
@@ -308,7 +312,13 @@ impl Renderer {
         } else {
             vec![]
         };
-        for (index, record) in self.lighting.pending.records.chunks_exact_mut(64).enumerate() {
+        for (index, record) in self
+            .lighting
+            .pending
+            .records
+            .chunks_exact_mut(64)
+            .enumerate()
+        {
             let w = slots
                 .iter()
                 .position(|s| *s == Some(index as u32))
@@ -357,7 +367,11 @@ impl Renderer {
             for draw in draws {
                 scene.update((std::ptr::from_ref(draw.mesh) as usize).to_ne_bytes());
                 scene.update(draw.mesh.index_count.to_ne_bytes());
-                scene.update(draw.material.map_or(0, |m| std::ptr::from_ref(m) as usize).to_ne_bytes());
+                scene.update(
+                    draw.material
+                        .map_or(0, |m| std::ptr::from_ref(m) as usize)
+                        .to_ne_bytes(),
+                );
                 for model in &draw.instances.state.models {
                     scene.update(matrix_bytes(*model));
                 }

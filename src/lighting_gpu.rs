@@ -530,9 +530,7 @@ impl Renderer {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 24,
-                                resource: wgpu::BindingResource::TextureView(
-                                    &state.clusters.lists,
-                                ),
+                                resource: wgpu::BindingResource::TextureView(&state.clusters.lists),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 25,

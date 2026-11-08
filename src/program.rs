@@ -371,7 +371,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
-    let lights = crate::light_cluster::shading_api(head, matches!(stage, Stage::Traced | Stage::TracedStreamed));
+    let lights = crate::light_cluster::shading_api(
+        head,
+        matches!(stage, Stage::Traced | Stage::TracedStreamed),
+    );
     let mut source = format!(
         "{head}\n{COMMON_API}{lights}{SPECULAR_API}{api}{indirect}{binding}// ---- program ----\n"
     );
