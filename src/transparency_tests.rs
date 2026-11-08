@@ -724,14 +724,21 @@ fn gpu_tp1_scene() {
     }
     log["stats"] = serde_json::json!(format!("{:?}", r.transparency_stats()));
     if sections.contains("timing") {
-        // Two phases of 8 interleaved 16-frame blocks, dropping each block's first 4
-        // frames. With the warmed emitters: foliage plus particles, then everything (glass
-        // cost is the difference). Without emitters: opaque, then foliage.
+        // Two phases of 8 interleaved 48-frame blocks, keeping each block's last 16 frames:
+        // a changed draw set relights the radiance cache, which goes idle after 16 still
+        // frames, so kept frames time TP1, not relighting. With the warmed emitters:
+        // foliage plus particles, then everything (glass cost is the difference). Without
+        // emitters: opaque, then foliage.
+        if !sections.contains("images") {
+            for _ in 0..300 {
+                render(&mut r, &camera, &mut asset, Some(&mut foliage), Some(&mut glass_instances));
+            }
+        }
         let mut phase = |r: &mut Renderer, asset: &mut quarry_prepared::Prepared, configs: [u8; 2]| {
             let mut rows: [Vec<f64>; 2] = Default::default();
             for _ in 0..8 {
                 for (k, &config) in configs.iter().enumerate() {
-                    for _ in 0..16 {
+                    for _ in 0..48 {
                         match config {
                             0 => render(r, &camera, asset, None, None),
                             1 => render(r, &camera, asset, Some(&mut foliage), None),
@@ -741,7 +748,8 @@ fn gpu_tp1_scene() {
                     r.test_drain("TP1 timing block");
                     let mut collected = vec![];
                     samples(r, &mut collected);
-                    rows[k].extend(collected.into_iter().skip(4));
+                    let skip = collected.len().saturating_sub(16);
+                    rows[k].extend(collected.into_iter().skip(skip));
                 }
             }
             rows.map(|mut v| serde_json::json!({"median_ms": median(&mut v), "frames": v.len()}))
@@ -751,7 +759,7 @@ fn gpu_tp1_scene() {
         let [opaque, foliage_only] = phase(&mut r, &mut asset, [0, 1]);
         log["timing"] = serde_json::json!({"opaque": opaque, "foliage": foliage_only,
             "foliage_particles": particles, "full": full,
-            "note": "GPU render span (first receiver pass to present end) medians"});
+            "note": "GPU render span (first receiver pass to present end) medians over the last 16 frames of 8 interleaved 48-frame blocks"});
     } else {
         drop((fire_emitter, smoke_emitter));
     }

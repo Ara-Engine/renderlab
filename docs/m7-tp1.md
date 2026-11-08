@@ -130,6 +130,16 @@ Fresnel reflection is the program's own specular, from the sky, the ES1 lobes an
 
 **Refraction (thin slab):** the view ray refracts into the slab through the shading normal (`material_normal`, so normal maps and rippled vertex normals distort), crosses `thickness`, and leaves through the flat back face. It continues to the opaque depth behind, and the colour copy is read at that point's projection. A read that lands on something nearer than the slab falls back to the unshifted pixel. This is a visual effect on transparent surfaces only, not core lighting (allowed by the brief).
 
+**Atmosphere (AT1).** AT1's `atmosphere_surface(c, p)` is affine in `c` (`c·t + s`: volumetric fog, height fog and aerial perspective from the eye to p). The transparent entry writes
+
+`atmosphere_surface(surface, p) + passed × max(behind − s, 0)`
+
+- `surface` is `shade` (with the hook) or `coverage × shade`;
+- `passed` is `transmittance` or `1 − coverage`;
+- `s` is `atmosphere_surface(0, p)`.
+
+The colour behind is already fogged to the eye, so only the transmitted part of the path's in-scattering counts again. Clear glass (`passed` = 1, no own light) leaves the fogged background exactly unchanged, and an opaque surface gets opaque fog.
+
 New program API (shared `program_api.wgsl`): `transparent_material`, `transparent_opacity`, `transparent_ior`, `transparent_coverage`. The material's last uniform word packs opacity and IOR as two halves; opaque materials keep zero.
 
 ### 1.3 GPU particles
@@ -151,6 +161,7 @@ Simulation, lighting and drawing:
 - **Lighting**, once per particle per step in the simulation pass: each directional light times the sun map's visibility at the particle, halved for an isotropic scatterer, plus the environment's mean irradiance over six axes. Drawn radiance is albedo/π × that, plus emission over life, exposed.
 - **Sort.** Keys are the top 21 bits of the view depth over an 11-bit slot. One 256-thread workgroup runs the bitonic sort in 8 KiB of shared memory. Dead and padding slots sort last and draw degenerate.
 - **Draw.** Camera-facing billboards with premultiplied alpha. Fragments behind opaque depth are discarded, and opacity fades over `soft_distance` toward the opaque surface behind.
+- **Atmosphere.** Particles take AT1's fog and aerial perspective as premultiplied `rgb·t + α·s`, which is `atmosphere_surface(rgb, p) − (1 − α)·s`, at each fragment's world point.
 
 ## 2. Files and ownership
 
@@ -167,6 +178,8 @@ Shared, minimal and marked `TP1`:
 - `src/reflection_probe.rs` (R0b's adapter composes the new helpers) and `src/reload_tests.rs` (its invalid-program edit follows the new `return` line).
 
 No shadow, GI, visibility or primary kernel changed.
+
+**G2b and AT1 (main f159fcd):** the radiance cache is on by default; transparent surfaces read it through the standard program's indirect inputs. They hold no cells of their own (gap). AT1's application is composed into the glass module by `program::compose`, and into the particle modules by TP1 (`atmosphere::api_source`).
 
 **R1 interface:** R1's traced reflections reach the standard program through `specular_incident`. In the transparent pass's raster composition that input is untraced (w = 0), so glass keeps its sky, lobe and sun specular (gap).
 
