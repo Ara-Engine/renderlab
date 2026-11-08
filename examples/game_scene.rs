@@ -264,12 +264,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         illuminance: [100_000.0, 96_000.0, 88_000.0],
         ..Default::default()
     }))?;
-    // A warm lantern under the arch (unshadowed local light at this revision).
-    engine.set_lights(&[Light::Point {
-        position: at(0.0, 3.2, -3.0),
-        candela: [40_000.0, 28_000.0, 14_000.0],
-        range: Some(15.0),
-    }])?;
+    // A warm lantern under the arch arrives with many-light shading (LC1): at this
+    // revision a soft sun must be the only light (docs/api.md, "Current limits").
 
     fs::create_dir_all(&args.out)?;
     let ready = start.elapsed();
@@ -335,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
-        "quarry": args.quarry, "startup_to_first_frame_seconds": ready.as_secs_f64(),
+        "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "gpu_render_span_ms": spans, "frames": frames,
         "note": "development build timings under shared-GPU contention; not a performance claim",
     });

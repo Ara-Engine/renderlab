@@ -110,7 +110,7 @@ Objects that share a mesh and a material are drawn together as one instanced dra
 ## Lighting, sky and exposure
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels; `illuminance` is lux per channel (clear midday is about 100,000); `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths. 0 gives hard shadows.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are unshadowed at this revision; many-light sampling and shadows arrive with LC1. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are unshadowed at this revision, and a soft sun must currently be the only light (see [Current limits](#current-limits)); many-light sampling and shadows arrive with LC1. Directional lights go in the sun.
 - `set_sky(Sky)`: `Sky::Uniform(radiance)` in cd/m², which is also the background colour; or `Sky::Map { map, rotation_y, intensity, backdrop }`, where the map lights the scene and `backdrop` fills the background. The visible-sky background and the physical atmosphere arrive with TR1b and AT1.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
@@ -171,7 +171,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - One shading program per frame on both quality paths (above).
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
-- Local lights are unshadowed (LC1).
+- Local lights are unshadowed, and a soft sun (`angular_radius > 0`) must be the only light: the renderer accepts soft sun visibility only for a light list of exactly one directional light. `set_lights` with a soft sun returns `InvalidInput`. Use `angular_radius: 0.0` (hard sun) to combine the sun with local lights. Many-light shading (LC1) is expected to lift this.
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
 - Virtual geometry (streamed cluster meshes) and the diagnostic view modes stay on the low-level `Renderer`.
 
@@ -199,7 +199,7 @@ Each overnight unit lands in a named slot. The shapes below are the intended API
 | AT1 | atmosphere, fog | new `Sky::Atmosphere { .. }` variant (`Sky` is `#[non_exhaustive]`); `Settings::fog` |
 | SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])` |
 | LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper |
-| DC1 | decals | `create_decal(DecalDesc) -> DecalId`, `set_decal_transform`, `remove_decal` |
+| DC1 | decals | `set_decals(&[Decal])`, a whole-list replacement like `set_lights`, with `Decal`, `DecalTextures` and `DecalTexture::from_rgba8` re-exported (DC1's branch already has this shape on `Renderer`) |
 | PP1 | post-processing | `Settings::post` (bloom, tone mapper, colour grading); `Exposure::Auto { .. }` variant |
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.

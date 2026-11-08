@@ -135,6 +135,13 @@ pub(crate) fn lighting(
                 "sun angular_radius must be in [0, 0.1]",
             ));
         }
+        // Current renderer limit (shadow_gpu.rs validate_shadow_settings): soft sun
+        // visibility needs the sun to be the only light. Many-light shading (LC1) lifts it.
+        if sun.angular_radius > 0.0 && !lights.is_empty() {
+            return Err(Error::InvalidInput(
+                "a soft sun (angular_radius > 0) cannot be combined with local lights yet; use angular_radius 0 or no local lights",
+            ));
+        }
         all.push(Light::Directional {
             travel: sun.travel,
             lux: sun.illuminance,
@@ -188,4 +195,64 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
         })?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sun_is_light_zero_and_the_only_shadowed_light() {
+        let lamp = Light::Point {
+            position: Vec3::Y,
+            candela: [100.0; 3],
+            range: Some(5.0),
+        };
+        let soft = Sun::default();
+        assert!(super::lighting(Some(soft), &[lamp], Sky::default(), Exposure::default()).is_err());
+        let sun = Sun {
+            angular_radius: 0.0,
+            ..soft
+        };
+        let (lighting, shadows) = lighting(
+            Some(sun),
+            &[lamp, lamp],
+            Sky::Uniform([1.0, 2.0, 3.0]),
+            Exposure::Manual { stops: -3.0 },
+        )
+        .unwrap();
+        assert!(matches!(lighting.lights[0], Light::Directional { .. }));
+        assert_eq!(lighting.lights.len(), 3);
+        assert_eq!(lighting.environment, [1.0, 2.0, 3.0]);
+        assert_eq!(lighting.exposure_stops, -3.0);
+        assert!(matches!(
+            shadows.requests[0],
+            ShadowRequest::Directional { .. }
+        ));
+        assert!(
+            shadows.requests[1..]
+                .iter()
+                .all(|r| *r == ShadowRequest::None)
+        );
+        assert_eq!(shadows.directional_disk_angle, sun.angular_radius);
+
+        // No sun: an empty request vector disables shadows for every light.
+        let (lighting, shadows) =
+            super::lighting(None, &[lamp], Sky::default(), Exposure::default()).unwrap();
+        assert_eq!(lighting.lights.len(), 1);
+        assert!(shadows.requests.is_empty());
+
+        let directional = Light::Directional {
+            travel: Vec3::NEG_Y,
+            lux: [1.0; 3],
+        };
+        assert!(
+            super::lighting(None, &[directional], Sky::default(), Exposure::default()).is_err()
+        );
+        let wide = Sun {
+            angular_radius: 0.2,
+            ..soft
+        };
+        assert!(super::lighting(Some(wide), &[], Sky::default(), Exposure::default()).is_err());
+    }
 }

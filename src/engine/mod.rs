@@ -727,6 +727,8 @@ impl Engine {
     pub fn settings(&self) -> Settings {
         self.settings
     }
+    /// Publishes the sun, lights, sky and exposure. Everything is validated before the
+    /// renderer changes, so a rejected call leaves the previous lighting in place.
     fn apply_lighting(&mut self) -> Result<(), Error> {
         let (lighting, shadows) =
             settings::lighting(self.sun, &self.lights, self.sky, self.settings.exposure)?;
@@ -737,16 +739,22 @@ impl Engine {
                 rotation_y,
                 intensity,
                 ..
-            } => (
-                Some(self.environments.get(map)?),
-                EnvironmentParameters {
+            } => {
+                if !rotation_y.is_finite() || !intensity.is_finite() || intensity < 0.0 {
+                    return Err(Error::InvalidInput(
+                        "sky rotation must be finite and intensity finite and nonnegative",
+                    ));
+                }
+                let parameters = EnvironmentParameters {
                     rotation_y_radians: rotation_y,
                     intensity,
-                },
-            ),
+                };
+                (Some(self.environments.get(map)?), parameters)
+            }
         };
-        self.renderer.set_environment(map, parameters)?;
-        self.renderer.set_lighting_and_shadows(&lighting, &shadows)
+        self.renderer
+            .set_lighting_and_shadows(&lighting, &shadows)?;
+        self.renderer.set_environment(map, parameters)
     }
 
     // ---- Frames ----
