@@ -7,7 +7,7 @@
 // six-way normal bin (dominant axis of the receiver's geometric normal on its viewed
 // side). Positions are never projected (C2), cells stay cubic (C3). Each slot has a
 // hot record that shading reads (key, valid bit, the fixed-weight L2 SH of the
-// occluded sky in f16 with one f32 scale) and a cold record only the kernels touch
+// occluded sky, a constant sky's at unit radiance, in f16 with one f32 scale) and a cold record only the kernels touch
 // (definition, fixed query point, one visibility bit per fixed direction: the
 // per-direction slots of W1). Values are replaced on update; no field counts samples
 // (W1, C8).
@@ -44,6 +44,10 @@ const GI_H_BLEND:u32=12u;
 // Ray items in use: GI_RAY_ITEMS traces rays in parallel, 0 traces each cell's rays in
 // setup (one thread per cell). The same rays and bits either way.
 const GI_H_ITEMS:u32=13u;
+// Cut refill groups S (0 or 1 off): on the frames after a cut, a cell traces the first
+// group of directions k % S == g that is still untraced, one group a frame, so a cut's
+// rays spread over S frames (src/gi_cache.rs IndirectSettings::cut_phases).
+const GI_H_SPREAD:u32=14u;
 // The levels a point reads and the weight of the second: one level away from a switch
 // (or with the blend off), two around it. `margin` widens the band for the kernels,
 // which must also cover a shading module's rounding at the switch itself.
@@ -98,8 +102,9 @@ const GI_ORPHAN:u32=2u;
 const GI_PARTIAL:u32=4u;
 const GI_QUEUED:u32=8u;
 
-fn gi_word(i:u32) -> u32 { return gi_table[i]; }
-fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_table[i]); }
+// Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
+// shading a vec4 array (gi_api.wgsl) so records load whole.
+fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_word(i)); }
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
 fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*GI_COLD_WORDS; }
 
@@ -135,6 +140,13 @@ fn gi_bin_normal(bin:u32) -> vec3<f32> {
 fn gi_axis_mask(bin:u32) -> vec3<f32> {
     let a=bin>>1u;
     return vec3<f32>(f32(a==0u),f32(a==1u),f32(a==2u));
+}
+// The normal a pixel's bin comes from: its interpolated vertex normal turned to the
+// viewed side, or the viewed plane normal where that normal vanishes. On scans, triangles
+// are about a pixel wide and their plane normals flip bins from pixel to pixel.
+fn gi_bin_source(viewed:vec3<f32>, vertex:vec3<f32>) -> vec3<f32> {
+    if dot(vertex,vertex)<=1e-12 { return viewed; }
+    return select(-vertex,vertex,dot(vertex,viewed)>=0.0);
 }
 // The receiver's geometric normal on the side the camera sees.
 fn gi_viewed_normal(world:vec3<f32>, geometric:vec3<f32>) -> vec3<f32> {
@@ -183,9 +195,9 @@ fn gi_mix(x:u32) -> u32 {
     h^=h>>16u; h*=0x7feb352du; h^=h>>15u; h*=0x846ca68bu; h^=h>>16u;
     return h;
 }
-// Two independent names of (level, bin, cube): key a (31 bits, never zero) picks the
-// bucket and is what shading compares; key b picks the start offset in the bucket and
-// is kept in the cold record. With the bucket index a cell has about 46 bits of name.
+// Two independent hashes of (level, bin, cube). Key a (31 bits, never zero) is the name
+// lookups compare: its low bits pick the bucket and its top three bits the start offset
+// (gi_start). Key b fixes the cell's direction rotation and is kept in the cold record.
 fn gi_key(level:u32, bin:u32, cell:vec3<i32>) -> vec2<u32> {
     let c=bitcast<vec3<u32>>(cell);
     let d=level|(bin<<8u);
@@ -196,18 +208,22 @@ fn gi_key(level:u32, bin:u32, cell:vec3<i32>) -> vec2<u32> {
 // The slot holding `key`, or 0xffffffff: one hot word per probed slot, starting at the
 // key's own offset (where its insert put it when free). Shading and the kernels search
 // identically.
+// A key's start offset in its bucket: key a's top bits, which the bucket index does not
+// use (it takes at most 21 low bits), so a lookup hashes key a alone (measured 21 us
+// cheaper in shading than starting from key b). Key b stays the cell's rotation.
+fn gi_start(key:vec2<u32>) -> u32 { return key.x>>28u; }
 fn gi_find(key:vec2<u32>) -> u32 {
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
     for(var i=0u;i<GI_BUCKET;i+=1u) {
-        let slot=bucket+((key.y+i)&(GI_BUCKET-1u));
-        if (gi_table[gi_hot(slot)]&GI_KEY_BITS)==key.x { return slot; }
+        let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
+        if (gi_word(gi_hot(slot))&GI_KEY_BITS)==key.x { return slot; }
     }
     return 0xffffffffu;
 }
 // SH coefficient j (band j / 3, channel j % 3) of a hot record, before its scale.
 fn gi_half(hot:u32, j:u32) -> f32 {
-    let pair=unpack2x16float(gi_table[hot+2u+(j>>1u)]);
+    let pair=unpack2x16float(gi_word(hot+2u+(j>>1u)));
     return select(pair.x,pair.y,(j&1u)!=0u);
 }
 
