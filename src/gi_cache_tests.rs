@@ -779,7 +779,8 @@ fn profile_json(r: &mut Renderer) -> Json {
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
                      "ray_items": c.ray_items, "local_overflow": c.local_overflow,
-                     "orphans_no_surface": c.orphans_no_surface, "orphans_inside": c.orphans_inside},
+                     "orphans_no_surface": c.orphans_no_surface, "orphans_inside": c.orphans_inside,
+                     "splits": c.splits},
     })
 }
 /// The shading pass and the whole span of the most recent completed frame, ms.
@@ -1607,7 +1608,44 @@ fn gpu_gi_sky_visibility_sv() {
                 yaw(rig, t as f32);
                 (eye, target)
             });
-            path_json["environment"] = json!({"steps": steps, "rotating": rotating});
+            // The last rotated frame against a fresh cache at its yaw (a changing map
+            // re-integrates one fixed slot group a frame, so cells lag by up to seven
+            // frames), then the still frames until the rolled cache equals a fresh one.
+            let rolled = rig.radiance(&sv);
+            rig.r.reset_indirect();
+            for _ in 0..3 {
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let fresh = rig.radiance(&sv);
+            let compare = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+                let rel: Vec<f64> = a
+                    .iter()
+                    .zip(b)
+                    .filter(|(_, b)| luminance(**b) > 0.0)
+                    .map(|(a, b)| (luminance(*a) - luminance(*b)) / luminance(*b))
+                    .collect();
+                let n = rel.len().max(1) as f64;
+                json!({"pixels_differing": a.iter().zip(b).filter(|(a, b)| a != b).count(),
+                    "relative_rms": (rel.iter().map(|x| x * x).sum::<f64>() / n).sqrt(),
+                    "relative_max": rel.iter().fold(0.0f64, |m, x| m.max(x.abs()))})
+            };
+            let lag = compare(&rolled, &fresh);
+            rig.r.reset_indirect();
+            for t in 0..48 {
+                yaw(&mut rig, t as f32);
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let mut settle = vec![];
+            for _ in 0..10 {
+                rig.frame(&sv, eye, target, &materials);
+                settle.push(compare(&rig.radiance(&sv), &fresh));
+            }
+            let settled_after = settle
+                .iter()
+                .position(|s| s["pixels_differing"] == 0)
+                .map(|k| k + 1);
+            path_json["environment"] = json!({"steps": steps, "rotating": rotating,
+                "rotating_lag": lag, "still_frames_to_fresh": settled_after, "still_after_rotation": settle});
             rig.r.set_environment(None, Default::default()).unwrap();
             rig.settings(base);
         }
@@ -1961,16 +1999,37 @@ fn quarry_score(ours: &[[f32; 3]], exact: &[[f32; 3]], hits: &[u32]) -> Json {
             "above_1_5": ratio.iter().filter(|r| **r > 1.5).count()}})
 }
 
-/// The reference tracer's depth-2 image of the quarry pose under a constant `sky`, with
-/// the gate's albedo 0.5 Lambert on every placement, at RENDERLAB_M7_G1_SPP samples
-/// (default 1024). Cached by pose, sky and samples under RENDERLAB_M7_G1_REFS, so the non-RT
-/// process (no ray queries) reads what the RT process rendered.
+/// The sky a quarry reference sees: a constant radiance, or the registered RLE2 map
+/// (identified by its file's digest) as the reference tracer samples it.
+enum ReferenceSky {
+    Constant(f32),
+    Map([u8; 32], reference::Environment),
+}
+
+/// What a quarry reference renders, at `max_depth` 2 (camera, surface, light: no bounce).
+enum ReferenceScene<'a> {
+    /// G1's estimand: the gate's albedo 0.5 Lambert on every placement, under the sky alone.
+    Gate(&'a crate::asset::Asset),
+    /// The quarry's own materials and textures, its sun and the map, on a black camera
+    /// backdrop: U0b's quarry protocol without bounce. The asset decodes from `asset` (with
+    /// `limits`) only on a cache miss; `key` names its inputs.
+    Full {
+        asset: PathBuf,
+        limits: crate::asset::Limits,
+        sun: reference::Sun,
+        key: Vec<u8>,
+    },
+}
+
+/// The reference tracer's depth-2 image of the quarry pose at RENDERLAB_M7_G1_SPP samples
+/// (default 1024). Cached by pose, scene, sky and samples under RENDERLAB_M7_G1_REFS, so the
+/// non-RT process (no ray queries) reads what the RT process rendered.
 fn quarry_reference(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    source: &crate::asset::Asset,
+    content: &ReferenceScene<'_>,
     pose: &quarry_cameras::Pose,
-    sky: f32,
+    sky: &ReferenceSky,
 ) -> reference::Image {
     use sha2::Digest;
     let settings = reference::Settings {
@@ -1982,12 +2041,23 @@ fn quarry_reference(
         env("RENDERLAB_M7_G1_REFS").unwrap_or_else(|| "E:/renderlab-work/m7-g1b/refs".into()),
     );
     let mut h = sha2::Sha256::new();
-    h.update(b"quarry-v1");
+    // The constant-sky gate keeps its G1b key, so its cached images stay valid.
+    match (content, sky) {
+        (ReferenceScene::Gate(_), ReferenceSky::Constant(_)) => h.update(b"quarry-v1"),
+        (ReferenceScene::Gate(_), ReferenceSky::Map(..)) => h.update(b"quarry-map-v1"),
+        (ReferenceScene::Full { key, .. }, _) => {
+            h.update(b"quarry-full-v1");
+            h.update(key);
+        }
+    }
     for v in [pose.eye, pose.target, pose.up] {
         h.update(v.map(f32::to_le_bytes).concat());
     }
     h.update(pose.fov_y_radians.to_le_bytes());
-    h.update(sky.to_le_bytes());
+    match sky {
+        ReferenceSky::Constant(l) => h.update(l.to_le_bytes()),
+        ReferenceSky::Map(digest, _) => h.update(digest),
+    }
     h.update(settings.samples.to_le_bytes());
     h.update(settings.seed.to_le_bytes());
     let path = dir.join(format!("quarry-{:x}.f32", h.finalize()));
@@ -2013,54 +2083,75 @@ fn quarry_reference(
             geometry: vec![],
         };
     }
-    // One reference mesh per source primitive; one instance per placement and primitive.
-    let mut meshes = vec![];
-    let mut first = vec![];
-    for m in &source.meshes {
-        first.push(meshes.len());
-        for p in &m.primitives {
-            meshes.push(reference::Mesh {
-                positions: p.vertices.iter().map(|v| v.position).collect(),
-                normals: p.vertices.iter().map(|v| v.normal).collect(),
-                indices: p.indices.clone(),
-                uvs: vec![],
-                tangents: vec![],
-                colors: vec![],
-            });
+    let (constant, environment) = match sky {
+        ReferenceSky::Constant(l) => ([*l; 3], None),
+        ReferenceSky::Map(_, map) => ([0.0; 3], Some(map.clone())),
+    };
+    let scene = match content {
+        ReferenceScene::Gate(source) => {
+            // One reference mesh per source primitive; one instance per placement and
+            // primitive.
+            let mut meshes = vec![];
+            let mut first = vec![];
+            for m in &source.meshes {
+                first.push(meshes.len());
+                for p in &m.primitives {
+                    meshes.push(reference::Mesh {
+                        positions: p.vertices.iter().map(|v| v.position).collect(),
+                        normals: p.vertices.iter().map(|v| v.normal).collect(),
+                        indices: p.indices.clone(),
+                        uvs: vec![],
+                        tangents: vec![],
+                        colors: vec![],
+                    });
+                }
+            }
+            let instances = source
+                .placements
+                .iter()
+                .flat_map(|p| {
+                    let m = p.mesh as usize;
+                    let transform = Mat4::from_cols_array_2d(&p.transform);
+                    (0..source.meshes[m].primitives.len()).map(move |k| (m, k, transform))
+                })
+                .map(|(m, k, transform)| reference::Instance {
+                    mesh: first[m] + k,
+                    material: 0,
+                    transform,
+                })
+                .collect();
+            reference::Scene {
+                meshes,
+                materials: vec![reference::Material {
+                    base_color: [0.5; 3],
+                    metallic: 0.0,
+                    roughness: 1.0,
+                    specular: 0.0,
+                    emission: [0.0; 3],
+                    base_color_texture: None,
+                    metallic_roughness_texture: None,
+                    normal_texture: None,
+                }],
+                instances,
+                sun: None,
+                sky: constant,
+                textures: vec![],
+                environment,
+                camera_background: None,
+            }
         }
-    }
-    let instances = source
-        .placements
-        .iter()
-        .flat_map(|p| {
-            let m = p.mesh as usize;
-            let transform = Mat4::from_cols_array_2d(&p.transform);
-            (0..source.meshes[m].primitives.len()).map(move |k| (m, k, transform))
-        })
-        .map(|(m, k, transform)| reference::Instance {
-            mesh: first[m] + k,
-            material: 0,
-            transform,
-        })
-        .collect();
-    let scene = reference::Scene {
-        meshes,
-        materials: vec![reference::Material {
-            base_color: [0.5; 3],
-            metallic: 0.0,
-            roughness: 1.0,
-            specular: 0.0,
-            emission: [0.0; 3],
-            base_color_texture: None,
-            metallic_roughness_texture: None,
-            normal_texture: None,
-        }],
-        instances,
-        sun: None,
-        sky: [sky; 3],
-        textures: vec![],
-        environment: None,
-        camera_background: None,
+        ReferenceScene::Full {
+            asset, limits, sun, ..
+        } => {
+            let bytes = std::fs::read(asset).unwrap();
+            let mut scene =
+                reference::Scene::from_prepared(crate::asset::decode(&bytes, *limits).unwrap());
+            scene.sun = Some(*sun);
+            scene.sky = constant;
+            scene.environment = environment;
+            scene.camera_background = Some([0.0; 3]);
+            scene
+        }
     };
     let at = |p: [f32; 3]| Vec3::from_array(p);
     let pose_ = reference::Pose {
@@ -2093,9 +2184,12 @@ fn quarry_reference(
 /// rays: the cache's exact visibility for its estimator) writes its images to
 /// RENDERLAB_M7_G1_QUARRY_EXACT; non-RT scores each software-geometry variant against them
 /// (RENDERLAB_M7_G1_QUARRY_VARIANTS: "full" builds a full-detail BVH per mesh; "lodN" uses
-/// R0c's cooked cluster BVH at error index N). With RENDERLAB_M7_G1_QUARRY_SKY (a constant
-/// sky in place of the map), each variant is also scored against the reference tracer's
-/// depth-2 image (`quarry_reference`). Correctness only: no timing claim.
+/// R0c's cooked cluster BVH at error index N; "near" a cooked near field). With
+/// RENDERLAB_M7_G1_QUARRY_SKY (a constant sky in place of the map, or "map"), each variant is
+/// also scored against the reference tracer's depth-2 image (`quarry_reference`).
+/// RENDERLAB_M7_G1_QUARRY_MODE=full renders U0b's quarry protocol instead (the quarry's own
+/// materials, sun and shadows, black backdrop) for U0b's F0 scorer. Correctness only: no
+/// timing claim.
 #[test]
 #[ignore = "GPU; optimized build; RENDERLAB_M7_G1_QUARRY, RENDERLAB_M7_G1_OUT, RENDERLAB_M7_G1_QUARRY_EXACT"]
 fn gpu_gi_quarry() {
@@ -2144,17 +2238,82 @@ fn gpu_gi_quarry() {
     } else {
         rt_device()
     };
-    // RENDERLAB_M7_G1_QUARRY_SKY: a constant sky radiance in place of the RLE2 map. Every
-    // variant is then also scored against the reference tracer's image of G1's estimand
-    // (`max_depth` 2: camera, surface, sky), which the RT process renders before the
-    // renderer takes the device.
-    let constant_sky: Option<f32> = env("RENDERLAB_M7_G1_QUARRY_SKY").map(|s| s.parse().unwrap());
+    // RENDERLAB_M7_G1_QUARRY_MODE=full: the quarry's own materials and textures, its sun
+    // and shadows (each path's shipping configuration), the RLE2 sky and a black camera
+    // backdrop (U0b's quarry protocol), cache off and on. Its dumps feed U0b's F0 scorer
+    // (docs/m7-g1c.md). Otherwise G1's estimand under the albedo-0.5 gate program.
+    let full = env("RENDERLAB_M7_G1_QUARRY_MODE").as_deref() == Some("full");
+    // RENDERLAB_M7_G1_QUARRY_SKY: a constant sky radiance in place of the RLE2 map, or "map".
+    // Either way (and always in full mode) every variant is also scored against the
+    // reference tracer's depth-2 image (`quarry_reference`), which the RT process renders
+    // before the renderer takes the device.
+    let sky_mode = env("RENDERLAB_M7_G1_QUARRY_SKY");
+    let constant_sky: Option<f32> = sky_mode
+        .as_deref()
+        .filter(|s| *s != "map" && !full)
+        .map(|s| s.parse().unwrap());
+    let map = quarry_environment::load_environment(
+        &path_of("environment"),
+        crate::asset::environment::Limits {
+            max_dimension: 4096,
+            max_texels: 64 * 1024 * 1024,
+            max_payload_bytes: 128 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    let lighting: Json = if full {
+        serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap()
+    } else {
+        Json::Null
+    };
+    let v3 = |v: &Json| -> [f32; 3] { std::array::from_fn(|k| v[k].as_f64().unwrap() as f32) };
+    let sun_travel = full.then(|| Vec3::from_array(v3(&lighting["lights"][0]["travel"])));
+    let sun_lux = full.then(|| v3(&lighting["lights"][0]["lux"]));
+    let reference_sky = match constant_sky {
+        Some(l) => ReferenceSky::Constant(l),
+        None => {
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(std::fs::read(path_of("environment")).unwrap());
+            ReferenceSky::Map(
+                digest.into(),
+                reference::Environment {
+                    radiance: map.specular_radiance()[0].clone(),
+                    yaw: map.metadata().rotation_y_radians,
+                    intensity: 1.0,
+                },
+            )
+        }
+    };
+    let content = if full {
+        let key = json!({"asset": path_of("asset"), "asset_bytes": std::fs::metadata(path_of("asset")).unwrap().len(),
+            "lighting": lighting, "angular_radius": 0.04});
+        ReferenceScene::Full {
+            asset: path_of("asset"),
+            limits,
+            sun: reference::Sun {
+                to_light: -sun_travel.unwrap(),
+                illuminance: sun_lux.unwrap(),
+                angular_radius: 0.04,
+            },
+            key: key.to_string().into_bytes(),
+        }
+    } else {
+        ReferenceScene::Gate(&source)
+    };
     let references: Vec<Option<reference::Image>> = (0..2)
         .map(|pose| {
-            constant_sky
-                .map(|sky| quarry_reference(&device, &queue, &source, &cameras.frames[pose], sky))
+            (sky_mode.is_some() || full).then(|| {
+                quarry_reference(
+                    &device,
+                    &queue,
+                    &content,
+                    &cameras.frames[pose],
+                    &reference_sky,
+                )
+            })
         })
         .collect();
+    drop(content);
     let options = RendererOptions {
         samples: SampleCount::One,
         ..Default::default()
@@ -2184,30 +2343,46 @@ fn gpu_gi_quarry() {
         r
     };
     let exposure = manifest["exposure_stops"].as_f64().unwrap_or(-12.0) as f32;
-    r.set_lighting(&Lighting {
-        lights: vec![],
-        environment: constant_sky.map_or([0.0; 3], |l| [l; 3]),
-        exposure_stops: exposure,
-    })
+    let lights = match (sun_travel, sun_lux) {
+        (Some(travel), Some(lux)) => vec![Light::Directional { travel, lux }],
+        _ => vec![],
+    };
+    // Full mode: the shipping sun shadows, a 0.04 rad disk on the 4/12/40 m splits;
+    // traced Interactive on RT, and Virtual (selected at creation) on non-RT.
+    let shadows = if full {
+        Shadows {
+            directional_disk_angle: 0.04,
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![4., 12., 40.],
+            }],
+            ..Default::default()
+        }
+    } else {
+        Shadows::default()
+    };
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights,
+            // With the map bound the constant only clears primary misses: black, as U0b.
+            environment: constant_sky.map_or([0.0; 3], |l| [l; 3]),
+            exposure_stops: exposure,
+        },
+        &shadows,
+    )
     .unwrap();
+    if full && !nonrt {
+        r.set_soft_shadows(SoftShadows::Interactive);
+    }
     if constant_sky.is_none() {
-        let sky = quarry_environment::load_environment(
-            &path_of("environment"),
-            crate::asset::environment::Limits {
-                max_dimension: 4096,
-                max_texels: 64 * 1024 * 1024,
-                max_payload_bytes: 128 * 1024 * 1024,
-            },
-        )
-        .unwrap();
         let sky = loop {
-            if let Some(map) = r.try_upload_environment(&sky).unwrap() {
+            if let Some(map) = r.try_upload_environment(&map).unwrap() {
                 break map;
             }
             r.test_drain("G1 quarry environment");
         };
         r.set_environment(Some(&sky), Default::default()).unwrap();
     }
+    drop(map);
     let mut asset = quarry_prepared::Prepared::new_with_limits(source, limits, 1_000_000).unwrap();
     while !asset.ready() {
         asset.advance(&mut r).unwrap();
@@ -2252,16 +2427,30 @@ fn gpu_gi_quarry() {
     let cell_pixels = tuned["cell_pixels"]
         .as_f64()
         .map_or(base.cell_pixels, |p| p as f32);
+    // The cut refill groups; 1 (none) unless overridden, so the first frame is settled.
+    let cut_phases = tuned["cut_phases"].as_u64().map_or(1, |p| p as u32);
     let settle_frames: usize =
         env("RENDERLAB_M7_G1_QUARRY_FRAMES").map_or(4, |s| s.parse().unwrap());
     let mut results = json!({"path": path, "triangles": triangles, "load_seconds": load_seconds,
-        "constant_sky": constant_sky, "settings": {"directions": directions, "cell_pixels": cell_pixels},
+        "constant_sky": constant_sky, "settings": {"directions": directions, "cell_pixels": cell_pixels, "cut_phases": cut_phases},
         "shaders": env("RENDERLAB_GI_SHADERS"), "placements": placements, "variants": {}});
     for variant in &variants {
         let geometry_start = Instant::now();
         if variant == "full" || variant == "software-full" {
             for (mesh, (positions, indices)) in asset.meshes_mut().iter().zip(&geometry) {
                 r.set_indirect_geometry(mesh, positions, indices).unwrap();
+            }
+        } else if variant == "near" {
+            // A cooked near field (renderlab-cook m7-near, docs/m7-g1c.md): its package file,
+            // whose meshes are the asset's in order.
+            let field = crate::asset::near_field::decode(
+                &std::fs::read(env("RENDERLAB_M7_G1_NEAR").unwrap()).unwrap(),
+                crate::asset::near_field::Limits::default(),
+            )
+            .unwrap();
+            assert_eq!(field.meshes.len(), asset.meshes_mut().len());
+            for (m, mesh) in asset.meshes_mut().iter().enumerate() {
+                r.set_indirect_near_field(mesh, &field, m).unwrap();
             }
         } else if let Some(n) = variant.strip_prefix("lod") {
             let n: usize = n.parse().unwrap();
@@ -2290,10 +2479,11 @@ fn gpu_gi_quarry() {
             let size = [frame.width, frame.height];
             let target = color_target(&r, size);
             let mut render = |r: &mut Renderer| {
+                // Full mode keeps the quarry's own materials.
                 let mut draws: Vec<Draw<'_>> = asset
                     .draws(Visibility::Frustum)
                     .into_iter()
-                    .map(|d| d.with_material(&gate))
+                    .map(|d| if full { d } else { d.with_material(&gate) })
                     .collect();
                 let until = Instant::now() + Duration::from_secs(60);
                 while r
@@ -2311,7 +2501,7 @@ fn gpu_gi_quarry() {
             let open = capture_radiance(&mut r, exposure);
             r.set_indirect(IndirectSettings {
                 enabled: true,
-                cut_phases: 1,
+                cut_phases,
                 force_software: variant == "software-full",
                 directions,
                 cell_pixels,
@@ -2345,7 +2535,11 @@ fn gpu_gi_quarry() {
             let image = capture_radiance(&mut r, exposure);
             let hits = quarry_hits(&r);
             let stats = r.indirect_stats();
-            let sky_tag = constant_sky.map_or(String::new(), |l| format!("-sky{l}"));
+            let sky_tag = if full {
+                "-full".to_string()
+            } else {
+                constant_sky.map_or(String::new(), |l| format!("-sky{l}"))
+            };
             let exact_path = exact_dir.join(format!("rt-pose{pose}{sky_tag}.f32"));
             let exact: Vec<[f32; 3]> = if variant != "hardware" {
                 std::fs::read(&exact_path)
@@ -2366,6 +2560,35 @@ fn gpu_gi_quarry() {
                 std::fs::write(&exact_path, raw).unwrap();
                 image.clone()
             };
+            // RENDERLAB_M7_G1_QUARRY_DUMP: the radiance image and the scored-pixel mask as raw
+            // little-endian f32 and u32, for per-pixel analysis against the reference.
+            if let Some(dir) = env("RENDERLAB_M7_G1_QUARRY_DUMP") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let raw: Vec<u8> = image
+                    .iter()
+                    .flatten()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect();
+                std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}.f32")), raw).unwrap();
+                // And the cache-off image (the unoccluded sky), for the full-mode attribution.
+                let raw: Vec<u8> = open
+                    .iter()
+                    .flatten()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect();
+                std::fs::write(
+                    dir.join(format!("{path}-{variant}-pose{pose}-open.f32")),
+                    raw,
+                )
+                .unwrap();
+                let mask: Vec<u8> = hits.iter().flat_map(|h| h.to_le_bytes()).collect();
+                std::fs::write(
+                    dir.join(format!("{path}-{variant}-pose{pose}-hits.u32")),
+                    mask,
+                )
+                .unwrap();
+            }
             let scale = exposure.exp2();
             png(
                 &out.join(format!("{path}-{variant}-pose{pose}.png")),
@@ -2394,12 +2617,28 @@ fn gpu_gi_quarry() {
                 "against_rt": quarry_score(&image, &exact, &hits),
                 "open_against_rt": quarry_score(&open, &exact, &hits),
                 "cut": cut, "settled": settled, "trail": trail, "image_hash": hash_image(&image),
-                "memory": {"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes, "geometry_bytes": r.indirect_stats().geometry_bytes},
+                "memory": {"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes, "geometry_bytes": stats.geometry_bytes,
+                    "near_bytes": stats.near_bytes, "near_instances": stats.near_instances},
             });
             if let Some(reference) = &references[pose] {
                 let pose_json = &mut variant_json[format!("pose{pose}")];
                 pose_json["against_reference"] = quarry_score(&image, &reference.mean, &hits);
                 pose_json["open_against_reference"] = quarry_score(&open, &reference.mean, &hits);
+                if let Some(dir) = env("RENDERLAB_M7_G1_QUARRY_DUMP") {
+                    // The reference's mean then standard error, raw little-endian f32.
+                    let raw: Vec<u8> = reference
+                        .mean
+                        .iter()
+                        .chain(&reference.standard_error)
+                        .flatten()
+                        .flat_map(|x| x.to_le_bytes())
+                        .collect();
+                    std::fs::write(
+                        PathBuf::from(dir).join(format!("reference{sky_tag}-pose{pose}.f32")),
+                        raw,
+                    )
+                    .unwrap();
+                }
                 if variant == "hardware" {
                     png(
                         &out.join(format!("reference-pose{pose}.png")),
@@ -2429,6 +2668,136 @@ fn gpu_gi_quarry() {
                 variant_json[format!("pose{pose}")]["against_rt"]["frame"]["rms"],
                 variant_json[format!("pose{pose}")]["against_rt"]["dark"]["rms"]
             );
+        }
+        // RENDERLAB_M7_G1_QUARRY_CUTS=n: n warm cuts at pose 0 with the default settings
+        // (`cut_phases` 0: the four-frame refill on software rays), each followed by still
+        // frames. Per frame after the cut: the GPU span and the cache's pass times, median
+        // over the cuts. Functional leases show the shape; a cost claim needs a quiet window.
+        if let Some(cuts) = env("RENDERLAB_M7_G1_QUARRY_CUTS").map(|n| n.parse::<usize>().unwrap())
+        {
+            const FRAMES: usize = 10;
+            let frame = &cameras.frames[0];
+            let camera = frame.camera().unwrap();
+            let target = color_target(&r, [frame.width, frame.height]);
+            r.set_indirect(IndirectSettings {
+                enabled: true,
+                force_software: variant == "software-full",
+                directions,
+                cell_pixels,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut span = vec![vec![]; FRAMES];
+            let mut passes: Vec<Vec<IndirectProfile>> = vec![vec![]; FRAMES];
+            for _ in 0..cuts {
+                r.test_drain("G1 quarry cut");
+                r.poll().unwrap();
+                r.reset_indirect();
+                let before = r.indirect_stats().frames;
+                for _ in 0..FRAMES {
+                    let mut draws: Vec<Draw<'_>> = asset
+                        .draws(Visibility::Frustum)
+                        .into_iter()
+                        .map(|d| if full { d } else { d.with_material(&gate) })
+                        .collect();
+                    while r
+                        .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                        .unwrap()
+                        .is_none()
+                    {
+                        r.test_drain("G1 quarry cut admission");
+                    }
+                }
+                r.test_drain("G1 quarry cut frames");
+                let gpu = r.poll().unwrap().gpu;
+                for (k, g) in gpu.iter().rev().take(FRAMES).rev().enumerate() {
+                    span[k].push(g.render_span.as_secs_f64() * 1e3);
+                }
+                // Cache frames are the first ones after the cut; idle frames come last.
+                let cache_frames = (r.indirect_stats().frames - before) as usize;
+                let profiles = r.indirect_profiles().unwrap();
+                let profiles = &profiles[profiles.len().saturating_sub(cache_frames)..];
+                for (k, p) in profiles.iter().enumerate() {
+                    passes[k].push(*p);
+                }
+            }
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v.get(v.len() / 2).copied()
+            };
+            let pass = |k: usize, f: fn(&IndirectProfile) -> f64| {
+                median(passes[k].iter().map(f).collect())
+            };
+            variant_json["cuts"] = json!({
+                "cuts": cuts, "pose": 0,
+                "span_ms": span.iter().map(|v| median(v.clone())).collect::<Vec<_>>(),
+                "cache_us": (0..FRAMES).map(|k| json!({"total": pass(k, |p| p.total()),
+                    "probe": pass(k, |p| p.probe), "setup": pass(k, |p| p.setup),
+                    "rays": pass(k, |p| p.rays), "finish": pass(k, |p| p.finish)})).collect::<Vec<_>>(),
+            });
+            eprintln!("G1 quarry {path} {variant} cuts: {}", variant_json["cuts"]);
+        }
+        // RENDERLAB_M7_G1_QUARRY_MOTION=n: n camera-moving frames from pose 0 (1 cm a frame
+        // along x, as pose 1 steps), cache off then on (settled first), two visits each: the
+        // frame span p50 over the last n-2 frames of each visit. Functional leases only.
+        if let Some(n) = env("RENDERLAB_M7_G1_QUARRY_MOTION").map(|n| n.parse::<usize>().unwrap()) {
+            let target = color_target(&r, [cameras.frames[0].width, cameras.frames[0].height]);
+            let mut run = |r: &mut Renderer, step: f32, frames: usize| -> Vec<f64> {
+                r.test_drain("G1 quarry motion");
+                r.poll().unwrap();
+                for t in 0..frames {
+                    let mut pose = cameras.frames[0].clone();
+                    pose.eye[0] += step * t as f32;
+                    pose.target[0] += step * t as f32;
+                    let camera = pose.camera().unwrap();
+                    let mut draws: Vec<Draw<'_>> = asset
+                        .draws(Visibility::Frustum)
+                        .into_iter()
+                        .map(|d| if full { d } else { d.with_material(&gate) })
+                        .collect();
+                    while r
+                        .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                        .unwrap()
+                        .is_none()
+                    {
+                        r.test_drain("G1 quarry motion admission");
+                    }
+                }
+                r.test_drain("G1 quarry motion frames");
+                let mut spans: Vec<f64> = r
+                    .poll()
+                    .unwrap()
+                    .gpu
+                    .iter()
+                    .rev()
+                    .take(frames)
+                    .rev()
+                    .skip(2)
+                    .map(|g| g.render_span.as_secs_f64() * 1e3)
+                    .collect();
+                spans.sort_by(f64::total_cmp);
+                spans
+            };
+            let p50 = |v: &[f64]| v.get(v.len() / 2).copied();
+            let mut motion = json!({"frames": n, "step_m": 0.01});
+            for (state, enabled) in [("off", false), ("on", true)] {
+                r.set_indirect(IndirectSettings {
+                    enabled,
+                    force_software: variant == "software-full",
+                    directions,
+                    cell_pixels,
+                    ..Default::default()
+                })
+                .unwrap();
+                r.set_indirect_profiling(false);
+                r.reset_indirect();
+                run(&mut r, 0.0, 10);
+                let visits: Vec<Option<f64>> = (0..2).map(|_| p50(&run(&mut r, 0.01, n))).collect();
+                motion[state] = json!(visits);
+            }
+            r.set_indirect_profiling(true);
+            eprintln!("G1 quarry {path} {variant} motion: {motion}");
+            variant_json["motion"] = motion;
         }
         results["variants"][variant] = variant_json;
         std::fs::write(
@@ -2464,9 +2833,9 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
         glam::Quat::from_euler(glam::EulerRot::XYZ, 0.7, 0.3, -0.4),
         Vec3::new(1.0, 2.0, -1.0),
     );
-    let (offsets, total) = gi_bvh::layout(&[&blas], 1);
-    let mut words = gi_bvh::mesh_words(&[&blas], &offsets, total);
-    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0])]).unwrap();
+    let (offsets, near, total) = gi_bvh::layout(&[&blas], 1);
+    let mut words = gi_bvh::mesh_words(&[&blas], &offsets, &near, total);
+    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0], 0)]).unwrap();
     words[..head.len()].copy_from_slice(&head);
     let normal = model
         .inverse()

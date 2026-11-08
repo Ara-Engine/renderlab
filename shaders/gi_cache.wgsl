@@ -6,7 +6,8 @@
 //               vertex normal), deduplicated per 16x16 tile; each tile then finds its
 //               unique cells once, marks them seen, and lists the missing ones in the
 //               frame's request table (once per frame); a found orphan adds its parent
-//               level's cells, up to two levels, so the lookup falls back to them;
+//               level's cells, up to two levels, so the lookup falls back to them; a
+//               pixel whose cells are split also lists its finer levels' (G1c);
 //   gi_claim    each miss picks a free slot as the table stands and raises the slot's
 //               claim word to its priority (atomicMax, C4);
 //   gi_resolve  the highest claim writes the cell and queues it for tracing; claim and
@@ -18,8 +19,10 @@
 //               (slot+frame) mod P == 0, an environment change re-integrates, and
 //               partially traced cells (W1 form 2) re-queue;
 //   gi_setup    eight lanes per queued cell: the canonical query point when it has
-//               none (candidates in parallel), then one ray item per unknown (or this
-//               phase's) direction;
+//               none (five fixed probe lines in parallel, which also decide whether the
+//               cell is split), the directions cooked near-field masks block where it
+//               has them (G1c), then one ray item per unknown (or this phase's) direction
+//               they leave open;
 //   gi_rays     one thread per ray item: that direction's visibility bit;
 //   gi_finish   four lanes per queued cell: the bits into its direction slots and the
 //               SH over every slot, replacing the value (W1); after a miss-list
@@ -39,7 +42,9 @@ struct GiFrame {
     // x: slots, y: miss list offset, z: trace queue offset, w: integrate queue offset.
     offsets:vec4<u32>,
     // x: request table offset, y: its entry mask (two words per entry), z: ray item
-    // list offset (GI_RAY_ITEMS words, then the staged visibility bits, one per item).
+    // list offset (GI_RAY_ITEMS words, then the staged visibility bits, one per item), w:
+    // the environment's slot group: period (bits 0-7; 0: every slot), phase (bits 8-15),
+    // and bit 31 when the scan visits only that group (environment-only frames).
     requests:vec4<u32>,
     // Swept world bounds of moved placements: lo.xyz then hi.xyz.
     boxes:array<vec4<f32>,64>,
@@ -67,6 +72,8 @@ const GI_W_ITEMS:u32=12u;
 // or every qualifying candidate lay inside a solid (14).
 const GI_W_ORPHAN_NONE:u32=13u;
 const GI_W_ORPHAN_INSIDE:u32=14u;
+// Cells probed this frame that are split.
+const GI_W_SPLITS:u32=15u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 const GI_W_CLAIMS:u32=16u;
@@ -127,7 +134,14 @@ var<workgroup> gi_local_list:array<u32,GI_LOCAL>;
 var<workgroup> gi_local_count:atomic<u32>;
 // The end of this round's entries (lane 0 reads the count after the barrier).
 var<workgroup> gi_local_end:u32;
-const GI_PROBE_ROUNDS:u32=3u;
+// Per entry: found split this frame (written by the one lane that finds it); and whether
+// any entry so far is, which starts the pixels' refinement walks.
+var<workgroup> gi_local_split:array<u32,GI_LOCAL>;
+var<workgroup> gi_local_any_split:u32;
+// Rounds of finds: each finds what the last added. Parents of orphans are added in the
+// first GI_PARENT_ROUNDS; finer levels under split cells one level a round.
+const GI_PROBE_ROUNDS:u32=4u;
+const GI_PARENT_ROUNDS:u32=2u;
 
 // Adds one cell to the tile's set; the lowest pixel priority that wants it is kept.
 fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
@@ -201,12 +215,51 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         }
     }
 }
+// Whether the tile's set lists `key` and found it split this frame.
+fn gi_local_flag(key:u32) -> bool {
+    var h=key%GI_LOCAL;
+    for(var i=0u;i<GI_LOCAL;i+=1u) {
+        let k=atomicLoad(&gi_local_key[h]);
+        if k==key { return gi_local_split[h]!=0u; }
+        if k==0u { return false; }
+        h=(h+1u)%GI_LOCAL;
+    }
+    return false;
+}
+// Whether any cell the lookup reads at this level (the four bilinear corners of the
+// point's layer, or its containing cell) is listed and found split.
+fn gi_local_split_at(world:vec3<f32>, level:u32, bin:u32) -> bool {
+    let u=gi_lattice(world,gi_edge(level),bin);
+    if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u {
+        return gi_local_flag(gi_key(level,bin,vec3<i32>(floor(u))).x);
+    }
+    let corners=gi_corners(u,bin);
+    for(var c=0u;c<4u;c+=1u) {
+        if gi_local_flag(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)).x) { return true; }
+    }
+    return false;
+}
+// A pixel's refinement walk at one level and bin: while the cells it reads are split, it
+// lists the next finer level's (up to GI_REFINE levels), as shading's lookup reads them.
+// Each round's walk deepens by the level the last round found.
+fn gi_refine_requests(world:vec3<f32>, level:u32, bin:u32, priority:u32) {
+    var l=level;
+    for(var r=0u;r<GI_REFINE && l>0u;r+=1u) {
+        if !gi_local_split_at(world,l,bin) { return; }
+        l-=1u;
+        gi_request_cells(gi_request_desc(world,l,bin),priority);
+    }
+}
 @compute @workgroup_size(16,16) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     for(var i=lane;i<GI_LOCAL;i+=GI_PROBE_LANES) {
         atomicStore(&gi_local_key[i],0u);
         atomicStore(&gi_local_priority[i],0xffffffffu);
+        gi_local_split[i]=0u;
     }
-    if lane==0u { atomicStore(&gi_local_count,0u); }
+    if lane==0u {
+        atomicStore(&gi_local_count,0u);
+        gi_local_any_split=0u;
+    }
     workgroupBarrier();
     let p=grid.xy+gi_frame.region.xy;
     let size=textureDimensions(primary_hit);
@@ -214,17 +267,22 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
     if all(p<gi_frame.region.zw) && all(p<size) && textureLoad(primary_tiles,p/PRIMARY_TILE,0).x!=0u {
         record=textureLoad(primary_hit,vec2<i32>(p),0);
     }
+    // The pixel's receiver, bins and levels, kept for its refinement walks.
+    var world=vec3<f32>(0.0);
+    var bins=0u;
+    var pick=GiLevels(0u,0u,0.0);
+    // The pixel's priority: lower wins. Unique per pixel; its cells share it.
+    let priority=p.y*size.x+p.x;
     if record.x!=0u {
         let r=gi_receiver(record);
+        world=r.world;
         let n=gi_bin_source(gi_viewed_normal(r.world,r.geometric),r.vertex);
-        // The pixel's priority: lower wins. Unique per pixel; its cells share it.
-        let priority=p.y*size.x+p.x;
         // Both levels around a switch: inside the blend band, and within rounding of
         // the switch itself, where the shading module's ceil may go either way.
-        let pick=gi_levels(r.world,1e-3);
+        pick=gi_levels(r.world,1e-3);
         // Bins on either side of a near tie, and both sides of a near-grazing view.
         let a=abs(n);
-        var bins=1u<<gi_bin(n);
+        bins=1u<<gi_bin(n);
         let eps=1e-4;
         if abs(a.x-a.y)<eps || abs(a.x-a.z)<eps || abs(a.y-a.z)<eps {
             bins|=1u<<gi_bin(n+vec3<f32>(eps*sign(n.x),0.0,0.0));
@@ -269,8 +327,13 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
                 // dependent load per cell.
                 gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
                 let level=def.x&0xffu;
+                // A split cell (its hot record's last word, in the line the key read).
+                if (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u {
+                    gi_local_split[i]=1u;
+                    gi_local_any_split=1u;
+                }
                 // Only an invalid hot key reads the cold state (orphan or not yet traced).
-                if round+1u<GI_PROBE_ROUNDS && level+1u<levels && (gi_word(gi_hot(slot))&GI_VALID)==0u
+                if round<GI_PARENT_ROUNDS && level+1u<levels && (gi_word(gi_hot(slot))&GI_VALID)==0u
                     && (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u {
                     gi_request_cells(gi_request_desc(gi_cell(slot).centre,level+1u,(def.x>>8u)&7u),atomicLoad(&gi_local_priority[i]));
                 }
@@ -295,6 +358,16 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         }
         begin=to;
         workgroupBarrier();
+        // Pixels reading split cells list their finer levels' cells, which the next round
+        // finds or requests. Tiles with no split cell skip this (a uniform flag).
+        if round+1u<GI_PROBE_ROUNDS && workgroupUniformLoad(&gi_local_any_split)!=0u {
+            for(var b=0u;b<6u;b+=1u) {
+                if (bins&(1u<<b))==0u { continue; }
+                gi_refine_requests(world,pick.lo,b,priority);
+                if pick.hi!=pick.lo { gi_refine_requests(world,pick.hi,b,priority); }
+            }
+            workgroupBarrier();
+        }
     }
 }
 // The request-table entry of key a (linear probing; zero is empty), and whether this
@@ -379,12 +452,17 @@ fn gi_resolve_miss(index:u32) {
     let key=gi_miss_key(base);
     let cold=gi_cold(slot);
     gi_table[gi_hot(slot)]=key.x;
+    // No split flag from the slot's last occupant.
+    gi_table[gi_hot(slot)+15u]=0u;
     gi_table[cold+GI_C_KEY_B]=key.y;
     gi_table[cold+GI_C_STATE]=GI_QUEUED;
     gi_table[cold+GI_C_SEEN]=gi_word(GI_H_FRAME);
     gi_table[cold+GI_C_DEF]=atomicLoad(&gi_work[base]);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_CELL+i]=atomicLoad(&gi_work[base+1u+i]); }
-    for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_KNOWN+w]=0u; }
+    for(var w=0u;w<GI_MAX_WORDS;w+=1u) {
+        gi_table[cold+GI_C_KNOWN+w]=0u;
+        gi_table[cold+GI_C_NEAR+w]=0u;
+    }
     gi_queue_trace(slot);
     atomicAdd(&gi_work[GI_W_CREATED],1u);
 }
@@ -454,11 +532,26 @@ fn gi_sky(d:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 { return environment_radiance(environment_direction(d),GI_ENV_ROUGHNESS); }
     return vec3<f32>(1.0);
 }
-// One lane's or cell's SH sums (gi_lane_add, gi_lane_reduce).
-var<private> gi_cell_sh:array<vec3<f32>,9>;
+// One lane's or cell's SH sums (gi_lane_add, gi_lane_reduce); entry 9 is the same
+// directions' unoccluded sum, as L2 irradiance at the cell normal.
+var<private> gi_cell_sh:array<vec3<f32>,10>;
 // The sum replaces the slot's SH, stored as halves of one f32 scale: no blend with
 // any earlier value (W1).
+// A map's SH is first scaled per channel so that its unoccluded value at the cell normal is
+// the prepared diffuse irradiance there: 64 hemisphere directions of a map's prefiltered
+// radiance miss or blur a bright sun's lobe (G1c: open quarry ground read 11% dark with every
+// direction visible), while the prepared irradiance is exact. A constant sky needs no
+// scale: the directions integrate the L2 kernel to pi exactly.
 fn gi_store_sh(slot:u32) {
+    if lighting.map.w!=0.0 {
+        let n=gi_unpack_normal(gi_table[gi_cold(slot)+GI_C_NORMAL]);
+        let exact=environment_bilinear(environment_diffuse,environment_direction(n),0,0);
+        let open=gi_cell_sh[9];
+        // Guarded: a near-black or degenerate sum keeps its own value.
+        let s=select(vec3<f32>(1.0),clamp(exact/max(open,vec3<f32>(1e-30)),vec3<f32>(0.25),vec3<f32>(4.0)),
+            open>vec3<f32>(1e-20));
+        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]*=s; }
+    }
     var m=0.0;
     for(var i=0u;i<9u;i+=1u) {
         let c=abs(gi_cell_sh[i]);
@@ -471,6 +564,9 @@ fn gi_store_sh(slot:u32) {
         let b=select(0.0,gi_sh_component(min(2u*w+1u,26u)),2u*w+1u<27u);
         gi_table[hot+2u+w]=pack2x16float(vec2<f32>(a,b)/scale);
     }
+    // The last word's free half carries the split flag.
+    let split=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_SPLIT)!=0u;
+    gi_table[hot+15u]=gi_table[hot+15u]|select(0u,GI_SPLIT_HOT,split);
     gi_table[hot+1u]=bitcast<u32>(scale);
 }
 fn gi_sh_component(j:u32) -> f32 {
@@ -481,16 +577,29 @@ fn gi_sh_component(j:u32) -> f32 {
 
 // ---- trace: canonical query point, fixed directions, replace ----
 const GI_PROBES:u32=5u;
-// A deterministic probe from the key alone (W2): from a fixed point on the cube's
-// face along its bin normal, straight down through the cube. The first hit is the
-// query point when its viewed normal lies within about 70 degrees of the bin normal (not
+// Hits a probe line follows through its cube.
+const GI_LINE_HITS:u32=4u;
+// A deterministic probe from the key alone (W2): five fixed lines from fixed points on the
+// cube's face along its bin normal, straight down through the cube. A line's first hit is
+// its candidate when its viewed normal lies within about 70 degrees of the bin normal (not
 // only in the bin itself: scan triangles are about a pixel wide and their plane normals
 // scatter across bins), it lies in the cube, and a ray from it along its normal does not
-// leave through the inside of a closed surface.
-// Candidate j's down ray: its hit point (w 1) and viewed normal, or zero when the hit
-// does not qualify (no hit, too far from the bin normal, outside the cube).
-struct GiCandidate { q:vec4<f32>, n:vec4<f32> };
-fn gi_probe_down(c:GiCell, j:u32) -> GiCandidate {
+// leave through the inside of a closed surface. When that first hit lies inside a solid
+// (the face starts inside a slab), the line's next qualifying hit is tried (the floor
+// beneath the slab).
+// A candidate: its hit point (q.w 1), viewed normal (n.w 1: inside a solid), the hit
+// triangle's positions (tri.xyz) and instance, with bit 31 when it is seen from behind its
+// source winding (tri.w), and its barycentrics: the near field's inputs (G1c).
+struct GiCandidate { q:vec4<f32>, n:vec4<f32>, tri:vec4<u32>, bary:vec2<f32> };
+fn gi_no_candidate() -> GiCandidate {
+    return GiCandidate(vec4<f32>(0.0),vec4<f32>(0.0),vec4<u32>(0u),vec2<f32>(0.0));
+}
+// A line's first two qualifying hits and whether it is split: it meets two surface layers,
+// two faces toward the bin (by source winding) with open space between them, more than an
+// eighth of an edge apart (a slab over a floor, a sheet over the ground). A box resting on
+// the ground is one layer: its bottom and the ground coincide.
+struct GiLineHits { a:GiCandidate, b:GiCandidate, split:bool };
+fn gi_probe_line(c:GiCell, j:u32) -> GiLineHits {
     let nb=gi_bin_normal(c.bin);
     let axis=c.bin>>1u;
     let t1=gi_bin_normal(((axis+1u)%3u)*2u);
@@ -501,23 +610,75 @@ fn gi_probe_down(c:GiCell, j:u32) -> GiCandidate {
     // face is found by both cells beside it.
     let margin=0.01*c.edge;
     let start=c.centre+nb*(0.5*c.edge+margin)+(t1*o.x+t2*o.y)*c.edge;
-    let none=GiCandidate(vec4<f32>(0.0),vec4<f32>(0.0));
-    let down=gi_closest(start,-nb,0.0,c.edge+2.0*margin);
-    if !down.hit { return none; }
-    let n=select(-down.normal,down.normal,dot(down.normal,nb)>=0.0);
-    if dot(n,nb)<0.34 { return none; }
-    let q=start-nb*down.t;
-    let inside=abs(q-c.centre)<=vec3<f32>(0.5*c.edge+margin);
-    if !all(inside) { return none; }
-    return GiCandidate(vec4<f32>(q,1.0),vec4<f32>(n,0.0));
+    let length=c.edge+2.0*margin;
+    var out=GiLineHits(gi_no_candidate(),gi_no_candidate(),false);
+    var found=0u;
+    var layers=0u;
+    var last=0.0;
+    var tmin=0.0;
+    for(var i=0u;i<GI_LINE_HITS;i+=1u) {
+        let h=gi_closest(start,-nb,tmin,length);
+        if !h.hit { break; }
+        let facing=dot(h.normal,nb);
+        // Candidates: the first hit when it qualifies, then the next hit facing the bin past
+        // an open gap (the floor beneath a slab whose inside the line started in).
+        let second=found==1u && facing>=0.34 && h.t-last>0.01*c.edge;
+        if (i==0u && abs(facing)>=0.34) || second {
+            let n=select(-h.normal,h.normal,facing>=0.0);
+            let side=select(0u,0x80000000u,facing<0.0);
+            let r=GiCandidate(vec4<f32>(start-nb*h.t,1.0),vec4<f32>(n,0.0),vec4<u32>(h.tri,h.inst|side),h.bary);
+            if found==0u { out.a=r; } else { out.b=r; }
+            found+=1u;
+        }
+        if facing>=0.34 && (layers==0u || h.t-last>0.125*c.edge) { layers+=1u; }
+        last=h.t;
+        if layers>=2u && (found==2u || out.a.q.w==0.0) { break; }
+        tmin=h.t+1e-4*c.edge;
+    }
+    out.split=layers>=2u;
+    return out;
+}
+// The line's candidate: its first when it is not inside a solid, else its second when
+// that is not; otherwise its first, marked inside (n.w 1), or none. One inside-test site in
+// a loop: every inlined ray query adds to gi_setup's registers (G1c measured each extra
+// site costing setup time even where it never ran).
+fn gi_line_candidate(h:GiLineHits, edge:f32) -> GiCandidate {
+    if h.a.q.w==0.0 { return h.a; }
+    for(var k=0u;k<2u;k+=1u) {
+        var r=h.a;
+        if k==1u { r=h.b; }
+        if r.q.w==0.0 { break; }
+        if !gi_probe_inside(r,edge) { return r; }
+    }
+    var r=h.a;
+    r.n.w=1.0;
+    return r;
 }
 // Whether a candidate lies inside a solid: a ray from it along its normal first meets a
-// hit seen from the back of its source winding.
+// hit seen from the back of its source winding. A candidate the line met from behind (the
+// line started inside a solid) is inside on that alone, as at G1b. One it met from the
+// front is inside when that back face lies within an edge (a scan buried just under an
+// overlapping one, gravel under a stone), or further when each of four fixed rays 80
+// degrees off the normal meets a back face too: a point inside a closed solid (the ground
+// under a block resting on it) is enclosed on every side, while a floor under an open,
+// single-sided scan sheet sees the sheet's back overhead but has a way out to the side, and
+// it is a receiver (the quarry's cavity, G1c). Where two coincident faces tie (a block's
+// bottom on the ground), hardware and software rays may report either first; both give the
+// same answer, enclosed.
 fn gi_probe_inside(r:GiCandidate, edge:f32) -> bool {
     let q=r.q.xyz;
     let n=r.n.xyz;
-    let up=gi_closest(q+n*gi_origin_offset(q,edge),n,0.0,1e20);
-    return up.hit && dot(up.normal,n)>0.0;
+    let o=q+n*gi_origin_offset(q,edge);
+    let f=gi_basis(n);
+    // Ray 0 along the normal, rays 1-4 at 80 degrees off it, through one query site.
+    for(var i=0u;i<5u;i+=1u) {
+        let a=f32(i)*1.5707963267948966;
+        let d=select(f*vec3<f32>(0.9848078*cos(a),0.9848078*sin(a),0.17364818),n,i==0u);
+        let h=gi_closest(o,d,0.0,1e20);
+        if !h.hit || dot(h.normal,d)<=0.0 { return false; }
+        if i==0u && ((r.tri.w&0x80000000u)!=0u || h.t<=edge) { return true; }
+    }
+    return true;
 }
 // Directions a queued cell traces this frame, in word w: every unknown one (replace
 // mode: new cells, and the directions a moved caster reached), or this frame's phase
@@ -587,13 +748,14 @@ fn gi_open(k:u32, k0:u32, k1:u32, k2:u32, k3:u32, b0:u32, b1:u32, b2:u32, b3:u32
 fn gi_point(cold:u32) -> vec3<f32> {
     return vec3<f32>(bitcast<f32>(gi_table[cold+GI_C_POINT]),bitcast<f32>(gi_table[cold+GI_C_POINT+1u]),bitcast<f32>(gi_table[cold+GI_C_POINT+2u]));
 }
-// Eight lanes per queued cell, eight cells per workgroup: the canonical query point
-// when the cell has none, then one ray item per direction to trace (gi_rays),
-// contiguous per cell in direction order. Lane 0 tries candidate 0; only when it does not
-// qualify do lanes 1-4 trace candidates 1-4 together, each with its own inside test, and
-// lane 0 takes the first that qualifies, in fixed order (the same point as trying them in
-// turn). The lanes then write the items, or past the item capacity trace the cell's
-// directions themselves: the same rays and bits either way.
+/// Eight lanes per queued cell, eight cells per workgroup: the canonical query point
+// when the cell has none, its near-field mask bits, then one ray item per direction to trace
+// (gi_rays), contiguous per cell in direction order. A fresh cell's lanes 0-4 walk the
+// five probe lines and resolve their candidates together, each with its own inside tests
+// (every line also decides the split). Lane 0 takes the first point in line order (the same
+// point as trying them in turn). A point on an instance with cooked near-field masks then has each
+// lane mark the directions the masks block. The lanes then write the items, or past the item
+// capacity trace the cell's directions themselves: the same rays and bits either way.
 const GI_SETUP_LANES:u32=8u;
 const GI_SETUP_CELLS:u32=8u;
 var<workgroup> gi_wg_candidates:array<GiCandidate,64>;
@@ -603,67 +765,96 @@ const GI_SETUP_NONE:u32=0u;
 const GI_SETUP_PROBE:u32=1u;
 const GI_SETUP_ITEMS:u32=2u;
 const GI_SETUP_TRACE:u32=3u;
+const GI_SETUP_NEAR:u32=5u;
 var<workgroup> gi_wg_state:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_base:array<u32,GI_SETUP_CELLS>;
-// Per cell: candidate 0 qualified but lay inside a solid (orphan counters only).
-var<workgroup> gi_wg_inside:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_pending:array<u32,GI_SETUP_CELLS*GI_MAX_WORDS>;
 var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
+// Per cell: some probe line is split; and the directions the near-field masks block.
+var<workgroup> gi_wg_split:array<atomic<u32>,GI_SETUP_CELLS>;
+var<workgroup> gi_wg_near:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
+// A cell's chosen candidate sits in lane 7's slot, which no probe line uses.
+const GI_SETUP_CHOSEN:u32=7u;
 @compute @workgroup_size(64) fn gi_setup(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) index:u32) {
     let cell=index/GI_SETUP_LANES;
     let lane=index%GI_SETUP_LANES;
     let count=gi_uniform_count(index,GI_W_TRACES);
+    let bins=gi_word(GI_H_NEAR_BINS);
+    if lane==0u {
+        atomicStore(&gi_wg_split[cell],0u);
+        for(var w=0u;w<GI_MAX_WORDS;w+=1u) { atomicStore(&gi_wg_near[cell*GI_MAX_WORDS+w],0u); }
+    }
+    workgroupBarrier();
     for(var first=group.x*GI_SETUP_CELLS;first<count;first+=groups.x*GI_SETUP_CELLS) {
         let live=first+cell<count;
         var slot=0u;
         if live { slot=atomicLoad(&gi_work[gi_frame.offsets.z+first+cell]); }
         let c=gi_cell(slot);
         let cold=gi_cold(slot);
-        // Lane 0: a fresh cell's candidate 0, then (if it has a point) its directions.
+        // A fresh cell (nothing known) has no query point yet.
+        var fresh=live;
+        for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[cold+GI_C_KNOWN+w]==0u; }
+        // Stage 1: lines 0-4 walk their cube and resolve their candidates together.
+        if fresh && lane<GI_PROBES {
+            let line=gi_probe_line(c,lane);
+            if line.split { atomicOr(&gi_wg_split[cell],1u); }
+            gi_wg_candidates[index]=gi_line_candidate(line,c.edge);
+        }
         if live && lane==0u {
-            var fresh=true;
-            for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[cold+GI_C_KNOWN+w]==0u; }
-            var state=GI_SETUP_ITEMS;
-            gi_wg_inside[cell]=0u;
-            if fresh {
-                let r=gi_probe_down(c,0u);
-                if r.q.w!=0.0 && !gi_probe_inside(r,c.edge) {
-                    gi_setup_point(slot,r);
-                } else {
-                    state=GI_SETUP_PROBE;
-                    gi_wg_inside[cell]=select(0u,1u,r.q.w!=0.0);
-                }
-            }
-            gi_wg_state[cell]=state;
+            gi_wg_state[cell]=select(GI_SETUP_ITEMS,GI_SETUP_PROBE,fresh);
         }
         workgroupBarrier();
-        // Candidates 1-4 together, only for cells whose candidate 0 failed.
-        let probing=live && gi_wg_state[cell]==GI_SETUP_PROBE;
-        if probing && lane>=1u && lane<GI_PROBES {
-            var r=gi_probe_down(c,lane);
-            if r.q.w!=0.0 && gi_probe_inside(r,c.edge) { r.n.w=1.0; }
-            gi_wg_candidates[index]=r;
-        }
-        workgroupBarrier();
+        // Stage 3: lane 0 takes the first point in line order, or marks an orphan.
         if live && lane==0u {
             var state=gi_wg_state[cell];
             if state==GI_SETUP_PROBE {
+                let split=atomicLoad(&gi_wg_split[cell])!=0u;
+                var qualified=false;
                 state=GI_SETUP_NONE;
-                var qualified=gi_wg_inside[cell]!=0u;
-                for(var j=1u;j<GI_PROBES;j+=1u) {
-                    let r=gi_wg_candidates[index+j];
+                for(var j=0u;j<GI_PROBES;j+=1u) {
+                    let r=gi_wg_candidates[cell*GI_SETUP_LANES+j];
                     qualified=qualified || r.q.w!=0.0;
                     if r.q.w==0.0 || r.n.w!=0.0 { continue; }
-                    gi_setup_point(slot,r);
-                    state=GI_SETUP_ITEMS;
+                    let near=bins!=0u && gi_near_base(r.tri.w&0x7fffffffu)!=0u;
+                    gi_setup_point(slot,r,split);
+                    gi_wg_candidates[cell*GI_SETUP_LANES+GI_SETUP_CHOSEN]=r;
+                    state=select(GI_SETUP_ITEMS,GI_SETUP_NEAR,near);
                     break;
                 }
                 if state==GI_SETUP_NONE {
                     gi_table[gi_hot(slot)]=c.key.x;
-                    gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN;
+                    gi_table[gi_hot(slot)+15u]=select(0u,GI_SPLIT_HOT,split);
+                    gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN|select(0u,GI_SPLIT,split);
                     atomicAdd(&gi_work[GI_W_ORPHANS],1u);
                     atomicAdd(&gi_work[select(GI_W_ORPHAN_NONE,GI_W_ORPHAN_INSIDE,qualified)],1u);
                 }
+                if split { atomicAdd(&gi_work[GI_W_SPLITS],1u); }
+            }
+            gi_wg_state[cell]=state;
+        }
+        workgroupBarrier();
+        // Stage 4: a new point on cooked near-field masks: each lane marks its directions
+        // (k = lane, lane+8, ...) that the masks block (G1c).
+        if live && gi_wg_state[cell]==GI_SETUP_NEAR {
+            let r=gi_wg_candidates[cell*GI_SETUP_LANES+GI_SETUP_CHOSEN];
+            let base=gi_near_base(r.tri.w&0x7fffffffu);
+            let back=(r.tri.w&0x80000000u)!=0u;
+            let frame=gi_basis(r.n.xyz);
+            for(var k=lane;k<GI_DIRECTIONS;k+=GI_SETUP_LANES) {
+                if gi_near_blocked(base,r.tri.xyz,r.bary,back,gi_direction(frame,c.key,k),bins) {
+                    atomicOr(&gi_wg_near[cell*GI_MAX_WORDS+k/32u],1u<<(k%32u));
+                }
+            }
+        }
+        workgroupBarrier();
+        // Stage 5: lane 0 stores the mask bits, then the pending directions and items.
+        if live && lane==0u {
+            var state=gi_wg_state[cell];
+            if state==GI_SETUP_NEAR {
+                for(var w=0u;w<GI_MAX_WORDS;w+=1u) {
+                    gi_table[cold+GI_C_NEAR+w]=atomicLoad(&gi_wg_near[cell*GI_MAX_WORDS+w]);
+                }
+                state=GI_SETUP_ITEMS;
             }
             if state==GI_SETUP_ITEMS {
                 let base=gi_setup_directions(slot,cell);
@@ -698,7 +889,8 @@ var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
             }
         }
         workgroupBarrier();
-        // Past the capacity: the traced bits into the slots; nothing pending.
+        // Past the capacity: the traced bits into the slots; nothing pending. Lane 0 also
+        // clears the cell's split and near words for the next cells.
         if live && lane==0u && state==GI_SETUP_TRACE {
             for(var w=0u;w<GI_WORDS;w+=1u) {
                 let m=gi_wg_pending[cell*GI_MAX_WORDS+w];
@@ -708,24 +900,38 @@ var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
                 gi_table[cold+GI_C_PENDING+w]=0u;
             }
         }
+        if lane==0u {
+            atomicStore(&gi_wg_split[cell],0u);
+            for(var w=0u;w<GI_MAX_WORDS;w+=1u) { atomicStore(&gi_wg_near[cell*GI_MAX_WORDS+w],0u); }
+        }
         // The next cells overwrite the workgroup state only after every lane is done.
         workgroupBarrier();
     }
 }
-// A fresh cell's canonical query point and normal.
-fn gi_setup_point(slot:u32, r:GiCandidate) {
+// A fresh cell's canonical query point and normal, and whether it is split. Its near words
+// are cleared until stage 5 stores them.
+fn gi_setup_point(slot:u32, r:GiCandidate, split:bool) {
     let cold=gi_cold(slot);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
     gi_table[cold+GI_C_NORMAL]=gi_pack_normal(r.n.xyz);
-    gi_table[cold+GI_C_STATE]=GI_QUEUED;
+    gi_table[cold+GI_C_STATE]=GI_QUEUED|select(0u,GI_SPLIT,split);
+    for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_NEAR+w]=0u; }
 }
 // Lane 0's part of setup for a cell with a query point: the pending directions (into the
-// workgroup's copy too) and the item allocation. Returns the first item, or 0xffffffff
-// past the item capacity (the lanes then trace the directions themselves).
+// workgroup's copy too) and the item allocation. Directions its near-field masks block become
+// known and blocked, and are never traced. Returns the first item, or 0xffffffff past the
+// item capacity (the lanes then trace the directions themselves).
 fn gi_setup_directions(slot:u32, cell:u32) -> u32 {
     let cold=gi_cold(slot);
     let phases=max(gi_word(GI_H_PHASES),1u);
     let phase=gi_word(GI_H_FRAME)%phases;
+    // Near-blocked directions: static geometry within the near field blocks them whatever
+    // moves, so they are known and blocked, before any group or phase is chosen.
+    for(var w=0u;w<GI_WORDS;w+=1u) {
+        let near=gi_table[cold+GI_C_NEAR+w];
+        gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]|near;
+        gi_table[cold+GI_C_BITS+w]=gi_table[cold+GI_C_BITS+w]&~near;
+    }
     // Cut refill: the first direction group with untraced directions, one a frame.
     let spread=gi_word(GI_H_SPREAD);
     var group=0xffffffffu;
@@ -741,7 +947,7 @@ fn gi_setup_directions(slot:u32, cell:u32) -> u32 {
         var m=0u;
         if w<GI_WORDS {
             let known=gi_table[cold+GI_C_KNOWN+w];
-            m=gi_wanted(known,w,phases,phase);
+            m=gi_wanted(known,w,phases,phase)&~gi_table[cold+GI_C_NEAR+w];
             if group!=0xffffffffu { m=~known&gi_group_mask(w,spread,group); }
             gi_table[cold+GI_C_PENDING+w]=m;
         }
@@ -785,23 +991,32 @@ fn gi_ray(index:u32) {
 // and the cell's lane 0 stores the result. The value replaces the stored one (W1).
 const GI_SH_LANES:u32=4u;
 const GI_SH_CELLS:u32=16u;
-// Per cell in the workgroup: 27 components of GI_SH_LANES lanes.
-var<workgroup> gi_wg_sh:array<f32,GI_SH_CELLS*27u*GI_SH_LANES>;
+// Per cell in the workgroup: 30 components (gi_cell_sh) of GI_SH_LANES lanes.
+var<workgroup> gi_wg_sh:array<f32,GI_SH_CELLS*30u*GI_SH_LANES>;
 var<workgroup> gi_wg_bits:array<atomic<u32>,GI_SH_CELLS*GI_MAX_WORDS>;
 var<workgroup> gi_wg_count:u32;
-// Adds direction k's term, when it is open, to this lane's sums (gi_cell_sh).
+// Adds direction k's term to this lane's sums (gi_cell_sh): to the SH when it is open, and
+// with a map, to the unoccluded sum either way.
 fn gi_lane_add(c:GiCell, frame:mat3x3<f32>, k:u32, open:bool) {
-    if !open { return; }
+    let map=lighting.map.w!=0.0;
+    if !open && !map { return; }
     let d=gi_direction(frame,c.key,k);
     let radiance=gi_sky(d)*(6.283185307179586/f32(GI_DIRECTIONS));
+    // The unoccluded L2 irradiance at the cell normal: the clamped-cosine kernel through
+    // band 2 (gi_band_weight's bands) at z = d.n, 3/32 + z/2 + 15z^2/32 (gi_store_sh).
+    if map {
+        let z=1.0-(f32(k)+0.5)/f32(GI_DIRECTIONS);
+        gi_cell_sh[9]+=radiance*(0.09375+0.5*z+0.46875*z*z);
+    }
+    if !open { return; }
     gi_sh_basis(d);
     for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]+=radiance*gi_y[i]; }
 }
 // Sums each cell's lanes' gi_cell_sh into its lane 0, in a fixed tree order.
 // Every invocation of the workgroup calls it (it holds barriers).
 fn gi_lane_reduce(cell:u32, lane:u32) {
-    let at=cell*27u*GI_SH_LANES+lane;
-    for(var i=0u;i<9u;i+=1u) {
+    let at=cell*30u*GI_SH_LANES+lane;
+    for(var i=0u;i<10u;i+=1u) {
         gi_wg_sh[at+(i*3u)*GI_SH_LANES]=gi_cell_sh[i].x;
         gi_wg_sh[at+(i*3u+1u)*GI_SH_LANES]=gi_cell_sh[i].y;
         gi_wg_sh[at+(i*3u+2u)*GI_SH_LANES]=gi_cell_sh[i].z;
@@ -809,14 +1024,14 @@ fn gi_lane_reduce(cell:u32, lane:u32) {
     workgroupBarrier();
     for(var stride=GI_SH_LANES/2u;stride>0u;stride/=2u) {
         if lane<stride {
-            for(var j=0u;j<27u;j+=1u) {
+            for(var j=0u;j<30u;j+=1u) {
                 gi_wg_sh[at+j*GI_SH_LANES]+=gi_wg_sh[at+j*GI_SH_LANES+stride];
             }
         }
         workgroupBarrier();
     }
     if lane==0u {
-        for(var i=0u;i<9u;i+=1u) {
+        for(var i=0u;i<10u;i+=1u) {
             gi_cell_sh[i]=vec3<f32>(gi_wg_sh[at+(i*3u)*GI_SH_LANES],gi_wg_sh[at+(i*3u+1u)*GI_SH_LANES],gi_wg_sh[at+(i*3u+2u)*GI_SH_LANES]);
         }
     }
@@ -844,7 +1059,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             live=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)==0u;
         }
         let cold=gi_cold(slot);
-        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<10u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         // The bits first, every direction's, so untraced directions can read them.
         if live {
             let base=gi_table[cold+GI_C_BASE];
@@ -891,7 +1106,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             gi_store_sh(slot);
             // The item base depends on allocation order: cleared, so the table is deterministic.
             gi_table[cold+GI_C_BASE]=0u;
-            gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known);
+            gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known)|(gi_table[cold+GI_C_STATE]&GI_KEEP);
             gi_table[gi_hot(slot)]=gi_table[gi_hot(slot)]|GI_VALID;
         }
         // Lane 0 of each cell has read its bits before the next cells clear them.
@@ -915,7 +1130,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
         var slot=0u;
         if live { slot=atomicLoad(&gi_work[gi_frame.offsets.w+first+cell]); }
         let cold=gi_cold(slot);
-        for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<10u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         if live {
             let c=gi_cell(slot);
             let frame=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
@@ -971,19 +1186,25 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         for(var k=0u;k<GI_DIRECTIONS;k+=1u) {
             if gi_box_hit(origin,gi_direction(frame,c.key,k),lo,hi) {
                 reached[k/32u]|=1u<<(k%32u);
-                any_ray=true;
             }
         }
     }
-    if any_ray {
-        for(var w=0u;w<GI_WORDS;w+=1u) {
-            gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]&~reached[w];
-        }
+    // Directions the near field blocks stay blocked whatever moves: never re-traced.
+    for(var w=0u;w<GI_WORDS;w+=1u) {
+        let m=reached[w]&~gi_table[cold+GI_C_NEAR+w];
+        any_ray=any_ray || m!=0u;
+        gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]&~m;
     }
     return any_ray;
 }
 @compute @workgroup_size(64) fn gi_scan(@builtin(global_invocation_id) id:vec3<u32>) {
-    let slot=id.x;
+    // Environment-only frames (requests.w bit 31) visit only this frame's slot group.
+    let group=gi_frame.requests.w;
+    let period=group&0xffu;
+    var slot=id.x;
+    if (group&0x80000000u)!=0u {
+        slot=id.x*period+(period-((group>>8u)&0xffu)%period)%period;
+    }
     if slot>=gi_frame.offsets.x { return; }
     if gi_table[gi_hot(slot)]==0u || gi_evictable(slot) { return; }
     let cold=gi_cold(slot);
@@ -1006,7 +1227,10 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         gi_queue_trace(slot);
         return;
     }
-    if (flags&GI_SCAN_ENVIRONMENT)!=0u && (state&GI_ORPHAN)==0u {
+    // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
+    // ENVIRONMENT_PERIOD): a fixed rotation, never a ranking (W2).
+    if (flags&GI_SCAN_ENVIRONMENT)!=0u && (state&GI_ORPHAN)==0u
+        && (period==0u || (slot+((group>>8u)&0xffu))%period==0u) {
         gi_queue_integrate(slot);
     }
 }
