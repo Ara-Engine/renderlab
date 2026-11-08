@@ -355,6 +355,8 @@ fn gpu_iq1_quarry() {
     }
     // IQ1's 1x rows stay unreconstructed now that TR1 is the default (TR1b); its TR1 rows
     // enable it explicitly.
+    // The GI cache is on by default since G2b; IQ1's 1x rows keep it off.
+    r.set_indirect(IndirectSettings::off()).unwrap();
     r.set_reconstruction(Reconstruction::off()).unwrap();
     let lighting: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
@@ -527,7 +529,7 @@ fn gpu_iq1_quarry() {
             if jitter > 0 {
                 jittered(&mut r, &mut render, &format!("cache-jitter{jitter}"));
             }
-            r.set_indirect(IndirectSettings::default()).unwrap();
+            r.set_indirect(IndirectSettings::off()).unwrap();
         }
         r.reload_program(&standard, crate::STANDARD_PROGRAM)
             .unwrap();

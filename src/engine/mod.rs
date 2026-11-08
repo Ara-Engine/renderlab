@@ -23,9 +23,9 @@ pub use crate::asset::{
     Sampler, TangentStream, Texture as TextureData, environment::PreparedEnvironment,
 };
 pub use crate::{
-    Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures, Error, Events,
-    FrameId, FrameReport, Light, Limits, Mat4, MeshData, ReloadError, ReloadReport, RenderScale,
-    Renderer, Value, Vec3, Vertex,
+    AtmosphereMedium, Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
+    Error, Events, FrameId, FrameReport, HeightFog, Light, Limits, Mat4, MeshData, ReloadError,
+    ReloadReport, RenderScale, Renderer, Value, Vec3, Vertex, VolumetricFog,
 };
 
 use crate::{
@@ -730,13 +730,11 @@ impl Engine {
         if settings == self.settings {
             return Ok(());
         }
+        settings::atmosphere(self.sky, &settings).validate()?;
         settings::apply(&mut self.renderer, self.path, &settings)?;
-        let exposure_changed = settings.exposure != self.settings.exposure;
         self.settings = settings;
-        if exposure_changed {
-            self.apply_lighting()?;
-        }
-        Ok(())
+        // Exposure and the view-path media live with the lighting and atmosphere.
+        self.apply_lighting()
     }
     pub fn settings(&self) -> Settings {
         self.settings
@@ -746,8 +744,10 @@ impl Engine {
     fn apply_lighting(&mut self) -> Result<(), Error> {
         let (lighting, shadows) =
             settings::lighting(self.sun, &self.lights, self.sky, self.settings.exposure)?;
+        let atmosphere = settings::atmosphere(self.sky, &self.settings);
+        atmosphere.validate()?;
         let (map, parameters) = match self.sky {
-            Sky::Uniform(_) => (None, EnvironmentParameters::default()),
+            Sky::Atmosphere(_) | Sky::Uniform(_) => (None, EnvironmentParameters::default()),
             Sky::Map {
                 map,
                 rotation_y,
@@ -776,7 +776,7 @@ impl Engine {
                 ..
             }
         ));
-        Ok(())
+        self.renderer.set_atmosphere(atmosphere)
     }
 
     // ---- Frames ----

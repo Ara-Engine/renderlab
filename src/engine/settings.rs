@@ -6,8 +6,9 @@
 //! engine keeps these stable and maps them to each path's measured configuration.
 use super::{EnvironmentId, RenderPath};
 use crate::{
-    Error, IndirectSettings, Light, Lighting, Reconstruction, RenderScale, Renderer, ShadowRequest,
-    Shadows, SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings,
+    Atmosphere, AtmosphereMedium, Error, HeightFog, IndirectSettings, Light, Lighting,
+    Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows, SoftShadows, Vec3,
+    VirtualLookup, VirtualShadowSettings, VolumetricFog,
 };
 
 /// The scene's sun: its one shadowed directional light.
@@ -15,8 +16,10 @@ use crate::{
 pub struct Sun {
     /// The direction sunlight travels (from the sun toward the ground). Normalized on use.
     pub travel: Vec3,
-    /// Illuminance on a surface facing the sun, in lux per linear Rec.709 channel.
-    /// Clear midday sun is about 100,000 lux.
+    /// Illuminance on a surface facing the sun, in lux per linear Rec.709 channel. Under
+    /// [`Sky::Atmosphere`] it is the illuminance outside the atmosphere (about 120,000 lux),
+    /// which the atmosphere's transmittance dims and colours toward the horizon; under the
+    /// other skies it reaches surfaces as given (clear midday is about 100,000 lux).
     pub illuminance: [f32; 3],
     /// Angular radius of the sun disk, in radians, in [0, 0.1]. It sets penumbra width:
     /// 0 gives hard shadows. The default, 0.04, is the measured shipping configuration on
@@ -27,7 +30,7 @@ impl Default for Sun {
     fn default() -> Self {
         Self {
             travel: Vec3::new(-0.4, -0.8, -0.3),
-            illuminance: [100_000.0; 3],
+            illuminance: [120_000.0; 3],
             angular_radius: 0.04,
         }
     }
@@ -38,6 +41,12 @@ impl Default for Sun {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Sky {
+    /// The physical atmosphere (AT1, docs/m7-at1.md), the default: a Hillaire-2020 sky
+    /// computed from the medium and the sun, which lights the scene through a procedural
+    /// environment (image-based light and the GI cache take their sky from it), is the
+    /// background with a limb-darkened sun disk, and colours the sun through its
+    /// transmittance. `AtmosphereMedium::default()` is Earth.
+    Atmosphere(AtmosphereMedium),
     /// Uniform radiance in cd/m² (linear Rec.709) from every direction. It is also the
     /// background colour.
     Uniform([f32; 3]),
@@ -54,7 +63,7 @@ pub enum Sky {
 }
 impl Default for Sky {
     fn default() -> Self {
-        Self::Uniform([0.0; 3])
+        Self::Atmosphere(AtmosphereMedium::default())
     }
 }
 
@@ -107,8 +116,7 @@ pub enum Quality {
 pub struct Settings {
     pub quality: Quality,
     /// Indirect light: sky visibility and bounce light from the world radiance cache
-    /// (M7 G2). Off, programs read the unoccluded sky. Off by default until the GI unit
-    /// rules it on.
+    /// (M7 G2). On by default (G2b). Off, programs read the unoccluded sky.
     pub global_illumination: bool,
     /// Temporal reconstruction (TR1): each frame samples at a new sub-pixel offset and
     /// accumulates history, antialiasing edges and textures. On by default (TR1b).
@@ -118,15 +126,30 @@ pub struct Settings {
     /// reconstructs to the target size. Needs `temporal_reconstruction`.
     pub render_scale: RenderScale,
     pub exposure: Exposure,
+    /// Atmospheric scattering along every camera ray to a surface (AT1): distant surfaces
+    /// fade toward the sky. On by default; it uses the physical atmosphere's medium
+    /// whatever the [`Sky`].
+    pub aerial_perspective: bool,
+    /// Analytic exponential height fog on every camera ray, lit by the sun and the sky
+    /// mean (AT1). On by default (`HeightFog::default()`: about 2 % extinction per 100 m
+    /// near y = 0); None turns it off.
+    pub height_fog: Option<HeightFog>,
+    /// Froxel volumetric fog over the first `distance` metres, with sun shafts (AT1).
+    /// Off by default. Its sun visibility is traced on `HardwareRt`; on `NonRt` it is
+    /// unshadowed at this revision.
+    pub volumetric_fog: Option<VolumetricFog>,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             quality: Quality::Realtime,
-            global_illumination: false,
+            global_illumination: true,
             temporal_reconstruction: true,
             render_scale: RenderScale::Native,
             exposure: Exposure::default(),
+            aerial_perspective: true,
+            height_fog: Some(HeightFog::default()),
+            volumetric_fog: None,
         }
     }
 }
@@ -149,6 +172,8 @@ pub(crate) fn lighting(
     }
     let Exposure::Manual { stops } = exposure;
     let environment = match sky {
+        // The atmosphere's procedural environment lights the scene and its sky fills misses.
+        Sky::Atmosphere(_) => [0.0; 3],
         Sky::Uniform(radiance) => radiance,
         // A visible-sky background clears to black wherever the map is not drawn.
         Sky::Map { background, .. } => match background {
@@ -198,6 +223,27 @@ pub(crate) fn lighting(
     ))
 }
 
+/// The renderer's atmosphere for a sky choice and the frame's media settings. Only
+/// [`Sky::Atmosphere`] turns on the physical sky, its procedural environment and the sun's
+/// transmittance; aerial perspective and fog follow `settings` under every sky.
+pub(crate) fn atmosphere(sky: Sky, settings: &Settings) -> Atmosphere {
+    let medium = match sky {
+        Sky::Atmosphere(medium) => Some(medium),
+        _ => None,
+    };
+    let physical = medium.is_some();
+    Atmosphere {
+        sky: physical,
+        sun_disk: physical,
+        aerial_perspective: settings.aerial_perspective,
+        sun_transmittance: physical,
+        environment: physical,
+        medium: medium.unwrap_or_default(),
+        height_fog: settings.height_fog,
+        volumetric_fog: settings.volumetric_fog,
+    }
+}
+
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
@@ -206,9 +252,10 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
             "render_scale below Native needs temporal_reconstruction",
         ));
     }
-    r.set_indirect(IndirectSettings {
-        enabled: settings.global_illumination,
-        ..IndirectSettings::default()
+    r.set_indirect(if settings.global_illumination {
+        IndirectSettings::default()
+    } else {
+        IndirectSettings::off()
     })?;
     r.set_reconstruction(if settings.temporal_reconstruction {
         Reconstruction {
@@ -237,6 +284,27 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_atmosphere_sky_turns_on_the_physical_sky() {
+        let settings = Settings::default();
+        let physical = atmosphere(Sky::default(), &settings);
+        assert!(physical.sky && physical.sun_disk && physical.environment);
+        assert!(physical.sun_transmittance && physical.aerial_perspective);
+        assert_eq!(physical.height_fog, settings.height_fog);
+        let uniform = atmosphere(Sky::Uniform([1.0; 3]), &settings);
+        assert!(!uniform.sky && !uniform.sun_disk && !uniform.environment);
+        assert!(!uniform.sun_transmittance);
+        // The view-path media follow the settings under every sky.
+        assert!(uniform.aerial_perspective);
+        let clear = Settings {
+            aerial_perspective: false,
+            height_fog: None,
+            ..settings
+        };
+        let uniform = atmosphere(Sky::Uniform([1.0; 3]), &clear);
+        assert_eq!(uniform, Atmosphere::off());
+    }
 
     #[test]
     fn sun_is_light_zero_and_the_only_shadowed_light() {

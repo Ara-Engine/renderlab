@@ -2,9 +2,10 @@
 //!
 //! Procedural ground, an arch, crates, a red wall (colour bleeding), a glossy gold sphere,
 //! a mirror chrome sphere, a spinning crate and a bobbing toon-styled hero, with an emblem
-//! decal and a wet puddle decal on the ground. A sun with soft shadows, a uniform sky, GI,
-//! traced reflections (RT) and temporal reconstruction light it, seen from a camera fly
-//! path. Every `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the
+//! decal and a wet puddle decal on the ground. A sun with soft shadows, the physical
+//! atmosphere with aerial perspective and height fog, GI, traced reflections (RT) and
+//! temporal reconstruction light it, seen from a camera fly path. `--sky uniform` and
+//! `--volumetric-fog` switch the sky and add sun shafts. Every `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the
 //! ground with the registered quarry scans and its RLE2 sky (manifest keys `asset`,
 //! `limits`, `environment`, `exposure_stops`), shown as a visible sky. `--render-scale`
 //! picks a TR1 upscaling preset.
@@ -37,6 +38,8 @@ struct Args {
     gi: bool,
     temporal: bool,
     scale: RenderScale,
+    uniform_sky: bool,
+    volumetric_fog: bool,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -51,6 +54,8 @@ impl Args {
             gi: true,
             temporal: true,
             scale: RenderScale::Native,
+            uniform_sky: false,
+            volumetric_fog: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -75,6 +80,16 @@ impl Args {
                 "--exposure" => a.exposure = Some(value()?.parse()?),
                 "--quarry" => a.quarry = Some(value()?.into()),
                 "--no-gi" => a.gi = false,
+                "--sky" => {
+                    a.uniform_sky = match value()?.as_str() {
+                        "atmosphere" => false,
+                        "uniform" => true,
+                        other => {
+                            return Err(format!("--sky atmosphere|uniform, not {other}").into());
+                        }
+                    }
+                }
+                "--volumetric-fog" => a.volumetric_fog = true,
                 "--no-temporal" => a.temporal = false,
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
@@ -149,6 +164,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
                 render_scale: args.scale,
+                // Sun shafts through a light haze (0.01 per metre over the first 128 m).
+                volumetric_fog: args.volumetric_fog.then(|| VolumetricFog {
+                    extra_density: 0.01,
+                    ..Default::default()
+                }),
                 exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
             },
@@ -235,7 +255,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
             let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
             engine.spawn(plane, ground, Mat4::IDENTITY)?;
-            engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
+            // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
+            // constant blue sky for comparison.
+            if args.uniform_sky {
+                engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
+            }
             Vec3::ZERO
         }
     };
@@ -282,7 +306,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     engine.set_sun(Some(Sun {
         travel: Vec3::new(-0.45, -0.75, -0.5),
-        illuminance: [100_000.0, 96_000.0, 88_000.0],
+        // Under the atmosphere this is the sun outside it (`Sun::default()`, 120 klux), which
+        // its transmittance dims and warms; under `--sky uniform` it arrives as given.
         ..Default::default()
     }))?;
     // A warm lantern under the arch arrives with many-light shading (LC1): at this

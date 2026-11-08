@@ -125,12 +125,31 @@ engine.set_decals(&[Decal {
 
 `DecalBlend::{Alpha, Multiply, Add}` composites base colour; roughness, metallic and normal blend by their own `channels` strengths. Decals edit material inputs before a program's `surface` reads them, on both paths, and GI bounce sees them. A program opts in by calling `decal_base_color(input, base)` and `decal_metallic_roughness(input, vec2(rough, metal))` on its resolved inputs (`material_normal` already includes the normal overlay), as standard.wgsl and the example's program do; a program that ignores them is unaffected. Textures are copied when `set_decals` is called, so the caller may drop its handles. The decal grid's resolution stays on `renderer_mut().set_decals_with_settings`.
 
-## Lighting, sky and exposure
+## Lighting and exposure
 
-- `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels; `illuminance` is lux per channel (clear midday is about 100,000); `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths. 0 gives hard shadows.
+- `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
 - `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are unshadowed at this revision, and a soft sun must currently be the only light (see [Current limits](#current-limits)); many-light sampling and shadows arrive with LC1. Directional lights go in the sun.
-- `set_sky(Sky)`: `Sky::Uniform(radiance)` in cd/m², which is also the background colour; or `Sky::Map { map, rotation_y, intensity, background }`, where the map lights the scene and `background` is `Background::Color(radiance)` or `Background::Sky`. `Background::Sky` is TR1b's visible sky: misses show the map along each pixel's ray, exposed like the light it gives. The renderer keeps it opt-in, so choose it explicitly. The physical atmosphere arrives with AT1.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
+
+## Sky, atmosphere and fog
+
+`set_sky(Sky)` chooses what lights the scene from far away and what camera rays that miss everything show. The view-path media (aerial perspective and fog) are `Settings` fields, independent of the sky. Everything here is AT1 ([m7-at1.md](m7-at1.md)) and renders on both paths.
+
+| `Sky` | Lights the scene with | Background | Sun |
+|---|---|---|---|
+| `Atmosphere(AtmosphereMedium)`, **the default** (Earth) | a procedural environment generated from the physical sky (Hillaire 2020), so image-based light and the GI cache see it | the physical sky with a limb-darkened sun disk | `illuminance` is outside the atmosphere; transmittance at the camera's altitude dims and colours it, so low suns turn orange |
+| `Uniform(radiance)` | a constant radiance in cd/m² | the same constant | arrives as given |
+| `Map { map, rotation_y, intensity, background }` | a captured HDR environment (`create_environment`) | `Background::Color(radiance)`, or `Background::Sky` for the map along each pixel's ray (TR1b's visible sky) | arrives as given |
+
+`AtmosphereMedium` holds the planet and air: radii, `ground_height` (world y of the planet surface), Rayleigh, Mie and ozone coefficients per km, ground albedo and the visible sun radius. The procedural environment regenerates when the sun, the medium or the yaw changes, and the GI cache treats each regeneration as a new sky.
+
+| `Settings` field | Default | What it adds |
+|---|---|---|
+| `aerial_perspective: bool` | on | scattering along every camera ray to a surface: distant surfaces fade toward the sky colour (camera volume to 32 km) |
+| `height_fog: Option<HeightFog>` | `Some(HeightFog::default())`: about 2 % extinction per 100 m near y = 0, 50 m scale height | analytic exponential fog, `density * exp(-falloff * (y - base_height))` per metre, lit by the sun (Henyey-Greenstein `anisotropy`) and the sky mean |
+| `volumetric_fog: Option<VolumetricFog>` | `None` | froxel fog over the first `distance` metres with sun shafts: the height fog's medium plus `extra_density`, reprojected over frames by `history_weight` |
+
+Aerial perspective and fog use the physical medium's sky colour under every `Sky`. Every program's output gets the same fog in the generated entry, so custom programs need no changes. Volumetric fog's sun visibility is traced on `HardwareRt`. On `NonRt` it is unshadowed at this revision (a recorded AT1 gap), so shafts appear only on RT.
 
 ## Settings and quality presets
 
@@ -141,6 +160,9 @@ pub struct Settings {
     pub temporal_reconstruction: bool,    // TR1 jittered accumulation and antialiasing
     pub render_scale: RenderScale,        // Native | Quality (2/3 per axis) | Performance (1/2)
     pub exposure: Exposure,
+    pub aerial_perspective: bool,         // see Sky, atmosphere and fog
+    pub height_fog: Option<HeightFog>,
+    pub volumetric_fog: Option<VolumetricFog>,
 }
 ```
 
@@ -149,7 +171,14 @@ pub struct Settings {
 - `render_scale` is TR1b's upscaling preset: with temporal reconstruction on, every pass renders at the scale's internal size and TR1 reconstructs the target. It needs `temporal_reconstruction`; a scale below `Native` without it is rejected.
 - `set_settings` applies a change only when something changed, and validates before touching the renderer. It overwrites any overlapping tuning made through `renderer_mut()`.
 
-Defaults follow each feature unit's default ruling, not the facade's opinion. At main `ffdaee9`: temporal reconstruction is **on** at native scale (TR1b's overnight ruling; its remaining losses to no-AA and TSR are in [m7-gaps.md](m7-gaps.md)); GI is **off** (the M7-G2 ruling keeps the cache opt-in until G2b rules); traced reflections are on wherever a program asks for them (R1, see [Reflections](#reflections)). The example turns GI on.
+Defaults follow each feature unit's default ruling, not the facade's opinion. With G2b and AT1 merged:
+
+- GI is **on** (G2b; `global_illumination: false` maps to `IndirectSettings::off()`).
+- Temporal reconstruction is **on** at native scale (TR1b; its remaining losses to no-AA and TSR are in [m7-gaps.md](m7-gaps.md)).
+- The physical atmosphere sky, aerial perspective and height fog are **on**; volumetric fog is off (AT1).
+- Traced reflections are on wherever a program asks for them (R1, see [Reflections](#reflections)).
+
+Gaps against Unreal and the reference for each are in [m7-gaps.md](m7-gaps.md).
 
 Rendering is single-sample on both quality paths. Temporal reconstruction is the antialiasing; MSAA belongs to the low-level raster path only.
 
@@ -221,7 +250,8 @@ renderlab::engine            Engine, EngineDescriptor, Capabilities, RenderPath,
                              MaterialDesc, TextureRef, AssetHandles, Image, headless_adapter
 renderlab::engine (settings) Settings, Quality, Exposure, Sky, Background, Sun
 renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId
-renderlab::engine re-exports Camera, Light, Decal, DecalBlend, DecalTexture, DecalTextureKind,
+renderlab::engine re-exports Camera, Light, AtmosphereMedium, HeightFog, VolumetricFog, Decal,
+                             DecalBlend, DecalTexture, DecalTextureKind,
                              DecalTextures, MeshData, Vertex, Value, Limits, Mat4, Vec3, Error,
                              RenderScale, ReloadError, ReloadReport, FrameReport, Events, FrameId,
                              Sampler,
@@ -234,10 +264,10 @@ Each overnight unit lands in a named slot. The shapes below are the intended API
 | Unit | Feature | Planned engine API |
 |---|---|---|
 | TR1b | TR1 default, upscaling presets | **Wired**: `Settings::temporal_reconstruction` on by default; `Settings::render_scale` (`RenderScale::{Native, Quality, Performance}`); `Background::Sky` for the visible sky |
-| G2b | GI default | `Settings::global_illumination` default; no new calls |
+| G2b | GI default | **Wired**: `Settings::global_illumination` on by default, off maps to `IndirectSettings::off()`; no new calls |
 | R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). No setting, because the renderer has no switch. R1n's non-RT traced reflections need no API change. |
 | TP1 | transparency, particles | `MaterialDesc` blend/transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles` |
-| AT1 | atmosphere, fog | new `Sky::Atmosphere { .. }` variant (`Sky` is `#[non_exhaustive]`); `Settings::fog` |
+| AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
 | SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])` |
 | LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
@@ -253,7 +283,7 @@ Draft, to be finalised in phase 2 once the feature units have merged.
 
 - `Engine` method names and signatures above; `EngineDescriptor`, `Capabilities`, `RenderPath`, `ExperimentalRayQuery`.
 - Handle semantics: `Copy` typed `Id<T>`, stale handles rejected, the batching of objects by mesh and material.
-- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Uniform`/`Sky::Map`, `Background::Color`/`Sky`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
+- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Atmosphere`/`Uniform`/`Map`, `Background::Color`/`Sky`, `AtmosphereMedium`, `HeightFog`, `VolumetricFog`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
 - `set_decals(&[Decal])` and the re-exported decal types.
 - The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, and the documented engine inputs.
 
