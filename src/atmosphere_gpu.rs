@@ -672,11 +672,12 @@ impl Renderer {
                     targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
                 }),
                 primitive: Default::default(),
-                // Reversed-Z clears to 0: only samples no surface wrote pass.
+                // Drawn first in the pass, on every sample, without depth: the surfaces that
+                // follow cover it through their own depth test.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),

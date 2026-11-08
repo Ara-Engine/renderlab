@@ -3100,6 +3100,12 @@ impl Renderer {
                 timestamp_writes: timestamps,
                 ..Default::default()
             });
+            // AT1: the sky first, on every sample, without depth; surfaces then cover it.
+            if let Some(sky) = self.atmosphere.raster_sky().filter(|_| lit) {
+                pass.set_pipeline(sky);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                pass.draw(0..3, 0..1);
+            }
             // Each lit draw uses its material's program; pipelines switch in submission
             // order, which defines equal-depth winners.
             let default = self.default_material.as_ref().unwrap();
@@ -3174,12 +3180,6 @@ impl Renderer {
                     pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 }
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
-            }
-            // AT1: the sky on every sample no surface covered.
-            if let Some(sky) = self.atmosphere.raster_sky().filter(|_| lit) {
-                pass.set_pipeline(sky);
-                pass.set_bind_group(3, self.lighting.bind(), &[]);
-                pass.draw(0..3, 0..1);
             }
         }
         if hdr.is_some() {

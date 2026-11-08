@@ -243,7 +243,7 @@ fn sun_travel(azimuth_from: Vec3, elevation: f32) -> Vec3 {
 ///   pre-at1        Atmosphere::off(), the RLE2 sky and the quarry light (the old default);
 ///   default        Atmosphere::default() with the same captured sky and light;
 ///   noon / low     the procedural environment and sky, a 120 klux sun at 65 / 4 degrees;
-///   low-volumetric the low sun with 0.03/m volumetric fog.
+///   low-volumetric the low sun with 0.01/m volumetric fog.
 /// Then times AT1_FRAMES (default 60) static frames per timing configuration, twice
 /// (`<path>-at1.json`): wall-clock throughput and the timed passes.
 #[test]
@@ -380,7 +380,7 @@ fn gpu_at1_quarry() {
     let space = [120_000.0f32; 3];
     let volumetric = Atmosphere {
         volumetric_fog: Some(VolumetricFog {
-            extra_density: 0.03,
+            extra_density: 0.01,
             ..Default::default()
         }),
         ..Default::default()
