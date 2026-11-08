@@ -149,6 +149,9 @@ pub struct Camera {
     fov_y: f32,
     near: f32,
     depth: [f32; 2],
+    /// Sub-pixel projection offset in pixels (`Camera::jittered`); zero for every user
+    /// camera, so their matrices are unchanged bit for bit.
+    jitter: [f32; 2],
 }
 impl Camera {
     pub fn look_at(
@@ -193,6 +196,7 @@ impl Camera {
             fov_y,
             near,
             depth,
+            jitter: [0.0; 2],
         };
         if !camera.matrix(1, 1).is_finite() {
             return Err(Error::InvalidInput("camera matrix overflow"));
@@ -218,12 +222,40 @@ impl Camera {
         let (sin_fov, cos_fov) = (0.5 * self.fov_y).sin_cos();
         let h = cos_fov / sin_fov;
         let w = h / (width as f32 / height as f32);
+        // A jitter of (x, y) pixels moves the image so that each pixel centre samples the
+        // unjittered image at its centre plus (x, y) (y down): NDC shifts by -2x/width and
+        // +2y/height. The view-space Z column carries it, as clip W is -Z. No jitter keeps
+        // positive zeros, so unjittered matrices are the original bits.
+        let shift = if self.jitter == [0.0; 2] {
+            [0.0; 2]
+        } else {
+            [
+                2.0 * self.jitter[0] / width as f32,
+                -2.0 * self.jitter[1] / height as f32,
+            ]
+        };
         Mat4::from_cols(
             glam::Vec4::new(w, 0.0, 0.0, 0.0),
             glam::Vec4::new(0.0, h, 0.0, 0.0),
-            glam::Vec4::new(0.0, 0.0, self.depth[0], -1.0),
+            glam::Vec4::new(shift[0], shift[1], self.depth[0], -1.0),
             glam::Vec4::new(0.0, 0.0, self.depth[1], 0.0),
         ) * self.view
+    }
+    /// This camera with its pixel sample `offset` pixels from each pixel centre (y down),
+    /// for temporal reconstruction's jittered frames (temporal_reconstruction.rs). Traced
+    /// and visibility-buffer primaries both take it from the projection, and every
+    /// unprojection inverts it, so no shader edit carries the jitter.
+    pub(crate) fn jittered(self, offset: [f32; 2]) -> Self {
+        Self {
+            jitter: offset,
+            ..self
+        }
+    }
+    pub(crate) fn jitter(self) -> [f32; 2] {
+        self.jitter
+    }
+    pub(crate) fn unjittered(self) -> Self {
+        self.jittered([0.0; 2])
     }
 }
 

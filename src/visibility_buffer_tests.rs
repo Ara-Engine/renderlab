@@ -1921,3 +1921,9 @@ fn gpu_virtual_configuration_reset() {
 
 #[path = "texture_residency_tests.rs"]
 mod texture_residency_tests;
+
+#[path = "temporal_reconstruction_tests.rs"]
+mod temporal_reconstruction_tests;
+
+#[path = "virtual_limits_tests.rs"]
+mod virtual_limits_tests;

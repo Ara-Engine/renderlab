@@ -11,6 +11,8 @@ use crate::shadow_plan::Bounds;
 #[path = "film_accumulation.rs"]
 pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
+#[path = "temporal_reconstruction.rs"]
+pub(super) mod temporal_reconstruction;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
@@ -337,6 +339,31 @@ impl Renderer {
         self.soft_mode
     }
 
+    /// Selects TR1 temporal reconstruction (docs/m7-tr1.md) for traced and visibility-buffer
+    /// lit frames. Changing it restarts every pixel; disabling releases the history after
+    /// in-flight frames.
+    pub fn set_reconstruction(&mut self, settings: Reconstruction) -> Result<(), Error> {
+        settings.validate()?;
+        if settings != self.reconstruction {
+            // A new history starts the sample sequence again, so equal settings replay
+            // equal frames.
+            self.reconstruction_state = None;
+            self.reconstruction_index = 0;
+        }
+        self.reconstruction = settings;
+        Ok(())
+    }
+    pub fn reconstruction(&self) -> Reconstruction {
+        self.reconstruction
+    }
+    /// The next reconstructed frame restarts every pixel: a camera cut the engine cannot
+    /// infer from the camera alone.
+    pub fn cut_reconstruction(&mut self) {
+        if let Some(state) = &mut self.reconstruction_state {
+            state.cut = true;
+        }
+    }
+
     /// Selects how lit frames resolve camera visibility. Traced compiles its kernels and
     /// every program's traced modules from the installed source now, transactionally;
     /// failure keeps the current mode. Program traced pipelines compile when a traced
@@ -608,6 +635,9 @@ pub(super) struct PrimaryPipelines {
     /// reset frames' history start (`film_init`), compiled on the first such frame
     /// (`ensure_film_kernel`).
     pub film: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    /// Temporal reconstruction's resolve and rotated Interactive kernels, compiled by its
+    /// first frame after each prelude (`ensure_reconstruction`).
+    pub reconstruction: Option<temporal_reconstruction::Pipelines>,
     pub interactive_repair: Option<Owned<wgpu::ComputePipeline>>,
     pub interactive_retry: Option<Owned<wgpu::ComputePipeline>>,
     pub interactive_full: Option<Owned<wgpu::ComputePipeline>>,
@@ -618,6 +648,16 @@ impl PrimaryPipelines {
             + u64::from(self.interactive_retry.is_some())
             + u64::from(self.interactive_full.is_some())
     }
+}
+
+/// The passes after a frame's Interactive trace: the near-edge check (modern) or repair,
+/// the retry, and the full kernel used when edges are not deferred.
+#[derive(Clone, Copy)]
+pub(super) struct InteractiveKernels<'a> {
+    check: Option<&'a wgpu::ComputePipeline>,
+    repair: Option<&'a wgpu::ComputePipeline>,
+    retry: Option<&'a wgpu::ComputePipeline>,
+    full: Option<&'a wgpu::ComputePipeline>,
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -675,6 +715,8 @@ pub(super) struct PrimaryState {
     geometry_generation: u64,
     bindings_generation: u64,
     film_layouts: FilmLayouts,
+    /// Temporal reconstruction's group 0 and pipeline layouts.
+    reconstruction: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>),
     /// Temporal frames' film history, while `SoftShadows::Temporal` is selected.
     pub film: Option<FilmState>,
     /// Created by the first frame that streams textures.
@@ -973,6 +1015,7 @@ impl PrimaryState {
                 &material_bindings,
                 lighting,
             ),
+            reconstruction: Self::reconstruction_layout(device, ledger, &array_bindings),
             repair_layout: layout(
                 "primary edge repair ABI",
                 &[
@@ -1103,6 +1146,7 @@ impl PrimaryState {
                 pipeline(&hard, "primary_trace_receivers", &self.trace_layouts[1]),
             ],
             film: None,
+            reconstruction: None,
         }
     }
 
@@ -1406,6 +1450,13 @@ impl Renderer {
             dst.copy_from_slice(&(value as f32).to_ne_bytes());
         }
         bytes[80..84].copy_from_slice(&u32::from(sided).to_ne_bytes());
+        // Reconstructed frames' Interactive direction rotation (temporal_reconstruction.rs);
+        // production kernels never read it.
+        let rotation = self
+            .reconstruction_frame
+            .filter(|_| self.reconstruction.rotate_directions)
+            .map_or(0, temporal_reconstruction::rotation);
+        bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
         for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
@@ -1876,12 +1927,45 @@ impl Renderer {
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        let p = self.pipeline.primary.as_ref().unwrap();
+        let kernels = InteractiveKernels {
+            check: p.interactive_repair.as_deref(),
+            repair: p.interactive_repair.as_deref(),
+            retry: p.interactive_retry.as_deref(),
+            full: p.interactive_full.as_deref(),
+        };
+        self.encode_interactive_kernels(encoder, pipeline, kernels, tile, timestamp_writes);
+    }
+    /// The reconstruction's rotated Interactive kernels on production's passes and groups;
+    /// the near-edge check traces no direction, so it stays production's.
+    pub(super) fn encode_reconstruction_interactive(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        let p = self.pipeline.primary.as_ref().unwrap();
+        let t = p.reconstruction.as_ref().unwrap().trace.as_ref().unwrap();
+        let kernels = InteractiveKernels {
+            check: p.interactive_repair.as_deref(),
+            repair: t.repair.as_deref(),
+            retry: t.retry.as_deref(),
+            full: t.full.as_deref(),
+        };
+        self.encode_interactive_kernels(encoder, &t.trace, kernels, TRACE_TILE, timestamp_writes);
+    }
+    fn encode_interactive_kernels(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        kernels: InteractiveKernels<'_>,
+        tile: [u32; 2],
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         let state = self.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let bindings = state.bindings.as_ref().unwrap();
-        let pipelines = self.pipeline.primary.as_ref().unwrap();
         let targets = state.targets.as_ref().unwrap();
-        let deferred = targets.defer_edges && pipelines.interactive_repair.is_some();
+        let deferred = targets.defer_edges && kernels.check.is_some();
         #[cfg(not(test))]
         let split_timestamps = false;
         #[cfg(test)]
@@ -1893,7 +1977,7 @@ impl Renderer {
         let pipeline = if deferred {
             pipeline
         } else {
-            pipelines.interactive_full.as_deref().unwrap_or(pipeline)
+            kernels.full.unwrap_or(pipeline)
         };
         if deferred {
             encoder.clear_buffer(&targets.repairs.value, 0, Some(16));
@@ -1925,7 +2009,7 @@ impl Renderer {
             1,
         );
         drop(pass);
-        if deferred && pipelines.interactive_retry.is_none() {
+        if deferred && kernels.retry.is_none() {
             let stamps = timestamp_writes.map(|t| wgpu::ComputePassTimestampWrites {
                 query_set: t.query_set,
                 beginning_of_pass_write_index: if split_timestamps {
@@ -1941,7 +2025,7 @@ impl Renderer {
                 label: Some("retained two-pass receiver correction"),
                 timestamp_writes: stamps,
             });
-            pass.set_pipeline(pipelines.interactive_repair.as_ref().unwrap());
+            pass.set_pipeline(kernels.repair.unwrap());
             pass.set_bind_group(0, &**bindings.repair.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
             pass.set_bind_group(3, self.lighting.bind(), &[]);
@@ -1970,7 +2054,7 @@ impl Renderer {
                 label: Some("near-edge arithmetic check"),
                 timestamp_writes: end,
             });
-            pass.set_pipeline(pipelines.interactive_repair.as_ref().unwrap());
+            pass.set_pipeline(kernels.check.unwrap());
             pass.set_bind_group(0, &**bindings.check.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
             pass.dispatch_workgroups_indirect(&targets.repair_args.value, 0);
@@ -1990,7 +2074,7 @@ impl Renderer {
                 label: Some("sparse fallback and replacement visibility"),
                 timestamp_writes: stamps,
             });
-            pass.set_pipeline(pipelines.interactive_retry.as_ref().unwrap());
+            pass.set_pipeline(kernels.retry.unwrap());
             pass.set_bind_group(0, &**bindings.repair.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
             pass.set_bind_group(3, self.lighting.bind(), &[]);
