@@ -30,8 +30,7 @@ const FLAG_AERIAL: u32 = 4;
 const FLAG_HEIGHT_FOG: u32 = 8;
 const FLAG_VOLUMETRIC: u32 = 16;
 
-/// Hardware renderers shadow the froxels' sun with one ray each against the scene TLAS;
-/// others leave it unshadowed (docs/m7-gaps.md, Atmosphere).
+/// Hardware renderers shadow the froxels' sun with one ray each against the scene TLAS.
 const HARDWARE_VISIBILITY: &str = "@group(0) @binding(20) var at_scene:acceleration_structure;
 fn at_sun_visible(p:vec3<f32>) -> f32 {
     var query:ray_query;
@@ -40,7 +39,24 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
     return select(0.0,1.0,rayQueryGetCommittedIntersection(&query).kind==0u);
 }
 ";
-const NO_VISIBILITY: &str = "fn at_sun_visible(p:vec3<f32>) -> f32 { return 1.0; }\n";
+const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
+
+#[derive(PartialEq)]
+struct VisibilityKey {
+    virtual_map: bool,
+    generation: u64,
+    buffers: Vec<wgpu::Buffer>,
+}
+
+#[derive(PartialEq)]
+struct HistoryKey {
+    sun: Option<(Vec3, [f32; 3])>,
+    exposure: f32,
+    environment: u64,
+    shadows: Shadows,
+    primary: PrimaryVisibility,
+    soft: SoftShadows,
+}
 
 pub(super) struct Lut {
     _texture: Owned<wgpu::Texture>,
@@ -91,8 +107,8 @@ pub(super) struct Volume {
     scatter: Option<[Lut; 2]>,
     aerial: Option<Owned<wgpu::BindGroup>>,
     integrate: Option<[Owned<wgpu::BindGroup>; 2]>,
-    /// Injection groups, keyed by the scene TLAS they bind (0 without one).
-    inject: Option<([Owned<wgpu::BindGroup>; 2], usize)>,
+    /// Injection groups, keyed by their read-only shadow resources.
+    inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
 }
 impl Volume {
     fn new(device: &wgpu::Device, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
@@ -130,6 +146,7 @@ struct Kernels {
     ambient: Owned<wgpu::ComputePipeline>,
     aerial: Owned<wgpu::ComputePipeline>,
     inject: Owned<wgpu::ComputePipeline>,
+    inject_virtual: Option<Owned<wgpu::ComputePipeline>>,
     integrate: Owned<wgpu::ComputePipeline>,
     specular: Owned<wgpu::ComputePipeline>,
     diffuse: Owned<wgpu::ComputePipeline>,
@@ -165,6 +182,7 @@ pub(super) struct AtmosphereGpu {
     published: Option<Vec<u8>>,
     /// The last encoded frame's view-projection and eye, for froxel reprojection.
     previous: Option<(Mat4, Vec3)>,
+    history_key: Option<HistoryKey>,
     frame: u32,
     /// Whether this frame encodes the kernels (set by `prepare_atmosphere`).
     active: bool,
@@ -231,6 +249,7 @@ impl AtmosphereGpu {
             luts: None,
             published: None,
             previous: None,
+            history_key: None,
             frame: 0,
             active: false,
             generation: 0,
@@ -311,10 +330,19 @@ fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
 }
 
 impl Renderer {
+    pub(crate) fn atmosphere_shadow_source() -> String {
+        virtual_shadow_gpu::atmosphere_shadow::atmosphere_source()
+    }
     /// Replaces every atmosphere setting at once; the next lit frame uses them.
     pub fn set_atmosphere(&mut self, atmosphere: Atmosphere) -> Result<(), Error> {
         self.check_fault()?;
         atmosphere.validate()?;
+        if self.atmosphere.settings != atmosphere {
+            self.atmosphere.previous = None;
+            // TR1 otherwise keeps pixels integrated under the old fog density or
+            // medium even after the froxels have restarted.
+            self.cut_reconstruction();
+        }
         self.atmosphere.settings = atmosphere;
         Ok(())
     }
@@ -505,8 +533,29 @@ impl Renderer {
             self.atmosphere.generation += 1;
             self.atmosphere.previous = None;
         }
-        self.atmosphere_volume_groups();
+        self.atmosphere_volume_groups(false);
         self.update_procedural_environment();
+        if uploads.geometry > 0
+            || uploads.models > 0
+            || uploads.instances > 0
+            || uploads.skinning > 0
+        {
+            self.atmosphere.previous = None;
+        }
+        // A moving sun, changed medium, exposure or selected sky must not drag old
+        // in-scattering into the new frame. Camera motion uses world reprojection.
+        let key = HistoryKey {
+            sun: self.atmosphere_sun(),
+            exposure: self.lighting.pending.exposure,
+            environment: self.environment.generation,
+            shadows: self.shadows.settings.clone(),
+            primary: self.primary_mode,
+            soft: self.soft_mode,
+        };
+        if self.atmosphere.history_key.as_ref() != Some(&key) {
+            self.atmosphere.previous = None;
+            self.atmosphere.history_key = Some(key);
+        }
         let bytes = self.atmosphere_uniform(camera, size);
         if self.atmosphere.published.as_deref() != Some(&bytes[..]) {
             self.queue.write_buffer(&self.atmosphere.uniform, 0, &bytes);
@@ -590,7 +639,21 @@ impl Renderer {
         for v in [a.volume.grid[0], a.volume.grid[1], a.frame, source] {
             bytes.extend(v.to_ne_bytes());
         }
-        for v in [size[0] as f32, size[1] as f32, 0.0, 0.0] {
+        let range = self
+            .lighting
+            .source_lights
+            .iter()
+            .position(|l| matches!(l, Light::Directional { .. }))
+            .and_then(|i| self.lighting.pending.records.chunks_exact(64).nth(i))
+            .map_or([0, 0], |r| {
+                [52, 56].map(|i| u32::from_ne_bytes(r[i..i + 4].try_into().unwrap()))
+            });
+        for v in [
+            size[0] as f32,
+            size[1] as f32,
+            range[0] as f32,
+            range[1] as f32,
+        ] {
             bytes.extend(v.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len() as u64, UNIFORM_BYTES);
@@ -612,7 +675,7 @@ impl Renderer {
             if hardware {
                 HARDWARE_VISIBILITY
             } else {
-                NO_VISIBILITY
+                MAP_VISIBILITY
             }
         );
         let scopes = OperationScopes::new(&self.device);
@@ -635,6 +698,15 @@ impl Renderer {
             k("at_fog_integrate"),
         );
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
+        let inject_virtual = (!hardware).then(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("VF1 Virtual fog sampling"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!("{COMMON}{KERNELS}{}", Self::atmosphere_shadow_source()).into(),
+                ),
+            });
+            kernel(device, ledger, &module, "at_fog_inject")
+        });
         let a = &self.atmosphere;
         let uniform = wgpu::BindGroupEntry {
             binding: 0,
@@ -748,6 +820,7 @@ impl Renderer {
             ambient,
             aerial,
             inject,
+            inject_virtual,
             integrate,
             specular,
             diffuse,
@@ -759,7 +832,7 @@ impl Renderer {
 
     /// Creates the camera volume's kernel groups that are missing (the injection's again
     /// when the scene TLAS changed).
-    fn atmosphere_volume_groups(&mut self) {
+    fn atmosphere_volume_groups(&mut self, injection: bool) {
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &mut self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -789,9 +862,22 @@ impl Renderer {
         let Some(scatter) = &v.scatter else {
             return;
         };
-        // PP1 integration: aerial perspective alone needs no shadow TLAS.
+        // Aerial perspective alone needs no shadow resources.
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
-        let key = tlas.map_or(0, |t| t as *const wgpu::Tlas as usize);
+        let virtual_buffers = (self.hardware_shadows.is_none()
+            && self.primary_mode == PrimaryVisibility::VisibilityBuffer
+            && self.soft_mode == SoftShadows::Virtual
+            && self.shadows.settings.enabled()
+            && self.shadows.settings.directional_disk_angle > 0.0)
+            .then(|| self.virtual_shadows.as_ref()?.atmosphere_buffers())
+            .flatten();
+        let key = VisibilityKey {
+            virtual_map: virtual_buffers.is_some(),
+            generation: tlas.map_or(self.shadows.stats.resource_generation, |t| {
+                t as *const wgpu::Tlas as u64
+            }),
+            buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
+        };
         if v.integrate.is_none() {
             v.integrate = Some([0, 1].map(|i| {
                 group(
@@ -806,7 +892,7 @@ impl Renderer {
                 )
             }));
         }
-        if v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
+        if injection && v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
             let groups = [0, 1].map(|i| {
                 let mut entries = vec![
                     uniform.clone(),
@@ -820,8 +906,30 @@ impl Renderer {
                         binding: 20,
                         resource: wgpu::BindingResource::AccelerationStructure(tlas),
                     });
+                } else if let Some(buffers) = virtual_buffers {
+                    entries.extend(buffers.into_iter().enumerate().map(|(i, b)| {
+                        wgpu::BindGroupEntry {
+                            binding: 21 + i as u32,
+                            resource: b.as_entire_binding(),
+                        }
+                    }));
+                } else {
+                    entries.push(view(21, self.shadows.sample_view()));
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 22,
+                        resource: self.shadows.records().as_entire_binding(),
+                    });
                 }
-                group(device, ledger, &k.inject, &entries)
+                group(
+                    device,
+                    ledger,
+                    if key.virtual_map {
+                        k.inject_virtual.as_ref().unwrap()
+                    } else {
+                        &k.inject
+                    },
+                    &entries,
+                )
             });
             v.inject = Some((groups, key));
         }
@@ -834,6 +942,9 @@ impl Renderer {
         if !self.atmosphere.active {
             return;
         }
+        // Virtual's resources exist after prepare_virtual, and its pages have been
+        // encoded before this call. Raster depth and the TLAS are ready here too.
+        self.atmosphere_volume_groups(true);
         let a = &mut self.atmosphere;
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
@@ -875,7 +986,11 @@ impl Renderer {
         pass.dispatch_workgroups(v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1);
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
             let i = (a.frame % 2) as usize;
-            pass.set_pipeline(&k.inject);
+            pass.set_pipeline(if v.inject.as_ref().unwrap().1.virtual_map {
+                k.inject_virtual.as_ref().unwrap()
+            } else {
+                &k.inject
+            });
             pass.set_bind_group(0, &*inject[i], &[]);
             pass.dispatch_workgroups(
                 v.grid[0].div_ceil(4),
