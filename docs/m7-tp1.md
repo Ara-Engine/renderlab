@@ -168,4 +168,6 @@ Shared, minimal and marked `TP1`:
 
 No shadow, GI, visibility or primary kernel changed.
 
-**DC1 interface (root, 2026-11-08):** DC1 appends `decals: DecalInput` to `SurfaceInput`. `fs_transparent` builds `SurfaceInput` positionally, so it needs `decal_none()` appended when DC1 merges. TP1 adds no lighting-group binding. Its own group 0 uses 0, 2, 30-37, 40-42 and 50-53.
+**R1 interface:** R1's traced reflections reach the standard program through `specular_incident`. In the transparent pass's raster composition that input is untraced (w = 0), so glass keeps its sky, lobe and sun specular (gap).
+
+**DC1 interface (root, 2026-11-08):** `fs_transparent` passes `decal_none()`: decals project onto opaque receivers only. DC1 owns `material_opacity(input)`, so TP1's helpers are named `transparent_*`. TP1 adds no lighting-group binding. Its own group 0 uses 0, 2, 30-37, 40-42 and 50-53.

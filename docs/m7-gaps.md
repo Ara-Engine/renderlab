@@ -16,6 +16,7 @@ TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent 
 
   1x raster, traced and visibility-buffer frames at native scale run it.
 - **Cost** (M, quarry, functional lease): the pane adds 0.16-0.53 ms, including one full-HDR copy per transparent draw. The pass's fixed work and 448 particles add 0.09-0.65 ms. The RT raster default pays the most: +1.25 ms in total.
+- **No traced reflections on glass.** Transparent surfaces compose the raster stage, so R1's `specular_incident` is untraced there: glass reflects the sky, the ES1 lobes and the sun, not traced scene reflections.
 - **Lighting inputs.** Transparent surfaces read the same lights, sky, ES1 lobes and radiance-cache lookups as opaque ones. The cache holds no cells of its own for transparent surfaces, so they read nearby opaque cells or the open sky. Non-RT sun visibility is a 2048² map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1.
 - **Programmability.** A program shades transparent surfaces through its own `surface` and `shade`, plus an optional `transmittance` hook. Without the hook, it blends by coverage. Refraction uses the engine's `material_normal`, not a program normal. Streamed (non-resident) textures on transparent materials bind their resident levels without feedback.
 - **Cutout foliage.**
