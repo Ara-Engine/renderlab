@@ -6,8 +6,8 @@
 //! engine keeps these stable and maps them to each path's measured configuration.
 use super::{EnvironmentId, RenderPath};
 use crate::{
-    Error, IndirectSettings, Light, Lighting, Reconstruction, Renderer, ShadowRequest, Shadows,
-    SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings,
+    Error, IndirectSettings, Light, Lighting, Reconstruction, RenderScale, Renderer, ShadowRequest,
+    Shadows, SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings,
 };
 
 /// The scene's sun: its one shadowed directional light.
@@ -41,21 +41,32 @@ pub enum Sky {
     /// Uniform radiance in cd/m² (linear Rec.709) from every direction. It is also the
     /// background colour.
     Uniform([f32; 3]),
-    /// A prepared HDR environment ([`Engine::create_environment`](super::Engine::create_environment)).
-    /// `backdrop` (cd/m²) fills the background; the map lights the scene.
+    /// A prepared HDR environment ([`Engine::create_environment`](super::Engine::create_environment))
+    /// that lights the scene.
     Map {
         map: EnvironmentId,
         /// Rotation about +Y, in radians.
         rotation_y: f32,
         /// Radiance scale, nonnegative.
         intensity: f32,
-        backdrop: [f32; 3],
+        background: Background,
     },
 }
 impl Default for Sky {
     fn default() -> Self {
         Self::Uniform([0.0; 3])
     }
+}
+
+/// What camera rays that miss all geometry show under [`Sky::Map`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Background {
+    /// A constant radiance in cd/m², exposed like the scene.
+    Color([f32; 3]),
+    /// The map itself along each pixel's ray, exposed and scaled like the light it gives
+    /// (TR1b's visible sky, `Renderer::set_visible_environment`).
+    Sky,
 }
 
 /// How scene luminance maps to display values before tone mapping.
@@ -91,19 +102,33 @@ pub enum Quality {
 
 /// Frame-wide rendering choices. Construct with `..Default::default()`: new fields are
 /// added with defaults as features land, so struct literals that spell out every field
-/// may need updating.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// may need updating. Defaults follow each feature unit's default ruling (docs/api.md).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub quality: Quality,
     /// Indirect light: sky visibility and bounce light from the world radiance cache
-    /// (M7 G2). Off, programs read the unoccluded sky. Defaults follow the GI unit's
-    /// default ruling; see docs/api.md.
+    /// (M7 G2). Off, programs read the unoccluded sky. Off by default until the GI unit
+    /// rules it on.
     pub global_illumination: bool,
     /// Temporal reconstruction (TR1): each frame samples at a new sub-pixel offset and
-    /// accumulates history, antialiasing edges and textures. Defaults follow the TR1
-    /// unit's default ruling; see docs/api.md.
+    /// accumulates history, antialiasing edges and textures. On by default (TR1b).
     pub temporal_reconstruction: bool,
+    /// Internal resolution while temporal reconstruction is on: `Native`, or the
+    /// `Quality` (2/3 per axis) and `Performance` (1/2) upscaling presets, which TR1
+    /// reconstructs to the target size. Needs `temporal_reconstruction`.
+    pub render_scale: RenderScale,
     pub exposure: Exposure,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            quality: Quality::Realtime,
+            global_illumination: false,
+            temporal_reconstruction: true,
+            render_scale: RenderScale::Native,
+            exposure: Exposure::default(),
+        }
+    }
 }
 
 /// The renderer's light vector and shadow requests for a sun and local lights.
@@ -125,7 +150,11 @@ pub(crate) fn lighting(
     let Exposure::Manual { stops } = exposure;
     let environment = match sky {
         Sky::Uniform(radiance) => radiance,
-        Sky::Map { backdrop, .. } => backdrop,
+        // A visible-sky background clears to black wherever the map is not drawn.
+        Sky::Map { background, .. } => match background {
+            Background::Color(radiance) => radiance,
+            Background::Sky => [0.0; 3],
+        },
     };
     let mut all = Vec::with_capacity(lights.len() + 1);
     let mut requests = Vec::new();
@@ -172,14 +201,22 @@ pub(crate) fn lighting(
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
+    if !settings.temporal_reconstruction && settings.render_scale != RenderScale::Native {
+        return Err(Error::InvalidInput(
+            "render_scale below Native needs temporal_reconstruction",
+        ));
+    }
     r.set_indirect(IndirectSettings {
         enabled: settings.global_illumination,
         ..IndirectSettings::default()
     })?;
     r.set_reconstruction(if settings.temporal_reconstruction {
-        Reconstruction::identity()
+        Reconstruction {
+            scale: settings.render_scale,
+            ..Reconstruction::default()
+        }
     } else {
-        Reconstruction::default()
+        Reconstruction::off()
     })?;
     match path {
         RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {

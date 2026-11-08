@@ -2,10 +2,12 @@
 //!
 //! Procedural ground, an arch, crates, a red wall (colour bleeding), a gold sphere, a
 //! spinning crate and a bobbing toon-styled hero, lit by a sun with soft shadows, a
-//! uniform sky, GI and temporal reconstruction, seen from a camera fly path. Every
+//! uniform sky, GI, temporal reconstruction and two ground decals, seen from a camera fly
+//! path. Every
 //! `--every`-th frame is written as PNG. `--quarry MANIFEST` replaces the ground with the
 //! registered quarry scans and its RLE2 sky (manifest keys `asset`, `limits`,
-//! `environment`, `exposure_stops`).
+//! `environment`, `exposure_stops`), shown as a visible sky. `--render-scale` picks a TR1
+//! upscaling preset.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -34,6 +36,7 @@ struct Args {
     quarry: Option<PathBuf>,
     gi: bool,
     temporal: bool,
+    scale: RenderScale,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -47,6 +50,7 @@ impl Args {
             quarry: None,
             gi: true,
             temporal: true,
+            scale: RenderScale::Native,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -72,6 +76,19 @@ impl Args {
                 "--quarry" => a.quarry = Some(value()?.into()),
                 "--no-gi" => a.gi = false,
                 "--no-temporal" => a.temporal = false,
+                "--render-scale" => {
+                    a.scale = match value()?.as_str() {
+                        "native" => RenderScale::Native,
+                        "quality" => RenderScale::Quality,
+                        "performance" => RenderScale::Performance,
+                        other => {
+                            return Err(format!(
+                                "--render-scale native|quality|performance, not {other}"
+                            )
+                            .into());
+                        }
+                    }
+                }
                 _ => return Err(format!("unknown argument {arg}").into()),
             }
         }
@@ -131,6 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
+                render_scale: args.scale,
                 exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
             },
@@ -203,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 map,
                 rotation_y: 0.0,
                 intensity: 1.0,
-                backdrop: [400.0, 600.0, 900.0],
+                background: Background::Sky,
             })?;
             eprintln!(
                 "game_scene quarry objects={} load_seconds={:.1}",

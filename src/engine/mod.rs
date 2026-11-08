@@ -17,15 +17,15 @@ mod settings;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
 pub use ids::{EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind};
-pub use settings::{Exposure, Quality, Settings, Sky, Sun};
+pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
 
 pub use crate::asset::{
     Sampler, TangentStream, Texture as TextureData, environment::PreparedEnvironment,
 };
 pub use crate::{
     Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures, Error, Events,
-    FrameId, FrameReport, Light, Limits, Mat4, MeshData, ReloadError, ReloadReport, Renderer,
-    Value, Vec3, Vertex,
+    FrameId, FrameReport, Light, Limits, Mat4, MeshData, ReloadError, ReloadReport, RenderScale,
+    Renderer, Value, Vec3, Vertex,
 };
 
 use crate::{
@@ -768,7 +768,15 @@ impl Engine {
         };
         self.renderer
             .set_lighting_and_shadows(&lighting, &shadows)?;
-        self.renderer.set_environment(map, parameters)
+        self.renderer.set_environment(map, parameters)?;
+        self.renderer.set_visible_environment(matches!(
+            self.sky,
+            Sky::Map {
+                background: Background::Sky,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     // ---- Frames ----
