@@ -558,6 +558,8 @@ fn gpu_lc1_quarry_night() {
     };
     let mut log = serde_json::json!({"path": path, "lights": all.len(), "primary": format!("{:?}", r.primary_mode),
         "viewport": viewport, "frames": frames});
+    let capture_device = r.device.clone();
+    let capture_queue = r.queue.clone();
     let save = |name: &str, image: &[f32]| {
         write_png(
             &out.join(format!("{path}-{name}.png")),
@@ -565,6 +567,14 @@ fn gpu_lc1_quarry_night() {
             frame.width,
             frame.height,
         );
+        if lc2 {
+            write_presented_png(
+                &capture_device,
+                &capture_queue,
+                &target,
+                &out.join(format!("{path}-{name}-present.png")),
+            );
+        }
         let bytes: Vec<u8> = image.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(out.join(format!("{path}-{name}.f32")), bytes).unwrap();
     };
@@ -1031,6 +1041,12 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 size[0],
                 size[1],
             );
+            write_presented_png(
+                &r.device,
+                &r.queue,
+                &target,
+                &out.join(format!("{path}-{name}-{mode}-present.png")),
+            );
             images.push(image);
         }
         let changed = images[0]
@@ -1047,4 +1063,73 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
         serde_json::to_string_pretty(&log).unwrap(),
     )
     .unwrap();
+}
+
+// LC2 final-image inspection after PP1: capture the presented target as well as HDR.
+// These tests use a linear Unorm target, so encode sRGB for display in the PNG viewer.
+fn write_presented_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &wgpu::Texture,
+    path: &std::path::Path,
+) {
+    let (width, height) = (target.width(), target.height());
+    let row = (width * 4).next_multiple_of(256);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("LC2 presented image"),
+        size: u64::from(row) * u64::from(height),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
+        },
+        target.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(20)),
+        })
+        .unwrap();
+    let mapped = slice.get_mapped_range().unwrap();
+    let mut bytes = Vec::with_capacity((width * height * 3) as usize);
+    for line in mapped.chunks_exact(row as usize) {
+        for pixel in line[..width as usize * 4].chunks_exact(4) {
+            for &channel in &pixel[..3] {
+                let v = f32::from(channel) / 255.0;
+                let srgb = if target.format().is_srgb() {
+                    v
+                } else if v <= 0.0031308 {
+                    12.92 * v
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                };
+                bytes.push((srgb * 255.0 + 0.5) as u8);
+            }
+        }
+    }
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(path).unwrap()),
+        width,
+        height,
+    );
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&bytes)
+        .unwrap();
 }

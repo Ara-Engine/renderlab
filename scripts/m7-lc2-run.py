@@ -8,6 +8,7 @@ controls remain compatible. The fixture is gpu_lc2_penumbra.
 """
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 os.environ["M7_G1_UNIT"] = "m7-lc2"
@@ -19,4 +20,8 @@ runner.TARGET = runner.OUT / "target"
 runner.BINARY = runner.OUT / "bin/lc2-tests.exe"
 
 if __name__ == "__main__":
+    if len(sys.argv)>1 and sys.argv[1]=="build":
+        crlf=[str(p) for p in (runner.REPO/"shaders").rglob("*.wgsl") if b"\r\n" in p.read_bytes()]
+        if crlf:
+            raise SystemExit("WGSL includes require LF for engine seams; normalize before building: "+", ".join(crlf))
     runner.main()

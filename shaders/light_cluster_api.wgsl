@@ -98,7 +98,7 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     // retains LC1's deterministic hard-edge antialiasing below.
     if light.source.x>0.0 {
         let near=rl_light_frame.far.y;
-        let far=max(light.position_range.w,select(1000.0,2.0*near,light.position_range.w>0.0));
+        let far=max(select(1000.0,light.position_range.w,light.position_range.w>0.0),2.0*near);
         let projection=vec2<f32>(length(vec3<f32>(m[0].x,m[1].x,m[2].x)),length(vec3<f32>(m[0].y,m[1].y,m[2].y)));
         let source=0.5*projection*light.source.x*extent;
         let search=min(source*max(1.0/near-1.0/clip.w,0.0),vec2<f32>(96.0));
@@ -157,9 +157,11 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
     let extent=vec2<f32>(textureDimensions(rl_local_depth));
     let size=vec2<i32>(extent);
     let m=rl_local_matrix(layer);
-    let tap_ndc=((tap+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+    // Compare on the texel actually loaded, including fractional blocker-search taps.
+    // Otherwise a sloping receiver can be mistaken for its own blocker.
+    var coordinate=vec2<i32>(floor(tap+vec2<f32>(0.5)));
+    let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
     var use_layer=layer;
-    var coordinate=vec2<i32>(tap);
     var reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
     var depth_scale=1.0;
     if (light.kind.w&0x10000u)!=0u && any(abs(tap_ndc)>vec2<f32>(1.0)) {
@@ -178,9 +180,19 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
         let clip=neighbour*vec4<f32>(world,1.0);
         let n=clip.xyz/clip.w;
         coordinate=vec2<i32>(floor((n.xy*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5))*extent));
-        reference=n.z+bias;
+        coordinate=clamp(coordinate,vec2<i32>(0),size-vec2<i32>(1));
+        let centre=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
         let other_forward=vec3<f32>(neighbour[0].w,neighbour[1].w,neighbour[2].w);
-        depth_scale=dot(forward,direction)/dot(other_forward,direction);
+        let other_right=vec3<f32>(neighbour[0].x,neighbour[1].x,neighbour[2].x);
+        let other_up=vec3<f32>(neighbour[0].y,neighbour[1].y,neighbour[2].y);
+        let ray=other_forward+other_right*(centre.x/dot(other_right,other_right))+other_up*(centre.y/dot(other_up,other_up));
+        let denom=dot(normal,ray);
+        if abs(denom)<1e-6 { return vec2<f32>(1.0,0.0); }
+        let hit_t=dot(normal,biased-light.position_range.xyz)/denom;
+        if hit_t<=0.0 { return vec2<f32>(1.0,0.0); }
+        let hit=neighbour*vec4<f32>(light.position_range.xyz+ray*hit_t,1.0);
+        reference=hit.z/hit.w+bias;
+        depth_scale=dot(forward,ray)/dot(other_forward,ray);
     }
     coordinate=clamp(coordinate,vec2<i32>(0),size-vec2<i32>(1));
     let stored=textureLoad(rl_local_depth,coordinate,i32(use_layer),0);

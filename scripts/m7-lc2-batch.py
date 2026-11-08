@@ -29,12 +29,19 @@ def main():
     u = helper.runner.ue()
     if helper.runner.quiet_active(u, any_lease=False) or helper.runner.hold_state(u) == "hold":
         raise SystemExit("LC2 batch deferred: QUIET or game hold")
+    # A coordinator may give a short gate priority before this batch. The optional
+    # file is operational state outside the repo; no test starts before its release.
+    after_file = Path(os.environ.get("N8_OUT", str(root.parent))) / "after-label.txt"
+    if after_file.exists():
+        after = after_file.read_text().strip()
+        if not any(f" {after} window released " in line for line in u.SCHEDULE.read_text().splitlines()):
+            raise SystemExit(f"DEFERRED: waiting for {after}'s release")
     root.mkdir(parents=True, exist_ok=True)
     metadata = dict(binary=str(binary), binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                     base=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(), lease=owner,
                     validation=False, quiet_timing=False, frames=8)
     (root / "build.json").write_text(json.dumps(metadata, indent=2))
-    steps = sys.argv[3:] or ["lib"]
+    steps = sys.argv[3:] or ["lib", "fixture", "quarry"]
     log = []
     for step in steps:
         for path in ([None] if step == "lib" else ["traced", "nonrt", "raster"]):
