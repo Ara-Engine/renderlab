@@ -23,6 +23,8 @@
 use super::*;
 
 // PP1 reuses the two path/device helpers and the existing quarry loader only.
+#[path = "object_motion_tests.rs"]
+mod object_motion_tests;
 #[path = "post_tests.rs"]
 mod post_tests;
 

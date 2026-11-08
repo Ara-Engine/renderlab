@@ -9,9 +9,9 @@ struct PostU32s { data:array<u32> };
 fn post_position(batch:u32,index:u32)->vec3<f32> {
     return post_vertices[batch].data[post_indices[batch].data[index]*3u].xyz;
 }
-fn post_store(p:vec2<u32>,point:vec4<f32>,depth:f32) {
+fn post_store(p:vec2<u32>,point:vec4<f32>,previous_point:vec4<f32>,depth:f32) {
     let size=vec2<f32>(textureDimensions(post_surface));
-    let previous=post_frame.previous*point;
+    let previous=post_frame.previous*previous_point;
     let projected=post_frame.current*point;
     let current=(projected.xy/projected.w*vec2<f32>(0.5,-0.5)+0.5)*size;
     var velocity=vec2<f32>(0.0);
@@ -31,11 +31,15 @@ fn post_store(p:vec2<u32>,point:vec4<f32>,depth:f32) {
     if textureLoad(primary_tiles,sample_pixel/PRIMARY_TILE,0).x!=0u {record=textureLoad(primary_hit,sample_pixel,0);}
     if record.x==0u {
         let ray=primary_ray(sample_pixel,internal);let direction=normalize(ray.far-ray.near);
-        post_store(id.xy,vec4<f32>(direction,0.0),1e8);return;
+        post_store(id.xy,vec4<f32>(direction,0.0),vec4<f32>(direction,0.0),1e8);return;
     }
     let slot=record.x-1u;let batch=primary_placements[slot]&0x1fffffffu;let i=record.y*3u;
     let a=post_position(batch,i);let b=post_position(batch,i+1u);let c=post_position(batch,i+2u);
     let uv=bitcast<vec2<f32>>(record.zw);
     let point=world_position(receiver_point(a,b,c,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
-    post_store(id.xy,point,max(0.001,-(post_frame.view*point).z));
+    let pa=motion_previous_vertex(batch,post_indices[batch].data[i]);
+    let pb=motion_previous_vertex(batch,post_indices[batch].data[i+1u]);
+    let pc=motion_previous_vertex(batch,post_indices[batch].data[i+2u]);
+    let previous=motion_previous_world(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
+    post_store(id.xy,point,previous,max(0.001,-(post_frame.view*point).z));
 }

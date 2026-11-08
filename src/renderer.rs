@@ -2704,7 +2704,7 @@ impl Renderer {
         if shadow_frame.is_some() {
             shadow_preparation += shadow_start.elapsed();
         }
-        self.submit_frame(
+        let result = self.submit_frame(
             color,
             camera_bytes,
             camera,
@@ -2727,7 +2727,13 @@ impl Renderer {
                 poll,
                 ..CpuFrame::default()
             },
-        )
+        );
+        if matches!(&result, Ok(Some(_))) {
+            for draw in draws {
+                draw.instances.state.motion_submitted(self.frames);
+            }
+        }
+        result
     }
 
     fn upload_instance_edits(

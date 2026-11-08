@@ -159,8 +159,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var sum=vec3<f32>(0.0);
     var valid=0u;
     var shaded=false;
-    // TP2 merge repair: the query is already declared at function scope above.
-    // Reinitialize it per ray; never introduce a loop-local opaque null.
+    // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
+    // illegal opaque null for loop-local/conditionally initialized query variables.
     rl_reflection_hit=true;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
