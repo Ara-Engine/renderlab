@@ -379,6 +379,17 @@ fn gpu_tr1_sequence() {
                settings: Reconstruction,
                write: bool| {
         r.set_reconstruction(Reconstruction::off()).unwrap();
+        // RTDEF compares the legacy raster/Exact output with the reconstructed RT path
+        // without loading the quarry again. Other TR1 manifests keep their path settings.
+        if let Some(primary) = m["variants"][name]["primary"].as_str() {
+            let (primary, shadows) = match primary {
+                "raster-exact" => (PrimaryVisibility::Raster, SoftShadows::Exact),
+                "traced-interactive" => (PrimaryVisibility::Traced, SoftShadows::Interactive),
+                other => panic!("unknown RTDEF primary {other}"),
+            };
+            r.set_primary_visibility(primary).unwrap();
+            r.set_soft_shadows(shadows);
+        }
         r.set_reconstruction(settings).unwrap();
         // Every run starts from the same shadow state: the non-RT Surface cache keeps cells
         // across frames, so a replay after other runs would otherwise start warm.

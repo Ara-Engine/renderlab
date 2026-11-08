@@ -2,6 +2,38 @@
 
 One section per feature. Each lists the measured or inspected gaps that remain after its overnight first pass (2026-11-08 push).
 
+## RT shadows
+
+[RTDEF](rtdef.md) compares raster + Exact with traced + Interactive + the latest
+default TR1b on main `ae95d3a`. The quarry improves, but **the RT default is not
+promoted**: S2's cold and moving disk penumbrae are visibly grainier than
+raster + Exact, including at ordinary exposure and at the registered +4-stop stress.
+The cold disk witness is 14.0832 display codes RMS versus raster + Exact's
+12.6000 and retained HRT1's 13.6655. Settled TR1 substantially improves it.
+
+- History restarts on scene-transform/instance uploads. Moving casters can
+  therefore retain eight-ray startup grain indefinitely; a long still hold
+  does not establish camera/reveal/caster-motion acceptance. In S2's moving
+  blocker frame 63, the single-surface floor penumbra is 9.8755 codes RMS at
+  +4 stops versus raster + Exact's 6.6179. This diagnostic does not replace
+  the complete-image scorer.
+- All 24 S2 phase pools beat retained HRT1 in linear HDR and +0/+4 display
+  RMS. Per-frame +4 RMS still loses on **10/1,280 frames**: all eight cold
+  frame-0 cases, camera .25 px/point frame 1 and camera 1 px/point frame 122
+  (return/reveal). Linear HDR and +0 RMS win on all 1,280 frames. The HRT
+  comparison is non-blocking tonight; the default decision is held by the
+  visible regression against raster + Exact, not by these HRT rows.
+- The previous unfiltered Interactive visibility/flicker results in
+  [RT1c](rt1c-rt-default.md) still apply only to those registered masks.
+  Post-reconstruction visibility is not separately measured by the diagnostic
+  shadow shader, and is not inferred from its raw eight-ray visibility.
+- RT1d's fixed spatial filter remains opt-in: its quarry false-shadow,
+  lit-darkened and strict-solid losses were not repaired by this unit. No
+  film/Unreal quality floor or combined 2× performance floor is claimed here.
+- RT library and viewer defaults remain raster + Exact, so the RT default
+  still receives no TR1 anti-aliasing. Traced primaries and Interactive remain
+  settings; their historical TR1-off speed labels remain explicitly scoped.
+
 ## Decals
 
 DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before programmable shading on both paths. The API includes typed textures, alpha/multiply/add colour blends, stable sort order, angle fade, opacity and channel strengths. Placement activates them without another feature toggle.
