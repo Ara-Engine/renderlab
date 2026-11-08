@@ -15,8 +15,9 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
-const WIDTH: u32 = 384;
-const HEIGHT: u32 = 216;
+// 1080p: slot 0's list then outgrows one dispatch row (65,535 workgroups).
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// A third style: Lambert with engine visibility and a flat geometric normal, no environment.
 const CUSTOM: &str = "struct Surface { albedo:vec3<f32>, n:vec3<f32> };\nfn surface(input:SurfaceInput)->Surface { return Surface(input.material.base_color.rgb*input.color.rgb,input.geometric); }\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> {\n    var lit=ambient(s.n)*0.5;\n    for(var i=0u;i<light_count();i+=1u) { let l=light_sample(i,input); lit+=l.intensity*l.attenuation*max(dot(s.n,l.direction),0.0)*light_visibility(input,l); }\n    return expose(s.albedo*lit/PI);\n}\n";

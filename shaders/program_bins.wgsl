@@ -14,7 +14,8 @@ struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4
 @group(0) @binding(2) var<storage,read> bins_region:vec4<u32>;
 @group(0) @binding(3) var<storage,read> bins_placements:array<u32>;
 @group(0) @binding(4) var<uniform> bins_list:RlList;
-@group(0) @binding(5) var<storage,read_write> bins_entries:array<u32>;
+// Per slot at slot * capacity: the list's length, then its entries.
+@group(0) @binding(5) var<storage,read_write> bins_entries:array<atomic<u32>>;
 // Per slot: indirect dispatch arguments (x, y, z) and a pad word; cleared before this pass.
 @group(0) @binding(6) var<storage,read_write> bins_args:array<atomic<u32>>;
 
@@ -24,15 +25,22 @@ const BINS_CLEAR_TILE=16u;
 // Entry flags; program_traced_list.wgsl reads the same bits.
 const BINS_CLEAR=0x40000000u;
 const BINS_MISSES=0x80000000u;
+// Workgroups per row of a list's indirect dispatch: wgpu's default per-dimension limit,
+// which indirect validation enforces (a 1080p list holds up to about 139,000 tiles).
+// program_traced_list.wgsl RL_LIST_ROW must match.
+const BINS_ROW=65535u;
 
 var<workgroup> bins_mask:atomic<u32>;
 
 fn bins_append(slot:u32,entry:u32) {
-    let at=atomicAdd(&bins_args[slot*4u],1u);
-    atomicStore(&bins_args[slot*4u+1u],1u);
+    let base=slot*bins_list.capacity;
+    let at=atomicAdd(&bins_entries[base],1u);
+    // A list of n tiles dispatches min(n, ROW) x ceil(n / ROW) workgroups.
+    atomicMax(&bins_args[slot*4u],min(at+1u,BINS_ROW));
+    atomicMax(&bins_args[slot*4u+1u],at/BINS_ROW+1u);
     atomicStore(&bins_args[slot*4u+2u],1u);
     // Slot 0 writes misses and clear blocks.
-    bins_entries[slot*bins_list.capacity+at]=entry|select(0u,BINS_MISSES,slot==0u);
+    atomicStore(&bins_entries[base+1u+at],entry|select(0u,BINS_MISSES,slot==0u));
 }
 
 @compute @workgroup_size(4,4) fn program_bins(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {

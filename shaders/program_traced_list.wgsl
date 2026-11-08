@@ -8,15 +8,21 @@
 struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,16> };
 // This dispatch's slot (a dynamic offset per slot) and every draw's slot.
 @group(0) @binding(38) var<uniform> rl_list:RlList;
+// Per slot at base: the list's length, then its entries.
 @group(0) @binding(39) var<storage,read> rl_entries:array<u32>;
 const RL_LIST_CLEAR=0x40000000u;
 const RL_LIST_MISSES=0x80000000u;
+// Workgroups per dispatch row; program_bins.wgsl BINS_ROW must match.
+const RL_LIST_ROW=65535u;
 
 // The frame slot (program) of draw `batch`.
 fn rl_slot_of(batch:u32)->u32 { return rl_list.programs[batch>>2u][batch&3u]; }
 
 @compute @workgroup_size(4,4) fn primary_shade_list(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    let entry=rl_entries[rl_list.base+group.x];
+    // The dispatch is min(n, ROW) x ceil(n / ROW); the last row's surplus groups return.
+    let index=group.x+group.y*RL_LIST_ROW;
+    if index>=rl_entries[rl_list.base] {return;}
+    let entry=rl_entries[rl_list.base+1u+index];
     let size=textureDimensions(primary_hit);
     let tile=vec2<u32>(entry&0x7fffu,(entry>>15u)&0x7fffu);
     let region=primary_region;

@@ -155,10 +155,10 @@ pub(crate) fn frame_slots(programs: impl IntoIterator<Item = u64>) -> (Vec<u64>,
     (distinct, slots)
 }
 
-/// Tiles one slot list can hold for a `width` x `height` image: every 4x4 shading tile
-/// of the trace-tile-widened region, and every 16x16 clear block.
+/// Words of one slot list for a `width` x `height` image: its length, then room for
+/// every 4x4 shading tile of the trace-tile-widened region and every 16x16 clear block.
 fn capacity([width, height]: [u32; 2]) -> u32 {
-    (width + TRACE_TILE[0]).div_ceil(SHADE_TILE[0])
+    1 + (width + TRACE_TILE[0]).div_ceil(SHADE_TILE[0])
         * (height + TRACE_TILE[1]).div_ceil(SHADE_TILE[1])
         + width.div_ceil(CLEAR_TILE[0]) * height.div_ceil(CLEAR_TILE[1])
 }
@@ -376,7 +376,12 @@ impl Renderer {
             .as_ref()
             .unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
+        // Arguments and each list's length start at zero; the binning pass counts them.
         encoder.clear_buffer(&lists.args.value, 0, None);
+        for k in 0..state.programs.len() as u64 {
+            let at = k * u64::from(lists.capacity) * 4;
+            encoder.clear_buffer(&lists.entries.value, at, Some(4));
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("traced deferred shading, per program"),
             timestamp_writes,
@@ -422,7 +427,7 @@ mod tests {
             let region = [0, 1].map(|i| size[i].div_ceil(TRACE_TILE[i]) * TRACE_TILE[i]);
             let tiles = region[0] / SHADE_TILE[0] * (region[1] / SHADE_TILE[1]);
             let blocks = size[0].div_ceil(CLEAR_TILE[0]) * size[1].div_ceil(CLEAR_TILE[1]);
-            assert!(capacity(size) >= tiles + blocks, "{size:?}");
+            assert!(capacity(size) > tiles + blocks, "{size:?}");
         }
         // Entries pack tile coordinates in 15 bits each.
         assert!(capacity([16384, 16384]) > 0 && (16384u32 + 8) / 4 < 1 << 15);
