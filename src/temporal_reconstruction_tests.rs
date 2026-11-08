@@ -226,8 +226,6 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
-    b("pending_pairs", &mut s.pending_pairs);
-    b("debug_coverage", &mut s.debug_coverage);
     s
 }
 
@@ -369,7 +367,7 @@ fn gpu_tr1_sequence() {
                name: &str,
                settings: Reconstruction,
                write: bool| {
-        r.set_reconstruction(Reconstruction::default()).unwrap();
+        r.set_reconstruction(Reconstruction::off()).unwrap();
         r.set_reconstruction(settings).unwrap();
         // Every run starts from the same shadow state: the non-RT Surface cache keeps cells
         // across frames, so a replay after other runs would otherwise start warm.

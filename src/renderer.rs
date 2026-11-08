@@ -2273,9 +2273,12 @@ impl Renderer {
         self.validate_color(color)?;
         // Temporal reconstruction samples traced and visibility-buffer lit frames at the
         // next lattice offset: every matrix of this frame comes from the jittered camera.
+        // TR1b (default on): Temporal soft shadows keep their own film history and are never
+        // reconstructed, so their frames are not jittered either.
         self.reconstruction_frame = (self.reconstruction.enabled
             && view_mode == ViewMode::Lit
-            && self.primary_mode != PrimaryVisibility::Raster)
+            && self.primary_mode != PrimaryVisibility::Raster
+            && self.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.reconstruction_index);
         let jittered;
         let camera = match self.reconstruction_frame {

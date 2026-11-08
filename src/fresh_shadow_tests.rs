@@ -232,6 +232,11 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
         "fresh_startup validation={validate} instance_device_ms={device_ms:.6} all_renderer_pipeline_setup_ms={:.6}",
         pipelines.elapsed().as_secs_f64() * 1e3
     );
+    // TR1b made temporal reconstruction the default. The exact-repeat certifications built
+    // on this renderer (M6 film, RT1, N8, the quarry frame loop, primary-ray identity) need
+    // repeatable single frames, so they run with it off; TR1 harnesses enable it themselves.
+    let mut renderer = renderer;
+    renderer.set_reconstruction(crate::Reconstruction::off()).unwrap();
     renderer
 }
 

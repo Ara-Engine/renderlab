@@ -898,7 +898,7 @@ fn gpu_motion_bench_batch() {
                 r.set_soft_shadows(mode);
                 if reconstruction.enabled {
                     // The round-trip frame started a history: restart it.
-                    r.set_reconstruction(crate::Reconstruction::default())
+                    r.set_reconstruction(crate::Reconstruction::off())
                         .unwrap();
                     r.set_reconstruction(reconstruction).unwrap();
                     if name == "TR1-warm" {
@@ -999,7 +999,7 @@ fn gpu_motion_bench_batch() {
                 fs::rename(pending, out.join("timings.json")).unwrap();
                 eprintln!("MOTION {case} {name} complete");
             }
-            r.set_reconstruction(crate::Reconstruction::default())
+            r.set_reconstruction(crate::Reconstruction::off())
                 .unwrap();
             // Candidate-only reruns score against an already generated reference (N8b).
             if m["skip_reference"].as_bool() == Some(true) {

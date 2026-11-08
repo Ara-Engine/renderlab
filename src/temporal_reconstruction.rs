@@ -1,5 +1,5 @@
-//! TR1 temporal reconstruction of the final lit image (docs/m7-tr1.md), opt-in through
-//! `Renderer::set_reconstruction`. Each traced or visibility-buffer lit frame samples every
+//! TR1 temporal reconstruction of the final lit image (docs/m7-tr1.md), on by default and set
+//! through `Renderer::set_reconstruction`. Each traced or visibility-buffer lit frame samples every
 //! pixel at one sub-pixel offset of a rank-1 lattice, carried by the camera projection
 //! (`Camera::jittered`), so both primary paths and every program's shading follow it with
 //! no shader edit. On RT renderers, Interactive's eight disk directions also rotate by the
@@ -14,11 +14,13 @@
 //! (P0's W5); no later stage takes them as input.
 use super::*;
 
-/// Temporal reconstruction settings (TR1). The default is off: frames are unjittered and
-/// keep no history. Enabled, traced and visibility-buffer lit frames at 1x accumulate;
-/// raster and diagnostic frames are unaffected. History costs 40 bytes per pixel plus an
-/// 8-byte copy of the frame's samples. The other defaults are the variant measured best on
-/// the Q-walk screens (docs/m7-tr1b.md); TR1 is not the renderer default.
+/// Temporal reconstruction settings (TR1). On by default since TR1b (docs/m7-tr1b.md):
+/// traced and visibility-buffer lit frames at 1x are jittered and accumulate; raster,
+/// diagnostic and Temporal-shadow frames are unaffected. `Reconstruction::off()` is the named
+/// switch back to unjittered single frames with no history. History costs 40 bytes per pixel
+/// plus an 8-byte copy of the frame's samples. The other defaults are the variant measured
+/// best on the Q-walk and visible-sky screens (docs/m7-tr1b.md); the default still misses
+/// TSR Epic on moving edges and revealed pixels (docs/m7-gaps.md).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reconstruction {
     pub enabled: bool,
@@ -36,7 +38,9 @@ pub struct Reconstruction {
     /// Largest effective sample count a revealed pixel's spatial start may claim.
     pub start_window: f32,
     /// Tent radius (pixels) of a revealed pixel's spatial start over the 3x3 samples of its
-    /// surface; 0 starts from its own sample.
+    /// surface; 0 starts from its own sample. 1 (the default) interpolates to the pixel
+    /// centre, so a cold first frame (k = 0, unjittered) is the unreconstructed image; 2
+    /// blurs it (docs/m7-tr1b.md §4.6).
     pub start_radius: f32,
     /// Sun turn (radians per frame) at which the window falls to one frame; smaller turns
     /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn. 0.064 rad:
@@ -51,36 +55,35 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
-    /// Still single-surface pixels hold the first sample of each point-symmetric pair until
-    /// its partner arrives, so the shown mean is always balanced (screen option, TR1b §4.6).
-    pub pending_pairs: bool,
-    /// Screen diagnostic: silhouette pixels output coverage, transported coverage and branch.
-    pub debug_coverage: bool,
 }
 impl Default for Reconstruction {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
             coverage_window: 16.0,
             start_window: 4.0,
-            start_radius: 2.0,
+            start_radius: 1.0,
             turn_angle: 0.064,
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
-            pending_pairs: false,
-            debug_coverage: false,
         }
     }
 }
 impl Reconstruction {
-    /// TR1 with its measured settings (docs/m7-tr1.md).
+    /// TR1 with its measured settings: the default, named for harnesses that enable it
+    /// whatever the default is.
     pub fn identity() -> Self {
+        Self::default()
+    }
+    /// No temporal reconstruction: unjittered single frames with no history (the pre-TR1b
+    /// default, and every exact-repeat certification's setting).
+    pub fn off() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             ..Self::default()
         }
     }
@@ -145,8 +148,9 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// image, which a projection can carry. k = 0 and 255 are the centre; k = 1..=254 are 127
 /// point-symmetric pairs (odd k, then its negation) of a 256-point rank-1 lattice, in T1's
 /// lattice order (film_accumulation.wgsl `film_offset`). Every odd-length prefix from k = 0
-/// has a mean offset of exactly zero: a still pixel's mean is first-order exact on smooth
-/// shading, as the centre sample is (docs/m7-tr1b.md §4.6).
+/// has a mean offset of exactly zero, so a still pixel's mean is first-order exact on smooth
+/// shading (the sky's glow) every other frame, and off by at most one offset over n
+/// otherwise (docs/m7-tr1b.md §4.6).
 pub(in crate::renderer) fn sample_offset(k: u64) -> [f32; 2] {
     let k = (k & 0xff) as usize;
     if k == 0 || k == 255 {
@@ -557,10 +561,7 @@ impl Renderer {
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let options = u32::from(settings.catmull_rom)
-            | u32::from(settings.spatial_start) << 1
-            | u32::from(settings.pending_pairs) << 2
-            | u32::from(settings.debug_coverage) << 3;
+        let options = u32::from(settings.catmull_rom) | u32::from(settings.spatial_start) << 1;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -802,8 +803,10 @@ mod tests {
     #[test]
     fn settings_validate() {
         assert!(Reconstruction::default().validate().is_ok());
-        assert!(!Reconstruction::default().enabled);
-        assert!(Reconstruction::identity().enabled);
+        assert!(Reconstruction::default().enabled);
+        assert_eq!(Reconstruction::identity(), Reconstruction::default());
+        assert!(!Reconstruction::off().enabled);
+        assert!(Reconstruction::off().validate().is_ok());
         for bad in [
             Reconstruction {
                 window: 0.5,
