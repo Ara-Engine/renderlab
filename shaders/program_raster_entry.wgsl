@@ -17,6 +17,7 @@
     let surface_output=surface(surface_input);
     if material.double_sided==0u && !source_front { discard; }
     rl_indirect_prepare(surface_input);
+    rl_lights_prepare(surface_input.world);
     // AT1: the program's exposed output through the camera's fog and aerial perspective.
     return vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),1.0);
 }

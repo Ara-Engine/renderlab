@@ -3,6 +3,8 @@
 mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
+#[path = "light_cluster_gpu.rs"]
+mod light_cluster_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
@@ -2825,12 +2827,24 @@ impl Renderer {
         {
             state.rolling = false;
         }
+        let mut local_lights = None;
         if lit {
             let shadow_start = Instant::now();
             self.upload_shadows(shadow_frame.as_ref(), &mut uploads)?;
             if shadow_frame.is_some() {
                 cpu.shadow_upload = shadow_start.elapsed();
             }
+            // LC1: shadowed local lights trace where the shading module binds rays
+            // (light_cluster::ray_scene), else use pooled maps.
+            let maps =
+                !(self.hardware_shadows.is_some() && (traced || (hardware_shadowed && !fresh)));
+            local_lights = Some(self.prepare_light_clusters(
+                camera,
+                [color.width(), color.height()],
+                draws,
+                maps,
+                &mut uploads,
+            ));
             // AT1: the camera volume and uniform the lighting group binds.
             self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
@@ -2989,6 +3003,9 @@ impl Renderer {
             });
         let timed = self.timing_status == TimingStatus::Enabled;
         self.encode_skinning(&mut encoder, draws, hardware_build);
+        if let Some(frame) = &local_lights {
+            self.encode_light_clusters(&mut encoder, frame, draws);
+        }
         if hardware_build {
             let start = Instant::now();
             self.hardware_shadows
@@ -3659,3 +3676,7 @@ mod iq1_tests;
 #[cfg(test)]
 #[path = "skinning_tests.rs"]
 mod skinning_tests;
+
+#[cfg(test)]
+#[path = "light_cluster_tests.rs"]
+mod light_cluster_tests;

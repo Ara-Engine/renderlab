@@ -415,6 +415,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
+    // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
+    // Cell shading never calls light_visibility; it composes the map variant.
+    let lights = crate::light_cluster::shading_api(
+        if stage == Stage::Cell { "" } else { head },
+        matches!(stage, Stage::Traced | Stage::TracedStreamed),
+    );
     // AT1: camera-pixel entries apply the sky and fog (shaders/atmosphere_api.wgsl); cell
     // shading's bounce light carries none.
     let atmosphere = if stage == Stage::Cell {
@@ -434,7 +440,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         });
     }
     let mut source = format!(
-        "{head}\n{COMMON_API}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
