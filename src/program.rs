@@ -416,8 +416,9 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
+    // Cell shading never calls light_visibility; it composes the map variant.
     let lights = crate::light_cluster::shading_api(
-        head,
+        if stage == Stage::Cell { "" } else { head },
         matches!(stage, Stage::Traced | Stage::TracedStreamed),
     );
     // AT1: camera-pixel entries apply the sky and fog (shaders/atmosphere_api.wgsl); cell

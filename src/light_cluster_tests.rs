@@ -41,13 +41,13 @@ fn night_lights(count: usize) -> Vec<Light> {
     for i in 0..count {
         let hue = rng.next() * 6.0;
         let rgb = [0.0f32, 2.0, 4.0].map(|o| (((hue + o) % 6.0 - 3.0).abs() - 1.0).clamp(0.0, 1.0));
-        let candela = rng.range(4.0, 16.0);
+        let candela = rng.range(3.0, 12.0);
         let position = Vec3::new(
-            rng.range(-6.0, 6.0),
-            rng.range(0.4, 2.2),
-            rng.range(-6.0, 6.0),
+            rng.range(-3.2, 3.2),
+            rng.range(0.3, 1.8),
+            rng.range(-3.2, 3.2),
         );
-        let range = Some(rng.range(1.5, 3.5));
+        let range = Some(rng.range(0.8, 1.8));
         lights.push(if i % 3 == 0 {
             Light::Spot {
                 position,
@@ -84,7 +84,7 @@ fn night_lights(count: usize) -> Vec<Light> {
             Light::Spot {
                 position,
                 travel: Vec3::new(-0.2 * position.x, -1.0, -0.2 * position.z),
-                candela: rgb.map(|c| c * 900.0),
+                candela: rgb.map(|c| c * 150.0),
                 range: Some(9.0),
                 inner: 0.35,
                 outer: 0.7,
@@ -92,7 +92,7 @@ fn night_lights(count: usize) -> Vec<Light> {
         } else {
             Light::Point {
                 position,
-                candela: rgb.map(|c| c * 260.0),
+                candela: rgb.map(|c| c * 60.0),
                 range: Some(7.0),
             }
         });
@@ -228,7 +228,7 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     // LC1's own visibility variant in each module: one inline ray, or the pooled maps.
     let ray = |module: &str, scene: &str| {
         module.contains(&format!(
-            "rayQueryInitialize(&query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance))"
+            "rayQueryInitialize(&lc_query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance))"
         ))
     };
     let map = |module: &str| module.contains("{ return rl_local_shadow_map(light,receiver,l); }");
@@ -641,8 +641,8 @@ fn gpu_lc1_quarry_night() {
     log["unclustered_differing_channels"] = serde_json::json!(differing);
     r.set_indirect(IndirectSettings::default()).unwrap();
     r.set_reconstruction(Reconstruction::default()).unwrap();
-    // 4. The quarry's soft sun (G1c's lighting, 0.04 rad disk) with every local light: at
-    // the day exposure, and at dusk (sun at 1/500, +9.5 stops) where both read.
+    // 4. The quarry's soft sun (G1c's 1000 lux lighting, 0.04 rad disk) with every local
+    // light: by day (-3 stops), and at dusk (sun at 1/50, -1 stop) where both read.
     let sun: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
     let v3 = |v: &serde_json::Value| -> [f32; 3] {
@@ -650,8 +650,7 @@ fn gpu_lc1_quarry_night() {
     };
     let travel = Vec3::from_array(v3(&sun["lights"][0]["travel"]));
     let lux = v3(&sun["lights"][0]["lux"]);
-    let day = manifest["exposure_stops"].as_f64().unwrap() as f32;
-    for (name, scale, exposure) in [("sun-day", 1.0, day), ("sun-dusk", 0.002, day + 9.5)] {
+    for (name, scale, exposure) in [("sun-day", 1.0, -3.0), ("sun-dusk", 0.02, -1.0)] {
         let mut lights = all.clone();
         lights[0] = Light::Directional {
             travel,
