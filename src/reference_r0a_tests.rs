@@ -163,6 +163,7 @@ fn gpu_r0a_current() {
     let paths = std::env::var("RENDERLAB_M7_R0A_SCENES").unwrap();
     let output = super::tests::output();
     let rt = std::env::var("RENDERLAB_M7_R0A_PATH").as_deref() == Ok("rt");
+    let tr1 = std::env::var("RENDERLAB_R1_TR1").as_deref() == Ok("1");
     let (device, queue) = device(rt);
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let source = include_str!("../shaders/scene.wgsl");
@@ -233,6 +234,18 @@ fn gpu_r0a_current() {
         } else {
             SoftShadows::Virtual
         });
+        // M7-R1 (docs/m7-r1.md): RENDERLAB_R1_TR1=1 captures each pose after 32 TR1 frames
+        // from a cut, TR1's measured settings, so its rotated glossy strata integrate; =0
+        // keeps R0a's single-frame 1x protocol (TR1 off); unset, the renderer default.
+        match std::env::var("RENDERLAB_R1_TR1").as_deref() {
+            Ok("1") => renderer
+                .set_reconstruction(crate::Reconstruction::identity())
+                .unwrap(),
+            Ok("0") => renderer
+                .set_reconstruction(crate::Reconstruction::off())
+                .unwrap(),
+            _ => {}
+        }
         assert!(!renderer.indirect().enabled);
         let toon = renderer
             .try_create_program(&ProgramDescriptor {
@@ -310,7 +323,10 @@ fn gpu_r0a_current() {
                 100.0,
             )
             .unwrap();
-            for _ in 0..8 {
+            if tr1 {
+                renderer.cut_reconstruction();
+            }
+            for _ in 0..if tr1 { 32 } else { 8 } {
                 let mut draws: Vec<_> = meshes
                     .iter()
                     .zip(instances.iter_mut())
@@ -369,7 +385,8 @@ fn gpu_r0a_current() {
                     "bench": name, "pose": pose, "scene_sha256": bench.sha256,
                     "width":view.width,"height":view.height,"exposure_stops":exposure,
                     "rt_device":rt,"primary_visibility":format!("{:?}",renderer.primary_visibility()),
-                    "reflection_implementation":"current production environment only; indirect cache remains disabled",
+                    "reflection_implementation":"current production default: M7-R1 traced reflections on traced frames, environment only on non-RT; indirect cache remains disabled",
+                    "tr1":tr1,
                     "shadow_configuration":if rt {"hardware Interactive disk"} else {"Virtual disk; visibility-buffer non-RT default"},
                     "timing_eligible_for_claim":false
                 }))
