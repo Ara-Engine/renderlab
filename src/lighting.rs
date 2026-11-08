@@ -1,5 +1,8 @@
 use crate::{Error, Vec3};
 
+/// GPU light record: three radiometric vectors, shadow indices and source geometry.
+pub(crate) const LIGHT_BYTES: usize = 80;
+
 /// Metres and linear Rec.709 RGB. Y=.2126R+.7152G+.0722B carries the named
 /// photometric unit. `travel` points away from a source and is normalized on set.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -13,6 +16,8 @@ pub enum Light {
         position: Vec3,
         candela: [f32; 3],
         range: Option<f32>,
+        /// Emitter radius in metres. Zero keeps hard local shadows. Does not change candela.
+        source_radius: f32,
     },
     /// Cone half angles in radians; squared interpolation between their cosines.
     Spot {
@@ -22,6 +27,8 @@ pub enum Light {
         range: Option<f32>,
         inner: f32,
         outer: f32,
+        /// Emitter radius in metres, as for point lights.
+        source_radius: f32,
     },
 }
 
@@ -57,17 +64,34 @@ impl PackedLighting {
             .filter(|n| *n <= max)
             .ok_or(Error::InvalidInput("lighting exceeds device max_lights"))?;
         let exposure = Self::settings(value)?;
-        let mut records = Vec::with_capacity(value.lights.len() * 64);
+        let mut records = Vec::with_capacity(value.lights.len() * LIGHT_BYTES);
         for light in &value.lights {
-            let (position, range, travel, rgb, inner, outer, kind) = match *light {
-                Light::Directional { travel, lux } => {
-                    (Vec3::ZERO, None, direction(travel)?, lux, 0.0, 0.0, 0u32)
-                }
+            let (position, range, travel, rgb, inner, outer, kind, radius) = match *light {
+                Light::Directional { travel, lux } => (
+                    Vec3::ZERO,
+                    None,
+                    direction(travel)?,
+                    lux,
+                    0.0,
+                    0.0,
+                    0u32,
+                    0.0,
+                ),
                 Light::Point {
                     position,
                     candela,
                     range,
-                } => (position, range, Vec3::ZERO, candela, 0.0, 0.0, 1),
+                    source_radius,
+                } => (
+                    position,
+                    range,
+                    Vec3::ZERO,
+                    candela,
+                    0.0,
+                    0.0,
+                    1,
+                    source_radius,
+                ),
                 Light::Spot {
                     position,
                     travel,
@@ -75,6 +99,7 @@ impl PackedLighting {
                     range,
                     inner,
                     outer,
+                    source_radius,
                 } => {
                     if !inner.is_finite()
                         || !outer.is_finite()
@@ -90,10 +115,24 @@ impl PackedLighting {
                     if ci <= co {
                         return Err(Error::InvalidInput("spot cone cosines collapse in f32"));
                     }
-                    (position, range, direction(travel)?, candela, ci, co, 2)
+                    (
+                        position,
+                        range,
+                        direction(travel)?,
+                        candela,
+                        ci,
+                        co,
+                        2,
+                        source_radius,
+                    )
                 }
             };
             energy(rgb)?;
+            if !radius.is_finite() || radius < 0.0 {
+                return Err(Error::InvalidInput(
+                    "light source_radius must be finite and nonnegative",
+                ));
+            }
             if !position.is_finite() || range.is_some_and(|r| !r.is_finite() || r <= 0.0) {
                 return Err(Error::InvalidInput(
                     "light position must be finite; range must be a positive finite f32",
@@ -111,6 +150,9 @@ impl PackedLighting {
                 records.extend_from_slice(&v.to_ne_bytes());
             }
             for v in [kind, 0, 0, 0] {
+                records.extend_from_slice(&v.to_ne_bytes());
+            }
+            for v in [radius, 0.0, 0.0, 0.0] {
                 records.extend_from_slice(&v.to_ne_bytes());
             }
         }

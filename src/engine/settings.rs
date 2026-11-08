@@ -26,6 +26,44 @@ pub struct Sun {
     /// both paths (the real sun is about 0.0047).
     pub angular_radius: f32,
 }
+impl Sun {
+    /// A default sun (illuminance, disk) at `elevation` above the horizon and `azimuth`
+    /// clockwise from north seen from above, both in radians. World axes: +Y up, -Z north,
+    /// +X east, so azimuth pi/2 is a sun in the east. Changing the sun every frame is cheap
+    /// (AT2 updates the procedural sky in place and relights GI progressively).
+    pub fn at(elevation: f32, azimuth: f32) -> Self {
+        let toward = Vec3::new(
+            elevation.cos() * azimuth.sin(),
+            elevation.sin(),
+            -elevation.cos() * azimuth.cos(),
+        );
+        Self {
+            travel: -toward,
+            ..Self::default()
+        }
+    }
+    /// The sun at local solar time `hour` (0-24) on an equinox day at `latitude`
+    /// (radians, positive north): rising in the east at 6, highest toward the equator at 12
+    /// and setting in the west at 18. None while it is below the horizon. Axes as for
+    /// [`Sun::at`].
+    pub fn at_hour(hour: f32, latitude: f32) -> Option<Self> {
+        let angle = (hour - 12.0) * std::f32::consts::PI / 12.0;
+        // Toward the sun with zero declination: east -sin H, north -sin(lat) cos H,
+        // up cos(lat) cos H.
+        let up = latitude.cos() * angle.cos();
+        (up > 0.0 && hour.is_finite() && latitude.is_finite()).then(|| {
+            let toward = Vec3::new(-angle.sin(), up, latitude.sin() * angle.cos());
+            Self {
+                travel: -toward.normalize(),
+                ..Self::default()
+            }
+        })
+    }
+    /// The sun's angle above the horizon, radians.
+    pub fn elevation(&self) -> f32 {
+        (-self.travel.normalize().y).asin()
+    }
+}
 impl Default for Sun {
     fn default() -> Self {
         Self {
@@ -166,7 +204,8 @@ impl Default for Settings {
 }
 
 /// The renderer's light vector and shadow requests for a sun and local lights.
-/// The sun, when present, is light 0 and the only shadowed light.
+/// The sun, when present, is light 0 and the only explicit shadow request. Local lights
+/// use the automatic local-shadow pool; their source radii pass through unchanged.
 pub(crate) fn lighting(
     sun: Option<Sun>,
     lights: &[Light],
@@ -296,6 +335,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sun_angles_and_hours_follow_the_documented_axes() {
+        let east = Sun::at(0.0, std::f32::consts::FRAC_PI_2);
+        assert!(
+            (east.travel - Vec3::NEG_X).length() < 1e-6,
+            "an eastern sun shines west"
+        );
+        let overhead = Sun::at(std::f32::consts::FRAC_PI_2, 1.0);
+        assert!((overhead.elevation() - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+        // Equator at noon: straight down. Northern latitude at noon: toward the south (+Z).
+        let noon = Sun::at_hour(12.0, 0.0).unwrap();
+        assert!((noon.travel - Vec3::NEG_Y).length() < 1e-6);
+        let north = Sun::at_hour(12.0, 0.7).unwrap();
+        assert!(
+            north.travel.z < 0.0
+                && (north.elevation() - (0.5 * std::f32::consts::PI - 0.7)).abs() < 1e-5
+        );
+        // Dusk is low in the west: its light travels east.
+        let dusk = Sun::at_hour(17.5, 0.7).unwrap();
+        assert!(dusk.travel.x > 0.9 && dusk.elevation() > 0.0 && dusk.elevation() < 0.15);
+        assert!(Sun::at_hour(5.0, 0.7).is_none() && Sun::at_hour(19.0, 0.7).is_none());
+    }
+
+    #[test]
     fn only_the_atmosphere_sky_turns_on_the_physical_sky() {
         let settings = Settings::default();
         let physical = atmosphere(Sky::default(), &settings);
@@ -319,11 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn sun_is_light_zero_and_the_only_shadowed_light() {
+    fn sun_is_light_zero_and_the_only_explicit_shadow_request() {
         let lamp = Light::Point {
             position: Vec3::Y,
             candela: [100.0; 3],
             range: Some(5.0),
+            source_radius: 0.125,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.
@@ -343,6 +406,10 @@ mod tests {
         .unwrap();
         assert!(matches!(lighting.lights[0], Light::Directional { .. }));
         assert_eq!(lighting.lights.len(), 3);
+        assert_eq!(
+            lighting.lights[1], lamp,
+            "source radius survives the engine facade"
+        );
         assert_eq!(lighting.environment, [1.0, 2.0, 3.0]);
         assert_eq!(lighting.exposure_stops, -3.0);
         assert!(matches!(
@@ -356,7 +423,7 @@ mod tests {
         );
         assert_eq!(shadows.directional_disk_angle, sun.angular_radius);
 
-        // No sun: an empty request vector disables shadows for every light.
+        // No sun: no explicit shadow requests; the automatic local pool still shadows lamps.
         let (lighting, shadows) =
             super::lighting(None, &[lamp], Sky::default(), Exposure::default()).unwrap();
         assert_eq!(lighting.lights.len(), 1);

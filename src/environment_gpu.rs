@@ -394,7 +394,8 @@ impl Renderer {
     pub fn set_visible_environment(&mut self, visible: bool) {
         self.environment.visible = visible;
     }
-    /// Atomic CPU selection. None restores Lighting::environment. Admitted frames publish changes.
+    /// Atomic CPU selection. None restores the automatic sky (procedural atmosphere when
+    /// enabled, otherwise Lighting::environment). Admitted frames publish changes.
     /// The renderer retains the selected map; parameter edits never clone or reupload its pixels.
     pub fn set_environment(
         &mut self,
@@ -411,6 +412,8 @@ impl Renderer {
         let same = match (&self.environment.selected, map) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(&a.0, &b.0),
+            // Engine::set_sun republishes the automatic sky. Retain its GPU storage.
+            (Some(_), None) => !self.captured_environment(),
             _ => false,
         };
         if !same {

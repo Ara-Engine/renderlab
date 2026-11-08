@@ -22,7 +22,8 @@ use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
-const FRAME_BYTES: usize = 128;
+// TP2 integration: post-processing shares this ABI instead of freezing its byte size.
+pub(super) const FRAME_BYTES: usize = 128;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -51,6 +52,11 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
     let hard = crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
     let soft = fresh_shadow_gpu::shader_source(wgsl)?;
     Ok([hard, soft].map(|c| format!("{ENABLES}{c}\n{rays}")))
+}
+
+// TP2: glass reflection hits use R1's ordinary traced hit shading and geometry ABI.
+pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
+    Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
 }
 
 /// Same engine seams and material ABI, with no traversal declarations at all.

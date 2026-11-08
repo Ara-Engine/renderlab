@@ -19,6 +19,11 @@ use crate::primary_ray::{TRACED_DRAWS, placement_table};
 const HEADER_WORDS: u64 = 64;
 /// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
 const SLOT_WORDS: u64 = 24 + 32;
+// LC2 light-list plumbing only: cold records end with a visibility bit per light. Keep
+// vec4 alignment for the shading view; grow on demand, without a light-count cutoff.
+fn light_cold_words(lights: u32) -> u32 {
+    (31 + lights.div_ceil(32).max(1)).next_multiple_of(4)
+}
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
 const COUNTER_WORDS: u64 = 44;
 const MISS_WORDS: u64 = 6;
@@ -431,6 +436,7 @@ struct Resources {
     outgoing: Owned<wgpu::Buffer>,
     draws: Owned<wgpu::Buffer>,
     slots: u32,
+    cold_words: u32, // LC2: dynamic per-cell light bitset stride.
     misses: u32,
     _allocations: [Allocation; 4],
 }
@@ -918,7 +924,7 @@ impl Renderer {
         let reallocate =
             settings.enabled && self.gi.resources.as_ref().is_none_or(|r| r.slots != slots);
         if reallocate {
-            self.allocate_gi(slots);
+            self.allocate_gi(slots)?;
         } else if self.gi.settings.lookup != settings.lookup
             || self.gi.settings.cell_pixels != settings.cell_pixels
             || self.gi.settings.min_edge != settings.min_edge
@@ -942,12 +948,23 @@ impl Renderer {
     /// earlier ones. The cache is on by default (G2b) and allocates on the first frame whose
     /// program calls an indirect input (`prepare_gi`), so a renderer whose programs never do
     /// holds none of it.
-    fn allocate_gi(&mut self, slots: u32) {
+    fn allocate_gi(&mut self, slots: u32) -> Result<(), Error> {
         {
             // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
             // the miss list and request table stay at G2's size with the larger tables.
             let misses = slots.min(1 << 19);
-            let table_bytes = (HEADER_WORDS + u64::from(slots) * SLOT_WORDS) * 4;
+            let cold_words = light_cold_words(self.lighting.pending.count);
+            let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
+            let limits = self.device.limits();
+            if table_bytes
+                > limits
+                    .max_buffer_size
+                    .min(u64::from(limits.max_storage_buffer_binding_size))
+            {
+                return Err(Error::InvalidInput(
+                    "GI cell light lists exceed device buffer limits; reduce slots_log2 or light count",
+                ));
+            }
             // Counters, claims, misses, trace and integrate queues, ray items and their
             // staged bits, the request table, then bounce's two gather queues (a count, then
             // slots) and the cell shading queue (the frame offsets follow this order).
@@ -997,6 +1014,7 @@ impl Renderer {
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
                 slots,
+                cold_words,
                 misses,
                 _allocations: [
                     self.ledger.allocate(AllocationKind::Light, table_bytes),
@@ -1023,7 +1041,16 @@ impl Renderer {
             self.gi.generation += 1;
             self.gi.environment = None;
             self.gi.bounds.clear();
+            // LC2: a larger light bitset creates an empty table, including after a long
+            // idle view. Reset its normal empty-cache state before any idle shortcut.
+            self.gi.pending_clear = true;
         }
+        Ok(())
+    }
+    // LC2 measurement-only access to the light visibility bitset (no raw table dump).
+    #[cfg(test)]
+    pub(super) fn test_lc2_gi_table(&self) -> Option<&wgpu::Buffer> {
+        self.gi.resources.as_ref().map(|r| &*r.table)
     }
     pub fn indirect(&self) -> IndirectSettings {
         self.gi.settings
@@ -1040,6 +1067,10 @@ impl Renderer {
         self.gi.pending_clear = true;
         // Seen stamps restart too, so a reset sequence repeats bit for bit.
         self.gi.frame = 0;
+    }
+    #[cfg(test)]
+    pub(crate) fn test_indirect_age(&self) -> u32 {
+        self.gi.since_clear
     }
     /// Software-ray geometry for `mesh` on the non-RT path: a full-detail BVH built now
     /// from the mesh's object-space triangles. Hardware renderers ignore it unless
@@ -1973,7 +2004,18 @@ impl Renderer {
             if !(self.gi.settings.enabled && eligible && self.gi_callers(draws)) {
                 return Ok(());
             }
-            self.allocate_gi(1 << self.gi.settings.slots_log2);
+            self.allocate_gi(1 << self.gi.settings.slots_log2)?;
+        }
+        // LC2: changing light count may outgrow the bitset. Existing in-flight tables
+        // retire normally; scheduling and cache lookup are otherwise unchanged.
+        if self.gi.settings.enabled
+            && self
+                .gi
+                .resources
+                .as_ref()
+                .is_some_and(|r| r.cold_words < light_cold_words(self.lighting.pending.count))
+        {
+            self.allocate_gi(1 << self.gi.settings.slots_log2)?;
         }
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
@@ -1996,6 +2038,7 @@ impl Renderer {
         let mut header = [0u32; HEADER_WORDS as usize];
         header[0] = u32::from(run);
         header[1] = r.slots - 1;
+        header[23] = r.cold_words; // LC2 per-cell light visibility stride.
         let field = self.environment.selected.is_some();
         // Probe statistics (GI_F_STATS) on profiled frames only.
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
@@ -2140,6 +2183,7 @@ impl Renderer {
         let environment = {
             let mut h = Sha256::new();
             h.update(self.environment.generation.to_le_bytes());
+            h.update(self.environment.content_revision.to_le_bytes());
             let u = self.environment.uniform();
             h.update(&u[..8]);
             h.finalize().into()
@@ -2194,6 +2238,8 @@ impl Renderer {
             h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
             // DC1: altered surface inputs relight bounce cells on the existing schedule.
             h.update(self.lighting.decals.hash);
+            // TP2: transparent sun attenuation changes the cells' direct illumination.
+            h.update(self.lighting.transmission.hash);
             h.update(environment);
             h.update(self.program_slot(state.program).source.as_bytes());
             // MP1: every program of a mixed frame.

@@ -441,8 +441,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             _ => "fn rl_indirect_open() {}\n",
         });
     }
+    // TP2: light_sample filters incident sun RGB through transparent caster layers.
+    let transmission = super::renderer::transparency_gpu::transmission_shadow::api_source();
     let mut source = format!(
-        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{transmission}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
@@ -480,13 +482,14 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
-const LIST_HIT_PARAMETERS_SEAM: &str = "            rl_load_parameters(h.batch);\n";
+// TP2 integration: match the call independently of LF/CRLF checkout endings.
+const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
 /// In a mixed frame a reflection hit on another program's draw is shaded by this module's
 /// program with the hit's material inputs and the receiver's own parameter block: the
 /// recorded fallback (docs/m7-gaps.md, Programs), since another program's code is not in
 /// this module.
 const LIST_HIT_PARAMETERS: &str =
-    "            rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));\n";
+    "rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));";
 
 /// `compose` for the traced stages plus the tile-list entry of mixed-program frames. The
 /// single-program modules are composed by `compose` alone, so their text (and code) is
@@ -583,6 +586,20 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 /// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
+}
+// TP2: the forward glass pass supplies the declared lobe to R1 separately.
+pub(crate) fn declares_reflection(program: &str) -> bool {
+    declares(program, "fn", "reflection_lobe") && tokens(program).contains(&"specular_incident")
+}
+// TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
+// program, even when that program never asks for reflections of its own.
+pub(crate) fn glass_hit_program(program: &str) -> String {
+    let mut source = program.to_owned();
+    if !declares(program, "fn", "reflection_lobe") {
+        source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
+    }
+    source.push_str("\nfn rl_glass_requires_incident(input:SurfaceInput)->vec4<f32> {return specular_incident(input);}\n");
+    source
 }
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")

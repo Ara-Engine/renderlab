@@ -79,6 +79,7 @@ impl Fixture {
                         position: Vec3::new(-2., 2., 1.),
                         candela: [100.; 3],
                         range: Some(6.),
+                        source_radius: 0.0,
                     },
                     Light::Spot {
                         position: Vec3::new(2., 3., 2.),
@@ -87,6 +88,7 @@ impl Fixture {
                         range: Some(7.),
                         inner: 0.25,
                         outer: 0.5,
+                        source_radius: 0.0,
                     },
                 ],
                 environment: [4., 5., 8.],
@@ -108,8 +110,8 @@ impl Fixture {
     pub fn record(&self, width: u32, height: u32) -> serde_json::Value {
         let lights:Vec<_>=self.lighting.lights.iter().map(|l|match l {
             Light::Directional{travel,lux}=>serde_json::json!({"type":"directional","travel":travel.to_array(),"lux":lux}),
-            Light::Point{position,candela,range}=>serde_json::json!({"type":"point","position":position.to_array(),"candela":candela,"range":range}),
-            Light::Spot{position,travel,candela,range,inner,outer}=>serde_json::json!({"type":"spot","position":position.to_array(),"travel":travel.to_array(),"candela":candela,"range":range,"inner":inner,"outer":outer}),
+            Light::Point{position,candela,range, ..}=>serde_json::json!({"type":"point","position":position.to_array(),"candela":candela,"range":range}),
+            Light::Spot{position,travel,candela,range,inner,outer, ..}=>serde_json::json!({"type":"spot","position":position.to_array(),"travel":travel.to_array(),"candela":candela,"range":range,"inner":inner,"outer":outer}),
         }).collect();
         serde_json::json!({"fixture":"M5-A authored v1","units":"metres","coordinates":"right_handed_Y_up_camera_forward_minus_Z","width":width,"height":height,
             "camera":{"eye":self.eye.to_array(),"target":self.target.to_array(),"up":[0,1,0],"fov_y_radians":0.78,"near":0.05,"far":50.0,"motion_eye_dx_per_pose":0.04},
