@@ -131,3 +131,8 @@ Unreal packages, update of 2026-11-08 (from M7-U0b). Never mix packages within o
 Retention correction (root, 2026-11-08): path-traced reference archives, plus the Unreal native captures that later units score against, are not "raw dumps". Keep them until integrated M7 acceptance. That covers the S2G, Q-disocclusion, Q-sun and U1b specular references, and TSR's Q-disocclusion capture. The 5 MB delete rule applies to intermediate buffers, rejected attempts and duplicates. TR1 found that deleted S2G, Q-disocclusion and U1b references blocked its remaining gates. Regenerate those once, compactly (half-precision where the scorer allows), into `E:/renderlab-work/m7-refs/`, and keep them there.
 
 Package update (2026-11-08): R0a's reflection fixtures RF1-RF10 use `E:/renderlab-work/m7-r0a/ue-package-c` (package C). Keep package C and the source `ue-project/Content`. R0a needed no further recooks, so the Unreal project's DerivedDataCache and Saved/Cooked are deleted, freeing 2.88 GB.
+
+ES1 occlusion ruling (Islam, delegated, 2026-11-08): keep sky specular occlusion by direct sky visibility, the physically correct form, which can't double-count bounce light after G2.
+- ES1's record keeps the unoccluded diagnostic variant's quarry numbers as a comparison point.
+- The cache, with bounce light and ES1, may become the default only if it equals or beats both the cache-off image and that unoccluded variant on every quarry population, on both paths, static and in motion.
+- If it doesn't, record the miss and bring the trade-off back to Islam. Never switch to unoccluded quietly.
