@@ -10,6 +10,17 @@ fn integrated_reflection_spirv_has_no_ray_query_null() {
     .unwrap();
     for (name, source) in ["hard", "soft"].into_iter().zip(sources) {
         let module = naga::front::wgsl::parse_str(&source).unwrap();
+        // TP2: a stale 112-byte post binding broke the real 128-byte primary ABI.
+        let frame = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("PrimaryFrame"))
+            .unwrap()
+            .1;
+        let naga::TypeInner::Struct { span, .. } = &frame.inner else {
+            panic!("primary frame must be a struct")
+        };
+        assert_eq!(*span as usize, primary_ray_gpu::FRAME_BYTES);
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

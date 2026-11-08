@@ -45,7 +45,7 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
     let n=unit_normal(lobe.xyz);
     let geometric=unit_normal(textureLoad(tp_reflection_geometric,vec2<i32>(id.xy),0).xyz);
     let receiver=Receiver(p.xyz,geometric,vec2<i32>(id.xy),0u,p.w,true);
-    let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),n,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
+    let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),geometric,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
         vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),true,lighting.eye,id.xy,primary_materials[0].value,receiver,decal_none());
     rl_indirect_open();
     rl_reflection_prepare(SpecularLobe(n,lobe.w,1.0),input,0u,id.xy,size);

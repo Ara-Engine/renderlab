@@ -147,7 +147,8 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
 /// and AT1's camera fog and aerial perspective.
 fn particle_sources(prelude: &str) -> [String; 2] {
     let common = format!(
-        "{prelude}\n{}{}{}{}",
+        "{prelude}\n{}{}{}{}{}",
+        transmission_shadow::api_source(),
         crate::atmosphere::api_source(),
         section("TP_FRAME"),
         section("TP_SUN"),

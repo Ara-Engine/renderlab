@@ -258,7 +258,9 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
         if light.kind.x!=0u { continue; }
         let l=-light.travel_outer.xyz;
         let visible=select(1.0,tp_sun_visibility(world),dot(l,tp.sun.xyz)>0.9999);
-        sum+=light.rgb_inner.xyz*visible;
+        // TP2: particles receive the same coloured sun transmission as surfaces.
+        let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(world,l),light.kind.z!=0u);
+        sum+=light.rgb_inner.xyz*visible*transmission;
     }
     var sky=vec3<f32>(0.0);
     for(var a=0u;a<3u;a+=1u) {
