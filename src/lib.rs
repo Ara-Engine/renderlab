@@ -3,6 +3,8 @@
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+// AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
+mod atmosphere;
 mod environment;
 // DC1: owned projected decals and the programmable surface-input API.
 mod decal;
@@ -29,6 +31,7 @@ mod shadows;
 pub mod virtual_geometry;
 mod visibility;
 
+pub use atmosphere::{Atmosphere, AtmosphereMedium, HeightFog, VolumetricFog};
 pub use decal::{
     Decal, DecalBlend, DecalSettings, DecalStats, DecalTexture, DecalTextureKind, DecalTextures,
 };
