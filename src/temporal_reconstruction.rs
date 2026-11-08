@@ -419,6 +419,8 @@ impl PrimaryState {
 
 /// The previous reconstructed frame's inputs.
 struct Previous {
+    // MV1: match the instance snapshot's rendered frame, excluding upload submissions.
+    frame: u64,
     matrix: Mat4,
     jitter: [f32; 2],
     eye: Vec3,
@@ -865,12 +867,13 @@ impl Renderer {
             affected.max += margin;
             shadow_bounds = Some(affected);
         }
+        let rendered_frames = self.frames;
         let state = self.reconstruction_state.as_mut().unwrap();
         let cold = state.previous.is_none() || state.cut;
         let continued = state
             .previous
             .as_ref()
-            .filter(|p| p.key == key && p.suns.len() == suns.len())
+            .filter(|p| p.frame == rendered_frames && p.key == key && p.suns.len() == suns.len())
             .map(|p| {
                 // The largest directional-light turn since the previous frame.
                 let turn = p
@@ -985,6 +988,7 @@ impl Renderer {
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         state.previous = Some(Previous {
+            frame: rendered_frames + 1,
             matrix,
             jitter,
             eye,

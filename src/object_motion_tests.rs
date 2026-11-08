@@ -232,14 +232,48 @@ fn gpu_object_motion() {
                 .hit
                 .texture,
         );
-        let max_weight = history
+        let tiles = &r
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap()
+            .tiles
+            .texture;
+        let tile_width = tiles.width() as usize;
+        let region = r.primary.as_ref().unwrap().scene;
+        let [tile_x, tile_y] = primary_ray_gpu::TRACE_TILE.map(|v| v as usize);
+        let flags: Vec<_> = read_texture(&r, tiles)
+            .chunks_exact(4)
+            .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+            .collect();
+        let weights: Vec<_> = history
             .iter()
             .zip(&hits)
-            .filter(|(_, hit)| hit[0] == 1)
-            .map(|(v, _)| f32::from_bits(v[3]))
-            .fold(0f32, f32::max);
-        assert!(max_weight > 2., "moving surface history did not continue");
-        rows.push(serde_json::json!({"blur":blur,"max_history_weight":max_weight}));
+            .enumerate()
+            .filter(|(p, (_, hit))| {
+                let (x, y) = (p % size[0] as usize, p / size[0] as usize);
+                hit[0] == 1
+                    && x >= region[0] as usize
+                    && x < region[2] as usize
+                    && y >= region[1] as usize
+                    && y < region[3] as usize
+                    && flags[y / tile_y * tile_width + x / tile_x] != 0
+            })
+            .map(|(_, (v, _))| f32::from_bits(v[3]))
+            .collect();
+        let max_weight = weights.iter().copied().fold(0f32, f32::max);
+        let continued = weights.iter().filter(|&&v| v > 2.).count();
+        assert!(
+            continued > weights.len() / 4,
+            "moving surface history did not continue: {continued}/{}",
+            weights.len()
+        );
+        rows.push(
+            serde_json::json!({"blur":blur,"max_history_weight":max_weight,
+            "moving_pixels":weights.len(),"continued_moving_pixels":continued}),
+        );
         // A cleared strip behind the moving object must not retain its old colour.
         // Exclude the expanded current bounding box, including its antialiased edge.
         let corners: Vec<_> = vertices
@@ -292,6 +326,39 @@ fn gpu_object_motion() {
         "stopped object retained velocity {max_stop}"
     );
     rows.push(serde_json::json!({"max_stopped_half_extent_px":max_stop}));
+    // A diagnostic frame advances instance history without advancing TR1/post's
+    // camera history. Resuming lit output must cut the mismatched histories.
+    let resumed =
+        Camera::look_at(Vec3::new(0.3, 0., 4.), Vec3::ZERO, Vec3::Y, 0.8, 0.05, 100.).unwrap();
+    instances.set(0, transform(24)).unwrap();
+    loop {
+        if r.try_render_view(
+            &color,
+            &resumed,
+            &mut [Draw::new(&mesh, &mut instances)],
+            ViewMode::Normal,
+        )
+        .unwrap()
+        .is_some()
+        {
+            break;
+        }
+        r.collect().unwrap();
+    }
+    render(
+        &mut r,
+        &color,
+        &resumed,
+        &mut [Draw::new(&mesh, &mut instances)],
+    );
+    r.test_drain("MV1 resume after diagnostic view");
+    assert!(r.reconstruction_state.as_ref().unwrap().reset);
+    let max_resumed = words(&r, r.post.as_ref().unwrap().test_surface())
+        .iter()
+        .map(|v| glam::Vec2::new(f32::from_bits(v[0]), f32::from_bits(v[1])).length())
+        .fold(0f32, f32::max);
+    assert_eq!(max_resumed, 0.);
+    rows.push(serde_json::json!({"diagnostic_resume_reset":true,"max_resumed_half_extent_px":max_resumed}));
     drop(mesh);
     drop(instances);
     r.test_drain("MV1 fixture release");
