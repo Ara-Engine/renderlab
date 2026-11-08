@@ -1,9 +1,11 @@
 # M2: lossless geometry storage
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC. Base `b183023`, branch `t3/m2-memory`.
 
 **RT scope:** all Interactive RT timings, speed claims and memory rows here are
-**measured on the non-default fast setup (traced + Interactive)**. The RT-device
+**measured on the historical eight-ray setup with TR1 off (traced + Interactive)**. The RT-device
 default remains raster + 256-ray Exact; see [RT1](rt1-interactive.md). Traced + Virtual
 rows describe a separate explicit opt-in. Storage changes do not change those defaults.
 
@@ -203,7 +205,7 @@ release lines, checks games, requires 4 GiB free at start and aborts below 2 GiB
 
 ## Frame timing and verification cost
 
-RT timings and ratios here are **measured on the non-default fast setup (traced + Interactive)**.
+RT timings and ratios here are **measured on the historical eight-ray setup with TR1 off (traced + Interactive)**.
 
 RTX 4070 SUPER, NVIDIA 617.14, Windows/Vulkan, wgpu 30.0.1, rustc 1.96.0.
 Development/test profile (Renderlab opt-level 1), not release-performance data.

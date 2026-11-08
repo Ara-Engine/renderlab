@@ -23,8 +23,8 @@ use renderlab::virtual_geometry::{
 mod validation;
 use fixture::Scene;
 use renderlab::{
-    Draw, FrameId, Instances, Limits, Mesh, Renderer, RendererOptions, Revision, SampleCount,
-    ViewMode, Visibility, wgpu,
+    Draw, FrameId, HardwareShadowOptions, Instances, Limits, Mesh, PrimaryVisibility, Renderer,
+    RendererOptions, Revision, SampleCount, SoftShadows, ViewMode, Visibility, wgpu,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -87,6 +87,10 @@ struct Options {
     samples: SampleCount,
     anisotropy_clamp: u16,
     view: ViewMode,
+    primary: Option<PrimaryVisibility>,
+    soft_shadows: Option<SoftShadows>,
+    no_rt: bool,
+    rt_max_bytes: Option<u64>,
 }
 impl Options {
     fn parse() -> Result<Self, String> {
@@ -119,10 +123,37 @@ impl Options {
             samples: SampleCount::One,
             anisotropy_clamp: 1,
             view: ViewMode::BaseColor,
+            primary: None,
+            soft_shadows: None,
+            no_rt: false,
+            rt_max_bytes: Some(8 * 1024 * 1024 * 1024),
         };
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--no-rt" => options.no_rt = true,
+                "--primary" => {
+                    options.primary = Some(match args.next().as_deref() {
+                        Some("raster") => PrimaryVisibility::Raster,
+                        Some("traced") => PrimaryVisibility::Traced,
+                        _ => return Err("--primary requires raster|traced".into()),
+                    });
+                }
+                "--soft-shadows" => {
+                    options.soft_shadows = Some(match args.next().as_deref() {
+                        Some("exact") => SoftShadows::Exact,
+                        Some("interactive") => SoftShadows::Interactive,
+                        _ => return Err("--soft-shadows requires exact|interactive".into()),
+                    });
+                }
+                "--rt-max-bytes" => {
+                    let bytes: u64 = args
+                        .next()
+                        .ok_or("missing RT byte budget")?
+                        .parse()
+                        .map_err(|_| "invalid RT byte budget (0 disables the policy)")?;
+                    options.rt_max_bytes = (bytes != 0).then_some(bytes);
+                }
                 "--progressive" => options.progressive = true,
                 "--interactive-camera" => options.interactive_camera = true,
                 "--virtual-manifest" => {
@@ -474,8 +505,47 @@ impl View {
             } else {
                 wgpu::Features::PIPELINE_CACHE
             };
+        let ray_features = wgpu::Features::EXPERIMENTAL_RAY_QUERY | renderlab::TRACED_FEATURES;
+        let adapter_limits = adapter.limits();
+        let rt = !options.no_rt
+            && options.samples == SampleCount::One
+            && options.virtual_manifest.is_none()
+            && adapter.features().contains(ray_features)
+            && renderlab::traced_limits(adapter_limits.clone()) == adapter_limits
+            && adapter_limits.max_blas_primitive_count > 0
+            && adapter_limits.max_blas_geometry_count > 0
+            && adapter_limits.max_tlas_instance_count > 0;
+        if options.primary == Some(PrimaryVisibility::Traced) && !rt {
+            return Err(
+                "traced primaries require a capable RT device, 1x samples and regular geometry"
+                    .into(),
+            );
+        }
         let descriptor = wgpu::DeviceDescriptor {
-            required_features: required_features | renderlab::RECEIVER_FEATURES,
+            required_features: required_features
+                | renderlab::RECEIVER_FEATURES
+                | if rt {
+                    ray_features
+                } else {
+                    wgpu::Features::empty()
+                },
+            required_limits: if rt {
+                renderlab::traced_limits(wgpu::Limits {
+                    max_blas_primitive_count: adapter_limits.max_blas_primitive_count,
+                    max_blas_geometry_count: adapter_limits.max_blas_geometry_count,
+                    max_tlas_instance_count: adapter_limits.max_tlas_instance_count,
+                    ..Default::default()
+                })
+            } else {
+                wgpu::Limits::default()
+            },
+            // The viewer is the device caller: it explicitly accepts wgpu's experimental
+            // ray-query contract when negotiating this RT path. The library never does so.
+            experimental_features: if rt {
+                unsafe { wgpu::ExperimentalFeatures::enabled() }
+            } else {
+                Default::default()
+            },
             memory_hints: renderlab::MEMORY_HINTS,
             ..Default::default()
         };
@@ -540,17 +610,45 @@ impl View {
             );
         }
         let renderer_start = Instant::now();
-        let mut renderer = Renderer::new_with_options(
-            device,
-            queue,
-            config.format,
-            renderer_limits,
-            RendererOptions {
-                samples: options.samples,
-                anisotropy_clamp: options.anisotropy_clamp,
-            },
-            &source,
-        )?;
+        let renderer_options = RendererOptions {
+            samples: options.samples,
+            anisotropy_clamp: options.anisotropy_clamp,
+        };
+        let mut renderer = if rt {
+            Renderer::new_with_hardware_shadows(
+                device,
+                queue,
+                config.format,
+                renderer_limits,
+                renderer_options,
+                HardwareShadowOptions {
+                    max_estimated_bytes: options.rt_max_bytes,
+                },
+                &source,
+            )?
+        } else {
+            Renderer::new_with_options(
+                device,
+                queue,
+                config.format,
+                renderer_limits,
+                renderer_options,
+                &source,
+            )?
+        };
+        if let Some(primary) = options.primary {
+            renderer.set_primary_visibility(primary)?;
+        }
+        if let Some(shadows) = options.soft_shadows {
+            renderer.set_soft_shadows(shadows);
+        }
+        eprintln!(
+            "primary={:?} soft_shadows={:?} reconstruction={:?} shadow_budget={:?}",
+            renderer.primary_visibility(),
+            renderer.soft_shadows(),
+            renderer.reconstruction(),
+            renderer.reconstruction_shadow_budget()
+        );
         let program_cache = std::env::var_os("RENDERLAB_PIPELINE_CACHE_DIR")
             .map(PathBuf::from)
             .or_else(|| {
@@ -1270,6 +1368,12 @@ impl View {
                 }
             }
             if options.log_frames {
+                eprintln!(
+                    "render_path={:?} soft_shadows={:?} shadow_rays={:?}",
+                    report.primary,
+                    report.soft_shadows,
+                    self.renderer.reconstruction_shadow_rays()
+                );
                 eprintln!(
                     "lighting_stats={:?} shadows={:?} lighting_uploads={:?} shadow_prepare_ms={:.6} shadow_upload_ms={:.6} shadow_encode_ms={:.6}",
                     self.renderer.lighting_stats(),

@@ -159,6 +159,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // Reinitialize this query for each ray, without a loop-local zero initialization.
     var query:ray_query;
     rl_reflection_hit=true;
+    // Naga 30 must not emit a loop-local null initializer for this opaque type.
+    var query:ray_query;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
         if !mirror {

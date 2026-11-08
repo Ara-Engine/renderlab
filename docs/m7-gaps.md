@@ -43,35 +43,39 @@ PP1 provides bloom, camera motion blur, camera-requested near/far gather DOF, to
 
 ## RT shadows
 
-[RTDEF](rtdef.md) compares raster + Exact with traced + Interactive + the latest
-default TR1b on main `ae95d3a`. The quarry improves, but **the RT default is not
-promoted**: S2's cold and moving disk penumbrae are visibly grainier than
-raster + Exact, including at ordinary exposure and at the registered +4-stop stress.
-The cold disk witness is 14.0832 display codes RMS versus raster + Exact's
-12.6000 and retained HRT1's 13.6655. Settled TR1 substantially improves it.
+[RTDEF2](rtdef2.md) selects traced primaries, Interactive and TR1 for capable
+1x RT devices: 256 rays on a fresh target/cut, 64 on scene-history resets,
+32 for camera/light motion or young history, and eight after 16 held frames.
+The registered cold/moving disk witnesses no longer show RTDEF's extra grain.
+The viewer negotiates the required RT capabilities; explicit Raster/Exact
+settings and the old recorded gates remain available.
 
-- History restarts on scene-transform/instance uploads. Moving casters can
-  therefore retain eight-ray startup grain indefinitely; a long still hold
-  does not establish camera/reveal/caster-motion acceptance. In S2's moving
-  blocker frame 63, the single-surface floor penumbra is 9.8755 codes RMS at
-  +4 stops versus raster + Exact's 6.6179. This diagnostic does not replace
-  the complete-image scorer.
-- All 24 S2 phase pools beat retained HRT1 in linear HDR and +0/+4 display
-  RMS. Per-frame +4 RMS still loses on **10/1,280 frames**: all eight cold
-  frame-0 cases, camera .25 px/point frame 1 and camera 1 px/point frame 122
-  (return/reveal). Linear HDR and +0 RMS win on all 1,280 frames. The HRT
-  comparison is non-blocking tonight; the default decision is held by the
-  visible regression against raster + Exact, not by these HRT rows.
-- The previous unfiltered Interactive visibility/flicker results in
-  [RT1c](rt1c-rt-default.md) still apply only to those registered masks.
-  Post-reconstruction visibility is not separately measured by the diagnostic
-  shadow shader, and is not inferred from its raw eight-ray visibility.
-- RT1d's fixed spatial filter remains opt-in: its quarry false-shadow,
-  lit-darkened and strict-solid losses were not repaired by this unit. No
-  film/Unreal quality floor or combined 2× performance floor is claimed here.
-- RT library and viewer defaults remain raster + Exact, so the RT default
-  still receives no TR1 anti-aliasing. Traced primaries and Interactive remain
-  settings; their historical TR1-off speed labels remain explicitly scoped.
+- Global transform/material changes still restart every TR1 pixel. The
+  64-ray restart budget improves grain without fixing that coarse invalidation;
+  local motion histories and broader animated-game coverage remain work.
+- The final disk grain diagnostic wins 47/48 sampled checkpoints. The early
+  camera-1px frame 1 row is 4.857 versus Exact's 4.103 +4-stop codes, though
+  inspected speckle is not visibly worse and whole-crop error is lower.
+  Native quarry crops also retain TR1's fine-texture softness; this sampling
+  change does not fix its resolve filter or certify film-exact detail.
+- A first GI-cache initialization can dominate a cold frame (RTDEF2's
+  quiet first traced quarry visit reached 89.53 ms; an earlier functional
+  visit reached 120.9 ms). Warm-cache cold TR1 targets cost 14.85 ms median;
+  held/camera frames cost 3.71/4.65 ms versus Exact's 17.04/17.05 ms with
+  GI/AT1 enabled. These costs are reported separately; no startup/frame-time equivalence
+  or engine-wide Unreal performance claim is made.
+- The retained HRT comparison stays non-blocking. Disk cold grain is repaired;
+  point-source first-frame geometric aliasing, TR1's revealed-pixel/sky/specular
+  gaps and missing full-HDR flicker comparisons remain. RTDEF2's sparse
+  checkpoints do not replace RTDEF's full 1,280-frame audit.
+- RT1d's spatial visibility filter remains opt-in. Its false-shadow,
+  lit-darkened and strict-solid losses are not repaired by this ray budget.
+- Raster/4x, virtual geometry and RT devices without traced binding-array/
+  hit-vertex capabilities retain the fallback path. The traced draw/geometry
+  admission limits remain; this is not acceptance of every game workload.
+- Historical eight-ray, TR1-off speed/memory rows are retained as historical
+  evidence, not prices for the new GI/AT1/TR1 default. Unreal/film parity and
+  a combined 2x advantage are not certified by this unit.
 
 ## Atmosphere
 
@@ -135,7 +139,7 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 
 TR1 is the default on traced and visibility-buffer lit frames, both paths, from TR1b's overnight pass; `Reconstruction::off()` switches it off ([m7-tr1b.md](m7-tr1b.md)). It is never presented as meeting the Unreal bar.
 
-**Reach.** The RT device's code default is still raster primaries (RT1c/RT1d), which TR1 does not reconstruct: RT users get TR1 only with traced primaries. Temporal soft-shadow frames keep their own film history and are not reconstructed.
+**Reach.** RTDEF2 makes traced primaries and TR1 the capable 1x RT default; the viewer negotiates that path. Raster/4x and unsupported-capability fallbacks still do not reconstruct. Temporal soft-shadow frames keep their own film history and are not reconstructed.
 
 **Against no-AA, judged on each path's own 64-spp pixel integral** (Islam's ruling; the visible-sky quarry walk, 40 frames, every row pooled per segment). Before tonight TR1b lost 31 of 256 pooled rows on both paths. With the overnight changes (radius-1 spatial start with a radius-2 fallback, point-symmetric jitter pairs, exact single-layer output at whole coverage, sub-1e-3-px fetch snap) it loses 26 on both paths; the cold first frame now equals no-AA bit for bit (all start-age-0 rows tie). What still loses, by kind (RT; non-RT within a few rows of it):
 
@@ -177,7 +181,7 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 - On S2G's moving glossy reliefs both presets alias the finest specular stripes (stepped edges) where TR1 native does not; on the quarry they are slightly softer than native.
 - Timing is one functional (not QUIET) run: Q-walk RT p50 0.93 ms (quality) and 0.73 ms (performance) against TR1 native's 1.47 ms; non-RT 1.71 and 1.45 against 2.37.
 - The internal size is rounded per axis, so targets whose size isn't divisible by 3 (quality) or 2 (performance) render at a very slightly different aspect.
-- The viewer renders raster primaries, so it gets neither TR1 nor the presets.
+- The capable 1x RT viewer now renders traced primaries with TR1 (RTDEF2). Upscaling presets remain library settings; the viewer has no preset flag.
 
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
 

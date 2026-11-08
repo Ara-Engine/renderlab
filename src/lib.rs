@@ -71,7 +71,7 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, RenderScale, Renderer};
+pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
