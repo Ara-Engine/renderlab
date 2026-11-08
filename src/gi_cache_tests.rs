@@ -2230,6 +2230,8 @@ fn gpu_gi_quarry() {
     let cell_pixels = tuned["cell_pixels"]
         .as_f64()
         .map_or(base.cell_pixels, |p| p as f32);
+    let settle_frames: usize =
+        env("RENDERLAB_M7_G1_QUARRY_FRAMES").map_or(4, |s| s.parse().unwrap());
     let mut results = json!({"path": path, "triangles": triangles, "load_seconds": load_seconds,
         "constant_sky": constant_sky, "settings": {"directions": directions, "cell_pixels": cell_pixels},
         "shaders": env("RENDERLAB_GI_SHADERS"), "placements": placements, "variants": {}});
@@ -2297,8 +2299,25 @@ fn gpu_gi_quarry() {
             r.reset_indirect();
             render(&mut r);
             let cut = profile_json(&mut r);
-            for _ in 0..4 {
+            // RENDERLAB_M7_G1_QUARRY_FRAMES still frames after the cut (default 4), with the
+            // counters the renderer last read back after each (they lag the GPU by frames).
+            let mut trail = vec![];
+            for _ in 0..settle_frames {
                 render(&mut r);
+                let mut row = profile_json(&mut r)["counters"].clone();
+                // With RENDERLAB_M7_G1_QUARRY_TABLE=1, the table's live and distinct keys.
+                if env("RENDERLAB_M7_G1_QUARRY_TABLE").as_deref() == Some("1") {
+                    let table = r.indirect_table().unwrap().unwrap();
+                    let slots = 1usize << IndirectSettings::default().slots_log2;
+                    let keys: Vec<u32> = (0..slots)
+                        .map(|s| table[HEADER_WORDS as usize + s * 16] & 0x7fff_ffff)
+                        .filter(|&k| k != 0)
+                        .collect();
+                    let distinct: std::collections::HashSet<u32> = keys.iter().copied().collect();
+                    row["live_cells"] = json!(keys.len());
+                    row["distinct_keys"] = json!(distinct.len());
+                }
+                trail.push(row);
             }
             let settled = profile_json(&mut r);
             let image = capture_radiance(&mut r, exposure);
@@ -2352,7 +2371,7 @@ fn gpu_gi_quarry() {
             variant_json[format!("pose{pose}")] = json!({
                 "against_rt": quarry_score(&image, &exact, &hits),
                 "open_against_rt": quarry_score(&open, &exact, &hits),
-                "cut": cut, "settled": settled, "image_hash": hash_image(&image),
+                "cut": cut, "settled": settled, "trail": trail, "image_hash": hash_image(&image),
                 "memory": {"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes, "geometry_bytes": r.indirect_stats().geometry_bytes},
             });
             if let Some(reference) = &references[pose] {

@@ -1,4 +1,4 @@
-# M7-G1b: world radiance cache cost, cut refill and rotating environment
+# M7-G1b: world radiance cache cost, cut refill, rotating environment and quarry
 
 Unit G1b continues [M7-G1](m7-g1.md) on branch `t3/m7-g1b` from main `1660d4c`. Contract: [milestone-7.md](milestone-7.md). Claim constraints: [m7-p0-claims.md](m7-p0-claims.md) W1-W3, W8, C1-C5 and C8. Unreal comparator: M7-U0b checkpoint `35a2759` (`t3/m7-u0b`, not yet on main). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
 
@@ -6,12 +6,14 @@ Unit G1b continues [M7-G1](m7-g1.md) on branch `t3/m7-g1b` from main `1660d4c`. 
 
 The cache stays **off by default** (`IndirectSettings::enabled`), as at G1.
 
-**Cost (item 1).** These are camera-moving increments over the cache-off frame. The setup is SV at 1080p with the Lambert gate program and no per-pass timestamps. The window is `q5-1`, the one quiet window with no foreign compiler at any sample (section 1.4); ranges cover its two visits of each configuration.
+**Cost (item 1).** These are camera-moving increments over the cache-off frame. The setup is SV at 1080p with the Lambert gate program and no per-pass timestamps. The final code is measured in quiet window `q6-1`, beside the code of the earlier claim (`q5-1`) in the same window, and the delivered build is confirmed in `q7-1`. No window saw a foreign compiler at any sample (section 1.4).
 
-| Path | G1 (base, same window) | G1b final | Stricter budget (root) |
-|---|---:|---:|---:|
-| RT | +0.57-0.61 ms | **+0.37-0.44 ms** (median of four visits 0.41) | 0.45 ms: **met** |
-| Non-RT | +0.77 ms | **+0.49-0.50 ms** | 0.46 ms: **missed by 0.03-0.04 ms** |
+| Path | G1 (base) | G1b before the quarry changes (`q5-1`) | G1b final (`q6-1`, `q7-1`) | Stricter budget (root) |
+|---|---:|---:|---:|---:|
+| RT | +0.57-0.61 ms | +0.37-0.44 ms (median 0.41; 0.41 again in `q6-1`) | **+0.44 ms** | 0.45 ms: **met**, by 0.01 ms |
+| Non-RT | +0.77 ms | +0.49-0.50 ms (the same in `q6-1`) | **+0.52-0.53 ms** | 0.46 ms: **missed by 0.06-0.07 ms** |
+
+The quarry changes (section 6) cost about 0.03 ms a frame on SV, where they change no score: the probe now reads each pixel's three vertex normals.
 
 **Measurement correction.** G1's quoted costs (+0.684 / +0.809 ms) included its own per-pass timestamps, about 0.05 ms a frame. Without them, G1's code measures about +0.60 / +0.74 ms.
 
@@ -34,7 +36,7 @@ Every claim constraint holds, and every gate passes (section 5).
 **Sky steps.**
 - A constant-sky change now costs nothing: the lookup scales the cached unit-radiance values.
 - A prepared map's yaw re-integrates every cell and equals a fresh cache on the next frame: 0 pixels differ over six 15° steps, on both paths.
-- **Miss:** a continuously rotating map costs 2.4 ms a frame on non-RT and 4.7-6.3 ms on RT (section 3). On RT most of the excess is a shading-pass slowdown outside the cache, still under diagnosis.
+- **Miss:** a continuously rotating map costs 1.9-2.0 ms a frame on both paths, about 1.0 ms of it re-integrating every cell (section 3). An apparent RT shading spike under a rotating map was a missing GPU warm-up in the harness, not the map or the cache (section 3.1).
 
 **SV gate against Unreal (Lumen Epic, U0b `35a2759`).**
 - G1b beats Lumen HW Epic (the RT comparator) and Lumen SW Epic with mesh SDFs (the non-RT comparator) on every lighting population, static and in motion, on both paths. The table is in section 4.
@@ -42,13 +44,17 @@ Every claim constraint holds, and every gate passes (section 5).
 
 **Correction to G1's record.** G1's overview-pose scores counted about 323,000 stale sky records as surface pixels, which lowered its overview RMS. The default reads **1.95%**, not 1.64%; gaps-pose numbers stand (section 4.3).
 
-**Quarry (items 3 and 4): not done.**
-- The cook-time near field is not built.
-- There is no quarry gate. U0b's quarry comparator is still to come, and its retained quarry references include bounce, not G1's depth-2 sky term.
+**Quarry (items 3 and 4).**
+- **A software-ray bug, fixed.** Hit normals went through the world-to-object matrix instead of its transpose, which is wrong on rotated placements. SV's placements are translations, so it never showed there; the quarry's are rotated. Software against hardware rays on the quarry: 82.0% → 0.04% RMS.
+- **Gate input.** U0b's quarry comparator and Lumen quarry sky rows are not published yet, and U0b's retained quarry references include bounce. This record scores G1's own estimand instead: the reference tracer's depth-2 image (camera, surface, sky) at quarry poses 0 and 1, 1,024 spp, albedo 0.5, under a constant sky (the tracer on main has no map).
+- **Scans broke G1's cell rules; four changes fix most of it:** vertex-normal bins, looser probe acceptance, parallel inside tests and a parent-level fallback for orphans. Relative RMS against the reference falls from 70.4% to **35.8%** (RT) and **36.0%** (non-RT, full-detail software rays), and dark pixels from 120% to 61%. SV scores are unchanged.
+- **What remains:** one cavity under a slab holds 76% of the remaining squared error, a light leak where one cell spans the slab's open top and the floor beneath it. Without the worst 1,000 pixels the RMS is 13.6%.
+- **Against Unreal: open** until U0b publishes Lumen's quarry sky rows.
+- **The non-RT near field (item 3) is not built.** Full-detail software geometry (401 MB, 8 s to build) matches RT quality. R0c's LOD0 and LOD1 sidecars score 55% and 64% and trace slower. Non-RT quarry cut frames spend 31-41 ms in the cache.
 
-Section 6 has the plan.
+Section 6 has the details.
 
-**Memory:** 114.4 MiB (G1 110.1), far under both Lumen totals.
+**Memory:** 114.4 MiB on SV (G1 110.1). On the quarry, non-RT adds 382.4 MiB of full-detail software geometry. Both totals stay under Lumen's (section 7).
 
 ## 1. Cost
 
@@ -82,7 +88,7 @@ The renderer's per-frame GPU spans are read once per sequence, and p50s are repo
 **Conditions.**
 - Screens A1, B1, C2 and C3 are functional leases, not quiet windows. Visit-to-visit noise is about ±0.05 ms, and RT cache-off visits are bimodal (0.31-0.32 or 0.38-0.43 ms).
 - A foreign CPU build (`stillkit`, about 30 rustc processes) ran from 20:28:11Z. Screen C3's timed steps ended at 20:27:44Z. Lease F1 ran entirely beside it, so its timings are **contended** and none is used.
-- The cost claim is quiet window `q2`, started after stillkit's compilers had been gone for 60 s.
+- The cost claims are quiet windows `q5-1` and `q6-1`. Each started after 120 s with no stillkit compiler, and none appeared at any 3 s sample inside. `q2` and `q3` overlapped stillkit and are labelled contended.
 
 ### 1.2 What the profiles showed (M, Nsight, G1 code, RT camera motion)
 
@@ -128,11 +134,29 @@ The renderer's per-frame GPU spans are read once per sequence, and p50s are repo
 | **L4** | Bucket start offset from key a's top bits, so a lookup hashes key a alone | — | **−0.021** | — | — | **Yes**, on both paths |
 | **S1** | Software rays visit BVH children nearest first | — | — | — | −0.010 (setup 134 → 128, rays 53 → 49 µs) | **Yes.** Identical image hashes |
 | **v3** | Setup with eight lanes per cell: candidates in parallel, items written by lanes. Plus the constant sky at lookup, the probe reusing its tile key with a 256-entry tile table, and the cut refill with a neighbour fill | 125-140 | 0.13-0.18 | +0.37-0.41 | +0.39-0.65 (noisy) | Setup 24 → 14 (RT) and 133 → 55 µs (non-RT). **Regression:** cuts without the refill, setup 453 → 1,044 (RT) and 2,983 → 7,299 µs (non-RT) |
-| **v4 (final)** | Lane 0 tries candidate 0 first; lanes 1-4 trace the other candidates only when it fails. Rays past the item capacity are spread over the cell's eight lanes. Setup grid 4,096 | 122-135 | 0.18 | **+0.37-0.44** | **+0.49-0.50** | Table hashes equal v3's (`3000682f6ad7f495` RT, `ad7d818201c12a39` non-RT). RT cut setup 1,044 → 543 µs, non-RT cut (no refill) 7,299 → 1,731 µs. Frames from `q5-1`; passes from `q3` (contended) |
+| **v4** | Lane 0 tries candidate 0 first; lanes 1-4 trace the other candidates only when it fails. Rays past the item capacity are spread over the cell's eight lanes. Setup grid 4,096 | 122-135 | 0.18 | **+0.37-0.44** | **+0.49-0.50** | Table hashes equal v3's (`3000682f6ad7f495` RT, `ad7d818201c12a39` non-RT). RT cut setup 1,044 → 543 µs, non-RT cut (no refill) 7,299 → 1,731 µs. Frames from `q5-1`; passes from `q3` (contended) |
+| **Quarry (final)** | Vertex-normal bins, looser probe acceptance, inside tests on the candidates' own lanes, a parent fallback for orphans with early-exit rounds, and five identical frames before idling (section 6) | — | — | **+0.44** | **+0.52-0.53** | +0.03 ms against v4 in the same window (`q6-1`). SV scores unchanged (overview 1.95%, gaps 2.75%) |
 
-### 1.4 Final cost, quiet window `q2` (M)
+### 1.4 Final cost, quiet windows `q6-1` and `q5-1` (M)
 
-**Window.** `q5-1`, 23:56:20-23:56:47Z, 2026-11-07.
+**`q6-1`, the final code.** 01:21:18-01:21:45Z, 2026-11-08.
+- No stillkit compiler for 140 s before the lock, or at any 3 s sample inside.
+- Three processes, two visits each, no per-pass timestamps: the final code (`g1b-final4`), the `q5-1` code (`g1b-final2`), then the final code again.
+
+Camera-moving and other frame p50s in ms (visit 1 / visit 2; the final code's two processes separated by a semicolon):
+
+| Phase | RT off | RT `q5-1` code | RT final | Non-RT off | Non-RT `q5-1` code | Non-RT final |
+|---|---:|---:|---:|---:|---:|---:|
+| Camera moving | 0.418 / 0.377 | 0.866 / 0.785 (spread 0.790 / 0.786) | 0.895 / 0.818; 0.814 / 0.818 (spread 0.814-0.819) | 0.477 / 0.475 | 0.966 / 0.971 (spread 0.966 / 0.975) | 0.994 / 1.006; 1.000 / 0.998 (spread 0.997-1.005) |
+| Caster moving | 0.423 / 0.381 | 1.610 / 1.526 | 1.714 / 1.588; 1.603 / 1.603 | 0.482 / 0.479 | 2.018 / 2.012 | 2.137 / 2.148; 2.106 / 2.143 |
+| Cut, no refill | 0.422 / 0.381 | 2.615 / 2.587 | 2.605 / 2.625; 2.622 / 2.652 | 0.480 / 0.478 | 4.475 / 4.464 | 4.525 / 4.508; 4.571 / 4.547 |
+| Cut, refill S = 4 (the non-RT default) | — | 2.721 / 2.700 | 2.734 / 2.743; 2.766 / 2.758 | — | 3.192 / 3.184 | 3.241 / 3.239; 3.247 / 3.241 |
+
+The first visit of the first process is a cold GPU (RT off 1.150 ms); the warm visits are used.
+
+**`q7-1`, confirmation after the idle change** (02:03:11-02:03:27Z; no stillkit for 154 s before or inside). `g1b-final7`, the delivered code, differs from `g1b-final4` only in `IDLE_AFTER`, which never applies to camera, caster or cut frames. Interleaved, both read the same: RT camera 0.813-0.819 ms against off 0.377-0.378 (+0.44), non-RT 0.997-1.008 against 0.471-0.478 (+0.52-0.53), and identical still frames (RT 0.561-0.563, non-RT 0.667-0.676).
+
+**`q5-1`, the code before the quarry changes.** 23:56:20-23:56:47Z, 2026-11-07.
 - It started after 122 s with no foreign `stillkit` compiler, and no stillkit process appeared at any 3 s sample from lock to release.
 - One final process ran (`g1b-final2`: off, rotated and spread, two visits each), then one G1 base process (off and rotated, two visits).
 - No per-pass timestamps.
@@ -161,11 +185,12 @@ Frame p50s in ms, per visit (visit 1 / visit 2):
 
 **Against the budget.**
 - Root's stricter reading is about 0.45 ms (0.3 × Lumen over TSR, RT) and 0.46 ms (L_sw/2, non-RT).
-- **RT meets the stricter reading:** +0.37-0.44 ms (median 0.41) against 0.45.
-- **Non-RT misses it by 0.03-0.04 ms:** +0.49-0.50 against 0.46.
+- **RT meets the stricter reading:** +0.44 ms against 0.45 (`q6-1`); the code before the quarry changes read +0.41.
+- **Non-RT misses it by 0.06-0.07 ms:** +0.52-0.53 against 0.46 (before the quarry changes, +0.49-0.50).
+- The quarry changes add about 0.03 ms on both paths, and 0.07-0.10 ms to caster frames. They are kept because they halve the quarry error (section 6) and change no SV score.
 - The non-RT rest is the software-ray setup and rays (about 0.10 ms) plus the same per-pixel probe and lookup as RT.
 - Per Islam's rule, the non-RT miss is recorded and non-RT GI is still eligible if it wins on quality, which it does on SV (section 4).
-- These are SV costs. Lumen's L is measured on the quarry, and a same-bench cost waits for the quarry harness (section 6).
+- These are SV costs. Lumen's L is measured on the quarry; the quarry harness runs correctness only, and no quarry cost was taken in a quiet window (section 6.5).
 
 ## 2. Cut spike (item 2)
 
@@ -213,6 +238,8 @@ Frame p50s in ms, per visit (visit 1 / visit 2):
 | Final, refill S = 4 | 2.735 / 2.721 | **3.193 / 3.187** (the default) |
 | Steady camera frame (1.5x = rule) | 0.79 (1.18) | 0.97 (1.46) |
 
+**Final code (`q6-1`).** Cuts read 2.61-2.65 ms on RT (refill 2.73-2.77) and 3.24-3.25 ms on non-RT with the default refill (4.51-4.57 without), against steady camera frames of 0.82 and 1.00 ms.
+
 **Profiled breakdown (screens).**
 - **Non-RT with the refill:** setup 342-353 µs, rays 500-547, finish 775, probe 260-280.
 - **RT without the refill** (`q3`, contended): probe 240, claims and resolves 112, setup 543, rays 181, finish 747.
@@ -234,15 +261,17 @@ Frame p50s in ms, per visit (visit 1 / visit 2):
 
 It then yaws the map 15° a frame, six steps, comparing each stepped frame with a fresh cache at the same yaw. A continuous 1°-a-frame rotation is then timed.
 
-**Results (M, F1 equality; `q2` cost).**
+**Results (M, F1 equality; X2 cost, warm GPU).**
 
 | Measure | RT | Non-RT |
 |---|---:|---:|
 | Stepped frame equals fresh, six steps | **yes, 0 pixels** each step | **yes, 0 pixels** each step |
 | Pixels the yaw changes against open sky | 1,323,093-1,323,125 | same |
 | Cells re-integrated per step | 87,490 | 87,483 |
-| Rotating frame p50 / p95, ms | 6.31 / 20.04 (`q3` t0, final, unprofiled); 4.71 / 5.24 (C3, v3, profiled) | 2.37 / 17.97 (`q3` t0); 2.18 / 2.77 (C3) |
-| Integrate pass p50, µs | 2,170 (C3) | 998 (C3) |
+| Rotating frame p50, ms, warm GPU (X2 `mapdiag`, final code, profiled, functional lease) | **1.954** | **1.883** |
+| Integrate pass p50, µs (X2) | 1,019 | 923 |
+
+With the final code (x11) every step still equals a fresh cache (0 pixels). Parent cells raise the cells re-integrated per step to 90,204 (RT) and 90,212 (non-RT).
 
 **Constant skies.** A constant sky's change now costs nothing.
 - Cells cache unit radiance, and the lookup multiplies by the current constant (`gi_sky_scale`).
@@ -254,6 +283,30 @@ It then yaws the map 15° a frame, six steps, comparing each stepped frame with 
 - Mitigations, not tried:
   - re-integrate only cells seen this frame, and the rest when next seen;
   - spread the re-integration under the 8-frame settle rule. Lumen itself lags seconds, but each frame then mixes yaws.
+
+### 3.1 The apparent RT shading spike (item 5, diagnosed)
+
+**Symptom.** Earlier environment runs showed RT shading at 1.1-1.8 ms with a rotating map, against 0.33 normally. The non-RT path was unaffected, and the rotating RT frame read 4.7-6.3 ms.
+
+**Attribution matrix** (`section("mapdiag")`, SV, still camera, 32 frames per row, cache on or off):
+- rows with no map, a still map and a rotating map;
+- before and after the map's upload.
+
+**X1 (M).** The same matrix without the before-upload rows.
+- RT shading was slow in every cache-on row, **including no map at all**: 1.41 ms no map, 1.12 still, 1.12 rotating. The probe also slowed, 406-609 µs.
+- Every cache-off row was normal, 0.17-0.19 ms.
+- The cache-on rows ran first in the process, the cache-off rows last.
+
+**X2 (M).** The same binary, plus 64 cache-on and cache-off frames before the upload.
+- RT shading is 0.363 ms in **every** cache-on row (no map, still, rotating) and the probe 134 µs.
+- The rotating RT frame is 1.95 ms.
+- Non-RT agrees: shading 0.33, rotating frame 1.88 ms.
+
+**Cause (I, from the two runs).**
+- Passes run in the first seconds after the RT device and renderer are created were slow. The environment and diagnosis sections began timing at once.
+- The timing section has always discarded a 64-frame warm-up, which is why its RT numbers never showed it.
+- Neither the map nor the cache table is involved. VRAM was 1.4 GB used at the time, so placement under memory pressure is ruled out.
+- G1b's environment numbers now come from warm runs.
 
 **Not tested.** The reference tracer on main has only a constant sky (`reference.rs`, outside G1b's files), so rotating-map error against a path-traced map is not measured.
 
@@ -268,7 +321,8 @@ It then yaws the map 15° a frame, six steps, comparing each stepped frame with 
 - RT: Lumen HW Epic.
 - Non-RT: Lumen SW Epic with mesh SDFs and runtime RT off. The global-DF row is supplementary.
 
-**G1b rows.** From F1 (final code, deterministic): the default rotated set, 64 directions, 4 px cells. The non-RT default's settled image is the same image, with identical hashes.
+**G1b rows.** From F1 (the code before the quarry changes, deterministic): the default rotated set, 64 directions, 4 px cells. The non-RT default's settled image is the same image, with identical hashes.
+- **The final code reproduces them** (x11): frame 1.95 / 2.75% on both paths, and every motion row within 0.01 points except nearest-cell motion, which improves from 13.9 to 12.8%.
 
 ### 4.1 Static, per population (relative RMS %, overview / gaps)
 
@@ -349,18 +403,21 @@ A dash means no valid visible samples at that pose.
 
 The gaps-pose column of G1's table stands.
 
-## 5. Gates (M, F1 final code, both paths)
+## 5. Gates (M, x16 final code, both paths)
+
+Lease x16 ran F1's functional set on the delivered code (`g1b-final7`): SV quality, gates and caster over ten configurations, determinism, motion and environment. **Every gate passes.** (x11 ran the same set on the code before the idle change, with the same results and hashes.)
 
 **Determinism.**
 - Repeating a reset sequence gives equal tables and images in process.
-- Two processes (F1 `gates-a`, `gates-b`) give the same table and image hashes:
-  - RT `3000682f6ad7f495` / `9478be32f6dcb6c0`;
-  - non-RT `ad7d818201c12a39` / `bb2abe5f18d6da75`.
-- Serial tracing gives the identical table.
+- Five processes (x16 and x11 `gates-a` and `gates-b`, and x9's build without the early-exit rounds) give the same table and image hashes:
+  - RT `c67e08ba24901a25` / `9737655315ffd841`;
+  - non-RT `b51985694e5c17c1` / `8a9b3d26eab24d33`.
+- Serial tracing gives the identical table. (F1's hashes, before the quarry changes: RT `3000682f6ad7f495` / `9478be32f6dcb6c0`, non-RT `ad7d818201c12a39` / `bb2abe5f18d6da75`.)
 
 **Caster and staleness.**
 - Ten frames of sphere motion end byte-identical to a fresh cache: 0 pixels differ.
 - Fixed-rotation staleness reaches 0 differing pixels at age 7.
+- **Harness change.** The fresh reference now renders three frames after its reset, not two. With the parent fallback, a pixel whose cells and parent cells are orphans gets its grandparent on frame 3, because the probe finds an orphan parent a frame after creating it. With two frames, x10 showed 78 pixels at the open-sky fallback in the fresh image only, and the gate failed on both paths. A fresh cache now settles in three frames where orphans need parents.
 
 **Sky steps.** Constant and map steps equal a fresh cache on the next frame (sections 2-3).
 
@@ -369,28 +426,115 @@ The gaps-pose column of G1's table stands.
 **Programmability.** The hit record is unchanged (16 B). The lookup ABI is unchanged: `indirect_irradiance(input, n)`.
 
 **Suites.**
-- `cargo test -p renderlab --lib` exits 0, run inside lease F1: 129 passed, 123 ignored.
+- `cargo test -p renderlab --lib` exits 0, run inside lease x16: 130 passed, 125 ignored.
 - `cargo fmt --check` is clean.
-- Clippy reports nothing in G1b's files. It reports five pre-existing warnings in `virtual_shadow_gpu.rs` and `visibility_buffer.rs`, which this branch does not change.
+- `cargo clippy -p renderlab --lib --tests` reports nothing in G1b's files. It reports five pre-existing warnings in `virtual_shadow_gpu.rs` and `visibility_buffer.rs`, which this branch does not change.
+- New GPU test: `gpu_software_hit_normals_follow_instance_transforms` passes (x5).
 
-## 6. Quarry: near field and gate (items 3 and 4, not done)
+## 6. Quarry: gate and near field (items 3 and 4)
 
-**Not built:**
-- the cook-time short-range occlusion;
-- a quarry G1 harness;
-- the quarry gate.
+### 6.1 Harness (M)
 
-**Why.**
-- **The quarry comparator is still to come from U0b** (root, 2026-11-07).
-- U0b's retained quarry references are full-depth: sky plus multi-bounce, with a prepared RLE2 sky (`docs/m7-u0b.md`, "Retained quarry references"). They do not isolate G1's no-bounce sky term.
-- The reference tracer on main renders only a constant sky.
-- A depth-2, sky-only quarry reference with the prepared sky is the input the gate needs.
+**Scene.** `gpu_gi_quarry` loads the registered quarry fully resident.
+- 13,034,903 triangles in 12 scans, each placed with a −90° rotation about X and scale 0.01.
+- Inputs come from `E:/renderlab-work/m7-g1b/quarry/manifest.json`: the M6 quarry cameras, the RLE2 sky, and R0c's cluster-BVH package `78cd15dc…`.
+- Poses 0 and 1 at 1920x1080. Pose 1 is pose 0 moved 1 cm.
+- The gate program is albedo 0.5 under `indirect_irradiance` alone.
 
-**Plan, in order.**
-1. A quarry G1 harness reusing the full-resident prepared-asset loader (the pattern of `fresh_shadow_tests::load_quarry`), timing both paths at quarry poses 0/1.
-2. **Non-RT far field:** R0c's cooked cluster BVHs through `set_indirect_bvh`, starting rays beyond the near radius (R0c's `select_cone_level`).
-3. **Near field, G-N1.** A cook step writes each source vertex's K fixed-direction visibility within R_near against static geometry (8-16 B a vertex: 50-110 MB for the quarry's source vertices, inside the approved 50-150 MB). The cell's direction k reads it as the AND of its triangle's three vertex masks for the nearest cook direction. Movers keep their per-instance software BLASes.
-4. Score both paths against U0b's depth-2 sky reference and Lumen Epic sky-only quarry rows once on main, then run the cost gate on the quarry, where Lumen's L was measured.
+**Run.** Each run resets the cache, renders the cut frame and four still frames, and scores the last against:
+- **the reference:** the reference tracer's depth-2 image (camera, surface, sky) of the same pose. Every placement is two-sided opaque Lambert 0.5; 1,024 spp; median relative standard error 0.76% (`quarry_reference`, cached under `refs/`);
+- **the RT path's own image**, for software against hardware rays.
+
+**Constant sky.** The reference tracer on main renders only a constant sky, so the gate runs under a constant 16,384 cd/m² sky instead of the RLE2 map. Map runs are kept for software-against-hardware checks.
+
+**Metric.** G1's floored relative error, (ours − ref) / max(ref, 5% of its p90), over covered non-silhouette pixels (334,970 at pose 0):
+- RMS for the frame, and for dark pixels (below 70% of the p90);
+- bias, and luminance-ratio quantiles.
+
+### 6.2 Software rays were wrong on rotated placements (fixed)
+
+**Bug.** `gi_rays_software.wgsl` transformed hit normals by the world-to-object matrix itself, not its transpose. Instance records hold that matrix's rows, so the extra `transpose` undid the inverse transpose.
+
+**Why SV missed it.** SV's placements are translations, where the two agree. The quarry's are rotated.
+
+**Effect (M, quarry map runs; software rays on the RT device against hardware rays).**
+- Before: 82.0% RMS, and 4,765 inside-orphans against hardware's 2,359.
+- After: **0.04-0.18%**, with equal orphan counts.
+
+**Test.** `gpu_software_hit_normals_follow_instance_transforms` traces a rotated, non-uniformly scaled instance and checks the analytic inverse-transpose normal.
+
+### 6.3 What scans broke, and the changes (M, RT, pose 0)
+
+**Diagnosis against the reference, before these changes.** The median pixel is within 2% (ratio 0.979), but the tails are heavy: 1% of pixels read below 0.44x and 1% above 1.73x. 1,000 pixels carry 93% of the squared error.
+- **Bin flips.** Scan triangles are about a pixel wide. Each pixel chose its 6-way bin from its own triangle's plane normal, so neighbouring pixels read different cells. The result is salt-and-pepper speckle: black and white single pixels.
+- **Orphans.** 58% of requested cells (62,346 of 106,717) found no qualifying canonical point: the probe's hit had to lie in the cell's own bin, and on rough rock it usually did not.
+- **Open-sky fallback.** A pixel whose cells were all orphans, at its level and at every coarser level that existed, read the unoccluded sky. 10,225 pixels sat at exactly the open value, many in crevices the reference shows near black.
+
+**Screens.** Shader variants on one binary (x6-x8), relative RMS against the reference:
+
+| Variant | Frame RMS | Dark RMS | Below 0.5x | Above 1.5x | Orphans | Kept |
+|---|---:|---:|---:|---:|---:|---|
+| Before | 70.4% | 120.3% | 4,053 | 5,288 | 62,346 | — |
+| Candidates' inside tests on their own lanes | identical image | | | | | **yes**: cut setup 3.5 → 1.2 ms |
+| Bin from the interpolated vertex normal | 67.3% | 115.2% | 3,089 | 4,085 | 47,048 | **yes** |
+| + probe hits qualify within ~70° of the bin normal | 48.2% | 82.1% | 3,854 | 2,368 | 39,182 | **yes** |
+| + parent fallback (final) | **35.8%** | **60.6%** | 4,078 | 1,830 | 39,183 | **yes** |
+| Parent fallback alone | 55.9% | 95.0% | 5,128 | 2,871 | 62,346 | — |
+| Query normal averaged over the five candidates | 69.7% (66.2% with parents) | 119.3% | 3,500 | 2,548 | 39,444 | no: better quantiles, more extreme pixels |
+| Probe segment overhanging each face by half an edge | 71.0% | 121.5% | 3,796 | 2,878 | 22,274 | no |
+| 128 directions | 69.7% (the same as 64) | 119.2% | 3,424 | 2,486 | 39,444 | no |
+| Query-plane rejection at lookup | 35.6% | 60.2% | 4,022 | 1,798 | 39,182 | no: a cold-record read per corner for 0.2 points |
+
+**How the kept changes work.**
+- **Vertex-normal bins.** The probe computes each pixel's interpolated vertex normal the way the shading entry forms `SurfaceInput.normal`, and the lookup reads `input.normal`. Both choose the bin from it, turned to the viewed side (`gi_bin_source`). Near-tie pixels still request both bins.
+- **Looser acceptance.** A probe hit qualifies when its viewed normal lies within about 70° of the bin normal (dot ≥ 0.34), not only in the bin. The canonical point is still the first qualifying hit in fixed order.
+- **Parallel inside tests.** Candidates 1-4 run their inside tests on their own lanes. Lane 0 still takes the first that qualifies, so the point is unchanged.
+- **Parent fallback.** In the probe, a found orphan adds its parent level's four cells around its centre to the tile's set. Up to two further rounds find or request them, and the lookup's existing coarser-level fallback reads them. Open-valued pixels fall from 10,225 to 313. Rounds end early when a tile adds nothing.
+
+SV scores are unchanged: overview 1.95%, gaps 2.75% on both paths (x8, x11).
+
+### 6.4 Gate table (M, x16 final code; poses 0 / 1; x11 reads the same)
+
+| Path | Ray source | Frame RMS | Dark RMS | Bias | Ratio p1 / p50 / p99 |
+|---|---|---:|---:|---:|---|
+| Cache off (open sky) | — | 177.7 / 178.0% | — | +70.8% | — |
+| RT, before the changes | hardware | 70.4 / 70.5% | 120.3 / 120.4% | +0.9% | 0.44 / 0.98 / 1.73 |
+| **RT** | hardware | **35.8 / 35.9%** | **60.6 / 60.6%** | −3.1% | 0.45 / 0.975 / 1.32 |
+| RT device | software, full detail | 35.8 / 35.9% | 60.6 / 60.6% | −3.1% | the same |
+| **Non-RT** | software, full detail | **36.0 / 35.9%** | **60.8 / 60.6%** | −3.1% | 0.45 / 0.975 / 1.32 |
+| Non-RT | R0c LOD0 sidecar | 55.2 / 55.7% | 94.3 / 95.2% | −0.6% | 0.46 / 0.986 / 1.37 |
+| Non-RT | R0c LOD1 sidecar | 64.1 / 64.1% | 109.7 / 109.7% | +1.8% | 0.49 / 0.997 / 1.47 |
+
+Non-RT and RT differ only through their primaries (visibility buffer against traced).
+
+**The remaining error is concentrated (M, final images, pose 0).**
+- The 100 worst pixels hold 76% of the squared error. They lie in one cavity under a slab, where the reference reads 2% of the open sky and the cache reads the open value.
+- **Cause (I, from the images):** a +Y cell spans the slab's open top and the floor in the gap below. The probe from the cell's top face takes the slab, so floor pixels read its value. A lookup-side plane test cannot fix it when all four corners are such cells (row above).
+- Without the worst 1,000 pixels the RMS is 13.6%. The mean absolute error is 8.5% and the median 3.8%.
+- Cracks narrower than a cell also read brighter than the reference.
+
+**Against Unreal: open.** U0b's quarry Lumen sky-only rows are not published (`t3/m7-u0b` at `43ee18a`), and its retained quarry references include bounce. The quarry verdict waits for them, and so does a reference under the RLE2 map.
+
+### 6.5 Non-RT near field (item 3): not built
+
+**Measured instead** (x11 and x16, profiled functional leases; not timing claims):
+
+| Non-RT geometry | GPU bytes | Build | Gate RMS (pose 0) | Cut frame, cache passes |
+|---|---:|---:|---:|---:|
+| Full-detail BVH per mesh (built at load) | 401.0 MB | 8.2 s | 36.0% | 31-41 ms |
+| R0c LOD0 sidecar | 372.1 MB | 0.1 s | 55.2% | 151-172 ms |
+| R0c LOD1 sidecar | 372.1 MB | 0.1 s | 64.1% | 131-136 ms |
+| RT, hardware rays | — | — | 35.8% | 3.5-6.1 ms |
+
+- Full detail gives RT's quality. The cooked LOD sidecars are both worse and slower to trace here, and one package holds every level, so a single level saves no memory.
+- Memory stays under Lumen's with full-detail geometry (section 7).
+- The cook-time near field (G-N1: per-vertex K-direction masks within R_near, plus R0c's far field) remains the route to a cheaper non-RT quarry. With full-detail geometry it is not needed for quality.
+
+**Still frames (M, x16, per-frame table reads).** After a camera stops, the cache passes run for five identical frames and then stop (`IDLE_AFTER`, raised from three by G1b).
+- The quarry's fallback chain completes on the third frame: new cells per frame read 90,276 (the cut), 38,834, 15,724, then 1 and 0. The table then holds 144,835 live cells, all distinct.
+- At three frames, the 395 claims lost on the third frame were never retried while the view stayed still. With five, none is left.
+- The idle frames themselves run no cache pass. The quarry's camera-moving cost was not measured in a quiet window.
+- An earlier reading of 15,700 "new cells every still frame" was the counters frozen at the last active frame, not churn: the counters are cleared only by a frame that runs the passes.
 
 ## 7. Memory (M)
 
@@ -399,11 +543,12 @@ The gaps-pose column of G1's table stands.
 | Table: 2^19 slots × 160 B, plus header | 83,886,336 (80.0 MiB) |
 | Work: claims, misses, queues, 2^21 ray items and staged bits, request table | 35,913,792 (34.25 MiB) |
 | Non-RT SV geometry | 137,328 |
-| **WRC total** | **114.4 MiB** (G1 110.1; under the 160 MiB stop) |
+| **WRC total, SV** | **114.4 MiB** (G1 110.1; under the 160 MiB stop) |
+| Non-RT quarry geometry, full detail | 400,973,460 (382.4 MiB) |
 
 Against Unreal (M7-U0, LocalUsedMB):
 - RT: 2,641 + 114 = 2,755 MiB, against 6,444 MiB for Lumen HW Epic.
-- Non-RT: 3,503.7 + 114.4 + 29.6 (R0c's quarry BVH) ≈ 3,648 MiB, against 5,142 MiB.
+- Non-RT: 3,503.7 + 114.4 + 382.4 (full-detail quarry geometry) ≈ 4,000 MiB, against 5,142 MiB.
 
 These are buffer sums, not allocator residency (I).
 
@@ -417,19 +562,25 @@ These are buffer sums, not allocator residency (I).
 | Nearest-first software traversal | W8 | Per-ray, from the top; child order by entry distance within one ray's traversal. No per-node hit lists or launches |
 | Direct fixed grids, multi-lane finish | C4, C1 | Claims stay atomicMax-and-winner-writes. The tree sums are fixed-order. No resampling |
 | Single-hash start, constant sky at lookup | W3 | Lookups stay fixed-weight bilinear with no jitter |
+| Vertex-normal bins | W2, W3 | The bin is the lookup's address. The canonical point is still fixed by the key alone; no pixel's position or vote picks it |
+| Looser probe acceptance | W2 | A fixed threshold; the first qualifying hit in fixed order |
+| Inside tests on the candidates' lanes | W2 | The same point as the serial order (table hashes equal) |
+| Parent fallback | W2, W3 | A parent is requested because a child is an orphan, never ranked, and is traced in the frame it is requested. The lookup falls back to the coarser level deterministically, which W3's note names as fine ("the parent-on-miss fallback is deterministic") |
 
 No patented fallback is enabled.
 
 ## 9. Misses and open items
 
 1. **Edge population against Lumen HW Epic** (anti-aliasing, TR1's). Every other SV measure passes on both paths.
-2. **Non-RT camera cost +0.49-0.50 ms against 0.46** (RT +0.37-0.44 meets 0.45). These are SV costs; the quarry cost is open.
+2. **Non-RT camera cost +0.52-0.53 ms against 0.46** (RT +0.44 meets 0.45 by 0.01). The quarry changes add 0.03 ms of it. These are SV costs; no quarry cost was measured in a quiet window.
 3. **Cut frames above 1.5x steady** on both paths. They are recorded as a cold start (section 2.2).
-4. **A rotating prepared map costs 2.4 ms (non-RT) and 4.7-6.3 ms (RT) a frame** (section 3). Rotating-map error against a path-traced map is untested.
-5. **The quarry near field and gate are not built** (section 6).
-6. **2 px cells:** first frame at the gaps pose is 21-23%, against 4.8% settled. A 2 px cut overflows the item capacity and buckets. It is not a default.
-7. **Bucket-full inserts grow as the table fills** (M, G1's motion run: 61 → 294 a frame). A larger table or wider buckets would remove them; the quarry will show the size needed.
-8. **Contended measurements:** F1, `q2` and `q3` overlapped a foreign compiler (stillkit) and are labelled contended. The rotating-map rows (`q3` t0 ended before stillkit's first sample; C3 ran before it started) and the standard-program row are not from the clean window.
+4. **A rotating prepared map costs 1.9-2.0 ms a frame on both paths** (section 3, warm GPU). Rotating-map error against a path-traced map is untested.
+5. **Quarry against Unreal is open:** Lumen's quarry sky rows are not published. Against the depth-2 reference the cache reads 35.8% (RT) and 36.0% (non-RT), and a light leak under one slab carries most of the rest (section 6.4).
+6. **The non-RT near field (item 3) is not built.** Full-detail software geometry stands in: 401 MB, 8 s to build, and 31-41 ms quarry cut frames.
+7. **A fresh cache settles in three frames where orphans need parents** (section 5).
+8. **2 px cells:** first frame at the gaps pose is 21-23%, against 4.8% settled. A 2 px cut overflows the item capacity and buckets. It is not a default.
+9. **Bucket-full inserts grow as the table fills** (M, G1's motion run: 61 → 294 a frame). A larger table or wider buckets would remove them; the quarry will show the size needed.
+10. **Contended measurements:** F1, `q2` and `q3` overlapped a foreign compiler (stillkit) and are labelled contended. The rotating-map rows (`q3` t0 ended before stillkit's first sample; C3 ran before it started) and the standard-program row are not from the clean window.
 
 ## 10. Evidence and process
 
@@ -440,18 +591,31 @@ No patented fallback is enabled.
 - **B1:** v1, L1c/L2/L3, gates, no-profiling timing, traces.
 - **C2:** v2, F1/F4, L4/L4F4, S1, the cut refill, the rotating environment.
 - **C3:** v3.
-- **F1:** final functional, contended.
-- **Q2:** the final quiet window.
+- **F1:** functional, contended (the code before the quarry changes).
+- **Q2, Q3:** quiet windows that overlapped stillkit; contended.
+- **Q5-1:** the clean cost claim of the code before the quarry changes.
+- **X1-X4:** the rotating-map diagnosis, and the first quarry runs (software against hardware rays).
+- **X5:** the software-normal fix, its test, and the first depth-2 quarry gate.
+- **X6-X8:** quarry shader-variant screens and SV checks.
+- **X9:** a cost screen of three binaries, determinism, and the quarry with the changes.
+- **X10:** the caster gate's two-frame fresh reference failing (section 5).
+- **Q6-1:** the clean cost claim of the final code.
+- **X11:** the functional set; every gate passes.
+- **X12-X15:** per-frame counter and table diagnostics that traced the frozen-counter reading and the idle cutoff (section 6.5).
+- **X16:** the final functional set on the delivered code; every gate passes.
+- **Q7-1:** a clean window confirming the delivered code's cost.
 - **C1:** stopped at its first step on a WGSL reserved word (`active`). Naga checks then moved outside leases.
 
 **Other files.**
 - Analysis: `analysis/` (hotspots, stall legends). Unreal rows: `ue-rows.json`.
-- Variant shader sets: `variants/`. Build and lease scripts: `scripts/` (`build.sh`, `lease-force.sh`, `quiet-after-idle.sh`, `naga.sh`, `summ2.py`, `ue_rows.py`).
+- Variant shader sets: `variants/`, written by `scripts/mkvar.py` (named edits on the repo's shaders). Build and lease scripts: `scripts/` (`build.sh`, `lease-poll.py`, `quiet-poll.py`, `naga.sh`, `summ2.py`, `summq.py`, `ue_rows.py`).
+- Quarry crops: `analysis/quarry/`.
 - Raw traces and staged binaries are deleted at close.
 
 **Process.**
 - Two Cargo jobs beside other owners' functional leases, never inside a quiet window (`build --beside-leases`).
 - Lease C2 waited 14 minutes while two owners reacquired back to back. It then took the lock at its first free moment (`--force-schedule`), as recorded in `gpu-schedule.md`.
+- From X6 on, other owners handed the lock over within half a second, faster than a shell retry loop starts the runner. `lease-poll.py` and `quiet-poll.py` poll the lock in-process every 50 ms after a posted request line, with the runner's own checks (game hold, label reuse). `quiet-poll.py` also samples for stillkit every 3 s and relabels any attempt that sees it.
 
 **Reproduce.**
 
@@ -460,4 +624,4 @@ py -3 -B scripts/m7-g1b-run.py build --as NAME [--beside-leases]
 py -3 -B scripts/m7-g1b-run.py plan <label> plan.json --minutes 10 [--quiet] [--force-schedule]
 ```
 
-Plan steps take `sections`, `configs`, `visits`, `gate`, `shaders` (a variant directory), `env`, `lib`, `test` and `command`. The harness reads `RENDERLAB_M7_G1_{TIMING,TIMING_PROGRAM,PROFILING,PROFILE_FRAMES,PROFILE_MODE}`.
+Plan steps take `sections`, `configs`, `visits`, `gate`, `shaders` (a variant directory), `env`, `lib`, `test`, `test_name` and `command`. Quarry steps run `gpu_gi_quarry` with `RENDERLAB_M7_G1_{QUARRY,QUARRY_EXACT,QUARRY_VARIANTS,QUARRY_SKY,QUARRY_SETTINGS,QUARRY_FRAMES,PATHS,SPP,REFS}`. The harness reads `RENDERLAB_M7_G1_{TIMING,TIMING_PROGRAM,PROFILING,PROFILE_FRAMES,PROFILE_MODE}`.

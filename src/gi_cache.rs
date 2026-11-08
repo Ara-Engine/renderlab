@@ -47,8 +47,10 @@ const CELL_GROUPS: u32 = 2048;
 /// 256-byte aligned).
 const PROFILE_RING: u64 = 64;
 const PROFILE_STRIDE: u64 = 256;
-/// Consecutive identical frames after which a frame runs no cache pass.
-const IDLE_AFTER: u32 = 3;
+/// Consecutive identical frames after which a frame runs no cache pass: the orphan-parent
+/// chain completes on the third frame (gi_probe's rounds), and claims lost on it retry
+/// on the next two.
+const IDLE_AFTER: u32 = 5;
 /// Entries of the frame's request table: twice the miss capacity (a power of two).
 fn requests(misses: u32) -> u32 {
     misses * 2
