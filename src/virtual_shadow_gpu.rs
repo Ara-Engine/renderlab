@@ -22,7 +22,9 @@
 //! N8e (docs/non-rt-n8e.md) spends quality surplus over Unreal on cost: a walk cap, a map
 //! that keeps its sun basis through small turns, and a rolling refresh that looks up one
 //! trace tile in sixteen per frame while the camera, casters and settings hold still.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 #[path = "virtual_shadow_cache.rs"]
 mod surface_cache;
@@ -690,7 +692,7 @@ fn addressed_triangles(mesh: &Mesh) -> u64 {
 
 impl VirtualState {
     pub fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         arrays: &wgpu::BindGroupLayout,
         lighting: &wgpu::BindGroupLayout,
@@ -1167,7 +1169,7 @@ impl VirtualState {
 
     fn ensure_resources(
         &mut self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         levels: usize,
         size: [u32; 2],

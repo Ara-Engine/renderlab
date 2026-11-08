@@ -117,13 +117,20 @@ pub(crate) fn request_device(
             wgpu::ExperimentalFeatures::disabled(),
         ),
     };
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let descriptor = wgpu::DeviceDescriptor {
         label: Some("renderlab engine"),
         required_features: features | optional,
         required_limits,
         experimental_features,
         memory_hints: crate::MEMORY_HINTS,
         ..Default::default()
-    }))
-    .map_err(|_| Error::InvalidInput("adapter cannot create a device for this render path"))
+    };
+    // PC1: optional native driver timings use the existing compiler instrumentation.
+    if std::env::var_os("RENDERLAB_STARTUP_PROFILE_DRIVER").is_some()
+        && let Some(device) = crate::shader_compiler::request_device(adapter, &descriptor)?
+    {
+        return Ok(device);
+    }
+    pollster::block_on(adapter.request_device(&descriptor))
+        .map_err(|_| Error::InvalidInput("adapter cannot create a device for this render path"))
 }

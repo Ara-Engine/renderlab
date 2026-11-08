@@ -69,6 +69,7 @@ pub(crate) struct PreparedDraw<'a> {
     #[cfg(test)]
     pub reference_ids: Option<&'a wgpu::Buffer>,
 }
+use crate::pipeline_compilation::PipelineDevice;
 use crate::{
     instances::InstanceState,
     mesh::matrix_bytes,
@@ -407,7 +408,7 @@ impl Pipelines {
 /// tangent stream, reversed-Z depth and `samples`, through `cache` when given.
 #[allow(clippy::too_many_arguments)]
 fn mesh_pipeline(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
@@ -515,7 +516,7 @@ struct Depth {
 /// Use an sRGB output format for encoded base color; linear targets retain linear values.
 /// Alternating target sizes recreates attachments. Separate renderers suit independent streams.
 pub struct Renderer {
-    device: wgpu::Device,
+    device: PipelineDevice,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
     options: RendererOptions,
@@ -664,7 +665,15 @@ impl Renderer {
         options: RendererOptions,
         wgsl: &str,
     ) -> Result<Self, Error> {
-        Self::new_configured(device, queue, color_format, limits, options, None, wgsl)
+        Self::new_configured(
+            device.into(),
+            queue,
+            color_format,
+            limits,
+            options,
+            None,
+            wgsl,
+        )
     }
     /// Explicit optional hard shadows. The caller must negotiate the experimental
     /// device feature and its unsafe acknowledgment before calling this safe API.
@@ -680,7 +689,7 @@ impl Renderer {
         wgsl: &str,
     ) -> Result<Self, Error> {
         Self::new_configured(
-            device,
+            device.into(),
             queue,
             color_format,
             limits,
@@ -689,8 +698,8 @@ impl Renderer {
             wgsl,
         )
     }
-    fn new_configured(
-        device: wgpu::Device,
+    pub(crate) fn new_configured(
+        device: PipelineDevice,
         queue: wgpu::Queue,
         color_format: wgpu::TextureFormat,
         limits: Limits,
@@ -1173,7 +1182,7 @@ impl Renderer {
     /// traced kernel modules; programs compile separately (`program_gpu`).
     #[allow(clippy::too_many_arguments)]
     fn compile(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         layout: &wgpu::PipelineLayout,
         lighting: &LightingGpu,
@@ -3708,6 +3717,11 @@ impl Renderer {
         let duration = self.collect()?;
         Ok(self.events.drain(duration))
     }
+    /// Drain opt-in CPU compilation timings (`RENDERLAB_STARTUP_PROFILE=1`).
+    pub fn take_compilation_timings(&self) -> Vec<crate::pipeline_compilation::CompilationTiming> {
+        self.device.take_compilation_timings()
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }

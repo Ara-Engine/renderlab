@@ -79,7 +79,7 @@ loop {
 | `limits` | 1024 instances per batch, 128 MiB meshes and textures | development policy limits; device limits always apply |
 | `settings` | `Settings::default()` | initial frame settings |
 | `texture_anisotropy` | 1 | anisotropic filtering, 1-16, fixed for the engine's lifetime |
-| `pipeline_cache` | `None` | directory for the persistent program pipeline cache |
+| `pipeline_cache` | `None` | directory for the persistent shared pipeline cache (kernels and programs; loaded before initialization) |
 
 **Windowed games.** Create the surface on your own `wgpu::Instance`, request an adapter compatible with it, create the engine on that adapter, and configure the surface with `engine.device()` and `engine.output_format()`. Each frame, call `engine.render_to(&surface_texture.texture, &camera)` and then `engine.present(surface_texture)`. Resizing the window only means reconfiguring the surface: the engine follows the target's extent, and the camera's aspect follows the target.
 
@@ -317,3 +317,21 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
 ```
 
 Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, `--render-scale native|quality|performance`, `--sky atmosphere|uniform`, `--volumetric-fog`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
+
+
+PC1 startup controls: `game_scene` persists its Vulkan pipeline cache in the ignored
+`measurements/pipeline-cache/` directory. Set `--pipeline-cache DIR` (or
+`RENDERLAB_PIPELINE_CACHE_DIR`) to choose a directory; `--no-pipeline-cache` disables
+persistence. Applications opt in with `EngineDescriptor::pipeline_cache`; its default
+remains `None`. Cache I/O failures fall back to compilation. Driver and adapter changes
+use a different file, and wgpu keys compiled pipelines by shader and pipeline state.
+Shader edits still validate; rejected edits retain the last working pipelines.
+
+`RENDERLAB_STARTUP_PROFILE=1` records CPU module/pipeline compilation in the example's
+`run.json`, alongside scene-ready and first-image readback times and complete RGBA8
+hashes. `--reload-probe` applies a visible program edit, attempts invalid WGSL, then
+restores the source, writing separate diagnostic images. For an isolated pipeline
+reload check, use it with `--no-gi --no-temporal`. Optional
+`RENDERLAB_STARTUP_PROFILE_DRIVER=1` uses the existing instrumented Vulkan device to
+separate native driver compilation from the pipeline API's SPIR-V and validation work;
+use those rows as diagnostics, not as timings of the ordinary device.
