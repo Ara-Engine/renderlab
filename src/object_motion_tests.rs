@@ -138,9 +138,9 @@ fn gpu_mv1_mq1_static_identity() {
                 let hash = format!("{:x}", Sha256::digest(&bytes));
                 eprintln!("MV1 static identity {path} camera_moving={moving} mq1={mq1} HDR={hash}");
                 if let Some(expected) = &control {
-                    assert_eq!(
-                        &bytes, expected,
-                        "{path}, moving camera {moving}: static HDR changed"
+                    assert!(
+                        &bytes == expected,
+                        "{path}, moving camera {moving}: static HDR changed ({hash})"
                     );
                 } else {
                     control = Some(bytes);

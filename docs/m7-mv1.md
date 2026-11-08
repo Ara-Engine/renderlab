@@ -5,6 +5,10 @@
 (RTDEF2, G2c, TP1 and VF1 included). Scope: submitted instance-transform history and the motion source read
 by TR1 and PP1. MQ1 retains ownership of TR1's filtering/history policy.
 
+2026-11-09 integration follow-up: merged main `622db4d` (MQ1) and then
+`1ad5e29` (PC1/GC1). The acceptance results below initially describe the earlier
+delivery; the integration results are recorded separately below.
+
 **Core motion verified on both paths; full quarry follow-through is incomplete.**
 The quarry load hit the shared memory guard. Retrying with more launch headroom
 was blocked by available RAM through the unit's two-hour box; no quarry result
@@ -49,10 +53,11 @@ current point through the current camera, retaining its footprint offset and
 existing history validation. Its previous tangent plane also uses the previous
 placement. Rigid movers enter SK1's moving-silhouette source classification.
 Transform/derived-normal uploads no longer restart every history. A moving rigid
-caster extends SK1's existing swept world-space shadow-refresh region so newly
-changed lighting on static receivers does not accumulate stale shadows. Dynamic GI
-retains SK1's conservative scene-wide refresh. These edits are marked MV1; resolve
-weights, windows, clamping, coverage storage and filtering policy are unchanged.
+caster initially extended SK1's swept world-space shadow-refresh region. The MQ1
+integration removes that rigid-only extension: MQ1's nine-sample min/max clamp
+handles moved-placement lighting changes and static receivers keep their history.
+SK1's existing deformation refresh remains. These edits are marked MV1; MQ1 owns
+resolve weights, windows, clamping, coverage storage and filtering policy.
 RTDEF2's budget also sees rigid/deforming caster motion as motion, rather than
 entering its settled-camera shadow budget while objects move. Its budget values
 are unchanged. PP1 binds the primary-frame byte count from the owning module, so
@@ -172,14 +177,12 @@ running. The two-hour unit box is closed with the quarry gate explicitly unmet.
 Evidence root: `D:/Coding/renderlab-work/m7-mv1/`. No private asset or generated bulk
 output is committed.
 
-All owned build/test processes finished and the unstarted `screen-c`/`quarry-g`
+At the initial delivery, all owned build/test processes finished and the unstarted `screen-c`/`quarry-g`
 requests were withdrawn. **Target cleanup was blocked:** automatic execution
 approval rejected `Remove-Item -LiteralPath D:/Coding/renderlab-work/m7-mv1/target
 -Recurse -Force`, stating only "blocked by policy". The resolved path was verified
 as this unit's own D: target before the attempt; no deletion workaround was used.
-The target therefore remains. Staged `bin/mv1-tests.exe` and `bin/game-scene.exe`
-also remain for the coordinator's outstanding quarry verification; their production
-source includes the final frame-alignment fix.
+The coordinator subsequently removed that target before this integration follow-up.
 
 To finish the missing gate when RAM permits, rebuild with `scripts/m7-mv1-run.py
 build` if needed, then run `scripts/m7-mv1-batch.py` **through the MV1 `gpu` wrapper**,
@@ -198,9 +201,9 @@ quarry merely because the small-scene checks passed.
   the shipping traced and visibility-buffer paths; it adds no raster velocity pass.
 - Transparency and particle-layer velocities are not represented by the opaque hit.
   Hidden surfaces and shutter visibility changes remain PP1's single-layer limits.
-- Removing whole-scene transform resets exposes ordinary changing-lighting/material
-  history problems to TR1's existing validation. The swept-caster refresh is
-  conservative, and scene-wide with dynamic GI; it can reduce static accumulation.
+- Removing whole-scene transform resets exposes changing-lighting/material history
+  problems to TR1's validation. MQ1's retained box clamp limits stale colours but
+  cannot supply a newly disoccluded surface's missing lighting samples.
 - Motion evidence is native-resolution. The same source projects in output-pixel
   units when upscaled, but Quality/Performance object-motion sweeps were not run.
 - No ground-truth shutter, Unreal comparison, film-quality certification or speed

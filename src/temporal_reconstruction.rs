@@ -545,7 +545,12 @@ impl ReconstructionState {
             anchor: [anchor(), anchor()],
             layer: [layer(), layer()],
             sample: target(r, "TR1 frame samples", size, F::Rgba16Float, U::COPY_DST),
-            frame: Buffer::new(r, "TR1 frame state", FRAME_BUFFER_BYTES as u64, U::STORAGE),
+            frame: Buffer::new(
+                r,
+                "TR1 frame state",
+                FRAME_BUFFER_BYTES as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
             groups: None,
             parity: 0,
             previous: None,
