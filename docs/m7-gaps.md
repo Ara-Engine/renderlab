@@ -10,15 +10,20 @@ TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent 
 - **Order.** Sorting is per object: one key per draw, from its visible instances' mean bounds centre. Instances inside a draw, and intersecting transparent objects, aren't sorted per pixel, and no OIT fallback exists. Unreal sorts per primitive with optional OIT.
 - **Refraction** is screen-space and thin-slab only. Content off screen or behind a nearer occluder falls back to the unshifted pixel. No thick or volumetric refraction, no dispersion, no rough (blurred) refraction: the colour copy has no mip chain. Each transparent draw copies the full HDR target before it draws.
 - **Anti-aliasing.** The pass runs after TR1 at one sample per pixel, so transparent edges alias. Unreal composites translucency before TSR, with responsive AA.
-- **4x raster frames** skip the pass: there is no single-sample depth to read. 1x raster, traced and visibility-buffer frames run it.
+- **Frames that skip the pass.**
+  - 4x raster frames: there is no single-sample depth to read.
+  - TR1b upscaled frames (`RenderScale` below native): hit records are at the internal size and presentation reads the output HDR.
+
+  1x raster, traced and visibility-buffer frames at native scale run it.
+- **Cost** (M, quarry, functional lease): the pane adds 0.16-0.53 ms, including one full-HDR copy per transparent draw. The pass's fixed work and 448 particles add 0.09-0.65 ms. The RT raster default pays the most: +1.25 ms in total.
 - **Lighting inputs.** Transparent surfaces read the same lights, sky, ES1 lobes and radiance-cache lookups as opaque ones. The cache holds no cells of its own for transparent surfaces, so they read nearby opaque cells or the open sky. Non-RT sun visibility is a 2048² map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1.
 - **Programmability.** A program shades transparent surfaces through its own `surface` and `shade`, plus an optional `transmittance` hook. Without the hook, it blends by coverage. Refraction uses the engine's `material_normal`, not a program normal. Streamed (non-resident) textures on transparent materials bind their resident levels without feedback.
 - **Cutout foliage.**
   - The cut is static: no alpha animation, no runtime change of cutoff or texture.
-  - The contour is linear per grid cell, and the triangle cost is high: the fern card is about 8k triangles at 96 cells.
+  - The contour is linear per grid cell, and the triangle cost is high: the fern card is 7,722 triangles at 96 cells. Measured cost of 18 cards: +0.20 ms non-RT, +0.39 ms raster, within noise on RT traced. There's no LOD of the cut.
+  - Cuts must stay welded: an unwelded cut cost +6 ms on non-RT.
   - No tangent stream, so cut meshes take no normal map.
   - No alpha-to-coverage softening of the cut edge.
-  - Vertices aren't shared between cells (no index reuse).
 - **No Unreal or reference comparison** this push (rule 3).
 
 ## Particles

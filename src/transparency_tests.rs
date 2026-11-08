@@ -329,8 +329,9 @@ fn pane(width: f32, height: f32, cells: u32) -> (Vec<crate::Vertex>, Vec<u32>) {
         for i in 0..=cells {
             let (u, v) = (i as f32 / cells as f32, j as f32 / cells as f32);
             let (x, z) = ((u - 0.5) * width, v * height);
-            let nx = 0.15 * (x * 9.0 + z * 2.0).sin();
-            let nz = 0.15 * (z * 7.0).cos();
+            // Window glass: a gentle ripple of about 1.5 degrees.
+            let nx = 0.025 * (x * 9.0 + z * 2.0).sin();
+            let nz = 0.025 * (z * 7.0).cos();
             let length = (nx * nx + 1.0 + nz * nz).sqrt();
             vertices.push(vertex([x, 0.0, z], [nx / length, -1.0 / length, nz / length], [u, 1.0 - v]));
         }
@@ -587,7 +588,7 @@ fn gpu_tp1_scene() {
         roughness: 0.04,
         double_sided: true,
         thin: true,
-        transparency: Some(crate::Transparency { opacity: 0.0, ior: 1.5, thickness: 0.05 }),
+        transparency: Some(crate::Transparency { opacity: 0.0, ior: 1.5, thickness: 0.02 }),
         ..Default::default()
     });
     let mut glass_instances = upload_instances(&mut r, &[placement(glass_at, up, eye - glass_at, 0.25, 1.0)]);
