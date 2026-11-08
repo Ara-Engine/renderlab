@@ -68,7 +68,7 @@ Islam's decisions on design draft 2 (2026-11-07):
 
 Root decisions:
 - **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
-- **RT memory baseline:** M7 starts from the RT default path, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410.
+- **RT comparison memory baseline:** M7 measurements use the non-default fast setup, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410. The RT-device default remains raster plus Exact; [RT1c](rt1c-rt-default.md) and [RT1d](rt1d-shadow-filter.md) record the failed promotion gates.
 - **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
 
 ## Patent policy (Islam, 2026-11-07)
