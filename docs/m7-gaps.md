@@ -283,3 +283,30 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 8. **Unverified:** mixed frames with streamed textures (`TextureResidency` other than `Full`; composed and naga-checked, never rendered), mixed frames with RT1d's visibility filter, motion and disocclusion across program boundaries under TR1 (only static frames and the example's fly path were inspected), and Hard (inline-ray) shading in mixed frames (the gates use Interactive and Virtual).
 9. **Memory with many photoreal programs.** The eight-standard-program quarry run took available memory below the lease guard's 2 GiB twice (32 GB machine, other units running), where the toon-program run bottomed at 5.1 GiB. Not diagnosed: concurrent list-pipeline compiles, per-program GI cell pipelines and per-switch material churn are candidates.
 10. **No Unreal comparison** of per-object materials: Unreal assigns materials per mesh natively; the 2x speed gate on matched workloads was not measured for mixed frames.
+
+
+## Startup
+
+PC1 ([m7-pc1.md](m7-pc1.md)) persists engine and program Vulkan pipeline caches before
+initialization. Full-image identity passes on game/quarry, RT/non-RT, dev/release.
+The shared-machine release RT game sample falls from 48.771 s with an empty application
+cache to 0.745 s with a populated one. These are single diagnostic samples with an
+uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window claim.
+
+- Cold startup remains expensive: release RT game was 48.771 s empty-cache versus
+  37.497 s with persistence off. A real unseen program edit still took 31.335 s to
+  readback; 95.7 ms of module work was followed by a 31.081 s first-use mixed-program
+  list pipeline compile. Background/prewarmed creation of unseen variants remains open.
+- A driver-private-cache hit can already make startup fast. The dev matrix shows no
+  consistent extra benefit from persistence, and one non-RT warm sample is slower.
+- Warm quarry preparation remains 9.479/27.306 s in dev and 4.415/15.236 s in release
+  (RT/non-RT); resource/geometry/ray preparation and upload dominate non-RT. This unit
+  changes no GI, acceleration-structure or asset-cooking algorithms.
+- The timed quarry is the engine example with the complete registered scan asset and
+  game props, using its game camera. Startup of the low-level viewer/quarry walk was
+  not measured; its legacy program-only cache setter does not persist all startup kernels.
+- The program edit check uses the API, without GI/TR1, on RT. File-watch debounce,
+  physical scanout, a separate non-RT reload timing and native-only driver/SPIR-V
+  attribution were not measured. Corrupt-file/key tests pass on CPU; GPU replay after
+  corruption or an actual driver update remains untested. Cache files are bounded to
+  64 MiB and concurrent writers retain the last complete snapshot.
