@@ -2699,6 +2699,10 @@ mod tests {
             let cell = compose(head, crate::STANDARD_PROGRAM, Stage::Cell, false);
             assert!(cell.source.contains("fn gi_shade_cells("));
             validate("standard cell shading", &cell.source);
+            // MP1: a mixed frame's cell entry selects its own draws' cells.
+            let mixed = mixed_cell_entry(&cell.source, 3);
+            assert!(mixed.contains("if gs_program!=4u"));
+            validate("mixed standard cell shading", &mixed);
             // Cell shading binds only its own group 0 (work, outgoing radiance, draw table):
             // nothing it reaches may read traced shading's group 0 (camera, hit records).
             let module = naga::front::wgsl::parse_str(&cell.source).unwrap();
