@@ -611,6 +611,8 @@ pub struct Renderer {
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
     reconstruction: Reconstruction,
+    /// M7-R1/R1n global reflection controls (`set_reflections`).
+    reflections: crate::ReflectionSettings,
     reconstruction_shadow_budget: ReconstructionShadowBudget,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
@@ -1072,6 +1074,7 @@ impl Renderer {
             atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
+            reflections: crate::ReflectionSettings::default(),
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
@@ -1808,7 +1811,29 @@ impl Renderer {
                 let b = visibility_buffer::source_clusters(data);
                 self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
             });
+        // M7-R1n: non-RT visibility-buffer renderers trace reflections in software over
+        // each mesh's drawn triangles (reflection_software.rs), up to its triangle cap.
+        let reflection = (clusters.is_some()
+            && self.hardware_shadows.is_none()
+            && data.indices.len() / 3 <= crate::reflection_software::MAX_TRIANGLES)
+            .then(|| {
+                let started = Instant::now();
+                let positions: Vec<[f32; 3]> = data.vertices.iter().map(|v| v.position).collect();
+                let blas = crate::reflection_software::Blas::build(&positions, data.indices);
+                #[cfg(test)]
+                eprintln!(
+                    "software_reflection_bvh triangles={} bytes={} build_ms={:.3}",
+                    data.indices.len() / 3,
+                    blas.as_ref().map_or(0, |b| b.bytes()),
+                    started.elapsed().as_secs_f64() * 1000.
+                );
+                let _ = started;
+                blas
+            })
+            .flatten()
+            .map(Arc::new);
         Ok(Some(Mesh {
+            reflection,
             skin: None,
             clusters,
             repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),

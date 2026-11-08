@@ -192,12 +192,12 @@ fn reflection_lobe(s: Surface, input: SurfaceInput) -> SpecularLobe  // Specular
 
 and reads the result with the engine input `specular_incident(input) -> vec4<f32>`. Its rgb is the mean exposed radiance over the lobe, and w is the traced fraction, so the program blends it over its own untraced estimate: `mix(untraced, traced.rgb * reflectance, traced.w)`. `alpha` is perceptual roughness squared, and `weight > 0` requests rays.
 
-| Path | What a requesting program gets (M7-R1, [m7-r1.md](m7-r1.md)) |
+| Path | What a requesting program gets (M7-R1 [m7-r1.md](m7-r1.md), M7-R1n [m7-r1n.md](m7-r1n.md)) |
 |---|---|
 | `HardwareRt` | One mirror ray below roughness 0.05, and four fixed GGX strata up to 0.35, fading to the untraced estimate by 0.5 (w falls from 1 to 0 over 0.35-0.5). Hits are shaded by the frame's program, with the hit's own material, decals and a hard shadow ray. TR1 integrates the glossy strata over frames. One bounce. |
-| `NonRt` | w = 0 everywhere, so the program's untraced estimate stands: `indirect_radiance`, the environment, occluded and with bounce when GI runs. Software-traced non-RT reflections (R1n) are in progress and need no API change. |
+| `NonRt` | The same rays, bands, hit shading and TR1 integration, traced in software over per-mesh BVHs of the drawn triangles (R1n). A frame that draws any mesh over 2^19 triangles, or any streamed cluster mesh, traces nothing and keeps the program's untraced estimate (`indirect_radiance`), so no ray shows sky through a mesh without software geometry. |
 
-The standard program requests them for every material. The example's program shows per-material control: its `reflect` parameter is the lobe weight, so a material with `reflect: 0` asks for no rays. The renderer has no global reflection switch at this revision.
+The standard program requests them for every material. The example's program shows per-material control: its `reflect` parameter is the lobe weight, so a material with `reflect: 0` asks for no rays. `Settings::reflections: ReflectionSettings { enabled, max_roughness }` bounds every program on both paths: on by default up to roughness 0.5 (the bands above), and `ReflectionSettings::off()` traces nothing.
 
 R1 records three constraints. The hook is GGX-shaped, so a non-GGX style gives its nearest GGX lobe or weight 0. Hits read the open environment, not the GI cache. A program that declares the hook but not the input, or the reverse, traces nothing.
 
@@ -241,7 +241,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - Materials must be double-sided while the sun casts shadows.
 - Only the 4 most important local lights cast shadows (LC1); the rest are unshadowed. See the Lights section of [m7-gaps.md](m7-gaps.md#lights).
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
-- On `NonRt`, reflections are the environment estimate only (R1n adds software-traced reflections), and volumetric fog is unshadowed (no sun shafts).
+- On `NonRt`, reflections are traced only in frames whose meshes all have software geometry (none over 2^19 triangles, no streamed cluster meshes), and volumetric fog is unshadowed (no sun shafts).
 - The GI cache shows bright speckles near metallic objects and faceted streaks on some flat faces, on both paths. G2c owns the fix.
 - Virtual geometry (streamed cluster meshes) and the diagnostic view modes stay on the low-level `Renderer`.
 
@@ -266,14 +266,14 @@ Each overnight unit lands in a named slot. Wired rows are on this branch; the ot
 |---|---|---|
 | TR1b | TR1 default, upscaling presets | **Wired**: `Settings::temporal_reconstruction` on by default; `Settings::render_scale` (`RenderScale::{Native, Quality, Performance}`); `Background::Sky` for the visible sky |
 | G2b | GI default | **Wired**: `Settings::global_illumination` on by default, off maps to `IndirectSettings::off()`; no new calls |
-| R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). No setting, because the renderer has no switch. R1n's non-RT traced reflections need no API change. |
+| R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). |
 | TP1 | transparency, particles | `MaterialDesc` blend and transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles`. The example gets a glass pane and a particle emitter. |
 | AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
 | SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])`. The example's hero becomes a skinned character. |
 | LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper. LC1 also lifts the soft-sun-only limit, and the example's lantern returns. |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
 | PP1 | post-processing | `Settings::post: PostSettings` (bloom, motion blur, depth of field, tone mapper, white balance, grading, vignette, grain), with `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported, following PP1's branch; an `Exposure::Auto { .. }` variant if PP1 adds auto exposure |
-| R1n | non-RT traced reflections, reflection switch | `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported; the program hooks are unchanged |
+| R1n | non-RT traced reflections, reflection switch | **Wired**: `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported, applied with the other settings; the program hooks are unchanged |
 | MP1 | per-program dispatch | **Wired**, no API change: materials of different programs share a frame (see [Shading programs](#shading-programs)). The example's hero has its own toon program, examples/game_toon.wgsl. |
 | G2c | GI speckles and streaks | no API change |
 
