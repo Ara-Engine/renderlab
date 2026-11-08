@@ -1738,7 +1738,7 @@ fn gi_gather_period(count:u32) -> u32 {
             for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
             if m<=0.0 {
-                gi_table[hot+GI_HOT_BOUNCE]=0u;
+                gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
             } else {
                 for(var w=0u;w<6u;w+=1u) {
                     let a=gi_wg_bounce[(2u*w)*GI_GATHER_LANES];
