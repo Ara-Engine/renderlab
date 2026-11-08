@@ -904,6 +904,9 @@ impl PrimaryState {
                     23,
                     wgpu::TextureSampleType::Float { filterable: false },
                 ));
+            } else {
+                // M7-R1: Soft shading traces reflection rays on the shared TLAS.
+                entries.push(scene(2));
             }
             group("primary shading", &entries)
         });
@@ -1797,6 +1800,7 @@ impl Renderer {
                     )
                 }),
             ];
+            let reflection_scene = scene.clone();
             let shade = |shading: Shading, visibility: (u32, R<'_>)| {
                 let mut entries = vec![
                     camera.clone(),
@@ -1809,6 +1813,9 @@ impl Renderer {
                 ];
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
+                } else {
+                    // M7-R1: reflection rays (shaders/reflections.wgsl).
+                    entries.push(reflection_scene.clone());
                 }
                 Some(group(&state.shade_bindings[shading as usize], &entries))
             };
