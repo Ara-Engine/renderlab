@@ -372,6 +372,47 @@ impl Prepared {
             distance + self.radius * 4.0,
         )
     }
+    /// MP1 measurements (docs/m7-mp1.md): recreates material `i` with program
+    /// `programs[i % len]` (its defaults), keeping its factors and textures. Uploads must
+    /// be complete (`ready`).
+    #[allow(dead_code)]
+    pub fn set_programs(
+        &mut self,
+        r: &mut Renderer,
+        programs: &[&renderlab::Program],
+    ) -> Result<(), renderlab::Error> {
+        let mut materials = Vec::with_capacity(self.source.materials.len());
+        for (i, data) in self.source.materials.iter().enumerate() {
+            let binding = |id: u32, sampler| TextureBinding {
+                texture: &self.textures[id as usize],
+                sampler,
+            };
+            let descriptor = MaterialDescriptor {
+                base_color: data.base_color,
+                metallic: data.metallic,
+                roughness: data.roughness,
+                double_sided: data.double_sided,
+                normal_scale: data.normal_texture.map_or(1., |t| t.scale),
+                normal_texture: data.normal_texture.map(|t| binding(t.texture, t.sampler)),
+                base_color_texture: data
+                    .base_color_texture
+                    .map(|t| binding(t.texture, t.sampler)),
+                metallic_roughness_texture: data
+                    .metallic_roughness_texture
+                    .map(|t| binding(t.texture, t.sampler)),
+                program: Some(programs[i % programs.len()]),
+                ..Default::default()
+            };
+            materials.push(loop {
+                if let Some(m) = r.try_create_material(&descriptor)? {
+                    break m;
+                }
+                r.poll()?;
+            });
+        }
+        self.materials = materials;
+        Ok(())
+    }
     pub fn draws(&mut self, visibility: Visibility) -> Vec<Draw<'_>> {
         self.instances
             .iter_mut()

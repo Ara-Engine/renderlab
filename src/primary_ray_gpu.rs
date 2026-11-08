@@ -15,9 +15,14 @@ use film_accumulation::{FilmLayouts, FilmState};
 mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
 pub(super) mod temporal_reconstruction;
+// MP1: per-program deferred shading of mixed-program frames.
+#[path = "program_lists.rs"]
+pub(super) mod program_lists;
+use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
 /// `scene_pixels` rectangle.
+// TP2 integration: post-processing shares this ABI instead of freezing its byte size.
 pub(super) const FRAME_BYTES: usize = 128;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
@@ -47,6 +52,11 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
     let hard = crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
     let soft = fresh_shadow_gpu::shader_source(wgsl)?;
     Ok([hard, soft].map(|c| format!("{ENABLES}{c}\n{rays}")))
+}
+
+// TP2: glass reflection hits use R1's ordinary traced hit shading and geometry ABI.
+pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
+    Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
 }
 
 /// Same engine seams and material ABI, with no traversal declarations at all.
@@ -288,18 +298,29 @@ pub(super) fn supported(device: &wgpu::Device) -> bool {
 
 /// Rejects a traced frame before any frame write: hardware-shadowed frames need opaque
 /// double-sided casters, meshes must have BLASes, the draw count must fit, the camera
-/// inverse must exist, and every draw must use one shading program (`standard` for draws
-/// without a material): mixed-program frames need per-program tile dispatch.
+/// inverse must exist, and at most `MAX_FRAME_PROGRAMS` shading programs (`standard` for
+/// draws without a material) may shade it, per program (MP1). Temporal film frames
+/// (`single_program`) still shade with one program.
 pub(super) fn admit_draws(
     draws: &[Draw<'_>],
     matrix: Mat4,
     shadowed: bool,
     standard: u64,
+    single_program: bool,
 ) -> Result<(), Error> {
-    let program = |d: &Draw<'_>| d.material.map_or(standard, |m| m.program.id());
-    if draws.windows(2).any(|w| program(&w[0]) != program(&w[1])) {
+    let (programs, _) = program_lists::frame_slots(
+        draws
+            .iter()
+            .map(|d| d.material.map_or(standard, |m| m.program.id())),
+    );
+    if single_program && programs.len() > 1 {
         return Err(Error::InvalidInput(
-            "traced primary visibility supports one shading program per frame; mixed-program frames are not implemented yet",
+            "temporal film frames support one shading program per frame; mixed-program frames need another soft-shadow mode",
+        ));
+    }
+    if programs.len() > MAX_FRAME_PROGRAMS {
+        return Err(Error::InvalidInput(
+            "a traced or visibility-buffer frame supports at most 32 shading programs",
         ));
     }
     if shadowed
@@ -390,6 +411,7 @@ impl Renderer {
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = None;
+                    slot.pipelines.list = Default::default();
                 }
                 self.primary_sources = None;
                 if let Some(primary) = &mut self.primary {
@@ -437,6 +459,7 @@ impl Renderer {
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = None;
+                    slot.pipelines.list = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -613,7 +636,14 @@ pub(super) struct Targets {
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
-    key: (wgpu::Texture, wgpu::Texture, Option<wgpu::Texture>, u64),
+    /// Hit records, HDR, fresh targets, TLAS and list-buffer generations.
+    key: (
+        wgpu::Texture,
+        wgpu::Texture,
+        Option<wgpu::Texture>,
+        u64,
+        u64,
+    ),
     trace: [Option<Owned<wgpu::BindGroup>>; 2],
     fresh: Option<Owned<wgpu::BindGroup>>,
     /// Soft frames: the fused Interactive trace and visibility.
@@ -621,6 +651,8 @@ struct Bindings {
     repair: Option<Owned<wgpu::BindGroup>>,
     check: Option<Owned<wgpu::BindGroup>>,
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
+    /// MP1: `shade` plus the program list bindings, while list buffers exist.
+    list: [Option<Owned<wgpu::BindGroup>>; 2],
 }
 enum Retired {
     Targets(#[allow(dead_code)] Box<Targets>),
@@ -715,8 +747,16 @@ pub(super) struct PrimaryState {
     region_buffer: Option<Buffer>,
     /// Storage stand-in for absent tangent streams and unused draw slots.
     absent: Option<Buffer>,
-    /// The program every draw of the last prepared frame uses (`admit_draws`).
+    /// The first draw's program in the last prepared frame: its slot 0.
     pub program: u64,
+    /// MP1: the last prepared frame's distinct programs in first-draw order (its slots).
+    /// More than one makes it a mixed frame, shaded per program (`program_lists`).
+    pub programs: Vec<u64>,
+    list_layouts: ListLayouts,
+    /// The mixed frames' list buffers, kept for later mixed frames.
+    lists: Option<ProgramLists>,
+    /// The binning kernel, compiled by the first mixed frame.
+    bins: Option<Owned<wgpu::ComputePipeline>>,
     pub targets: Option<Targets>,
     geometry: Option<Geometry>,
     bindings: Option<Bindings>,
@@ -896,7 +936,7 @@ impl PrimaryState {
                 ),
             ],
         );
-        let shade_bindings = [scene(2), texture(6, uint)].map(|visibility| {
+        let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
             let mut entries = vec![
                 camera,
                 texture(7, uint),
@@ -915,8 +955,11 @@ impl PrimaryState {
                 // M7-R1: Soft shading traces reflection rays on the shared TLAS.
                 entries.push(scene(2));
             }
-            group("primary shading", &entries)
+            entries
         });
+        let shade_bindings = shade_entries
+            .each_ref()
+            .map(|e| group("primary shading", e));
         let fresh_bindings = group(
             "primary fresh visibility",
             &[
@@ -1024,6 +1067,14 @@ impl PrimaryState {
                     ],
                 )
             }),
+            list_layouts: ListLayouts::new(
+                device,
+                ledger,
+                &shade_entries,
+                &array_bindings,
+                [&material_bindings, &streamed_bindings],
+                lighting,
+            ),
             streamed_bindings,
             fresh_layout: layout(
                 "primary fresh visibility ABI",
@@ -1073,6 +1124,9 @@ impl PrimaryState {
             region_buffer: None,
             absent: None,
             program: 0,
+            programs: vec![],
+            lists: None,
+            bins: None,
             targets: None,
             geometry: None,
             bindings: None,
@@ -1387,6 +1441,7 @@ impl PrimaryState {
         self.frame = None;
         self.region_buffer = None;
         self.absent = None;
+        self.lists = None;
     }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
@@ -1420,11 +1475,15 @@ impl Renderer {
                 material.thin,
             )
         }))?;
-        // Admission guarantees one program; an empty frame shades nothing.
-        let program = draws.first().map_or(self.standard.id(), |d| {
-            d.material.unwrap_or(default).program.id()
-        });
-        self.primary.as_mut().unwrap().program = program;
+        // Slot 0 is the first draw's program (standard for an empty frame, which shades
+        // nothing); MP1 shades a frame with several programs per program.
+        let (programs, slots) = program_lists::frame_slots(
+            draws
+                .iter()
+                .map(|d| d.material.unwrap_or(default).program.id()),
+        );
+        self.primary.as_mut().unwrap().program =
+            programs.first().copied().unwrap_or(self.standard.id());
         let sided = placements.iter().any(|p| p & 1 << 30 != 0);
         let matrix = camera.matrix(size.width, size.height);
         let inverse = matrix.inverse();
@@ -1767,15 +1826,18 @@ impl Renderer {
                     .push((self.submissions, Retired::Targets(Box::new(old))));
             }
         }
+        self.prepare_program_lists(programs, &slots, [size.width, size.height], uploads);
         let state = self.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
         let fresh = soft.then(|| self.fresh.as_ref().unwrap().targets.as_ref().unwrap());
+        let lists = state.lists.as_ref();
         let key = (
             (*t.hit.texture).clone(),
             (*hdr.texture).clone(),
             fresh.map(|f| (*f.world.texture).clone()),
             scene_generation,
+            lists.map_or(0, |l| l.generation),
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             let reconstruction_changed = state
@@ -1842,7 +1904,9 @@ impl Renderer {
                 }),
             ];
             let reflection_scene = scene.clone();
-            let shade = |shading: Shading, visibility: (u32, R<'_>)| {
+            let shade = |shading: Shading,
+                         visibility: (u32, R<'_>)|
+             -> [Option<Owned<wgpu::BindGroup>>; 2] {
                 let mut entries = vec![
                     camera.clone(),
                     (7, hit.clone()),
@@ -1858,7 +1922,26 @@ impl Renderer {
                     // M7-R1: reflection rays (shaders/reflections.wgsl).
                     entries.push(reflection_scene.clone());
                 }
-                Some(group(&state.shade_bindings[shading as usize], &entries))
+                // MP1: the same group plus the slot table and tile lists.
+                let list = lists.map(|l| {
+                    let mut entries = entries.clone();
+                    entries.extend(l.shade_entries());
+                    group(state.list_shade_layout(shading), &entries)
+                });
+                [
+                    Some(group(&state.shade_bindings[shading as usize], &entries)),
+                    list,
+                ]
+            };
+            let [shade, list] = match fresh {
+                Some(f) => {
+                    let [s, l] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
+                    [[None, s], [None, l]]
+                }
+                None => {
+                    let [s, l] = shade(Shading::Hard, scene.clone());
+                    [[s, None], [l, None]]
+                }
             };
             let next = Bindings {
                 trace,
@@ -1915,13 +1998,8 @@ impl Renderer {
                         ],
                     )
                 }),
-                shade: match fresh {
-                    Some(f) => [
-                        None,
-                        shade(Shading::Soft, (6, R::TextureView(&f.visibility.view))),
-                    ],
-                    None => [shade(Shading::Hard, scene), None],
-                },
+                shade,
+                list,
                 key,
             };
             let state = self.primary.as_mut().unwrap();
@@ -1933,6 +2011,7 @@ impl Renderer {
                     .push((self.submissions, Retired::Bindings(old)));
             }
         }
+        self.prepare_bins_group();
         Ok(())
     }
 
@@ -2337,7 +2416,7 @@ impl Renderer {
     }
 
     /// Deferred shading of the scene region into the HDR target with the frame's program,
-    /// and the clear colour everywhere else, in one dispatch.
+    /// and the clear colour everywhere else, in one dispatch; per program in mixed frames.
     pub(super) fn encode_primary_shading(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -2345,6 +2424,10 @@ impl Renderer {
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.primary.as_ref().unwrap();
+        if state.mixed() {
+            self.encode_program_lists(encoder, shading, timestamp_writes);
+            return;
+        }
         let program = self.program_slot(state.program);
         let set = if state.requests {
             &program.pipelines.streamed

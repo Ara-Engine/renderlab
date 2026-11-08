@@ -71,6 +71,87 @@ fn cube(r: &mut Renderer) -> (Mesh, Instances) {
 }
 
 #[test]
+#[ignore = "MV1 owned n8 GPU lease; RENDERLAB_MQ1_RESOLVE is the immutable main shader"]
+fn gpu_mv1_mq1_static_identity() {
+    use sha2::{Digest, Sha256};
+    let baseline = fs::read_to_string(std::env::var("RENDERLAB_MQ1_RESOLVE").unwrap()).unwrap();
+    for path in ["rt", "nonrt"] {
+        let mut r = if path == "rt" {
+            renderer(true)
+        } else {
+            no_rt_renderer()
+        };
+        if path == "rt" {
+            r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        }
+        r.set_shadows(&Shadows::default()).unwrap();
+        r.set_indirect(IndirectSettings::off()).unwrap();
+        r.test_reload_standard(&standard_returning(
+            "select(vec3<f32>(0.04,0.1,0.2),vec3<f32>(0.9,0.6,0.12),fract(input.uv.x*8.0)>0.5)",
+        ))
+        .unwrap();
+        let (mesh, mut placement) = cube(&mut r);
+        placement
+            .set(
+                0,
+                Mat4::from_translation(Vec3::new(0.12, 0.07, 0.))
+                    * Mat4::from_rotation_y(0.37)
+                    * Mat4::from_rotation_z(0.12),
+            )
+            .unwrap();
+        let color = target(&r, 160, 96);
+        let camera = |f: u32, moving: bool| {
+            Camera::look_at(
+                Vec3::new(if moving { f as f32 * 0.005 } else { 0. }, 0.3, 3.),
+                Vec3::ZERO,
+                Vec3::Y,
+                0.8,
+                0.05,
+                100.,
+            )
+            .unwrap()
+        };
+        render(
+            &mut r,
+            &color,
+            &camera(0, false),
+            &mut [Draw::new(&mesh, &mut placement)],
+        );
+        r.test_drain("MV1 static control warmup");
+        for moving in [false, true] {
+            let mut control = None;
+            for mq1 in [true, false] {
+                r.test_resolve_source(mq1.then_some(baseline.as_str()));
+                r.cut_reconstruction();
+                r.reconstruction_index = 0;
+                r.cut_post_motion();
+                for f in 0..32 {
+                    render(
+                        &mut r,
+                        &color,
+                        &camera(f, moving),
+                        &mut [Draw::new(&mesh, &mut placement)],
+                    );
+                    r.test_drain("MV1 static identity");
+                }
+                let bytes = read_texture(&r, &r.lighting.hdr.as_ref().unwrap().resolved.texture);
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                eprintln!("MV1 static identity {path} camera_moving={moving} mq1={mq1} HDR={hash}");
+                if let Some(expected) = &control {
+                    assert_eq!(
+                        &bytes, expected,
+                        "{path}, moving camera {moving}: static HDR changed"
+                    );
+                } else {
+                    control = Some(bytes);
+                }
+            }
+        }
+        assert!(r.fault.get().is_none());
+    }
+}
+
+#[test]
 #[ignore = "MV1 owned n8 GPU lease; RENDERLAB_PRIMARY_MANIFEST selects path/output/quarry"]
 fn gpu_object_motion() {
     let m = manifest();

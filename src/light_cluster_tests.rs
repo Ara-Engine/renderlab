@@ -56,12 +56,14 @@ fn night_lights(count: usize) -> Vec<Light> {
                 range,
                 inner: 0.25,
                 outer: 0.55,
+                source_radius: 0.0,
             }
         } else {
             Light::Point {
                 position,
                 candela: rgb.map(|c| c * candela),
                 range,
+                source_radius: 0.0,
             }
         });
     }
@@ -88,12 +90,14 @@ fn night_lights(count: usize) -> Vec<Light> {
                 range: Some(9.0),
                 inner: 0.35,
                 outer: 0.7,
+                source_radius: 0.0,
             }
         } else {
             Light::Point {
                 position,
                 candela: rgb.map(|c| c * 60.0),
                 range: Some(7.0),
+                source_radius: 0.0,
             }
         });
     }
@@ -179,6 +183,7 @@ fn shadowed_lights_rank_by_illuminance_and_keep_their_slots() {
         position,
         candela: [candela; 3],
         range: Some(5.0),
+        source_radius: 0.0,
     };
     let lights = vec![
         Light::Directional {
@@ -414,7 +419,8 @@ impl Renderer {
 /// Interactive; `nonrt` = the visibility buffer and Virtual). LC1_QUARRY names G1c's
 /// manifest; LC1_OUT receives PNGs, raw f32 captures and `lc1-<path>.json` (cluster checks,
 /// selection, timings). LC1_LIGHTS sets the small-light count (default 256), LC1_FRAMES
-/// the timed frames per configuration (default 24).
+/// the timed frames per configuration (default 24). LC2=1 adds 8 cm source radii,
+/// hard-shadow captures/timing and the GI visibility counters beyond lights 32 and 256.
 #[test]
 #[ignore = "GPU; optimized build; LC1_QUARRY, LC1_OUT, LC1_PATH"]
 fn gpu_lc1_quarry_night() {
@@ -468,8 +474,19 @@ fn gpu_lc1_quarry_night() {
     };
     if path == "traced" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    } else if path == "raster" {
+        r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+        r.set_soft_shadows(SoftShadows::Exact);
     }
-    let all = night_lights(count);
+    let lc2 = env("LC2").as_deref() == Some("1");
+    let mut all = night_lights(count);
+    if lc2 {
+        for light in &mut all {
+            if let Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } = light {
+                *source_radius = 0.08;
+            }
+        }
+    }
     let shadows = |n: usize| Shadows {
         directional_disk_angle: 0.04,
         requests: std::iter::once(ShadowRequest::Directional {
@@ -495,6 +512,20 @@ fn gpu_lc1_quarry_night() {
         r.collect().unwrap();
     }
     r.test_drain("LC1 upload");
+    // LC2: the low-level non-RT renderer needs explicit software GI geometry. LC1's
+    // original night harness omitted it, so its non-RT GI-on capture was a fallback.
+    if lc2 && path == "nonrt" {
+        let field = crate::asset::near_field::decode(
+            &std::fs::read(env("LC2_NEAR").expect("LC2_NEAR names G1c's cooked near field"))
+                .unwrap(),
+            crate::asset::near_field::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(field.meshes.len(), asset.meshes_mut().len());
+        for (i, mesh) in asset.meshes_mut().iter().enumerate() {
+            r.set_indirect_near_field(mesh, &field, i).unwrap();
+        }
+    }
     let frame = &cameras.frames[0];
     let camera = frame.camera().unwrap();
     let viewport = [frame.width, frame.height];
@@ -544,6 +575,8 @@ fn gpu_lc1_quarry_night() {
     };
     let mut log = serde_json::json!({"path": path, "lights": all.len(), "primary": format!("{:?}", r.primary_mode),
         "viewport": viewport, "frames": frames});
+    let capture_device = r.device.clone();
+    let capture_queue = r.queue.clone();
     let save = |name: &str, image: &[f32]| {
         write_png(
             &out.join(format!("{path}-{name}.png")),
@@ -551,15 +584,53 @@ fn gpu_lc1_quarry_night() {
             frame.width,
             frame.height,
         );
+        if lc2 {
+            write_presented_png(
+                &capture_device,
+                &capture_queue,
+                &target,
+                &out.join(format!("{path}-{name}-present.png")),
+            );
+        }
         let bytes: Vec<u8> = image.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(out.join(format!("{path}-{name}.f32")), bytes).unwrap();
     };
+    // LC2 also exercises in-flight bitset growth from one light to 261 lights. This
+    // follows the same allocation/retirement path a game adding its first many lights uses.
+    if lc2 {
+        r.set_lighting_and_shadows(&lighting(&all[..1]), &shadows(1))
+            .unwrap();
+        render(&mut r, &mut asset, &camera);
+        r.set_lighting_and_shadows(&lighting(&all), &shadows(all.len()))
+            .unwrap();
+    }
     // 1. The shipped defaults (GI, TR1 on traced and visibility-buffer frames, atmosphere),
     // clustered, four shadowed local lights, after the cache and history settle.
     for _ in 0..12 {
         render(&mut r, &mut asset, &camera);
     }
     save("night", &capture(&mut r));
+    if lc2 {
+        log["gi_visible_cells_per_light"] =
+            serde_json::json!(gi_light_counts(&mut r, all.len() as u32));
+        log["gi_table_bytes"] = serde_json::json!(r.indirect_stats().table_bytes);
+        let mut hard = all.clone();
+        for light in &mut hard {
+            if let Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } = light {
+                *source_radius = 0.0;
+            }
+        }
+        r.set_lighting(&lighting(&hard)).unwrap();
+        for _ in 0..12 {
+            render(&mut r, &mut asset, &camera);
+        }
+        save("night-hard", &capture(&mut r));
+        log["time_hard"] = time(&mut r, &mut asset, &mut |_, _| {});
+        r.set_lighting(&lighting(&all)).unwrap();
+        for _ in 0..12 {
+            render(&mut r, &mut asset, &camera);
+        }
+    }
     let stats = r.light_cluster_stats();
     log["selection"] = serde_json::json!({"shadowed": stats.shadowed, "maps": stats.maps,
         "faces_drawn_total": stats.total_faces_drawn, "clustered": stats.clustered});
@@ -672,7 +743,7 @@ fn gpu_lc1_quarry_night() {
         log[name] = serde_json::json!({"shadowed": r.light_cluster_stats().shadowed,
             "maps": r.light_cluster_stats().maps});
     }
-    let file = out.join(format!("lc1-{path}.json"));
+    let file = out.join(format!("{}-{path}.json", if lc2 { "lc2" } else { "lc1" }));
     std::fs::write(&file, serde_json::to_string_pretty(&log).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&log).unwrap());
     // LC1_RECORD_ONLY=1: a batch records every path before any gate stops it.
@@ -687,4 +758,399 @@ fn gpu_lc1_quarry_night() {
         differing, 0,
         "clustered shading differs from walking every light"
     );
+}
+
+// LC2: reduce the cache's per-light visibility to small counters on the GPU. No table
+// readback or raw dump: the evidence checks lights beyond 32 and beyond 256 explicitly.
+fn gi_light_counts(r: &mut Renderer, count: u32) -> Vec<u32> {
+    r.test_drain("LC2 GI light list");
+    let Some(table) = r.test_lc2_gi_table() else {
+        return vec![];
+    };
+    let output = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("LC2 light visibility counters"),
+        size: u64::from(count) * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("LC2 light counter readback"),
+        size: output.size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let source = format!(
+        "@group(0) @binding(0) var<storage,read> table:array<u32>;
+@group(0) @binding(1) var<storage,read_write> counts:array<atomic<u32>>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>) {{
+ let slots=table[1]+1u; let slot=id.x; if slot>=slots {{ return; }}
+ if (table[64u+slot*24u]&0x80000000u)==0u {{ return; }}
+ let cold=64u+slots*24u+slot*table[23];
+ if (table[cold]&2u)!=0u {{ return; }}
+ for(var i=0u;i<{count}u;i+=1u) {{
+  if (table[cold+31u+(i>>5u)]&(1u<<(i&31u)))!=0u {{ atomicAdd(&counts[i],1u); }}
+ }}
+}}"
+    );
+    let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("LC2 list reduction"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = r
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("LC2 list reduction"),
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let bind = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = r.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups((1u32 << r.indirect().slots_log2).div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output.size());
+    r.queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    r.test_drain("LC2 light counters");
+    let bytes = slice.get_mapped_range().unwrap();
+    let counts: Vec<_> = bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    assert!(
+        counts.iter().skip(32).any(|n| *n > 0),
+        "lights beyond 32 reach no GI cell"
+    );
+    assert!(
+        counts.iter().skip(256).any(|n| *n > 0),
+        "lights beyond 256 reach no GI cell"
+    );
+    counts
+}
+
+/// A bounded penumbra fixture: point and spot, hard/soft, a floor and raised blocker.
+/// LC1_PATH selects raster, traced (RT) or nonrt. Captures are visibility itself so a
+/// wider penumbra cannot be confused with changed exposure, material or bounce lighting.
+#[test]
+#[ignore = "GPU; LC1_PATH, LC1_OUT; both local light types, radius zero and positive"]
+fn gpu_lc2_penumbra() {
+    let path = env("LC1_PATH").unwrap_or_else(|| "traced".into());
+    let out = PathBuf::from(
+        env("LC1_OUT")
+            .or_else(|| env("RENDERLAB_M7_G1_OUT"))
+            .unwrap(),
+    );
+    std::fs::create_dir_all(&out).unwrap();
+    let options = RendererOptions {
+        samples: SampleCount::One,
+        ..Default::default()
+    };
+    let mut r = if path == "nonrt" {
+        let (d, q) = no_rt_device();
+        Renderer::new_with_options(
+            d,
+            q,
+            wgpu::TextureFormat::Rgba8Unorm,
+            Limits::default(),
+            options,
+            SOURCE,
+        )
+        .unwrap()
+    } else {
+        let (d, q) = rt_device();
+        Renderer::new_with_hardware_shadows(
+            d,
+            q,
+            wgpu::TextureFormat::Rgba8Unorm,
+            Limits::default(),
+            options,
+            HardwareShadowOptions::default(),
+            SOURCE,
+        )
+        .unwrap()
+    };
+    if path == "traced" {
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    } else if path == "raster" {
+        r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+        r.set_soft_shadows(SoftShadows::Exact);
+    }
+    let program = r
+        .try_create_program(&ProgramDescriptor {
+            label: "LC2 visibility",
+            source: "
+struct Surface { unused:f32 };
+fn surface(input:SurfaceInput)->Surface {return Surface(0.0);}
+fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
+ for(var i=0u;i<light_count();i+=1u) {
+  let sample=light_sample(i,input);
+  if sample.index==1u {return vec3<f32>(light_visibility(input,sample));}
+ }
+ return vec3<f32>(1.0);
+}",
+        })
+        .unwrap();
+    let material = loop {
+        if let Some(m) = r
+            .try_create_material(&MaterialDescriptor {
+                program: Some(&program),
+                double_sided: true,
+                ..Default::default()
+            })
+            .unwrap()
+        {
+            break m;
+        }
+        r.test_drain("LC2 material");
+    };
+    let indices = [0, 1, 2, 0, 2, 3];
+    let mut meshes = vec![];
+    let mut placements = vec![];
+    for (half, translation) in [(2.5, Vec3::ZERO), (0.35, Vec3::new(0.0, 0.0, 1.0))] {
+        let vertices = [
+            [-half, -half, 0.0],
+            [half, -half, 0.0],
+            [half, half, 0.0],
+            [-half, half, 0.0],
+        ]
+        .map(|position| Vertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0; 2],
+            color: [1.0; 4],
+        });
+        let mesh = loop {
+            if let Some(m) = r
+                .try_upload_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap()
+            {
+                break m;
+            }
+            r.test_drain("LC2 mesh");
+        };
+        let instance = loop {
+            if let Some(i) = r
+                .try_upload_instances(&[Mat4::from_translation(translation)])
+                .unwrap()
+            {
+                break i;
+            }
+            r.test_drain("LC2 instances");
+        };
+        meshes.push(mesh);
+        placements.push(instance);
+    }
+    let size = [512, 512];
+    let target = r.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("LC2 penumbra"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let camera = Camera::look_at(
+        Vec3::new(0.0, 0.0, 5.0),
+        Vec3::ZERO,
+        Vec3::Y,
+        0.8,
+        0.05,
+        20.0,
+    )
+    .unwrap();
+    let render = |r: &mut Renderer, placements: &mut Vec<Instances>| {
+        let mut draws: Vec<_> = meshes
+            .iter()
+            .zip(placements)
+            .map(|(m, i)| Draw::new(m, i).with_material(&material))
+            .collect();
+        loop {
+            if r.try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            r.test_drain("LC2 penumbra admission");
+        }
+    };
+    let mut log = serde_json::json!({"path":path});
+    for spot in [false, true] {
+        let name = if spot { "spot" } else { "point" };
+        let mut images = vec![];
+        for radius in [0.0, 0.25] {
+            let position = Vec3::new(1.0, 0.6, 3.0);
+            let local = if spot {
+                Light::Spot {
+                    position,
+                    travel: -position,
+                    candela: [10.0; 3],
+                    range: Some(10.0),
+                    inner: 0.5,
+                    outer: 0.8,
+                    source_radius: radius,
+                }
+            } else {
+                Light::Point {
+                    position,
+                    candela: [10.0; 3],
+                    range: Some(10.0),
+                    source_radius: radius,
+                }
+            };
+            r.set_lighting_and_shadows(
+                &Lighting {
+                    lights: vec![
+                        Light::Directional {
+                            travel: -Vec3::Z,
+                            lux: [0.1; 3],
+                        },
+                        local,
+                    ],
+                    ..Default::default()
+                },
+                &Shadows {
+                    directional_disk_angle: 0.04,
+                    requests: vec![
+                        ShadowRequest::Directional {
+                            split_ends: vec![4.0, 12.0, 40.0],
+                        },
+                        ShadowRequest::None,
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            r.set_reconstruction(Reconstruction::default()).unwrap();
+            for _ in 0..24 {
+                render(&mut r, &mut placements);
+            }
+            let image = capture(&mut r);
+            let mode = if radius == 0.0 { "hard" } else { "soft" };
+            write_png(
+                &out.join(format!("{path}-{name}-{mode}.png")),
+                &image,
+                size[0],
+                size[1],
+            );
+            write_presented_png(
+                &r.device,
+                &r.queue,
+                &target,
+                &out.join(format!("{path}-{name}-{mode}-present.png")),
+            );
+            images.push(image);
+        }
+        let changed = images[0]
+            .iter()
+            .zip(&images[1])
+            .filter(|(a, b)| (*a - *b).abs() > 0.03)
+            .count()
+            / 3;
+        log[name] = serde_json::json!({"changed_pixels":changed});
+        assert!(changed > 100, "{name}: source radius changed no penumbra");
+    }
+    std::fs::write(
+        out.join(format!("penumbra-{path}.json")),
+        serde_json::to_string_pretty(&log).unwrap(),
+    )
+    .unwrap();
+}
+
+// LC2 final-image inspection after PP1: capture the presented target as well as HDR.
+// These tests use a linear Unorm target, so encode sRGB for display in the PNG viewer.
+fn write_presented_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &wgpu::Texture,
+    path: &std::path::Path,
+) {
+    let (width, height) = (target.width(), target.height());
+    let row = (width * 4).next_multiple_of(256);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("LC2 presented image"),
+        size: u64::from(row) * u64::from(height),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
+        },
+        target.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(20)),
+        })
+        .unwrap();
+    let mapped = slice.get_mapped_range().unwrap();
+    let mut bytes = Vec::with_capacity((width * height * 3) as usize);
+    for line in mapped.chunks_exact(row as usize) {
+        for pixel in line[..width as usize * 4].chunks_exact(4) {
+            for &channel in &pixel[..3] {
+                let v = f32::from(channel) / 255.0;
+                let srgb = if target.format().is_srgb() {
+                    v
+                } else if v <= 0.0031308 {
+                    12.92 * v
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                };
+                bytes.push((srgb * 255.0 + 0.5) as u8);
+            }
+        }
+    }
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(path).unwrap()),
+        width,
+        height,
+    );
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&bytes)
+        .unwrap();
 }

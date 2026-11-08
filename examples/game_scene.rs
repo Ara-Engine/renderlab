@@ -10,6 +10,8 @@
 //! ground with the registered quarry scans and its RLE2 sky (manifest keys `asset`,
 //! `limits`, `environment`, `exposure_stops`), shown as a visible sky. `--render-scale`
 //! picks a TR1 upscaling preset.
+//! `--sun-speed DEGREES_PER_SECOND` animates time of day; `--sun-after FRAME` starts
+//! it after a warm-up, and `--still` freezes the camera and objects for lighting inspection.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -26,6 +28,7 @@ use renderlab::{asset, engine::*};
 use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
 
 const GAME_PROGRAM: &str = include_str!("game_scene.wgsl");
+const TOON_PROGRAM: &str = include_str!("game_toon.wgsl");
 const FPS: f32 = 30.0;
 
 struct Args {
@@ -41,6 +44,10 @@ struct Args {
     scale: RenderScale,
     uniform_sky: bool,
     volumetric_fog: Option<bool>,
+    sun_speed: f32,
+    sun_after: u32,
+    still: bool,
+    timing_frames: u32,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -57,6 +64,10 @@ impl Args {
             scale: RenderScale::Native,
             uniform_sky: false,
             volumetric_fog: None,
+            sun_speed: 0.0,
+            sun_after: 0,
+            still: false,
+            timing_frames: 0,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -93,6 +104,10 @@ impl Args {
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
+                "--sun-speed" => a.sun_speed = value()?.parse()?,
+                "--sun-after" => a.sun_after = value()?.parse()?,
+                "--still" => a.still = true,
+                "--timing-frames" => a.timing_frames = value()?.parse()?,
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
                         "native" => RenderScale::Native,
@@ -111,6 +126,9 @@ impl Args {
         }
         if a.frames == 0 {
             return Err("--frames must be positive".into());
+        }
+        if !a.sun_speed.is_finite() {
+            return Err("--sun-speed must be finite".into());
         }
         Ok(a)
     }
@@ -192,8 +210,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg!(debug_assertions)
     );
 
-    // One program for the whole frame; the hero's material selects the toon style.
+    // Two programs in one frame: photoreal props and the toon hero (MP1).
     let program = engine.create_program("game", GAME_PROGRAM)?;
+    let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
         engine.create_material(&MaterialDesc {
             base_color: [color[0], color[1], color[2], 1.0],
@@ -210,14 +229,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paint = material(&mut engine, [0.1, 0.3, 0.85], 0.0, 0.35)?;
     let chrome = material(&mut engine, [0.95, 0.95, 0.97], 1.0, 0.02)?;
     let hero_style = [
-        ("style", Value::U32(1)),
         ("bands", Value::F32(3.0)),
         ("shadow_tint", Value::Vec3([0.22, 0.14, 0.38])),
         ("rim_color", Value::Vec3([0.35, 0.5, 0.7])),
     ];
     let toon = engine.create_material(&MaterialDesc {
         base_color: [0.95, 0.55, 0.2, 1.0],
-        program: Some(program),
+        program: Some(toon_program),
         parameters: &hero_style,
         ..Default::default()
     })?;
@@ -365,8 +383,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&args.out)?;
     let ready = start.elapsed();
     let mut frames = Vec::new();
+    let mut last_camera = None;
     for frame in 0..args.frames {
-        let t = frame as f32 / FPS;
+        let t = if args.still { 0.0 } else { frame as f32 / FPS };
+        let sun_update = Instant::now();
+        let sun_angle =
+            (frame.saturating_sub(args.sun_after) as f32 / FPS * args.sun_speed).to_radians();
+        if args.sun_speed != 0.0 && frame >= args.sun_after {
+            engine.set_sun(Some(Sun {
+                travel: Mat4::from_rotation_z(sun_angle)
+                    .transform_vector3(Vec3::new(-0.45, -0.75, -0.5)),
+                ..Default::default()
+            }))?;
+        }
+        let sun_update_ms = sun_update.elapsed().as_secs_f64() * 1e3;
         // The hero walks a circle through the arch and bobs.
         let walk = 0.35 * t;
         let hero = at(
@@ -412,9 +442,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         frames.push(serde_json::json!({
             "frame": frame, "renderer_frame": report.frame.0, "cpu_render_ms": cpu_ms,
+            "sun_angle_degrees": sun_angle.to_degrees(), "cpu_sun_update_ms": sun_update_ms,
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
         }));
+        last_camera = Some(camera);
     }
     let events = engine.poll()?;
     let spans: Vec<f64> = events
@@ -422,12 +454,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|g| g.render_span.as_secs_f64() * 1e3)
         .collect();
+    // A drained segment excludes scene startup and PNG encoding. The final capture
+    // drains all submitted work; its copy/readback cost is included in throughput.
+    let timing = if args.timing_frames > 0 {
+        let camera = last_camera.as_ref().unwrap();
+        engine.capture()?;
+        engine.poll()?;
+        let begin = Instant::now();
+        let mut cpu = Vec::new();
+        for step in 0..args.timing_frames {
+            let submit = Instant::now();
+            if args.sun_speed != 0.0 {
+                let angle = ((args.frames + step).saturating_sub(args.sun_after) as f32 / FPS
+                    * args.sun_speed)
+                    .to_radians();
+                engine.set_sun(Some(Sun {
+                    travel: Mat4::from_rotation_z(angle)
+                        .transform_vector3(Vec3::new(-0.45, -0.75, -0.5)),
+                    ..Default::default()
+                }))?;
+            }
+            engine.render(camera)?;
+            cpu.push(submit.elapsed().as_secs_f64() * 1e3);
+        }
+        engine.capture()?;
+        serde_json::json!({"frames":args.timing_frames,
+            "wall_ms_per_frame":begin.elapsed().as_secs_f64()*1e3/f64::from(args.timing_frames),
+            "cpu_submit_ms":cpu,
+            "note":"drained throughput, final colour copy/readback included; no PNG encoding"})
+    } else {
+        serde_json::Value::Null
+    };
     let summary = serde_json::json!({
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
-        "gpu_render_span_ms": spans, "frames": frames,
+        "gpu_render_span_ms": spans, "frames": frames, "timing":timing,
         "note": "shared-GPU diagnostic timings; debug_build records the build profile; not a performance claim",
     });
     fs::write(

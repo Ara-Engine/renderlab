@@ -43,8 +43,9 @@ struct Tr1Frame {
     // (0: the pixel's own sample).
     starts:vec4<f32>,
     // x: nonzero restarts every pixel (cut, first frame, reset events); y: TR1_* options;
-    // z: nonzero when nothing moved (bit-equal unjittered view-projections; moved placements
-    // restart), decided on the CPU: the GPU need not round two projections alike.
+    // z: nonzero when the camera did not move (bit-equal unjittered view-projections),
+    // decided on the CPU: the GPU need not round two projections alike. Surfaces whose vertices
+    // or placement moved are not still (tr1_still).
     flags:vec4<u32>,
     // SK1: swept moving-caster shadow volume; w enables receiver-history rejection.
     shadow_lo:vec4<f32>,
@@ -52,6 +53,10 @@ struct Tr1Frame {
 };
 const TR1_CATMULL_ROM:u32=1u;
 const TR1_SPATIAL_START:u32=2u;
+// MQ1 (docs/m7-mq1.md): some placement's transform changed since the previous frame, and
+// continued histories are clamped to the plain min/max box of this frame's 3x3 samples (all
+// nine samples, no mean or variance: P0's box, docs/m7-p0-claims.md).
+const TR1_BOX:u32=8u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -139,8 +144,18 @@ fn tr1_id(p:vec2<i32>)->u32 {
 }
 
 // A sample's surface: world point (w = 1) or background direction (w = 0), its identity,
-// view distance and unit geometric normal.
-struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, deforming:bool };
+// view distance and unit geometric normal; the same point and plane in the previous frame
+// (skinned vertices' previous positions, SK1; a moved placement's previous transform, MQ1),
+// and whether either moved it.
+struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool };
+// MQ1's surface classification, fed by MV1's shared placement snapshot.
+fn tr1_moved(id:u32)->bool {return id!=0u && id!=TR1_NONE && motion_rigid((id-1u)&TR1_ID);}
+// The surface neither the camera nor its vertices or placement moved: its history is its
+// own pixel's.
+fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
+// MQ1's box over this frame's 3x3 samples (TR1_BOX frames only).
+var<private> tr1_box_lo:vec3<f32>;
+var<private> tr1_box_hi:vec3<f32>;
 // Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
 // border (TR1_NONE outside the image), loaded once per workgroup by tr1_resolve.
 var<workgroup> tr1_tile:array<u32,100>;
@@ -171,8 +186,16 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let uv=bitcast<vec2<f32>>(record.zw);
     var pa=a;var pb=b;var pc=c;
     if tr1_skinned(batch) {pa=tr1_previous_position(batch,i);pb=tr1_previous_position(batch,i+1u);pc=tr1_previous_position(batch,i+2u);}
-    let px=motion_previous_world(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
-    let pn=cross(motion_previous_world(pb,slot).xyz-motion_previous_world(pa,slot).xyz,motion_previous_world(pc,slot).xyz-motion_previous_world(pa,slot).xyz);
+    // Preserve MQ1/SK1's exact static arithmetic; both moving consumers read the
+    // same previous transform in the shared placement table (object_motion.wgsl).
+    var px=world_position(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
+    var pn=cross(world_position(pb,slot).xyz-world_position(pa,slot).xyz,world_position(pc,slot).xyz-world_position(pa,slot).xyz);
+    let placed=motion_rigid(slot);
+    if placed {
+        px=motion_previous_world(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
+        let qa=motion_previous_world(pa,slot).xyz;
+        pn=cross(motion_previous_world(pb,slot).xyz-qa,motion_previous_world(pc,slot).xyz-qa);
+    }
     let x=world_position(receiver_point(a,b,c,vec3<f32>(1.0-uv.x-uv.y,uv)),slot).xyz;
     let wa=world_position(a,slot).xyz;
     let n=cross(world_position(b,slot).xyz-wa,world_position(c,slot).xyz-wa);
@@ -180,7 +203,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let distance=sqrt(tr1_dot(view,view));
     let facing=tr1_dot(n,view);
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
-    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),motion_rigid(slot)||any(a!=pa)||any(b!=pb)||any(c!=pc));
+    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),placed||any(a!=pa)||any(b!=pb)||any(c!=pc));
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -192,7 +215,7 @@ fn tr1_pixel(m:mat4x4<f32>,p:vec4<f32>,size:vec2<f32>)->vec2<f32> {
 // Where a surface point was in the previous frame, as the continuous position of this
 // pixel's footprint there (pixel centres at + 0.5, minus 0.5 for bilinear taps).
 fn tr1_fetch_position(p:vec2<i32>,s:Tr1Surface,size:vec2<f32>)->vec2<f32> {
-    if tr1.flags.z!=0u && !s.deforming {return vec2<f32>(p);}
+    if tr1_still(s) {return vec2<f32>(p);}
     let q=vec2<f32>(p)+tr1_pixel(tr1.previous,s.previous_point,size)-tr1_pixel(tr1.current,s.point,size);
     // Rounding in two projections of one point is not motion: the sky under a camera
     // translation lands within 1e-6 px of its pixel, and must not be resampled (nor get the
@@ -236,7 +259,7 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
     let thin=s.id!=0u && (primary_placements[s.id-1u]&0x20000000u)!=0u;
     let a=textureLoad(tr1_anchor_in,t,0).xy;
     if (a.x&TR1_ID)==s.id && !(thin && ((a.x>>23u)&1u)!=s.side) {
-        var ok=s.id==0u || (tr1.flags.z!=0u && !s.deforming);
+        var ok=s.id==0u || tr1_still(s);
         if !ok {
             let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
             ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
@@ -329,6 +352,9 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         }
     }
     h.window=min(h.window,tr1.windows.y);
+    // MQ1: while placements move, light they change on other surfaces (moving shadows,
+    // reflections of moving objects) is held to this frame's 3x3 range.
+    if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
     return h;
 }
 
@@ -521,6 +547,15 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
+    if (tr1.flags.y&TR1_BOX)!=0u {
+        tr1_box_lo=vec3<f32>(3.4e38);tr1_box_hi=vec3<f32>(-3.4e38);
+        for(var i=0;i<9;i+=1) {
+            let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+            if !tr1_inside(t,size) {continue;}
+            let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
+            tr1_box_lo=min(tr1_box_lo,c);tr1_box_hi=max(tr1_box_hi,c);
+        }
+    }
     var kept:Tr1Second;
     kept.id=TR1_NONE;
     // SK1: a character that left this pixel is not a still silhouette missed by
@@ -531,7 +566,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if first!=0u {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
         if second!=0u && second!=TR1_NONE {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
-    if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin {
+    if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin && !s.moved {
         // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether
         // the jittered 3x3 shows the other one depends on the jitter, not on the footprint,
         // and at a corner of three surfaces the jitter alternates which other one it shows;
@@ -539,7 +574,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         let own=tr1_second(p);
         let a=textureLoad(tr1_anchor_in,p,0).xy;
         let first=a.x&TR1_ID;
-        if own.id!=TR1_NONE {
+        // MQ1: a pair with a moved placement is a moving silhouette (below).
+        if own.id!=TR1_NONE && !tr1_moved(own.id) && !tr1_moved(first) {
             if first==s.id || own.id==s.id {
                 kept=own;
                 if own.id==s.id {
@@ -581,7 +617,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // The occluder: never the background; between two hits, the nearer.
         occluder_is_s=u.id==0u || (s.id!=0u && s.distance<=u.distance);
     } else {
-        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.deforming);
+        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved);
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         occluder_is_s=select(!kept.first_occludes,kept.first_occludes,first==s.id);
     }
@@ -598,7 +634,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
             theirs=vec4<f32>(h.colour,min(h.weight,max(h.window,1.0)));
             // A hidden surface's history gets no sample: under motion it is only resampled,
             // so it carries at most the start window once revealed.
-            if tr1.flags.z==0u || u.deforming {theirs.w=min(theirs.w,max(tr1.starts.y,1.0));}
+            if !tr1_still(u) {theirs.w=min(theirs.w,max(tr1.starts.y,1.0));}
         } else {
             let start=tr1_spatial(p,u.id,size);
             theirs=vec4<f32>(start.xyz,clamp(start.w,1.0,max(tr1.starts.y,1.0)));

@@ -2,6 +2,7 @@
 import importlib.util
 import datetime as dt
 import ctypes
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -32,9 +33,27 @@ def available_mb():
         raise ctypes.WinError()
     return status.available // (1024 * 1024)
 
-if sys.argv[1] == "build":
+def turn_ready(u):
+    """Acknowledge the exact latest order and count only subsequent releases."""
+    lines = u.SCHEDULE.read_text(encoding="utf-8").splitlines()
+    order_index = next((i for i in range(len(lines)-1, -1, -1)
+                        if lines[i].startswith("[root order]")), None)
+    if order_index is None:
+        return True
+    gate = OUT / "gpu-after.json"
+    acknowledged = json.loads(gate.read_text()) if gate.exists() else {}
+    if acknowledged.get("root_order") != lines[order_index]:
+        (OUT / "latest-root-order.txt").write_text(lines[order_index])
+        return False
+    releases = [line for line in lines[order_index+1:]
+                if "window released" in line and not line.startswith("[")]
+    return all(sum(line.startswith(item["owner"] + " ") for line in releases) >= item["count"]
+               for item in acknowledged.get("requires", []))
+
+def main():
+  if sys.argv[1] == "build":
     g1.build(SimpleNamespace(release=False, beside_leases=True, name="mv1-tests"))
-elif sys.argv[1] == "example":
+  elif sys.argv[1] == "example":
     u = g1.ue()
     if g1.quiet_active(u, any_lease=False) or g1.hold_state(u) == "hold":
         raise SystemExit("MV1 example compile deferred for QUIET/game hold")
@@ -48,7 +67,7 @@ elif sys.argv[1] == "example":
                 proc.wait()
                 raise SystemExit("MV1 example compile stopped for QUIET/game hold")
         raise SystemExit(proc.returncode)
-else:
+  else:
     label = sys.argv[2]
     command = sys.argv[3:]
     if command[:1] == ["--"]:
@@ -59,7 +78,7 @@ else:
     deadline = time.monotonic() + 75 * 60
     attempt = 0
     while time.monotonic() < deadline:
-        if available_mb() < int(os.environ.get("M7_MV1_MIN_AVAILABLE_MB", "4096")):
+        if not turn_ready(u) or available_mb() < 8192 or Path("D:/Coding/renderlab-work/gpu-slot.lock").exists():
             time.sleep(2)
             continue
         reservation = g1.window_open(u)
@@ -69,9 +88,12 @@ else:
             continue
         attempt += 1
         result = subprocess.call([sys.executable, "-B", str(ROOT / "scripts/n8-run.py"),
-            "--label", f"{label}-{attempt}", "--minutes", "15", "--wait-seconds", "45", "--fast-check", "--", *command],
+            "--label", f"{label}-{attempt}", "--minutes", "15", "--wait-seconds", "0", "--fast-check", "--", *command],
             cwd=ROOT, env=dict(os.environ, N8_OWNER="m7-mv1", N8_OUT=str(OUT)))
         if result != 3:
             raise SystemExit(result)
         time.sleep(2)
     raise SystemExit("MV1 lease timed out; no owned job remains")
+
+if __name__ == "__main__":
+    main()
