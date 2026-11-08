@@ -269,6 +269,11 @@ fn gpu_tr1_sequence() {
         ),
         other => panic!("unknown TR1 path {other}"),
     };
+    if m["current_defaults"].as_bool().unwrap_or(false) {
+        // AT1 intentionally starts test renderers with atmosphere off for old protocols.
+        // RTDEF2's complete default comparison explicitly exercises the production value.
+        r.set_atmosphere(crate::Atmosphere::default()).unwrap();
+    }
     let quarry_lighting = || {
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
             .unwrap()
@@ -385,6 +390,20 @@ fn gpu_tr1_sequence() {
                settings: Reconstruction,
                write: bool| {
         r.set_reconstruction(Reconstruction::off()).unwrap();
+        r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+            cold_rays: m["variants"][name]["cold_rays"]
+                .as_u64()
+                .or_else(|| m["variants"][name]["active_rays"].as_u64())
+                .unwrap_or(8) as u32,
+            reset_rays: m["variants"][name]["reset_rays"]
+                .as_u64()
+                .or_else(|| m["variants"][name]["active_rays"].as_u64())
+                .unwrap_or(8) as u32,
+            active_rays: m["variants"][name]["active_rays"].as_u64().unwrap_or(8) as u32,
+            held_rays: 8,
+            settle_frames: 16,
+        })
+        .unwrap();
         // RTDEF compares the legacy raster/Exact output with the reconstructed RT path
         // without loading the quarry again. Other TR1 manifests keep their path settings.
         if let Some(primary) = m["variants"][name]["primary"].as_str() {
@@ -408,11 +427,12 @@ fn gpu_tr1_sequence() {
         let mut pending = std::collections::HashMap::new();
         let mut spans = vec![serde_json::Value::Null; path_cameras.len()];
         let collect = |r: &mut Renderer,
-                       pending: &mut std::collections::HashMap<u64, usize>,
+                       pending: &mut std::collections::HashMap<u64, (usize, Option<u32>)>,
                        spans: &mut Vec<serde_json::Value>| {
             for g in r.poll().unwrap().gpu {
-                if let Some(f) = pending.remove(&g.frame.0) {
+                if let Some((f, rays)) = pending.remove(&g.frame.0) {
                     spans[f] = serde_json::json!({"span_ms":ms(g.render_span),
+                        "shadow_rays":rays,
                         "receiver_ms":g.receiver_pass.map(ms),"shading_ms":ms(g.mesh_pass),
                         "reconstruction_ms":g.reconstruction_pass.map(ms),"present_ms":g.present_pass.map(ms)});
                 }
@@ -431,7 +451,7 @@ fn gpu_tr1_sequence() {
                 sun = Some(d);
             }
             let report = render(r, &color, camera, &mut content.draws());
-            pending.insert(report.frame.0, f);
+            pending.insert(report.frame.0, (f, r.reconstruction_shadow_rays()));
             if written.contains(&f) {
                 // Frames between captures fill every flight; a capture needs a free one.
                 r.test_drain("TR1 capture");

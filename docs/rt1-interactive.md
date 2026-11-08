@@ -1,5 +1,7 @@
 # RT1: Interactive false shadows and the RT default
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 2026-11-07 UTC. Base `bce1e39`, branch `t3/rt1-interactive-default`.
 
 **Later ruling:** [RT1c](rt1c-rt-default.md) applies Islam's HRT floor to the RT
@@ -233,8 +235,8 @@ their original workload and limits. Smaller is better except speed ratios.
 | S3 jump, mask / HDR lag90 | 0 / 0 frames | Same algorithm | VSM 0 / 1 | R; diagnostic, not a film-quality pass |
 | S2 moving flicker, camera tracks | .0132–.0191 | Same algorithm | VSM .0605–.0615 | R, M6 acceptance replay |
 | S3 moving flicker, rotations | .0025–.0050 | Same algorithm | VSM .080–.082; HRT1 .123–.124 | R, M6 acceptance replay |
-| Quarry shadow increment, static/sun/camera/caster | .276 ms | No new timing claim | HRT .626–.655; VSM RT-on .497–.935 by phase | R; measured on the non-default fast setup (traced + Interactive) |
-| Quarry complete GPU span, static/sun/camera/caster | .867 / .867 / .868 / .865 ms | No new timing claim | HRT 1.738–1.778; VSM RT-on 1.554–2.039 by phase | R; measured on the non-default fast setup (traced + Interactive) |
+| Quarry shadow increment, static/sun/camera/caster | .276 ms | No new timing claim | HRT .626–.655; VSM RT-on .497–.935 by phase | R; measured on the historical eight-ray setup with TR1 off (traced + Interactive) |
+| Quarry complete GPU span, static/sun/camera/caster | .867 / .867 / .868 / .865 ms | No new timing claim | HRT 1.738–1.778; VSM RT-on 1.554–2.039 by phase | R; measured on the historical eight-ray setup with TR1 off (traced + Interactive) |
 | Quarry allocator reserved / WDDM | 2,641.2 / 2,716.3 MiB | No resource change | HRT DXGI 5,407–5,410; VSM RT-on 3,946 | R; allocator and driver counters differ |
 
 F0's full numerical rows are in [m6-film-reference.md](m6-film-reference.md).
@@ -329,5 +331,5 @@ are retained independently of the raw files.
 
 ```tsv
 2026-11-07	RT1	Keep raster primaries and 256-ray Exact as the RT-device default; Traced plus Interactive remains opt-in	Current own-reference false shadows 27/26 vs VSM 11/9; independent 1048576-direction point replay leaves 15/16, including 13/14 outside the repair strip; zero fused/separate differences; the F0 origin-era witnesses are mostly obsolete	Single-upload current capture and targeted point lease, CPU film/edge replay; docs/rt1-interactive.md	open; no default promotion
-2026-11-07	RT1	Label RT speed comparisons as measured on the non-default fast setup (traced + Interactive)	The measured 0.276 ms shadow increment and roughly 0.867 ms frame span do not describe the raster plus Exact RT-device default	Recorded M6-close/M5-DL figures; no new performance claim; docs/m6-acceptance.md, docs/m5-dev-loop.md, docs/memory-m1.md, docs/memory-m2.md, docs/memory-m3.md	corrected scope
+2026-11-07	RT1	Label RT speed comparisons as measured on the historical eight-ray setup with TR1 off (traced + Interactive)	The measured 0.276 ms shadow increment and roughly 0.867 ms frame span do not describe the raster plus Exact RT-device default	Recorded M6-close/M5-DL figures; no new performance claim; docs/m6-acceptance.md, docs/m5-dev-loop.md, docs/memory-m1.md, docs/memory-m2.md, docs/memory-m3.md	corrected scope
 ```

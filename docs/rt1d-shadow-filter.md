@@ -1,5 +1,7 @@
 # RT1d: current-frame shadow visibility filter
 
+RTDEF2 update (2026-11-08): the current traced-capable RT default is traced + Interactive + TR1 with the adaptive 256/64/32/8 budget; see [RTDEF2](rtdef2.md). Earlier decisions below are historical. Their fixed-eight-ray, TR1-off timings and memory are not measurements of the new profile.
+
 Branch `t3/rt1d-shadow-filter`, based on main `29d2391`.
 **Do not switch the RT default:** the quarry loses to HRT on false shadows and
 lit-darkened pixels at both poses. The RT default remains raster plus Exact.

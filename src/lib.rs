@@ -12,6 +12,8 @@ extern crate self as renderlab;
 pub mod animation;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
+/// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
+pub mod cutout;
 pub mod engine;
 mod environment;
 // DC1: owned projected decals and the programmable surface-input API.
@@ -39,6 +41,7 @@ mod renderer;
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
+mod transparency;
 pub mod virtual_geometry;
 mod visibility;
 
@@ -71,13 +74,16 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, RenderScale, Renderer};
+pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
 };
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
+pub use transparency::{
+    Emitter, EmitterDescriptor, MAX_PARTICLES, Transparency, TransparencyStats,
+};
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 

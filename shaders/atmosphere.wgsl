@@ -235,17 +235,32 @@ fn at_jitter(k:u32) -> vec3<f32> {
     let d=at_view_direction(at_uv_ndc(uv));
     let distance=at_froxel_distance((f32(id.z)+j.z)/f32(grid.z));
     let world=atmosphere.eye.xyz+d*distance;
-    let extinction=at_fog_density(world.y)+atmosphere.volume.y;
-    let sun=at_sun_transmittance()*at_hg(atmosphere.fog_albedo.w,dot(d,atmosphere.sun.xyz))*at_sun_visible(world);
-    var value=vec4<f32>(atmosphere.fog_albedo.rgb*extinction*(sun+at_ambient()),extinction);
+    let extinction=select(0.0,at_fog_density(world.y)+atmosphere.volume.y,distance>=atmosphere.fog.w);
+    let sun=at_sun_transmittance()*at_hg(atmosphere.fog_albedo.w,dot(d,atmosphere.sun.xyz));
+    let ambient=at_ambient();
+    let scattering=atmosphere.fog_albedo.rgb*extinction;
+    var value=vec4<f32>(scattering*(sun*at_sun_visible(world)+ambient),extinction);
     if atmosphere.previous_eye.w>0.0 {
-        let clip=atmosphere.previous_view_projection*vec4<f32>(world,1.0);
+        // Reproject the cell centre, not this frame's jittered integration sample.
+        // Otherwise even a stationary camera repeatedly blurs history across cells.
+        let centre_uv=(vec2<f32>(id.xy)+vec2<f32>(0.5))/vec2<f32>(grid.xy);
+        let centre=atmosphere.eye.xyz+at_view_direction(at_uv_ndc(centre_uv))*at_froxel_distance((f32(id.z)+0.5)/f32(grid.z));
+        let clip=atmosphere.previous_view_projection*vec4<f32>(centre,1.0);
         if clip.w>0.0 {
             let ndc=clip.xy/clip.w;
-            let previous=vec3<f32>(ndc.x*0.5+0.5,0.5-ndc.y*0.5,at_froxel_coordinate(length(world-atmosphere.previous_eye.xyz)));
-            if all(previous>=vec3<f32>(0.0)) && all(previous<=vec3<f32>(1.0)) {
+            let previous=vec3<f32>(ndc.x*0.5+0.5,0.5-ndc.y*0.5,at_froxel_coordinate(length(centre-atmosphere.previous_eye.xyz)));
+            let border=vec3<f32>(0.5)/vec3<f32>(grid);
+            if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {
                 let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);
-                value=mix(value,history,atmosphere.volume.z);
+                // Reject density discontinuities; limit old lighting to this cell's
+                // physical lit/shadowed range. Rapid visibility changes get less lag.
+                let density_error=abs(history.a-extinction)/max(extinction,1e-6);
+                let lo=scattering*ambient;let hi=scattering*(ambient+sun);
+                let old=clamp(history.rgb,lo,hi);
+                let delta=abs(old-value.rgb)/max(hi-lo,vec3<f32>(1e-6));
+                let change=max(delta.x,max(delta.y,delta.z));
+                let weight=atmosphere.volume.z*(1.0-smoothstep(0.1,0.5,density_error))*mix(1.0,0.3,smoothstep(0.25,0.75,change));
+                value=vec4<f32>(mix(value.rgb,old,weight),extinction);
             }
         }
     }
