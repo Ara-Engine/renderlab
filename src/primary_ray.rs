@@ -45,7 +45,7 @@ pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(11),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
-            .max(11 * TRACED_DRAWS),
+            .max(12 * TRACED_DRAWS),
         max_binding_array_sampler_elements_per_shader_stage: limits
             .max_binding_array_sampler_elements_per_shader_stage
             .max(3 * TRACED_DRAWS),
@@ -128,7 +128,7 @@ mod tests {
         let limits = traced_limits(wgpu::Limits::default());
         assert_eq!(
             limits.max_binding_array_elements_per_shader_stage,
-            11 * TRACED_DRAWS
+            12 * TRACED_DRAWS
         );
         assert_eq!(limits.max_acceleration_structures_per_shader_stage, 2);
     }

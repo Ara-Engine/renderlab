@@ -3,6 +3,7 @@
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+pub mod animation;
 mod environment;
 mod environment_lobes;
 mod gi_bvh;
@@ -43,6 +44,7 @@ pub use primary_ray::{
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
+pub use renderer::skinning::SkinnedMeshInstance;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,

@@ -5,7 +5,7 @@ use crate::{Error, Light, SampleCount, ShadowRequest, Shadows};
 /// `Features::EXPERIMENTAL_RAY_QUERY` and explicitly acknowledge wgpu's experimental
 /// safety contract in its own `DeviceDescriptor`. Renderlab never enables it implicitly.
 ///
-/// Initial support: regular, immutable geometry; opaque double-sided materials;
+/// Regular static or skinned geometry; opaque double-sided materials;
 /// directional hard shadows; 1x or per-sample 4x visibility. Virtual geometry is
 /// rejected while shadowed. 4x requires the adapter's MULTISAMPLED_SHADING capability.
 #[derive(Clone, Copy, Debug)]
@@ -57,8 +57,10 @@ impl HardwareShadowOptions {
 /// attributed bytes, not physical residency. Scratch estimates retire with their flight.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HardwareShadowStats {
-    /// Cumulative immutable mesh builds submitted by this renderer.
+    /// Cumulative initial mesh builds submitted by this renderer.
     pub blas_builds: u64,
+    /// SK1 pose updates submitted through PreferUpdate (wgpu 30 currently rebuilds).
+    pub blas_updates: u64,
     /// Immutable mesh BLAS generations compacted after their build completed.
     pub blas_compactions: u64,
     /// Cumulative placement-generation builds submitted by this renderer.

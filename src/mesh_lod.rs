@@ -453,7 +453,8 @@ impl Renderer {
             ));
         }
         let source = u64::from(lod.source_triangles) * 12;
-        if mesh.vertex.size() != lod.vertices as u64 * 48
+        if mesh.skin.is_some()
+            || mesh.vertex.size() != lod.vertices as u64 * 48
             || mesh.index_count != lod.source_triangles * 3
         {
             return Err(Error::InvalidInput("LOD was built for a different mesh"));
