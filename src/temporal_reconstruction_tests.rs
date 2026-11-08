@@ -41,112 +41,6 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     s
 }
 
-/// `no_rt_renderer` with one more storage buffer per stage than `visibility_limits` asks
-/// for. Since G1 (714a5a7) bound the radiance-cache table in the lighting group, the
-/// non-RT Virtual pass's layout needs 11 and a device at `visibility_limits` (10) rejects it
-/// (docs/m7-tr1.md records the defect; primary_ray.rs is outside TR1's files).
-fn no_rt_renderer_11() -> Renderer {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: crate::RECEIVER_FEATURES
-            | crate::VISIBILITY_FEATURES
-            | crate::VISIBILITY_RASTER_FEATURES
-            | crate::VIRTUAL_FEATURES
-            | wgpu::Features::TIMESTAMP_QUERY,
-        required_limits: wgpu::Limits {
-            max_storage_buffers_per_shader_stage: 11,
-            ..crate::visibility_limits(wgpu::Limits::default())
-        },
-        memory_hints: super::test_memory_hints(),
-        ..Default::default()
-    }))
-    .unwrap();
-    assert!(!device.features().intersects(
-        wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN
-    ));
-    let r = Renderer::new_with_options(
-        device,
-        queue,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-        Limits {
-            max_mesh_bytes: 134217728,
-            max_texture_bytes: 134217728,
-            ..Default::default()
-        },
-        RendererOptions {
-            samples: SampleCount::One,
-            anisotropy_clamp: 16,
-        },
-        include_str!("../shaders/scene.wgsl"),
-    )
-    .unwrap();
-    assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
-    r
-}
-
-/// The RT test device (`renderer_with_features`, with the visibility-buffer and Virtual
-/// features) at 11 storage buffers per stage, for the same reason as `no_rt_renderer_11`:
-/// its Virtual pass also needs 11 since G1.
-fn rt_renderer_11() -> Renderer {
-    assert_eq!(
-        std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
-        Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
-    );
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    let limits = crate::traced_limits(wgpu::Limits {
-        max_blas_primitive_count: 2_000_000,
-        max_blas_geometry_count: 1,
-        max_tlas_instance_count: 4096,
-        max_acceleration_structures_per_shader_stage: 1,
-        ..Default::default()
-    });
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: crate::RECEIVER_FEATURES
-            | wgpu::Features::EXPERIMENTAL_RAY_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY
-            | crate::TRACED_FEATURES
-            | crate::VIRTUAL_FEATURES
-            | crate::VISIBILITY_RASTER_FEATURES,
-        required_limits: wgpu::Limits {
-            max_storage_buffers_per_shader_stage:
-                limits.max_storage_buffers_per_shader_stage.max(11),
-            ..limits
-        },
-        // The test caller explicitly accepts the experimental device contract above.
-        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-        memory_hints: super::test_memory_hints(),
-        ..Default::default()
-    }))
-    .unwrap();
-    Renderer::new_with_hardware_shadows(
-        device,
-        queue,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-        Limits {
-            max_mesh_bytes: 134217728,
-            max_texture_bytes: 134217728,
-            ..Default::default()
-        },
-        RendererOptions {
-            samples: SampleCount::One,
-            anisotropy_clamp: 16,
-        },
-        HardwareShadowOptions {
-            max_estimated_bytes: Some(8 * 1024 * 1024 * 1024),
-        },
-        include_str!("../shaders/scene.wgsl"),
-    )
-    .unwrap()
-}
-
 fn hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -174,9 +68,12 @@ fn gpu_tr1_sequence() {
         }
         "nonrt" | "nonrt-on-rt" => {
             let mut r = if path == "nonrt" {
-                no_rt_renderer_11()
+                no_rt_renderer()
             } else {
-                rt_renderer_11()
+                renderer_with_features(
+                    validate,
+                    crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+                )
             };
             let (asset, _, _) = load_quarry_lod(&m, &mut r);
             if path == "nonrt-on-rt" {
