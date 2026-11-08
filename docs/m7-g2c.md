@@ -1,6 +1,6 @@
 # M7-G2c: GI speckles and edge streaks in API1's game scene
 
-Unit G2c, branch `t3/m7-g2c` (main `f159fcd` with G2b's GI default, plus `t3/m7-api1` for its example). API1's game scene ([examples/game_scene.rs](../examples/game_scene.rs)) showed two GI-only defects on both paths, with and without TR1: bright gold speckles over the near ground, and faceted dark streaks on the arch's lintel end and the top of its right pillar. Both are fixed at the cause. Labels: **M** measured here, **I** inference. Overnight-push rules (AGENTS.md, 2026-11-08): lib tests in a lease, inspected images on both paths, one timing run. Gaps are listed under "GI" in [m7-gaps.md](m7-gaps.md).
+Unit G2c, branch `t3/m7-g2c` (from main `f159fcd` with G2b's GI default and `t3/m7-api1` for its example; main merged again at `f870cb4`, after API1 landed). API1's game scene ([examples/game_scene.rs](../examples/game_scene.rs)) showed two GI-only defects on both paths, with and without TR1: bright gold speckles over the near ground, and faceted dark streaks on the arch's lintel end and the top of its right pillar. Both are fixed at the cause. Labels: **M** measured here, **I** inference. Overnight-push rules (AGENTS.md, 2026-11-08): lib tests in a lease, inspected images on both paths, one timing run. Gaps are listed under "GI" in [m7-gaps.md](m7-gaps.md).
 
 ## 1. Status
 
@@ -8,8 +8,8 @@ Unit G2c, branch `t3/m7-g2c` (main `f159fcd` with G2b's GI default, plus `t3/m7-
 |---|---|---|---|
 | Ground speckles | Cell shading evaluated each light as `scatter(l, n)`, the program's radiance toward the cell's normal alone, and stored it as the cell's view-independent outgoing radiance. A glossy or mirror cell facing the sun stored its specular peak and sent it in every direction. The few gather rays that met such cells on the gold and chrome spheres lit single ground cells several times over | A cell reflects as a Lambertian surface with the program's own directional albedo toward its normal, capped at 1 per channel. Its value is the cosine-weighted mean of what the program sends, so the reflected power is kept but no highlight is amplified (section 2) | Ground hot pixels per frame (RT / non-RT, mean over 48 frames): 106 / 72 → **2.9 / 0**. The RT residue is shadow-penumbra pixels, not speckles. No-GI image: 0 |
 | Arch streaks | As the camera closes in, the nearest surfaces switch first to a finer cache level. The new cells have sky in their first frame but no bounce until their first gather, which the per-frame gather cap can defer by several frames. The lookup read "not gathered yet" as "no bounce" | Gathers now mark "gathered, no light" (`GI_BOUNCE_NONE`) apart from "not gathered yet" (0). The lookup treats a corner without a gather like an absent corner for bounce only, and fills its share from the next coarser level, as it already did for absent corners (section 3) | Gone on both paths: the edge's 6% dip (139-143 against 148-151 codes) is flat at 148-151 in frame 47 (`analysis/c1-arch-047.png`) |
-| Quarry, SV | — | — | Quarry unchanged: every population within 0.01 codes of G2b's final run on RT, TR1x64 pinholes 142 → 141. RESULT-QUARRY |
-| Lib suite | — | — | `cargo test -p renderlab --lib` in lease `g2c-c1`: 159 passed, exit 0 |
+| Quarry, SV | — | — | RT quarry unchanged: every population within 0.01 codes of G2b's final run, TR1x64 pinholes 142 → 141. Non-RT quarry slightly better on every population: TR1x64 all-covered 7.24 → 7.20, pinholes 128 → 123. SV: RT images byte-identical to G2b's. Non-RT gaps-pose RMS at frame 48 drops from 11.03% to 6.10%, because G2b's draining speckle is filled (section 4) |
+| Lib suite | — | — | `cargo test -p renderlab --lib` inside leases: 159 passed (`g2c-c1`), and 160 passed on the code merged with main (`g2c-d1`), exit 0 both |
 | Cost | — | — | Equal within noise on the game scene: RT p50 6.17 / 6.08 ms (main) against 6.02 / 5.93 (G2c), non-RT 9.49 / 9.28 against 9.58 / 9.36 (section 4) |
 
 ## 2. Ground speckles
@@ -64,7 +64,7 @@ The full frames are otherwise alike (`analysis/c1-full-rt-047.png`, `analysis/c1
 
 ## 4. Verification
 
-Final code: example build `fix2`, test binary `c`, leases `g2c-c1` to `g2c-c8`. These are development builds on an RTX 4070 SUPER: functional runs, with contention not classified.
+Final code: example builds `fix2` (before the second main merge) and `merged`, test binaries `c` and `d`. Leases: `g2c-c1` (game scene, lib, RT quarry), `g2c-c2` (timing), `g2c-c3` (RT quarry), `g2c-d1` (merged code: game scene, lib, non-RT quarry, SV on both paths). `c1` and `c3` stopped early, at a missing quarry manifest and at another unit's build script tripping the lease guard; `c4` at the SV harness's missing bench variable. Their remaining steps ran in `d1`. These are development builds on an RTX 4070 SUPER: functional runs, with contention not classified.
 
 **API1's game scene** (1280×720, 48-frame fly path, TR1 on, both paths, every frame written in `c1`): covered in sections 2 and 3. No new defect was found in the inspected frames (0, 8, 24, 28, 41-47). Both paths look alike.
 
@@ -77,9 +77,31 @@ Final code: example build `fix2`, test binary `c`, leases `g2c-c1` to `g2c-c8`. 
 | G2b (`k1`), pose 1 | 7.39 | 6.35 | 12.62 | 10.40 | 10.02 | 9.07 | 13.63 | 13.40 | 6.77 | 126 |
 | G2c, pose 1 | 7.39 | 6.35 | 12.62 | 10.39 | 10.02 | 9.07 | 13.63 | 13.39 | 6.77 | 126 |
 
-The 1x captures are equal to G2b's too (pose 0 all-covered 9.53, pinholes 1,459 in both). This is as expected: the quarry's standard program on rough rock is close to Lambert, and its static captures are settled. RESULT-QUARRY-NONRT
+The 1x captures are equal to G2b's too (pose 0 all-covered 9.53, pinholes 1,459 in both). This is as expected: the quarry's standard program on rough rock is close to Lambert, and its RT captures are settled.
 
-RESULT-SV
+| Non-RT, TR1x64 (`d1`, merged code) | all-covered | lit | occluded | narrow | faint | isolated | multi-surface | hollow | crop | pinholes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| G2b (`k1`), pose 0 | 7.24 | 6.00 | 13.46 | 10.56 | 9.96 | 7.86 | 13.37 | 14.04 | 7.04 | 128 |
+| G2c, pose 0 | 7.20 | 5.97 | 13.37 | 10.48 | 9.90 | 7.83 | 13.27 | 13.98 | 7.01 | 123 |
+| G2b (`k1`), pose 1 | 7.23 | 5.99 | 13.38 | 10.69 | 9.90 | 8.29 | 13.59 | 14.12 | 7.05 | 125 |
+| G2c, pose 1 | 7.19 | 5.97 | 13.29 | 10.60 | 9.84 | 8.26 | 13.48 | 14.06 | 7.03 | 123 |
+
+Non-RT at 1x, pose 0: all-covered 9.90 → 9.68 and pinholes 1,900 → 1,766. Cache-off is identical to `k1`. Non-RT gathers are still draining under the 8,192-cell cap when the quarry is captured (G2b, section 4). G2c's coarser fill replaces the zero bounce of the cells not yet gathered, so every population gains a little.
+
+**SV test scene** (G1's harness, the G2 Lambert gate, frame 48 at 1x, `d1`; G2b's `h1-sv` as the base, whose cache-off and sky-only rows this run reproduces exactly):
+- **RT:** the gaps and overview images are byte-identical to G2b's.
+- **Non-RT:** the per-frame settle RMS (gaps pose) improves throughout, and the overview converges to the same 1.76% by frame 48:
+
+  | Non-RT, bounce | f8 | f12 | f24 | f48 |
+  |---|---:|---:|---:|---:|
+  | Gaps pose, G2b | 19.11% | 17.98% | 15.62% | 11.03% |
+  | Gaps pose, G2c | 16.36% | 13.89% | 10.02% | **6.10%** |
+  | Overview, G2b | 10.28% | 8.31% | 4.79% | 1.76% |
+  | Overview, G2c | 7.84% | 5.02% | 3.06% | 1.76% |
+
+`analysis/d1-sv-gaps.png` (non-RT G2b | non-RT G2c | RT G2b | RT G2c): the speckle G2b recorded while non-RT gathers drain is mostly gone. A faint grain remains on the leftmost panel, where cells and their coarser parents are both still waiting.
+
+**Merged code** (`d1`: main with API1's merge, whose example now defaults to the physical atmosphere): the game scene on both paths has no ground speckles (0 to 13 hot pixels, all on shadow penumbrae) and clean arch edges (`analysis/d1-game-047.png`).
 
 **Timing** (`c2`, the game scene, last frame only written, main and G2c interleaved twice per path in one lease; p50 of the per-frame GPU span over frames 8-47):
 
@@ -105,4 +127,4 @@ The differences (−0.15 ms RT, +0.09 ms non-RT) are within the visit-to-visit s
 
 ## Evidence
 
-Under `D:/Coding/renderlab-work/m7-g2c`: `runs/a1` (main and G2c cell shading, game scene, every frame, both paths), `runs/b1` (bounce-diagnostic builds), `runs/c1` (final code: game scene, lib suite, quarry, SV), `runs/c2` (timing), `analysis/` (inspected crops and hot-pixel maps), `tools/` (crop, row, speckle and hot-map scripts), `variants/base` (main's GI shaders for same-binary comparisons). Per-frame PNG sets are deleted once summarized; inspected frames are kept.
+Under `D:/Coding/renderlab-work/m7-g2c`: `runs/a1` (main and G2c cell shading, game scene, every frame, both paths), `runs/b1` (bounce-diagnostic builds), `runs/c1` (game scene every frame, lib suite), `runs/c2` (timing), `runs/c3` (RT quarry scores), `runs/d1` (merged code: game scene, lib suite, non-RT quarry scores, SV images and scores), `analysis/` (inspected crops and hot-pixel maps), `tools/` (crop, row, speckle and hot-map scripts), `variants/base` (main's GI shaders for same-binary comparisons). Quarry float captures are deleted once scored (`deleted-raw.txt`). Game-scene PNGs, all under 5 MB each, are kept; G2b's `k1` and `h1-sv` serve as the quarry and SV bases.
