@@ -48,6 +48,7 @@ struct Args {
     sun_after: u32,
     still: bool,
     timing_frames: u32,
+    night_lanterns: bool,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -68,6 +69,7 @@ impl Args {
             sun_after: 0,
             still: false,
             timing_frames: 0,
+            night_lanterns: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -108,6 +110,7 @@ impl Args {
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
+                "--night-lanterns" => a.night_lanterns = true,
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
                         "native" => RenderScale::Native,
@@ -169,6 +172,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or(format!("quarry manifest needs `{key}`"))
     };
     let exposure = args.exposure.unwrap_or_else(|| {
+        if args.night_lanterns {
+            return -1.0;
+        }
         quarry
             .as_ref()
             .and_then(|m| m["exposure_stops"].as_f64())
@@ -332,10 +338,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         travel: Vec3::new(-0.45, -0.75, -0.5),
         // Under the atmosphere this is the sun outside it (`Sun::default()`, 120 klux), which
         // its transmittance dims and warms; under `--sky uniform` it arrives as given.
+        illuminance: if args.night_lanterns {
+            [0.03, 0.04, 0.08]
+        } else {
+            Sun::default().illuminance
+        },
         ..Default::default()
     }))?;
-    // A warm lantern under the arch arrives with many-light shading (LC1): at this
-    // revision a soft sun must be the only light (docs/api.md, "Current limits").
+    // LC3 example-only edit: lanterns exercise local visibility beneath the arch and
+    // around the crates. --night-lanterns exposes their light without the daylight sky.
+    let lanterns: Vec<_> = (0..24)
+        .map(|i| {
+            let x = (i % 6) as f32 * 1.8 - 4.5;
+            let z = (i / 6) as f32 * 2.0 - 1.5;
+            Light::Point {
+                position: at(x, 1.8, z),
+                candela: [22.0, 12.0, 4.0],
+                range: Some(4.0),
+                source_radius: 0.06,
+            }
+        })
+        .collect();
+    engine.set_lights(&lanterns)?;
+    if args.night_lanterns {
+        engine.set_sky(Sky::Uniform([0.001, 0.002, 0.005]))?;
+    }
 
     // Decals on the ground: an emblem in front of the arch, and a wet puddle that darkens
     // the ground and makes it glossy. Ground decals turn local +Z (their receiver normal)
@@ -393,6 +420,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.set_sun(Some(Sun {
                 travel: Mat4::from_rotation_z(sun_angle)
                     .transform_vector3(Vec3::new(-0.45, -0.75, -0.5)),
+                illuminance: engine
+                    .sun()
+                    .map_or(Sun::default().illuminance, |s| s.illuminance),
                 ..Default::default()
             }))?;
         }
@@ -471,6 +501,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.set_sun(Some(Sun {
                     travel: Mat4::from_rotation_z(angle)
                         .transform_vector3(Vec3::new(-0.45, -0.75, -0.5)),
+                    illuminance: engine
+                        .sun()
+                        .map_or(Sun::default().illuminance, |s| s.illuminance),
                     ..Default::default()
                 }))?;
             }

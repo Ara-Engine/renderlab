@@ -9,11 +9,10 @@
 //! Point and spot lights cull by their range (the inverse-square falloff's windowed
 //! cutoff); directional and unlimited-range lights meet every cluster.
 //!
-//! Each frame the CPU also ranks the local lights by estimated contribution and shadows the
-//! first `LocalShadows::count`: by four disk rays per pixel and light (one at radius zero)
-//! where the shading module binds an acceleration structure, otherwise from pooled cube
-//! and spot maps with blocker-search soft PCF (3x3 PCF at radius zero). Maps redraw only
-//! when the light placement or a caster changes. Lights beyond the count are unshadowed.
+//! LC3 traces every contributing local light where the shading head binds an acceleration
+//! structure: four disk rays at positive source radius, one at zero. Map heads rank by
+//! screen influence and energy, fade slot changes, and retain fixed tiles in a six-layer
+//! atlas. Maps redraw only when their light placement or intersecting casters change.
 use crate::{Camera, Error, Light, Vec3};
 
 pub(crate) const TILES_X: u32 = 32;
@@ -24,14 +23,15 @@ pub(crate) const MAX_PER_CLUSTER: u32 = 128;
 pub(crate) const CLUSTERS: u32 = TILES_X * TILES_Y * SLICES;
 /// Words per cluster: its count, then u16 index pairs.
 pub(crate) const STRIDE: u32 = 1 + MAX_PER_CLUSTER / 2;
-/// Pooled shadow slots the shading header can address (six map layers each).
-pub(crate) const MAX_SLOTS: u32 = 16;
+/// Map slots the 64 KiB uniform can address (six transforms and one tile per slot).
+pub(crate) const MAX_SLOTS: u32 = 128;
 /// Clusters per row of the list texture, which is `LIST_SIZE` texels of R32Uint.
 pub(crate) const ROW: u32 = 4;
 pub(crate) const LIST_SIZE: [u32; 2] = [ROW * STRIDE, CLUSTERS / ROW];
 /// The `LcFrame` uniform: view, projection, info and far (112 bytes), then one
 /// world-to-clip matrix per pooled map layer.
-pub(crate) const FRAME_BYTES: usize = 112 + (MAX_SLOTS * 6 * 64) as usize;
+pub(crate) const TILE_OFFSET: usize = 112 + (MAX_SLOTS * 6 * 64) as usize;
+pub(crate) const FRAME_BYTES: usize = TILE_OFFSET + MAX_SLOTS as usize * 16;
 /// Lights the u16 lists can name; larger sets walk every light.
 pub(crate) const MAX_CLUSTERED: usize = 0xffff;
 /// Spot lights wider than this half-angle use a six-face slot.
@@ -40,11 +40,12 @@ const WIDE_SPOT: f32 = 1.0;
 /// Shadows for the most important point and spot lights, chosen every frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalShadows {
-    /// Local lights shadowed per frame, ranked by illuminance at the camera (candela over
-    /// squared distance, at least 1 m) among lights whose range meets the view. 0 disables
-    /// local shadows; at most 16.
+    /// Map budget, at most 128 local lights, ranked by projected influence and energy.
+    /// RT shadows every contributing clustered local light when this is nonzero.
+    /// Zero disables automatic local shadows on both paths.
     pub count: u32,
-    /// Square resolution of each pooled map face, on frames that use maps.
+    /// Maximum map-face resolution. The atlas is four times this wide; smaller lights
+    /// receive smaller cached tiles. Held tiles keep their resolution to avoid shimmer.
     pub resolution: u32,
     /// Near plane of each local shadow view in metres. Casters closer to the light are
     /// not drawn into its maps (rays have no near plane).
@@ -53,7 +54,7 @@ pub struct LocalShadows {
 impl Default for LocalShadows {
     fn default() -> Self {
         Self {
-            count: 4,
+            count: 128,
             resolution: 1024,
             near: 0.02,
         }
@@ -63,12 +64,12 @@ impl LocalShadows {
     pub(crate) fn validate(&self, max_resolution: u32) -> Result<(), Error> {
         if self.count > MAX_SLOTS
             || self.resolution == 0
-            || self.resolution > max_resolution
+            || self.resolution > max_resolution / 4
             || !self.near.is_finite()
             || self.near <= 0.0
         {
             return Err(Error::InvalidInput(
-                "local shadows need count <= 16, a device-valid nonzero resolution and a positive finite near",
+                "local shadows need count <= 128, resolution <= device maximum / 4 and a positive finite near",
             ));
         }
         Ok(())
@@ -80,7 +81,7 @@ impl LocalShadows {
 pub struct LightClusterStats {
     /// The frame binned its lights (false: disabled or more than 65,535 lights).
     pub clustered: bool,
-    /// Global light index per pooled shadow slot, or None for a free slot.
+    /// Global light index per map slot (None for free slots), or all ray-shadowed lights.
     pub shadowed: Vec<Option<u32>>,
     /// The frame's shadowed lights used pooled maps (false: inline rays, or none).
     pub maps: bool,
@@ -89,6 +90,11 @@ pub struct LightClusterStats {
     pub total_faces_drawn: u64,
     /// Caster draws submitted to those faces.
     pub caster_draws: u32,
+    /// Current map face resolution and fade strength per slot (zero for free slots).
+    pub resolutions: Vec<u32>,
+    pub strengths: Vec<f32>,
+    /// Allocated atlas depth bytes, excluding uniforms; zero for ray-only frames.
+    pub atlas_bytes: u64,
 }
 
 /// The WGSL constants and frame struct both the culling kernel and the shading API use.
@@ -105,7 +111,7 @@ const LC_SLOTS:u32={MAX_SLOTS}u;
 // view: world to view (forward -Z). proj: x and y projection scales, near (metres), slices
 // per log2 unit. info: x lights, y clustered, z TR1 sample. far: x camera far, y shadow near.
 // shadows: pooled map layers.
-struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32>, shadows:array<mat4x4<f32>,{}> }};
+struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32>, shadows:array<mat4x4<f32>,{}>, tiles:array<vec4<f32>,{MAX_SLOTS}> }};
 ",
         MAX_SLOTS * 6
     )
@@ -114,7 +120,7 @@ pub(crate) const KERNEL: &str = include_str!("../shaders/light_cluster.wgsl");
 const API: &str = include_str!("../shaders/light_cluster_api.wgsl");
 /// Local-light visibility: hard at radius zero, four disk rays otherwise (LC2).
 const RAY: &str = include_str!("../shaders/local_light_ray.wgsl");
-const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return rl_local_shadow_map(light,receiver,l); }\n";
+const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { let slot=(light.kind.w&0xffffu)-1u; if slot>=LC_SLOTS { return 1.0; } return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w); }\n";
 
 /// The acceleration structure a composed head binds for shading, if any: the hardware
 /// head's on every stage, the fresh head's only on traced stages (its raster layout has
@@ -172,6 +178,26 @@ pub(crate) fn select(
     previous: &[Option<u32>],
     count: u32,
 ) -> Vec<Option<u32>> {
+    select_ranked(lights, view_projection, eye, previous, count, true)
+}
+#[cfg(test)]
+pub(crate) fn select_legacy(
+    lights: &[Light],
+    vp: glam::Mat4,
+    eye: Vec3,
+    previous: &[Option<u32>],
+    count: u32,
+) -> Vec<Option<u32>> {
+    select_ranked(lights, vp, eye, previous, count, false)
+}
+fn select_ranked(
+    lights: &[Light],
+    view_projection: glam::Mat4,
+    eye: Vec3,
+    previous: &[Option<u32>],
+    count: u32,
+    screen_weighted: bool,
+) -> Vec<Option<u32>> {
     let rows = view_projection.transpose();
     // Left, right, bottom, top and near planes of the reversed-depth clip volume.
     let planes = [
@@ -192,7 +218,12 @@ pub(crate) fn select(
                 length == 0.0 || p.truncate().dot(position) + p.w >= -radius * length
             });
             let distance = position.distance(eye).max(1.0);
-            let mut score = luminance(candela) / (distance * distance);
+            let mut score = luminance(candela) / (distance * distance)
+                * if screen_weighted {
+                    coverage(light, view_projection)
+                } else {
+                    1.0
+                };
             if !visible || score <= 0.0 || !score.is_finite() {
                 return None;
             }
@@ -221,6 +252,116 @@ pub(crate) fn select(
         }
     }
     slots
+}
+
+/// Conservative clipped screen area of the influence sphere, in fractions of the view.
+/// It weights shadow allocation only; light culling and programmable incidence are unchanged.
+pub(crate) fn coverage(light: &Light, vp: glam::Mat4) -> f32 {
+    let Some((position, _, range, _)) = local(light) else {
+        return 0.0;
+    };
+    let Some(radius) = range else {
+        return 1.0;
+    };
+    let clip = vp * position.extend(1.0);
+    let rows = vp.transpose();
+    let minimum_w = clip.w - radius * rows.w_axis.truncate().length();
+    if minimum_w <= 0.0 {
+        return 1.0;
+    }
+    let half = glam::Vec2::new(
+        rows.x_axis.truncate().length(),
+        rows.y_axis.truncate().length(),
+    ) * radius
+        / minimum_w;
+    let centre = clip.truncate().truncate() / clip.w;
+    let lo = (centre - half).clamp(glam::Vec2::splat(-1.0), glam::Vec2::ONE);
+    let hi = (centre + half).clamp(glam::Vec2::splat(-1.0), glam::Vec2::ONE);
+    let extent = (hi - lo).max(glam::Vec2::ZERO);
+    extent.x * extent.y * 0.25
+}
+
+/// Slot transitions never replace a nonzero shadow. Outgoing maps remain resident for
+/// eight admitted frames; incoming maps then fade in over eight frames.
+pub(crate) fn transition(
+    previous: &[Option<u32>],
+    strengths: &[f32],
+    desired: &[Option<u32>],
+    count: u32,
+) -> (Vec<Option<u32>>, Vec<f32>) {
+    let mut slots = vec![None; count as usize];
+    let mut next = vec![0.0; count as usize];
+    for (slot, light) in previous.iter().take(count as usize).enumerate() {
+        let Some(light) = light else {
+            continue;
+        };
+        let strength = strengths.get(slot).copied().unwrap_or(0.0);
+        let strength = if desired.contains(&Some(*light)) {
+            (strength + 0.125).min(1.0)
+        } else {
+            (strength - 0.125).max(0.0)
+        };
+        if strength > 0.0 {
+            slots[slot] = Some(*light);
+            next[slot] = strength;
+        }
+    }
+    for light in desired.iter().flatten() {
+        if !slots.contains(&Some(*light))
+            && let Some(slot) = slots.iter().position(Option::is_none)
+        {
+            slots[slot] = Some(*light);
+            // A just-released outgoing light reached zero this frame; the replacement
+            // starts at zero as well, avoiding even a one-step discontinuity.
+            next[slot] = 0.0;
+        }
+    }
+    (slots, next)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tile {
+    pub x: u32,
+    pub y: u32,
+    pub size: u32,
+}
+
+/// A small aligned square allocator. Existing tiles never move when the camera moves.
+/// Resolution falls back by halves when larger squares cannot fit; no silent eviction.
+pub(crate) fn allocate_tile(existing: &[Option<Tile>], maximum: u32, desired: u32) -> Option<Tile> {
+    let extent = maximum * 4;
+    let minimum = (maximum / 8).max(1);
+    let mut size = desired.min(maximum).max(minimum);
+    let occupied: u64 = existing
+        .iter()
+        .flatten()
+        .map(|t| u64::from(t.size).pow(2))
+        .sum();
+    let remaining = existing
+        .len()
+        .saturating_sub(existing.iter().flatten().count() + 1);
+    loop {
+        let fits_budget =
+            occupied + u64::from(size).pow(2) + remaining as u64 * u64::from(minimum).pow(2)
+                <= u64::from(extent).pow(2);
+        for y in (0..extent).step_by(size as usize).filter(|_| fits_budget) {
+            for x in (0..extent).step_by(size as usize) {
+                if x + size > extent || y + size > extent {
+                    continue;
+                }
+                let free = existing.iter().flatten().all(|t| {
+                    x + size <= t.x || t.x + t.size <= x || y + size <= t.y || t.y + t.size <= y
+                });
+                if free {
+                    return Some(Tile { x, y, size });
+                }
+            }
+        }
+        if size <= minimum {
+            return None;
+        }
+        size = (size / 2).max(minimum);
+    }
 }
 
 /// Whether a shadowed light takes a six-face slot (points and wide spots).

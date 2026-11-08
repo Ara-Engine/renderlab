@@ -175,7 +175,7 @@ fn cluster_lists_hold_every_light_that_reaches_a_receiver() {
 }
 
 #[test]
-fn shadowed_lights_rank_by_illuminance_and_keep_their_slots() {
+fn shadowed_lights_rank_by_screen_influence_and_keep_their_slots() {
     let camera = test_camera();
     let vp = camera.matrix(1920, 1080);
     let eye = Vec3::new(5.2, 3.4, 6.2);
@@ -216,6 +216,51 @@ fn shadowed_lights_rank_by_illuminance_and_keep_their_slots() {
 }
 
 #[test]
+fn local_shadow_tiles_stay_disjoint_and_fades_release_before_reuse() {
+    let mut tiles = vec![None; lc::MAX_SLOTS as usize];
+    for i in 0..lc::MAX_SLOTS as usize {
+        let tile = lc::allocate_tile(&tiles, 1024, 1024).expect("every slot fits");
+        tiles[i] = Some(tile);
+    }
+    assert_eq!(tiles.len(), 128);
+    assert!(tiles.iter().flatten().any(|t| t.size < 1024));
+    let mut slots = vec![Some(1)];
+    let mut strengths = vec![1.0];
+    for frame in 1..=8 {
+        (slots, strengths) = lc::transition(&slots, &strengths, &[Some(2)], 1);
+        assert_eq!(strengths[0], 1.0 - frame as f32 / 8.0);
+        assert_eq!(slots[0], Some(if frame < 8 { 1 } else { 2 }));
+    }
+    for frame in 1..=8 {
+        (slots, strengths) = lc::transition(&slots, &strengths, &[Some(2)], 1);
+        assert_eq!(strengths[0], frame as f32 / 8.0);
+    }
+    assert!(lc::FRAME_BYTES <= 65536);
+}
+
+#[test]
+fn screen_influence_prioritizes_large_pools_at_equal_camera_illuminance() {
+    let camera = test_camera();
+    let point = |range| Light::Point {
+        position: Vec3::ZERO,
+        candela: [20.0; 3],
+        range: Some(range),
+        source_radius: 0.0,
+    };
+    let lights = [point(0.1), point(3.0)];
+    assert_eq!(
+        lc::select(
+            &lights,
+            camera.matrix(1920, 1080),
+            camera.view().inverse().w_axis.truncate(),
+            &[],
+            1
+        ),
+        [Some(1)]
+    );
+}
+
+#[test]
 fn light_cluster_kernel_and_every_shading_head_validate() {
     let validate = |label: &str, source: &str| {
         let module = naga::front::wgsl::parse_str(source)
@@ -236,7 +281,11 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             "rayQueryInitialize(&lc_query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance))"
         ))
     };
-    let map = |module: &str| module.contains("{ return rl_local_shadow_map(light,receiver,l); }");
+    let map = |module: &str| {
+        module.contains(
+            "return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w)",
+        )
+    };
     let raster = compose(SOURCE, standard, Stage::Raster, false).source;
     assert!(map(&raster) && !ray(&raster, "hardware_scene"));
     validate("raster", &raster);
@@ -479,6 +528,7 @@ fn gpu_lc1_quarry_night() {
         r.set_soft_shadows(SoftShadows::Exact);
     }
     let lc2 = env("LC2").as_deref() == Some("1");
+    let lc3 = env("LC3").as_deref() == Some("1");
     let mut all = night_lights(count);
     if lc2 {
         for light in &mut all {
@@ -633,7 +683,10 @@ fn gpu_lc1_quarry_night() {
     }
     let stats = r.light_cluster_stats();
     log["selection"] = serde_json::json!({"shadowed": stats.shadowed, "maps": stats.maps,
-        "faces_drawn_total": stats.total_faces_drawn, "clustered": stats.clustered});
+        "faces_drawn_total": stats.total_faces_drawn, "clustered": stats.clustered,
+        "resolutions": stats.resolutions, "strengths": stats.strengths, "atlas_bytes": stats.atlas_bytes,
+        "local_lights_without_direct_shadow": all.len()-1-stats.shadowed.iter().flatten().count(),
+        "cached_faces_redrawn": stats.faces_drawn});
     // GPU lists against the CPU reference over every cluster.
     let words = r.test_cluster_words();
     let (mut mismatched, mut overflowed, mut longest, mut total) = (0u32, 0u32, 0u32, 0u64);
@@ -661,6 +714,62 @@ fn gpu_lc1_quarry_night() {
         "longest": longest, "mean": total as f64 / f64::from(lc::CLUSTERS)});
     // 2. Timings in the shipped configuration.
     log["time_default"] = time(&mut r, &mut asset, &mut |_, _| {});
+    if lc3 {
+        r.set_local_shadows(LocalShadows {
+            count: 4,
+            ..Default::default()
+        })
+        .unwrap();
+        r.lighting.clusters.legacy_limit = true;
+        r.lighting.clusters.test_reset_selection();
+        for _ in 0..16 {
+            render(&mut r, &mut asset, &camera);
+        }
+        save("night-lc2-limit", &capture(&mut r));
+        let baseline = r.light_cluster_stats();
+        log["lc2_limit"] = serde_json::json!({"shadowed":baseline.shadowed,
+            "local_lights_without_direct_shadow":all.len()-1-baseline.shadowed.iter().flatten().count(),
+            "time":time(&mut r,&mut asset,&mut|_,_|{})});
+        r.set_local_shadows(LocalShadows::default()).unwrap();
+        r.lighting.clusters.legacy_limit = false;
+        for _ in 0..16 {
+            render(&mut r, &mut asset, &camera);
+        }
+        // One short camera walk, preserving this process's loaded asset and caches.
+        let mut samples = vec![];
+        let mut walk = vec![];
+        for k in 0..16 {
+            let shift = Vec3::new(0.03 * k as f32, 0.0, 0.0);
+            let moving_camera = Camera::look_at(
+                Vec3::from_array(frame.eye) + shift,
+                Vec3::from_array(frame.target),
+                Vec3::Y,
+                frame.fov_y_radians,
+                frame.near,
+                frame.far,
+            )
+            .unwrap();
+            let begin = Instant::now();
+            render(&mut r, &mut asset, &moving_camera);
+            r.test_drain("LC3 camera motion");
+            if k >= 8 {
+                samples.push(begin.elapsed().as_secs_f64() * 1e3);
+            }
+            let stats = r.light_cluster_stats();
+            walk.push(serde_json::json!({"frame": k, "shadowed":stats.shadowed,
+                "strengths":stats.strengths,"faces_drawn":stats.faces_drawn}));
+            if [0, 3, 7, 11, 15].contains(&k) {
+                save(&format!("walk-{k:02}"), &capture(&mut r));
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        log["time_camera_moving"] =
+            serde_json::json!({"median_ms":samples[4],"min_ms":samples[0],"max_ms":samples[7]});
+        log["walk"] = serde_json::json!(walk);
+        for _ in 0..16 {
+            render(&mut r, &mut asset, &camera);
+        }
+    }
     r.set_light_clusters(false);
     log["time_unclustered"] = time(&mut r, &mut asset, &mut |_, _| {});
     r.set_light_clusters(true);
@@ -685,6 +794,9 @@ fn gpu_lc1_quarry_night() {
         r.set_lighting(&lighting(&lights)).unwrap();
     };
     log["time_moving_shadowed_lights"] = time(&mut r, &mut asset, &mut |r, k| moving(r, k));
+    if lc3 {
+        save("lights-moving", &capture(&mut r));
+    }
     r.set_lighting(&lighting(&all)).unwrap();
     r.set_lighting_and_shadows(&lighting(&all[..1]), &shadows(1))
         .unwrap();
@@ -698,6 +810,11 @@ fn gpu_lc1_quarry_night() {
     r.set_reconstruction(Reconstruction::off()).unwrap();
     render(&mut r, &mut asset, &camera);
     render(&mut r, &mut asset, &camera);
+    if lc3 {
+        for _ in 0..16 {
+            render(&mut r, &mut asset, &camera);
+        }
+    }
     let clustered = capture(&mut r);
     save("night-gi-off", &clustered);
     r.set_light_clusters(false);
@@ -1078,6 +1195,117 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
             / 3;
         log[name] = serde_json::json!({"changed_pixels":changed});
         assert!(changed > 100, "{name}: source radius changed no penumbra");
+    }
+    if env("LC3").as_deref() == Some("1") {
+        // All 64 sources share a position, so every light is demonstrably blocked in
+        // the umbra. The diagnostic's minimum visibility counts leaking lights there.
+        let program = r
+            .try_create_program(&ProgramDescriptor {
+                label: "LC3 leaking-light counter",
+                source: "
+struct Surface { unused:f32 };
+fn surface(input:SurfaceInput)->Surface { return Surface(0.0); }
+fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
+ var sum=0.0;
+ for(var i=0u;i<light_count();i+=1u) {
+  let sample=light_sample(i,input);
+  if sample.index>0u { sum+=light_visibility(input,sample); }
+ }
+ return vec3<f32>(sum/64.0);
+}",
+            })
+            .unwrap();
+        let diagnostic = loop {
+            if let Some(m) = r
+                .try_create_material(&MaterialDescriptor {
+                    program: Some(&program),
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap()
+            {
+                break m;
+            }
+            r.test_drain("LC3 diagnostic material");
+        };
+        let mut lights = vec![Light::Directional {
+            travel: -Vec3::Z,
+            lux: [0.1; 3],
+        }];
+        lights.extend(std::iter::repeat_n(
+            Light::Point {
+                position: Vec3::new(1.0, 0.6, 3.0),
+                candela: [10.0; 3],
+                range: Some(10.0),
+                source_radius: 0.08,
+            },
+            64,
+        ));
+        r.set_lighting_and_shadows(
+            &Lighting {
+                lights,
+                ..Default::default()
+            },
+            &Shadows {
+                directional_disk_angle: 0.04,
+                requests: std::iter::once(ShadowRequest::Directional {
+                    split_ends: vec![4., 12., 40.],
+                })
+                .chain(std::iter::repeat_n(ShadowRequest::None, 64))
+                .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        r.set_reconstruction(Reconstruction::off()).unwrap();
+        for (name, budget, legacy) in [("lc2-limit", 4, true), ("lc3", 128, false)] {
+            r.set_local_shadows(LocalShadows {
+                count: budget,
+                ..Default::default()
+            })
+            .unwrap();
+            r.lighting.clusters.legacy_limit = legacy;
+            for _ in 0..24 {
+                let mut draws: Vec<_> = meshes
+                    .iter()
+                    .zip(&mut placements)
+                    .map(|(m, i)| Draw::new(m, i).with_material(&diagnostic))
+                    .collect();
+                loop {
+                    if r.try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                        .unwrap()
+                        .is_some()
+                    {
+                        break;
+                    }
+                    r.test_drain("LC3 diagnostic admission");
+                }
+            }
+            let image = capture(&mut r);
+            write_png(
+                &out.join(format!("{path}-64-lights-{name}-visibility.png")),
+                &image,
+                size[0],
+                size[1],
+            );
+            let minimum = image
+                .iter()
+                .copied()
+                .filter(|v| *v > 0.0)
+                .fold(f32::INFINITY, f32::min);
+            let umbra = ((292usize * size[0] as usize + 195) * 3).min(image.len() - 3);
+            let visibility = image[umbra];
+            let shadowed = r.light_cluster_stats().shadowed.iter().flatten().count();
+            log["leak_fixture"][name] = serde_json::json!({"lights":64,"shadowed":shadowed,
+            "minimum_positive_visibility":minimum,
+            "umbra_visibility":visibility,"leaking_lights":(visibility*64.0).round()});
+            assert_eq!(shadowed, budget.min(64) as usize);
+            let expected = if legacy { 60.0 / 64.0 } else { 0.0 };
+            assert!(
+                (visibility - expected).abs() < 0.01,
+                "{name}: visibility {visibility}, expected {expected}"
+            );
+        }
     }
     std::fs::write(
         out.join(format!("penumbra-{path}.json")),

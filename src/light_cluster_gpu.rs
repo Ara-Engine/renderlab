@@ -4,7 +4,7 @@ use super::*;
 use crate::light_cluster::{self as lc, LightClusterStats, LocalShadows};
 use sha2::{Digest, Sha256};
 
-/// The pooled local shadow maps: `slots` x 6 Depth32Float layers, reversed depth.
+/// Six Depth32Float atlas layers, with the same tile rectangle on each cube face.
 pub(super) struct Atlas {
     _texture: Owned<wgpu::Texture>,
     pub view: Owned<wgpu::TextureView>,
@@ -15,6 +15,7 @@ pub(super) struct Atlas {
     stride: u64,
     resolution: u32,
     slots: u32,
+    clear: Option<Owned<wgpu::RenderPipeline>>,
     _allocation: Allocation,
 }
 impl Atlas {
@@ -29,7 +30,7 @@ impl Atlas {
         let (size, layers) = if slots == 0 {
             (1, 1)
         } else {
-            (resolution, slots * 6)
+            (resolution * 4, 6)
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
@@ -63,7 +64,7 @@ impl Atlas {
             let buffer = ledger.own(
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("LC1 local shadow view matrices"),
-                    size: u64::from(layers) * stride,
+                    size: u64::from(slots * 6) * stride,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -79,6 +80,8 @@ impl Atlas {
                     }),
                     ResourceKind::TextureView,
                 ));
+            }
+            for layer in 0..slots * 6 {
                 binds.push(ledger.own(
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("LC1 one local shadow view"),
@@ -99,6 +102,44 @@ impl Atlas {
         }
         let bytes = u64::from(layers) * 4 * u64::from(size).pow(2)
             + uniforms.as_ref().map_or(0, |u| u.size());
+        let clear = (slots > 0).then(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("LC3 tile clear"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/local_light_clear.wgsl").into(),
+                ),
+            });
+            ledger.own(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("LC3 tile clear"),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vertex"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fragment"),
+                        targets: &[],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+                ResourceKind::RenderPipeline,
+            )
+        });
         Self {
             _texture: texture,
             view,
@@ -108,12 +149,15 @@ impl Atlas {
             stride,
             resolution,
             slots,
+            clear,
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
         }
     }
 }
 
 pub(super) struct LightClusters {
+    #[cfg(test)]
+    pub legacy_limit: bool,
     pub enabled: bool,
     pub settings: LocalShadows,
     /// The `LcFrame` uniform: the grid's camera and the pooled map matrices (group 3
@@ -132,6 +176,9 @@ pub(super) struct LightClusters {
     pub generation: u64,
     /// Each slot's map content (light placement, settings and casters), None to redraw.
     keys: Vec<Option<[u8; 32]>>,
+    slots: Vec<Option<u32>>,
+    strengths: Vec<f32>,
+    tiles: Vec<Option<lc::Tile>>,
     pub stats: LightClusterStats,
     /// The frame uniform as last written: unchanged frames upload nothing.
     published: Vec<u8>,
@@ -236,6 +283,8 @@ impl LightClusters {
             ResourceKind::ComputePipeline,
         );
         Self {
+            #[cfg(test)]
+            legacy_limit: false,
             enabled: true,
             settings: LocalShadows::default(),
             _allocation: ledger.allocate(
@@ -252,6 +301,9 @@ impl LightClusters {
             retired: vec![],
             generation: 0,
             keys: vec![],
+            slots: vec![],
+            strengths: vec![],
+            tiles: vec![],
             stats: LightClusterStats::default(),
             published: vec![],
         }
@@ -262,6 +314,12 @@ impl LightClusters {
     #[cfg(test)]
     pub fn test_lists(&self) -> &wgpu::Texture {
         &self._lists
+    }
+    #[cfg(test)]
+    pub fn test_reset_selection(&mut self) {
+        self.slots.clear();
+        self.strengths.clear();
+        self.tiles.clear();
     }
 }
 
@@ -300,15 +358,44 @@ impl Renderer {
         let lights = &self.lighting.source_lights;
         let state = &mut self.lighting.clusters;
         let count = state.settings.count;
+        for slot in &mut state.slots {
+            if slot.is_some_and(|i| {
+                lights
+                    .get(i as usize)
+                    .is_none_or(|l| lc::sphere(l).is_none())
+            }) {
+                *slot = None;
+            }
+        }
         let eye = camera.view().inverse().w_axis.truncate();
-        let slots = if count > 0 {
-            lc::select(
+        let previous = state.slots.clone();
+        let all_rays = !maps && count > 0;
+        #[cfg(test)]
+        let all_rays = all_rays && !state.legacy_limit;
+        let slots = if count > 0 && !all_rays {
+            let desired = lc::select(
                 lights,
                 camera.matrix(viewport[0], viewport[1]),
                 eye,
-                &state.stats.shadowed,
+                &state.slots,
                 count,
-            )
+            );
+            #[cfg(test)]
+            let desired = if state.legacy_limit {
+                lc::select_legacy(
+                    lights,
+                    camera.matrix(viewport[0], viewport[1]),
+                    eye,
+                    &state.slots,
+                    count,
+                )
+            } else {
+                desired
+            };
+            let (slots, strengths) =
+                lc::transition(&state.slots, &state.strengths, &desired, count);
+            state.strengths = strengths;
+            slots
         } else {
             vec![]
         };
@@ -319,18 +406,46 @@ impl Renderer {
             .chunks_exact_mut(crate::lighting::LIGHT_BYTES)
             .enumerate()
         {
-            let w = slots
-                .iter()
-                .position(|s| *s == Some(index as u32))
-                .map_or(0, |slot| {
-                    (slot as u32 + 1) | if lc::cube(&lights[index]) { 0x10000 } else { 0 }
-                });
+            let w = if all_rays && lc::sphere(&lights[index]).is_some() {
+                // Rays address the light directly and need neither a map slot nor selection.
+                (index as u32 & 0xffff) + 1
+            } else {
+                slots
+                    .iter()
+                    .position(|s| *s == Some(index as u32))
+                    .map_or(0, |slot| {
+                        (slot as u32 + 1) | if lc::cube(&lights[index]) { 0x10000 } else { 0 }
+                    })
+            };
             record[60..64].copy_from_slice(&w.to_ne_bytes());
         }
         let mut layers = vec![glam::Mat4::IDENTITY; count as usize * 6];
         let mut faces = vec![0usize; count as usize];
+        state.tiles.resize(count as usize, None);
+        if state.atlas.resolution != state.settings.resolution {
+            state.tiles.fill(None);
+        }
+        for slot in 0..count as usize {
+            if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot) {
+                state.tiles[slot] = None;
+            }
+        }
+        let vp = camera.matrix(viewport[0], viewport[1]);
         for (slot, light) in slots.iter().enumerate() {
             if let Some(light) = light {
+                if state.tiles[slot].is_none() {
+                    let pixels = lc::coverage(&lights[*light as usize], vp).sqrt()
+                        * viewport[0].max(viewport[1]) as f32;
+                    let maximum = state.settings.resolution;
+                    let desired = if pixels > maximum as f32 * 0.5 {
+                        maximum
+                    } else if pixels > maximum as f32 * 0.25 {
+                        (maximum / 2).max(1)
+                    } else {
+                        (maximum / 4).max(1)
+                    };
+                    state.tiles[slot] = lc::allocate_tile(&state.tiles, maximum, desired);
+                }
                 let m = lc::matrices(&lights[*light as usize], state.settings.near);
                 faces[slot] = m.len();
                 layers[slot * 6..slot * 6 + m.len()].copy_from_slice(&m);
@@ -338,6 +453,22 @@ impl Renderer {
         }
         let clustered = state.enabled && lights.len() <= lc::MAX_CLUSTERED;
         let mut header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
+        for (slot, tile) in state.tiles.iter().enumerate() {
+            if let Some(tile) = tile {
+                for (k, value) in [
+                    tile.x as f32,
+                    tile.y as f32,
+                    tile.size as f32,
+                    state.strengths.get(slot).copied().unwrap_or(0.0),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let offset = lc::TILE_OFFSET + slot * 16 + k * 4;
+                    header[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+        }
         // LC2 source sampling rotates only with TR1; comparisons with history off remain
         // deterministic. Raster map filtering is deterministic on every frame.
         let sample = self
@@ -369,32 +500,62 @@ impl Renderer {
                 state.generation += 1;
                 state.keys = vec![None; count as usize];
             }
-            // Every caster placement this frame; any change redraws every slot.
-            let mut scene = Sha256::new();
-            for draw in draws {
-                scene.update((std::ptr::from_ref(draw.mesh) as usize).to_ne_bytes());
-                scene.update(draw.mesh.index_count.to_ne_bytes());
-                scene.update(
-                    draw.material
-                        .map_or(0, |m| std::ptr::from_ref(m) as usize)
-                        .to_ne_bytes(),
-                );
-                for model in &draw.instances.state.models {
-                    scene.update(matrix_bytes(*model));
+            // Hash each caster once, then include only intersecting casters in a map's
+            // key. A distant moving object no longer invalidates the entire atlas.
+            let mut candidates = vec![];
+            for (d, draw) in draws.iter().enumerate() {
+                for (i, model) in draw.instances.state.models.iter().enumerate() {
+                    let Ok(bounds) = shadow_gpu::world_bounds(draw.mesh.bounds, *model) else {
+                        continue;
+                    };
+                    let key: [u8; 32] = Sha256::new()
+                        .chain_update((std::ptr::from_ref(draw.mesh) as usize).to_ne_bytes())
+                        .chain_update(draw.mesh.index_count.to_ne_bytes())
+                        .chain_update(
+                            draw.mesh
+                                .skin
+                                .as_ref()
+                                .map_or(0, |s| s.revision)
+                                .to_ne_bytes(),
+                        )
+                        .chain_update(
+                            draw.material
+                                .map_or(0, |m| std::ptr::from_ref(m) as usize)
+                                .to_ne_bytes(),
+                        )
+                        .chain_update(matrix_bytes(*model))
+                        .finalize()
+                        .into();
+                    candidates.push((d, i as u32, bounds, key));
                 }
             }
-            let scene: [u8; 32] = scene.finalize().into();
             for (slot, light) in slots.iter().enumerate() {
                 let Some(light) = *light else {
                     state.keys[slot] = None;
                     continue;
                 };
+                let Some(tile) = state.tiles[slot] else {
+                    continue;
+                };
+                let (centre, radius) = lc::sphere(&lights[light as usize]).unwrap();
+                let mut casters = vec![];
+                let mut scene = Sha256::new();
+                for (d, i, b, key) in &candidates {
+                    if centre.distance_squared(centre.clamp(b.min, b.max)) <= radius * radius {
+                        casters.push((*d, *i));
+                        scene.update(key);
+                    }
+                }
+                let scene: [u8; 32] = scene.finalize().into();
                 let record = &self.lighting.pending.records
                     [light as usize * crate::lighting::LIGHT_BYTES..]
                     [..crate::lighting::LIGHT_BYTES];
                 let key: [u8; 32] = Sha256::new()
                     .chain_update(&record[..32])
-                    .chain_update(&record[60..64])
+                    .chain_update((light as u32).to_ne_bytes())
+                    .chain_update(tile.x.to_ne_bytes())
+                    .chain_update(tile.y.to_ne_bytes())
+                    .chain_update(tile.size.to_ne_bytes())
                     .chain_update(state.settings.near.to_ne_bytes())
                     .chain_update(state.settings.resolution.to_ne_bytes())
                     .chain_update(scene)
@@ -404,18 +565,6 @@ impl Renderer {
                     continue;
                 }
                 state.keys[slot] = Some(key);
-                let (centre, radius) = lc::sphere(&lights[light as usize]).unwrap();
-                let mut casters = vec![];
-                for (d, draw) in draws.iter().enumerate() {
-                    for (i, model) in draw.instances.state.models.iter().enumerate() {
-                        let Ok(b) = shadow_gpu::world_bounds(draw.mesh.bounds, *model) else {
-                            continue;
-                        };
-                        if centre.distance_squared(centre.clamp(b.min, b.max)) <= radius * radius {
-                            casters.push((d, i as u32));
-                        }
-                    }
-                }
                 for face in 0..faces[slot] {
                     let layer = (slot * 6 + face) as u32;
                     self.queue.write_buffer(
@@ -433,7 +582,36 @@ impl Renderer {
         }
         let stats = &mut state.stats;
         stats.clustered = clustered;
-        stats.shadowed = slots;
+        stats.shadowed = if all_rays {
+            lights
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| lc::sphere(l).is_some())
+                .map(|(i, _)| Some(i as u32))
+                .collect()
+        } else {
+            slots.clone()
+        };
+        stats.resolutions = if maps {
+            state
+                .tiles
+                .iter()
+                .map(|t| t.map_or(0, |t| t.size))
+                .collect()
+        } else {
+            vec![]
+        };
+        stats.strengths = if maps {
+            state.strengths.clone()
+        } else {
+            vec![1.0; stats.shadowed.len()]
+        };
+        stats.atlas_bytes = if maps {
+            6 * 4 * u64::from(state.atlas.resolution * 4).pow(2)
+        } else {
+            0
+        };
+        state.slots = slots;
         stats.maps = maps;
         stats.faces_drawn = redraw.len() as u32;
         stats.total_faces_drawn += redraw.len() as u64;
@@ -492,15 +670,27 @@ impl Renderer {
                 label: Some("LC1 local shadow face"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &state.atlas.layers[*layer as usize],
+                    view: &state.atlas.layers[*layer as usize % 6],
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.0),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
             });
+            let tile = state.tiles[*layer as usize / 6].unwrap();
+            pass.set_viewport(
+                tile.x as f32,
+                tile.y as f32,
+                tile.size as f32,
+                tile.size as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
+            pass.set_pipeline(state.atlas.clear.as_ref().unwrap());
+            pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.pipeline.shadow);
             pass.set_bind_group(0, &*state.atlas.binds[*layer as usize], &[]);
             let (mut instances, mut material, mut mesh) = (None, None, None);

@@ -128,7 +128,7 @@ engine.set_decals(&[Decal {
 ## Lighting and exposure
 
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster, and the most important 4 are shadowed each frame (LC1, [m7-lc1.md](m7-lc1.md); `Renderer::set_local_shadows`); the rest are unshadowed. They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster. LC3 ([m7-lc3.md](m7-lc3.md)) traces shadows for every contributing clustered local light on RT heads; map heads shadow up to 128 lights from a cached atlas, ranked by projected influence and energy, with fading slot changes. `Renderer::set_local_shadows` controls the map budget and maximum face resolution; count zero disables automatic local shadows on both paths. They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Sky, atmosphere and fog
@@ -239,7 +239,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
-- Only the 4 most important local lights cast shadows (LC1); the rest are unshadowed. See the Lights section of [m7-gaps.md](m7-gaps.md#lights).
+- Map heads shadow at most 128 local lights (LC3); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Reflection-hit visibility retains its separate limitation. See [Lights gaps](m7-gaps.md#lights).
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
 - On `NonRt`, reflections are the environment estimate only (R1n adds software-traced reflections), and volumetric fog is unshadowed (no sun shafts).
 - The GI cache shows bright speckles near metallic objects and faceted streaks on some flat faces, on both paths. G2c owns the fix.
