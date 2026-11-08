@@ -5,6 +5,7 @@ conditioned sun visibility and registered geometric populations. A candidate in 
 HDR must supply its measured pre-exposure; no inferred gain is accepted by the scorer.
 """
 import argparse
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
@@ -266,6 +267,15 @@ def floor(args):
                 p99=float(np.sqrt(np.quantile(e2[mask],.99))),maximum=float(np.abs(error[mask]).max()),
                 signed_mean=float(error[mask].mean()))
         return result
+    @lru_cache(maxsize=2)
+    def reference_arrays(path):
+        # Alternation and held cameras reuse the same immutable reference. Bound
+        # this CPU cache so a moving sequence does not retain its entire corpus.
+        with np.load(path) as reference:
+            halves=[reference[k] for k in ("L0","L1")]
+            populations={k[4:]:reference[k] for k in reference.files if k.startswith("pop_")}
+            hit=reference["hit"][...,0]
+        return halves,(halves[0]+halves[1])/2,populations,hit
     for directory in sorted(args.root.iterdir()):
         if not directory.is_dir() or not (directory/"native.json").exists():continue
         recipe=json.loads((directory/"recipe.json").read_text())
@@ -291,11 +301,8 @@ def floor(args):
                 exposure=float(candidate["pre_exposure"])
                 if exposure!=capture["pre_exposure"] or exposure!=2.**args.stops:raise ValueError("pre-exposure drift")
                 hdr=candidate["hdr"][...,:3]/exposure
-            with np.load(reference_path) as reference:
-                halves=[reference[k] for k in ("L0","L1")];mean=(halves[0]+halves[1])/2
-                if mean.shape!=hdr.shape or not np.isfinite(hdr).all():raise ValueError("invalid native HDR")
-                populations={k[4:]:reference[k] for k in reference.files if k.startswith("pop_")}
-                hit=reference["hit"][...,0]
+            halves,mean,populations,hit=reference_arrays(reference_path)
+            if mean.shape!=hdr.shape or not np.isfinite(hdr).all():raise ValueError("invalid native HDR")
             row=dict(frame=index,phase=pose.get("phase"),reference=str(reference_path),
                      reference_sha256=meta["archive_sha256"],samples=meta["samples"],
                      candidate_sha256=capture["archive_sha256"],measures={})
