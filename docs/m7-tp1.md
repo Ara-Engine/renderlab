@@ -190,6 +190,11 @@ No shadow, GI, visibility or primary kernel changed.
 
 **G2b and AT1 (main f159fcd):** the radiance cache is on by default; transparent surfaces read it through the standard program's indirect inputs. They hold no cells of their own (gap). AT1's application is composed into the glass module by `program::compose`, and into the particle modules by TP1 (`atmosphere::api_source`).
 
+**API1 handoff (main `f870cb4`).** `docs/api.md` reserves TP1's slot. TP1 doesn't edit `src/engine` beyond a compile fix: `transparency: None`, so engine materials stay opaque until API1 wires the slot. The renderer API to wire:
+- **Glass.** `MaterialDescriptor::transparency: Option<renderlab::Transparency { opacity, ior, thickness }>`. The engine's batching needs nothing more: `try_render_view` splits transparent draws out before the one-program admission, so a glass material may use any program.
+- **Particles.** `Renderer::try_create_emitter(&EmitterDescriptor) -> Emitter`. Dropping the handle removes the emitter. Also `try_update_emitter`, `set_particle_step` and `transparency_stats`. The engine's `create_particles`, `set_particles` and `remove_particles` map onto these, with the handle in the engine's slot table.
+- **Cutouts.** `renderlab::cutout::{AlphaMask, cutout, CutoutMesh}`, applied to `MeshData` before mesh creation, with an ordinary opaque, usually double-sided and thin, material.
+
 **R1 interface:** R1's traced reflections reach the standard program through `specular_incident`. In the transparent pass's raster composition that input is untraced (w = 0), so glass keeps its sky, lobe and sun specular (gap).
 
 **DC1 interface (root, 2026-11-08):** `fs_transparent` passes `decal_none()`: decals project onto opaque receivers only. DC1 owns `material_opacity(input)`, so TP1's helpers are named `transparent_*`. TP1 adds no lighting-group binding. Its own group 0 uses 0, 2, 30-37, 40-42 and 50-53.
