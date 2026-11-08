@@ -705,10 +705,14 @@ fn gi_pack_normal(n:vec3<f32>) -> u32 {
     let q=select((vec2<f32>(1.0)-abs(p.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0)),p,n.z>=0.0);
     return pack2x16snorm(q);
 }
+// How far a cell's rays start off its query point along its axis: at least the reference
+// path tracer's offset (1e-4 + 4e-7 |p|max, reference_path_tracer.wgsl), which scan micro-relief
+// needs (G2: the smaller ulp-scaled offset blocked rays the reference's escape; quarry TR1 RMS
+// 7.56 to 7.35 F0 codes).
 fn gi_origin_offset(q:vec3<f32>, edge:f32) -> f32 {
     let m=max(max(abs(q.x),abs(q.y)),abs(q.z));
     let ulp=bitcast<f32>(bitcast<u32>(max(m,1e-30))+1u)-max(m,1e-30);
-    return max(1e-5,32.0*ulp)+1e-4*edge;
+    return max(max(1e-5,32.0*ulp)+1e-4*edge,1e-4+4e-7*m);
 }
 
 // ---- SH of the occluded sky over the fixed directions ----
@@ -754,6 +758,8 @@ fn gi_store_sh(slot:u32) {
     let split=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_SPLIT)!=0u;
     gi_table[hot+15u]=gi_table[hot+15u]|select(0u,GI_SPLIT_HOT,split);
     gi_table[hot+1u]=bitcast<u32>(scale);
+    // The query normal beside the value, for shading's agreement weight (G2).
+    gi_table[hot+GI_HOT_NORMAL]=gi_table[gi_cold(slot)+GI_C_NORMAL];
 }
 fn gi_sh_component(j:u32) -> f32 {
     let v=gi_cell_sh[j/3u];
@@ -997,10 +1003,15 @@ const GI_SETUP_CHOSEN:u32=7u;
                 let split=atomicLoad(&gi_wg_split[cell])!=0u;
                 var qualified=false;
                 state=GI_SETUP_NONE;
-                for(var j=0u;j<GI_PROBES;j+=1u) {
-                    let r=gi_wg_candidates[cell*GI_SETUP_LANES+j];
+                for(var j=0u;j<2u*GI_PROBES;j+=1u) {
+                    let r=gi_wg_candidates[cell*GI_SETUP_LANES+j%GI_PROBES];
                     qualified=qualified || r.q.w!=0.0;
                     if r.q.w==0.0 || r.n.w!=0.0 { continue; }
+                    // Front faces first, in line order; back faces only when no line has one
+                    // (G2: a back face's cell sees under its sheet, and the pixels near a
+                    // bin tie that read it showed as dark pinholes; docs/m7-g2.md). The point
+                    // still comes from the key alone, in a fixed order (W2).
+                    if j<GI_PROBES && (r.tri.w&0x80000000u)!=0u { continue; }
                     let near=bins!=0u && gi_near_base(r.tri.w&0x7fffffffu)!=0u;
                     gi_setup_point(slot,r,split);
                     gi_wg_candidates[cell*GI_SETUP_LANES+GI_SETUP_CHOSEN]=r;
@@ -1099,10 +1110,25 @@ const GI_SETUP_CHOSEN:u32=7u;
 // A fresh cell's canonical query point and normal, whether it is split, and the point's
 // material (G2: the placement and, where the ray source names it, the hit triangle). Its near
 // words are cleared until stage 5 stores them. The bounce bits survive a re-probe.
+// The normal, the axis of the cell's fixed directions, is the interpolated vertex normal at
+// the point where the ray source names the triangle (hardware rays), turned to the
+// candidate's side; otherwise the hit facet's plane normal. On scans a facet's plane tilts
+// from the surface around it, and a hemisphere about it dips into the rock: such cells read
+// near-black and made isolated dark pixels (G2: quarry all-covered RMS 10.35 -> 9.76 codes,
+// pinholes 1,754 -> 1,523 at 1x; docs/m7-g2.md). Fixed by the key alone, as before (W2).
 fn gi_setup_point(slot:u32, r:GiCandidate, split:bool) {
     let cold=gi_cold(slot);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
-    gi_table[cold+GI_C_NORMAL]=gi_pack_normal(r.n.xyz);
+    var axis=r.n.xyz;
+    let primitive=gi_hit_primitive(r.tri.xyz);
+    if primitive!=GI_NO_PRIMITIVE {
+        let rec=gi_receiver(vec4<u32>((r.tri.w&0x7fffffffu)+1u,primitive,bitcast<vec2<u32>>(r.bary)));
+        if dot(rec.vertex,rec.vertex)>1e-12 {
+            let v=normalize(rec.vertex);
+            axis=select(-v,v,dot(v,r.n.xyz)>=0.0);
+        }
+    }
+    gi_table[cold+GI_C_NORMAL]=gi_pack_normal(axis);
     gi_table[cold+GI_C_STATE]=GI_QUEUED|select(0u,GI_SPLIT,split)
         |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
     for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_NEAR+w]=0u; }

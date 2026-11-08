@@ -39,10 +39,23 @@ fn gi_hot_find(key:vec2<u32>) -> GiHot {
 // array costs a local-memory copy per call).
 var<private> gi_lv_sky:array<vec3<f32>,9>;
 var<private> gi_lv_bounce:array<vec3<f32>,4>;
-// Adds a record's coefficients with weight w to the level sums; returns w, or 0 for an
-// absent or invalid cell.
-fn gi_hot_add(h:GiHot, w:f32) -> f32 {
-    if w<=0.0 || (h.r0.x&GI_VALID)==0u { return 0.0; }
+// The receiver's bin-source normal (its viewed vertex normal), against which each cell's query
+// normal is weighed (gi_prepare).
+var<private> gi_rx_normal:vec3<f32>;
+// How far a cell's surface agrees with the receiver's: full weight within about 75 degrees,
+// none for a surface facing away (G2). A cell whose fixed query point lies on another side
+// (the back of the receiver's own sheet, a facet across a crease) describes light the
+// receiver does not get; reading it made isolated near-black pixels where a receiver's
+// normal sat near a bin tie (docs/m7-g2.md). A fixed geometric weight, no jitter (W3).
+fn gi_agreement(h:GiHot) -> f32 {
+    return clamp(dot(gi_unpack_normal(h.r5.w),gi_rx_normal)*4.0,0.0,1.0);
+}
+// Adds a record's coefficients with weight w to the level sums; returns the weight it added,
+// or 0 for an absent or invalid cell.
+fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {
+    if w_in<=0.0 || (h.r0.x&GI_VALID)==0u { return 0.0; }
+    let w=w_in*gi_agreement(h);
+    if w<=0.0 { return 0.0; }
     let s=w*bitcast<f32>(h.r0.y);
     let p0=unpack2x16float(h.r0.z);let p1=unpack2x16float(h.r0.w);
     let p2=unpack2x16float(h.r1.x);let p3=unpack2x16float(h.r1.y);
@@ -77,7 +90,7 @@ fn gi_hot_add(h:GiHot, w:f32) -> f32 {
 // the next finer level, where the slab and the floor beneath it are separate cells.
 var<private> gi_sampled_split:bool;
 fn gi_note_split(h:GiHot, w:f32) {
-    gi_sampled_split=gi_sampled_split || (w>0.0 && (h.r3.w&GI_SPLIT_HOT)!=0u);
+    gi_sampled_split=gi_sampled_split || (w>0.0 && (h.r3.w&GI_SPLIT_HOT)!=0u && (h.r0.x&GI_VALID)!=0u && gi_agreement(h)>0.0);
 }
 // The cells around `world` at `level` for `bin` into the level sums (gi_lv_*), returning
 // their total weight; the caller normalizes. Bilinear over four cells in the bin's tangent
@@ -151,7 +164,9 @@ fn gi_prepare(input:SurfaceInput) {
     if gi_word(GI_H_ENABLED)==0u { return; }
     let world=input.receiver.world;
     // The bin comes from the interpolated vertex normal, as gi_probe requests it.
-    let bin=gi_bin(gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal));
+    let source=gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal);
+    gi_rx_normal=unit_normal(source);
+    let bin=gi_bin(source);
     let levels=gi_word(GI_H_LEVELS);
     let pick=gi_levels(world,0.0);
     // Two levels around a switch (level blend), each normalized by its own weights.
@@ -159,10 +174,25 @@ fn gi_prepare(input:SurfaceInput) {
     for(var j=0u;j<2u;j+=1u) {
         let w=select(1.0-pick.t,pick.t,j==1u);
         if w<=0.0 || (j==1u && pick.hi==pick.lo) { continue; }
-        let s=gi_sample_refined(world,select(pick.lo,pick.hi,j==1u),bin);
+        let level=select(pick.lo,pick.hi,j==1u);
+        let s=gi_sample_refined(world,level,bin);
         if s<=1e-6 { continue; }
-        gi_rx_add(w/s);
+        // Corners holding part of the weight (orphans, absent or disagreeing cells) keep it;
+        // the next coarser level fills the rest, instead of the corners left taking all of
+        // it (G2: renormalizing over one dark corner made isolated pinholes after TR1).
         total+=w;
+        if s>=0.999 || level+1u>=levels {
+            gi_rx_add(w/s);
+            continue;
+        }
+        gi_rx_add(w);
+        let c=gi_sample(world,level+1u,bin);
+        if c>1e-6 {
+            gi_rx_add(w*(1.0-s)/c);
+            continue;
+        }
+        // No coarser value: the level's own corners take the rest, as without the fill.
+        gi_rx_add(w*(1.0-s)/gi_sample_refined(world,level,bin));
     }
     if total>0.0 {
         let inv=1.0/total;
@@ -171,7 +201,15 @@ fn gi_prepare(input:SurfaceInput) {
         gi_rx_valid=true;
         return;
     }
-    // Neither level has a value here: coarser levels, then the open environment.
+    // No agreeing value at the receiver's level in its bin: its second bin there (the next
+    // axis of its normal, which a receiver near a bin tie shares with its neighbours), then
+    // coarser levels, then the open environment.
+    let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));
+    if s2>1e-6 {
+        gi_rx_add(1.0/s2);
+        gi_rx_valid=true;
+        return;
+    }
     for(var level=max(pick.lo,pick.hi)+1u;level<levels;level+=1u) {
         let s=gi_sample(world,level,bin);
         if s<=1e-6 { continue; }
@@ -210,8 +248,19 @@ fn gi_rx_bounce_radiance(direction:vec3<f32>, roughness:f32) -> vec3<f32> {
 // sky plus the bounce light from the world radiance cache (M7 G1, G2). The engine computes
 // it identically for every program. Without a current cache value (cache off, non-traced
 // frames, overflow) it is the unoccluded environment.
+// A normal facing away from the receiver's viewed side (a scan micro-fold whose interpolated
+// vertex normal points into the surface the camera sees) is read mirrored into that side: the
+// cells hold only the viewed hemisphere's light, so the light beyond it reads as none, and such
+// pixels went near-black where the uncached image does not (G2; IQ1's cache pinholes,
+// docs/m7-g2.md). Continuous at the plane; normals on the viewed side are unchanged.
+fn gi_viewed_side(n:vec3<f32>) -> vec3<f32> {
+    let d=dot(n,gi_rx_normal);
+    if d>=0.0 { return n; }
+    return n-2.0*d*gi_rx_normal;
+}
 fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid { return gi_open_irradiance(n); }
-    return gi_rx_sky_irradiance(n)+gi_rx_bounce_irradiance(n);
+    let m=gi_viewed_side(n);
+    return gi_rx_sky_irradiance(m)+gi_rx_bounce_irradiance(m);
 }
 // ---- end of the indirect-light inputs ----

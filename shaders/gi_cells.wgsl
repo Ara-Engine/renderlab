@@ -19,8 +19,10 @@ const GI_HEADER:u32=64u;
 const GI_HOT_WORDS:u32=24u;
 const GI_COLD_WORDS:u32=32u;
 // Hot words 16-22 (G2): the bounce SH's f32 scale (0: no bounce), then its 12 halves (L1,
-// coefficient i*3+c for band index i, channel c), divided by the scale. Word 23 is unused.
+// coefficient i*3+c for band index i, channel c), divided by the scale. Word 23: the packed
+// query normal (as GI_C_NORMAL), which shading's agreement weight reads in the same load.
 const GI_HOT_BOUNCE:u32=16u;
+const GI_HOT_NORMAL:u32=23u;
 // Slots searched per key, from an offset the key picks.
 const GI_BUCKET:u32=8u;
 // Fixed directions per cell: a uniform Fibonacci hemisphere about the query normal.
@@ -177,6 +179,16 @@ fn gi_bin(n:vec3<f32>) -> u32 {
     if a.x>=a.y && a.x>=a.z { return select(1u,0u,n.x>=0.0); }
     if a.y>=a.z { return select(3u,2u,n.y>=0.0); }
     return select(5u,4u,n.z>=0.0);
+}
+// The bin of n's second-largest component (ties to the lower axis), signed by it.
+fn gi_second_bin(n:vec3<f32>) -> u32 {
+    let a=abs(n);
+    let first=gi_bin(n)>>1u;
+    var axis=select(0u,1u,first==0u);
+    for(var k=0u;k<3u;k+=1u) {
+        if k!=first && a[k]>a[axis] { axis=k; }
+    }
+    return axis*2u+select(1u,0u,n[axis]>=0.0);
 }
 fn gi_bin_normal(bin:u32) -> vec3<f32> {
     let s=select(1.0,-1.0,(bin&1u)!=0u);

@@ -41,12 +41,14 @@ def load(name):
 
 
 ES1 = load("m7-es1-score")
+# IQ1's pinhole measure (docs/iq1-quarry-image.md 1): single dark pixels the reference lacks.
+IQ1 = load("iq1-analyse")
 
 
 def reference_of(name):
     if (m := re.fullmatch(r".+-p(\d)", name)):
         return f"quarry-p{m.group(1)}"
-    if (m := re.fullmatch(r".+-pan-(\d{3})", name)):
+    if (m := re.fullmatch(r".+-(?:pan|pantr1)-(\d{3})", name)):
         return f"pan-{m.group(1)}"
     if re.fullmatch(r".+-(settle-\d\d|sun-\d\d|sun-fresh)", name):
         return "quarry-p0"
@@ -94,11 +96,15 @@ def score(args):
                     bias = error.mean(-1)
                     measures[str(stops)] = {p: dict(n=int(m.sum()), rms=float(np.sqrt(squared[m].mean())),
                                                     bias=float(bias[m].mean())) for p, m in populations.items()}
+                holes = IQ1.pinholes(image, reference, populations["all-covered"])
+                measures["pinholes"] = int(holes.sum())
+                measures["pinholes_by_population"] = {p: int((holes & m).sum()) for p, m in populations.items()}
                 ratio = (image @ ES1.LUM) / np.maximum(reference @ ES1.LUM, 1e-8)
                 measures["ground"] = {str(k): dict(n=int((m := ground & (hit == k)).sum()), ratio=float(np.median(ratio[m])))
                                       for k in np.unique(hit[ground]) if (ground & (hit == k)).sum() > 1000}
                 report[c.stem] = measures
-                print(path_dir.name, c.stem, "all-covered", round(measures["-14"]["all-covered"]["rms"], 3),
+                print(path_dir.name, c.stem, "pinholes", measures["pinholes"],
+                      "all-covered", round(measures["-14"]["all-covered"]["rms"], 3),
                       "hollow" if "hollow" in measures["-14"] else "",
                       round(measures["-14"]["hollow"]["rms"], 3) if "hollow" in measures["-14"] else "", flush=True)
         (path_dir / "score.json").write_text(json.dumps(report, indent=2))
@@ -110,29 +116,36 @@ def gate(args):
     motion = json.loads(ES1.FLOORS.read_text())["motion"] if ES1.FLOORS.exists() else {}
     cell = lambda a, b: f"{a:.2f}/{b:.2f}"
     result = {}
-    for path in ("rt", "nonrt"):
+    for base_path in ("rt", "nonrt"):
+        # --tag reads a shader-variant process's directory (PATH-TAG) as the candidate.
+        path = f"{base_path}-{args.tag}" if args.tag else base_path
         if not (run / path / "score.json").exists():
             continue
         report = json.loads((run / path / "score.json").read_text())
         open_report = {}
-        if (run / f"{path}-open" / "score.json").exists():
-            open_report = json.loads((run / f"{path}-open" / "score.json").read_text())
+        if (run / f"{base_path}-open" / "score.json").exists():
+            open_report = json.loads((run / f"{base_path}-open" / "score.json").read_text())
         merged = dict(report)
         merged.update({k.replace("es1open", "es1open"): v for k, v in open_report.items()})
         rows = {}
-        for case in ("p0", "p1", "pan"):
+        holes = {}
+        cases = ("p0", "p1", "tr1x8-p0", "tr1x8-p1", "tr1x64-p0", "tr1x64-p1", "pan", "pantr1")
+        for case in cases:
+            moving = case in ("pan", "pantr1")
+            def names_of(variant):
+                return [n for n in merged if n.startswith(f"{variant}-{case}-")] if moving else (
+                    [f"{variant}-{case}"] if f"{variant}-{case}" in merged else [])
             def value(variant, stops, pop):
-                if case == "pan":
-                    names = [n for n in merged if n.startswith(f"{variant}-pan-")]
-                    if not names:
-                        return None
-                    v, n = ES1.pooled(merged, names, stops, pop)
-                    return v if n else None
-                m = merged.get(f"{variant}-{case}")
-                return m[stops][pop]["rms"] if m and pop in m[stops] else None
-            base = merged.get(f"g2-{case}") or merged.get(next((n for n in merged if n.startswith("g2-pan-")), ""), {})
-            if not base:
+                names = names_of(variant)
+                if not names:
+                    return None
+                v, n = ES1.pooled(merged, names, stops, pop)
+                return v if n else None
+            if not names_of("g2"):
                 continue
+            base = merged[names_of("g2")[0]]
+            holes[case] = {v: [merged[n]["pinholes"] for n in names_of(v)] for v in ("off", "es1", "es1open", "g2")}
+            print(f"\n{path} {case} pinholes (IQ1's measure):", holes[case])
             pops = sorted(base["-14"])
             table = []
             print(f"\n#### {path} {case}\n")
@@ -143,10 +156,10 @@ def gate(args):
                 vals = {v: [value(v, s, pop) for s in ("-14", "-10")] for v in ("off", "es1", "es1open", "g2")}
                 lumen = {}
                 for name in ("ue-hw-e", "ue-sw-e"):
-                    if case == "p0":
+                    if case.endswith("p0"):
                         m = floors.get(name, {})
                         lumen[name] = [m[k][pop]["rms"] if pop in m.get(k, {}) else None for k in ("0", "4")]
-                    elif case == "pan":
+                    elif moving:
                         m = motion.get(name, {}).get("error", {})
                         lumen[name] = [m[k][pop]["rms"] if pop in m.get(k, {}) else None for k in ("0", "4")]
                     else:
@@ -164,8 +177,12 @@ def gate(args):
                       f"**{fmt(g)}** | {fmt(lumen['ue-hw-e'])} | {fmt(lumen['ue-sw-e'])} | {', '.join(losses)} |")
                 table.append(dict(population=pop, values=vals, lumen=lumen, losses=losses))
             rows[case] = table
-        result[path] = rows
+        result[path] = dict(populations=rows, pinholes=holes)
         for case, table in rows.items():
+            h = holes.get(case, {})
+            if h.get("g2") and h.get("off"):
+                print(f"{path} {case}: cache pinholes {sum(h['g2'])} against cache off {sum(h['off'])}"
+                      f" ({'meets' if sum(h['g2']) <= sum(h['off']) else 'misses'} the cache-off level)")
             for comparator in ("off", "es1open", "lumen-hw", "lumen-sw"):
                 lost = [t["population"] for t in table if comparator in t["losses"]]
                 print(f"{path} {case}: G2 loses to {comparator} on {len(lost)}: {', '.join(lost)}")
@@ -207,6 +224,7 @@ def main():
     p.set_defaults(run_command=score)
     p = sub.add_parser("gate")
     p.add_argument("run")
+    p.add_argument("--tag")
     p.set_defaults(run_command=gate)
     p = sub.add_parser("settle")
     p.add_argument("run")

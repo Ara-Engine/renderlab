@@ -252,6 +252,22 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     return expose(indirect_irradiance(input,s.n)*s.base/PI);
 }
 ";
+/// The G2 gate program: the G1 gate plus a Lambert `scatter`, so its surfaces reflect bounce
+/// light into the cache. Its reference is the path tracer with bounces and specular 0.
+const LAMBERT_BOUNCE: &str = "struct Surface { base:vec3<f32>, n:vec3<f32> };
+fn surface(input:SurfaceInput) -> Surface {
+    var n=unit_normal(input.normal);
+    if dot(input.normal,input.normal)<=1e-12 { n=input.geometric; }
+    if input.material.double_sided!=0u && !input.source_front { n=-n; }
+    return Surface(input.material.base_color.rgb*input.color.rgb,n);
+}
+fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
+    return s.base*(max(dot(s.n,wi),0.0)/PI);
+}
+fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
+    return expose(indirect_irradiance(input,s.n)*s.base/PI);
+}
+";
 const TOON: &str = include_str!("../shaders/programs/toon.wgsl");
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -269,7 +285,9 @@ struct Rig {
     instances: Vec<Instances>,
     /// Per bench material: the standard program, the Lambert gate and toon (a non-caller).
     materials: [Vec<Material>; 3],
-    _programs: [Program; 2],
+    /// Per bench material: G2's Lambert gate with `scatter` (bounce light).
+    bounce: Vec<Material>,
+    _programs: [Program; 3],
     path: Path_,
 }
 fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
@@ -348,11 +366,22 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
         meshes.push(mesh);
         instances.push(inst);
     }
-    let programs = [("g1-lambert", LAMBERT), ("toon", TOON)].map(|(label, source)| {
+    let programs = [
+        ("g1-lambert", LAMBERT),
+        ("toon", TOON),
+        ("g2-lambert", LAMBERT_BOUNCE),
+    ]
+    .map(|(label, source)| {
         r.try_create_program(&ProgramDescriptor { label, source })
             .unwrap()
     });
-    let materials = [None, Some(&programs[0]), Some(&programs[1])].map(|program| {
+    let [standard, gate, toon, bounce] = [
+        None,
+        Some(&programs[0]),
+        Some(&programs[1]),
+        Some(&programs[2]),
+    ]
+    .map(|program| {
         sv.materials
             .iter()
             .map(|m| {
@@ -371,7 +400,7 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
                     r.test_drain("G1 material admission");
                 }
             })
-            .collect()
+            .collect::<Vec<_>>()
     });
     r.set_indirect_profiling(true);
     Rig {
@@ -379,7 +408,8 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
         target,
         meshes,
         instances,
-        materials,
+        materials: [standard, gate, toon],
+        bounce,
         _programs: programs,
         path,
     }
@@ -1093,6 +1123,33 @@ fn gpu_gi_sky_visibility_sv() {
             &settings(spp),
         )
     });
+    // G2: references with bounce light (the constant sky's light after any number of
+    // bounces off the 0.5 Lambert surfaces, specular 0), per pose and per frame of a 5-frame
+    // pan at the gaps pose.
+    let bounce_settings = reference::Settings {
+        samples: spp,
+        max_depth: 10,
+        ..Default::default()
+    };
+    let bounce_refs: Vec<_> = poses
+        .iter()
+        .filter(|_| section("bounce"))
+        .map(|(_, eye, target)| cached_reference(&rt, &sv, &[], 0.0, *eye, *target, &bounce_settings))
+        .collect();
+    let bounce_motion: Vec<_> = (0..5)
+        .filter(|_| section("bounce"))
+        .map(|t| {
+            cached_reference(
+                &rt,
+                &sv,
+                &[],
+                0.0,
+                motion_eye + pan(t),
+                motion_target + pan(t),
+                &bounce_settings,
+            )
+        })
+        .collect();
     let reference_seconds = start.elapsed().as_secs_f64();
     eprintln!("G1 references in {reference_seconds:.1} s");
 
@@ -1433,6 +1490,89 @@ fn gpu_gi_sky_visibility_sv() {
                 );
             }
             path_json[*config] = config_json;
+        }
+        // G2: G2's Lambert gate (with `scatter`) against the bounce references, with the cache
+        // off, sky only (bounce off), and with bounce: every population after twelve frames,
+        // the settle (frames 1, 2, 4, 8 and 12 after a reset), and the 5-frame pan's flicker.
+        if section("bounce") {
+            let bounce = std::mem::take(&mut rig.bounce);
+            let mut rows = json!({});
+            for (config, s) in [
+                ("off", IndirectSettings::default()),
+                (
+                    "sky",
+                    IndirectSettings {
+                        enabled: true,
+                        bounce: false,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "bounce",
+                    IndirectSettings {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                ),
+            ] {
+                let mut config_json = json!({});
+                for ((pose, eye, target), reference) in poses.iter().zip(&bounce_refs) {
+                    rig.settings(s);
+                    rig.r.reset_indirect();
+                    let mut frames = vec![];
+                    for f in 1..=12 {
+                        rig.frame(&sv, *eye, *target, &bounce);
+                        if [1, 2, 4, 8, 12].contains(&f) {
+                            frames.push((f, rig.radiance(&sv)));
+                        }
+                    }
+                    let image = frames.last().unwrap().1.clone();
+                    let placements = rig.placements(&sv);
+                    let sets = labels(&sv, &placements, *eye, *target);
+                    let open = open_luminance(&sv, &sets, reference);
+                    let scores: Json = names
+                        .iter()
+                        .zip(&sets)
+                        .map(|(n, px)| (n.clone(), score(&image, reference, open, px)))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                    let settle: Vec<Json> = frames
+                        .iter()
+                        .map(|(f, im)| json!({"frame": f, "frame_score": score(im, reference, open, sets.last().unwrap())}))
+                        .collect();
+                    png(
+                        &out.join(format!("{label}-bounce-{config}-{pose}.png")),
+                        sv.size,
+                        image.iter().copied(),
+                        (sv.exposure).exp2(),
+                    );
+                    config_json[pose] = json!({"scores": scores, "settle": settle, "image_hash": hash_image(&image)});
+                    eprintln!("G2 SV {label} {config} {pose}: frame rms {}", scores["frame"]["rms"]);
+                }
+                if !bounce_motion.is_empty() {
+                    rig.settings(s);
+                    rig.r.reset_indirect();
+                    for _ in 0..12 {
+                        rig.frame(&sv, motion_eye, motion_target, &bounce);
+                    }
+                    let mut images = vec![];
+                    for t in 0..bounce_motion.len() {
+                        rig.frame(&sv, motion_eye + pan(t), motion_target + pan(t), &bounce);
+                        images.push(rig.radiance(&sv));
+                    }
+                    let placements = rig.placements(&sv);
+                    let all: Vec<usize> = placements
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| **p != 0 && **p >> 31 == 0)
+                        .map(|(i, _)| i)
+                        .collect();
+                    config_json["motion"] = flicker(&images, &bounce_motion, &all);
+                }
+                rows[config] = config_json;
+            }
+            path_json["bounce"] = rows;
+            rig.bounce = bounce;
         }
         // A program that never calls the cache runs no cache pass and draws the same bytes.
         if section("gates") {
@@ -3435,7 +3575,13 @@ fn gpu_g2_quarry() {
                 "misses": c.misses})
         })
     };
-    let mut results = json!({"path": path, "variants": variants, "sections": sections});
+    let tr1: Vec<u32> = env("RENDERLAB_G2_TR1")
+        .unwrap_or_else(|| "8,64".into())
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let mut results = json!({"path": path, "variants": variants, "sections": sections, "tr1": tr1});
     for section in &sections {
         match section.as_str() {
             "static" => {
@@ -3461,13 +3607,30 @@ fn gpu_g2_quarry() {
                                 std::fs::write(out.join(format!("{v}-outgoing.f32")), raw).unwrap();
                             }
                         }
+                        // The shipping image (TR1 the default anti-aliasing, milestone-7.md):
+                        // TR1's measured settings over N still frames of the settled cache,
+                        // as IQ1's tr1xN (RENDERLAB_G2_TR1, default 8 and 64; empty: none).
+                        for n in &tr1 {
+                            r.set_reconstruction(Reconstruction::identity()).unwrap();
+                            for _ in 0..*n {
+                                draw(&mut r, &camera);
+                            }
+                            write(&format!("{v}-tr1x{n}-p{pose}"), &capture_radiance(&mut r, exposure));
+                            r.set_reconstruction(Reconstruction::default()).unwrap();
+                        }
                     }
                 }
             }
-            "pan" => {
-                // U0b's pan: frame f >= 96 is pose 0 moved 2 cm a frame in x.
+            "pan" | "pan-tr1" => {
+                // U0b's pan: frame f >= 96 is pose 0 moved 2 cm a frame in x. pan-tr1 runs it
+                // with TR1 on throughout, from the cut.
+                let tr1_on = section == "pan-tr1";
+                let tag = if tr1_on { "pantr1" } else { "pan" };
                 for v in &variants {
                     r.set_indirect(g2_variant(v)).unwrap();
+                    if tr1_on {
+                        r.set_reconstruction(Reconstruction::identity()).unwrap();
+                    }
                     r.reset_indirect();
                     for _ in 0..12 {
                         draw(&mut r, &camera_at(0, 0.0));
@@ -3475,10 +3638,34 @@ fn gpu_g2_quarry() {
                     for f in 97..=159 {
                         draw(&mut r, &camera_at(0, 0.02 * (f - 96) as f32));
                         if [97, 112, 128, 159].contains(&f) {
-                            write(&format!("{v}-pan-{f:03}"), &capture_radiance(&mut r, exposure));
+                            write(&format!("{v}-{tag}-{f:03}"), &capture_radiance(&mut r, exposure));
                         }
                     }
+                    r.set_reconstruction(Reconstruction::default()).unwrap();
                 }
+            }
+            "determinism" => {
+                // The same reset sequence twice in this process: image and table hashes (the
+                // table without its per-frame header), and both tables tagged by process id, so
+                // two processes' tables compare word by word (G1d's cross-process difference).
+                let v = &variants[0];
+                let mut rows = vec![];
+                for rep in 0..2 {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    r.reset_indirect();
+                    for _ in 0..12 {
+                        draw(&mut r, &camera_at(0, 0.0));
+                    }
+                    let image = capture_radiance(&mut r, exposure);
+                    let words = r.indirect_table().unwrap().unwrap_or_default();
+                    let body = &words[words.len().min(64)..];
+                    let pid = std::process::id();
+                    let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    std::fs::write(out.join(format!("{v}-det{rep}-{pid}-table.u32")), raw).unwrap();
+                    write(&format!("{v}-det{rep}-{pid}"), &image);
+                    rows.push(json!({"rep": rep, "pid": pid, "image": hash_image(&image), "table": hash_words(body)}));
+                }
+                results["determinism"] = json!(rows);
             }
             "settle" => {
                 let v = &variants[0];
