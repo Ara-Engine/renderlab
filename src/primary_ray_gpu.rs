@@ -2609,7 +2609,8 @@ impl Renderer {
             if words != r.records {
                 let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
                 self.queue.write_buffer(&r.buffer.value, 0, &bytes);
-                uploads.geometry += (words.len() * 4) as u64;
+                // MV1/MQ2: transform-only software-ray records must not reset TR1.
+                uploads.models += (words.len() * 4) as u64;
                 uploads.write_calls += 1;
                 self.primary
                     .as_mut()
