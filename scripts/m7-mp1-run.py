@@ -158,8 +158,12 @@ def run_steps(g, out, binary, baseline, args):
             if extra and extra[0]:
                 env["RENDERLAB_ES1_SECTIONS"] = extra[0]
             step_binary = OUT / "bin" / (extra[1] + ".exe") if len(extra) > 1 else binary
+            if test == "rftoonstd":
+                # MP1 diagnostic: R0a's RF10 with its toon material on the standard program.
+                test = "rf"
+                env["RENDERLAB_R0A_TOON"] = "standard"
             if test in ("rf", "rftr1"):
-                tag = path + ("-tr1" if test == "rftr1" else "")
+                tag = path + ("-tr1" if test == "rftr1" else "") + ("-toonstd" if env.get("RENDERLAB_R0A_TOON") else "")
                 env.update(RENDERLAB_M7_R0A_SCENES=";".join(str(R0A / "scenes" / f) for f in FIXTURES),
                            RENDERLAB_M7_R0A_PATH=path, RENDERLAB_M7_REFERENCE_OUT=str(out / f"rf-{tag}"),
                            RENDERLAB_R1_TR1="1" if test == "rftr1" else "0")

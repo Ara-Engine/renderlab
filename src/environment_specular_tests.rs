@@ -733,18 +733,26 @@ fn gpu_es1_quarry() {
         results["paired"] = paired;
     }
     // MP1 (docs/m7-mp1.md): the quarry's twelve materials on 1, 2 and 8 programs (material
-    // i on program i % K: standard, toon, then distinct toon variants), interleaved in
-    // each of three visits per cache state, the `abcost` rows. Images at pose 0 for K = 2.
-    if sections.iter().any(|s| s == "mp1") {
-        let toon = include_str!("../shaders/programs/toon.wgsl");
+    // i on program i % K), interleaved in each of three visits per cache state, the `abcost`
+    // rows. `mp1`: standard, toon, then distinct toon variants (images at pose 0 for K = 2);
+    // `mp1std`: standard then distinct copies of it, so every pixel runs the same code and
+    // only the per-program dispatch differs.
+    for (section, base) in [
+        ("mp1", include_str!("../shaders/programs/toon.wgsl")),
+        ("mp1std", crate::STANDARD_PROGRAM),
+    ] {
+        if !sections.iter().any(|s| s == section) {
+            continue;
+        }
         let mut programs = vec![r.standard_program().clone()];
         for k in 0..7 {
-            let source = if k == 0 {
-                toon.to_string()
+            let source = if k == 0 && section == "mp1" {
+                base.to_string()
             } else {
-                toon.replace(
+                base.replacen(
                     "struct Surface",
                     &format!("const VARIANT:f32={k}.0;\nstruct Surface"),
+                    1,
                 )
             };
             let label = format!("mp1-{k}");
@@ -776,7 +784,7 @@ fn gpu_es1_quarry() {
                     }
                     r.test_drain("MP1 cut frames");
                     let cut = frame_times(&mut r, 10, 0);
-                    if visit == 0 && k == 2 {
+                    if visit == 0 && k == 2 && section == "mp1" {
                         let image = es1_radiance(&mut r, exposure);
                         write(&format!("mp1-k2-{cache}-p0"), &image);
                     }
@@ -796,7 +804,7 @@ fn gpu_es1_quarry() {
         }
         let set = [&programs[0]];
         asset.set_programs(&mut r, &set).unwrap();
-        results["mp1"] = rows;
+        results[section] = rows;
     }
     for (program, text) in es1_programs() {
         r.test_reload_standard(&text).unwrap();
@@ -872,7 +880,7 @@ fn gpu_es1_quarry() {
                     }
                     row["cost"] = timing;
                 }
-                "abcost" | "mp1" => {}
+                "abcost" | "mp1" | "mp1std" => {}
                 other => panic!("unknown ES1 section {other}"),
             }
         }

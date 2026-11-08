@@ -767,7 +767,7 @@ impl Renderer {
             return vec![];
         };
         let standard = self.standard.id();
-        let mut programs = draws
+        let programs = draws
             .into_iter()
             .map(|m| m.map_or(standard, |m| m.program.id()));
         let mut programs: Vec<u64> = if matches!(variant, Variant::Traced | Variant::Temporal) {
