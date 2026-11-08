@@ -242,6 +242,21 @@ F2 covered pools contain **98,629 / 95,359** age-3 / age-7 pixels; the age-7 bac
 
 The four full-frame/error sheets at 64 and 95 have been inspected. Reference-half noise is much smaller than the visible metal/front-edge discrepancies. The one-frame self-final proxy is not an independent film-settle result. Both native raw inputs are summarized and deleted (**2,654,208,000 bytes**); readbacks, hashes and inspected sheets remain.
 
+## S2G moving Sun: provisional witnesses
+
+While references arrive, `physical-batches/sun-first49-witness.json` scores **ten selected frames per path**: 0, 1, 7, 8, 31, 32, 39, 40, 47 and 48. This is not a full-track score or a substitute for the pending 160-frame result. Frame-32 full-image/error sheets at L0 and L4 are inspected.
+
+| Witness | TSR Epic, no RT | TSR Epic, HRT |
+|---|---:|---:|
+| Frame 32 covered L0 / L4 RMS | 7.9580 / 6.1566 | 15.3010 / 8.2510 |
+| Frame 32 metal / dielectric highlight energy ratio | 0.06115 / 1.08560 | 0.16193 / 1.26292 |
+| Frame 48 covered L0 / L4 RMS | 7.8707 / 6.1292 | 15.5139 / 8.2749 |
+| Frame 48 metal / dielectric highlight energy ratio | 0.05416 / 0.98760 | 0.13230 / 1.01246 |
+| F6 L0 residual, frames 31→32 | 0.84754 | 1.06799 |
+| F6 L0 residual, frames 47→48 | 0.84491 | 0.98816 |
+
+The Sun turns continuously; the stationary camera does not make this a temporal hold. No stop/settle count is inferred. These are combined final-colour errors against the new physical reference, with no T1b Sun score available. Sun native inputs remain retained for the complete score and final inspection.
+
 ## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
