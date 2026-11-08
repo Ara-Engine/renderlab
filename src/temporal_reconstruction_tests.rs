@@ -226,6 +226,8 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
+    b("pending_pairs", &mut s.pending_pairs);
+    b("debug_coverage", &mut s.debug_coverage);
     s
 }
 

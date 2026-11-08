@@ -49,6 +49,9 @@ struct Tr1Frame {
 };
 const TR1_CATMULL_ROM:u32=1u;
 const TR1_SPATIAL_START:u32=2u;
+const TR1_PENDING_PAIRS:u32=4u;
+const TR1_DEBUG_COVERAGE:u32=8u;
+var<private> tr1_branch:u32;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -139,7 +142,12 @@ fn tr1_pixel(m:mat4x4<f32>,p:vec4<f32>,size:vec2<f32>)->vec2<f32> {
 // pixel's footprint there (pixel centres at + 0.5, minus 0.5 for bilinear taps).
 fn tr1_fetch_position(p:vec2<i32>,s:Tr1Surface,size:vec2<f32>)->vec2<f32> {
     if tr1.flags.z!=0u {return vec2<f32>(p);}
-    return vec2<f32>(p)+tr1_pixel(tr1.previous,s.point,size)-tr1_pixel(tr1.current,s.point,size);
+    let q=vec2<f32>(p)+tr1_pixel(tr1.previous,s.point,size)-tr1_pixel(tr1.current,s.point,size);
+    // Rounding in two projections of one point is not motion: the sky under a camera
+    // translation lands within 1e-6 px of its pixel, and must not be resampled (nor get the
+    // Catmull-Rom window).
+    let r=round(q);
+    return select(q,r,abs(q-r)<vec2<f32>(1e-3));
 }
 
 // A previous-frame tap's latest sample point, rebuilt from its own camera ray (its pixel
@@ -351,33 +359,47 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
                 sw+=w;
             }
             if sw>0.0 {
+                tr1_branch=1u;
                 return vec3<f32>(tr1_box_area(sd/sw,n),weight,min(min(tr1.windows.x,tr1.windows.z),tr1.windows.y));
             }
         }
     }
+    tr1_branch=2u;
     return vec3<f32>(coverage/total,weight,min(window,tr1.windows.y));
 }
 
 // A start from this frame's samples only: the tent-weighted mean of the 3x3 samples showing
 // `id`, each weighted at its jittered position, and that estimate's effective sample count.
+// At radius 2 and zero jitter the tent is the 3x3 [1,2,1] filter; at radius 1 it is bilinear
+// interpolation to the pixel centre (the own sample alone at zero jitter). A surface the
+// tent misses (shown only farther out in the 3x3) starts from the radius-2 tent.
 fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
     let radius=tr1.starts.z;
     if radius<=0.0 && tr1_id(p)==id {return vec4<f32>(textureLoad(tr1_sample,p,0).xyz,1.0);}
     var sum=vec3<f32>(0.0);
     var w1=0.0;
     var w2=0.0;
+    var wide=vec3<f32>(0.0);
+    var v1=0.0;
+    var v2=0.0;
     for(var i=0;i<9;i+=1) {
         let o=vec2<i32>(i%3,i/3)-vec2<i32>(1);
         let t=p+o;
         if !tr1_inside(t,size) || tr1_ring(i)!=id {continue;}
-        // At radius 2 and zero jitter, the 3x3 [1,2,1] filter.
-        let d=abs(vec2<f32>(o)+tr1.jitter.xy)/max(radius,2.0);
+        let a=abs(vec2<f32>(o)+tr1.jitter.xy);
+        let c=textureLoad(tr1_sample,t,0).xyz;
+        let d=a/radius;
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
-        sum=fma(textureLoad(tr1_sample,t,0).xyz,vec3<f32>(w),sum);
+        sum=fma(c,vec3<f32>(w),sum);
         w1+=w;w2=fma(w,w,w2);
+        let e=0.5*a;
+        let v=max(1.0-e.x,0.0)*max(1.0-e.y,0.0);
+        wide=fma(c,vec3<f32>(v),wide);
+        v1+=v;v2=fma(v,v,v2);
     }
-    if w1<=0.0 {return vec4<f32>(0.0);}
-    return vec4<f32>(sum/w1,w1*w1/w2);
+    if w1>0.0 {return vec4<f32>(sum/w1,w1*w1/w2);}
+    if v1<=0.0 {return vec4<f32>(0.0);}
+    return vec4<f32>(wide/v1,v1*v1/v2);
 }
 // The tent-weighted share of this frame's 3x3 samples showing `id` at the pixel centre: a
 // one-frame coverage estimate.
@@ -479,6 +501,40 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // One surface: open constant background is the background exactly; an interior (or
         // the visible sky) continues its surface's history from either slot of the previous
         // frame.
+        if (tr1.flags.y&TR1_PENDING_PAIRS)!=0u && tr1.flags.x==0u && !(s.id==0u && tr1.background.w!=0.0)
+                && all(tr1_fetch_position(p,s,vec2<f32>(size))==vec2<f32>(p)) {
+            // Unmoved (a still view, or the sky under a camera translation): samples
+            // k = 1..254 come in point-symmetric pairs (odd k, then its negation;
+            // temporal_reconstruction.rs sample_offset). The first of a pair waits in this
+            // pixel's unused second-slot words and joins the mean with its partner, so the
+            // shown mean is always balanced (first-order exact, as the centre sample).
+            let k=tr1.flags.w&0xffu;
+            if k!=0u && k!=255u {
+                let h=tr1_history(p,s,size);
+                if h.weight>0.0 {
+                    if (k&1u)==1u {
+                        textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+                        textureStore(tr1_colour_out,p,vec4<f32>(h.colour,h.weight));
+                        textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,pack2x16float(sample.xy),pack2x16float(vec2<f32>(sample.z,1.0)),0u));
+                        textureStore(tr1_output,p,vec4<f32>(h.colour,1.0));
+                        return;
+                    }
+                    let window=max(h.window,1.0);
+                    var m=h.colour;
+                    var n=h.weight;
+                    let l=textureLoad(tr1_layer_in,p,0);
+                    let held=unpack2x16float(l.z);
+                    if l.x==TR1_NONE && held.y==1.0 {
+                        n=clamp(n+1.0,1.0,window);
+                        m=fma(vec3<f32>(unpack2x16float(l.y),held.x)*tr1.jitter.z-m,vec3<f32>(1.0/n),m);
+                    }
+                    n=clamp(n+1.0,1.0,window);
+                    m=fma(sample-m,vec3<f32>(1.0/n),m);
+                    tr1_store_single(p,s,vec4<f32>(m,n));
+                    return;
+                }
+            }
+        }
         tr1_store_single(p,s,tr1_continue(p,s,sample,size));
         return;
     }
@@ -528,7 +584,20 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     }
     var front=theirs.xyz;var back=mine.xyz;
     if occluder_is_s {front=mine.xyz;back=theirs.xyz;}
-    let film=mix(back,front,coverage);
+    // Whole coverage shows one layer exactly: mix's arithmetic is not exact at its ends when
+    // the layers differ by orders of magnitude (a bright sky behind rock).
+    let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
+    if (tr1.flags.y&TR1_DEBUG_COVERAGE)!=0u {
+        // Screen diagnostic: coverage, transported coverage, branch (1 straight edge,
+        // 2 bilinear, 0 none) + 10 when this pixel's sample is the occluder.
+        textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+        textureStore(tr1_colour_out,p,mine);
+        let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
+        textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
+            pack2x16float(vec2<f32>(theirs.z,theirs.w)),pack2x16float(vec2<f32>(first_coverage,coverage_weight))));
+        textureStore(tr1_output,p,vec4<f32>(coverage,c.x,f32(tr1_branch)+select(0.0,10.0,occluder_is_s),1.0));
+        return;
+    }
     textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);

@@ -51,6 +51,11 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
+    /// Still single-surface pixels hold the first sample of each point-symmetric pair until
+    /// its partner arrives, so the shown mean is always balanced (screen option, TR1b §4.6).
+    pub pending_pairs: bool,
+    /// Screen diagnostic: silhouette pixels output coverage, transported coverage and branch.
+    pub debug_coverage: bool,
 }
 impl Default for Reconstruction {
     fn default() -> Self {
@@ -66,6 +71,8 @@ impl Default for Reconstruction {
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
+            pending_pairs: false,
+            debug_coverage: false,
         }
     }
 }
@@ -102,6 +109,30 @@ impl Reconstruction {
 const FRAME_BYTES: usize = 304;
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
+/// The lattice's shifts in 1/256 px: x as T1's; y chosen so the 256 points are
+/// point-symmetric about the pixel centre (point j's partner is 239 - j).
+const SHIFT: [u32; 2] = [8, 91];
+/// Lattice point of each sample k = 1..=254: T1's visiting order (bit-reversed k, the first
+/// three swapped), each newly visited point followed by its point-symmetric partner.
+const SEQUENCE: [u8; 254] = {
+    let mut out = [0u8; 254];
+    let mut used = [false; 256];
+    let (mut n, mut k) = (0, 1u32);
+    while n < 254 {
+        let order = if k < 4 { (0x0231 >> (4 * k)) & 0xf } else { k };
+        let j = order.reverse_bits() >> 24;
+        let partner = (239 + 256 - j) & 0xff;
+        if !used[j as usize] {
+            used[j as usize] = true;
+            used[partner as usize] = true;
+            out[n] = j as u8;
+            out[n + 1] = partner as u8;
+            n += 2;
+        }
+        k += 1;
+    }
+    out
+};
 /// Interactive's disk directions continue by the frame's rotation word. The estimator body
 /// is otherwise production's; only the reconstruction's own trace modules carry this edit.
 const ROTATION_SEAM: (&str, &str) = (
@@ -110,17 +141,19 @@ const ROTATION_SEAM: (&str, &str) = (
 );
 const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 
-/// Sample k's offset from the pixel centre in pixels (y down): T1's corner-free 256-point
-/// lattice (film_accumulation.wgsl `film_offset`) with one symmetry for the whole image,
-/// which a projection can carry. k = 0 is the centre.
+/// Sample k's offset from the pixel centre in pixels (y down), one offset for the whole
+/// image, which a projection can carry. k = 0 and 255 are the centre; k = 1..=254 are 127
+/// point-symmetric pairs (odd k, then its negation) of a 256-point rank-1 lattice, in T1's
+/// lattice order (film_accumulation.wgsl `film_offset`). Every odd-length prefix from k = 0
+/// has a mean offset of exactly zero: a still pixel's mean is first-order exact on smooth
+/// shading, as the centre sample is (docs/m7-tr1b.md §4.6).
 pub(in crate::renderer) fn sample_offset(k: u64) -> [f32; 2] {
-    let k = (k & 0xff) as u32;
-    if k == 0 {
+    let k = (k & 0xff) as usize;
+    if k == 0 || k == 255 {
         return [0.0; 2];
     }
-    let order = if k < 4 { (0x0231 >> (4 * k)) & 0xf } else { k };
-    let j = order.reverse_bits() >> 24;
-    [j, (GENERATOR * j) & 0xff].map(|v| (((v + 8) & 0xff) as f32 + 0.5) / 256.0 - 0.5)
+    let j = u32::from(SEQUENCE[k - 1]);
+    [j + SHIFT[0], GENERATOR * j + SHIFT[1]].map(|v| ((v & 0xff) as f32 + 0.5) / 256.0 - 0.5)
 }
 /// Interactive's direction rotation for sample k: directions 8 (k mod 32) onward.
 pub(in crate::renderer) fn rotation(k: u64) -> u32 {
@@ -524,7 +557,10 @@ impl Renderer {
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let options = u32::from(settings.catmull_rom) | u32::from(settings.spatial_start) << 1;
+        let options = u32::from(settings.catmull_rom)
+            | u32::from(settings.spatial_start) << 1
+            | u32::from(settings.pending_pairs) << 2
+            | u32::from(settings.debug_coverage) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -670,18 +706,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn samples_are_the_film_lattice_with_one_symmetry() {
+    fn samples_are_balanced_lattice_pairs() {
         assert_eq!(sample_offset(0), [0.0; 2]);
-        // T1's 16-point prefix (rows 8, 12, 4, 0, then bit-reversed), moved off the edges.
-        let rows = [8u32, 12, 4, 0, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
-        for (k, row) in rows.into_iter().enumerate().skip(1) {
-            let expected = [16 * row, 16 * (7 * row % 16)]
-                .map(|v| ((v + 8) & 0xff) as f32 / 256.0 + 0.5 / 256.0 - 0.5);
-            assert_eq!(sample_offset(k as u64), expected, "k={k}");
-        }
+        assert_eq!(sample_offset(255), [0.0; 2]);
+        let mut seen = std::collections::HashSet::new();
+        let mut sum = [0.0f64; 2];
         for k in 0..512 {
-            assert!(sample_offset(k).iter().all(|v| v.abs() < 0.5), "k={k}");
-            assert_eq!(sample_offset(k), sample_offset(k + 256));
+            let o = sample_offset(k);
+            assert!(o.iter().all(|v| v.abs() < 0.5), "k={k}");
+            assert_eq!(o, sample_offset(k + 256));
+            if k % 2 == 1 && k < 255 {
+                assert_eq!(sample_offset(k + 1), o.map(|v| -v), "k={k}");
+            }
+            if (1..255).contains(&k) {
+                assert!(seen.insert(o.map(f32::to_bits)), "repeated offset at k={k}");
+            }
+            sum = [sum[0] + f64::from(o[0]), sum[1] + f64::from(o[1])];
+            // Every odd-length prefix of the cycle is balanced.
+            if k < 256 && k % 2 == 0 {
+                assert!(sum.iter().all(|s| s.abs() < 1e-9), "k={k}: {sum:?}");
+            }
         }
         assert_eq!(rotation(0), 0);
         assert_eq!(rotation(33), 8);
