@@ -225,30 +225,39 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     validate("kernel", &format!("{}{}", lc::constants(), lc::KERNEL));
     use crate::program::{Stage, compose};
     let standard = crate::STANDARD_PROGRAM;
+    // LC1's own visibility variant in each module: one inline ray, or the pooled maps.
+    let ray = |module: &str, scene: &str| {
+        module.contains(&format!(
+            "rayQueryInitialize(&query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance))"
+        ))
+    };
+    let map = |module: &str| module.contains("{ return rl_local_shadow_map(light,receiver,l); }");
     let raster = compose(SOURCE, standard, Stage::Raster, false).source;
-    assert!(raster.contains("rl_local_shadow_map(light,receiver,l)"));
+    assert!(map(&raster) && !ray(&raster, "hardware_scene"));
     validate("raster", &raster);
     let hardware = crate::hardware_shadows::shader_source(SOURCE, crate::SampleCount::One).unwrap();
     let hardware = compose(&hardware, standard, Stage::Raster, false).source;
-    assert!(hardware.contains("rayQueryInitialize(&query,hardware_scene"));
+    assert!(ray(&hardware, "hardware_scene") && !map(&hardware));
     validate("hardware raster", &hardware);
+    // The fresh raster layout binds no acceleration structure for fragments: maps.
     let fresh = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
     let fresh = compose(&fresh, standard, Stage::Raster, false).source;
-    assert!(!fresh.contains("rayQueryInitialize(&query,fresh_scene"));
+    assert!(map(&fresh) && !ray(&fresh, "fresh_scene"));
     validate("fresh raster", &fresh);
     let traced = primary_ray_gpu::shading_heads(SOURCE).unwrap();
-    for (k, head) in traced.iter().enumerate() {
+    for (k, (head, scene)) in traced
+        .iter()
+        .zip(["hardware_scene", "fresh_scene"])
+        .enumerate()
+    {
         let module = compose(head, standard, Stage::Traced, false).source;
-        assert!(module.contains("rayQueryInitialize(&query,"), "traced {k}");
+        assert!(ray(&module, scene) && !map(&module), "traced {k}");
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;
     for (k, head) in non_rt.iter().enumerate() {
         let module = compose(head, standard, Stage::Traced, false).source;
-        assert!(
-            module.contains("rl_local_shadow_map(light,receiver,l)"),
-            "non-RT {k}"
-        );
+        assert!(map(&module), "non-RT {k}");
         validate(&format!("non-RT {k}"), &module);
     }
 }
@@ -623,6 +632,10 @@ fn gpu_lc1_quarry_night() {
     let file = out.join(format!("lc1-{path}.json"));
     std::fs::write(&file, serde_json::to_string_pretty(&log).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&log).unwrap());
+    // LC1_RECORD_ONLY=1: a batch records every path before any gate stops it.
+    if env("LC1_RECORD_ONLY").as_deref() == Some("1") {
+        return;
+    }
     assert_eq!(
         mismatched, 0,
         "GPU cluster lists differ from the CPU reference"
