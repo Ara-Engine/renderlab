@@ -122,6 +122,11 @@ fn gpu_skinned_streams_history_and_paths() {
                 r.collect().unwrap();
             }
             r.test_drain("skin oracle frame");
+            assert_eq!(
+                r.reconstruction_state.as_ref().unwrap().reset,
+                frame == 0,
+                "animated TR1 must continue after the first frame on rt={rt}"
+            );
             let current = read_buffer(&r, &skin.mesh().vertex);
             let old = read_buffer(&r, &skin.mesh().skin.as_ref().unwrap().previous);
             for (i, v) in p.vertices.iter().enumerate() {

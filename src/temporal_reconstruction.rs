@@ -551,7 +551,7 @@ impl Renderer {
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
             .chain_update(state.geometry_generation.to_ne_bytes())
-            .chain_update(state.bindings_generation.to_ne_bytes())
+            .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.shadows.settings).as_bytes())
             .chain_update(format!("{:?}", self.virtual_settings).as_bytes())
             .chain_update(format!("{:?} {:?}", self.soft_mode, self.primary_mode).as_bytes())

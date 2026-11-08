@@ -520,6 +520,14 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
     var kept:Tr1Second;
     kept.id=TR1_NONE;
+    // SK1: a character that left this pixel is not a still silhouette missed by
+    // this frame's sample. Retire its retained slot, even outside the current ring.
+    if tr1.flags.x==0u && tr1.flags.z!=0u {
+        let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
+        let second=tr1_second(p).id;
+        if first!=0u {tr1_near_skin=tr1_near_skin || tr1_skinned(primary_placements[first-1u]&0x1fffffffu);}
+        if second!=0u && second!=TR1_NONE {tr1_near_skin=tr1_near_skin || tr1_skinned(primary_placements[second-1u]&0x1fffffffu);}
+    }
     if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin {
         // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether
         // the jittered 3x3 shows the other one depends on the jitter, not on the footprint,

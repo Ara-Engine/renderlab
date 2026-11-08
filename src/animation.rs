@@ -20,11 +20,13 @@ impl AnimationPose {
             .skins
             .get(b.skin as usize)
             .ok_or(Error::InvalidInput("skin index"))?;
-        let inverse = self
+        let model = self
             .globals
             .get(b.node as usize)
-            .ok_or(Error::InvalidInput("skin node index"))?
-            .inverse();
+            .ok_or(Error::InvalidInput("skin node index"))?;
+        // Preserve the exact affine row; a general f32 inverse can round its W
+        // away from one, which the renderer correctly rejects as projective.
+        let inverse = Mat4::from(glam::Affine3A::from_mat4(*model).inverse());
         if !inverse.is_finite() {
             return Err(Error::InvalidInput("animated mesh transform is singular"));
         }
@@ -181,6 +183,36 @@ fn sample_channel(c: &Channel, t: f32) -> Vec4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mesh_local_palette_preserves_an_exact_affine_row() {
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::new(1.37, 0.73, 2.43),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.3, 0.7, -0.2),
+            Vec3::new(2., 3., 4.),
+        );
+        let joint = Mat4::from_translation(Vec3::new(1., 2., 3.));
+        let pose = AnimationPose {
+            globals: vec![model, model * joint],
+        };
+        let asset = SkinnedAsset {
+            geometry: Default::default(),
+            nodes: vec![],
+            influences: vec![],
+            clips: vec![],
+            skins: vec![crate::asset::skin::Skin {
+                joints: vec![1],
+                inverse_bind: vec![joint.inverse().to_cols_array_2d()],
+            }],
+            bindings: vec![crate::asset::skin::Binding {
+                mesh: 0,
+                node: 0,
+                skin: 0,
+            }],
+        };
+        let palette = pose.joint_palette(&asset, 0).unwrap();
+        assert!(crate::normal::NormalTransform::new(palette[0]).valid());
+        assert!(palette[0].abs_diff_eq(Mat4::IDENTITY, 1e-5));
+    }
     #[test]
     fn clip_sampling_handles_steps_shortest_rotations_and_cubic_tangent_units() {
         let mut c = Channel {

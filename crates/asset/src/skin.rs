@@ -142,6 +142,9 @@ impl SkinnedAsset {
                     .flatten()
                     .flatten()
                     .any(|v| !v.is_finite())
+                || s.inverse_bind
+                    .iter()
+                    .any(|m| m[0][3] != 0. || m[1][3] != 0. || m[2][3] != 0. || m[3][3] != 1.)
             {
                 return Err(Error("invalid joints or inverse bind matrices"));
             }

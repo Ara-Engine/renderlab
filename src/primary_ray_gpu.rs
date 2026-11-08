@@ -720,6 +720,8 @@ pub(super) struct PrimaryState {
     /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
     geometry_generation: u64,
     bindings_generation: u64,
+    // SK1: TLAS-only rebinding changes poses, not reconstruction target identity.
+    reconstruction_bindings_generation: u64,
     film_layouts: FilmLayouts,
     /// Temporal reconstruction's group 0 and pipeline layouts.
     reconstruction: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>),
@@ -1070,6 +1072,7 @@ impl PrimaryState {
             bindings: None,
             geometry_generation: 0,
             bindings_generation: 0,
+            reconstruction_bindings_generation: 0,
             film: None,
             residency: None,
             requests: false,
@@ -1756,6 +1759,10 @@ impl Renderer {
             scene_generation,
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
+            let reconstruction_changed = state
+                .bindings
+                .as_ref()
+                .is_none_or(|b| b.key.0 != key.0 || b.key.1 != key.1 || b.key.2 != key.2);
             use wgpu::BindingResource as R;
             let hardware = self.hardware_shadows.as_ref();
             let frame = &state.frame.as_ref().unwrap().0.value;
@@ -1896,6 +1903,7 @@ impl Renderer {
             };
             let state = self.primary.as_mut().unwrap();
             state.bindings_generation += 1;
+            state.reconstruction_bindings_generation += u64::from(reconstruction_changed);
             if let Some(old) = state.bindings.replace(next) {
                 state
                     .retired
