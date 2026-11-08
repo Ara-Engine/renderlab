@@ -248,7 +248,10 @@ mod tests {
         let (mut p, mut i) = grid(40);
         let (q, j) = grid(4);
         let base = p.len() as u32;
-        p.extend(q.iter().map(|v| [v[0] * 30.0 + 2.0, v[1] + 0.5, v[2] * 30.0]));
+        p.extend(
+            q.iter()
+                .map(|v| [v[0] * 30.0 + 2.0, v[1] + 0.5, v[2] * 30.0]),
+        );
         i.extend(j.iter().map(|k| k + base));
         let bvh = build(&p, &i).unwrap();
         let mut seen = vec![0u32; i.len() / 3];
@@ -258,7 +261,8 @@ mod tests {
             if child & LEAF_BIT != 0 {
                 let leaf = &bvh.leaves[(child & !LEAF_BIT) as usize];
                 assert!(leaf.indices.count as usize <= 3 * LEAF_TRIANGLES);
-                let span = leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
+                let span = leaf.indices.offset as usize
+                    ..(leaf.indices.offset + leaf.indices.count) as usize;
                 for t in bvh.indices[span].chunks_exact(3) {
                     let at = i.chunks_exact(3).position(|s| s == t).unwrap();
                     seen[at] += 1;
@@ -266,7 +270,11 @@ mod tests {
                 continue;
             }
             deepest = deepest.max(d + 1);
-            for &c in bvh.nodes[child as usize].children.iter().filter(|&&c| c != EMPTY) {
+            for &c in bvh.nodes[child as usize]
+                .children
+                .iter()
+                .filter(|&&c| c != EMPTY)
+            {
                 stack.push((c, d + 1));
             }
         }

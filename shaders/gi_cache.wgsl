@@ -1618,11 +1618,17 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
 // - GI_HIT_CHANGING (0.75): the same, but the cell still has gathers scheduled;
 // - GI_HIT_MISSING (0.5): a coarser level's value while the hit level's cell is absent or not
 //   shaded yet, which a later gather reads instead (the gather is then repeated once);
-// - 0: no value (the ray adds nothing; counted as missing too).
+// - GI_HIT_NONE (0.25): no value, and none can come: the hit level's cell is an orphan, or
+//   absent and not requested by this gather, and no coarser level has one (the ray adds
+//   nothing, finally);
+// - 0: no value yet (the ray adds nothing; counted as missing too).
+// An absent hit cell a tertiary cell's gather meets (tertiary cells request none) counts as an
+// orphan does: the coarser value it reads is the one a repeated gather would read.
 const GI_HIT_FINAL:f32=1.0;
 const GI_HIT_CHANGING:f32=0.75;
 const GI_HIT_MISSING:f32=0.5;
-fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32) -> vec4<f32> {
+const GI_HIT_NONE:f32=0.25;
+fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
@@ -1636,7 +1642,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32) -> vec4<f32
         let slot=gi_find(gi_key(l,bin,cell));
         if slot==0xffffffffu {
             if l==base && band!=0u { gi_request_one(l,bin,cell,band); }
-            if l==base { cause=GI_W_GATHER_ABSENT; }
+            if l==base { cause=GI_W_GATHER_ABSENT; orphan=tertiary; }
             continue;
         }
         // A gather keeps the cells it reads alive, like a pixel (the race is benign).
@@ -1652,7 +1658,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32) -> vec4<f32
         }
     }
     atomicAdd(&gi_work[select(GI_W_GATHER_ORPHANS,cause,cause!=0u)],1u);
-    return vec4<f32>(0.0);
+    return vec4<f32>(0.0,0.0,0.0,select(0.0,GI_HIT_NONE,orphan));
 }
 // One workgroup per queued cell and one lane per fixed direction (k = lane, and lane + 64 with
 // 128 directions): each lane traces its direction when it is blocked, with a closest-hit ray,
@@ -1724,10 +1730,10 @@ fn gi_gather_period(count:u32) -> u32 {
                 let h=gi_closest(origin,d,0.0,1e20);
                 rays+=1u;
                 if !h.hit { continue; }
-                let o=gi_hit_radiance(origin,d,h,band);
-                if o.w<=GI_HIT_MISSING { missing+=1u; }
+                let o=gi_hit_radiance(origin,d,h,band,tertiary);
+                if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
                 if o.w==GI_HIT_CHANGING { changing+=1u; }
-                if o.w==0.0 { continue; }
+                if o.w<=GI_HIT_NONE { continue; }
                 gi_sh_basis(d);
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }

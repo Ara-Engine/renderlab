@@ -320,7 +320,8 @@ impl Builder<'_> {
         let mut best: Option<(f32, usize, usize)> = None;
         for axis in 0..3 {
             let extent = hi[axis] - lo[axis];
-            if !(extent > 0.0) {
+            // Flat (or non-finite) along this axis: no plane separates the centroids.
+            if extent.is_nan() || extent <= 0.0 {
                 continue;
             }
             let bin = |t: usize| {

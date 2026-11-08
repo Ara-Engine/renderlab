@@ -162,7 +162,8 @@ pub struct IndirectSettings {
     /// Edge of level 0 in metres; each level doubles it.
     pub min_edge: f32,
     pub levels: u32,
-    /// log2 of the slot count (each slot is 160 bytes).
+    /// log2 of the slot count (each slot is 224 bytes in the table, plus 16 of outgoing
+    /// radiance and 4 of claim word).
     pub slots_log2: u32,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
@@ -233,6 +234,10 @@ impl Default for IndirectSettings {
     /// 2 px cells fix the quarry's crevice mouths but speckle flat test-scene surfaces and need a
     /// 448 MiB table, over the non-RT device's 256 MiB buffer limit: an opt-in setting
     /// (`cell_pixels` 2, `slots_log2` 21) where the device allows it.
+    /// 2^20 slots since GC1 (224 MiB, under that limit): at 2^19 the quarry's cells filled
+    /// buckets, so claims failed (about 280 a moving frame on RT, 1,100 on non-RT) and lookups
+    /// walked long buckets; the larger table cut the quarry's moving GI cost by 0.3-0.5 ms (RT)
+    /// at the same image (docs/m7-gc1.md).
     fn default() -> Self {
         Self {
             enabled: true,
@@ -240,7 +245,7 @@ impl Default for IndirectSettings {
             cell_pixels: 4.0,
             min_edge: 1.0 / 512.0,
             levels: 14,
-            slots_log2: 19,
+            slots_log2: 20,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,

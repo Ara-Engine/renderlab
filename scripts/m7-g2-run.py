@@ -235,7 +235,9 @@ def run_steps(g, out, binary, args):
                            "--args", f"{TESTS['quarry']} --ignored --exact --nocapture --test-threads=1",
                            "--env", "; ".join(f"{k}={v}" for k, v in passed.items()),
                            "--start-after-ms", env.get("RENDERLAB_G2_TRACE_START_MS", "45000"),
-                           "--limit-to-submits", "4", "--max-duration-ms", "200",
+                           # RENDERLAB_G2_TRACE_MS (GC1): a shorter window needs less RAM for
+                           # Nsight's buffer (200 ms takes about 800 MB).
+                           "--limit-to-submits", "4", "--max-duration-ms", env.get("RENDERLAB_G2_TRACE_MS", "200"),
                            "--set-gpu-clocks", "unaltered", "--collect-screenshot", "0", "--architecture", "Ada",
                            "--metric-set-name", "Top-Level Triage", "--real-time-shader-profiler"]
             # "cpu=FILTER": the non-ignored lib tests whose names contain FILTER (naga checks).
