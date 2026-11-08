@@ -3,6 +3,10 @@ mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 use lighting_gpu::LightingGpu;
+// PP1: presentation-only resources, independent of temporal reconstruction history.
+#[path = "post_gpu.rs"]
+mod post_gpu;
+use post_gpu::PostGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
 use sha2::{Digest, Sha256};
@@ -518,6 +522,10 @@ pub struct Renderer {
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
+    post_settings: PostSettings,
+    post_lut: Option<ColourLut>,
+    post: Option<PostGpu>,
+    retired_post: Vec<(u64, PostGpu)>,
     environment: crate::environment::EnvironmentState,
     shadows: ShadowState,
     hardware_shadows: Option<HardwareState>,
@@ -1010,6 +1018,10 @@ impl Renderer {
             pipeline,
             shader_hash: [0; 32],
             lighting,
+            post_settings: PostSettings::default(),
+            post_lut: None,
+            post: None,
+            retired_post: vec![],
             environment: Default::default(),
             shadows,
             hardware_shadows,
@@ -2215,6 +2227,21 @@ impl Renderer {
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let hdr = self.lighting.hdr.as_ref().unwrap();
+        // PP1 runs after reconstruction and never modifies its HDR/history targets.
+        let mut timestamp_writes = timestamp_writes;
+        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+            if let Some(stamps) = &mut timestamp_writes {
+                let _start = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("post start timestamp"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: stamps.query_set,
+                        beginning_of_pass_write_index: stamps.beginning_of_pass_write_index.take(),
+                        end_of_pass_write_index: None,
+                    }),
+                });
+            }
+            post.encode(self, encoder);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("HDR present pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2229,8 +2256,12 @@ impl Renderer {
             timestamp_writes,
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline.present);
-        pass.set_bind_group(0, &*hdr.bind, &[]);
+        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+            post.tone(&mut pass);
+        } else {
+            pass.set_pipeline(&self.pipeline.present);
+            pass.set_bind_group(0, &*hdr.bind, &[]);
+        }
         pass.draw(0..3, 0..1);
     }
 
@@ -2817,6 +2848,7 @@ impl Renderer {
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
                         | if cfg!(test) && self.options.samples == SampleCount::One {
                             wgpu::TextureUsages::COPY_SRC
                         } else {
@@ -2937,6 +2969,13 @@ impl Renderer {
                 return Err(self.fail(error.to_string()));
             }
             result?;
+        }
+        if lit {
+            let scopes = OperationScopes::new(&self.device);
+            self.prepare_post(camera, traced)?;
+            if let Some(error) = scopes.finish() {
+                return Err(self.fail(error.to_string()));
+            }
         }
         self.check_fault()?;
         let view = self
@@ -3482,6 +3521,8 @@ impl Renderer {
         }
         self.residency.prune();
         self.lighting.collect(self.completed_submission);
+        self.retired_post
+            .retain(|(last, _)| *last > self.completed_submission);
         self.gi.collect(self.completed_submission);
         self.environment
             .uploading

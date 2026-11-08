@@ -13,6 +13,10 @@
 //! `replay` renders the first variant again and compares every frame hash (F8).
 use super::*;
 
+// PP1 reuses the two path/device helpers and the existing quarry loader only.
+#[path = "post_tests.rs"]
+mod post_tests;
+
 fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     let mut s = Reconstruction::identity();
     let f = |key: &str, value: &mut f32| {

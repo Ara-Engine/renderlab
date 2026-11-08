@@ -13,6 +13,8 @@ mod material;
 mod mesh;
 mod normal;
 mod observe;
+// PP1 public camera/display settings; implementation stays in the tone stage.
+mod post;
 mod primary_ray;
 mod program;
 pub mod program_watch;
@@ -37,6 +39,7 @@ pub use material::{
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
+pub use post::{ColourLut, DepthOfField, PostSettings, Tonemapper};
 pub use primary_ray::{
     PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES,
     VISIBILITY_RASTER_FEATURES, traced_limits, visibility_limits,
