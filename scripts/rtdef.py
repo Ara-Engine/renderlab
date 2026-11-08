@@ -101,7 +101,8 @@ def run_child(binary, test, manifest=None):
     if test:
         cmd += [test, '--ignored']
     cmd += ['--nocapture', '--test-threads=1']
-    subprocess.run(cmd, cwd=REPO, env=env, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
+    subprocess.run(cmd, cwd=REPO, env=env, stdout=sys.stdout, stderr=subprocess.STDOUT,
+                   creationflags=subprocess.CREATE_NO_WINDOW, check=True)
 
 
 def batch(args):

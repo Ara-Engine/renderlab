@@ -131,6 +131,30 @@ def s2():
         writer.writerows(summary)
 
 
+def witness():
+    """Diagnose grain on one registered surface; never replace the complete-crop score."""
+    rows = []
+    for case in ('camera-0.25px-r0.04', 'camera-1px-r0.04', 'shadow-step-r0.04'):
+        root = ROOT / 'S2' / case
+        for frame in (0, 31, 63, 95, 127, 159):
+            path = Path('D:/Coding/renderlab-work/rt1d/motion/S2/renderlab') / case / 'reference' / f'pose-{frame}.npz'
+            with np.load(path) as d:
+                reference = d['hdr'].astype('f4')
+                # Original estimator's all-256-on-centre-placement/depth population,
+                # restricted to a partially shadowed floor receiver, away from silhouettes.
+                use = (d['n'] == 256) & (d['hit'][..., 0] == 1) & (d['ref'] > .1) & (d['ref'] < .9)
+            ref_display = np.asarray(s1.film.tone(reference, 4), dtype=float)
+            panels = [('Film +4', s1.film.tone(reference, 4))]
+            for name in ('Raster-Exact', 'Interactive', 'TR1'):
+                value = hdr(root / name / f'{frame:04}.rgba16f', (288, 512))
+                display = np.asarray(s1.film.tone(value, 4), dtype=float)
+                rows.append(dict(case=case, frame=frame, mode=name, pixels=int(use.sum()),
+                                 grain_display_plus4=s1.metrics.summary((display - ref_display)[use].ravel())))
+                panels.append((name + ' +4', Image.fromarray(display.astype('u1'))))
+            image_sheet(panels, root / f'plus4-f{frame:03}.png')
+    save(ROOT / 's2-grain-diagnostic.json', rows)
+
+
 if __name__ == '__main__':
     import sys
     start = time.monotonic()
@@ -139,4 +163,6 @@ if __name__ == '__main__':
         quarry()
     if action in ('s2', 'all'):
         s2()
+    if action in ('witness', 'all'):
+        witness()
     print('CPU score seconds', time.monotonic() - start)
