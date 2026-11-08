@@ -233,10 +233,35 @@ def tables(args, r):
     rows = []
     for item in motion["rows"]:
         by_frame = {x["frame"]:x for x in item["frames"]}
+        labels = {}
         for phase, ages in item["ages"].items():
             for age, frame in ages.items():
-                rows.append(metric_row([item["fixture"]+" / "+phase+" / age "+age+" (f"+str(frame)+")", CONFIG_NAMES[item["config"]]], by_frame[frame]["measures"]["reflector"]))
+                labels[frame] = phase+" / age "+age
+        for frame,value in sorted(by_frame.items()):
+            rows.append(metric_row([item["fixture"]+" / "+labels.get(frame,"witness")+" (f"+str(frame)+")", CONFIG_NAMES[item["config"]]], value["measures"]["reflector"]))
     pages.append(table(headers, rows))
+    pages.append("## Motion roughness and off-screen populations\n\n"
+        "Every registered witness is retained, including intermediate motion and the final hold. "
+        "These are fixed reference-defined populations, not a candidate-dependent crop.\n")
+    rows = []
+    for item in motion["rows"]:
+        for frame in item["frames"]:
+            for population,value in frame["measures"].items():
+                if population in ("reflector","image","ground","direct-objects","occluder","toon"):
+                    continue
+                rows.append(metric_row([item["fixture"]+" / f"+str(frame["frame"])+" / "+population,CONFIG_NAMES[item["config"]]],value))
+    pages.append(table(headers,rows))
+    pages.append("## Motion feature energy, position and blur\n")
+    rows = []
+    for item in motion["rows"]:
+        for frame in item["frames"]:
+            for feature,value in frame["features"].items():
+                edge = value.get("edge_spread",{})
+                rows.append([item["fixture"]+" / f"+str(frame["frame"])+" / "+feature,CONFIG_NAMES[item["config"]],
+                    value["guide_pixels"],number(value["footprint_energy_ratio"]),number(value.get("chromatic_energy_ratio")),
+                    number(value.get("centroid_error_pixels")),number(edge.get("median_extra_pixels")),number(edge.get("p95_extra_pixels")),
+                    str(edge.get("candidate_missing_edges","—"))+" / "+str(edge.get("eligible_reference_edges","—"))])
+    pages.append(table(["Fixture / feature","Mode","Pixels","E/Eref","C/Cref","Position px","Median blur px","p95 blur px","Missing / edges"],rows))
     pages.append("## Adjacent-frame residuals and visible trails\n\n"
         "Residuals are frame-to-frame changes of candidate-minus-reference display error. "
         "Trails require excess target-colour contrast above two display codes in an old-only reflection footprint. "
@@ -330,7 +355,8 @@ def motion_qa(args, r):
     codes = r.load("m7-u0b-score").codes
     old_inventory = r.OUT/"qa"/args.label/"motion-inventory.json"
     inventory = [entry for entry in json.loads(old_inventory.read_text())["images"]
-        if Path(entry["file"]).name.split("-")[0] not in args.fixtures] if old_inventory.exists() else []
+        if not any(name in Path(entry["file"]).parts or Path(entry["file"]).name.startswith(name+"-")
+            for name in args.fixtures)] if old_inventory.exists() else []
     for fixture in ("RF3", "RF5"):
         if fixture not in args.fixtures:
             continue
@@ -354,6 +380,12 @@ def motion_qa(args, r):
                         image = data["L"] if current else data["hdr"][...,:3]/data["pre_exposure"]
                     for ev,sheet in sheets.items():
                         a,b = codes(truth,ev),codes(image,ev)
+                        full = np.concatenate((a,b,np.minimum(255,4*np.abs(a-b))),axis=1)
+                        output = r.OUT/"qa"/args.label/"motion-full"/fixture/config/f"f{frame:03d}-ev{ev}.png"
+                        output.parent.mkdir(parents=True,exist_ok=True)
+                        Image.fromarray(np.clip(full,0,255).astype("u1")).save(output)
+                        inventory.append(dict(file=str(output),sha256=r.sha(output),frame=frame,
+                            layout="1920x1080 reference | candidate | 4x absolute error, original pixels"))
                         for col,(name,value) in enumerate((("reference",a),(config,b),("4x absolute error",np.minimum(255,4*np.abs(a-b))))):
                             sheet.paste(Image.fromarray(np.clip(value,0,255).astype("u1")).resize((480,270)), (480*col,294*row+24))
                             ImageDraw.Draw(sheet).text((480*col+8,294*row+6),f"f{frame:03d} {name}",fill="white")

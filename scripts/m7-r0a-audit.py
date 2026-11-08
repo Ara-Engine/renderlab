@@ -81,6 +81,8 @@ def main():
     checks = read(out/"checks.json")
     assert checks["cargo_exit"]==checks["fmt_exit"]==0
     assert all(r.sha(r.REPO/name)==digest for name,digest in checks["rust_sources"].items())
+    rf3_baseline = read(out/"motion/RF3-baseline-equivalence.json")
+    assert rf3_baseline["complete"] and rf3_baseline["byte_identical"]
     compatibility = read(out/"compatibility/a/comparison.json")
     assert len(compatibility["files"])==60 and all(x["identical"] for x in compatibility["files"])
     controls = []
@@ -90,6 +92,8 @@ def main():
                  "oracle-guided-hi/XRF10MW/16384/XRF10MW-pitch30-crosscheck.json"):
         path = out/"reference"/name; value = read(path); assert value["pass"]
         controls.append(dict(file=str(path.relative_to(out)),sha256=r.sha(path),result=value))
+    processes = [read(path) for path in out.rglob("process.json")]
+    lease_history = read(out/"lease-history.json")
     result = dict(base="79719917c0fba4d159ec81a3d466b33f6937abed",package_identity_sha256=r.sha(identity),
         hardware=dict(gpu="NVIDIA GeForce RTX 4070 SUPER",driver="617.14",cpu="AMD Ryzen 7 7800X3D",ram_gib=31.116),
         static_rows=130,static_supported_images=128,unsupported_rows=2,
@@ -99,13 +103,22 @@ def main():
             seconds=checks["seconds"],binary_sha256=checks["binary_sha256"],reference_binary_sha256=r.sha(r.REFERENCE_BINARY),
             default_reference_identical_arrays=60),
         static_track_equivalences=equivalences,
-        artifacts={name:r.sha(out/name) for name in ("scores/c-static.json","scores/c-motion.json","scores/shutter-summary.json","scores/native-telemetry.json","reference/final/manifest.json")},
+        verification_timing=dict(recorded_guarded_processes=len(processes),
+            recorded_process_wall_seconds=sum(p.get("elapsed_seconds",0) for p in processes),
+            gpu_lock_occupied_seconds=sum(p["seconds"] for p in lease_history),
+            library_and_fmt_seconds=checks["seconds"],
+            scope="Includes failed/excluded guarded attempts; lock occupancy includes archiving inside leases. Neither is GPU busy time or end-to-end verification duration.",
+            implementation_active_time="not instrumented; coding and measurement preparation overlapped verification; no inferred duration"),
+        artifacts={name:r.sha(out/name) for name in ("scores/c-static.json","scores/c-motion.json","scores/shutter-summary.json","scores/native-telemetry.json","reference/final/manifest.json","motion/RF3-baseline-equivalence.json","motion/overlap-correction.json")},
         limits=["RF10 HDR floor remains noise-limited at 16384 spp; close rankings are not certified",
                 "current Renderlab RF10 produces no image on either path",
                 "current motion rows are independent warmed state snapshots, not continuous history",
                 "RF8 is procedural rock, not a private-quarry acceptance run",
                 "memory telemetry covers components and transient pools, not total VRAM",
                 "functional timings under compiler load; no performance claim"])
+    retention = out/"retention-proof.json"
+    if retention.exists():
+        result["retention"] = read(retention)
     target = r.REPO/"docs/m7-r0a-evidence.json"; r.save(target,result)
     print(json.dumps(dict(output=str(target),static_rows=130,motion_workloads=10,identities_ok=True)))
 

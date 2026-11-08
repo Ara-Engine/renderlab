@@ -10,6 +10,7 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--final", action="store_true")
+    parser.add_argument("--release-target", action="store_true")
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("r0a", Path(__file__).with_name("m7-r0a.py"))
     r = importlib.util.module_from_spec(spec); spec.loader.exec_module(r)
@@ -40,7 +41,7 @@ def main():
         if old.resolve()!=Path("E:/renderlab-work/m7-r0a/ue-package-b").resolve():
             raise ValueError("unexpected obsolete package path")
         shutil.rmtree(old)
-    for name in ("capture/b", "motion/capture/b", "asprobe", "motion/capture-before-overlap", "motion/reference-before-overlap", "current/b-motion-before-overlap"):
+    for name in ("capture/b", "motion/capture/b", "asprobe", "reference/m-ordered-before-overlap", "motion/capture-before-overlap", "motion/reference-before-overlap", "current/b-motion-before-overlap"):
         for path in (root/name).rglob("*.npz"):
             if path.stat().st_size>5*1024**2:
                 # These are superseded matrices or repeated AS diagnostic dumps;
@@ -72,6 +73,7 @@ def main():
             for path in (root/name).rglob("*.npz"):
                 if path.stat().st_size>5*1024**2:
                     remove_file(path,"scored and inspected final capture; retained summaries/PNGs/reference inputs")
+    if args.final or args.release_target:
         checks = json.loads((root/"checks.json").read_text())
         if checks["cargo_exit"] or checks["fmt_exit"] or any(r.sha(r.REPO/name)!=digest for name,digest in checks["rust_sources"].items()):
             raise ValueError("Rust checks no longer match source")
@@ -81,6 +83,7 @@ def main():
                 raise ValueError("unexpected Cargo target path")
             ledger["target/"] = dict(bytes=sum(p.stat().st_size for p in target.rglob("*") if p.is_file()),reason="owned Cargo target; checks and pinned executables retained")
             shutil.rmtree(target)
+        r.cleanup_raw(root/"compatibility")
     r.save(ledger_path,ledger)
     print(json.dumps(dict(deleted_entries=len(ledger),free_gib=shutil.disk_usage(root).free/2**30)))
 

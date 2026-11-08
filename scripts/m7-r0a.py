@@ -28,6 +28,7 @@ SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 LOCK = Path("D:/Coding/renderlab-work/gpu-slot.lock")
 PINNED = Path("E:/renderlab-work/m7-u0b/bin/reference-tests.exe")
 REFERENCE_BINARY = OUT/"bin/r0a-reference-tests.exe"
+# Bump when motion metric definitions change; reuse also checks every input hash.
 MOTION_SCORING_VERSION = 1
 
 
@@ -86,13 +87,13 @@ def cpu_note(action):
 
 def schedule_text():
     """Retry a transient Windows writer-sharing conflict, then remain fail-closed."""
-    for attempt in range(11):
+    for attempt in range(41):
         try:
             return SCHEDULE.read_text(encoding="utf-8")
         except PermissionError:
-            if attempt==10:
+            if attempt==40:
                 raise
-            time.sleep(.02)
+            time.sleep(.05)
 
 
 def game_state():
@@ -1239,6 +1240,8 @@ def motion_score(args):
     cpu_note("score registered native motion centres and age witnesses"); no_quiet()
     rows = []; codes = load("m7-u0b-score").codes
     for fixture in ("RF3", "RF5"):
+        if fixture not in args.fixtures:
+            continue
         scene = json.loads((OUT/"scenes"/fixture/"scene.json").read_text())
         for config in [*args.configs, "renderlab-nonrt", "renderlab-rt"]:
             current = config.startswith("renderlab-")
