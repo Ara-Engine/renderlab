@@ -24,7 +24,7 @@ pub(super) struct PostGpu {
     lut: Depth,
     retired_luts: Vec<(u64, Depth)>,
     lut_custom: bool,
-    previous: Option<Mat4>,
+    previous: Option<(u64, Mat4)>,
     serial: u32,
     // Bindings are rebuilt only when input textures or enabled stage topology change.
     groups: Option<Groups>,
@@ -186,6 +186,10 @@ fn texture(
     }
 }
 impl PostGpu {
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_surface(&self) -> &wgpu::Texture {
+        &self.aux.texture
+    }
     fn new(r: &Renderer, size: wgpu::Extent3d) -> Result<Self, Error> {
         use wgpu::{TextureFormat as F, TextureSampleType as T};
         let float = T::Float { filterable: false };
@@ -240,7 +244,9 @@ impl PostGpu {
                 r,
                 "post primary surface",
                 &[&bindings, primary.array_layout()],
-                &(head + include_str!("../shaders/post_surface.wgsl")),
+                &(head
+                    + include_str!("../shaders/object_motion.wgsl")
+                    + include_str!("../shaders/post_surface.wgsl")),
                 "post_primary_surface",
             );
             (Some(bindings), Some(pipe))
@@ -443,10 +449,14 @@ impl PostGpu {
         let s = r.post_settings;
         let internal = r.lighting.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
-        let previous = self.previous.unwrap_or(current);
+        // MV1: camera and object history must describe the same rendered frame.
+        let previous = self
+            .previous
+            .filter(|(frame, _)| *frame == r.frames)
+            .map(|(_, matrix)| matrix);
         let mut frame = Vec::with_capacity(272);
         for m in [
-            previous,
+            previous.unwrap_or(current),
             current,
             camera.matrix(internal.width, internal.height).inverse(),
             camera.view(),
@@ -456,13 +466,13 @@ impl PostGpu {
         for f in [
             s.shutter_angle_degrees / 720.0,
             s.max_motion_radius_px,
-            if self.previous.is_some() { 1.0 } else { 0.0 },
+            if previous.is_some() { 1.0 } else { 0.0 },
             0.0,
         ] {
             frame.extend_from_slice(&f.to_ne_bytes());
         }
         r.queue.write_buffer(&self.frame.value, 0, &frame);
-        self.previous = Some(current);
+        self.previous = Some((r.frames + 1, current));
         self.serial = self.serial.wrapping_add(1);
         let d = s.depth_of_field.unwrap_or_default();
         let focal = d.focal_length_mm * 0.001;
@@ -779,6 +789,7 @@ mod tests {
         let primary = primary_ray_gpu::non_rt_heads(include_str!("../shaders/scene.wgsl")).unwrap()
             [0]
         .clone()
+            + include_str!("../shaders/object_motion.wgsl")
             + include_str!("../shaders/post_surface.wgsl");
         for source in [
             include_str!("../shaders/post.wgsl"),
