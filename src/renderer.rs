@@ -2,6 +2,9 @@
 mod environment_gpu;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
+// DC1: one storage binding beside lighting; no separate render pass.
+#[path = "decal_gpu.rs"]
+mod decal_gpu;
 use lighting_gpu::LightingGpu;
 #[path = "shadow_gpu.rs"]
 mod shadow_gpu;
