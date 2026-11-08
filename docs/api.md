@@ -2,7 +2,7 @@
 
 The engine-facing API is `renderlab::engine`. A game owns one `Engine`. It creates resources and objects through typed handles, sets lights, sky and settings, and calls `render` once per frame. Everything else in the crate root is the low-level renderer the engine wraps. That renderer's tuning surface changes as features are measured; the engine module is the part that stays stable (see [Stability](#stability-and-freeze-notes)).
 
-Status: unit API1 (2026-11-08). Phase 1 covered main `984a18b`; phase 2 has wired DC1, TR1b, R1, G2b and AT1 (main `f159fcd`) and wires the other overnight feature units as they merge (see [Planned extension points](#module-layout-and-planned-extension-points)).
+Status: **frozen** (unit API1b, 2026-11-09, main `4c8ef7d`). The engine API below is frozen apart from the additions listed under [Stability and freeze notes](#stability-and-freeze-notes). Every overnight feature unit merged by then is wired: DC1, TR1b, R1, R1n, G2b, G2c, AT1, AT2, VF1, PP1, TP1, TP2, LC1, LC2, SK1, MP1, MQ1, PC1 and GC1.
 
 ## Principles
 
@@ -79,7 +79,7 @@ loop {
 | `limits` | 1024 instances per batch, 128 MiB meshes and textures | development policy limits; device limits always apply |
 | `settings` | `Settings::default()` | initial frame settings |
 | `texture_anisotropy` | 1 | anisotropic filtering, 1-16, fixed for the engine's lifetime |
-| `pipeline_cache` | `None` | directory for the persistent program pipeline cache |
+| `pipeline_cache` | `None` | directory for the persistent shared pipeline cache (kernels and programs; loaded before initialization) |
 
 **Windowed games.** Create the surface on your own `wgpu::Instance`, request an adapter compatible with it, create the engine on that adapter, and configure the surface with `engine.device()` and `engine.output_format()`. Each frame, call `engine.render_to(&surface_texture.texture, &camera)` and then `engine.present(surface_texture)`. Resizing the window only means reconfiguring the surface: the engine follows the target's extent, and the camera's aspect follows the target.
 
@@ -97,15 +97,44 @@ loop {
 | `set_material_parameters(id, &[(name, Value)])` | | a buffer write, no shader compile |
 | `create_environment(&PreparedEnvironment)` | `EnvironmentId` | an RLE1/RLE2 HDR map for `Sky::Map` |
 | `add_asset(asset::Asset)` | `AssetHandles` | a cooked `.rla`: textures, materials, one mesh per primitive, one object per placed primitive |
+| `create_skinned_mesh(&Primitive, &[Influence], joints)` | `MeshId` | one independently posed skinned primitive (see [Skinned characters](#skinned-characters)) |
+| `add_skinned_asset(&SkinnedAsset)` | `SkinnedHandles` | a cooked skinned `.rls`: textures, double-sided materials, one posable mesh per skinned primitive of each binding |
+| `create_emitter(&EmitterDescriptor, sprite)` | `EmitterId` | a GPU particle emitter (see [Glass, foliage and particles](#glass-foliage-and-particles)) |
 | `remove_*(id)` | | meshes and materials only once no object uses them; materials keep their own textures and program alive |
 
-`MaterialDesc::default()` is an untextured, double-sided, white dielectric (metallic 0, roughness 0.5) on the standard program. Keep `double_sided: true` for now: both paths' shadowed primaries currently need double-sided materials.
+`MaterialDesc::default()` is an untextured, double-sided, white dielectric (metallic 0, roughness 0.5) on the standard program. Keep `double_sided: true` for now: both paths' shadowed primaries currently need double-sided materials. `thin: true` lets shadow rays leave either side, for leaves and cards. `transparency: Some(Transparency { opacity, ior, thickness })` makes the material glass (below).
 
 ## Objects
 
 `spawn(mesh, material, transform) -> ObjectId`, `set_transform(object, Mat4)`, `transform(object)`, `despawn(object)`.
 
 Objects that share a mesh and a material are drawn together as one instanced draw. Moving an object is a transform write on the next frame. Spawning or despawning re-uploads that group's transforms on the next frame. One group holds at most `limits.max_instances` objects (raise it in the descriptor for large crowds or forests).
+
+## Skinned characters
+
+SK1's skinned meshes are engine meshes whose pose you set each frame:
+
+```rust
+let asset = renderlab::asset::skin::decode(&std::fs::read(rls_path)?, Default::default())?;
+let fox = engine.add_skinned_asset(&asset)?;           // textures, materials, posable meshes
+let objects: Vec<ObjectId> = fox.bindings[0].iter()
+    .map(|&(mesh, material)| engine.spawn(mesh, material, model))
+    .collect::<Result<_, _>>()?;
+let mut player = ClipPlayer::new(1);                   // the asset's walk clip
+// every frame:
+player.advance(dt)?;
+let pose = player.sample(&asset)?;
+for (binding, parts) in fox.bindings.iter().enumerate() {
+    let palette = pose.joint_palette(&asset, binding)?;
+    for &(mesh, _) in parts { engine.set_joint_palette(mesh, &palette)?; }
+}
+for &object in &objects { engine.set_transform(object, model)?; } // move the character
+```
+
+- Cook the glTF source with the cooker's skin recipe (`renderlab_cook::skin::cook_file`, an RLS file). `create_skinned_mesh(&Primitive, &[Influence], joint_count)` uploads one primitive yourself.
+- Objects spawned from one skinned mesh share its pose; create another skinned mesh for another pose. A skinned mesh holds its bind pose until the first `set_joint_palette`.
+- Skinning works on both paths. RT refits the mesh's acceleration structure every posed frame (an explicit SK1 cost gap); non-RT's GI and shadows see the deforming caster.
+- Materials may use any program: the example draws the Fox with its toon program and the Fox's own texture.
 
 ## Decals
 
@@ -125,10 +154,26 @@ engine.set_decals(&[Decal {
 
 `DecalBlend::{Alpha, Multiply, Add}` composites base colour; roughness, metallic and normal blend by their own `channels` strengths. Decals edit material inputs before a program's `surface` reads them, on both paths, and GI bounce sees them. A program opts in by calling `decal_base_color(input, base)` and `decal_metallic_roughness(input, vec2(rough, metal))` on its resolved inputs (`material_normal` already includes the normal overlay), as standard.wgsl and the example's program do; a program that ignores them is unaffected. Textures are copied when `set_decals` is called, so the caller may drop its handles. The decal grid's resolution stays on `renderer_mut().set_decals_with_settings`.
 
+## Glass, foliage and particles
+
+**Glass (TP1, TP2).** A material with `transparency: Some(Transparency { opacity, ior, thickness })` leaves the opaque paths and draws in a forward pass after reconstruction, back to front, refracting what is behind it through a thin slab of `thickness` metres. Its program shades it. A program that declares `fn transmittance(s: Surface, input: SurfaceInput) -> vec3<f32>` gets `shade + transmittance x behind`; the standard program does (Fresnel and the base colour as tint), and the example's glass pane uses it. Glass casts coloured sun shadows on both paths, and reflects the scene on RT (TP2). It casts no local-light shadows, and transparent surfaces are absent from GI rays.
+
+**Cutout foliage (TP1).** Alpha-tested cards are cut once, at load, into ordinary opaque geometry, so every path, shadow method and GI ray sees the exact cutout at no per-frame cost:
+
+```rust
+let mask = AlphaMask::from_rgba8(width, height, &rgba8);    // alpha of a leaf texture
+let card = cutout(&card_mesh_data, &mask, 1.0, 0.5, 64)?;    // opacity, cutoff, cells per uv unit
+let bush = engine.create_mesh(&card.data())?;
+let leaves = engine.create_material(&MaterialDesc { thin: true, ..leaf_material })?;
+```
+
+**Particles (TP1).** `create_emitter(&EmitterDescriptor, sprite: Option<TextureId>) -> EmitterId` starts a GPU emitter that simulates and draws every frame until `remove_emitter`. It is lit by the sun (with its shadows and glass tint) and the environment, sorted on the GPU, faded against opaque depth (soft particles) and fogged. Leave `EmitterDescriptor::texture` None and pass the sprite by id. `update_emitter` changes a live emitter (same capacity and sprite presence). `set_particle_step(seconds)` sets the simulation time per frame (default 1/60); set it to the game's frame time. Particles cast no shadows. Fire and other light sources should pair the emitter with a point light, as the example's brazier does.
+
 ## Lighting and exposure
 
+- **Time of day (AT2).** `Sun::at(elevation, azimuth)` places a default sun by angles (radians; azimuth clockwise from north, with +Y up, -Z north and +X east). `Sun::at_hour(hour, latitude) -> Option<Sun>` follows an equinox sun path: it rises in the east at 6, peaks toward the equator at 12, sets in the west at 18, and is None below the horizon. Calling `set_sun` every frame is cheap. AT2 updates the procedural sky in place, and GI relights progressively without a flush, so a day cycle is just `engine.set_sun(Sun::at_hour(hour, latitude))` per frame.
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster. LC3 ([m7-lc3.md](m7-lc3.md)) traces shadows for every contributing clustered local light on RT heads; map heads shadow up to 128 lights from a cached atlas, ranked by projected influence and energy, with fading slot changes. `Renderer::set_local_shadows` controls the map budget and maximum face resolution; count zero disables automatic local shadows on both paths. They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster. LC3 ([m7-lc3.md](m7-lc3.md)) traces shadows for every contributing clustered local light on RT heads; map heads shadow up to 128 lights from a cached atlas, ranked by projected influence and energy, with fading slot changes. `Settings::local_shadows` controls the map budget (128 by default, maximum 128), maximum map-face resolution and near plane; count zero disables automatic local shadows on both paths. Any positive count enables all-light RT visibility. Every light also reaches GI (LC2). They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Sky, atmosphere and fog
@@ -163,20 +208,27 @@ pub struct Settings {
     pub aerial_perspective: bool,         // see Sky, atmosphere and fog
     pub height_fog: Option<HeightFog>,
     pub volumetric_fog: Option<VolumetricFog>,
+    pub local_shadows: LocalShadows,      // cached map budget, maximum face size, near; positive enables all-light RT
+    pub post: PostSettings,               // bloom, motion blur, DOF, tone mapper, grading
+    pub reflections: ReflectionSettings,  // traced reflections: enabled, max_roughness
 }
 ```
 
 - `Quality::Realtime` is each path's measured real-time configuration (the table above).
 - `Quality::Reference` integrates sun visibility exactly: all 256 disk directions per pixel on RT, and the exact triangle-tested map lookup without RT. It is for stills, captures and A/B checks, not real-time play.
 - `render_scale` is TR1b's upscaling preset: with temporal reconstruction on, every pass renders at the scale's internal size and TR1 reconstructs the target. It needs `temporal_reconstruction`; a scale below `Native` without it is rejected.
+- `local_shadows` (LC3): `LocalShadows { count, resolution, near }`, default 128 cached atlas lights with a 1024-square maximum face and 0.02 m near plane. Counts 0-128 are accepted; zero turns automatic local shadows off, and any positive value enables every contributing RT local. Map tiles can be smaller than the maximum (down to 128-square at the default), retain their placement/resolution while selected, and redraw when the light or intersecting casters move. Selection changes fade out/in over eight frames each. Penumbrae come from each light's `source_radius`. The default six-layer depth atlas uses 384 MiB; maximum face size must not exceed one quarter of the device's 2D texture limit.
+- `post` (PP1): `PostSettings` with `enabled`, `bloom`, `motion_blur`, `shutter_angle_degrees`, `depth_of_field: Option<DepthOfField>`, `tonemapper: Tonemapper`, white balance, `contrast`, `saturation`, `vignette`, `grain`, chromatic aberration and `lut_strength`. It is on by default; `enabled: false` presents the plain tone-mapped image. `Engine::set_colour_lut(Option<ColourLut>)` sets the grading LUT.
+- `reflections` (R1n): `ReflectionSettings { enabled, max_roughness }`; `ReflectionSettings::off()` leaves every program its untraced estimate.
 - `set_settings` applies a change only when something changed, and validates before touching the renderer. It overwrites any overlapping tuning made through `renderer_mut()`.
 
 Defaults follow each feature unit's default ruling, not the facade's opinion. With G2b and AT1 merged:
 
 - GI is **on** (G2b; `global_illumination: false` maps to `IndirectSettings::off()`).
 - Temporal reconstruction is **on** at native scale (TR1b; its remaining losses to no-AA and TSR are in [m7-gaps.md](m7-gaps.md)).
-- The physical atmosphere sky, aerial perspective and height fog are **on**; volumetric fog is off (AT1).
-- Traced reflections are on wherever a program asks for them (R1, see [Reflections](#reflections)).
+- The physical atmosphere sky, aerial perspective, height fog and a light volumetric haze are **on** (AT1, VF1).
+- Traced reflections are on wherever a program asks for them, on both paths (R1, R1n; see [Reflections](#reflections)).
+- Post (bloom, motion blur, grading, vignette) is **on**; depth of field is opt-in (PP1). Automatic local shadows are **on**: every contributing RT local, or up to 128 cached map lights (LC3).
 
 Gaps against Unreal and the reference for each are in [m7-gaps.md](m7-gaps.md).
 
@@ -192,14 +244,22 @@ fn reflection_lobe(s: Surface, input: SurfaceInput) -> SpecularLobe  // Specular
 
 and reads the result with the engine input `specular_incident(input) -> vec4<f32>`. Its rgb is the mean exposed radiance over the lobe, and w is the traced fraction, so the program blends it over its own untraced estimate: `mix(untraced, traced.rgb * reflectance, traced.w)`. `alpha` is perceptual roughness squared, and `weight > 0` requests rays.
 
-| Path | What a requesting program gets (M7-R1, [m7-r1.md](m7-r1.md)) |
+| Path | What a requesting program gets (M7-R1 [m7-r1.md](m7-r1.md), M7-R1n [m7-r1n.md](m7-r1n.md)) |
 |---|---|
 | `HardwareRt` | One mirror ray below roughness 0.05, and four fixed GGX strata up to 0.35, fading to the untraced estimate by 0.5 (w falls from 1 to 0 over 0.35-0.5). Hits are shaded by the frame's program, with the hit's own material, decals and a hard shadow ray. TR1 integrates the glossy strata over frames. One bounce. |
-| `NonRt` | w = 0 everywhere, so the program's untraced estimate stands: `indirect_radiance`, the environment, occluded and with bounce when GI runs. Software-traced non-RT reflections (R1n) are in progress and need no API change. |
+| `NonRt` | The same rays, bands, hit shading and TR1 integration, traced in software over per-mesh BVHs of the drawn triangles (R1n). A frame that draws any mesh over 2^19 triangles, or any streamed cluster mesh, traces nothing and keeps the program's untraced estimate (`indirect_radiance`), so no ray shows sky through a mesh without software geometry. |
 
-The standard program requests them for every material. The example's program shows per-material control: its `reflect` parameter is the lobe weight, so a material with `reflect: 0` asks for no rays. The renderer has no global reflection switch at this revision.
+The standard program requests them for every material. The example's program shows per-material control: its `reflect` parameter is the lobe weight, so a material with `reflect: 0` asks for no rays. `Settings::reflections: ReflectionSettings { enabled, max_roughness }` bounds every program on both paths: on by default up to roughness 0.5 (the bands above), and `ReflectionSettings::off()` traces nothing.
 
 R1 records three constraints. The hook is GGX-shaped, so a non-GGX style gives its nearest GGX lobe or weight 0. Hits read the open environment, not the GI cache. A program that declares the hook but not the input, or the reverse, traces nothing.
+
+Reflections move across their surfaces when the view turns, so TR1's surface history would trail them. A program says how much of its output does so with a second optional hook (MQ2, [m7-mq2.md](m7-mq2.md)), on both paths:
+
+```wgsl
+fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence  // ViewDependence { alpha, share }
+```
+
+`share` (0-1) is the part of `shade`'s output that moves with the view like a GGX reflection of `alpha`. TR1 caps such pixels' history while their view direction turns (`Reconstruction::view_budget`), so mirrors and glossy reflections stay sharp in motion; still views keep full history. The standard and example programs return their specular albedo's share under uniform light. A program that declares nothing (the toon programs) is treated as view-independent.
 
 ## Frames
 
@@ -228,9 +288,10 @@ struct Parameters { ... };                               // f32, vecN<f32>, u32,
 const DEFAULT_PARAMETERS: Parameters = Parameters(...);
 fn scatter(s: Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec3<f32> { ... } // bounce light
 fn emission(s: Surface, input: SurfaceInput) -> vec3<f32> { ... }
+fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence { ... } // TR1 history hint
 ```
 
-Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` hook joins `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
+Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` and `view_dependence` hooks join `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
 
 **Programs per object.** Each material names its program, and a frame may mix up to 32 programs on both quality paths: traced RT primaries and the non-RT visibility buffer shade each program's pixels with that program's own pipeline (MP1, [m7-mp1.md](m7-mp1.md)); raster frames switch pipelines per draw. The example's props use examples/game_scene.wgsl and its hero examples/game_toon.wgsl. Two limits remain: a reflection hit on another program's object is shaded by the reflecting surface's program with the hit's material inputs, and `SoftShadows::Temporal` frames still use one program.
 
@@ -239,49 +300,60 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
-- Map heads shadow at most 128 local lights (LC3); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Reflection-hit visibility retains its separate limitation. See [Lights gaps](m7-gaps.md#lights).
+- Map heads shadow at most 128 local lights (`Settings::local_shadows`); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Coarse tail tiles, changed-light full-detail map redraws and reflection-hit visibility remain limitations. Budget reductions and removal/reindexing of the light vector do not guarantee a smooth fade. See [Lights gaps](m7-gaps.md#lights).
+- Glass casts coloured sun shadows only (no local-light shadows) and is invisible to GI rays; particles cast no shadows (TP1, TP2).
+- Small, very bright emitters (a lamp bulb's `emission`) turn into GI fireflies, because each cache cell traces a few fixed directions. Light such sources with a point light and keep their glow out of `emission`, as the example's bulbs do.
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
-- On `NonRt`, reflections are the environment estimate only (R1n adds software-traced reflections), and volumetric fog is unshadowed (no sun shafts).
-- The GI cache shows bright speckles near metallic objects and faceted streaks on some flat faces, on both paths. G2c owns the fix.
+- On `NonRt`, reflections are traced only in frames whose meshes all have software geometry (none over 2^19 triangles, no streamed cluster meshes), and volumetric fog is unshadowed (no sun shafts).
 - Virtual geometry (streamed cluster meshes) and the diagnostic view modes stay on the low-level `Renderer`.
 
 ## Module layout and planned extension points
 
 ```
 renderlab::engine            Engine, EngineDescriptor, Capabilities, RenderPath, ExperimentalRayQuery,
-                             MaterialDesc, TextureRef, AssetHandles, Image, headless_adapter
+                             MaterialDesc, TextureRef, AssetHandles, SkinnedHandles, Image,
+                             headless_adapter
 renderlab::engine (settings) Settings, Quality, Exposure, Sky, Background, Sun
-renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId
+renderlab::engine (ids)      Id<T>, MeshId, TextureId, ProgramId, MaterialId, EnvironmentId, ObjectId,
+                             EmitterId
 renderlab::engine re-exports Camera, Light, Mat4, Vec3, MeshData, Vertex, Value, Limits,
                              RenderScale, AtmosphereMedium, HeightFog, VolumetricFog,
+                             LocalShadows, PostSettings, Tonemapper, DepthOfField, ColourLut,
+                             ReflectionSettings, Transparency, EmitterDescriptor, MAX_PARTICLES,
+                             AlphaMask, CutoutMesh, cutout, ClipPlayer, AnimationPose,
+                             SkinnedAsset, Influence, Primitive,
                              Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
                              Sampler, TextureData, TangentStream, PreparedEnvironment,
                              Error, ReloadError, ReloadReport, FrameReport, Events, FrameId, Renderer
 renderlab::*                 the low-level renderer (expert API, not frozen)
 ```
 
-Each overnight unit lands in a named slot. Wired rows are on this branch; the others are the intended shape, which phase 2 confirms against what each unit merges.
+Each overnight unit landed in a named slot; every row is now wired.
 
 | Unit | Feature | Planned engine API |
 |---|---|---|
 | TR1b | TR1 default, upscaling presets | **Wired**: `Settings::temporal_reconstruction` on by default; `Settings::render_scale` (`RenderScale::{Native, Quality, Performance}`); `Background::Sky` for the visible sky |
 | G2b | GI default | **Wired**: `Settings::global_illumination` on by default, off maps to `IndirectSettings::off()`; no new calls |
-| R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). No setting, because the renderer has no switch. R1n's non-RT traced reflections need no API change. |
-| TP1 | transparency, particles | `MaterialDesc` blend and transmission fields for glass; `create_particles(ParticleDesc) -> ParticlesId`, `set_particles`, `remove_particles`. The example gets a glass pane and a particle emitter. |
+| R1 | reflections | **Wired**: the `reflection_lobe` hook and the `specular_incident` input (see [Reflections](#reflections)). |
+| TP1, TP2 | glass, foliage, particles | **Wired**: `MaterialDesc::{transparency, thin}`; `cutout`/`AlphaMask` for foliage; `create_emitter`/`update_emitter`/`remove_emitter`/`set_particle_step` with `EmitterId`. TP2's coloured glass shadows, RT glass reflections and coverage AA need no API. |
 | AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
-| SK1 | skinned meshes | `create_skinned_mesh(..) -> MeshId` with joints and weights; `set_pose(object, &[Mat4])`. The example's hero becomes a skinned character. |
-| LC1 | many lights | `set_lights` keeps its shape; per-light shadows and the light budget arrive as `Light` fields or a `LocalLight` wrapper. LC1 also lifts the soft-sun-only limit, and the example's lantern returns. |
+| SK1 | skinned meshes | **Wired**: `create_skinned_mesh`, `add_skinned_asset -> SkinnedHandles`, `set_joint_palette(MeshId, &[Mat4])`; `ClipPlayer` and `AnimationPose` re-exported. The example's hero is the walking Fox. |
+| LC1, LC2 | many lights, soft local shadows | **Wired**: `set_lights` unchanged; `Settings::local_shadows: LocalShadows`; `Light::{Point, Spot}::source_radius` (LC2). The example has three soft-shadowed lanterns. |
+| AT2 | time of day | **Wired**: `Sun::at(elevation, azimuth)`, `Sun::at_hour(hour, latitude)`; per-frame `set_sun` is cheap. |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
-| PP1 | post-processing | `Settings::post: PostSettings` (bloom, motion blur, depth of field, tone mapper, white balance, grading, vignette, grain), with `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported, following PP1's branch; an `Exposure::Auto { .. }` variant if PP1 adds auto exposure |
-| R1n | non-RT traced reflections, reflection switch | `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported; the program hooks are unchanged |
+| PP1 | post-processing | **Wired**: `Settings::post: PostSettings`, `Engine::set_colour_lut`; `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported. No auto exposure yet (`Exposure` may grow an `Auto` variant). |
+| PC1, GC1, MQ1, VF1 | startup cache, GI cost, moving-object history, volumetric fog default | **Wired**, no API change beyond `EngineDescriptor::pipeline_cache` (PC1) and the `volumetric_fog` default (VF1) |
+| R1n | non-RT traced reflections, reflection switch | **Wired**: `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported, applied with the other settings; the program hooks are unchanged |
 | MP1 | per-program dispatch | **Wired**, no API change: materials of different programs share a frame (see [Shading programs](#shading-programs)). The example's hero has its own toon program, examples/game_toon.wgsl. |
-| G2c | GI speckles and streaks | no API change |
+| G2c | GI speckles and streaks | **Wired**, no API change |
+
+Units still arriving (RQ1, TP3) are internal: their planned changes need no new engine API. Anything they do need is an addition under the rules below.
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.
 
 ## Stability and freeze notes
 
-These notes are final for everything wired above. Rows still marked planned become final when their unit merges and the row is updated.
+**The engine API is frozen as of this revision.** Changes from here are additions only, as listed under "May grow", or a recorded migration agreed with Islam. The additions made since the phase-1 freeze notes are recorded in the migration table below.
 
 **Stable** (changes only with a recorded migration):
 
@@ -289,13 +361,14 @@ These notes are final for everything wired above. Rows still marked planned beco
 - Handle semantics: `Copy` typed `Id<T>`, stale handles rejected, the batching of objects by mesh and material.
 - `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Atmosphere`/`Uniform`/`Map`, `Background::Color`/`Sky`, `AtmosphereMedium`, `HeightFog`, `VolumetricFog`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
 - `set_decals(&[Decal])` and the re-exported decal types.
-- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, and the documented engine inputs.
+- Skinned meshes (`create_skinned_mesh`, `add_skinned_asset`, `set_joint_palette`), emitters (`create_emitter`, `update_emitter`, `remove_emitter`, `set_particle_step`), `set_colour_lut`, `cutout`/`AlphaMask`, `Sun::at`/`at_hour`.
+- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, `view_dependence`, and the documented engine inputs.
 
 **May grow** (additive only): new `Settings` fields with defaults, new variants of the `#[non_exhaustive]` enums (`Sky`, `Background`, `Exposure`, `Quality`), new engine calls and handle kinds, new engine inputs for programs.
 
 **May change**: `FrameReport`, `Events` and the other diagnostic counters; defaults that a unit's ruling flips; every low-level crate-root type and `renderer_mut()` tuning; the current limits listed above, which should only loosen.
 
-**Re-exported renderer types** (`AtmosphereMedium`, `HeightFog`, `VolumetricFog`, the decal types, `RenderScale`) are plain parameter structs and enums owned by their units. They are part of the stable surface. A field added to one of them is a breaking change for struct literals that spell out every field, so construct them with `..Default::default()`.
+**Re-exported renderer types** (`AtmosphereMedium`, `HeightFog`, `VolumetricFog`, the decal types, `RenderScale`, `Light`, `LocalShadows`, `PostSettings`, `ReflectionSettings`, `Transparency`, `EmitterDescriptor`) are plain parameter structs and enums owned by their units. They are part of the stable surface. A field added to one of them is a breaking change for struct literals that spell out every field, so construct them with `..Default::default()`.
 
 ### Migrations since phase 1
 
@@ -307,6 +380,11 @@ These notes are final for everything wired above. Rows still marked planned beco
 | `Settings::default()`: GI and TR1 on, aerial perspective, height fog and volumetric fog on | G2b, TR1b, AT1, VF1 | set the fields off explicitly to reproduce older frames |
 | `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
 | Soft sun plus local lights renders (was rejected) | LC1 | none |
+| `Settings::local_shadows` follows LC3: default/max count 128; `resolution` is the maximum atlas face size; positive count enables all contributing RT locals | LC3 | names/signatures unchanged; set `count: 4` for the old map budget, `count: 0` to disable |
+| `Light::Point`/`Spot` gained `source_radius` | LC2 | add `source_radius: 0.0` to light literals for hard shadows |
+| `MaterialDesc` gained `thin` and `transparency` | TP1 | none for `..Default::default()` constructions |
+| `Settings` gained `local_shadows`, `post`, `reflections`; post and volumetric fog are on by default | LC1, PP1, R1n, VF1 | `post: PostSettings { enabled: false, .. }` and `volumetric_fog: None` reproduce older frames |
+| New calls: skinned meshes, emitters, `set_colour_lut`, `Sun::at`/`at_hour`; new `EmitterId`, `SkinnedHandles` | SK1, TP1, PP1, AT2 | additions only |
 
 ## Example
 
@@ -316,4 +394,33 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
     cargo run --example game_scene -- --path rt --out D:/Coding/renderlab-work/api1/rt
 ```
 
-Options: `--path rt|nonrt|auto`, `--frames N` (48), `--every K` (8; PNG every K-th frame and the last), `--size WxH` (1280x720), `--exposure STOPS`, `--no-gi`, `--no-temporal`, `--render-scale native|quality|performance`, `--sky atmosphere|uniform`, `--volumetric-fog`, and `--quarry MANIFEST` to load the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
+The scene is a dusk courtyard with every feature on by default:
+- props and materials: glossy, mirror and glass objects, cutout bushes, decals;
+- light: three soft-shadowed lanterns with glowing bulbs, and a brazier with fire and smoke particles;
+- the walking skinned Fox, drawn with its own toon program (`--fox Fox.glb`, from `scripts/m7-sk1-asset.py`, or `RENDERLAB_FOX_GLB`; without it the hero is two toon spheres);
+- the atmosphere at sunset, volumetric haze, GI, reflections, TR1, and post with bloom.
+
+Options:
+- `--path rt|nonrt|auto`; `--frames N` (48); `--every K` (8: a PNG every K-th frame and the last); `--size WxH` (1280x720).
+- `--night-lanterns` dims the sky/moon and courtyard emitters and adds 24 warm point lights (27 locals total); `--local-shadow-count N` selects a 0-128 map budget, with any positive value enabling all-light RT.
+- `--hour H` (17.5) or `--time dusk|noon`; `--sun-speed DEG_PER_S` with `--sun-after FRAME`; `--still`; `--timing-frames N`.
+- `--exposure STOPS`; `--no-gi`, `--no-temporal`, `--no-post`, `--no-glass`, `--no-particles`, `--no-volumetric-fog`; `--render-scale native|quality|performance`; `--sky atmosphere|uniform`.
+- `--quarry MANIFEST` loads the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
+
+
+PC1 startup controls: `game_scene` persists its Vulkan pipeline cache in the ignored
+`measurements/pipeline-cache/` directory. Set `--pipeline-cache DIR` (or
+`RENDERLAB_PIPELINE_CACHE_DIR`) to choose a directory; `--no-pipeline-cache` disables
+persistence. Applications opt in with `EngineDescriptor::pipeline_cache`; its default
+remains `None`. Cache I/O failures fall back to compilation. Driver and adapter changes
+use a different file, and wgpu keys compiled pipelines by shader and pipeline state.
+Shader edits still validate; rejected edits retain the last working pipelines.
+
+`RENDERLAB_STARTUP_PROFILE=1` records CPU module/pipeline compilation in the example's
+`run.json`, alongside scene-ready and first-image readback times and complete RGBA8
+hashes. `--reload-probe` applies a visible program edit, attempts invalid WGSL, then
+restores the source, writing separate diagnostic images. For an isolated pipeline
+reload check, use it with `--no-gi --no-temporal`. Optional
+`RENDERLAB_STARTUP_PROFILE_DRIVER=1` uses the existing instrumented Vulkan device to
+separate native driver compilation from the pipeline API's SPIR-V and validation work;
+use those rows as diagnostics, not as timings of the ordinary device.

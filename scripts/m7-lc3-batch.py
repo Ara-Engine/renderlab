@@ -70,7 +70,10 @@ def main():
                 still = step in ("game-still", "game-control")
                 command = [os.environ["LC3_GAME_BINARY"], "--path", "rt" if path == "traced" else "nonrt",
                     "--out", str(target), "--frames", "16" if still else "32",
-                    "--every", "8", "--night-lanterns", "--timing-frames", "8"]
+                    "--every", "8", "--night-lanterns", "--timing-frames", "8",
+                    "--pipeline-cache", str(root / f"pipeline-cache-{path}")]
+                if os.environ.get("LC3_FOX"):
+                    command += ["--fox", os.environ["LC3_FOX"]]
                 if still: command.append("--still")
                 if step == "game-control": command += ["--local-shadow-count", "4"]
             start = time.monotonic()

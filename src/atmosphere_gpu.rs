@@ -3,8 +3,10 @@
 //! kernels and the raster sky. Lit frames with any atmosphere part on prepare it before the
 //! lighting group binds it and encode its kernels before shading; every other frame skips
 //! it entirely. The shading side is shaders/atmosphere_api.wgsl.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
 use crate::atmosphere::{Atmosphere, AtmosphereMedium};
+use crate::pipeline_compilation::PipelineDevice;
 
 const COMMON: &str = include_str!("../shaders/atmosphere_common.wgsl");
 const KERNELS: &str = include_str!("../shaders/atmosphere.wgsl");
@@ -63,7 +65,7 @@ pub(super) struct Lut {
     pub view: Owned<wgpu::TextureView>,
     _allocation: Allocation,
 }
-fn lut(device: &wgpu::Device, ledger: &Ledger, label: &str, size: [u32; 3], d3: bool) -> Lut {
+fn lut(device: &PipelineDevice, ledger: &Ledger, label: &str, size: [u32; 3], d3: bool) -> Lut {
     let texture = ledger.own(
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -111,7 +113,7 @@ pub(super) struct Volume {
     inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
 }
 impl Volume {
-    fn new(device: &wgpu::Device, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
+    fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
         Self {
             grid,
             camera: lut(
@@ -197,7 +199,7 @@ pub(super) struct AtmosphereGpu {
     pub generation: u64,
 }
 impl AtmosphereGpu {
-    pub fn new(device: &wgpu::Device, ledger: &Ledger) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         let uniform = ledger.own(
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("AT1 atmosphere uniform"),
@@ -278,7 +280,7 @@ impl AtmosphereGpu {
 
 /// One kernel pipeline with its derived layout.
 fn kernel(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     module: &wgpu::ShaderModule,
     entry: &str,
@@ -296,7 +298,7 @@ fn kernel(
     )
 }
 fn group(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     pipeline: &wgpu::ComputePipeline,
     entries: &[wgpu::BindGroupEntry<'_>],
@@ -559,7 +561,7 @@ impl Renderer {
             self.atmosphere.generation += 1;
             self.atmosphere.previous = None;
         }
-        self.atmosphere_volume_groups(false);
+        self.atmosphere_volume_groups(false, 0);
         self.update_procedural_environment(eye);
         if uploads.geometry > 0
             || uploads.models > 0
@@ -857,8 +859,9 @@ impl Renderer {
     }
 
     /// Creates the camera volume's kernel groups that are missing (the injection's again
-    /// when the scene TLAS changed).
-    fn atmosphere_volume_groups(&mut self, injection: bool) {
+    /// when the scene TLAS changed). `scene` is the frame's TLAS generation
+    /// (`tlas_builds + hardware_build`), the key the other TLAS consumers use.
+    fn atmosphere_volume_groups(&mut self, injection: bool, scene: u64) {
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &mut self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -899,9 +902,11 @@ impl Renderer {
             .flatten();
         let key = VisibilityKey {
             virtual_map: virtual_buffers.is_some(),
-            generation: tlas.map_or(self.shadows.stats.resource_generation, |t| {
-                t as *const wgpu::Tlas as u64
-            }),
+            // API1b fix: the TLAS's address is not its identity. A new scene generation
+            // replaces it in place (`HardwareState::active`), so an address key kept binding
+            // the previous TLAS: stale fog shadows, and a validation fault once a skinned
+            // BLAS was refit after that TLAS's build. Key on the scene generation instead.
+            generation: tlas.map_or(self.shadows.stats.resource_generation, |_| scene),
             buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
         };
         if v.integrate.is_none() {
@@ -964,13 +969,13 @@ impl Renderer {
     /// The atmosphere kernels for this frame, after the TLAS build and before shading: the
     /// fixed LUTs when the medium changed, the sky view and its mean, the aerial
     /// perspective, then volumetric fog.
-    pub(super) fn encode_atmosphere(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn encode_atmosphere(&mut self, encoder: &mut wgpu::CommandEncoder, scene: u64) {
         if !self.atmosphere.active {
             return;
         }
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
-        self.atmosphere_volume_groups(true);
+        self.atmosphere_volume_groups(true, scene);
         let a = &mut self.atmosphere;
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);

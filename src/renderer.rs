@@ -69,6 +69,7 @@ pub(crate) struct PreparedDraw<'a> {
     #[cfg(test)]
     pub reference_ids: Option<&'a wgpu::Buffer>,
 }
+use crate::pipeline_compilation::PipelineDevice;
 use crate::{
     instances::InstanceState,
     mesh::matrix_bytes,
@@ -407,7 +408,7 @@ impl Pipelines {
 /// tangent stream, reversed-Z depth and `samples`, through `cache` when given.
 #[allow(clippy::too_many_arguments)]
 fn mesh_pipeline(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
@@ -515,7 +516,7 @@ struct Depth {
 /// Use an sRGB output format for encoded base color; linear targets retain linear values.
 /// Alternating target sizes recreates attachments. Separate renderers suit independent streams.
 pub struct Renderer {
-    device: wgpu::Device,
+    device: PipelineDevice,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
     options: RendererOptions,
@@ -610,6 +611,8 @@ pub struct Renderer {
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
     reconstruction: Reconstruction,
+    /// M7-R1/R1n global reflection controls (`set_reflections`).
+    reflections: crate::ReflectionSettings,
     reconstruction_shadow_budget: ReconstructionShadowBudget,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
@@ -664,7 +667,15 @@ impl Renderer {
         options: RendererOptions,
         wgsl: &str,
     ) -> Result<Self, Error> {
-        Self::new_configured(device, queue, color_format, limits, options, None, wgsl)
+        Self::new_configured(
+            device.into(),
+            queue,
+            color_format,
+            limits,
+            options,
+            None,
+            wgsl,
+        )
     }
     /// Explicit optional hard shadows. The caller must negotiate the experimental
     /// device feature and its unsafe acknowledgment before calling this safe API.
@@ -680,7 +691,7 @@ impl Renderer {
         wgsl: &str,
     ) -> Result<Self, Error> {
         Self::new_configured(
-            device,
+            device.into(),
             queue,
             color_format,
             limits,
@@ -689,8 +700,8 @@ impl Renderer {
             wgsl,
         )
     }
-    fn new_configured(
-        device: wgpu::Device,
+    pub(crate) fn new_configured(
+        device: PipelineDevice,
         queue: wgpu::Queue,
         color_format: wgpu::TextureFormat,
         limits: Limits,
@@ -1065,6 +1076,7 @@ impl Renderer {
             atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
+            reflections: crate::ReflectionSettings::default(),
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
@@ -1176,7 +1188,7 @@ impl Renderer {
     /// traced kernel modules; programs compile separately (`program_gpu`).
     #[allow(clippy::too_many_arguments)]
     fn compile(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         layout: &wgpu::PipelineLayout,
         lighting: &LightingGpu,
@@ -1801,7 +1813,29 @@ impl Renderer {
                 let b = visibility_buffer::source_clusters(data);
                 self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
             });
+        // M7-R1n: non-RT visibility-buffer renderers trace reflections in software over
+        // each mesh's drawn triangles (reflection_software.rs), up to its triangle cap.
+        let reflection = (clusters.is_some()
+            && self.hardware_shadows.is_none()
+            && data.indices.len() / 3 <= crate::reflection_software::MAX_TRIANGLES)
+            .then(|| {
+                let started = Instant::now();
+                let positions: Vec<[f32; 3]> = data.vertices.iter().map(|v| v.position).collect();
+                let blas = crate::reflection_software::Blas::build(&positions, data.indices);
+                #[cfg(test)]
+                eprintln!(
+                    "software_reflection_bvh triangles={} bytes={} build_ms={:.3}",
+                    data.indices.len() / 3,
+                    blas.as_ref().map_or(0, |b| b.bytes()),
+                    started.elapsed().as_secs_f64() * 1000.
+                );
+                let _ = started;
+                blas
+            })
+            .flatten()
+            .map(Arc::new);
         Ok(Some(Mesh {
+            reflection,
             skin: None,
             clusters,
             repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),
@@ -2672,7 +2706,7 @@ impl Renderer {
         if shadow_frame.is_some() {
             shadow_preparation += shadow_start.elapsed();
         }
-        self.submit_frame(
+        let result = self.submit_frame(
             color,
             camera_bytes,
             camera,
@@ -2695,7 +2729,13 @@ impl Renderer {
                 poll,
                 ..CpuFrame::default()
             },
-        )
+        );
+        if matches!(&result, Ok(Some(_))) {
+            for draw in draws {
+                draw.instances.state.motion_submitted(self.frames);
+            }
+        }
+        result
     }
 
     fn upload_instance_edits(
@@ -3096,6 +3136,11 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mesh frame"),
             });
+        // API1b fix: the frame's TLAS generation keys VF1's fog-injection bind group.
+        let scene_generation = self
+            .hardware_shadows
+            .as_ref()
+            .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
         let timed = self.timing_status == TimingStatus::Enabled;
         self.encode_skinning(&mut encoder, draws, hardware_build);
         if let Some(frame) = &local_lights {
@@ -3120,7 +3165,7 @@ impl Renderer {
             self.encode_transmission(&mut encoder, transparent);
         }
         if lit && !virtual_frame {
-            self.encode_atmosphere(&mut encoder);
+            self.encode_atmosphere(&mut encoder, scene_generation);
         }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
@@ -3164,7 +3209,7 @@ impl Renderer {
                     }
                     self.encode_virtual(&mut encoder, stamps(8));
                     // VF1 samples the freshly generated Virtual depth pages.
-                    self.encode_atmosphere(&mut encoder);
+                    self.encode_atmosphere(&mut encoder, scene_generation);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
@@ -3717,6 +3762,11 @@ impl Renderer {
         let duration = self.collect()?;
         Ok(self.events.drain(duration))
     }
+    /// Drain opt-in CPU compilation timings (`RENDERLAB_STARTUP_PROFILE=1`).
+    pub fn take_compilation_timings(&self) -> Vec<crate::pipeline_compilation::CompilationTiming> {
+        self.device.take_compilation_timings()
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }

@@ -5,7 +5,9 @@
 //! slot (program) it holds, and each program shades its list with its own pipeline
 //! (shaders/program_traced_list.wgsl) in one indirect dispatch, all in one compute pass.
 //! User programs stay separate modules; no uber-shader.
+// PC1: list pipelines participate in shared-cache routing and compilation timings.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 
 /// Programs one frame can shade: the binning mask is one u32 per tile.
 pub(crate) const MAX_FRAME_PROGRAMS: usize = 32;
@@ -168,7 +170,7 @@ impl PrimaryState {
     /// `program::compose_list` module, through `cache` when given.
     pub fn list_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         shading: usize,

@@ -1,7 +1,9 @@
 //! GPU half of LC1 (src/light_cluster.rs): the cluster buffer and its culling kernel, and
 //! the pooled local shadow maps with their cached redraws.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
 use crate::light_cluster::{self as lc, LightClusterStats, LocalShadows};
+use crate::pipeline_compilation::PipelineDevice;
 use sha2::{Digest, Sha256};
 
 /// Six Depth32Float atlas layers, with the same tile rectangle on each cube face.
@@ -21,7 +23,7 @@ pub(super) struct Atlas {
 impl Atlas {
     /// `slots` 0 is the 1x1 placeholder bound while no frame needs maps.
     fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         bindings: Option<&wgpu::BindGroupLayout>,
         resolution: u32,
@@ -191,7 +193,7 @@ pub(super) struct LocalFrame {
     redraw: Vec<(u32, Vec<(usize, u32)>)>,
 }
 impl LightClusters {
-    pub fn new(device: &wgpu::Device, ledger: &Ledger) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         let frame = ledger.own(
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("LC1 cluster frame"),

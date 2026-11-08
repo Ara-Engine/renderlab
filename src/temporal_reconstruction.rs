@@ -12,7 +12,9 @@
 //!
 //! Its histories, weights, coverages and anchors are read only by that pass, next frame
 //! (P0's W5); no later stage takes them as input.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 
 /// Temporal reconstruction settings (TR1). On by default since TR1b (docs/m7-tr1b.md):
 /// traced and visibility-buffer lit frames at 1x are jittered and accumulate; raster,
@@ -60,6 +62,13 @@ pub struct Reconstruction {
     /// statistic), so light that moving objects change on other surfaces (shadows, reflections,
     /// bounce) is not carried as a trail. Frames where nothing moved never clamp.
     pub motion_box: bool,
+    /// MQ2 (docs/m7-mq2.md): view budget, in pixels of a reflected image weighted by the
+    /// program's declared view-dependent share (`fn view_dependence`, src/program.rs). While a
+    /// surface's view direction turns, its reflections slide across it; its window is capped
+    /// at `1 + view_budget / drift`, drift being that share-weighted slide per frame, so
+    /// surface-identity history does not trail them. Zero turns the cap off. Programs that
+    /// declare nothing are unaffected.
+    pub view_budget: f32,
     /// Internal resolution of reconstructed frames: every pass renders at this fraction of
     /// the target size and TR1 reconstructs the target from the jittered samples.
     pub scale: RenderScale,
@@ -103,6 +112,7 @@ impl Default for Reconstruction {
             spatial_start: true,
             rotate_directions: true,
             motion_box: true,
+            view_budget: 0.25,
             scale: RenderScale::Native,
         }
     }
@@ -145,12 +155,13 @@ impl Reconstruction {
         let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
             && (0.0..=f32::MAX).contains(&self.blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
+            && (0.0..=f32::MAX).contains(&self.view_budget)
             && (0.0..=2.0).contains(&self.start_radius);
         if valid {
             Ok(())
         } else {
             Err(Error::InvalidInput(
-                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radius in [0, 2]",
+                "reconstruction windows in [1, 65536]; blur budget, turn angle and view budget finite and nonnegative; start radius in [0, 2]",
             ))
         }
     }
@@ -158,9 +169,10 @@ impl Reconstruction {
 
 /// WGSL Tr1Frame.
 const FRAME_BYTES: usize = 336;
-/// The previous frame's placement transforms follow the fixed frame words (64 bytes per
-/// placement, at least one), so moved placements reproject without a new binding (MQ1).
-const MODEL_BYTES: usize = 64;
+// Test-only tail permits the immutable MQ1 static-control shader's runtime-array
+// minimum binding span. Production has only fixed words; transform history lives
+// exclusively in the shared placement buffer.
+const FRAME_BUFFER_BYTES: usize = FRAME_BYTES + if cfg!(test) { 64 } else { 0 };
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
 /// The lattice's shifts in 1/256 px: x as T1's; y chosen so the 256 points are
@@ -309,12 +321,16 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
 }
 pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
-    Ok(format!("{head}\n{RESOLVE}"))
+    // MV1 motion-source seam; history/resolve policy belongs to MQ1.
+    Ok(format!(
+        "{head}\n{}\n{RESOLVE}",
+        include_str!("../shaders/object_motion.wgsl")
+    ))
 }
 
 impl PrimaryState {
     pub(super) fn reconstruction_layout(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         arrays: &wgpu::BindGroupLayout,
     ) -> (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>) {
@@ -328,7 +344,7 @@ impl PrimaryState {
                     texture(7, uint),
                     uniform(10, super::FRAME_BYTES as u64),
                     texture(21, uint),
-                    read(40, (FRAME_BYTES + MODEL_BYTES) as u64),
+                    read(40, FRAME_BUFFER_BYTES as u64),
                     texture(41, float),
                     texture(42, float),
                     texture(43, uint),
@@ -356,7 +372,7 @@ impl PrimaryState {
     /// production entries `production` has.
     pub(super) fn reconstruction_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         resolve: &str,
         trace: Option<(&str, &PrimaryPipelines)>,
@@ -424,6 +440,8 @@ impl PrimaryState {
 
 /// The previous reconstructed frame's inputs.
 struct Previous {
+    // MV1: match the instance snapshot's rendered frame, excluding upload submissions.
+    frame: u64,
     matrix: Mat4,
     jitter: [f32; 2],
     eye: Vec3,
@@ -443,11 +461,8 @@ pub(in crate::renderer) struct ReconstructionState {
     /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
     layer: [Depth; 2],
     sample: Depth,
-    /// The frame words, then the previous frame's placement transforms.
+    /// Fixed frame words; shared placement history is bound with the geometry.
     frame: Buffer,
-    /// The previous reconstructed frame's placement transforms (the primary tables' bytes),
-    /// which moved placements reproject through (MQ1).
-    models: Vec<u8>,
     /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
     groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
     /// The side this frame writes; the other holds the previous frame.
@@ -467,16 +482,6 @@ type GroupKey = (
     wgpu::Buffer,
     wgpu::Buffer,
 );
-
-/// The frame-state buffer for `models` bytes of placement transforms.
-fn frame_buffer(r: &Renderer, models: usize) -> Buffer {
-    Buffer::new(
-        r,
-        "TR1 frame state and previous transforms",
-        (FRAME_BYTES + models.max(MODEL_BYTES)) as u64,
-        wgpu::BufferUsages::STORAGE,
-    )
-}
 
 /// A sampled 2D target owned through the ledger (copyable in tests).
 fn target(
@@ -532,6 +537,10 @@ pub(in crate::renderer) struct Upscale {
 }
 
 impl ReconstructionState {
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
+        &self.colour[self.parity].texture
+    }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
     fn new(r: &Renderer, size: wgpu::Extent3d, output: wgpu::Extent3d) -> Self {
@@ -545,8 +554,12 @@ impl ReconstructionState {
             anchor: [anchor(), anchor()],
             layer: [layer(), layer()],
             sample: target(r, "TR1 frame samples", size, F::Rgba16Float, U::COPY_DST),
-            frame: frame_buffer(r, 0),
-            models: Vec::new(),
+            frame: Buffer::new(
+                r,
+                "TR1 frame state",
+                FRAME_BUFFER_BYTES as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
             groups: None,
             parity: 0,
             previous: None,
@@ -720,6 +733,8 @@ impl Renderer {
             u.lut,
             u.textures,
             u.materials,
+            // MV1: transform/derived-normal uploads move surfaces; they no longer
+            // reset all history. Placement identity/topology stays in the key above.
             u.instances,
         ] {
             hash.update(v.to_ne_bytes());
@@ -772,6 +787,35 @@ impl Renderer {
         });
         self.pipeline.primary.as_mut().unwrap().reconstruction = Some(pipelines);
         Ok(())
+    }
+
+    /// Static-image control against an immutable pre-merge MQ1 resolve shader. Keep
+    /// traced-primary kernels installed; only the resolve is exchanged by the GPU test.
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_resolve_source(&mut self, mq1: Option<&str>) {
+        let source = match mq1 {
+            Some(source) => format!("{}\n{source}", non_rt_heads(&self.source).unwrap()[0]),
+            None => resolve_source(&self.source).unwrap(),
+        };
+        let scopes = OperationScopes::new(&self.device);
+        let pipelines = self.primary.as_ref().unwrap().reconstruction_pipelines(
+            &self.device,
+            &self.ledger,
+            &source,
+            None,
+        );
+        assert!(
+            scopes.finish().is_none(),
+            "static-control resolve must compile"
+        );
+        self.pipeline
+            .primary
+            .as_mut()
+            .unwrap()
+            .reconstruction
+            .as_mut()
+            .unwrap()
+            .resolve = pipelines.resolve;
     }
 
     /// Publishes one reconstructed frame after `prepare_primary` (and the visibility
@@ -828,11 +872,21 @@ impl Renderer {
         let mut scene_bounds = None;
         let mut skin_bounds = None;
         let mut skin_revisions = vec![];
+        let mut rigid_motion = false;
         for d in draws {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
             }
-            for &model in &d.instances.state.models {
+            for (&model, &previous_model) in d
+                .instances
+                .state
+                .models
+                .iter()
+                .zip(d.instances.state.previous_models(self.frames))
+            {
+                let moved = model.to_cols_array().map(f32::to_bits)
+                    != previous_model.to_cols_array().map(f32::to_bits);
+                rigid_motion |= moved;
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
                     if d.mesh.skin.is_some() {
@@ -842,6 +896,8 @@ impl Renderer {
             }
         }
         let mut shadow_bounds = None;
+        // MQ2: some skinned pose changed since the previous frame.
+        let mut posed = false;
         if let (Some(current), Some(previous)) = (
             skin_bounds,
             self.reconstruction_state
@@ -849,6 +905,7 @@ impl Renderer {
                 .and_then(|s| s.previous.as_ref()),
         ) && previous.skin_revisions != skin_revisions
         {
+            posed = true;
             let swept = union(previous.skin_bounds, current);
             let mut affected = swept;
             let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
@@ -875,24 +932,22 @@ impl Renderer {
                     affected = union(Some(affected), scene);
                 }
             }
-            // Sky occlusion/bounce can change outside a directional shadow. The first
-            // dynamic-GI base conservatively refreshes receiver history scene-wide.
-            if self.gi.settings.enabled
-                && let Some(scene) = scene_bounds
-            {
-                affected = union(Some(affected), scene);
-            }
+            // Sky occlusion and bounce the character changes outside its direct shadow are
+            // held to this frame's 3x3 box (MQ2: skinned frames set TR1_BOX), as MQ1 holds
+            // rigid motion's; SK1 rejected every receiver's history scene-wide while GI was
+            // on, so an animated character restarted the whole image on every frame.
             let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
             affected.min -= margin;
             affected.max += margin;
             shadow_bounds = Some(affected);
         }
+        let rendered_frames = self.frames;
         let state = self.reconstruction_state.as_mut().unwrap();
         let cold = state.previous.is_none() || state.cut;
         let continued = state
             .previous
             .as_ref()
-            .filter(|p| p.key == key && p.suns.len() == suns.len())
+            .filter(|p| p.frame == rendered_frames && p.key == key && p.suns.len() == suns.len())
             .map(|p| {
                 // The largest directional-light turn since the previous frame.
                 let turn = p
@@ -915,46 +970,19 @@ impl Renderer {
         };
         state.reset = continued.is_none() || state.cut || event_window < 1.0;
         state.cut = false;
-        // MQ1: this frame's placement transforms, the models half of the primary tables'
-        // bytes in placement order (primary_ray_gpu.rs).
-        let models = self
-            .primary
-            .as_ref()
-            .unwrap()
-            .geometry
-            .as_ref()
-            .map_or(&[][..], |g| &g.instances[..g.instances.len() / 2]);
-        let state = self.reconstruction_state.as_mut().unwrap();
-        // Placements moved: the resolve reprojects their surfaces through the previous
-        // transforms, written after the frame words (a restart reprojects nothing).
-        let moved = !state.reset && state.models.len() == models.len() && state.models != models;
-        if state.frame.value.size() < (FRAME_BYTES + models.len().max(MODEL_BYTES)) as u64 {
-            let frame = frame_buffer(self, models.len());
-            self.reconstruction_state.as_mut().unwrap().frame = frame;
-        }
-        let state = self.reconstruction_state.as_mut().unwrap();
-        if moved {
-            self.queue
-                .write_buffer(&state.frame.value, FRAME_BYTES as u64, &state.models);
-            self.uploads.view_settings += state.models.len() as u64;
-            self.uploads.write_calls += 1;
-        }
-        if state.models != models {
-            state.models.clear();
-            state.models.extend_from_slice(models);
-        }
+        // MQ1's clamp event comes from the same submitted transforms that feed
+        // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
+        let moved = !state.reset && rigid_motion;
         let jitter = camera.jitter();
         let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
             Some((m, e, x, _, j)) if !state.reset => (m, e, exposure / x, j),
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        // TR1_MOVED: placements moved (previous transforms follow the frame words); TR1_BOX:
-        // clamp continued histories to this frame's 3x3 box (MQ1).
+        // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from(moved) << 2
-            | u32::from(moved && settings.motion_box) << 3;
+            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -985,17 +1013,18 @@ impl Renderer {
             settings.sharp_window,
             settings.start_window,
             settings.start_radius,
-            0.0,
+            settings.view_budget,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // The camera did not move: the unjittered view-projection is bit-equal. Surfaces whose
-        // vertices or placement moved are not still (the resolve compares them).
+        // Camera stillness; MV1/SK1's surface source handles moving placements/vertices.
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
-        let sampling_still = still && turn == 0.0;
+        // MV1 motion-source integration: rigid/deforming casters must not enter
+        // RTDEF2's settled shadow budget just because the camera is stationary.
+        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
         state.held_frames = if sampling_still {
             state.held_frames.saturating_add(1)
         } else {
@@ -1039,6 +1068,7 @@ impl Renderer {
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         state.previous = Some(Previous {
+            frame: rendered_frames + 1,
             matrix,
             jitter,
             eye,
@@ -1264,8 +1294,45 @@ mod tests {
                 turn_angle: -1.0,
                 ..Default::default()
             },
+            Reconstruction {
+                view_budget: f32::INFINITY,
+                ..Default::default()
+            },
         ] {
             assert!(bad.validate().is_err());
+        }
+    }
+
+    /// MQ2: a program declaring `view_dependence` gets its struct on every stage and the hint
+    /// on traced stages; any other program's traced entry stores the view-independent 1.
+    #[test]
+    fn view_dependence_composition() {
+        use crate::program::{Stage, compose};
+        let toon = include_str!("../shaders/programs/toon.wgsl");
+        for stage in [
+            Stage::Raster,
+            Stage::Traced,
+            Stage::TracedStreamed,
+            Stage::Cell,
+        ] {
+            let traced = matches!(stage, Stage::Traced | Stage::TracedStreamed);
+            let standard = compose("", crate::STANDARD_PROGRAM, stage, false).source;
+            let other = compose("", toon, stage, true).source;
+            assert!(standard.contains("struct ViewDependence {"));
+            assert!(!other.contains("ViewDependence"));
+            assert_eq!(standard.contains("let d=view_dependence(s,input);"), traced);
+            for source in [&standard, &other] {
+                assert_eq!(
+                    source.matches("fn tr1_view_hint(").count(),
+                    usize::from(traced)
+                );
+                assert_eq!(
+                    source
+                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .count(),
+                    usize::from(traced)
+                );
+            }
         }
     }
 

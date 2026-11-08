@@ -23,6 +23,8 @@
 use super::*;
 
 // PP1 reuses the two path/device helpers and the existing quarry loader only.
+#[path = "object_motion_tests.rs"]
+mod object_motion_tests;
 #[path = "post_tests.rs"]
 mod post_tests;
 
@@ -221,6 +223,7 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     f("start_window", &mut s.start_window);
     f("turn_angle", &mut s.turn_angle);
     f("start_radius", &mut s.start_radius);
+    f("view_budget", &mut s.view_budget);
     let b = |key: &str, value: &mut bool| {
         if let Some(x) = v[key].as_bool() {
             *value = x;
