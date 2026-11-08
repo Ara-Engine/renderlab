@@ -186,11 +186,14 @@ const ROTATION_SEAM: (&str, &str) = (
 );
 const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 
-/// Engine-side sampling for reconstructed Interactive shadows. A cold/reset frame or
-/// moving camera uses `active_rays`; after `settle_frames` unchanged frames it uses
-/// `held_rays`. Materials still receive the same visibility value and shading inputs.
+/// Engine-side sampling for reconstructed Interactive shadows. New targets/cuts use
+/// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
+/// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
+/// Materials still receive the same visibility value and shading inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconstructionShadowBudget {
+    pub cold_rays: u32,
+    pub reset_rays: u32,
     pub active_rays: u32,
     pub held_rays: u32,
     pub settle_frames: u32,
@@ -198,7 +201,9 @@ pub struct ReconstructionShadowBudget {
 impl Default for ReconstructionShadowBudget {
     fn default() -> Self {
         Self {
-            active_rays: 8,
+            cold_rays: 256,
+            reset_rays: 64,
+            active_rays: 32,
             held_rays: 8,
             settle_frames: 16,
         }
@@ -206,9 +211,14 @@ impl Default for ReconstructionShadowBudget {
 }
 impl ReconstructionShadowBudget {
     fn validate(self) -> Result<(), Error> {
-        if [self.active_rays, self.held_rays]
-            .into_iter()
-            .any(|n| !(8..=256).contains(&n) || !n.is_power_of_two())
+        if [
+            self.cold_rays,
+            self.reset_rays,
+            self.active_rays,
+            self.held_rays,
+        ]
+        .into_iter()
+        .any(|n| !(8..=256).contains(&n) || !n.is_power_of_two())
         {
             return Err(Error::InvalidInput(
                 "reconstruction shadow rays must be powers of two in 8..=256",
@@ -216,8 +226,12 @@ impl ReconstructionShadowBudget {
         }
         Ok(())
     }
-    fn rays(self, still: bool, held_frames: u32) -> u32 {
-        if still && held_frames >= self.settle_frames {
+    fn rays(self, cold: bool, reset: bool, still: bool, held_frames: u32) -> u32 {
+        if cold {
+            self.cold_rays
+        } else if reset {
+            self.reset_rays
+        } else if still && held_frames >= self.settle_frames {
             self.held_rays
         } else {
             self.active_rays
@@ -542,6 +556,13 @@ impl Renderer {
     }
     /// Last prepared reconstructed frame's Interactive ray count, for telemetry.
     pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
+        if self.primary_mode != PrimaryVisibility::Traced
+            || self.soft_mode != SoftShadows::Interactive
+            || self.shadows.settings.directional_disk_angle == 0.0
+            || !self.reconstruction.enabled
+        {
+            return None;
+        }
         self.reconstruction_state.as_ref().map(|s| s.shadow_rays)
     }
     /// This frame's internal colour target when an upscaling preset applies to it (a
@@ -745,6 +766,7 @@ impl Renderer {
             || self.atmosphere_sky_visible();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
         let state = self.reconstruction_state.as_mut().unwrap();
+        let cold = state.previous.is_none() || state.cut;
         let continued = state
             .previous
             .as_ref()
@@ -818,14 +840,18 @@ impl Renderer {
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
-        state.held_frames = if still {
+        let sampling_still = still && turn == 0.0;
+        state.held_frames = if sampling_still {
             state.held_frames.saturating_add(1)
         } else {
             0
         };
-        state.shadow_rays = self
-            .reconstruction_shadow_budget
-            .rays(still, state.held_frames);
+        state.shadow_rays = self.reconstruction_shadow_budget.rays(
+            cold,
+            state.reset,
+            sampling_still,
+            state.held_frames,
+        );
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
         let primary_frame = &self
             .primary
@@ -1083,15 +1109,19 @@ mod tests {
     #[test]
     fn shadow_budget_keeps_resets_and_motion_at_the_active_count() {
         let budget = ReconstructionShadowBudget {
+            cold_rays: 256,
+            reset_rays: 64,
             active_rays: 32,
             held_rays: 8,
             settle_frames: 16,
         };
         assert!(budget.validate().is_ok());
-        assert_eq!(budget.rays(false, 0), 32);
-        assert_eq!(budget.rays(false, 100), 32);
-        assert_eq!(budget.rays(true, 15), 32);
-        assert_eq!(budget.rays(true, 16), 8);
+        assert_eq!(budget.rays(true, true, true, 100), 256);
+        assert_eq!(budget.rays(false, true, true, 100), 64);
+        assert_eq!(budget.rays(false, false, false, 0), 32);
+        assert_eq!(budget.rays(false, false, false, 100), 32);
+        assert_eq!(budget.rays(false, false, true, 15), 32);
+        assert_eq!(budget.rays(false, false, true, 16), 8);
         for rays in [0, 7, 12, 257] {
             assert!(
                 ReconstructionShadowBudget {

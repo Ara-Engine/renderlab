@@ -154,6 +154,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var valid=0u;
     var shaded=false;
     rl_reflection_hit=true;
+    // Naga 30 must not emit a loop-local null initializer for this opaque type.
+    var query:ray_query;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
         if !mirror {
@@ -161,7 +163,6 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
-        var query:ray_query;
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);

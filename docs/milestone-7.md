@@ -68,7 +68,7 @@ Islam's decisions on design draft 2 (2026-11-07):
 
 Root decisions:
 - **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
-- **RT comparison memory baseline:** M7 measurements use the non-default fast setup, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410. The RT-device default remains raster plus Exact; [RT1c](rt1c-rt-default.md) and [RT1d](rt1d-shadow-filter.md) record the failed promotion gates.
+- **RT comparison memory baseline:** M7 measurements use the historical eight-ray setup with TR1 off, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410. Those measurements predate RTDEF2's traced/Interactive/TR1 adaptive default; [RTDEF2](rtdef2.md) prices the new profile, while [RT1c](rt1c-rt-default.md) and [RT1d](rt1d-shadow-filter.md) retain the earlier failed gates.
 - **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
 
 ## Patent policy (Islam, 2026-11-07)
@@ -150,7 +150,7 @@ Default anti-aliasing ruling (Islam, delegated, 2026-11-08). TR1 becomes the def
 3. Before the default flips, the claim that TR1 is better everywhere must also hold on the quarry walk with the real sky visible behind silhouettes, on both paths. If TR1 is worse than no-AA anywhere there, the default doesn't flip, and it's reported instead.
 4. Cost tails above the half-TSR ceiling stay recorded as a miss.
 5. Earlier quality gates are re-scored on the new default image, noting which numbers moved.
-IQ1 also found the RT-device code default is still raster primaries, which TR1 doesn't reconstruct. A TR1 default helps RT users only once traced primaries are the RT default (RT1d).
+IQ1 found the old raster RT default could not use TR1. [RTDEF2](rtdef2.md) resolves that reach gap for capable 1x RT devices and the viewer.
 
 TR1 visible-sky gate result and ruling (Islam, delegated, 2026-11-08). TR1b's 40-frame visible-sky quarry walk failed condition 3, so TR1 stays opt-in.
 - Against the path-traced reference, TR1 is worse than no-AA in 149 of 256 rows on both paths. Most of that comes from the lighting error both images share (unoccluded sky in shadow), not from AA.

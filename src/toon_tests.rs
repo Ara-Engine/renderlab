@@ -111,7 +111,7 @@ fn renderer() -> Renderer {
         ..Default::default()
     }))
     .unwrap();
-    Renderer::new_with_hardware_shadows(
+    let mut renderer = Renderer::new_with_hardware_shadows(
         device,
         queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -129,7 +129,16 @@ fn renderer() -> Renderer {
         },
         PRELUDE,
     )
-    .unwrap()
+    .unwrap();
+    // Preserve the recorded raster/Exact program gates after RTDEF2.
+    renderer
+        .set_primary_visibility(PrimaryVisibility::Raster)
+        .unwrap();
+    renderer.set_soft_shadows(crate::SoftShadows::Exact);
+    renderer
+        .set_reconstruction(crate::Reconstruction::off())
+        .unwrap();
+    renderer
 }
 
 /// Upload retries are admission retries, with a bounded completion wait between them.

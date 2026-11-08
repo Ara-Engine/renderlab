@@ -767,6 +767,16 @@ fn gpu_motion_bench_batch() {
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     let mut r = renderer_with_features(false, crate::VIRTUAL_FEATURES);
+    if m["registered_direct"].as_bool().unwrap_or(false) {
+        // RTDEF2's ray-grain gate reuses the registered direct-light films. The
+        // complete quarry comparison separately retains current GI/atmosphere defaults.
+        r.set_indirect(crate::IndirectSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        r.set_atmosphere(crate::Atmosphere::off()).unwrap();
+    }
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     r.set_interactive_shadow_filter(m["shadow_filter"].as_bool().unwrap_or(false))
         .unwrap();
@@ -827,6 +837,8 @@ fn gpu_motion_bench_batch() {
                 ("TR1-64", SoftShadows::Interactive),
                 ("TR1-128", SoftShadows::Interactive),
                 ("TR1-256", SoftShadows::Interactive),
+                ("TR1-Auto16", SoftShadows::Interactive),
+                ("TR1-Auto32", SoftShadows::Interactive),
                 ("TR1-warm", SoftShadows::Interactive),
             ] {
                 // N8 is a disk-light mode; a zero radius takes the hard path.
@@ -841,9 +853,19 @@ fn gpu_motion_bench_batch() {
                 r.set_reconstruction(reconstruction).unwrap();
                 let active_rays = name
                     .strip_prefix("TR1-")
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| s.strip_prefix("Auto").unwrap_or(s).parse().ok())
                     .unwrap_or(8);
                 r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+                    cold_rays: if name.starts_with("TR1-Auto") {
+                        256
+                    } else {
+                        active_rays
+                    },
+                    reset_rays: if name.starts_with("TR1-Auto") {
+                        64
+                    } else {
+                        active_rays
+                    },
                     active_rays,
                     held_rays: 8,
                     settle_frames: 16,
@@ -969,6 +991,7 @@ fn gpu_motion_bench_batch() {
                     )
                     .unwrap();
                     if !m["no_full_captures"].as_bool().unwrap_or(false)
+                        && selected("full_cases", &case)
                         && m["full_frames"].as_array().is_none_or(|frames| {
                             frames.iter().any(|f| f.as_u64() == Some(p.frame as u64))
                         })

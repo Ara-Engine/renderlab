@@ -71,14 +71,44 @@ def prepare():
                               modes=['Raster-Exact', 'TR1', 'TR1-16', 'TR1-32', 'TR1-64', 'TR1-128', 'TR1-256'],
                               cases=['camera-0.25px-r0.04', 'shadow-step-r0.04'],
                               capture_frames=[0, 1, 2, 7, 15, 16, 19, 23, 31, 32, 63, 64, 95, 96, 127, 159],
-                              no_full_captures=True, repeats=0, skip_reference=True))
+                              no_full_captures=True, registered_direct=True, repeats=0, skip_reference=True))
     steps.append(dict(name='s2', test='gpu_motion_bench_batch', manifest=str(ROOT / 's2.json')))
-    timing_frames = [dict(camera, frame=f + pose * 32)
-                     for pose, camera in enumerate(cameras) for f in range(32)]
+    final_variants = {'raster-exact': {'enabled': False, 'primary': 'raster-exact'},
+                      'default': {'primary': 'traced-interactive', 'cold_rays': 256,
+                                  'reset_rays': 64, 'active_rays': 32}}
+    timing_frames = []
+    for pose in range(len(cameras)):
+        seq = ROOT / f'quarry-p{pose}-sequence.json'
+        frames = json.loads(seq.read_text())['frames']
+        offset = len(timing_frames)
+        timing_frames.extend(dict(f, frame=offset + i) for i, f in enumerate(frames))
+        save(ROOT / f'quarry-final-p{pose}.json', dict(
+            base, path='rt', output=str(ROOT / f'quarry-final-p{pose}-at1'),
+            sequence=str(seq), variants=final_variants, frames=[0, 15, 31, 39, 47, 63],
+            replay=False, visits=0, validate=False, current_defaults=True))
+    s2 = json.loads((ROOT / 's2.json').read_text())
+    save(ROOT / 's2-final.json', dict(
+        s2, output=str(ROOT / 'S2-final'), modes=['Raster-Exact', 'TR1-Auto32'],
+        cases=['camera-0.25px-r0.04', 'camera-1px-r0.04', 'shadow-step-r0.04'],
+        no_full_captures=False, full_frames=[0, 31, 95],
+        full_cases=['camera-0.25px-r0.04', 'shadow-step-r0.04']))
+    save(ROOT / 'nonrt-quarry.json', dict(
+        base, path='nonrt', output=str(ROOT / 'nonrt-quarry'),
+        sequence=str(ROOT / 'quarry-p0-sequence.json'), variants={'default': {}},
+        frames=[0, 31, 47], replay=False, visits=0, validate=False, current_defaults=True,
+        virtual_cache='D:/Coding/projects/desktop/renderlab/measurements/quarry-quality/detail/cache',
+        virtual_manifest='D:/Coding/projects/desktop/renderlab/measurements/quarry-quality/detail/virtual.manifest'))
+    s2g = json.loads(Path('E:/renderlab-work/m7-tr0/inputs/s2g-camera-0.5px.json').read_text())
+    save(ROOT / 'nonrt-s2g-sequence.json', dict(frames=s2g['frames'][:32]))
+    save(ROOT / 'nonrt-s2g.json', dict(
+        path='nonrt', scene='E:/renderlab-work/m7-u0b/scenes/S2G/scene.json',
+        sequence=str(ROOT / 'nonrt-s2g-sequence.json'), output=str(ROOT / 'nonrt-s2g'),
+        variants={'default': {}}, frames=[0, 15, 31], replay=False, visits=0,
+        validate=False, current_defaults=True))
     save(ROOT / 'timing-sequence.json', dict(frames=timing_frames))
     save(ROOT / 'timing.json', dict(base, path='rt', output=str(ROOT / 'timing'),
-                                   sequence=str(ROOT / 'timing-sequence.json'), variants=variants,
-                                   frames=[], replay=False, visits=8, validate=False))
+                                   sequence=str(ROOT / 'timing-sequence.json'), variants=final_variants,
+                                   frames=[], replay=False, visits=8, validate=False, current_defaults=True))
     save(ROOT / 'steps.json', steps)
     print(ROOT / 'steps.json', flush=True)
 
@@ -89,7 +119,27 @@ def build():
     g.TARGET = TARGET
     g.BINARY = ROOT / 'bin/rtdef2-tests.exe'
     ROOT.mkdir(parents=True, exist_ok=True)
-    g.build(argparse.Namespace(release=True, beside_leases=True, name='rtdef2-tests'))
+    g.build(argparse.Namespace(release=True, beside_leases=True,
+                              name=os.environ.get('RTDEF2_BUILD_NAME', 'rtdef2-tests')))
+
+
+def build_viewer():
+    g, u = schedule()
+    if g.hold_state(u) == 'hold' or g.quiet_active(u, any_lease=False):
+        raise SystemExit('DEFERRED: game hold or foreign QUIET window')
+    with (ROOT / 'viewer-build.log').open('w') as output:
+        child = subprocess.Popen(['cargo', 'build', '-p', 'renderlab-viewer', '--release', '-j', '2',
+                                  '--target-dir', str(TARGET)], cwd=REPO, stdout=output,
+                                 stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+        while child.poll() is None:
+            time.sleep(.5)
+            if g.hold_state(u) == 'hold' or g.quiet_active(u, any_lease=False):
+                subprocess.run(['taskkill', '/PID', str(child.pid), '/T', '/F'], capture_output=True)
+                raise SystemExit('STOPPED for game hold or foreign QUIET window; retry after release')
+    if child.returncode:
+        raise SystemExit((ROOT / 'viewer-build.log').read_text()[-4000:])
+    import shutil
+    shutil.copy2(TARGET / 'release/renderlab-viewer.exe', ROOT / 'bin/renderlab-viewer.exe')
 
 
 def run_child(binary, test, manifest=None):
@@ -114,6 +164,26 @@ def batch(args):
     if args.only == 'pilot':
         run_child(binary, None)
         run_child(binary, 'gpu_motion_bench_batch', ROOT / 's2.json')
+        return
+    if args.only == 'retained':
+        run_child(binary, None)
+        run_child(binary, 'gpu_motion_bench_batch', ROOT / 's2-auto.json')
+        run_child(binary, TR1, ROOT / 'quarry-p0.json')
+        run_child(binary, TR1, ROOT / 'quarry-p1.json')
+        return
+    if args.only in ('final', 'integration'):
+        run_child(binary, None)
+        if args.only == 'final':
+            run_child(binary, 'gpu_motion_bench_batch', ROOT / 's2-final.json')
+        for name in ('quarry-final-p0', 'quarry-final-p1', 'nonrt-quarry', 'nonrt-s2g'):
+            run_child(binary, TR1, ROOT / (name + '.json'))
+        for primary in ('default', 'raster'):
+            command = [str(ROOT / 'bin/renderlab-viewer.exe'), '--background', '--frames', '24',
+                       '--view', 'lit', '--log-frames', '--capture-hdr', str(ROOT / 'viewer' / primary)]
+            if primary == 'raster':
+                command += ['--primary', 'raster', '--soft-shadows', 'exact']
+            subprocess.run(command, cwd=REPO, check=True, stdout=sys.stdout, stderr=subprocess.STDOUT,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
         return
     if args.only == 'lib':
         run_child(binary, None)
@@ -189,7 +259,7 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('prepare', 'build', 'run', 'batch'))
+    p.add_argument('action', choices=('prepare', 'build', 'viewer-build', 'run', 'batch'))
     p.add_argument('--only')
     a = p.parse_args()
     if a.action == 'prepare':
@@ -198,6 +268,8 @@ def main():
         build()
     elif a.action == 'batch':
         batch(a)
+    elif a.action == 'viewer-build':
+        build_viewer()
     else:
         run(a)
 

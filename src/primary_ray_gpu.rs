@@ -323,7 +323,9 @@ pub(super) fn admit_draws(
 }
 
 impl Renderer {
-    /// Chooses disk-shadow sampling for traced lit 1x frames. Exact is the default.
+    /// Chooses disk-shadow sampling for traced lit 1x frames. Traced-capable RT
+    /// renderers start with Interactive and TR1's adaptive ray budget; Exact remains
+    /// the portable selector default and the explicit historical reference setting.
     /// The preference survives primary-path changes and reload; raster, hard and
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
     /// Leaving `Temporal` releases its film history after in-flight frames.
