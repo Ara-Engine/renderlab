@@ -15,7 +15,10 @@ TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent 
   - TR1b upscaled frames (`RenderScale` below native): hit records are at the internal size and presentation reads the output HDR.
 
   1x raster, traced and visibility-buffer frames at native scale run it.
-- **Cost** (M, quarry, functional lease): the pane adds 0.16-0.53 ms, including one full-HDR copy per transparent draw. The pass's fixed work and 448 particles add 0.09-0.65 ms. The RT raster default pays the most: +1.25 ms in total.
+- **Cost** (M, quarry, main `f159fcd` defaults, functional lease).
+  - One glass pane: +0.22 ms on non-RT, but **+1.02 ms on RT traced**. That is unprofiled; the same pane cost +0.17 ms before the radiance cache and AT1 became defaults. Suspects: cache lookups at points with no cells, and the per-fragment hardware sun ray.
+  - Each transparent draw copies the full HDR target.
+  - TP1 in total adds +0.83 to +1.59 ms on the test scene.
 - **No traced reflections on glass.** Transparent surfaces compose the raster stage, so R1's `specular_incident` is untraced there: glass reflects the sky, the ES1 lobes and the sun, not traced scene reflections.
 - **Lighting inputs.** Transparent surfaces read the same lights, sky, ES1 lobes and radiance-cache lookups as opaque ones. The cache holds no cells of its own for transparent surfaces, so they read nearby opaque cells or the open sky. Non-RT sun visibility is a 2048² map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1.
 - **Programmability.** A program shades transparent surfaces through its own `surface` and `shade`, plus an optional `transmittance` hook. Without the hook, it blends by coverage. Refraction uses the engine's `material_normal`, not a program normal. Streamed (non-resident) textures on transparent materials bind their resident levels without feedback.
@@ -43,7 +46,8 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
   - Spawns per step are capped at the capacity.
 - **Rendering.**
   - Billboards render at full resolution after TR1, with no temporal stability or motion blur.
-  - Overdraw isn't bounded: no low-resolution particle buffer.
+  - Overdraw isn't bounded: no low-resolution particle buffer. Fire (192) and smoke (256) together add +0.44 to +1.21 ms (M, indicative), mostly smoke overdraw (I).
+  - AT1 fog and aerial perspective apply at each fragment's billboard point. Particles neither receive nor cast volumetric fog lighting.
   - Soft fading uses opaque depth only: particles don't fade against glass.
 - **No Unreal (Niagara) comparison** this push (rule 3).
 

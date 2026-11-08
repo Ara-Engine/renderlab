@@ -14,17 +14,18 @@ Unit TP1 of the overnight complete-base push (Islam, 2026-11-08; rules in [AGENT
 ## 0. Results (M)
 
 Evidence is under `D:/Coding/renderlab-work/m7-tp1/`:
-- `runs/g6`: merged build `b6`, at main `ae95d3a` with DC1 and TR1b; the verification and timing lease;
-- `runs/g7`: build `b7`, with the test pane's ripple toned to window glass; the final images;
+- `runs/g10`: the final build `b9`, merged with main `f159fcd` (DC1, TR1b, R1, G2b's radiance cache on by default, AT1's atmosphere on by default); the final verification and images;
+- `runs/g11`: build `b10`, the same code with the settled timing protocol; the final timing;
+- `runs/g6` and `runs/g7`: earlier merges (main `ae95d3a`); the earlier timing and the window-glass images before GI and AT1 became defaults;
 - `inspect/`: brightened crops (×2.2) and diffs.
 
 Runs on the RTX 4070 SUPER, NVIDIA 617.14, headless at 1920×1080. These were functional leases, not QUIET windows: other units' compilers ran during them.
 
 | Check | Result | Verdict |
 |---|---|---|
-| Lib suite inside the lease (`b6`, merged) | 161 passed, 0 failed, 146 ignored | **Pass** |
+| Lib suite inside the lease (`b9`, merged with `f159fcd`) | 167 passed, 0 failed, 148 ignored (161 on `b6`, 162 on the R1 merge) | **Pass** |
 | TP1 CPU tests | Pass. 5 transparency tests: naga validation of every TP1 module (the standard and toon programs on the map and RT heads, particles, both depth kernels, the shadow map), packing, map fit, pre-TP1 source exactness. 5 cutout tests: area and winding, a disk contour within 1 %, a mirrored uv mapping, saddles, a welded connected mesh | **Pass** |
-| Default image unchanged | Opaque quarry with the TP1 standard program against main's pre-TP1 one (TR1 off for the pair): **0 differing pixels** on RT traced, non-RT visibility buffer and RT raster | **Pass** |
+| Default image unchanged | Opaque quarry with the TP1 standard program against main's pre-TP1 one (TR1 and the radiance cache off for the pair): **0 differing pixels** on RT traced, non-RT visibility buffer and RT raster, at every merge (`b4`, `b6`, `b8`, `b9`) | **Pass** |
 | Test scene renders on all three paths | Quarry pose 0 with 18 cutout fern cards (6 bushes), a rippled clear glass pane (IOR 1.5, 2 cm) in front of the island, and fire (192) and smoke (256) emitters. 240 still frames, then a 40-frame pan at 1.5 cm a frame. No faults, no validation errors | **Pass** |
 | Inspected images | Section 0.1 | **Pass**, gaps listed |
 | Cutout mesh | Fern card at 96 cells: 7,722 triangles, 4,395 welded vertices, cut in 17 ms on the CPU. Receiver adjacency: 0 ambiguous and 0 degenerate half-edges, 1,076 open contour half-edges | **Pass** |
@@ -32,7 +33,7 @@ Runs on the RTX 4070 SUPER, NVIDIA 617.14, headless at 1920×1080. These were fu
 
 ### 0.1 Images
 
-Files are in `runs/g7`: `{rt,nonrt,rtraster}-{opaque,foliage,full-f60,full-f240,full-pan40,depth}.png`.
+Files are in `runs/g10`, the final build at main `f159fcd` defaults (radiance cache, TR1 and AT1 on): `{rt,nonrt,rtraster}-{opaque,foliage,full-f60,full-f240,full-pan40,depth}.png`. Brightened crops are `inspect/g10-rt.png` and `inspect/g10-nonrt-raster.png`. `runs/g7` holds the same scene before the cache and AT1 became defaults; its images are byte-identical to the R1 merge's (`runs/g9`).
 
 Inspected:
 - **Cutout foliage.** Fern silhouettes are exact and smooth at the cut resolution on every path, with no alpha fringe. Crossed cards occlude each other and the island. The images match across the three paths (`inspect/g7-nonrt-raster.png` against `inspect/g7-rt.png`).
@@ -51,21 +52,29 @@ Bug found by inspection and fixed: the exit refraction used the wrong-facing nor
 
 ### 0.2 Cost
 
-GPU render-span medians: first receiver pass to the end of present, 96 frames each, in two phases of 8 interleaved 16-frame blocks:
-- phase 1, with emitters: foliage plus particles, then full;
-- phase 2, without emitters: opaque, then foliage.
+**Protocol.** GPU render span: first receiver pass to the end of present. Build `b10`, main `f159fcd` defaults: radiance cache, TR1 and AT1 on (`runs/g11/*-tp1.json`). Two phases of 8 interleaved 48-frame blocks; each block keeps its last 16 frames, so the cache has gone idle after the draw-set change. That makes 128 frames per configuration.
+- Phase 1, with the warmed emitters: foliage plus particles, then full.
+- Phase 2, without emitters: opaque, then foliage.
 
-Particle deltas cross the two phases, so treat them as indicative. Build `b6` (`runs/g6/*-tp1.json`).
+Particle deltas cross the two phases, so treat them as indicative. A functional lease: other units' compilers ran during it.
 
-| Path | Opaque | + foliage (18 cards, 139k triangles) | + particles (448) | + glass (1 pane) | TP1 total |
+| Path | Opaque | + foliage (18 cards, 139k triangles) | + particles (448) | + glass (1 pane, about a quarter of the frame) | TP1 total |
 |---|---:|---:|---:|---:|---:|
-| RT traced, Interactive, TR1 | 1.511 ms | 1.406 (−0.11, noise) | 2.054 (+0.65) | 2.220 (+0.17) | +0.71 |
-| Non-RT visibility buffer, Virtual, TR1 | 3.178 | 3.381 (+0.20) | 3.468 (+0.09) | 3.631 (+0.16) | +0.45 |
-| RT raster, Exact (RT default) | 16.869 | 17.262 (+0.39) | 17.592 (+0.33) | 18.119 (+0.53) | +1.25 |
+| RT traced, Interactive | 3.592 ms | 3.323 (−0.27, noise) | 3.822 (+0.50) | 4.838 (**+1.02**) | +1.25 |
+| Non-RT visibility buffer, Virtual | 2.970 | 3.145 (+0.18) | 3.584 (+0.44) | 3.802 (+0.22) | +0.83 |
+| RT raster, Exact (RT default) | 16.118 | 16.576 (+0.46) | 17.782 (+1.21) | 17.705 (−0.08, noise) | +1.59 |
 
 What the costs are:
-- The particle increment includes the pass's fixed work: the opaque-depth kernel, and the shadow map's key check (the map rendered twice per process: once for the probe, once for the scene).
-- The glass increment is the HDR copy plus the pane's fragments.
+- The particle increment includes the pass's fixed work: the opaque-depth kernel, and the shadow map's key check (the map rendered twice per process).
+- The glass increment is one HDR copy plus the pane's fragments: the program, cache lookups, the sun's visibility and AT1's two `atmosphere_surface` calls.
+
+**RT glass, +1.0 ms, unprofiled.** The figure repeats in `runs/g10`. Before G2b and AT1 became defaults, the same pane cost +0.17 ms on RT (`runs/g6`, main `ae95d3a`). Suspects (I):
+- radiance-cache lookups at glass points that hold no cells (probe and parent rounds on every fragment);
+- the per-fragment hardware sun ray.
+
+The first g10 run interleaved 16-frame blocks. With the cache on by default, each change of draw set relit it, which inflated that run's phase 2 on RT (opaque 7.31 ms). Hence the 48-frame settle above.
+
+Earlier figures, at main `ae95d3a` with the cache and AT1 off (`runs/g6`): TP1 totals +0.71 ms on RT traced, +0.45 on non-RT and +1.25 on RT raster. Glass alone was +0.16 to +0.53.
 
 **Unwelded cutouts were expensive on non-RT.** Before welding (`runs/g4`), the same foliage cost **+6.0 ms** on non-RT (1.16 → 7.16 ms), against +0.08 ms on RT traced. That mesh had per-cell vertices: 16,028 vertices, with 802 ambiguous and 486 degenerate half-edges. Welding brought it to +0.20 ms (I: the visibility buffer's exact receiver repair treats every unshared edge as a silhouette).
 
