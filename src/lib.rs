@@ -1,12 +1,19 @@
-//! Persistent indexed meshes and transform collections with bounded submissions.
-//! Draw order, then ascending instance slot, defines equal-depth winners. Windowing belongs to the caller.
-//! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
+//! Renderlab: a Rust/wgpu renderer with first-class hardware-RT and non-RT paths.
+//!
+//! Games build against [`engine`]: one owned [`engine::Engine`] with typed resource and
+//! object handles, coarse settings, and blocking-only-for-backpressure frames
+//! (docs/api.md). The crate root is the low-level renderer that the engine wraps:
+//! persistent indexed meshes and transform collections with bounded submissions. Draw
+//! order, then ascending instance slot, defines equal-depth winners. Windowing belongs to
+//! the caller. Use a dedicated device and queue. External queue clones/submissions are
+//! outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 /// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
 pub mod cutout;
+pub mod engine;
 mod environment;
 // DC1: owned projected decals and the programmable surface-input API.
 mod decal;
