@@ -58,6 +58,20 @@ fn tp1_modules_validate() {
         "shadow",
         &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
     );
+    validate(
+        "TP2 coloured shadow",
+        &transmission_shadow::draw_source(SOURCE),
+    );
+    validate("TP2 glass AA", section("TP_AA_SEED"));
+    let head = primary_ray_gpu::transparent_reflection_head(SOURCE).unwrap();
+    validate(
+        "TP2 R1 glass reflection",
+        &reflection::source(&head, crate::STANDARD_PROGRAM, false),
+    );
+    validate(
+        "TP2 glass reflecting a toon program",
+        &reflection::source(&head, toon, true),
+    );
     // The standard program declares the hook; toon blends by coverage.
     assert!(crate::program::declares_transmittance(
         crate::STANDARD_PROGRAM
@@ -938,7 +952,7 @@ fn gpu_tp1_scene() {
         save(&mut r, "full-pan40");
     }
     log["stats"] = serde_json::json!(format!("{:?}", r.transparency_stats()));
-    if sections.contains("timing") {
+    if sections.contains("timing") || sections.contains("glassprofile") {
         // Two phases of 8 interleaved 48-frame blocks, keeping each block's last 16 frames:
         // a changed draw set relights the radiance cache, which goes idle after 16 still
         // frames, so kept frames time TP1, not relighting. With the warmed emitters:
@@ -983,12 +997,23 @@ fn gpu_tp1_scene() {
             }
             rows.map(|mut v| serde_json::json!({"median_ms": median(&mut v), "frames": v.len()}))
         };
-        let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
-        drop((fire_emitter, smoke_emitter));
-        let [opaque, foliage_only] = phase(&mut r, &mut asset, [0, 1]);
-        log["timing"] = serde_json::json!({"opaque": opaque, "foliage": foliage_only,
-            "foliage_particles": particles, "full": full,
-            "note": "GPU render span (first receiver pass to present end) medians over the last 16 frames of 8 interleaved 48-frame blocks"});
+        if sections.contains("glassprofile") {
+            for variant in ["baseline", "open", "map", "openmap", "openmapnofog"] {
+                r.transparency.profile = Some(variant.into());
+                let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
+                eprintln!("TP2 profile {variant}: particles {particles}, full {full}");
+                log["profile"][variant] =
+                    serde_json::json!({"foliage_particles":particles,"full":full});
+            }
+            drop((fire_emitter, smoke_emitter));
+        } else {
+            let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
+            drop((fire_emitter, smoke_emitter));
+            let [opaque, foliage_only] = phase(&mut r, &mut asset, [0, 1]);
+            log["timing"] = serde_json::json!({"opaque": opaque, "foliage": foliage_only,
+                "foliage_particles": particles, "full": full,
+                "note": "GPU render span (first receiver pass to present end) medians over the last 16 frames of 8 interleaved 48-frame blocks"});
+        }
     } else {
         drop((fire_emitter, smoke_emitter));
     }
@@ -997,4 +1022,170 @@ fn gpu_tp1_scene() {
         serde_json::to_string_pretty(&log).unwrap(),
     )
     .unwrap();
+}
+
+/// A small sunlit ground, tinted pane and emissive target in its reflection. The
+/// quarry's clear pane is subtle; this fixture makes the shadow/reflection visible.
+#[test]
+#[ignore = "GPU; n8 lease; TP1_PATH and TP1_OUT"]
+fn gpu_tp2_fixture() {
+    let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
+    let out = PathBuf::from(env("RENDERLAB_TP1_OUT").unwrap());
+    std::fs::create_dir_all(&out).unwrap();
+    let rt = path != "nonrt";
+    let (device, queue) = device(rt);
+    let mut r = if rt {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            HardwareShadowOptions::default(),
+            SOURCE,
+        )
+        .unwrap()
+    } else {
+        Renderer::new_with_options(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            SOURCE,
+        )
+        .unwrap()
+    };
+    if rt {
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        r.set_soft_shadows(SoftShadows::Interactive);
+    }
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(0.25, 0.5, -1.0),
+                lux: [20000.; 3],
+            }],
+            environment: [80.; 3],
+            exposure_stops: -12.0,
+        },
+        &Shadows {
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![30.],
+            }],
+            directional_disk_angle: 0.01,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    r.set_atmosphere(crate::Atmosphere::off()).unwrap();
+    let (width, height) = (768, 512);
+    let target = r.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("TP2 fixture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let floor_vertices = [
+        vertex([-6., -5., 0.], [0., 0., 1.], [0., 0.]),
+        vertex([6., -5., 0.], [0., 0., 1.], [1., 0.]),
+        vertex([6., 7., 0.], [0., 0., 1.], [1., 1.]),
+        vertex([-6., 7., 0.], [0., 0., 1.], [0., 1.]),
+    ];
+    let floor_mesh = upload_mesh(&mut r, &floor_vertices, &[0, 1, 2, 0, 2, 3]);
+    let (vertices, indices) = pane(3.4, 2.6, 1);
+    let pane_mesh = upload_mesh(&mut r, &vertices, &indices);
+    let source=crate::STANDARD_PROGRAM.replace("return exposed;","return exposed+select(vec3<f32>(0.0),vec3<f32>(5.0,0.05,0.02),input.material.base_color.r>0.78);");
+    let program = r
+        .try_create_program(&crate::ProgramDescriptor {
+            label: "TP2 emissive target",
+            source: &source,
+        })
+        .unwrap();
+    let ground = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.75, 0.75, 0.75, 1.],
+            double_sided: true,
+            roughness: 0.7,
+            program: Some(&program),
+            ..Default::default()
+        },
+    );
+    let glass = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.35, 0.85, 0.5, 1.],
+            double_sided: true,
+            thin: true,
+            roughness: 0.015,
+            transparency: Some(crate::Transparency {
+                opacity: 0.08,
+                ior: 1.5,
+                thickness: 0.02,
+            }),
+            ..Default::default()
+        },
+    );
+    let red = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.8, 0.02, 0.01, 1.],
+            double_sided: true,
+            roughness: 0.8,
+            program: Some(&program),
+            ..Default::default()
+        },
+    );
+    let mut floor = upload_instances(&mut r, &[Mat4::IDENTITY]);
+    let mut pane_instance = upload_instances(&mut r, &[Mat4::IDENTITY]);
+    // A small red card in front of the pane faces it, visible in its reflection.
+    let mut target_instance =
+        upload_instances(
+            &mut r,
+            &[Mat4::from_translation(Vec3::new(-1.0, -2.5, 0.8))
+                * Mat4::from_scale(Vec3::splat(0.35))],
+        );
+    let camera = Camera::look_at(
+        Vec3::new(4., -7., 4.),
+        Vec3::new(0., 0.7, 0.8),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.05,
+        50.,
+    )
+    .unwrap();
+    for (name, pane_visible) in [("control", false), ("glass", true)] {
+        for _ in 0..48 {
+            let mut draws = vec![
+                Draw::new(&floor_mesh, &mut floor).with_material(&ground),
+                Draw::new(&pane_mesh, &mut target_instance).with_material(&red),
+            ];
+            if pane_visible {
+                draws.push(Draw::new(&pane_mesh, &mut pane_instance).with_material(&glass));
+            }
+            while r
+                .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("TP2 fixture admission");
+            }
+        }
+        r.test_drain("TP2 fixture capture");
+        write_png(
+            &out.join(format!("{path}-{name}.png")),
+            width,
+            height,
+            &read_texture(&r, &target, 4),
+        );
+    }
 }

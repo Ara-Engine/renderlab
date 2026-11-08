@@ -55,7 +55,7 @@ mod gi_cache;
 pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
 #[path = "transparency_gpu.rs"]
-mod transparency_gpu;
+pub(crate) mod transparency_gpu;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -760,7 +760,8 @@ impl Renderer {
         if device_limits.max_texture_array_layers < 6
             || device_limits.max_bind_groups < 4
             || device_limits.max_storage_buffers_per_shader_stage < 2
-            || device_limits.max_sampled_textures_per_shader_stage < 8
+            // TP2 adds one sampled map to the complete lighting/material ABI (15).
+            || device_limits.max_sampled_textures_per_shader_stage < 15
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
         {
             return Err(Error::InvalidInput(
@@ -2928,6 +2929,8 @@ impl Renderer {
             ));
             // AT1: the camera volume and uniform the lighting group binds.
             self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
+            // TP2: publish the coloured sun map before binding the frame's lighting.
+            self.prepare_transmission(transparent)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
         cpu.upload += start.elapsed() - cpu.shadow_upload;
@@ -3110,6 +3113,10 @@ impl Renderer {
             cpu.shadow_encode = shadow_start.elapsed();
         }
         // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
+        if lit {
+            // TP2: all opaque paths and GI shading read this independent caster map.
+            self.encode_transmission(&mut encoder, transparent);
+        }
         if lit && !virtual_frame {
             self.encode_atmosphere(&mut encoder);
         }
