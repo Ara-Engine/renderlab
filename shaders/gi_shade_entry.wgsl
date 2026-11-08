@@ -152,11 +152,15 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     albedo=select(vec3<f32>(0.0),albedo*(6.283185307179586/f32(GS_DIRECTIONS)),albedo>=vec3<f32>(0.0));
     albedo=min(albedo,vec3<f32>(1.0));
     var incident=gi_sky_scale(gi_cell_sky_irradiance(hot,nc))+gi_cell_bounce_irradiance(hot,nc);
-    let bits=gi_word(cold+GI_C_LIGHTS);
-    for(var i=0u;i<min(light_count(),32u);i+=1u) {
-        if (bits&(1u<<i))==0u { continue; }
-        let light=light_sample(i,input);
-        incident+=light.intensity*(light.attenuation*max(dot(nc,light.direction),0.0));
+    // LC2 light-list plumbing only: preserve G2c's hit shading and sum all light words.
+    for(var first=0u;first<light_count();first+=32u) {
+        var bits=gi_word(cold+GI_C_LIGHTS+(first>>5u));
+        while bits!=0u {
+            let i=first+firstTrailingBit(bits);
+            bits&=bits-1u;
+            let light=light_sample(i,input);
+            incident+=light.intensity*(light.attenuation*max(dot(nc,light.direction),0.0));
+        }
     }
     var out=rl_emission(s,input)+albedo*incident*(1.0/PI);
     // Finite and nonnegative, as rl_finite but without the HDR store's 16-bit ceiling.
@@ -169,5 +173,11 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=gi_shade_work[queue+i];
         gi_shade_out[slot]=gs_shade(slot);
+        // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose
+        // cell still has gathers scheduled is marked as changing (w 0.75), so gathers that read
+        // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
+        // dispatches agree whichever stored the value.
+        let gs_out=gi_shade_out[slot];
+        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
     }
 }

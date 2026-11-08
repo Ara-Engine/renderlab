@@ -93,13 +93,68 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
     let scene = ["hardware_scene", "fresh_scene"]
         .into_iter()
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
-    match scene.filter(|_| lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed))
-    {
+    let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
+    match scene.filter(|_| traced) {
         Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+        // M7-R1n: non-RT heads that declare the software geometry trace it instead.
+        None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
+            (software_reflection_api(), true)
+        }
         None => (REFLECTION_STUB.to_owned(), false),
     }
 }
 // ---- end of M7-R1 reflections ----
+
+// ---- MQ2 view dependence (docs/m7-mq2.md) ----
+/// Programs may declare `fn view_dependence(s: Surface, input: SurfaceInput) ->
+/// ViewDependence`: the share (0-1) of `shade`'s output that moves with the view direction
+/// like a GGX reflection of `alpha` (any style declares its own; a view-independent style
+/// declares nothing). TR1 shortens such pixels' history while their view direction turns,
+/// so reflections do not trail across their surfaces. The struct is composed on every stage
+/// of a declaring program; only traced shading entries call the hook.
+pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
+const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
+/// The traced entry's hint for programs that declare nothing: view-independent.
+const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 { return 1.0; }\n";
+// ---- end of MQ2 view dependence ----
+
+// ---- M7-R1n software reflections (docs/m7-r1n.md) ----
+/// The non-RT shading heads' software reflection geometry (src/reflection_software.rs).
+pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
+    "@group(0) @binding(36) var<storage,read> rl_geometry:array<u32>;\n";
+const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
+/// R1's two ray queries and their software replacements: the hit's light visibility, and
+/// the reflection ray itself, which yields the same hit record. The queries' declarations
+/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed.
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 2] = [
+    (
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
+        "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
+    ),
+    (
+        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.kind!=0u {\n            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);\n",
+        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.x!=0u {\n            let h=rl_hit_input(hit,origin,d,width,spread,pixel);\n",
+    ),
+];
+/// R1's ray-query declaration line.
+const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
+/// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
+/// reconstruction, decals and program shading, with no ray queries.
+fn software_reflection_api() -> String {
+    let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    assert!(
+        api.contains(SOFTWARE_REFLECTION_QUERY),
+        "R1 reflection seam moved"
+    );
+    api = api.replace(SOFTWARE_REFLECTION_QUERY, "");
+    for (from, to) in SOFTWARE_REFLECTION_SEAMS {
+        assert_eq!(api.matches(from).count(), 1, "R1 reflection seam moved");
+        api = api.replacen(from, to, 1);
+    }
+    assert!(!api.contains("RL_SCENE") && !api.contains("ray_query"));
+    api
+}
+// ---- end of M7-R1n software reflections ----
 
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
@@ -441,8 +496,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             _ => "fn rl_indirect_open() {}\n",
         });
     }
+    let view = declares(program, "fn", "view_dependence");
+    let view_api = if view { VIEW_API } else { "" };
+    // TP2: light_sample filters incident sun RGB through transparent caster layers.
+    let transmission = super::renderer::transparency_gpu::transmission_shadow::api_source();
     let mut source = format!(
-        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{transmission}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}{view_api}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
@@ -457,6 +516,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     source.push_str(program);
     let program_range = start..source.len();
     source.push_str("\n// ---- end of program ----\n");
+    // MQ2: the traced entry stores the program's view dependence for TR1.
+    if matches!(stage, Stage::Traced | Stage::TracedStreamed) {
+        source.push_str(if view { VIEW_HINT } else { VIEW_STUB });
+    }
     if stage == Stage::Cell {
         source.push_str(&reflection_wrappers(program));
         if head.contains("primary_decode(") {
@@ -480,13 +543,14 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
-const LIST_HIT_PARAMETERS_SEAM: &str = "            rl_load_parameters(h.batch);\n";
+// TP2 integration: match the call independently of LF/CRLF checkout endings.
+const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
 /// In a mixed frame a reflection hit on another program's draw is shaded by this module's
 /// program with the hit's material inputs and the receiver's own parameter block: the
 /// recorded fallback (docs/m7-gaps.md, Programs), since another program's code is not in
 /// this module.
 const LIST_HIT_PARAMETERS: &str =
-    "            rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));\n";
+    "rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));";
 
 /// `compose` for the traced stages plus the tile-list entry of mixed-program frames. The
 /// single-program modules are composed by `compose` alone, so their text (and code) is
@@ -583,6 +647,20 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 /// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
+}
+// TP2: the forward glass pass supplies the declared lobe to R1 separately.
+pub(crate) fn declares_reflection(program: &str) -> bool {
+    declares(program, "fn", "reflection_lobe") && tokens(program).contains(&"specular_incident")
+}
+// TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
+// program, even when that program never asks for reflections of its own.
+pub(crate) fn glass_hit_program(program: &str) -> String {
+    let mut source = program.to_owned();
+    if !declares(program, "fn", "reflection_lobe") {
+        source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
+    }
+    source.push_str("\nfn rl_glass_requires_incident(input:SurfaceInput)->vec4<f32> {return specular_incident(input);}\n");
+    source
 }
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")

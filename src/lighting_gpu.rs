@@ -1,5 +1,7 @@
+// PC1: pass the shared pipeline compiler to cluster kernel creation.
 use super::*;
 use crate::lighting::{DFG, DFG_SIZE, PackedLighting, dirty_span};
+use crate::pipeline_compilation::PipelineDevice;
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
@@ -10,6 +12,8 @@ pub(super) struct LightBuffer {
     atmosphere_generation: u64,
     // DC1: rebind only when an admitted frame publishes a new decal table.
     decal_generation: u64,
+    // TP2: transparent sun-map allocation changes require a new lighting group.
+    transmission_generation: u64,
     _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
@@ -29,6 +33,8 @@ pub(super) struct Hdr {
     pub lighting_hash: [u8; 32],
 }
 pub(super) struct LightingGpu {
+    // TP2 owns the coloured map; the lighting group exposes it to every program.
+    pub transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow,
     pub(super) decals: super::decal_gpu::DecalState,
     pub bindings: Owned<wgpu::BindGroupLayout>,
     pub layout: Owned<wgpu::PipelineLayout>,
@@ -59,7 +65,7 @@ pub(super) struct LightingGpu {
 }
 impl LightingGpu {
     pub fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         queue: &wgpu::Queue,
         ledger: &Ledger,
         groups: [&wgpu::BindGroupLayout; 3],
@@ -95,7 +101,9 @@ impl LightingGpu {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(64),
+                            min_binding_size: wgpu::BufferSize::new(
+                                crate::lighting::LIGHT_BYTES as u64,
+                            ),
                         },
                         count: None,
                     },
@@ -205,7 +213,10 @@ impl LightingGpu {
                         },
                         count: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(super::transparency_gpu::transmission_shadow::binding_entries())
+                .collect::<Vec<_>>(),
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -283,6 +294,9 @@ impl LightingGpu {
         let limits = device.limits();
         let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
+            transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(
+                device, ledger,
+            ),
             clusters,
             decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
@@ -308,7 +322,7 @@ impl LightingGpu {
             max: (limits
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size)
-                / 64)
+                / crate::lighting::LIGHT_BYTES as u64)
                 .min(u64::from(u32::MAX)) as u32,
             generation: 0,
             target_generation: 0,
@@ -469,7 +483,7 @@ impl Renderer {
             .decals
             .publish(&self.device, &self.ledger, self.submissions, uploads);
         let records = scaled.as_ref().unwrap_or(&state.pending.records);
-        let needed = records.len().max(64) as u64;
+        let needed = records.len().max(crate::lighting::LIGHT_BYTES) as u64;
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
@@ -478,6 +492,7 @@ impl Renderer {
                 || active.indirect_generation != self.gi.generation
                 || active.atmosphere_generation != self.atmosphere.generation
                 || active.decal_generation != state.decals.generation
+                || active.transmission_generation != state.transmission.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -495,6 +510,17 @@ impl Renderer {
                         label: Some(label),
                         layout: &state.bindings,
                         entries: &[
+                            // TP2: shared sun transmission, independent of opaque visibility.
+                            wgpu::BindGroupEntry {
+                                binding: 26,
+                                resource: state.transmission.uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 27,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &state.transmission.map.view,
+                                ),
+                            },
                             wgpu::BindGroupEntry {
                                 binding: 21,
                                 resource: state.decals.active.buffer.as_entire_binding(),
@@ -621,6 +647,7 @@ impl Renderer {
                 indirect_generation: self.gi.generation,
                 atmosphere_generation: self.atmosphere.generation,
                 decal_generation: state.decals.generation,
+                transmission_generation: state.transmission.generation,
                 _environment: self.environment.selected.clone(),
                 buffer,
                 bind,

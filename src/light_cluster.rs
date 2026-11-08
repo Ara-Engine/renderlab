@@ -10,10 +10,10 @@
 //! cutoff); directional and unlimited-range lights meet every cluster.
 //!
 //! Each frame the CPU also ranks the local lights by estimated contribution and shadows the
-//! first `LocalShadows::count`: by one inline ray per pixel and light where the frame's
-//! shading module has a bound acceleration structure, otherwise from pooled cube and spot
-//! maps with 3x3 PCF, redrawn only when the light or a caster changes. Lights beyond the
-//! count are unshadowed.
+//! first `LocalShadows::count`: by four disk rays per pixel and light (one at radius zero)
+//! where the shading module binds an acceleration structure, otherwise from pooled cube
+//! and spot maps with blocker-search soft PCF (3x3 PCF at radius zero). Maps redraw only
+//! when the light placement or a caster changes. Lights beyond the count are unshadowed.
 use crate::{Camera, Error, Light, Vec3};
 
 pub(crate) const TILES_X: u32 = 32;
@@ -103,7 +103,8 @@ const LC_STRIDE:u32={STRIDE}u;
 const LC_ROW:u32={ROW}u;
 const LC_SLOTS:u32={MAX_SLOTS}u;
 // view: world to view (forward -Z). proj: x and y projection scales, near (metres), slices
-// per log2 unit. info: x lights, y clustered. far.x: far plane. shadows: pooled map layers.
+// per log2 unit. info: x lights, y clustered, z TR1 sample. far: x camera far, y shadow near.
+// shadows: pooled map layers.
 struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32>, shadows:array<mat4x4<f32>,{}> }};
 ",
         MAX_SLOTS * 6
@@ -111,20 +112,8 @@ struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32
 }
 pub(crate) const KERNEL: &str = include_str!("../shaders/light_cluster.wgsl");
 const API: &str = include_str!("../shaders/light_cluster_api.wgsl");
-/// Local-light visibility by one inline ray, for heads that bind `LC_SCENE`.
-const RAY: &str = "// LC1: a shadowed local light's visibility by one inline ray toward its position.
-fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
-    let origin=shadow_origin(receiver,l);
-    let delta=light.position_range.xyz-origin;
-    let distance=length(delta);
-    let tmax=distance-max(1e-4*distance,1e-3);
-    if !(tmax>receiver.epsilon) { return 1.0; }
-    var lc_query:ray_query;
-    rayQueryInitialize(&lc_query,LC_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance));
-    while rayQueryProceed(&lc_query) {}
-    return select(0.0,1.0,rayQueryGetCommittedIntersection(&lc_query).kind==0u);
-}
-";
+/// Local-light visibility: hard at radius zero, four disk rays otherwise (LC2).
+const RAY: &str = include_str!("../shaders/local_light_ray.wgsl");
 const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return rl_local_shadow_map(light,receiver,l); }\n";
 
 /// The acceleration structure a composed head binds for shading, if any: the hardware
@@ -160,6 +149,7 @@ fn local(light: &Light) -> Option<Local> {
             position,
             candela,
             range,
+            ..
         } => Some((position, candela, range, None)),
         Light::Spot {
             position,

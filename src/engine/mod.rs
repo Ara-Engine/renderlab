@@ -16,22 +16,30 @@ mod ids;
 mod settings;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
-pub use ids::{EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind};
+pub use ids::{
+    EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
+};
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
 
+pub use crate::animation::{AnimationPose, ClipPlayer};
 pub use crate::asset::{
-    Sampler, TangentStream, Texture as TextureData, environment::PreparedEnvironment,
+    Primitive, Sampler, TangentStream, Texture as TextureData,
+    environment::PreparedEnvironment,
+    skin::{Influence, SkinnedAsset},
 };
+pub use crate::cutout::{AlphaMask, CutoutMesh, cutout};
 pub use crate::{
-    AtmosphereMedium, Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
-    Error, Events, FrameId, FrameReport, HeightFog, Light, Limits, Mat4, MeshData, ReloadError,
-    ReloadReport, RenderScale, Renderer, Value, Vec3, Vertex, VolumetricFog,
+    AtmosphereMedium, Camera, ColourLut, Decal, DecalBlend, DecalTexture, DecalTextureKind,
+    DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, FrameId, FrameReport, HeightFog,
+    Light, Limits, LocalShadows, MAX_PARTICLES, Mat4, MeshData, PostSettings, ReflectionSettings,
+    ReloadError, ReloadReport, RenderScale, Renderer, Tonemapper, Transparency, Value, Vec3,
+    Vertex, VolumetricFog,
 };
 
 use crate::{
-    EnvironmentMap, EnvironmentParameters, HardwareShadowOptions, Instances, Material,
+    Emitter, EnvironmentMap, EnvironmentParameters, HardwareShadowOptions, Instances, Material,
     MaterialDescriptor, Mesh, PrimaryVisibility, Program, ProgramDescriptor, RendererOptions,
-    SampleCount, Texture, TextureBinding, ViewMode,
+    SampleCount, SkinnedMeshInstance, Texture, TextureBinding, ViewMode,
 };
 use ids::Slots;
 use std::{
@@ -66,8 +74,9 @@ pub struct EngineDescriptor {
     /// Anisotropic filtering of all-linear mipmapped textures, 1 (off) to 16. Fixed for
     /// the engine's lifetime.
     pub texture_anisotropy: u16,
-    /// Directory for the persistent program pipeline cache, so a relaunch or a reverted
-    /// shader edit is a cache hit. None keeps the cache in memory only.
+    /// Directory for the persistent shared pipeline cache, so a relaunch or a reverted
+    /// shader edit can reuse driver compilation. Includes first-use engine kernels.
+    /// None retains only the in-memory program cache; cache I/O failures fall back to empty.
     pub pipeline_cache: Option<PathBuf>,
 }
 impl Default for EngineDescriptor {
@@ -105,6 +114,14 @@ pub struct MaterialDesc<'a> {
     /// Both faces shade and cast. The default is true: both paths' shadowed primaries
     /// currently require double-sided materials.
     pub double_sided: bool,
+    /// Shadow rays may leave either side toward the light, as for leaves and cards
+    /// (cutout foliage). False keeps opaque receivers on the camera-viewed side.
+    pub thin: bool,
+    /// Glass and other see-through surfaces (TP1): drawn in a forward pass after the
+    /// opaque frame, refracting and tinting what is behind them. Their program shades
+    /// them; the standard program declares the `transmittance` hook glass needs. They
+    /// cast no shadows at this revision. None is opaque.
+    pub transparency: Option<Transparency>,
     /// The shading program; None is the engine's standard photoreal program.
     pub program: Option<ProgramId>,
     /// Values for the program's `struct Parameters`, checked by member name and type.
@@ -122,6 +139,8 @@ impl Default for MaterialDesc<'_> {
             normal_texture: None,
             normal_scale: 1.0,
             double_sided: true,
+            thin: false,
+            transparency: None,
             program: None,
             parameters: &[],
         }
@@ -146,6 +165,17 @@ pub struct AssetHandles {
     pub objects: Vec<Vec<ObjectId>>,
 }
 
+/// The handles [`Engine::add_skinned_asset`] created.
+#[derive(Clone, Debug, Default)]
+pub struct SkinnedHandles {
+    pub textures: Vec<TextureId>,
+    pub materials: Vec<MaterialId>,
+    /// Per `SkinnedAsset::bindings` entry, its primitives as (posable mesh, material).
+    /// Pose a binding with `AnimationPose::joint_palette(asset, binding)` and
+    /// [`Engine::set_joint_palette`] on each of its meshes.
+    pub bindings: Vec<Vec<(MeshId, MaterialId)>>,
+}
+
 /// An RGBA8 readback of the engine's output ([`Engine::capture`]).
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -153,6 +183,20 @@ pub struct Image {
     pub height: u32,
     /// Tightly packed rows, top row first, in the output format's encoding.
     pub rgba8: Vec<u8>,
+}
+
+/// Static geometry, or one independently posed skinned primitive (SK1).
+enum MeshEntry {
+    Static(Mesh),
+    Skinned(SkinnedMeshInstance),
+}
+impl MeshEntry {
+    fn mesh(&self) -> &Mesh {
+        match self {
+            Self::Static(mesh) => mesh,
+            Self::Skinned(skinned) => skinned.mesh(),
+        }
+    }
 }
 
 struct MaterialEntry {
@@ -181,12 +225,13 @@ pub struct Engine {
     format: wgpu::TextureFormat,
     limits: Limits,
     output: Option<wgpu::Texture>,
-    meshes: Slots<kind::Mesh, Mesh>,
+    meshes: Slots<kind::Mesh, MeshEntry>,
     textures: Slots<kind::Texture, Texture>,
     programs: Slots<kind::Program, Program>,
     materials: Slots<kind::Material, MaterialEntry>,
     environments: Slots<kind::Environment, EnvironmentMap>,
     objects: Slots<kind::Object, ObjectEntry>,
+    emitters: Slots<kind::Emitter, Emitter>,
     batches: Slots<kind::Batch, Batch>,
     batch_keys: HashMap<(MeshId, MaterialId), Id<kind::Batch>>,
     standard: ProgramId,
@@ -231,33 +276,29 @@ impl Engine {
             anisotropy_clamp: descriptor.texture_anisotropy,
         };
         let format = descriptor.output_format;
-        let mut renderer = match path {
-            RenderPath::HardwareRt => {
-                let mut r = Renderer::new_with_hardware_shadows(
-                    device,
-                    queue,
-                    format,
-                    descriptor.limits,
-                    options,
-                    HardwareShadowOptions {
-                        max_estimated_bytes: Some(8 << 30),
-                    },
-                    PRELUDE,
-                )?;
-                r.set_primary_visibility(PrimaryVisibility::Traced)?;
-                r
-            }
-            // A device with the visibility-buffer and Virtual-shadow features selects
-            // both at creation.
-            RenderPath::NonRt => Renderer::new_with_options(
-                device,
-                queue,
-                format,
-                descriptor.limits,
-                options,
-                PRELUDE,
-            )?,
-        };
+        // PC1: load the shared driver cache before any renderer pipeline is built.
+        let info = adapter.get_info();
+        let device = crate::pipeline_compilation::PipelineDevice::new(
+            device,
+            descriptor
+                .pipeline_cache
+                .as_deref()
+                .map(|directory| (directory, &info)),
+        );
+        let mut renderer = crate::Renderer::new_configured(
+            device,
+            queue,
+            format,
+            descriptor.limits,
+            options,
+            (path == RenderPath::HardwareRt).then_some(HardwareShadowOptions {
+                max_estimated_bytes: Some(8 << 30),
+            }),
+            PRELUDE,
+        )?;
+        if path == RenderPath::HardwareRt {
+            renderer.set_primary_visibility(PrimaryVisibility::Traced)?;
+        }
         let expected = match path {
             RenderPath::HardwareRt => PrimaryVisibility::Traced,
             RenderPath::NonRt => PrimaryVisibility::VisibilityBuffer,
@@ -266,12 +307,6 @@ impl Engine {
             return Err(Error::InvalidInput(
                 "renderer did not select the path's primary visibility",
             ));
-        }
-        let info = adapter.get_info();
-        if let Some(directory) = &descriptor.pipeline_cache {
-            renderer
-                .set_program_cache_directory(directory, &info)
-                .map_err(|_| Error::InvalidInput("pipeline cache directory is unreadable"))?;
         }
         let mut programs = Slots::new("unknown or removed program");
         let standard = programs.insert(renderer.standard_program().clone());
@@ -288,6 +323,7 @@ impl Engine {
             materials: Slots::new("unknown or removed material"),
             environments: Slots::new("unknown or removed environment"),
             objects: Slots::new("unknown or removed object"),
+            emitters: Slots::new("unknown or removed emitter"),
             batches: Slots::new("internal: unknown batch"),
             batch_keys: HashMap::new(),
             standard,
@@ -308,6 +344,11 @@ impl Engine {
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
     }
+    /// Drain opt-in CPU compilation timings (`RENDERLAB_STARTUP_PROFILE=1`).
+    pub fn take_compilation_timings(&self) -> Vec<crate::pipeline_compilation::CompilationTiming> {
+        self.renderer.take_compilation_timings()
+    }
+
     /// The engine's device, for creating surfaces' configurations and the game's own
     /// resources. Submit nothing to its queue that the engine's frames depend on.
     pub fn device(&self) -> &wgpu::Device {
@@ -357,7 +398,7 @@ impl Engine {
             self.renderer
                 .set_indirect_geometry(&mesh, &positions, indices)?;
         }
-        Ok(self.meshes.insert(mesh))
+        Ok(self.meshes.insert(MeshEntry::Static(mesh)))
     }
     /// Releases the mesh once no object uses it.
     pub fn remove_mesh(&mut self, mesh: MeshId) -> Result<(), Error> {
@@ -444,11 +485,10 @@ impl Engine {
             normal_texture: binding(desc.normal_texture)?,
             normal_scale: desc.normal_scale,
             double_sided: desc.double_sided,
-            thin: false,
+            thin: desc.thin,
             program: Some(program),
             parameters: desc.parameters,
-            // TP1: opaque until API1 wires its planned transmission fields (docs/api.md).
-            transparency: None,
+            transparency: desc.transparency,
         };
         let deadline = Instant::now() + ADMISSION;
         let material = loop {
@@ -513,37 +553,9 @@ impl Engine {
         for texture in std::mem::take(&mut asset.textures) {
             handles.textures.push(self.create_texture(texture)?);
         }
-        let texture = |t: u32, sampler| -> Result<TextureRef, Error> {
-            let texture = *handles.textures.get(t as usize).ok_or(Error::InvalidInput(
-                "asset material names a missing texture",
-            ))?;
-            Ok(TextureRef { texture, sampler })
-        };
-        let mut materials = Vec::with_capacity(asset.materials.len());
         for m in &asset.materials {
-            materials.push(MaterialDesc {
-                base_color: m.base_color,
-                metallic: m.metallic,
-                roughness: m.roughness,
-                base_color_texture: m
-                    .base_color_texture
-                    .map(|t| texture(t.texture, t.sampler))
-                    .transpose()?,
-                metallic_roughness_texture: m
-                    .metallic_roughness_texture
-                    .map(|t| texture(t.texture, t.sampler))
-                    .transpose()?,
-                normal_texture: m
-                    .normal_texture
-                    .map(|t| texture(t.texture, t.sampler))
-                    .transpose()?,
-                normal_scale: m.normal_texture.map_or(1.0, |t| t.scale),
-                double_sided: m.double_sided,
-                ..Default::default()
-            });
-        }
-        for desc in &materials {
-            handles.materials.push(self.create_material(desc)?);
+            let desc = asset_material(m, &handles.textures)?;
+            handles.materials.push(self.create_material(&desc)?);
         }
         // Mesh preparation (receiver adjacency) runs for every primitive at once.
         let mut shapes = Vec::new();
@@ -580,7 +592,7 @@ impl Engine {
                 self.renderer
                     .set_indirect_geometry(&mesh, &positions, &indices)?;
             }
-            flat.push((self.meshes.insert(mesh), material));
+            flat.push((self.meshes.insert(MeshEntry::Static(mesh)), material));
         }
         let mut next = flat.iter();
         for mesh in &asset.meshes {
@@ -610,6 +622,123 @@ impl Engine {
             handles.objects.push(objects);
         }
         Ok(handles)
+    }
+
+    /// Uploads one skinned primitive (SK1) as an independently posed mesh. Objects spawned
+    /// with it share its pose; spawn from another skinned mesh for another pose. Until
+    /// [`set_joint_palette`](Self::set_joint_palette) it holds its bind pose.
+    pub fn create_skinned_mesh(
+        &mut self,
+        primitive: &Primitive,
+        influences: &[Influence],
+        joint_count: u32,
+    ) -> Result<MeshId, Error> {
+        let mesh = self.admit("skinned mesh upload admission timed out", |r| {
+            r.try_upload_skinned_mesh(primitive, influences, joint_count)
+        })?;
+        Ok(self.meshes.insert(MeshEntry::Skinned(mesh)))
+    }
+    /// Poses a skinned mesh with mesh-local joint matrices, uploaded with the next frame:
+    /// `AnimationPose::joint_palette` gives them from a cooked clip (`ClipPlayer`).
+    pub fn set_joint_palette(&mut self, mesh: MeshId, palette: &[Mat4]) -> Result<(), Error> {
+        match self.meshes.get_mut(mesh)? {
+            MeshEntry::Skinned(skinned) => skinned.set_joint_palette(palette),
+            MeshEntry::Static(_) => Err(Error::InvalidInput("mesh is not skinned")),
+        }
+    }
+    /// Uploads a cooked skinned asset (`renderlab_asset::skin::decode`, an RLS file from the
+    /// cooker's skin recipe): its textures, materials (double-sided, as the shadowed paths
+    /// need) and one posable mesh per skinned primitive of each binding. Spawn objects from
+    /// the returned meshes; its static meshes and placements are not added.
+    pub fn add_skinned_asset(&mut self, asset: &SkinnedAsset) -> Result<SkinnedHandles, Error> {
+        let mut handles = SkinnedHandles::default();
+        for texture in &asset.geometry.textures {
+            handles.textures.push(self.create_texture(texture.clone())?);
+        }
+        for m in &asset.geometry.materials {
+            let desc = MaterialDesc {
+                double_sided: true,
+                ..asset_material(m, &handles.textures)?
+            };
+            handles.materials.push(self.create_material(&desc)?);
+        }
+        for binding in &asset.bindings {
+            let missing = Error::InvalidInput("skinned binding names a missing mesh or skin");
+            let joints = asset
+                .skins
+                .get(binding.skin as usize)
+                .ok_or(missing)?
+                .joints
+                .len();
+            let mesh = asset
+                .geometry
+                .meshes
+                .get(binding.mesh as usize)
+                .ok_or(Error::InvalidInput("skinned binding names a missing mesh"))?;
+            let mut parts = Vec::with_capacity(mesh.primitives.len());
+            for (p, primitive) in mesh.primitives.iter().enumerate() {
+                let influences = asset
+                    .influences
+                    .get(binding.mesh as usize)
+                    .and_then(|m| m.get(p))
+                    .and_then(Option::as_ref)
+                    .ok_or(Error::InvalidInput("skinned primitive has no influences"))?;
+                let id = self.create_skinned_mesh(primitive, influences, joints as u32)?;
+                let material = *handles.materials.get(primitive.material as usize).ok_or(
+                    Error::InvalidInput("skinned primitive names a missing material"),
+                )?;
+                parts.push((id, material));
+            }
+            handles.bindings.push(parts);
+        }
+        Ok(handles)
+    }
+
+    // ---- Particles ----
+
+    /// Creates a GPU particle emitter (TP1), simulated and drawn in every frame until
+    /// removed. `sprite` is its optional texture; leave `desc.texture` None.
+    pub fn create_emitter(
+        &mut self,
+        desc: &EmitterDescriptor<'_>,
+        sprite: Option<TextureId>,
+    ) -> Result<EmitterId, Error> {
+        if desc.texture.is_some() {
+            return Err(Error::InvalidInput(
+                "pass an emitter's sprite as a TextureId",
+            ));
+        }
+        let texture = sprite.map(|t| self.textures.get(t)).transpose()?;
+        let emitter = self
+            .renderer
+            .try_create_emitter(&EmitterDescriptor { texture, ..*desc })?;
+        Ok(self.emitters.insert(emitter))
+    }
+    /// Changes a live emitter; its particles continue. Its capacity and whether it has a
+    /// sprite must stay the same.
+    pub fn update_emitter(
+        &mut self,
+        emitter: EmitterId,
+        desc: &EmitterDescriptor<'_>,
+        sprite: Option<TextureId>,
+    ) -> Result<(), Error> {
+        if desc.texture.is_some() {
+            return Err(Error::InvalidInput(
+                "pass an emitter's sprite as a TextureId",
+            ));
+        }
+        let texture = sprite.map(|t| self.textures.get(t)).transpose()?;
+        let handle = self.emitters.get(emitter)?;
+        self.renderer
+            .try_update_emitter(handle, &EmitterDescriptor { texture, ..*desc })
+    }
+    pub fn remove_emitter(&mut self, emitter: EmitterId) -> Result<(), Error> {
+        self.emitters.remove(emitter).map(drop)
+    }
+    /// Particle simulation time per rendered frame, in seconds (default 1/60). Set it to
+    /// the game's frame time; zero freezes particles.
+    pub fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
+        self.renderer.set_particle_step(seconds)
     }
 
     // ---- Objects ----
@@ -712,7 +841,8 @@ impl Engine {
     pub fn sun(&self) -> Option<Sun> {
         self.sun
     }
-    /// Replaces the local lights (point and spot; unshadowed at this revision).
+    /// Replaces the local lights (point and spot). The most important lights shadow
+    /// automatically; `source_radius` sets their penumbra size (zero keeps hard shadows).
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
         let previous = std::mem::replace(&mut self.lights, lights.to_vec());
         self.apply_lighting()
@@ -740,6 +870,11 @@ impl Engine {
     }
     pub fn settings(&self) -> Settings {
         self.settings
+    }
+    /// Sets or clears the post pass's display-linear 3D colour LUT (PP1), applied at
+    /// `Settings::post.lut_strength`.
+    pub fn set_colour_lut(&mut self, lut: Option<ColourLut>) -> Result<(), Error> {
+        self.renderer.set_colour_lut(lut)
     }
     /// Publishes the sun, lights, sky and exposure. Everything is validated before the
     /// renderer changes, so a rejected call leaves the previous lighting in place.
@@ -854,7 +989,7 @@ impl Engine {
         } = self;
         let mut draws = Vec::with_capacity(batches.len());
         for batch in batches.values_mut() {
-            let mesh = meshes.get(batch.mesh)?;
+            let mesh = meshes.get(batch.mesh)?.mesh();
             let material = &materials.get(batch.material)?.material;
             let instances = batch.instances.as_mut().expect("uploaded above");
             draws.push(crate::Draw::new(mesh, instances).with_material(material));
@@ -932,6 +1067,40 @@ impl Engine {
             std::thread::yield_now();
         }
     }
+}
+
+/// A cooked asset material as an engine material description, its textures given by the
+/// asset's texture order.
+fn asset_material(
+    m: &crate::asset::Material,
+    textures: &[TextureId],
+) -> Result<MaterialDesc<'static>, Error> {
+    let texture = |t: u32, sampler| -> Result<TextureRef, Error> {
+        let texture = *textures.get(t as usize).ok_or(Error::InvalidInput(
+            "asset material names a missing texture",
+        ))?;
+        Ok(TextureRef { texture, sampler })
+    };
+    Ok(MaterialDesc {
+        base_color: m.base_color,
+        metallic: m.metallic,
+        roughness: m.roughness,
+        base_color_texture: m
+            .base_color_texture
+            .map(|t| texture(t.texture, t.sampler))
+            .transpose()?,
+        metallic_roughness_texture: m
+            .metallic_roughness_texture
+            .map(|t| texture(t.texture, t.sampler))
+            .transpose()?,
+        normal_texture: m
+            .normal_texture
+            .map(|t| texture(t.texture, t.sampler))
+            .transpose()?,
+        normal_scale: m.normal_texture.map_or(1.0, |t| t.scale),
+        double_sided: m.double_sided,
+        ..Default::default()
+    })
 }
 
 /// Keeps the newest `KEPT_EVENTS` of each kind for `Engine::poll`.

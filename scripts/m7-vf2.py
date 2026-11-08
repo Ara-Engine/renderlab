@@ -83,17 +83,18 @@ def gpu(label):
         time.sleep(.05)
     raise SystemExit("GPU wait deadline reached; no job remains")
 
-def build():
+def build(example=False):
     runner=g.load("m7-g2-run");runner.UNIT=g.OWNER;runner.OUT=g.OUT
     target=g.OUT/"target"
-    command=["cargo","test","-p","renderlab","--lib","--no-run","--release","-j","2","--target-dir",str(target),"--message-format=json"]
-    start=time.monotonic();code=runner.cargo(None,command,"build-"+os.environ.get("VF2_TAG","retained"))
+    label=("game-" if example else "")+os.environ.get("VF2_TAG","retained")
+    command=["cargo",*( ["build","-p","renderlab","--example","game_scene"] if example else ["test","-p","renderlab","--lib","--no-run"] ),"--release","-j","2","--target-dir",str(target),"--message-format=json"]
+    start=time.monotonic();code=runner.cargo(None,command,"build-"+label)
     print("compile seconds",time.monotonic()-start,flush=True)
-    if code:raise SystemExit((g.OUT/("build-"+os.environ.get("VF2_TAG","retained")+".err")).read_text(errors="replace")[-6000:])
-    rows=[json.loads(l) for l in (g.OUT/("build-"+os.environ.get("VF2_TAG","retained")+".out")).read_text().splitlines() if l.startswith("{")]
+    if code:raise SystemExit((g.OUT/("build-"+label+".err")).read_text(errors="replace")[-6000:])
+    rows=[json.loads(l) for l in (g.OUT/("build-"+label+".out")).read_text().splitlines() if l.startswith("{")]
     executable=next(r["executable"] for r in reversed(rows) if r.get("executable"))
     import shutil,hashlib
-    g.BIN.mkdir(parents=True,exist_ok=True);dest=g.BIN/(os.environ.get("VF2_TAG","retained")+".exe");shutil.copy2(executable,dest)
+    g.BIN.mkdir(parents=True,exist_ok=True);dest=g.BIN/(label+".exe");shutil.copy2(executable,dest)
     (dest.with_suffix(".json")).write_text(json.dumps({"sha256":hashlib.sha256(dest.read_bytes()).hexdigest(),"head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"diff":subprocess.check_output(["git","diff"],text=True),"compile_seconds":time.monotonic()-start,"source_sha256":{str(f):hashlib.sha256(f.read_bytes()).hexdigest() for d in ["src","shaders"] for f in (REPO/d).rglob("*") if f.is_file()}}))
 
 
@@ -148,13 +149,19 @@ def batch(label):
             if os.environ.get("VF2_BASELINE_QUARRY")=="1":
                 run("quarry-baseline-"+path,[str(g.BIN/"baseline.exe"),"atmosphere::tests::gpu_at1_quarry","--ignored","--exact","--nocapture"],dict(AT1_QUARRY="E:/renderlab-work/m7-g1c/quarry/manifest.json",AT1_OUT=str(root/("baseline-"+path)),AT1_PATH=path,VF2="1"),minimum=6144)
             run("quarry-"+path,[tests,"atmosphere::tests::gpu_at1_quarry","--ignored","--exact","--nocapture"],dict(AT1_QUARRY="E:/renderlab-work/m7-g1c/quarry/manifest.json",AT1_OUT=str(root/path),AT1_PATH=path,VF2="1"),minimum=6144)
+    if fox:=os.environ.get("VF2_FOX"):
+        example=g.BIN/("game-"+os.environ.get("VF2_TAG","retained")+".exe")
+        example_identity=json.loads(example.with_suffix(".json").read_text())
+        assert hashlib.sha256(example.read_bytes()).hexdigest()==example_identity["sha256"], "staged example changed"
+        (root/"example-identity.json").write_text(json.dumps(example_identity,indent=2))
+        run("fox-rt",[str(example),"--path","rt","--fox",fox,"--volumetric-fog","--frames","48","--every","8","--size","960x540","--out",str(root/"fox-rt"),"--pipeline-cache",str(g.OUT/"pipeline-cache")],dict(WGPU_VALIDATION="1"))
     if durations.get("lib",{}).get("exit",0):raise SystemExit(1)
 
 if __name__=="__main__":
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action",choices=["build","gpu","batch"])
+    p.add_argument("action",choices=["build","example","gpu","batch"])
     p.add_argument("label",nargs="?",default="a")
     a=p.parse_args()
-    if a.action=="build":build()
+    if a.action in ("build","example"):build(a.action=="example")
     elif a.action=="gpu":gpu(a.label)
     else:batch(a.label)

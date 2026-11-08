@@ -73,6 +73,8 @@ fn shader() -> String {
     source.push_str(
         "struct LightSample {index:u32,direction:vec3<f32>,attenuation:f32,intensity:vec3<f32>};\n",
     );
+    // MQ2: the standard program's `view_dependence` hook returns this engine type.
+    source.push_str(crate::program::VIEW_API);
     // LC1: the probe walks every light, unshadowed beyond its own hard_shadow.
     source.push_str("fn rl_light_total()->u32 {return lighting.count;}\nfn rl_light_index(i:u32)->u32 {return i;}\nfn rl_local_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {return 1.0;}\n");
     for name in [
@@ -90,6 +92,8 @@ fn shader() -> String {
         source.push_str(&function(api, name));
         source.push('\n');
     }
+    // TP2: this isolated reference adapter has no transparent casters.
+    source.push_str("fn transparent_sun_transmission(world:vec3<f32>, direction:vec3<f32>)->vec3<f32> { return vec3<f32>(1.0); }\n");
     let standard = crate::STANDARD_PROGRAM
         .replace("Surface", "StdSurface")
         .replace("StdSurfaceInput", "SurfaceInput")

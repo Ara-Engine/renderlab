@@ -31,11 +31,15 @@ mod observe;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;
+// PC1: shared pipeline caching and startup instrumentation.
+pub mod pipeline_compilation;
 mod program;
 pub mod program_watch;
 mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
+mod reflection_software;
+mod reflections;
 mod renderer;
 #[path = "program_vulkan.rs"]
 pub mod shader_compiler;
@@ -67,6 +71,7 @@ pub use primary_ray::{
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
+pub use reflections::ReflectionSettings;
 pub use renderer::skinning::SkinnedMeshInstance;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{

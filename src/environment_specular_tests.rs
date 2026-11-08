@@ -619,6 +619,11 @@ fn gpu_es1_quarry() {
             ..Default::default()
         },
     );
+    // M7-R1n: RENDERLAB_ES1_TR1=0 captures with TR1 off; TR1 (the default since TR1b)
+    // jitters each program's frames differently, so program A/B images need it off.
+    if var("RENDERLAB_ES1_TR1").as_deref() == Some("0") {
+        r.set_reconstruction(crate::Reconstruction::off()).unwrap();
+    }
     let exposure = -14.0;
     r.set_lighting_and_shadows(
         &Lighting {

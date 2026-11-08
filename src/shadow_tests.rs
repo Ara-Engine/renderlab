@@ -109,6 +109,7 @@ fn gpu_shadow_offscreen_local_and_reload() {
                     position: Vec3::new(4., 0., 4.),
                     candela: [3200.; 3],
                     range: None,
+                    source_radius: 0.0,
                 },
                 ShadowRequest::Point {
                     near: 0.001,
@@ -123,6 +124,7 @@ fn gpu_shadow_offscreen_local_and_reload() {
                     range: None,
                     inner: 0.3,
                     outer: 0.6,
+                    source_radius: 0.0,
                 },
                 ShadowRequest::Spot {
                     near: 0.001,
@@ -513,6 +515,7 @@ fn gpu_shadow_planar_receiver_motion() {
                                 range: None,
                                 inner: 0.3,
                                 outer: 0.6,
+                                source_radius: 0.0,
                             },
                             ShadowRequest::Spot {
                                 near: 0.05,
@@ -524,6 +527,7 @@ fn gpu_shadow_planar_receiver_motion() {
                                 position,
                                 candela: [32000.; 3],
                                 range: None,
+                                source_radius: 0.0,
                             },
                             ShadowRequest::Point {
                                 near: 0.05,
@@ -657,6 +661,7 @@ fn gpu_shadow_admission_and_resources() {
                 position: Vec3::ZERO,
                 candela: [100.; 3],
                 range: None,
+                source_radius: 0.0,
             }],
             ..Default::default()
         },

@@ -7,8 +7,8 @@
 use super::{EnvironmentId, RenderPath};
 use crate::{
     Atmosphere, AtmosphereMedium, Error, HeightFog, IndirectSettings, Light, Lighting,
-    Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows, SoftShadows, Vec3,
-    VirtualLookup, VirtualShadowSettings, VolumetricFog,
+    LocalShadows, PostSettings, Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows,
+    SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings, VolumetricFog,
 };
 
 /// The scene's sun: its one shadowed directional light.
@@ -25,6 +25,44 @@ pub struct Sun {
     /// 0 gives hard shadows. The default, 0.04, is the measured shipping configuration on
     /// both paths (the real sun is about 0.0047).
     pub angular_radius: f32,
+}
+impl Sun {
+    /// A default sun (illuminance, disk) at `elevation` above the horizon and `azimuth`
+    /// clockwise from north seen from above, both in radians. World axes: +Y up, -Z north,
+    /// +X east, so azimuth pi/2 is a sun in the east. Changing the sun every frame is cheap
+    /// (AT2 updates the procedural sky in place and relights GI progressively).
+    pub fn at(elevation: f32, azimuth: f32) -> Self {
+        let toward = Vec3::new(
+            elevation.cos() * azimuth.sin(),
+            elevation.sin(),
+            -elevation.cos() * azimuth.cos(),
+        );
+        Self {
+            travel: -toward,
+            ..Self::default()
+        }
+    }
+    /// The sun at local solar time `hour` (0-24) on an equinox day at `latitude`
+    /// (radians, positive north): rising in the east at 6, highest toward the equator at 12
+    /// and setting in the west at 18. None while it is below the horizon. Axes as for
+    /// [`Sun::at`].
+    pub fn at_hour(hour: f32, latitude: f32) -> Option<Self> {
+        let angle = (hour - 12.0) * std::f32::consts::PI / 12.0;
+        // Toward the sun with zero declination: east -sin H, north -sin(lat) cos H,
+        // up cos(lat) cos H.
+        let up = latitude.cos() * angle.cos();
+        (up > 0.0 && hour.is_finite() && latitude.is_finite()).then(|| {
+            let toward = Vec3::new(-angle.sin(), up, latitude.sin() * angle.cos());
+            Self {
+                travel: -toward.normalize(),
+                ..Self::default()
+            }
+        })
+    }
+    /// The sun's angle above the horizon, radians.
+    pub fn elevation(&self) -> f32 {
+        (-self.travel.normalize().y).asin()
+    }
 }
 impl Default for Sun {
     fn default() -> Self {
@@ -138,6 +176,19 @@ pub struct Settings {
     /// On by default with a subtle 0.001/m haze. Sun visibility uses hardware rays or
     /// the non-RT path's cached shadow depth; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
+    /// Shadows for the most important point and spot lights, chosen every frame (LC1):
+    /// traced rays on `HardwareRt`, pooled maps on `NonRt`. Default: 4 lights; `count: 0`
+    /// turns local shadows off. Lights beyond the count still light the scene.
+    pub local_shadows: LocalShadows,
+    /// Presentation after reconstruction (PP1): bloom, motion blur, optional depth of field,
+    /// the tone mapper, white balance, contrast, saturation, vignette, grain and the colour
+    /// LUT's strength. On by default; `PostSettings { enabled: false, .. }` presents the
+    /// plain tone-mapped image.
+    pub post: PostSettings,
+    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
+    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
+    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
+    pub reflections: crate::ReflectionSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -150,12 +201,16 @@ impl Default for Settings {
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
             volumetric_fog: Some(VolumetricFog::default()),
+            local_shadows: LocalShadows::default(),
+            post: PostSettings::default(),
+            reflections: crate::ReflectionSettings::default(),
         }
     }
 }
 
 /// The renderer's light vector and shadow requests for a sun and local lights.
-/// The sun, when present, is light 0 and the only shadowed light.
+/// The sun, when present, is light 0 and the only explicit shadow request. Local lights
+/// use the automatic local-shadow pool; their source radii pass through unchanged.
 pub(crate) fn lighting(
     sun: Option<Sun>,
     lights: &[Light],
@@ -242,6 +297,10 @@ pub(crate) fn atmosphere(sky: Sky, settings: &Settings) -> Atmosphere {
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
+    // Validated setters first, so a rejected value changes nothing else.
+    settings.post.validate()?;
+    r.set_local_shadows(settings.local_shadows)?;
+    r.set_post_settings(settings.post)?;
     if !settings.temporal_reconstruction && settings.render_scale != RenderScale::Native {
         return Err(Error::InvalidInput(
             "render_scale below Native needs temporal_reconstruction",
@@ -260,6 +319,7 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
     } else {
         Reconstruction::off()
     })?;
+    r.set_reflections(settings.reflections)?;
     match path {
         RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {
             Quality::Realtime => SoftShadows::Interactive,
@@ -279,6 +339,29 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sun_angles_and_hours_follow_the_documented_axes() {
+        let east = Sun::at(0.0, std::f32::consts::FRAC_PI_2);
+        assert!(
+            (east.travel - Vec3::NEG_X).length() < 1e-6,
+            "an eastern sun shines west"
+        );
+        let overhead = Sun::at(std::f32::consts::FRAC_PI_2, 1.0);
+        assert!((overhead.elevation() - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+        // Equator at noon: straight down. Northern latitude at noon: toward the south (+Z).
+        let noon = Sun::at_hour(12.0, 0.0).unwrap();
+        assert!((noon.travel - Vec3::NEG_Y).length() < 1e-6);
+        let north = Sun::at_hour(12.0, 0.7).unwrap();
+        assert!(
+            north.travel.z < 0.0
+                && (north.elevation() - (0.5 * std::f32::consts::PI - 0.7)).abs() < 1e-5
+        );
+        // Dusk is low in the west: its light travels east.
+        let dusk = Sun::at_hour(17.5, 0.7).unwrap();
+        assert!(dusk.travel.x > 0.9 && dusk.elevation() > 0.0 && dusk.elevation() < 0.15);
+        assert!(Sun::at_hour(5.0, 0.7).is_none() && Sun::at_hour(19.0, 0.7).is_none());
+    }
 
     #[test]
     fn only_the_atmosphere_sky_turns_on_the_physical_sky() {
@@ -304,11 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn sun_is_light_zero_and_the_only_shadowed_light() {
+    fn sun_is_light_zero_and_the_only_explicit_shadow_request() {
         let lamp = Light::Point {
             position: Vec3::Y,
             candela: [100.0; 3],
             range: Some(5.0),
+            source_radius: 0.125,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.
@@ -328,6 +412,10 @@ mod tests {
         .unwrap();
         assert!(matches!(lighting.lights[0], Light::Directional { .. }));
         assert_eq!(lighting.lights.len(), 3);
+        assert_eq!(
+            lighting.lights[1], lamp,
+            "source radius survives the engine facade"
+        );
         assert_eq!(lighting.environment, [1.0, 2.0, 3.0]);
         assert_eq!(lighting.exposure_stops, -3.0);
         assert!(matches!(
@@ -341,7 +429,7 @@ mod tests {
         );
         assert_eq!(shadows.directional_disk_angle, sun.angular_radius);
 
-        // No sun: an empty request vector disables shadows for every light.
+        // No sun: no explicit shadow requests; the automatic local pool still shadows lamps.
         let (lighting, shadows) =
             super::lighting(None, &[lamp], Sky::default(), Exposure::default()).unwrap();
         assert_eq!(lighting.lights.len(), 1);
