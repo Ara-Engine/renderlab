@@ -379,6 +379,12 @@ fn gpu_tr1_sequence() {
                settings: Reconstruction,
                write: bool| {
         r.set_reconstruction(Reconstruction::off()).unwrap();
+        r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
+            active_rays: m["variants"][name]["active_rays"].as_u64().unwrap_or(8) as u32,
+            held_rays: 8,
+            settle_frames: 16,
+        })
+        .unwrap();
         // RTDEF compares the legacy raster/Exact output with the reconstructed RT path
         // without loading the quarry again. Other TR1 manifests keep their path settings.
         if let Some(primary) = m["variants"][name]["primary"].as_str() {

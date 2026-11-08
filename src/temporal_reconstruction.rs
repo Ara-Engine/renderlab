@@ -186,6 +186,45 @@ const ROTATION_SEAM: (&str, &str) = (
 );
 const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 
+/// Engine-side sampling for reconstructed Interactive shadows. A cold/reset frame or
+/// moving camera uses `active_rays`; after `settle_frames` unchanged frames it uses
+/// `held_rays`. Materials still receive the same visibility value and shading inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconstructionShadowBudget {
+    pub active_rays: u32,
+    pub held_rays: u32,
+    pub settle_frames: u32,
+}
+impl Default for ReconstructionShadowBudget {
+    fn default() -> Self {
+        Self {
+            active_rays: 8,
+            held_rays: 8,
+            settle_frames: 16,
+        }
+    }
+}
+impl ReconstructionShadowBudget {
+    fn validate(self) -> Result<(), Error> {
+        if [self.active_rays, self.held_rays]
+            .into_iter()
+            .any(|n| !(8..=256).contains(&n) || !n.is_power_of_two())
+        {
+            return Err(Error::InvalidInput(
+                "reconstruction shadow rays must be powers of two in 8..=256",
+            ));
+        }
+        Ok(())
+    }
+    fn rays(self, still: bool, held_frames: u32) -> u32 {
+        if still && held_frames >= self.settle_frames {
+            self.held_rays
+        } else {
+            self.active_rays
+        }
+    }
+}
+
 /// Sample k's offset from the pixel centre in pixels (y down), one offset for the whole
 /// image, which a projection can carry. k = 0 and 255 are the centre; k = 1..=254 are 127
 /// point-symmetric pairs (odd k, then its negation) of a 256-point rank-1 lattice, in T1's
@@ -228,7 +267,22 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
             "temporal reconstruction requires the unchanged Interactive direction seam",
         ));
     }
-    Ok(soft_kernels.replacen(find, replace, 1))
+    let source = soft_kernels.replacen(find, replace, 1);
+    let loop_seam =
+        "for(var j=lane;j<FRESH_DIRECTIONS;j+=select(FRESH_LANES,1u,FRESH_DIRECTIONS==8u))";
+    if source.matches(loop_seam).count() != 1 {
+        return Err(Error::InvalidInput(
+            "reconstruction shadow budget requires the fresh ray loop",
+        ));
+    }
+    // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
+    // Exact pipelines keep their override, direction sequence and normalization.
+    Ok(source
+        .replace(
+            loop_seam,
+            "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
+        )
+        .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"))
 }
 pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
@@ -374,6 +428,8 @@ pub(in crate::renderer) struct ReconstructionState {
     pub cut: bool,
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
+    held_frames: u32,
+    pub shadow_rays: u32,
 }
 type GroupKey = (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Buffer);
 
@@ -454,6 +510,8 @@ impl ReconstructionState {
             previous: None,
             cut: false,
             reset: true,
+            held_frames: 0,
+            shadow_rays: 8,
         }
     }
     fn size(&self) -> wgpu::Extent3d {
@@ -465,6 +523,27 @@ impl ReconstructionState {
 }
 
 impl Renderer {
+    /// Changes reconstructed Interactive shadow sampling without changing user programs
+    /// or compiling pipelines. A policy change starts a fresh reconstruction history.
+    pub fn set_reconstruction_shadow_budget(
+        &mut self,
+        budget: ReconstructionShadowBudget,
+    ) -> Result<(), Error> {
+        budget.validate()?;
+        if budget != self.reconstruction_shadow_budget {
+            self.reconstruction_state = None;
+            self.reconstruction_index = 0;
+        }
+        self.reconstruction_shadow_budget = budget;
+        Ok(())
+    }
+    pub fn reconstruction_shadow_budget(&self) -> ReconstructionShadowBudget {
+        self.reconstruction_shadow_budget
+    }
+    /// Last prepared reconstructed frame's Interactive ray count, for telemetry.
+    pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
+        self.reconstruction_state.as_ref().map(|s| s.shadow_rays)
+    }
     /// This frame's internal colour target when an upscaling preset applies to it (a
     /// reconstructed frame below native scale), allocated for the caller's `color`; None
     /// renders at the caller's size and releases the upscaling targets.
@@ -735,6 +814,28 @@ impl Renderer {
         let still = !state.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
+        state.held_frames = if still {
+            state.held_frames.saturating_add(1)
+        } else {
+            0
+        };
+        state.shadow_rays = self
+            .reconstruction_shadow_budget
+            .rays(still, state.held_frames);
+        // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
+        let primary_frame = &self
+            .primary
+            .as_ref()
+            .unwrap()
+            .frame
+            .as_ref()
+            .unwrap()
+            .0
+            .value;
+        self.queue
+            .write_buffer(primary_frame, 112, &state.shadow_rays.to_ne_bytes());
+        self.uploads.view_settings += 4;
+        self.uploads.write_calls += 1;
         for w in [
             u32::from(state.reset),
             options,
@@ -972,6 +1073,30 @@ mod tests {
             },
         ] {
             assert!(bad.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn shadow_budget_keeps_resets_and_motion_at_the_active_count() {
+        let budget = ReconstructionShadowBudget {
+            active_rays: 32,
+            held_rays: 8,
+            settle_frames: 16,
+        };
+        assert!(budget.validate().is_ok());
+        assert_eq!(budget.rays(false, 0), 32);
+        assert_eq!(budget.rays(false, 100), 32);
+        assert_eq!(budget.rays(true, 15), 32);
+        assert_eq!(budget.rays(true, 16), 8);
+        for rays in [0, 7, 12, 257] {
+            assert!(
+                ReconstructionShadowBudget {
+                    active_rays: rays,
+                    ..budget
+                }
+                .validate()
+                .is_err()
+            );
         }
     }
 }

@@ -19,7 +19,9 @@ use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 mod primary_ray_gpu;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
-pub use primary_ray_gpu::temporal_reconstruction::{Reconstruction, RenderScale};
+pub use primary_ray_gpu::temporal_reconstruction::{
+    Reconstruction, ReconstructionShadowBudget, RenderScale,
+};
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
@@ -588,6 +590,7 @@ pub struct Renderer {
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
     reconstruction: Reconstruction,
+    reconstruction_shadow_budget: ReconstructionShadowBudget,
     reconstruction_state: Option<ReconstructionState>,
     reconstruction_index: u64,
     reconstruction_frame: Option<u64>,
@@ -1031,6 +1034,7 @@ impl Renderer {
             virtual_settings: VirtualShadowSettings::default(),
             gi,
             reconstruction: Reconstruction::default(),
+            reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             reconstruction_state: None,
             reconstruction_index: 0,
             reconstruction_frame: None,
