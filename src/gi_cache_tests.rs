@@ -406,6 +406,9 @@ fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
             .collect::<Vec<_>>()
     });
     r.set_indirect_profiling(true);
+    // TR1 is the default since TR1b; the SV gates (exact repeats, staleness, settle curves) are
+    // defined on single-sample frames, so the rig renders without it.
+    r.set_reconstruction(Reconstruction::off()).unwrap();
     Rig {
         r,
         target,
