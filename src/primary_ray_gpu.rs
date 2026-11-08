@@ -403,7 +403,7 @@ impl Renderer {
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = None;
-                    slot.pipelines.list = [None, None];
+                    slot.pipelines.list = Default::default();
                 }
                 self.primary_sources = None;
                 if let Some(primary) = &mut self.primary {
@@ -451,7 +451,7 @@ impl Renderer {
                     slot.pipelines.traced = None;
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = None;
-                    slot.pipelines.list = [None, None];
+                    slot.pipelines.list = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));

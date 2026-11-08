@@ -2793,9 +2793,7 @@ impl Renderer {
                 .map(|d| d.material.map_or(self.standard.id(), |m| m.program.id())),
         );
         if traced && !temporal && programs.len() > 1 {
-            for &id in &programs {
-                self.ensure_list(id, streaming)?;
-            }
+            self.ensure_lists(&programs, streaming, usize::from(soft))?;
             self.ensure_bins()?;
         } else if streaming {
             self.ensure_streamed(programs.first().copied().unwrap_or(self.standard.id()))?;

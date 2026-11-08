@@ -390,8 +390,8 @@ impl Renderer {
         pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         for (k, &id) in state.programs.iter().enumerate() {
-            let set = &self.program_slot(id).pipelines.list[usize::from(state.requests)];
-            pass.set_pipeline(&set.as_ref().unwrap()[shading as usize]);
+            let list = &self.program_slot(id).pipelines.list[usize::from(state.requests)];
+            pass.set_pipeline(list[shading as usize].as_ref().unwrap());
             pass.set_bind_group(0, &**group, &[k as u32 * lists.stride]);
             pass.dispatch_workgroups_indirect(&lists.args.value, k as u64 * ARGS_BYTES);
         }
