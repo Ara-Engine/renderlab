@@ -425,7 +425,8 @@ fn target(
 /// which present tone-maps into the caller's target.
 pub(in crate::renderer) struct Upscale {
     color: Depth,
-    hdr: Depth,
+    // PP1 consumes only the output image, never TR1's history or coverage state.
+    pub(in crate::renderer) hdr: Depth,
     pub present: Owned<wgpu::BindGroup>,
     /// This frame's caller target, which present writes.
     pub output: wgpu::Texture,
