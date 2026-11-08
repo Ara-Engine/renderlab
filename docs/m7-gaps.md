@@ -173,6 +173,8 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 ## Reflections
 
+- **OPEN, blocking the base: non-RT courtyard reflection blotches.** In the dusk courtyard (`examples/game_scene.rs`), the non-RT chrome and gold spheres show dark blotches and patches in motion (frames 008-024) in LC3's inspected sheet (`D:/Coding/renderlab-work/lc3/final-inspected-sheet.png`), and the chrome sphere is fully black in frame 000. RT is clean. The cause is not found yet; unit RD1 owns it ([m7-rd1.md](m7-rd1.md) once it lands). Suspects: R1n software geometry or frame-0 preparation, kept history with the transform-accounting fix, RQ1 ray counts, skinned and particle meshes without software geometry, and LC3 hit shadows.
+
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
 
 1. **Non-RT reflections (R1n, [m7-r1n.md](m7-r1n.md)) trace in software, with limits.** R1's rays now run on non-RT visibility-buffer frames over per-mesh software BVHs, on by default. They beat UE SW Epic on RF1-RF7 and RF9 (RF1 4.15 vs 37.2, RF2 13.8 vs 15.9, RF6 6.7 vs 12.3, RF7 23.3 vs 35.6) and miss it on RF8 (7.96 vs 5.24, the untraced rough band, item 5). Against UE HW-Hit Epic they miss RF7 and RF8, as R1 does. They match R1's RT scores within 0.04 codes. What is still missing:
