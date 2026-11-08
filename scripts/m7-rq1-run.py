@@ -53,6 +53,14 @@ def root_hold():
         return None
     if "hold" not in order:
         return None
+    # An order quoting its release text ('m7-mv1 FINAL release') needs exactly that line.
+    quoted = re.findall(r"'([^']*releas[^']*)'", order)
+    for literal in quoted:
+        owner, _, rest = literal.partition(" ")
+        if not re.search(rf"^\W*{re.escape(owner)}\b[^\n]*{re.escape(rest)}", after, re.M):
+            return literal
+    if quoted:
+        return None
     names = [n for n in re.findall(r"\bm7-[a-z0-9-]*[a-z0-9]", order) if n != "m7-rq1"]
     names += re.findall(r"\broot ([a-z][\w-]*-[\w-]+)", order)
     for name in names:

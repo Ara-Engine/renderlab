@@ -3128,6 +3128,11 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mesh frame"),
             });
+        // API1b fix: the frame's TLAS generation keys VF1's fog-injection bind group.
+        let scene_generation = self
+            .hardware_shadows
+            .as_ref()
+            .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
         let timed = self.timing_status == TimingStatus::Enabled;
         self.encode_skinning(&mut encoder, draws, hardware_build);
         if let Some(frame) = &local_lights {
@@ -3152,7 +3157,7 @@ impl Renderer {
             self.encode_transmission(&mut encoder, transparent);
         }
         if lit && !virtual_frame {
-            self.encode_atmosphere(&mut encoder);
+            self.encode_atmosphere(&mut encoder, scene_generation);
         }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
@@ -3196,7 +3201,7 @@ impl Renderer {
                     }
                     self.encode_virtual(&mut encoder, stamps(8));
                     // VF1 samples the freshly generated Virtual depth pages.
-                    self.encode_atmosphere(&mut encoder);
+                    self.encode_atmosphere(&mut encoder, scene_generation);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));

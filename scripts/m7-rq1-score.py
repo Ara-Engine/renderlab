@@ -1,6 +1,6 @@
-"""M7-RQ1: score matched game_scene renders against its path-traced reference (docs/m7-rq1.md).
-CPU only. References come from `game_scene --reference SPP` (frame-NNN.png, with the
-independent half-sample images frame-NNN-a.png / -b.png); renders from `game_scene --matched`.
+"""M7-RQ1: score matched reflection_matched renders against its path-traced reference (docs/m7-rq1.md).
+CPU only. References come from `reflection_matched --reference SPP` (frame-NNN.png, with the
+independent half-sample images frame-NNN-a.png / -b.png); renders from `reflection_matched --matched`.
 Both use the legacy display transform (exposure, x/(1+x), sRGB), so codes compare directly.
 
 Per region (sphere interiors at 0.9 radius from MQ1's per-frame projection; the full frame):

@@ -3,9 +3,13 @@
 // its program, and both quality paths shade every program of a frame with its own
 // pipeline (MP1, docs/m7-mp1.md).
 // Materials request traced mirror and glossy reflections (M7-R1) through
-// `reflection_lobe` unless they set `reflect` to 0.
-struct Parameters { reflect:f32 };
-const DEFAULT_PARAMETERS:Parameters = Parameters(1.0);
+// `reflection_lobe` unless they set `reflect` to 0. `glow` is emitted radiance (cd/m²,
+// unexposed), as for lantern bulbs: it adds to the shaded colour only. The bulbs' light
+// reaches other surfaces through the scene's point and spot lights; feeding a small, very
+// bright emitter to the GI cache through the `emission` hook as well would double its
+// light and turn it into fireflies (each cache cell traces a few fixed directions).
+struct Parameters { glow:vec3<f32>, reflect:f32 };
+const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),1.0);
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {
@@ -26,6 +30,18 @@ fn surface(input:SurfaceInput) -> Surface {
 // asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
     return SpecularLobe(s.n,s.rough*s.rough,params.reflect);
+}
+
+// TR1's history hint (docs/m7-mq2.md), as the standard program's: the specular share under
+// uniform light, which moves with the view like the lobe above.
+fn view_dependence(s:Surface, input:SurfaceInput) -> ViewDependence {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let ab=environment_dfg(dot(s.n,v),s.rough);
+    let f0=vec3<f32>(0.04)*(1.0-s.metal)+s.base*s.metal;
+    let specular=dot(f0*ab.x+vec3<f32>(ab.y),vec3<f32>(1.0));
+    let diffuse=dot(s.base,vec3<f32>(1.0-s.metal));
+    return ViewDependence(s.rough*s.rough,specular/max(specular+diffuse,1e-6));
 }
 
 fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
@@ -93,5 +109,5 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         let response=brdf(n,v,light.direction,base,metal,rough);
         exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));
     }
-    return exposed;
+    return min(exposed+expose(max(params.glow,vec3<f32>(0.0))),vec3<f32>(65504.0));
 }

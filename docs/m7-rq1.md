@@ -33,7 +33,7 @@
 
 ## 1. Ground truth
 
-The shipped example can't be path-traced as it stands: it uses the physical atmosphere, aerial perspective, height fog, volumetric fog, decals, the toon hero and post. So `examples/game_scene.rs` gains two measurement modes over the same placements, camera path and time:
+The shipped example can't be path-traced as it stands: it uses the physical atmosphere, aerial perspective, height fog, volumetric fog, decals, the toon hero and post. So the measurements add two modes to the example over the same placements, camera path and time. When API1b reworked `examples/game_scene.rs` into a dusk scene with lanterns, glass, foliage and the Fox, this scene was frozen as `examples/reflection_matched.rs` (the example at main `4c8ef7d` plus these modes), so reflection measurements stay comparable as the game example changes:
 - **`--matched`** renders what the tracer reproduces: a uniform sky (3500, 5000, 7500 cd/m²), the same 120 klux sun with a 0.04 rad disk, no aerial perspective or fog, no decals, the hero on the photoreal program (base 0.95/0.55/0.2, roughness 0.5) and post off. Display is exposure −14.5, x/(1+x), sRGB.
 - **`--reference SPP`** builds `renderlab::reference` meshes, standard-model materials, instances and the sun from the recorded spawns, then path-traces the requested frames on its own ray-query device. It writes the mean and both independent half-sample images in the same display transform. Tracing at 16,384 spp takes 16 s at 1280×720; 4,096 spp takes 6 s per frame.
 
@@ -237,10 +237,10 @@ Everything is under `D:/Coding/renderlab-work/rq1/`; nothing was written to E:.
 Raw RF radiance dumps (24.9 MB each) were deleted after scoring. The Cargo target is deleted at delivery.
 
 ```powershell
-cargo build --example game_scene --target-dir D:/Coding/renderlab-work/rq1/target
-game_scene --path nonrt --reference 16384 --write-frames 47 --out REF
-game_scene --path rt --matched --write-frames 16,32,47 --out RUN/rt-flight
-game_scene --path rt --matched --freeze 47 --write-frames 47 --out RUN/rt-still
+cargo build --example reflection_matched --target-dir D:/Coding/renderlab-work/rq1/target
+reflection_matched --path nonrt --reference 16384 --write-frames 47 --out REF
+reflection_matched --path rt --matched --write-frames 16,32,47 --out RUN/rt-flight
+reflection_matched --path rt --matched --freeze 47 --write-frames 47 --out RUN/rt-still
 py -3 -B scripts/m7-rq1-score.py score RUN --ref REF --runs rt-flight,rt-still --frames 47 --out score.json
 py -3 -B scripts/m7-rq1-score.py crops RUN --ref REF --runs rt-flight,rt-still --frame 47 --out crops
 py -3 -B scripts/m7-r1-score.py RF_RUN_BEFORE; py -3 -B scripts/m7-r1-score.py RF_RUN_AFTER
