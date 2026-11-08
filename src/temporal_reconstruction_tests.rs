@@ -59,10 +59,8 @@ fn no_rt_renderer_11() -> Renderer {
             | crate::VISIBILITY_RASTER_FEATURES
             | crate::VIRTUAL_FEATURES
             | wgpu::Features::TIMESTAMP_QUERY,
-        required_limits: wgpu::Limits {
-            max_storage_buffers_per_shader_stage: 11,
-            ..crate::visibility_limits(wgpu::Limits::default())
-        },
+        // DC1 adds its decal table to the current lighting ABI.
+        required_limits: crate::visibility_limits(wgpu::Limits::default()),
         memory_hints: super::test_memory_hints(),
         ..Default::default()
     }))
