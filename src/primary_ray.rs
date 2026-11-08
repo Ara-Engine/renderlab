@@ -36,13 +36,15 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 
 /// Deferred material arrays and five resolve storage targets (hits, world, normal,
 /// coverage and receiver epsilon), and twelve storage buffers per stage for the Virtual
-/// shadow lookup, including radiance-cache and DC1 decal tables. No
-/// acceleration-structure limits are raised. Check these against the adapter limits
+/// shadow lookup, including radiance-cache and DC1 decal tables, and 24 sampled textures per
+/// stage (LC1: the lighting group's AT1 sky and LC1 cluster/shadow textures take the
+/// temporal film layout to 18). No acceleration-structure limits are raised. Check these against the adapter limits
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(12),
+        max_sampled_textures_per_shader_stage: limits.max_sampled_textures_per_shader_stage.max(24),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
             .max(11 * TRACED_DRAWS),
@@ -104,6 +106,7 @@ mod tests {
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());
         assert_eq!(limits.max_storage_buffers_per_shader_stage, 12);
+        assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
             12
