@@ -115,8 +115,8 @@ fn pre_tp1_standard_is_exact() {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(pre_tp1_standard().as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    // shaders/programs/standard.wgsl at main ae95d3a (DC1, before TP1).
-    assert_eq!(hex, "52f85e454919938f87bcc240d82f91ca906582e7a606c58f3bacf34160c1a8ad");
+    // shaders/programs/standard.wgsl at main ffdaee9 (DC1, R1; before TP1).
+    assert_eq!(hex, "c30842af78c4fa216e494182e63673f4aedf083c00ce2405c552f0836c5f43c7");
 }
 
 fn env(name: &str) -> Option<String> {
