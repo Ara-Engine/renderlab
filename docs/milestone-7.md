@@ -162,3 +162,8 @@ Ruling:
 - Keep the path-traced comparison in the record, and re-score it once G2's sky occlusion and bounce make the cache the default, so the lighting gap shows separately.
 - Fix the losses in order of size, recording each fix's effect. If a row can't be fixed without hurting others, report it back; never relax the gate.
 - Build an Unreal quarry level with the sky visible as a separate short unit, with its package and captures on D:, then delete Unreal's derived data and build cache once the cook is verified.
+
+G2 ruling (Islam, delegated, 2026-11-08): keep the blocked (direct-visibility) sky specular, and keep the cache opt-in. The next unit, G2b:
+1. Fixes crevice mouths on both paths, preferring a short per-pixel visibility check or finer cells over any screen-space core-lighting trick. Study how Lumen and other engines handle near-field occlusion at cell boundaries before building.
+2. Cuts cost toward the ~0.45 ms budget, with camera cuts spread over frames and bounded in time, not just in frame count. Everything is timed on the quarry on both paths.
+3. Makes the cache the default only when it equals or beats both cache-off and the unblocked variant on every quarry population, both paths, static and moving, scored on TR1 frames. Any remaining miss is recorded and brought back; the gate is never relaxed.
