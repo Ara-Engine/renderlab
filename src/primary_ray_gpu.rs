@@ -777,6 +777,21 @@ impl PrimaryState {
             .as_ref()
             .map(|g| (&*g.models.value, &*g.arrays))
     }
+    /// The prepared frame's traced shading groups 1 (geometry tables) and 2 (materials), on
+    /// which the world radiance cache's cell shading runs the frame's program (M7 G2).
+    pub(super) fn shading_groups(&self) -> Option<(&wgpu::BindGroup, &wgpu::BindGroup)> {
+        let g = self.geometry.as_ref()?;
+        Some((&*g.arrays, &**g.materials.as_ref()?))
+    }
+    /// The layout of this frame's material group: with the texture residency bindings
+    /// while it streams textures.
+    pub(super) fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        if self.requests {
+            &self.streamed_bindings
+        } else {
+            &self.material_bindings
+        }
+    }
 
     #[cfg(test)]
     pub(super) fn test_fresh_bindings(&self) -> (&wgpu::BindGroupLayout, &wgpu::BindGroup) {

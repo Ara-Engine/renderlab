@@ -33,9 +33,14 @@ const INDIRECT_API: [&str; 3] = [
     include_str!("../shaders/gi_api.wgsl"),
     include_str!("../shaders/environment_lobes.wgsl"),
 ];
+/// The world radiance cache's cell shading entry (M7 G2): a program's `surface` plus its
+/// optional `scatter`/`emission` at each cell's query point (shaders/gi_shade_entry.wgsl).
+const CELL_ENTRY: &str = include_str!("../shaders/gi_shade_entry.wgsl");
 /// The M7-ES1 inputs that read the receiver's sky visibility for specular. The generated
-/// entry prepares it once before `shade`, for programs that call one of them
-/// (`rl_indirect_prepare`): a lookup at each call site cost 0.4 ms of shading on the quarry.
+/// entry prepares the receiver's one cache lookup before `surface` for every program that
+/// calls an indirect input (`rl_indirect_prepare`: a lookup at each call site cost 0.4 ms of
+/// shading on the quarry), and the specular visibility from it for programs that call one
+/// of these.
 const SPECULAR_INPUTS: [&str; 4] = [
     "indirect_radiance",
     "environment_lobe_count",
@@ -285,6 +290,9 @@ pub(crate) enum Stage {
     Traced,
     /// Traced, with the residency-recording sampling helpers (`TRACED_RESIDENCY`).
     TracedStreamed,
+    /// The world radiance cache's cell shading (M7 G2): the traced material ABI and the
+    /// cache definitions with `CELL_ENTRY`, for programs that `reflects`.
+    Cell,
 }
 
 /// The traced API with its `sample_*_grad` helpers, from the base-colour one to the DFG
@@ -298,6 +306,14 @@ fn traced_streamed_api() -> String {
         &TRACED_API[..start],
         &TRACED_API[end..]
     )
+}
+
+/// The traced entry's hit-record helpers (`PrimaryHit`, `primary_decode`, `primary_input`),
+/// everything before its `primary_vertex`. A traced head with RT1d's shadow visibility filter
+/// calls them, so a cell module composed on that head defines them too; cell shading itself
+/// never runs the filter (its lights come from the cache's light pass).
+fn traced_hit_helpers() -> &'static str {
+    &TRACED_ENTRY[..TRACED_ENTRY.find("fn primary_vertex(").unwrap()]
 }
 
 /// A composed module and the bytes its program occupies.
@@ -317,43 +333,85 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             if parameters { RASTER_PARAMETERS } else { "" },
             RASTER_ENTRY,
         ),
-        Stage::Traced | Stage::TracedStreamed => (
-            if stage == Stage::Traced {
-                TRACED_API
-            } else {
+        Stage::Traced | Stage::TracedStreamed | Stage::Cell => (
+            if stage == Stage::TracedStreamed {
                 streamed = traced_streamed_api();
                 &streamed
+            } else {
+                TRACED_API
             },
             if parameters {
                 TRACED_PARAMETERS
             } else {
                 TRACED_NO_PARAMETERS
             },
-            TRACED_ENTRY,
+            if stage == Stage::Cell {
+                CELL_ENTRY
+            } else {
+                TRACED_ENTRY
+            },
         ),
     };
-    let mut indirect = if uses_indirect(program) {
+    let indirect_calls = uses_indirect(program);
+    // Cell shading reads the cache's own definitions whatever the program calls.
+    let mut indirect = if indirect_calls || stage == Stage::Cell {
         indirect_api()
     } else {
         String::new()
     };
-    // Each entry calls this once per receiver before `shade`; it is empty unless the
-    // program reads the specular inputs.
-    indirect.push_str(
-        if tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t)) {
-            "fn rl_indirect_prepare(input:SurfaceInput) { es_prepare(input); }\n"
-        } else {
-            "fn rl_indirect_prepare(input:SurfaceInput) {}\n"
-        },
-    );
+    // Each entry calls this once per receiver before `surface`: the receiver's one cache
+    // lookup for programs that call an indirect input, and the specular visibility from it
+    // for those that read the specular inputs.
+    let specular = tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t));
+    indirect.push_str(match (indirect_calls, specular) {
+        (true, true) => {
+            "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); es_prepare(input); }\n"
+        }
+        (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
+        _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
+    });
     let mut source =
         format!("{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{binding}// ---- program ----\n");
     let start = source.len();
     source.push_str(program);
-    let program = start..source.len();
+    let program_range = start..source.len();
     source.push_str("\n// ---- end of program ----\n");
+    if stage == Stage::Cell {
+        source.push_str(&reflection_wrappers(program));
+        if head.contains("primary_decode(") {
+            source.push_str(traced_hit_helpers());
+        }
+    }
     source.push_str(entry);
-    Composed { source, program }
+    Composed {
+        source,
+        program: program_range,
+    }
+}
+
+/// Whether `program` declares the optional bounce-light hooks (M7 G2): `fn scatter(s:
+/// Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec3<f32>`, the radiance it
+/// sends toward `wo` per unit radiance arriving from `wi` (its BRDF times the cosine at `wi`),
+/// and `fn emission(s: Surface, input: SurfaceInput) -> vec3<f32>`, its own radiance. A program
+/// that declares neither still blocks light in the world radiance cache but reflects none.
+pub(crate) fn reflects(program: &str) -> bool {
+    declares(program, "fn", "scatter") || declares(program, "fn", "emission")
+}
+/// Cell shading's calls into the hooks, zero for an absent one.
+fn reflection_wrappers(program: &str) -> String {
+    let scatter = if declares(program, "fn", "scatter") {
+        "return scatter(s,input,wi,wo);"
+    } else {
+        "return vec3<f32>(0.0);"
+    };
+    let emission = if declares(program, "fn", "emission") {
+        "return emission(s,input);"
+    } else {
+        "return vec3<f32>(0.0);"
+    };
+    format!(
+        "fn rl_scatter(s:Surface,input:SurfaceInput,wi:vec3<f32>,wo:vec3<f32>)->vec3<f32> {{ {scatter} }}\nfn rl_emission(s:Surface,input:SurfaceInput)->vec3<f32> {{ {emission} }}\n"
+    )
 }
 
 /// The program's identifiers in order, without comments (WGSL block comments nest).
@@ -491,6 +549,26 @@ pub(crate) fn analyse(label: &str, program: &str, composed: &Composed) -> Result
             .or_else(|| e.location(source));
         diagnostic(label, composed, location, &message)
     })?;
+    // The optional bounce hooks must match cell shading's calls (M7 G2).
+    if reflects(program) {
+        let checked = format!("{source}\n{}", reflection_wrappers(program));
+        let valid = naga::front::wgsl::parse_str(&checked)
+            .map_err(|e| e.message().to_string())
+            .and_then(|m| {
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&m)
+                .map(|_| ())
+                .map_err(|e| e.as_inner().to_string())
+            });
+        if let Err(message) = valid {
+            return Err(Error::Shader(format!(
+                "program `{label}`: bounce light calls fn scatter(s: Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec3<f32> and fn emission(s: Surface, input: SurfaceInput) -> vec3<f32>: {message}"
+            )));
+        }
+    }
     let parameters = module
         .types
         .iter()
