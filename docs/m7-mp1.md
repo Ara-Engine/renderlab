@@ -1,6 +1,6 @@
 # M7-MP1: per-object shading programs
 
-Overnight unit (Islam's complete-base push, 2026-11-08; rules in AGENTS.md). Branch `t3/m7-mp1`, from main `f159fcd`, main merged at `f870cb4` (with API1). Inputs: [programmable shading](programmable-shading.md) (the design's per-program tile lists, section 2.5 and phase 3), [R1](m7-r1.md) (reflection hits shade with the hit's program), [G2](m7-g2.md) (cell shading) and API1's facade ([api.md](api.md)). Labels: **M** measured here, **I** inference.
+Overnight unit (Islam's complete-base push, 2026-11-08; rules in AGENTS.md). Branch `t3/m7-mp1`, from main `f159fcd`; main merged at `f870cb4` (API1) and `9f98869` (PP1, LC1, SK1), the verified final code. Inputs: [programmable shading](programmable-shading.md) (the design's per-program tile lists, section 2.5 and phase 3), [R1](m7-r1.md) (reflection hits shade with the hit's program), [G2](m7-g2.md) (cell shading) and API1's facade ([api.md](api.md)). Labels: **M** measured here, **I** inference.
 
 ## Status
 
@@ -60,15 +60,15 @@ Windows/Vulkan, RTX 4070 SUPER, NVIDIA 617.14, dev-profile test binaries (`opt-l
 
 | Check | Result |
 |---|---|
-| `cargo test -p renderlab --lib` (binary `d`, final code) | 163 passed, 0 failed, 148 ignored, exit 0. Includes `list_compositions_validate` (naga on the binning kernel and every program's list module, RT and non-RT, plain and streamed), `frame_slots_follow_first_draw_order`, `list_capacity_holds_every_region_tile_and_clear_block` and the mixed cell entry's naga check |
-| `gpu_mp1_mixed_programs`, RT (Interactive) and non-RT (Virtual) | Identity: 0 unmatched of 2,073,600 pixels on each path. Pixels owned by one program only: standard 1,236,429, toon 116,363, custom 73,358 (RT). 2-program, 8-program and mirror frames with the defaults (TR1 and GI on) finite. Pipelines created in the whole test: 31 RT, 34 non-RT (39 and 42 before section 1.2's trims) |
+| `cargo test -p renderlab --lib` | Final code (binary `e`, main `9f98869` merged, run `g11`): 173 passed, 0 failed, 152 ignored, exit 0; binary `d` (before that merge, `g5`): 163 passed. Includes `list_compositions_validate` (naga on the binning kernel and every program's list module, RT and non-RT, plain and streamed), `frame_slots_follow_first_draw_order`, `list_capacity_holds_every_region_tile_and_clear_block` and the mixed cell entry's naga check |
+| `gpu_mp1_mixed_programs`, RT (Interactive) and non-RT (Virtual) | Runs `g5` (`d`) and `g11` (`e`, final): identity 0 unmatched of 2,073,600 pixels on each path, in both runs. Pixels owned by one program only: standard 1,236,429, toon 116,363, custom 73,358 (RT). 2-program, 8-program and mirror frames with the defaults (TR1 and GI on) finite. Pipelines created in the whole test with `d`: 31 RT, 34 non-RT (39 and 42 before section 1.2's trims; 39 and 42 again with `e`, whose merged main adds LC1's and PP1's pipelines) |
 | RF1-RF10 (`gpu_r0a_current`, R0a protocol: 1x, TR1 off, GI off) | RF1-RF9 scores identical to R1's on both paths; RF10 renders (Status) |
 | RF10 with its toon material on the standard program (diagnostic) | Single-program frame correct: separated the stale-pixel bug (section 1.1) from the reflection fallback |
 | `cargo fmt`, `cargo clippy -p renderlab --lib --tests` | Clean in MP1's files |
 
 ### 2.2 Inspected images
 
-`D:/Coding/renderlab-work/m7-mp1/runs/g5/`:
+`D:/Coding/renderlab-work/m7-mp1/runs/g5/` and `g11/`:
 - `mp1-{rt,nonrt}/identity-{standard,toon,custom,mixed}.png`: eight boxes and a floor. No missing tiles, holes or seams at program boundaries; shadows cross program boundaries unchanged.
 - `mp1-{rt,nonrt}/{two-programs,two-programs-mirror,eight-programs-mirror}.png`: the RT standard mirror reflects all eight boxes, other programs' boxes through the fallback. Non-RT mirrors show the environment only (R1n is not on main). The mottle on the standard box with GI on is the cache's known speckle (G2c), not MP1.
 - `sheets/RF10-pitch30-{rt,nonrt}.png` (reference | MP1 | 4x difference): the toon sphere is banded in the primary view and smooth in the puddle reflection.
@@ -77,7 +77,7 @@ Windows/Vulkan, RTX 4070 SUPER, NVIDIA 617.14, dev-profile test binaries (`opt-l
 
 `examples/game_scene.rs` now creates two programs: `game_scene.wgsl` (photoreal, with R1's `reflect` parameter) and `game_toon.wgsl` (the hero: banded light, tinted shadow side, rim, GI fill, flat-Lambert `scatter`). The `style` member and branch are gone, and `docs/api.md` lists the new limits (32 programs per frame; Temporal frames one; the reflection fallback).
 
-Run `g4` (code before the row fix, which only affects lists over 65,535 tiles; the 1280x720 example's lists stay below that): 48 frames per path, exit 0. `example-{rt,nonrt}/frame-*.png` show the toon hero (bands, rim) as its own program beside the photoreal props on both paths, and the RT chrome sphere reflects the hero through the fallback. Debug example build, first-frame CPU time (all pipeline compiles): RT 49.0 s and non-RT 24.8 s, against 88.2 s and 37.4 s before section 1.2's trims. API1's one-program runs took 11.6-43.8 s (RT) and 13.3-23.7 s (non-RT). Later frames: 1.6-6.2 ms CPU. The final code (`d`, run `g10`) renders the same frames on both paths; its 4.0 s RT first frame is not comparable, because a stopped attempt seconds earlier had warmed the driver's cache.
+Run `g4` (code before the row fix, which only affects lists over 65,535 tiles; the 1280x720 example's lists stay below that): 48 frames per path, exit 0. `example-{rt,nonrt}/frame-*.png` show the toon hero (bands, rim) as its own program beside the photoreal props on both paths, and the RT chrome sphere reflects the hero through the fallback. Debug example build, first-frame CPU time (all pipeline compiles): RT 49.0 s and non-RT 24.8 s, against 88.2 s and 37.4 s before section 1.2's trims. API1's one-program runs took 11.6-43.8 s (RT) and 13.3-23.7 s (non-RT). Later frames: 1.6-6.2 ms CPU. The final code (`e`, run `g11`, with PP1, LC1 and SK1 merged) renders the same scene on both paths, the hero still its own program; first frame 45.4 s RT and 23.2 s non-RT, later frames at most 63 and 18 ms CPU.
 
 ## 3. Cost (M)
 
@@ -110,11 +110,11 @@ The single-program shading pass is unchanged within noise on both paths; the fra
 
 ## 4. Process and evidence
 
-Every GPU process ran inside an m7-mp1 lease holding `D:/Coding/renderlab-work/gpu-slot.lock` (`scripts/m7-mp1-run.py`, R1's runner with per-step binaries, an `example` step and retries of steps stopped by other units' builds). Leases: `g3` (18:07-18:19 UTC, all steps), `g4` (18:33-18:39, stopped by a foreign build in the quarry step), `g5` (18:51-18:55, stopped by the memory guard in the quarry step), `g6`-`g9` (quarry steps stopped by foreign builds or memory; `g7` and `g8` before any test ran), `g10` (19:31-19:39). Two requests (`g1`, `g2`) were withdrawn before taking the lock. Builds ran outside my leases, with one lapse: a 40 s example build ran inside rtdef2's QUIET window after my test build had correctly stopped for it, recorded in the schedule.
+Every GPU process ran inside an m7-mp1 lease holding `D:/Coding/renderlab-work/gpu-slot.lock` (`scripts/m7-mp1-run.py`, R1's runner with per-step binaries, an `example` step and retries of steps stopped by other units' builds). Leases: `g3` (18:07-18:19 UTC, all steps), `g4` (18:33-18:39, stopped by a foreign build in the quarry step), `g5` (18:51-18:55, stopped by the memory guard in the quarry step), `g6`-`g9` (quarry steps stopped by foreign builds or memory; `g7` and `g8` before any test ran), `g10` (19:31-19:39), `g11` (20:06-20:10, final code). Two requests (`g1`, `g2`) were withdrawn before taking the lock. Builds ran outside my leases, with one lapse: a 40 s example build ran inside rtdef2's QUIET window after my test build had correctly stopped for it, recorded in the schedule.
 
-Binaries (`D:/Coding/renderlab-work/m7-mp1/bin/`): `main` (main `f159fcd`, the one-program baseline), `a` (first MP1), `c` (compile trims), `d` (row fix, final code; `dstd` and `dtoon` are copies so each quarry section writes its own directory), and `game_scene_*` (the example).
+Binaries (`D:/Coding/renderlab-work/m7-mp1/bin/`): `main` (main `f159fcd`, the one-program baseline), `a` (first MP1), `c` (compile trims), `d` (row fix; `dstd` and `dtoon` are copies so each quarry section writes its own directory), `e` (final code, main `9f98869` merged), and `game_scene_*` (the example).
 
-Evidence under `D:/Coding/renderlab-work/m7-mp1/runs/`: `g3` (one-program quarry A/B, RF1-RF9 baseline scores, first example run), `g4` (example after the trims, the RF10 toon-as-standard diagnostic), `g5` (final gates at 1080p, RF scores), `g10` (2- and 8-program quarry rows, final example), and `inspect/` (RF10 crops). Raw `.f32` captures are deleted once scored; scores, summaries, sheets and inspected PNGs remain.
+Evidence under `D:/Coding/renderlab-work/m7-mp1/runs/`: `g3` (one-program quarry A/B, RF1-RF9 baseline scores, first example run), `g4` (example after the trims, the RF10 toon-as-standard diagnostic), `g5` (final gates at 1080p, RF scores), `g10` (2- and 8-program quarry rows), `g11` (final code: lib, gates, example), and `inspect/` (RF10 crops). Raw `.f32` captures are deleted once scored; scores, summaries, sheets and inspected PNGs remain.
 
 ```text
 py -3 -B scripts/m7-mp1-run.py build LABEL
@@ -122,7 +122,7 @@ py -3 -B scripts/m7-mp1-run.py gpu RUN rt:lib rt:mp1 nonrt:mp1 rt:rf nonrt:rf rt
 py -3 -B scripts/m7-r1-score.py D:/Coding/renderlab-work/m7-mp1/runs/RUN
 ```
 
-The unit took about 2.5 hours, inside the 2-3 hour box: about 1.5 hours of reading, design and code (including the row fix the RF10 check found), and verification interleaved with it, mostly waiting for the shared lease and retrying stopped steps (about 25 minutes of GPU held in all).
+The unit took about 3 hours, at the end of the 2-3 hour box: about 1.5 hours of reading, design and code (including the row fix the RF10 check found), and verification interleaved with it, mostly waiting for the shared lease and retrying stopped steps (about 25 minutes of GPU held in all).
 
 ## 5. Gaps
 
