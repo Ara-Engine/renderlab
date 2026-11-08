@@ -2,6 +2,8 @@ use super::*;
 use crate::asset::{Filter, Mip, MipmapFilter, Sampler, TextureRole, Wrap};
 #[path = "../viewer/src/prepared.rs"]
 pub(super) mod prepared;
+#[path = "material_response_tests.rs"]
+mod response;
 
 const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 fn material_renderer(samples: SampleCount) -> Renderer {
