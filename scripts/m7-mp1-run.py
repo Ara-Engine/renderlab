@@ -184,8 +184,21 @@ def run_steps(g, out, binary, baseline, args):
             step_dir = out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}"
             if step_dir.exists() and not (step_dir / "process.json").exists():
                 shutil.rmtree(step_dir)
-            g.guarded(command, step_dir,
-                      timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
+            # Other units' builds (build-script-build.exe) stop a step: keep the stopped
+            # attempt's record, wait for their builds to finish, and run the step again.
+            for attempt in range(4):
+                try:
+                    g.guarded(command, step_dir,
+                              timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
+                    break
+                except RuntimeError as error:
+                    if "foreign" not in str(error) or attempt == 3 or g.remaining_seconds(owner) < 240:
+                        raise
+                    step_dir.rename(step_dir.with_name(f"{step_dir.name}-stopped-{attempt}"))
+                    for _ in range(120):
+                        if not g.E2E.state().get("foreign_renderers"):
+                            break
+                        time.sleep(1)
 
 
 def main():
