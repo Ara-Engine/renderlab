@@ -167,3 +167,24 @@ G2 ruling (Islam, delegated, 2026-11-08): keep the blocked (direct-visibility) s
 1. Fixes crevice mouths on both paths, preferring a short per-pixel visibility check or finer cells over any screen-space core-lighting trick. Study how Lumen and other engines handle near-field occlusion at cell boundaries before building.
 2. Cuts cost toward the ~0.45 ms budget, with camera cuts spread over frames and bounded in time, not just in frame count. Everything is timed on the quarry on both paths.
 3. Makes the cache the default only when it equals or beats both cache-off and the unblocked variant on every quarry population, both paths, static and moving, scored on TR1 frames. Any remaining miss is recorded and brought back; the gate is never relaxed.
+
+## Overnight complete-base push (Islam, 2026-11-08, about 19:00)
+
+"I want global illumination that's better than Lumen. I want every single feature that we talked about done… within 3 to 10 hours, by the time I wake up tomorrow… an engine that is ready to render games on the quality of Unreal… We can improve further after that, but everything should have a good base."
+
+Target by about 05:00 local: every feature built and on by default, on both paths.
+
+| Feature | Unit |
+|---|---|
+| TR1, plus an upscaling preset | TR1b |
+| GI: sky cache with bounce and ES1 | G2b |
+| Reflections | R1 |
+| Transparency, plus particles | TP1 |
+| Atmosphere and fog | AT1 |
+| Skinned meshes | SK1 |
+| Many lights | LC1 |
+| Decals | DC1 |
+| Post-processing | PP1 |
+| Engine-facing API freeze and example scene | API1 |
+
+The default rule, time-box and verification for this push are in AGENTS.md. They supersede the stricter default gates above for this push. Every gap to Unreal and to the reference is recorded in `docs/m7-gaps.md`.
