@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -162,6 +163,20 @@ def disocclusion(args):
          definition="TR0's fixed external benchmark ages (m7-tr0-s2g.py advance_age): nearest previous centre, same "
                     "instance, 2% forward depth; age0 on rejection, +1 on acceptance capped 255; black infinity "
                     "same-pixel for the translation-only track. Offline scoring only."))
+
+
+def available_gib():
+    """Available physical memory (Windows), the measure the lease guard uses."""
+    import ctypes
+
+    class Status(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                    ("available", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong), ("page_available", ctypes.c_ulonglong),
+                    ("virtual_total", ctypes.c_ulonglong), ("virtual_available", ctypes.c_ulonglong), ("extended", ctypes.c_ulonglong)]
+    status = Status()
+    status.length = ctypes.sizeof(Status)
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    return status.available / 2 ** 30
 
 
 def member_hashes(path):
@@ -333,12 +348,16 @@ def qsun(args):
         states.setdefault(key(p), (i, p))
     out = REFS / "quarry"
     compactor = REPO / "scripts/m7-u0b-score.py"
-    for i, p in states.values():
+    for i, p in [s for _ in range(4) for s in states.values()]:
         name = f"{args.track}-{i:03}"
         if (out / (name + ".npz")).exists():
             continue
         if shutil.disk_usage(REFS).free < 7 * 1024 ** 3:
             raise SystemExit("deferred: less than 7 GiB free")
+        # The quarry tracer holds the whole asset in memory: start its lease only with room,
+        # or the 2 GiB guard stops it.
+        while available_gib() < 9:
+            time.sleep(5)
         label = f"qsun-{uuid.uuid4().hex[:8]}"
         work = REFS / "work" / label
         data = work / "data"
@@ -361,6 +380,9 @@ def qsun(args):
                             "--note", "U0b quarry Q-sun reference state, functional, no timing claim"], cwd=REPO)
             if (data / (name + ".compact-pending.json")).exists():
                 break
+        else:
+            print(name, "not rendered; left pending for a later pass", flush=True)
+            continue
         environment = {k: v for k, v in os.environ.items() if k != "RENDERLAB_M7_DEFER_REFERENCE_COMPACT"}
         subprocess.run(["py", "-3", "-B", str(compactor), "compact", str(data), name], cwd=REPO, env=environment, check=True)
         meta = json.loads((data / (name + ".json")).read_text())
