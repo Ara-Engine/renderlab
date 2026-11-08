@@ -27,7 +27,10 @@ impl AlphaMask {
         Self {
             width,
             height,
-            alpha: rgba8.chunks_exact(4).map(|p| f32::from(p[3]) / 255.0).collect(),
+            alpha: rgba8
+                .chunks_exact(4)
+                .map(|p| f32::from(p[3]) / 255.0)
+                .collect(),
         }
     }
     fn texel(&self, x: i64, y: i64) -> f32 {
@@ -81,7 +84,10 @@ pub fn cutout(
         || cells == 0
         || !(opacity.is_finite() && cutoff.is_finite())
         || data.indices.len() % 3 != 0
-        || data.indices.iter().any(|&i| i as usize >= data.vertices.len())
+        || data
+            .indices
+            .iter()
+            .any(|&i| i as usize >= data.vertices.len())
     {
         return Err(crate::Error::InvalidInput(
             "cutout needs a nonempty mask, cells > 0, finite factors and valid triangles",
@@ -120,7 +126,12 @@ pub fn cutout(
             let above: Vec<f64> = (lo[0]..=hi[0]).map(|i| field(node(i, j + 1))).collect();
             for i in lo[0]..hi[0] {
                 let k = (i - lo[0]) as usize;
-                let corners = [node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1)];
+                let corners = [
+                    node(i, j),
+                    node(i + 1, j),
+                    node(i + 1, j + 1),
+                    node(i, j + 1),
+                ];
                 let values = [below[k], below[k + 1], above[k + 1], above[k]];
                 for polygon in cell_polygons(corners, values, || {
                     field([(i as f64 + 0.5) / grid, (j as f64 + 0.5) / grid])
@@ -149,7 +160,8 @@ fn weld(mesh: CutoutMesh, extent: f32) -> CutoutMesh {
     let scale = f64::from((1u32 << 22) as f32 / extent);
     let key = |v: &Vertex| -> [i64; 5] {
         let p = v.position.map(|c| (f64::from(c) * scale).round() as i64);
-        let t = v.uv.map(|c| (f64::from(c) * f64::from(1u32 << 22)).round() as i64);
+        let t =
+            v.uv.map(|c| (f64::from(c) * f64::from(1u32 << 22)).round() as i64);
         [p[0], p[1], p[2], t[0], t[1]]
     };
     let mut slots = std::collections::HashMap::with_capacity(mesh.vertices.len());
@@ -171,7 +183,10 @@ fn weld(mesh: CutoutMesh, extent: f32) -> CutoutMesh {
             continue;
         }
         let [pa, pb, pc] = [a, b, c].map(|i| out.vertices[i as usize].position.map(f64::from));
-        let (e1, e2) = ([0, 1, 2].map(|k| pb[k] - pa[k]), [0, 1, 2].map(|k| pc[k] - pa[k]));
+        let (e1, e2) = (
+            [0, 1, 2].map(|k| pb[k] - pa[k]),
+            [0, 1, 2].map(|k| pc[k] - pa[k]),
+        );
         let n = [
             e1[1] * e2[2] - e1[2] * e2[1],
             e1[2] * e2[0] - e1[0] * e2[2],
@@ -269,7 +284,11 @@ fn clip_to_triangle(mut polygon: Vec<[f64; 2]>, uv: &[[f64; 2]; 3], ccw: bool) -
             }
             if (sp >= 0.0) != (sq >= 0.0) {
                 // From the lower endpoint, as cell crossings are.
-                let ((p, sp), (q, sq)) = if (p[1], p[0]) <= (q[1], q[0]) { ((p, sp), (q, sq)) } else { ((q, sq), (p, sp)) };
+                let ((p, sp), (q, sq)) = if (p[1], p[0]) <= (q[1], q[0]) {
+                    ((p, sp), (q, sq))
+                } else {
+                    ((q, sq), (p, sp))
+                };
                 let t = sp / (sp - sq);
                 next.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
             }
@@ -330,7 +349,12 @@ mod tests {
             color: [1.0; 4],
         };
         (
-            vec![vertex(0., 0.), vertex(1., 0.), vertex(1., 1.), vertex(0., 1.)],
+            vec![
+                vertex(0., 0.),
+                vertex(1., 0.),
+                vertex(1., 1.),
+                vertex(0., 1.),
+            ],
             vec![0, 1, 2, 0, 2, 3],
         )
     }
@@ -346,22 +370,55 @@ mod tests {
     fn disk(size: u32, radius: f32) -> AlphaMask {
         let alpha = (0..size * size)
             .map(|i| {
-                let p = [(i % size) as f32 + 0.5, (i / size) as f32 + 0.5].map(|c| c / size as f32 - 0.5);
+                let p = [(i % size) as f32 + 0.5, (i / size) as f32 + 0.5]
+                    .map(|c| c / size as f32 - 0.5);
                 f32::from(u8::from(p[0].hypot(p[1]) < radius))
             })
             .collect();
-        AlphaMask { width: size, height: size, alpha }
+        AlphaMask {
+            width: size,
+            height: size,
+            alpha,
+        }
     }
 
     #[test]
     fn opaque_mask_keeps_the_card_area_and_winding() {
         let (vertices, indices) = quad();
-        let mask = AlphaMask { width: 1, height: 1, alpha: vec![1.0] };
-        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &mask, 1.0, 0.5, 16).unwrap();
+        let mask = AlphaMask {
+            width: 1,
+            height: 1,
+            alpha: vec![1.0],
+        };
+        let mesh = cutout(
+            &MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            },
+            &mask,
+            1.0,
+            0.5,
+            16,
+        )
+        .unwrap();
         // Signed area: every output triangle keeps the source's counter-clockwise winding.
         assert!((area(&mesh) - 1.0).abs() < 1e-5, "{}", area(&mesh));
-        let empty = AlphaMask { width: 1, height: 1, alpha: vec![0.0] };
-        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &empty, 1.0, 0.5, 16).unwrap();
+        let empty = AlphaMask {
+            width: 1,
+            height: 1,
+            alpha: vec![0.0],
+        };
+        let mesh = cutout(
+            &MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            },
+            &empty,
+            1.0,
+            0.5,
+            16,
+        )
+        .unwrap();
         assert!(mesh.indices.is_empty());
     }
 
@@ -369,7 +426,17 @@ mod tests {
     fn cut_cells_weld_into_one_connected_mesh() {
         let (vertices, indices) = quad();
         let mask = disk(256, 0.3);
-        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &mask, 1.0, 0.5, 64).unwrap();
+        let mesh = cutout(
+            &MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            },
+            &mask,
+            1.0,
+            0.5,
+            64,
+        )
+        .unwrap();
         // Interior edges are shared by two triangles; only the contour is open.
         let mut edges = std::collections::HashMap::new();
         for t in mesh.indices.chunks_exact(3) {
@@ -388,9 +455,23 @@ mod tests {
     fn disk_mask_cuts_to_its_contour() {
         let (vertices, indices) = quad();
         let mask = disk(256, 0.3);
-        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &mask, 1.0, 0.5, 64).unwrap();
+        let mesh = cutout(
+            &MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            },
+            &mask,
+            1.0,
+            0.5,
+            64,
+        )
+        .unwrap();
         let expected = std::f32::consts::PI * 0.09;
-        assert!((area(&mesh) - expected).abs() < 0.01 * expected, "{} vs {expected}", area(&mesh));
+        assert!(
+            (area(&mesh) - expected).abs() < 0.01 * expected,
+            "{} vs {expected}",
+            area(&mesh)
+        );
         // Every vertex lies within a cell of the circle or inside it.
         for v in &mesh.vertices {
             let r = (v.position[0] - 0.5).hypot(v.position[1] - 0.5);
@@ -405,10 +486,24 @@ mod tests {
             v.uv[0] = 1.0 - v.uv[0];
         }
         let mask = disk(128, 0.4);
-        let mesh = cutout(&MeshData { vertices: &vertices, indices: &indices }, &mask, 1.0, 0.5, 32).unwrap();
+        let mesh = cutout(
+            &MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            },
+            &mask,
+            1.0,
+            0.5,
+            32,
+        )
+        .unwrap();
         assert!(area(&mesh) > 0.0);
         let expected = std::f32::consts::PI * 0.16;
-        assert!((area(&mesh) - expected).abs() < 0.02 * expected, "{}", area(&mesh));
+        assert!(
+            (area(&mesh) - expected).abs() < 0.02 * expected,
+            "{}",
+            area(&mesh)
+        );
     }
 
     #[test]

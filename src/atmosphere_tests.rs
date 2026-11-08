@@ -100,6 +100,14 @@ fn atmosphere_modules_validate() {
         "{common}{kernels}fn at_sun_visible(p:vec3<f32>) -> f32 {{ return 1.0; }}\n"
     ));
     validate(&format!(
+        "{common}{kernels}{}",
+        include_str!("../shaders/atmosphere_shadow_map.wgsl")
+    ));
+    validate(&format!(
+        "{common}{kernels}{}",
+        crate::Renderer::atmosphere_shadow_source()
+    ));
+    validate(&format!(
         "{}{}",
         api_source(),
         include_str!("../shaders/atmosphere_sky.wgsl")
@@ -194,6 +202,157 @@ fn no_rt_device() -> (wgpu::Device, wgpu::Queue) {
         ..Default::default()
     }))
     .unwrap()
+}
+
+/// The read-only clipmap contract: lit/blocked heights, coarse fallback, missing
+/// epochs and samples outside coverage. This device has no ray-query feature.
+#[test]
+#[ignore = "GPU; VF1 owned lease"]
+fn gpu_vf1_clip_reader() {
+    use wgpu::util::DeviceExt;
+    let (device, queue) = no_rt_device();
+    let mut frame = vec![0u8; 1680]; // the reused VsmFrame ABI
+    let mut put = |at: usize, words: [u32; 4]| {
+        for (i, word) in words.into_iter().enumerate() {
+            frame[at + i * 4..at + i * 4 + 4].copy_from_slice(&word.to_ne_bytes());
+        }
+    };
+    put(0, [1.0f32.to_bits(), 0, 0, 0]);
+    put(16, [0, 1.0f32.to_bits(), 0, 0]);
+    put(32, [0, 0, 1.0f32.to_bits(), 0]);
+    put(
+        64,
+        [0, 1.0f32.to_bits(), 1.0f32.to_bits(), 1.0f32.to_bits()],
+    );
+    put(96, [2, 1, 0, 0]);
+    for (i, (origin, texel)) in [(-64.0f32, 1.0f32), (-128.0, 2.0)].into_iter().enumerate() {
+        put(
+            128 + i * 32,
+            [origin.to_bits(), origin.to_bits(), texel.to_bits(), 0],
+        );
+        put(144 + i * 32, [1, 0, 0, 0]);
+    }
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("VF1 synthetic clipmap"),
+        contents: &frame,
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let top: Vec<u8> = [0.75f32, 0.5]
+        .into_iter()
+        .flat_map(|height| {
+            (0..128 * 128).flat_map(move |_| {
+                [1u32, height.to_bits()]
+                    .into_iter()
+                    .flat_map(u32::to_ne_bytes)
+            })
+        })
+        .collect();
+    let top = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("VF1 synthetic top"),
+        contents: &top,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let pages = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let result = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 28,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 28,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let source = format!(
+        "{}{}",
+        Renderer::atmosphere_shadow_source(),
+        r#"
+@group(0) @binding(24) var<storage,read_write> results:array<f32>;
+@compute @workgroup_size(1) fn test_reader() {
+    results[0]=at_sun_visible(vec3<f32>(0.0,0.0,0.25));
+    results[1]=at_sun_visible(vec3<f32>(0.0,0.0,0.9));
+    results[2]=at_sun_visible(vec3<f32>(80.0,0.0,0.6));
+    results[3]=at_sun_visible(vec3<f32>(80.0,0.0,0.25));
+    results[4]=at_sun_visible(vec3<f32>(256.0,0.0,0.25));
+    results[5]=at_sun_visible(vec3<f32>(0.0,0.0,2.0));
+    results[6]=at_sun_visible(vec3<f32>(0.0,0.0,0.6));
+}"#
+    );
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("VF1 clip reader oracle"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &module,
+        entry_point: Some("test_reader"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let entries = [&uniform, &top, &pages, &result]
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| wgpu::BindGroupEntry {
+            binding: 21 + i as u32,
+            resource: b.as_entire_binding(),
+        })
+        .collect::<Vec<_>>();
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    });
+    for (epochs, expected) in [
+        ([1u32, 1], [0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0]),
+        ([0, 1], [0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]),
+        ([0, 0], [1.0; 7]),
+    ] {
+        queue.write_buffer(
+            &pages,
+            0,
+            &epochs
+                .into_iter()
+                .flat_map(u32::to_ne_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&result, 0, &readback, 0, 28);
+        let done = std::sync::Arc::new(std::sync::OnceLock::new());
+        let callback = done.clone();
+        encoder.map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |r| {
+            callback.set(r).unwrap();
+        });
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(20)),
+            })
+            .unwrap();
+        done.get().unwrap().as_ref().unwrap();
+        let view = readback.get_mapped_range(..).unwrap();
+        let actual = view
+            .chunks_exact(4)
+            .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "page epochs {epochs:?}");
+        drop(view);
+        readback.unmap();
+    }
 }
 
 /// The exposed HDR target as RGB.
@@ -362,11 +521,11 @@ fn gpu_at1_quarry() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let render = |r: &mut Renderer, asset: &mut quarry_prepared::Prepared| {
+    let render = |r: &mut Renderer, asset: &mut quarry_prepared::Prepared, camera: &Camera| {
         let mut draws = asset.draws(Visibility::Frustum);
         let until = Instant::now() + Duration::from_secs(60);
         while r
-            .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+            .try_render_view(&target, camera, &mut draws, ViewMode::Lit)
             .unwrap()
             .is_none()
         {
@@ -382,6 +541,10 @@ fn gpu_at1_quarry() {
             extra_density: 0.01,
             ..Default::default()
         }),
+        ..Default::default()
+    };
+    let legacy = Atmosphere {
+        volumetric_fog: None,
         ..Default::default()
     };
     // (name, atmosphere, captured sky, sun travel, lux, frames)
@@ -402,8 +565,10 @@ fn gpu_at1_quarry() {
             quarry_lux,
             8,
         ),
-        ("noon", Atmosphere::default(), false, noon, space, 8),
-        ("low", Atmosphere::default(), false, low, space, 8),
+        ("legacy", legacy, true, quarry_travel, quarry_lux, 24),
+        ("noon", Atmosphere::default(), false, noon, space, 24),
+        ("low", legacy, false, low, space, 24),
+        ("low-default", Atmosphere::default(), false, low, space, 32),
         ("low-volumetric", volumetric, false, low, space, 24),
     ];
     let mut log = serde_json::json!({"path": path,
@@ -418,7 +583,7 @@ fn gpu_at1_quarry() {
     for (name, atmosphere, captured, travel, lux, frames) in configs {
         apply(&mut r, atmosphere, captured, travel, lux);
         for _ in 0..frames {
-            render(&mut r, &mut asset);
+            render(&mut r, &mut asset, &camera);
         }
         let image = capture(&mut r);
         png(&out.join(format!("{path}-{name}.png")), size, &image);
@@ -434,13 +599,51 @@ fn gpu_at1_quarry() {
         log["configs"][name] = serde_json::json!({"mean_exposed_rgb": mean,
             "sun_travel": travel.to_array(), "lux": lux, "captured_sky": captured, "frames": frames});
     }
+    // A near-horizontal view toward the low sun makes the shafts behind the
+    // rocks visible in the surrounding medium, rather than against surfaces only.
+    let mut shaft_pose = frame.clone();
+    shaft_pose.eye[1] = 1.1;
+    shaft_pose.target[1] = 1.1;
+    let shaft_camera = shaft_pose.camera().unwrap();
+    for (name, atmosphere) in [
+        ("off", legacy),
+        ("default", Atmosphere::default()),
+        ("dense", volumetric),
+    ] {
+        apply(&mut r, atmosphere, false, low, space);
+        for _ in 0..24 {
+            render(&mut r, &mut asset, &shaft_camera);
+        }
+        png(
+            &out.join(format!("{path}-shaft-view-{name}.png")),
+            size,
+            &capture(&mut r),
+        );
+    }
+    // VF1: a short camera-only move followed by a hold, so world reprojection is
+    // exercised without caster uploads resetting fog history every frame.
+    apply(&mut r, volumetric, false, low, space);
+    for step in 0..24 {
+        let mut pose = frame.clone();
+        let offset = (step.min(15) as f32) * 0.005;
+        pose.eye[0] += offset;
+        pose.target[0] += offset;
+        render(&mut r, &mut asset, &pose.camera().unwrap());
+        if [0, 7, 15, 23].contains(&step) {
+            png(
+                &out.join(format!("{path}-motion-{step:02}.png")),
+                size,
+                &capture(&mut r),
+            );
+        }
+    }
     // Timing: static frames back to back after a warm-up, every configuration twice.
     let frames: u32 = env("AT1_FRAMES").map_or(60, |s| s.parse().unwrap());
     // Pairs that change one thing: the atmosphere (off/default), the environment source at
     // the quarry sun (procedural), the low sun alone (off-low), then the procedural sky and
     // volumetric fog at the low sun.
     let timing_configs = [
-        ("off", Atmosphere::off(), true, quarry_travel, quarry_lux),
+        ("off", legacy, true, quarry_travel, quarry_lux),
         (
             "default",
             Atmosphere::default(),
@@ -456,7 +659,8 @@ fn gpu_at1_quarry() {
             space,
         ),
         ("off-low", Atmosphere::off(), true, low, space),
-        ("procedural-low", Atmosphere::default(), false, low, space),
+        ("procedural-low", legacy, false, low, space),
+        ("default-fog", Atmosphere::default(), false, low, space),
         ("volumetric", volumetric, false, low, space),
     ];
     let mut timing = serde_json::json!({});
@@ -464,14 +668,14 @@ fn gpu_at1_quarry() {
         for (name, atmosphere, captured, travel, lux) in timing_configs {
             apply(&mut r, atmosphere, captured, travel, lux);
             for _ in 0..20 {
-                render(&mut r, &mut asset);
+                render(&mut r, &mut asset, &camera);
             }
             r.test_drain("AT1 warm");
             let _ = r.poll().unwrap();
             let start = Instant::now();
             let mut samples = vec![];
             for _ in 0..frames {
-                render(&mut r, &mut asset);
+                render(&mut r, &mut asset, &camera);
                 samples.extend(r.poll().unwrap().gpu);
             }
             r.test_drain("AT1 timing");

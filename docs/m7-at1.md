@@ -1,5 +1,9 @@
 # M7-AT1: atmosphere and fog
 
+Follow-up: [VF1](m7-vf1.md) adds non-RT froxel shadows and stabilized reprojection,
+and promotes subtle volumetric fog on both paths. The results below describe AT1
+before that follow-up.
+
 Overnight complete-base unit (Islam, 2026-11-08; rules in AGENTS.md and [milestone-7.md](milestone-7.md)). Branch `t3/m7-at1`.
 
 ## What shipped

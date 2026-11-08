@@ -3109,18 +3109,26 @@ impl Renderer {
         if lit {
             // TP2: all opaque paths and GI shading read this independent caster map.
             self.encode_transmission(&mut encoder, transparent);
+        }
+        if lit && !virtual_frame {
             self.encode_atmosphere(&mut encoder);
         }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
         if traced {
+            // Own this handle while VF1 updates its history between the Virtual
+            // depth pass and shading; no timestamp borrow crosses that update.
+            let queries = self
+                .timing
+                .as_ref()
+                .filter(|_| timed)
+                .map(|t| (*t.queries).clone());
             let stamps = |first: u32| {
-                self.timing
+                queries
                     .as_ref()
-                    .filter(|_| timed)
-                    .map(|t| wgpu::ComputePassTimestampWrites {
-                        query_set: &t.queries,
+                    .map(|queries| wgpu::ComputePassTimestampWrites {
+                        query_set: queries,
                         beginning_of_pass_write_index: Some(slot as u32 * 10 + first),
                         end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
                     })
@@ -3146,6 +3154,8 @@ impl Renderer {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
                     self.encode_virtual(&mut encoder, stamps(8));
+                    // VF1 samples the freshly generated Virtual depth pages.
+                    self.encode_atmosphere(&mut encoder);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));

@@ -37,27 +37,51 @@ fn tp1_modules_validate() {
     let hardware = crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap();
     for (name, program) in [("standard", crate::STANDARD_PROGRAM), ("toon", toon)] {
         let parameters = crate::program::declares_parameters(program);
-        validate(&format!("{name} map"), &glass_source(SOURCE, false, program, parameters));
-        validate(&format!("{name} rt"), &glass_source(&hardware, true, program, parameters));
+        validate(
+            &format!("{name} map"),
+            &glass_source(SOURCE, false, program, parameters),
+        );
+        validate(
+            &format!("{name} rt"),
+            &glass_source(&hardware, true, program, parameters),
+        );
     }
     for source in particle_sources(SOURCE) {
         validate("particles", &source);
     }
     validate("hit depth", &hit_depth_source());
-    validate("raster depth", &format!("{}{}", section("TP_FRAME"), section("TP_DEPTH_RASTER")));
-    validate("shadow", &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")));
-    validate("TP2 coloured shadow", &transmission_shadow::draw_source(SOURCE));
+    validate(
+        "raster depth",
+        &format!("{}{}", section("TP_FRAME"), section("TP_DEPTH_RASTER")),
+    );
+    validate(
+        "shadow",
+        &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
+    );
+    validate(
+        "TP2 coloured shadow",
+        &transmission_shadow::draw_source(SOURCE),
+    );
     validate("TP2 glass AA", section("TP_AA_SEED"));
     let head = primary_ray_gpu::transparent_reflection_head(SOURCE).unwrap();
-    validate("TP2 R1 glass reflection", &reflection::source(&head, crate::STANDARD_PROGRAM, false));
+    validate(
+        "TP2 R1 glass reflection",
+        &reflection::source(&head, crate::STANDARD_PROGRAM, false),
+    );
     // The standard program declares the hook; toon blends by coverage.
-    assert!(crate::program::declares_transmittance(crate::STANDARD_PROGRAM));
+    assert!(crate::program::declares_transmittance(
+        crate::STANDARD_PROGRAM
+    ));
     assert!(!crate::program::declares_transmittance(toon));
 }
 
 #[test]
 fn transparency_word_packs_opacity_and_ior() {
-    let t = crate::Transparency { opacity: 0.25, ior: 1.5, thickness: 0.01 };
+    let t = crate::Transparency {
+        opacity: 0.25,
+        ior: 1.5,
+        thickness: 0.01,
+    };
     let word = crate::Transparency::word(Some(&t));
     assert_eq!(word & 0xffff, 0x3400);
     assert_eq!(word >> 16, 0x3e00);
@@ -80,7 +104,10 @@ fn shadow_fit_maps_receivers_into_the_map() {
             if i & 4 == 0 { min.z } else { max.z },
         );
         let q = fit.matrix * p.extend(1.0);
-        assert!(q.x.abs() < 1.0 && q.y.abs() < 1.0 && (0.0..1.0).contains(&q.z), "{q}");
+        assert!(
+            q.x.abs() < 1.0 && q.y.abs() < 1.0 && (0.0..1.0).contains(&q.z),
+            "{q}"
+        );
     }
     // Farther along the sun's travel is deeper in the map.
     let near = fit.matrix * Vec3::new(0.0, 2.5, 1.0).extend(1.0);
@@ -105,11 +132,21 @@ struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };
         assert_eq!(s.matches(from).count(), 1, "{from}");
         s = s.replace(from, to);
     }
-    let start = s.find("
-// TP1: the share of the light behind").unwrap();
-    let end = start + s[start..].find("
+    let start = s
+        .find(
+            "
+// TP1: the share of the light behind",
+        )
+        .unwrap();
+    let end = start
+        + s[start..]
+            .find(
+                "
 }
-").unwrap() + 3;
+",
+            )
+            .unwrap()
+        + 3;
     s.replace_range(start..end, "");
     s
 }
@@ -120,7 +157,10 @@ fn pre_tp1_standard_is_exact() {
     let digest = sha2::Sha256::digest(pre_tp1_standard().as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     // shaders/programs/standard.wgsl at main f159fcd (DC1, R1, G2b, AT1; before TP1).
-    assert_eq!(hex, "c30842af78c4fa216e494182e63673f4aedf083c00ce2405c552f0836c5f43c7");
+    assert_eq!(
+        hex,
+        "c30842af78c4fa216e494182e63673f4aedf083c00ce2405c552f0836c5f43c7"
+    );
 }
 
 fn env(name: &str) -> Option<String> {
@@ -227,12 +267,20 @@ fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) {
     for p in opaque.chunks_exact_mut(4) {
         p[3] = 255;
     }
-    encoder.write_header().unwrap().write_image_data(&opaque).unwrap();
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&opaque)
+        .unwrap();
 }
 
 /// A full mip chain by 2x2 box filtering (odd edges clamp).
 fn mips(width: u32, height: u32, rgba: Vec<u8>) -> Vec<crate::asset::Mip> {
-    let mut levels = vec![crate::asset::Mip { width, height, rgba8: rgba }];
+    let mut levels = vec![crate::asset::Mip {
+        width,
+        height,
+        rgba8: rgba,
+    }];
     while let Some(last) = levels.last().filter(|m| m.width > 1 || m.height > 1) {
         let (w, h) = ((last.width / 2).max(1), (last.height / 2).max(1));
         let mut next = vec![0u8; (w * h * 4) as usize];
@@ -249,7 +297,11 @@ fn mips(width: u32, height: u32, rgba: Vec<u8>) -> Vec<crate::asset::Mip> {
                 }
             }
         }
-        levels.push(crate::asset::Mip { width: w, height: h, rgba8: next });
+        levels.push(crate::asset::Mip {
+            width: w,
+            height: h,
+            rgba8: next,
+        });
     }
     levels
 }
@@ -308,7 +360,12 @@ fn puff_texture(size: u32) -> Vec<u8> {
 }
 
 fn vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> crate::Vertex {
-    crate::Vertex { position, normal, uv, color: [1.0; 4] }
+    crate::Vertex {
+        position,
+        normal,
+        uv,
+        color: [1.0; 4],
+    }
 }
 
 /// A unit card in local x (width) and z (height), facing -y.
@@ -337,7 +394,11 @@ fn pane(width: f32, height: f32, cells: u32) -> (Vec<crate::Vertex>, Vec<u32>) {
             let nx = 0.025 * (x * 9.0 + z * 2.0).sin();
             let nz = 0.025 * (z * 7.0).cos();
             let length = (nx * nx + 1.0 + nz * nz).sqrt();
-            vertices.push(vertex([x, 0.0, z], [nx / length, -1.0 / length, nz / length], [u, 1.0 - v]));
+            vertices.push(vertex(
+                [x, 0.0, z],
+                [nx / length, -1.0 / length, nz / length],
+                [u, 1.0 - v],
+            ));
         }
     }
     let mut indices = vec![];
@@ -365,8 +426,16 @@ fn placement(at: Vec3, up: Vec3, facing: Vec3, yaw: f32, scale: f32) -> Mat4 {
     )
 }
 
-fn upload_texture(r: &mut Renderer, role: crate::asset::TextureRole, size: u32, rgba: Vec<u8>) -> crate::Texture {
-    let data = crate::asset::Texture { role, mips: mips(size, size, rgba) };
+fn upload_texture(
+    r: &mut Renderer,
+    role: crate::asset::TextureRole,
+    size: u32,
+    rgba: Vec<u8>,
+) -> crate::Texture {
+    let data = crate::asset::Texture {
+        role,
+        mips: mips(size, size, rgba),
+    };
     loop {
         if let Some(t) = r.try_upload_texture(&data).unwrap() {
             return t;
@@ -403,7 +472,8 @@ fn create_material(r: &mut Renderer, d: &MaterialDescriptor<'_>) -> Material {
 #[ignore = "GPU; optimized build; RENDERLAB_TP1_QUARRY (G2's manifest), RENDERLAB_TP1_OUT, RENDERLAB_TP1_PATH rt|nonrt|rtraster"]
 fn gpu_tp1_scene() {
     let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(env("RENDERLAB_TP1_QUARRY").unwrap()).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(env("RENDERLAB_TP1_QUARRY").unwrap()).unwrap())
+            .unwrap();
     let out = PathBuf::from(env("RENDERLAB_TP1_OUT").unwrap());
     std::fs::create_dir_all(&out).unwrap();
     let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
@@ -425,28 +495,53 @@ fn gpu_tp1_scene() {
     let rt = path != "nonrt";
     let (device, queue) = device(rt);
     let mut r = if rt {
-        Renderer::new_with_hardware_shadows(device, queue, FORMAT, renderer_limits, Default::default(),
-            HardwareShadowOptions { max_estimated_bytes: Some(8 * 1024 * 1024 * 1024) }, SOURCE).unwrap()
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            renderer_limits,
+            Default::default(),
+            HardwareShadowOptions {
+                max_estimated_bytes: Some(8 * 1024 * 1024 * 1024),
+            },
+            SOURCE,
+        )
+        .unwrap()
     } else {
-        Renderer::new_with_options(device, queue, FORMAT, renderer_limits, Default::default(), SOURCE).unwrap()
+        Renderer::new_with_options(
+            device,
+            queue,
+            FORMAT,
+            renderer_limits,
+            Default::default(),
+            SOURCE,
+        )
+        .unwrap()
     };
     if path == "rt" {
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     }
     let lighting: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap();
-    let v3 = |v: &serde_json::Value| -> [f32; 3] { std::array::from_fn(|k| v[k].as_f64().unwrap() as f32) };
+    let v3 = |v: &serde_json::Value| -> [f32; 3] {
+        std::array::from_fn(|k| v[k].as_f64().unwrap() as f32)
+    };
     let exposure: f32 = env("RENDERLAB_TP1_EXPOSURE").map_or(-14.0, |s| s.parse().unwrap());
     let travel = Vec3::from_array(v3(&lighting["lights"][0]["travel"]));
     r.set_lighting_and_shadows(
         &Lighting {
-            lights: vec![Light::Directional { travel, lux: v3(&lighting["lights"][0]["lux"]) }],
+            lights: vec![Light::Directional {
+                travel,
+                lux: v3(&lighting["lights"][0]["lux"]),
+            }],
             environment: [0.0; 3],
             exposure_stops: exposure,
         },
         &Shadows {
             directional_disk_angle: 0.04,
-            requests: vec![ShadowRequest::Directional { split_ends: vec![4., 12., 40.] }],
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![4., 12., 40.],
+            }],
             ..Default::default()
         },
     )
@@ -486,7 +581,11 @@ fn gpu_tp1_scene() {
     let (width, height) = (pose.width, pose.height);
     let target = r.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("TP1 color"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -500,10 +599,20 @@ fn gpu_tp1_scene() {
         "tr1": r.reconstruction.enabled});
 
     // 1. Pick ground points from the opaque depth the pass writes (a probe emitter runs it).
-    let probe = r.try_create_emitter(&EmitterDescriptor { capacity: 1, spawn_rate: 0.0, ..Default::default() }).unwrap();
+    let probe = r
+        .try_create_emitter(&EmitterDescriptor {
+            capacity: 1,
+            spawn_rate: 0.0,
+            ..Default::default()
+        })
+        .unwrap();
     {
         let mut draws = asset.draws(Visibility::Frustum);
-        while r.try_render_view(&target, &camera, &mut draws, ViewMode::Lit).unwrap().is_none() {
+        while r
+            .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+            .unwrap()
+            .is_none()
+        {
             r.test_drain("TP1 probe");
         }
     }
@@ -517,13 +626,31 @@ fn gpu_tp1_scene() {
             .collect()
     };
     // The opaque depth itself, as an image (near white, far black) and statistics.
-    let finite: Vec<f32> = depth.iter().copied().filter(|d| d.is_finite() && *d < 1e20).collect();
+    let finite: Vec<f32> = depth
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite() && *d < 1e20)
+        .collect();
     let far = finite.iter().copied().fold(0.0f32, f32::max).max(1e-3);
-    let image: Vec<u8> = depth.iter().flat_map(|&d| {
-        let v = if d.is_finite() && d < 1e20 { (255.0 * (1.0 - d / far).clamp(0.0, 1.0)) as u8 } else if d.is_nan() { 0 } else { 32 };
-        [v, v, if d.is_nan() { 255 } else { v }, 255]
-    }).collect();
-    write_png(&out.join(format!("{path}-depth.png")), width, height, &image);
+    let image: Vec<u8> = depth
+        .iter()
+        .flat_map(|&d| {
+            let v = if d.is_finite() && d < 1e20 {
+                (255.0 * (1.0 - d / far).clamp(0.0, 1.0)) as u8
+            } else if d.is_nan() {
+                0
+            } else {
+                32
+            };
+            [v, v, if d.is_nan() { 255 } else { v }, 255]
+        })
+        .collect();
+    write_png(
+        &out.join(format!("{path}-depth.png")),
+        width,
+        height,
+        &image,
+    );
     log["depth"] = serde_json::json!({"covered": finite.len(), "pixels": depth.len(),
         "nan": depth.iter().filter(|d| d.is_nan()).count(), "max": far,
         "min": finite.iter().copied().fold(f32::INFINITY, f32::min)});
@@ -535,7 +662,10 @@ fn gpu_tp1_scene() {
     let pick = |fx: f32, fy: f32| -> Option<Vec3> {
         let (x, y) = ((fx * width as f32) as u32, (fy * height as f32) as u32);
         let d = depth[(y * width + x) as usize];
-        let ndc = [(x as f32 + 0.5) / width as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / height as f32 * 2.0];
+        let ndc = [
+            (x as f32 + 0.5) / width as f32 * 2.0 - 1.0,
+            1.0 - (y as f32 + 0.5) / height as f32 * 2.0,
+        ];
         let far = unproject * glam::Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
         let dir = (far.truncate() / far.w - eye).normalize();
         // Only island hits: the backdrop is empty.
@@ -543,7 +673,14 @@ fn gpu_tp1_scene() {
     };
     // Pose 0 sees the quarry island over a black backdrop: bushes on its gravel and sand,
     // the fire on the sand in front of the cliff.
-    let picks: Vec<(f32, f32)> = vec![(0.33, 0.56), (0.36, 0.58), (0.45, 0.66), (0.52, 0.69), (0.62, 0.66), (0.80, 0.60)];
+    let picks: Vec<(f32, f32)> = vec![
+        (0.33, 0.56),
+        (0.36, 0.58),
+        (0.45, 0.66),
+        (0.52, 0.69),
+        (0.62, 0.66),
+        (0.80, 0.60),
+    ];
     let bushes: Vec<Vec3> = picks.iter().filter_map(|&(x, y)| pick(x, y)).collect();
     let fire_at = pick(0.56, 0.67).unwrap();
     let centre = pick(0.5, 0.55).map_or(8.0, |p| (p - eye).dot(forward));
@@ -559,27 +696,58 @@ fn gpu_tp1_scene() {
     let (card_vertices, card_indices) = card();
     let cells: u32 = env("RENDERLAB_TP1_CELLS").map_or(96, |s| s.parse().unwrap());
     let cut_start = Instant::now();
-    let cut = crate::cutout::cutout(&MeshData { vertices: &card_vertices, indices: &card_indices }, &mask, 1.0, 0.5, cells).unwrap();
+    let cut = crate::cutout::cutout(
+        &MeshData {
+            vertices: &card_vertices,
+            indices: &card_indices,
+        },
+        &mask,
+        1.0,
+        0.5,
+        cells,
+    )
+    .unwrap();
     let cut_ms = cut_start.elapsed().as_secs_f64() * 1e3;
-    let leaf_texture = upload_texture(&mut r, crate::asset::TextureRole::BaseColorSrgb, 256, leaf_rgba);
+    let leaf_texture = upload_texture(
+        &mut r,
+        crate::asset::TextureRole::BaseColorSrgb,
+        256,
+        leaf_rgba,
+    );
     let leaf_mesh = upload_mesh(&mut r, &cut.vertices, &cut.indices);
-    let leaf = create_material(&mut r, &MaterialDescriptor {
-        base_color: [1.0; 4],
-        metallic: 0.0,
-        roughness: 0.65,
-        base_color_texture: Some(TextureBinding { texture: &leaf_texture, sampler: Default::default() }),
-        double_sided: true,
-        thin: true,
-        ..Default::default()
-    });
+    let leaf = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [1.0; 4],
+            metallic: 0.0,
+            roughness: 0.65,
+            base_color_texture: Some(TextureBinding {
+                texture: &leaf_texture,
+                sampler: Default::default(),
+            }),
+            double_sided: true,
+            thin: true,
+            ..Default::default()
+        },
+    );
     let mut models = vec![];
     for (k, &at) in bushes.iter().enumerate() {
         let scale = 0.9 + 0.25 * (k % 3) as f32;
         for c in 0..3 {
-            models.push(placement(at - up * 0.05, up, eye - at, k as f32 * 0.7 + c as f32 * 2.094, scale));
+            models.push(placement(
+                at - up * 0.05,
+                up,
+                eye - at,
+                k as f32 * 0.7 + c as f32 * 2.094,
+                scale,
+            ));
         }
     }
-    assert!(models.iter().all(|m| m.is_finite()), "TP1 foliage placements {:?}", log["picks"]);
+    assert!(
+        models.iter().all(|m| m.is_finite()),
+        "TP1 foliage placements {:?}",
+        log["picks"]
+    );
     let mut foliage = upload_instances(&mut r, &models);
     log["foliage"] = serde_json::json!({"cards": models.len(), "cut_triangles": cut.indices.len() / 3,
         "cut_vertices": cut.vertices.len(), "cut_ms": cut_ms, "cells": cells});
@@ -587,19 +755,34 @@ fn gpu_tp1_scene() {
     // 3. Glass: a rippled clear pane facing the camera.
     let (pane_vertices, pane_indices) = pane(2.2, 1.6, 48);
     let pane_mesh = upload_mesh(&mut r, &pane_vertices, &pane_indices);
-    let glass = create_material(&mut r, &MaterialDescriptor {
-        base_color: [0.86, 0.95, 0.92, 1.0],
-        metallic: 0.0,
-        roughness: 0.04,
-        double_sided: true,
-        thin: true,
-        transparency: Some(crate::Transparency { opacity: 0.0, ior: 1.5, thickness: 0.02 }),
-        ..Default::default()
-    });
-    let mut glass_instances = upload_instances(&mut r, &[placement(glass_at, up, eye - glass_at, 0.25, 1.0)]);
+    let glass = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.86, 0.95, 0.92, 1.0],
+            metallic: 0.0,
+            roughness: 0.04,
+            double_sided: true,
+            thin: true,
+            transparency: Some(crate::Transparency {
+                opacity: 0.0,
+                ior: 1.5,
+                thickness: 0.02,
+            }),
+            ..Default::default()
+        },
+    );
+    let mut glass_instances = upload_instances(
+        &mut r,
+        &[placement(glass_at, up, eye - glass_at, 0.25, 1.0)],
+    );
 
     // 4. Fire and smoke.
-    let puff = upload_texture(&mut r, crate::asset::TextureRole::BaseColorSrgb, 64, puff_texture(64));
+    let puff = upload_texture(
+        &mut r,
+        crate::asset::TextureRole::BaseColorSrgb,
+        64,
+        puff_texture(64),
+    );
     let lux = v3(&lighting["lights"][0]["lux"]);
     let sun = lux[0].max(lux[1]).max(lux[2]);
     let fire = EmitterDescriptor {
@@ -614,7 +797,10 @@ fn gpu_tp1_scene() {
         size: [0.28, 0.06],
         color: [[1.0, 0.5, 0.15, 0.25], [0.6, 0.2, 0.05, 0.0]],
         // A flame several times brighter than the sunlit ground.
-        emission: [[sun * 0.9, sun * 0.42, sun * 0.1], [sun * 0.25, sun * 0.06, 0.0]],
+        emission: [
+            [sun * 0.9, sun * 0.42, sun * 0.1],
+            [sun * 0.25, sun * 0.06, 0.0],
+        ],
         fade: [0.15, 0.5],
         soft_distance: 0.15,
         texture: Some(&puff),
@@ -640,8 +826,11 @@ fn gpu_tp1_scene() {
         seed: 11,
     };
 
-    let render = |r: &mut Renderer, camera: &Camera, asset: &mut quarry_prepared::Prepared,
-                  foliage: Option<&mut Instances>, glass_draw: Option<&mut Instances>| {
+    let render = |r: &mut Renderer,
+                  camera: &Camera,
+                  asset: &mut quarry_prepared::Prepared,
+                  foliage: Option<&mut Instances>,
+                  glass_draw: Option<&mut Instances>| {
         let mut draws = asset.draws(Visibility::Frustum);
         if let Some(instances) = foliage {
             draws.push(Draw::new(&leaf_mesh, instances).with_material(&leaf));
@@ -651,7 +840,10 @@ fn gpu_tp1_scene() {
         }
         let until = Instant::now() + Duration::from_secs(60);
         loop {
-            if let Some(report) = r.try_render_view(&target, camera, &mut draws, ViewMode::Lit).unwrap() {
+            if let Some(report) = r
+                .try_render_view(&target, camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+            {
                 return report;
             }
             assert!(Instant::now() < until, "TP1 admission");
@@ -661,7 +853,12 @@ fn gpu_tp1_scene() {
     let save = |r: &mut Renderer, name: &str| {
         r.test_drain("TP1 capture");
         let rgba = read_texture(r, &target, 4);
-        write_png(&out.join(format!("{path}-{name}.png")), width, height, &rgba);
+        write_png(
+            &out.join(format!("{path}-{name}.png")),
+            width,
+            height,
+            &rgba,
+        );
     };
     let samples = |r: &mut Renderer, rows: &mut Vec<f64>| {
         let events = r.poll().unwrap();
@@ -695,10 +892,15 @@ fn gpu_tp1_scene() {
         }
         r.test_drain("TP1 identity");
         let before = read_texture(&r, &target, 4);
-        r.reload_program(&standard, crate::STANDARD_PROGRAM).unwrap();
+        r.reload_program(&standard, crate::STANDARD_PROGRAM)
+            .unwrap();
         r.set_reconstruction(reconstruction).unwrap();
         r.set_indirect(indirect).unwrap();
-        let differing = current.chunks_exact(4).zip(before.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        let differing = current
+            .chunks_exact(4)
+            .zip(before.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
         log["identity"] = serde_json::json!({"differing_pixels": differing,
             "note": "opaque quarry, TP1 standard program vs the pre-TP1 one, presented RGBA8"});
         eprintln!("tp1 identity {}", log["identity"]);
@@ -711,7 +913,13 @@ fn gpu_tp1_scene() {
     let smoke_emitter = r.try_create_emitter(&smoke).unwrap();
     if sections.contains("images") {
         for frame in 1..=240 {
-            render(&mut r, &camera, &mut asset, Some(&mut foliage), Some(&mut glass_instances));
+            render(
+                &mut r,
+                &camera,
+                &mut asset,
+                Some(&mut foliage),
+                Some(&mut glass_instances),
+            );
             if frame == 60 || frame == 240 {
                 save(&mut r, &format!("full-f{frame}"));
             }
@@ -720,9 +928,22 @@ fn gpu_tp1_scene() {
         let right = inverse_view.x_axis.truncate();
         for k in 1..=40 {
             let shift = right * (0.015 * k as f32);
-            let moved = Camera::look_at(eye + shift, Vec3::from_array(pose.target) + shift, up,
-                pose.fov_y_radians, pose.near, pose.far).unwrap();
-            render(&mut r, &moved, &mut asset, Some(&mut foliage), Some(&mut glass_instances));
+            let moved = Camera::look_at(
+                eye + shift,
+                Vec3::from_array(pose.target) + shift,
+                up,
+                pose.fov_y_radians,
+                pose.near,
+                pose.far,
+            )
+            .unwrap();
+            render(
+                &mut r,
+                &moved,
+                &mut asset,
+                Some(&mut foliage),
+                Some(&mut glass_instances),
+            );
         }
         save(&mut r, "full-pan40");
     }
@@ -735,10 +956,18 @@ fn gpu_tp1_scene() {
         // emitters: opaque, then foliage.
         if !sections.contains("images") {
             for _ in 0..300 {
-                render(&mut r, &camera, &mut asset, Some(&mut foliage), Some(&mut glass_instances));
+                render(
+                    &mut r,
+                    &camera,
+                    &mut asset,
+                    Some(&mut foliage),
+                    Some(&mut glass_instances),
+                );
             }
         }
-        let mut phase = |r: &mut Renderer, asset: &mut quarry_prepared::Prepared, configs: [u8; 2]| {
+        let mut phase = |r: &mut Renderer,
+                         asset: &mut quarry_prepared::Prepared,
+                         configs: [u8; 2]| {
             let mut rows: [Vec<f64>; 2] = Default::default();
             for _ in 0..8 {
                 for (k, &config) in configs.iter().enumerate() {
@@ -746,7 +975,13 @@ fn gpu_tp1_scene() {
                         match config {
                             0 => render(r, &camera, asset, None, None),
                             1 => render(r, &camera, asset, Some(&mut foliage), None),
-                            _ => render(r, &camera, asset, Some(&mut foliage), Some(&mut glass_instances)),
+                            _ => render(
+                                r,
+                                &camera,
+                                asset,
+                                Some(&mut foliage),
+                                Some(&mut glass_instances),
+                            ),
                         };
                     }
                     r.test_drain("TP1 timing block");
@@ -759,13 +994,14 @@ fn gpu_tp1_scene() {
             rows.map(|mut v| serde_json::json!({"median_ms": median(&mut v), "frames": v.len()}))
         };
         if sections.contains("glassprofile") {
-            for variant in ["baseline","open","map","openmap","openmapnofog"] {
-                r.transparency.profile=Some(variant.into());
-                let [particles,full]=phase(&mut r,&mut asset,[1,2]);
+            for variant in ["baseline", "open", "map", "openmap", "openmapnofog"] {
+                r.transparency.profile = Some(variant.into());
+                let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
                 eprintln!("TP2 profile {variant}: particles {particles}, full {full}");
-                log["profile"][variant]=serde_json::json!({"foliage_particles":particles,"full":full});
+                log["profile"][variant] =
+                    serde_json::json!({"foliage_particles":particles,"full":full});
             }
-            drop((fire_emitter,smoke_emitter));
+            drop((fire_emitter, smoke_emitter));
         } else {
             let [particles, full] = phase(&mut r, &mut asset, [1, 2]);
             drop((fire_emitter, smoke_emitter));
@@ -777,7 +1013,11 @@ fn gpu_tp1_scene() {
     } else {
         drop((fire_emitter, smoke_emitter));
     }
-    std::fs::write(out.join(format!("{path}-tp1.json")), serde_json::to_string_pretty(&log).unwrap()).unwrap();
+    std::fs::write(
+        out.join(format!("{path}-tp1.json")),
+        serde_json::to_string_pretty(&log).unwrap(),
+    )
+    .unwrap();
 }
 
 /// A small sunlit ground, tinted pane and emissive target in its reflection. The
@@ -785,40 +1025,163 @@ fn gpu_tp1_scene() {
 #[test]
 #[ignore = "GPU; n8 lease; TP1_PATH and TP1_OUT"]
 fn gpu_tp2_fixture() {
-    let path=env("RENDERLAB_TP1_PATH").unwrap_or_else(||"rt".into());
-    let out=PathBuf::from(env("RENDERLAB_TP1_OUT").unwrap());
+    let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
+    let out = PathBuf::from(env("RENDERLAB_TP1_OUT").unwrap());
     std::fs::create_dir_all(&out).unwrap();
-    let rt=path!="nonrt";
-    let (device,queue)=device(rt);
-    let mut r=if rt {Renderer::new_with_hardware_shadows(device,queue,FORMAT,Limits::default(),Default::default(),HardwareShadowOptions::default(),SOURCE).unwrap()}
-        else {Renderer::new_with_options(device,queue,FORMAT,Limits::default(),Default::default(),SOURCE).unwrap()};
-    if rt {r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();r.set_soft_shadows(SoftShadows::Interactive);}
-    r.set_lighting_and_shadows(&Lighting {lights:vec![Light::Directional {travel:Vec3::new(0.25,0.5,-1.0),lux:[20000.;3]}],environment:[80.;3],exposure_stops:-12.0},
-        &Shadows {requests:vec![ShadowRequest::Directional {split_ends:vec![30.]}],directional_disk_angle:0.01,..Default::default()}).unwrap();
+    let rt = path != "nonrt";
+    let (device, queue) = device(rt);
+    let mut r = if rt {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            HardwareShadowOptions::default(),
+            SOURCE,
+        )
+        .unwrap()
+    } else {
+        Renderer::new_with_options(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            SOURCE,
+        )
+        .unwrap()
+    };
+    if rt {
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        r.set_soft_shadows(SoftShadows::Interactive);
+    }
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(0.25, 0.5, -1.0),
+                lux: [20000.; 3],
+            }],
+            environment: [80.; 3],
+            exposure_stops: -12.0,
+        },
+        &Shadows {
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![30.],
+            }],
+            directional_disk_angle: 0.01,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     r.set_atmosphere(crate::Atmosphere::off()).unwrap();
-    let (width,height)=(768,512);
-    let target=r.device().create_texture(&wgpu::TextureDescriptor {label:Some("TP2 fixture"),size:wgpu::Extent3d {width,height,depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:FORMAT,usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::COPY_SRC,view_formats:&[]});
-    let floor_vertices=[vertex([-6.,-5.,0.],[0.,0.,1.],[0.,0.]),vertex([6.,-5.,0.],[0.,0.,1.],[1.,0.]),vertex([6.,7.,0.],[0.,0.,1.],[1.,1.]),vertex([-6.,7.,0.],[0.,0.,1.],[0.,1.])];
-    let floor_mesh=upload_mesh(&mut r,&floor_vertices,&[0,1,2,0,2,3]);
-    let (vertices,indices)=pane(3.4,2.6,1);
-    let pane_mesh=upload_mesh(&mut r,&vertices,&indices);
+    let (width, height) = (768, 512);
+    let target = r.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("TP2 fixture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let floor_vertices = [
+        vertex([-6., -5., 0.], [0., 0., 1.], [0., 0.]),
+        vertex([6., -5., 0.], [0., 0., 1.], [1., 0.]),
+        vertex([6., 7., 0.], [0., 0., 1.], [1., 1.]),
+        vertex([-6., 7., 0.], [0., 0., 1.], [0., 1.]),
+    ];
+    let floor_mesh = upload_mesh(&mut r, &floor_vertices, &[0, 1, 2, 0, 2, 3]);
+    let (vertices, indices) = pane(3.4, 2.6, 1);
+    let pane_mesh = upload_mesh(&mut r, &vertices, &indices);
     let source=crate::STANDARD_PROGRAM.replace("return exposed;","return exposed+select(vec3<f32>(0.0),vec3<f32>(5.0,0.05,0.02),input.material.base_color.r>0.78);");
-    let program=r.try_create_program(&crate::ProgramDescriptor {label:"TP2 emissive target",source:&source}).unwrap();
-    let ground=create_material(&mut r,&MaterialDescriptor {base_color:[0.75,0.75,0.75,1.],double_sided:true,roughness:0.7,program:Some(&program),..Default::default()});
-    let glass=create_material(&mut r,&MaterialDescriptor {base_color:[0.35,0.85,0.5,1.],double_sided:true,thin:true,roughness:0.015,transparency:Some(crate::Transparency {opacity:0.08,ior:1.5,thickness:0.02}),..Default::default()});
-    let red=create_material(&mut r,&MaterialDescriptor {base_color:[0.8,0.02,0.01,1.],double_sided:true,roughness:0.8,program:Some(&program),..Default::default()});
-    let mut floor=upload_instances(&mut r,&[Mat4::IDENTITY]);
-    let mut pane_instance=upload_instances(&mut r,&[Mat4::IDENTITY]);
+    let program = r
+        .try_create_program(&crate::ProgramDescriptor {
+            label: "TP2 emissive target",
+            source: &source,
+        })
+        .unwrap();
+    let ground = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.75, 0.75, 0.75, 1.],
+            double_sided: true,
+            roughness: 0.7,
+            program: Some(&program),
+            ..Default::default()
+        },
+    );
+    let glass = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.35, 0.85, 0.5, 1.],
+            double_sided: true,
+            thin: true,
+            roughness: 0.015,
+            transparency: Some(crate::Transparency {
+                opacity: 0.08,
+                ior: 1.5,
+                thickness: 0.02,
+            }),
+            ..Default::default()
+        },
+    );
+    let red = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.8, 0.02, 0.01, 1.],
+            double_sided: true,
+            roughness: 0.8,
+            program: Some(&program),
+            ..Default::default()
+        },
+    );
+    let mut floor = upload_instances(&mut r, &[Mat4::IDENTITY]);
+    let mut pane_instance = upload_instances(&mut r, &[Mat4::IDENTITY]);
     // A small red card in front of the pane faces it, visible in its reflection.
-    let mut target_instance=upload_instances(&mut r,&[Mat4::from_translation(Vec3::new(-1.0,-2.5,0.8))*Mat4::from_scale(Vec3::splat(0.35))]);
-    let camera=Camera::look_at(Vec3::new(4.,-7.,4.),Vec3::new(0.,0.7,0.8),Vec3::Z,55f32.to_radians(),0.05,50.).unwrap();
-    for (name,pane_visible) in [("control",false),("glass",true)] {
+    let mut target_instance =
+        upload_instances(
+            &mut r,
+            &[Mat4::from_translation(Vec3::new(-1.0, -2.5, 0.8))
+                * Mat4::from_scale(Vec3::splat(0.35))],
+        );
+    let camera = Camera::look_at(
+        Vec3::new(4., -7., 4.),
+        Vec3::new(0., 0.7, 0.8),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.05,
+        50.,
+    )
+    .unwrap();
+    for (name, pane_visible) in [("control", false), ("glass", true)] {
         for _ in 0..48 {
-            let mut draws=vec![Draw::new(&floor_mesh,&mut floor).with_material(&ground),Draw::new(&pane_mesh,&mut target_instance).with_material(&red)];
-            if pane_visible {draws.push(Draw::new(&pane_mesh,&mut pane_instance).with_material(&glass));}
-            while r.try_render_view(&target,&camera,&mut draws,ViewMode::Lit).unwrap().is_none() {r.test_drain("TP2 fixture admission");}
+            let mut draws = vec![
+                Draw::new(&floor_mesh, &mut floor).with_material(&ground),
+                Draw::new(&pane_mesh, &mut target_instance).with_material(&red),
+            ];
+            if pane_visible {
+                draws.push(Draw::new(&pane_mesh, &mut pane_instance).with_material(&glass));
+            }
+            while r
+                .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("TP2 fixture admission");
+            }
         }
         r.test_drain("TP2 fixture capture");
-        write_png(&out.join(format!("{path}-{name}.png")),width,height,&read_texture(&r,&target,4));
+        write_png(
+            &out.join(format!("{path}-{name}.png")),
+            width,
+            height,
+            &read_texture(&r, &target, 4),
+        );
     }
 }

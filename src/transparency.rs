@@ -144,8 +144,18 @@ impl EmitterDescriptor<'_> {
             ]
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0)
-            && self.lifetime.iter().chain(&self.size).chain(&self.fade).all(|v| v.is_finite() && *v >= 0.0)
-            && self.color.iter().flatten().chain(self.emission.iter().flatten()).all(|v| v.is_finite() && *v >= 0.0);
+            && self
+                .lifetime
+                .iter()
+                .chain(&self.size)
+                .chain(&self.fade)
+                .all(|v| v.is_finite() && *v >= 0.0)
+            && self
+                .color
+                .iter()
+                .flatten()
+                .chain(self.emission.iter().flatten())
+                .all(|v| v.is_finite() && *v >= 0.0);
         if !finite
             || self.lifetime[0] <= 0.0
             || self.lifetime[1] < self.lifetime[0]
