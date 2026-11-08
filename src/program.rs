@@ -93,13 +93,47 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
     let scene = ["hardware_scene", "fresh_scene"]
         .into_iter()
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
-    match scene.filter(|_| lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed))
-    {
+    let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
+    match scene.filter(|_| traced) {
         Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+        // M7-R1n: non-RT heads that declare the software geometry trace it instead.
+        None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
+            (software_reflection_api(), true)
+        }
         None => (REFLECTION_STUB.to_owned(), false),
     }
 }
 // ---- end of M7-R1 reflections ----
+
+// ---- M7-R1n software reflections (docs/m7-r1n.md) ----
+/// The non-RT shading heads' software reflection geometry (src/reflection_software.rs).
+pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
+    "@group(0) @binding(36) var<storage,read> rl_geometry:array<u32>;\n";
+const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
+/// R1's two ray queries and their software replacements: the hit's light visibility, and
+/// the reflection ray itself, which yields the same hit record.
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 2] = [
+    (
+        "    var query:ray_query;\n    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
+        "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
+    ),
+    (
+        "        var query:ray_query;\n        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.kind!=0u {\n            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);\n",
+        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.x!=0u {\n            let h=rl_hit_input(hit,origin,d,width,spread,pixel);\n",
+    ),
+];
+/// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
+/// reconstruction, decals and program shading, with no ray queries.
+fn software_reflection_api() -> String {
+    let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    for (from, to) in SOFTWARE_REFLECTION_SEAMS {
+        assert_eq!(api.matches(from).count(), 1, "R1 reflection seam moved");
+        api = api.replacen(from, to, 1);
+    }
+    assert!(!api.contains("RL_SCENE") && !api.contains("ray_query"));
+    api
+}
+// ---- end of M7-R1n software reflections ----
 
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen

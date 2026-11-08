@@ -62,6 +62,8 @@ pub struct Mesh {
     pub(crate) index: std::sync::Arc<Owned<wgpu::Buffer>>,
     pub(crate) index_count: u32,
     pub(crate) bounds: Aabb,
+    /// M7-R1n: software reflection geometry on non-RT visibility-buffer renderers.
+    pub(crate) reflection: Option<std::sync::Arc<crate::reflection_software::Blas>>,
 }
 pub struct Draw<'a> {
     pub(crate) mesh: &'a Mesh,

@@ -19,6 +19,7 @@ mod primary_ray;
 mod program;
 pub mod program_watch;
 mod receiver_adjacency;
+mod reflection_software;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
 mod renderer;
