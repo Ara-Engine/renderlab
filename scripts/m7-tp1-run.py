@@ -172,7 +172,8 @@ def run_steps(g, out, binary, args):
         base[k] = v
     done = []
     with g.lease("tp1-" + args.label, args.minutes) as owner:
-        out.mkdir(parents=True)
+        # A deferred preflight (foreign renderer, RAM) retries the lease with the same label.
+        out.mkdir(parents=True, exist_ok=True)
         if args.quiet:
             import datetime as dt
             now = g.utc()
