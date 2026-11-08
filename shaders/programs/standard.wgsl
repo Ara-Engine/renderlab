@@ -19,7 +19,10 @@ fn surface(input:SurfaceInput) -> Surface {
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
     let rough=clamp(material.roughness*mr.g,0.0,1.0);
-    return Surface(n,base,metal,rough);
+    // DC1: apply overlays to resolved inputs, before any BRDF or user shading.
+    let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
+    let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));
+    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its

@@ -108,9 +108,10 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
     let positions=array<vec3<f32>,3>(ta.position,tb.position,tc.position);
     let info=primary_placements[hit.placement];
     let receiver=Receiver(receiver_world,geometric,vec2<i32>(pixel),info&0x1fffffffu,primary_epsilon(positions,hit.placement),(info&0x20000000u)!=0u);
-    let input=SurfaceInput(world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,
+    // DC1's world-space decals project onto hits as onto camera receivers.
+    let input=decal_prepare(SurfaceInput(world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,
         a.normal*w.x+b.normal*w.y+c.normal*w.z,normal_dx,normal_dy,a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,a.handedness,
-        a.uv*w.x+b.uv*w.y+c.uv*w.z,gradients[0],gradients[1],a.color*w.x+b.color*w.y+c.color*w.z,lit_front,origin,pixel,material,receiver);
+        a.uv*w.x+b.uv*w.y+c.uv*w.z,gradients[0],gradients[1],a.color*w.x+b.color*w.y+c.color*w.z,lit_front,origin,pixel,material,receiver,decal_none()));
     // A single-sided draw's source-back face blocks the ray and sends nothing.
     return RlHit(input,hit.batch,material.double_sided!=0u || lit_front);
 }

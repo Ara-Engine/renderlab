@@ -89,7 +89,7 @@ fn input_at(r:ProbeRecord,id:vec2<u32>)->SurfaceInput {
     return SurfaceInput(r.world.xyz,vec3<f32>(0.0),vec3<f32>(0.0),r.geometric.xyz*r.geometric.w,
         r.normal.xyz*r.geometric.w,vec3<f32>(0.0),vec3<f32>(0.0),basis(r.normal.xyz)[0],1.0,
         r.uv.xy,vec2<f32>(0.0),vec2<f32>(0.0),r.color,r.geometric.w>0.0,r.world.xyz-r.direction.xyz,id,
-        material,Receiver(r.world.xyz,r.geometric.xyz,vec2<i32>(id),r.identity.z,1e-4,false));
+        material,Receiver(r.world.xyz,r.geometric.xyz,vec2<i32>(id),r.identity.z,1e-4,false),decal_none());
 }
 fn own_program(r:ProbeRecord,id:vec2<u32>)->vec3<f32> {
     let input=input_at(r,id);
