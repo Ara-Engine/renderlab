@@ -114,7 +114,7 @@ impl Default for HeightFog {
             base_height: 0.0,
             start_distance: 0.0,
             albedo: [0.9; 3],
-            anisotropy: 0.6,
+            anisotropy: 0.8,
         }
     }
 }

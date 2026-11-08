@@ -16,7 +16,8 @@ const SKYVIEW: [u32; 2] = [192, 108];
 const FROXEL_SLICES: u32 = 64;
 const VOLUME_SLICES: u32 = 96;
 /// Screen pixels per camera-volume column.
-pub(super) const FROXEL_TILE: u32 = 16;
+pub(super) const FROXEL_TILE: u32 = 8;
+const FROXEL_SHADOW_SAMPLES: u32 = 2;
 pub(super) const UNIFORM_BYTES: u64 = 432;
 /// The procedural environment's specular chain (shaders/atmosphere.wgsl must match): the
 /// smallest level stays 8 texels (7 levels from 64 down to 1 texel cost 0.47 ms more quarry
@@ -99,14 +100,15 @@ fn lut(device: &wgpu::Device, ledger: &Ledger, label: &str, size: [u32; 3], d3: 
     }
 }
 
-/// The camera volume at one froxel grid, and the two volumetric scattering volumes the
-/// injection alternates between (history, then current).
+/// The camera volume, raw samples and alternating visibility/extinction histories.
 pub(super) struct Volume {
     grid: [u32; 2],
     pub camera: Lut,
     scatter: Option<[Lut; 2]>,
+    raw: Option<Lut>,
     aerial: Option<Owned<wgpu::BindGroup>>,
     integrate: Option<[Owned<wgpu::BindGroup>; 2]>,
+    temporal: Option<[Owned<wgpu::BindGroup>; 2]>,
     /// Injection groups, keyed by their read-only shadow resources.
     inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
 }
@@ -126,14 +128,24 @@ impl Volume {
                     lut(
                         device,
                         ledger,
-                        "AT1 froxel scattering",
+                        "VF2 visibility/extinction history",
                         [grid[0], grid[1], FROXEL_SLICES],
                         true,
                     )
                 })
             }),
+            raw: volumetric.then(|| {
+                lut(
+                    device,
+                    ledger,
+                    "VF2 raw fog samples",
+                    [grid[0], grid[1], FROXEL_SLICES],
+                    true,
+                )
+            }),
             aerial: None,
             integrate: None,
+            temporal: None,
             inject: None,
         }
     }
@@ -147,6 +159,7 @@ struct Kernels {
     aerial: Owned<wgpu::ComputePipeline>,
     inject: Owned<wgpu::ComputePipeline>,
     inject_virtual: Option<Owned<wgpu::ComputePipeline>>,
+    temporal: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     specular: Owned<wgpu::ComputePipeline>,
     diffuse: Owned<wgpu::ComputePipeline>,
@@ -191,6 +204,8 @@ pub(super) struct AtmosphereGpu {
     previous: Option<(Mat4, Vec3)>,
     history_key: Option<HistoryKey>,
     frame: u32,
+    #[cfg(test)]
+    test_fog_quality: Option<(u32, u32)>,
     /// Whether this frame encodes the kernels (set by `prepare_atmosphere`).
     active: bool,
     /// Bumped when the camera volume is replaced, so lighting rebinds it.
@@ -258,6 +273,8 @@ impl AtmosphereGpu {
             previous: None,
             history_key: None,
             frame: 0,
+            #[cfg(test)]
+            test_fog_quality: None,
             active: false,
             generation: 0,
         }
@@ -355,6 +372,13 @@ impl Renderer {
     }
     pub fn atmosphere(&self) -> Atmosphere {
         self.atmosphere.settings
+    }
+    #[cfg(test)]
+    pub(crate) fn test_fog_quality(&mut self, tile: u32, samples: u32) {
+        assert!([8, 16].contains(&tile) && (1..=2).contains(&samples));
+        self.atmosphere.test_fog_quality = Some((tile, samples));
+        self.atmosphere.previous = None;
+        self.cut_reconstruction();
     }
     #[cfg(test)]
     pub(crate) fn test_atmosphere_environment(&self) -> (u64, u64, usize) {
@@ -548,7 +572,10 @@ impl Renderer {
             return Ok(());
         }
         self.ensure_atmosphere_kernels()?;
-        let grid = size.map(|n| n.div_ceil(FROXEL_TILE));
+        let tile = FROXEL_TILE;
+        #[cfg(test)]
+        let tile = self.atmosphere.test_fog_quality.map_or(tile, |q| q.0);
+        let grid = size.map(|n| n.div_ceil(tile));
         let volumetric = s.volumetric_fog.is_some();
         if self.atmosphere.volume.grid != grid
             || self.atmosphere.volume.scatter.is_some() != volumetric
@@ -568,8 +595,8 @@ impl Renderer {
         {
             self.atmosphere.previous = None;
         }
-        // A moving sun, changed medium, exposure or selected sky must not drag old
-        // in-scattering into the new frame. Camera motion uses world reprojection.
+        // Conservatively invalidate visibility reuse for shadow, medium and lighting
+        // changes. Camera motion uses world reprojection; phase is always current.
         let key = HistoryKey {
             sun: self.atmosphere_sun(),
             exposure: self.lighting.pending.exposure,
@@ -613,6 +640,9 @@ impl Renderer {
             ..Default::default()
         });
         let volume = s.volumetric_fog.unwrap_or_default();
+        let samples = FROXEL_SHADOW_SAMPLES;
+        #[cfg(test)]
+        let samples = a.test_fog_quality.map_or(samples, |q| q.1);
         let matrix = camera.matrix(size[0], size[1]);
         let (previous, previous_eye, valid) = match a.previous {
             Some((m, e)) => (m, e, 1.0),
@@ -653,7 +683,7 @@ impl Renderer {
             volume.distance,
             volume.extra_density,
             volume.history_weight,
-            0.0,
+            samples as f32,
         ]);
         f.extend(previous_eye.to_array());
         f.push(valid);
@@ -724,6 +754,7 @@ impl Renderer {
             k("at_fog_integrate"),
         );
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
+        let temporal = k("at_fog_temporal");
         let inject_virtual = (!hardware).then(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
@@ -847,6 +878,7 @@ impl Renderer {
             aerial,
             inject,
             inject_virtual,
+            temporal,
             integrate,
             specular,
             diffuse,
@@ -888,6 +920,23 @@ impl Renderer {
         let Some(scatter) = &v.scatter else {
             return;
         };
+        let raw = v.raw.as_ref().unwrap();
+        if v.temporal.is_none() {
+            v.temporal = Some([0, 1].map(|i| {
+                group(
+                    device,
+                    ledger,
+                    &k.temporal,
+                    &[
+                        uniform.clone(),
+                        sampler.clone(),
+                        view(5, &scatter[1 - i].view),
+                        view(6, &raw.view),
+                        view(15, &scatter[i].view),
+                    ],
+                )
+            }));
+        }
         // Aerial perspective alone needs no shadow resources.
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
         let virtual_buffers = (self.hardware_shadows.is_none()
@@ -912,6 +961,8 @@ impl Renderer {
                     &k.integrate,
                     &[
                         uniform.clone(),
+                        view(1, &a.transmittance.view),
+                        sampler.clone(),
                         view(6, &scatter[i].view),
                         view(13, &v.camera.view),
                     ],
@@ -919,14 +970,8 @@ impl Renderer {
             }));
         }
         if injection && v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
-            let groups = [0, 1].map(|i| {
-                let mut entries = vec![
-                    uniform.clone(),
-                    view(1, &a.transmittance.view),
-                    sampler.clone(),
-                    view(5, &scatter[1 - i].view),
-                    view(15, &scatter[i].view),
-                ];
+            let groups = [0, 1].map(|_| {
+                let mut entries = vec![uniform.clone(), view(15, &raw.view)];
                 if let Some(tlas) = tlas {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 20,
@@ -1018,6 +1063,13 @@ impl Renderer {
                 &k.inject
             });
             pass.set_bind_group(0, &*inject[i], &[]);
+            pass.dispatch_workgroups(
+                v.grid[0].div_ceil(4),
+                v.grid[1].div_ceil(4),
+                FROXEL_SLICES / 4,
+            );
+            pass.set_pipeline(&k.temporal);
+            pass.set_bind_group(0, &*v.temporal.as_ref().unwrap()[i], &[]);
             pass.dispatch_workgroups(
                 v.grid[0].div_ceil(4),
                 v.grid[1].div_ceil(4),
