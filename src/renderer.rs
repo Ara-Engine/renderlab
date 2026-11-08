@@ -39,6 +39,7 @@ pub use texture_residency::{ResidencyStats, TextureResidency};
 mod gi_cache;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
+    ProbeCounters,
 };
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,

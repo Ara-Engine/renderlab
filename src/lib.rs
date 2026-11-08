@@ -45,6 +45,7 @@ pub use receiver_adjacency::MeshUpload;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
+    ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
 pub use renderer::{Reconstruction, Renderer};

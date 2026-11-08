@@ -19,7 +19,8 @@ use crate::primary_ray::{TRACED_DRAWS, placement_table};
 const HEADER_WORDS: u64 = 64;
 /// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
 const SLOT_WORDS: u64 = 16 + 28;
-const COUNTER_WORDS: u64 = 16;
+/// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
+const COUNTER_WORDS: u64 = 32;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
 const FRAME_BYTES: usize = 64 + 64 * 16;
@@ -32,7 +33,19 @@ const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate.
 const PROFILE_STAMPS: u32 = 2 * (6 + 2 * CLAIM_ROUNDS);
 /// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
-const PROBE_TILE: u32 = 16;
+const PROBE_TILE: u32 = 8;
+/// The probe tile side; test builds that screen shader variants (RENDERLAB_GI_SHADERS) may
+/// override it with RENDERLAB_GI_PROBE_TILE to match a variant's workgroup.
+fn probe_tile() -> u32 {
+    #[cfg(test)]
+    if let Some(tile) = std::env::var("RENDERLAB_GI_PROBE_TILE")
+        .ok()
+        .and_then(|t| t.parse().ok())
+    {
+        return tile;
+    }
+    PROBE_TILE
+}
 /// Fixed grids, in 64-thread workgroups, of the passes whose counts only the GPU knows:
 /// each kernel reads its count and loops over it. Direct dispatches need no argument
 /// passes, and skip the per-dispatch validation pass wgpu adds to indirect dispatches
@@ -238,6 +251,30 @@ pub struct IndirectCounters {
     /// Cells probed this frame whose fixed probe lines each met two surface layers
     /// (shaders/gi_cache.wgsl gi_probe_line); their pixels read finer levels.
     pub splits: u32,
+    /// The probe's work, counted on profiled frames only (zero otherwise).
+    pub probe: ProbeCounters,
+}
+
+/// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
+/// covered pixel, covered pixels, tile-table insert calls and their probe steps, unique cells
+/// from pixels, added for orphans' parents and by refinement, table finds and how many found
+/// a cell, refinement walks (pixel, bin and level), tiles that refined, the most unique cells
+/// in one tile, and tiles by unique cells (< 32, < 64, < 256, full).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProbeCounters {
+    pub tiles: u32,
+    pub pixels: u32,
+    pub inserts: u32,
+    pub steps: u32,
+    pub cells: u32,
+    pub parents: u32,
+    pub refined: u32,
+    pub finds: u32,
+    pub found: u32,
+    pub walks: u32,
+    pub refine_tiles: u32,
+    pub max_cells: u32,
+    pub tiles_by_cells: [u32; 4],
 }
 
 struct Resources {
@@ -279,10 +316,15 @@ struct Arrays {
     bind: Owned<wgpu::BindGroup>,
 }
 /// Software-ray geometry: every draw's mesh records and near masks, and the flat instance
-/// list.
+/// list. With a merged world (`World`), the world BVH is the last packed mesh and the draws
+/// whose instances it covers pack nothing.
 struct Packed {
     meshes: Vec<wgpu::Buffer>,
     instances: usize,
+    /// Per (draw, instance) in draw order, whether the world BVH covers it (empty: no world).
+    covered: Vec<bool>,
+    /// Per draw, its mesh's index among the packed meshes (None: every instance is covered).
+    entry: Vec<Option<usize>>,
     offsets: Vec<[u32; 4]>,
     /// Per draw, the base word of each of its mesh's cooked near placements' masks.
     near: Vec<Vec<u32>>,
@@ -291,6 +333,94 @@ struct Packed {
     buffer: Owned<wgpu::Buffer>,
     bytes: u64,
     _allocation: Allocation,
+}
+/// A cooked near field's placements merged into one world-space BVH (non-RT, G1d), built at
+/// `set_indirect_near_field` from fields without masks: every placement's far-field cut in
+/// world space. While each placement is drawn with its exact cooked transform (and nothing
+/// else draws a field mesh), software rays trace it as one identity instance in place of the
+/// placements' own BVHs: the quarry's twelve scans overlap, so a ray otherwise descends each
+/// scan's BVH in turn. Any other instance set falls back to per-placement BVHs.
+struct World {
+    blas: Arc<Blas>,
+    source: [u8; 32],
+    /// Each placement's field mesh and transform bits.
+    placements: Vec<(u32, [u32; 16])>,
+    /// Per field mesh, the renderer mesh (vertex buffer) registered for it.
+    meshes: Vec<Option<wgpu::Buffer>>,
+}
+impl World {
+    fn new(field: &crate::asset::near_field::NearField) -> Result<Self, Error> {
+        let mut positions = vec![];
+        let mut indices = vec![];
+        for p in &field.placements {
+            let model = Mat4::from_cols_array_2d(&p.transform);
+            let mesh = field
+                .meshes
+                .get(p.mesh as usize)
+                .ok_or(Error::InvalidInput("near-field placement mesh"))?;
+            let base = positions.len() as u32;
+            positions.extend(mesh.positions.iter().map(|q| {
+                model
+                    .transform_point3(glam::Vec3::new(q[0], q[1], q[2]))
+                    .to_array()
+            }));
+            // A mirroring transform reverses the winding the source-side tests read.
+            let flip = model.determinant() < 0.0;
+            for t in mesh.indices.chunks_exact(3) {
+                let (b, c) = if flip { (t[2], t[1]) } else { (t[1], t[2]) };
+                indices.extend_from_slice(&[base + t[0], base + b, base + c]);
+            }
+        }
+        Ok(Self {
+            blas: Arc::new(Blas::new(gi_bvh::build(&positions, &indices)?, 0)?),
+            source: field.source,
+            placements: field
+                .placements
+                .iter()
+                .map(|p| (p.mesh, transform_bits(&p.transform)))
+                .collect(),
+            meshes: vec![None; field.meshes.len()],
+        })
+    }
+    /// Per (draw, instance) of `draws`, whether the world covers it, when its placements
+    /// are exactly the drawn instances of the field's meshes; None otherwise.
+    fn covers(&self, draws: &[PreparedDraw<'_>]) -> Option<Vec<bool>> {
+        let mut wanted: Vec<Option<(&wgpu::Buffer, [u32; 16])>> = self
+            .placements
+            .iter()
+            .map(|(m, bits)| Some((self.meshes.get(*m as usize)?.as_ref()?, *bits)))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut covered = vec![];
+        for d in draws {
+            let key: &wgpu::Buffer = &d.mesh.vertex;
+            let field_mesh = self.meshes.iter().any(|m| m.as_ref() == Some(key));
+            for model in &d.instances.state.models {
+                let bits = model.to_cols_array().map(f32::to_bits);
+                let hit = wanted
+                    .iter_mut()
+                    .find(|w| w.is_some_and(|(k, b)| k == key && b == bits));
+                match hit {
+                    Some(w) => {
+                        *w = None;
+                        covered.push(true);
+                    }
+                    // A field mesh drawn elsewhere: its BVH would double the world's.
+                    None if field_mesh => return None,
+                    None => covered.push(false),
+                }
+            }
+        }
+        wanted.iter().all(Option::is_none).then_some(covered)
+    }
+}
+/// A placement transform's exact bits, column-major (as `Mat4::to_cols_array`).
+fn transform_bits(t: &[[f32; 4]; 4]) -> [u32; 16] {
+    Mat4::from_cols_array_2d(t)
+        .to_cols_array()
+        .map(f32::to_bits)
 }
 struct Groups {
     key: (wgpu::Texture, wgpu::Texture, u64, bool),
@@ -341,6 +471,8 @@ pub(super) struct GiState {
     meshes: Vec<(wgpu::Buffer, Arc<Blas>)>,
     /// The octahedral bins per side every cooked mesh's near-field masks share (0: none).
     near_bins: u32,
+    /// A mask-free cooked near field merged into one world BVH (`World`).
+    world: Option<World>,
     packed: Option<Packed>,
     /// Last frame's world bounds per placement, for moved-caster boxes.
     bounds: Vec<[f32; 6]>,
@@ -390,6 +522,7 @@ impl GiState {
             arrays: None,
             meshes: vec![],
             near_bins: 0,
+            world: None,
             packed: None,
             bounds: vec![],
             environment: None,
@@ -690,7 +823,26 @@ impl Renderer {
         if bins != 0 {
             self.gi.near_bins = bins;
         }
-        self.set_indirect_blas(mesh, blas)
+        // Mask-free fields also trace as one merged world BVH where their placements allow.
+        let reuse = self.gi.world.as_ref().is_some_and(|w| {
+            w.source == field.source
+                && w.placements.len() == field.placements.len()
+                && w.placements
+                    .iter()
+                    .zip(&field.placements)
+                    .all(|((m, bits), p)| *m == p.mesh && *bits == transform_bits(&p.transform))
+        });
+        if bins != 0 {
+            self.gi.world = None;
+        } else if !reuse {
+            self.gi.world = Some(World::new(field)?);
+        }
+        let key: wgpu::Buffer = (**mesh.vertex).clone();
+        self.set_indirect_blas(mesh, blas)?;
+        if let Some(slot) = self.gi.world.as_mut().and_then(|w| w.meshes.get_mut(index)) {
+            *slot = Some(key);
+        }
+        Ok(())
     }
     fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
         if !Arc::ptr_eq(&self.identity, &mesh.renderer) {
@@ -698,6 +850,12 @@ impl Renderer {
         }
         let key: wgpu::Buffer = (**mesh.vertex).clone();
         self.gi.meshes.retain(|(k, _)| *k != key);
+        // Whatever this mesh traced before, it no longer stands for a field mesh.
+        for m in self.gi.world.iter_mut().flat_map(|w| &mut w.meshes) {
+            if m.as_ref() == Some(&key) {
+                *m = None;
+            }
+        }
         self.gi.meshes.push((key, Arc::new(blas)));
         if self.gi.meshes.iter().all(|(_, b)| b.near.is_empty()) {
             self.gi.near_bins = 0;
@@ -849,6 +1007,21 @@ impl Renderer {
             orphans_no_surface: w[13],
             orphans_inside: w[14],
             splits: w[15],
+            probe: ProbeCounters {
+                tiles: w[16],
+                pixels: w[17],
+                inserts: w[18],
+                steps: w[19],
+                cells: w[20],
+                parents: w[21],
+                refined: w[22],
+                finds: w[23],
+                found: w[24],
+                walks: w[25],
+                refine_tiles: w[26],
+                max_cells: w[27],
+                tiles_by_cells: [w[28], w[29], w[30], w[31]],
+            },
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1172,14 +1345,40 @@ impl Renderer {
             blases.push(blas.clone());
         }
         let meshes: Vec<wgpu::Buffer> = draws.iter().map(|d| (**d.mesh.vertex).clone()).collect();
-        let instances: usize = draws.iter().map(|d| d.instances.len()).sum();
+        let covered = self
+            .gi
+            .world
+            .as_ref()
+            .filter(|_| self.gi.near_bins == 0)
+            .and_then(|w| w.covers(draws))
+            .unwrap_or_default();
+        // The world BVH is one identity instance in place of the instances it covers.
+        let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
+            - covered.iter().filter(|&&c| c).count()
+            + usize::from(!covered.is_empty());
         if self
             .gi
             .packed
             .as_ref()
-            .is_none_or(|p| p.meshes != meshes || p.instances != instances)
+            .is_none_or(|p| p.meshes != meshes || p.instances != instances || p.covered != covered)
         {
-            let refs: Vec<&Blas> = blases.iter().map(|b| &**b).collect();
+            // Pack each draw's mesh unless the world covers all its instances, then the world.
+            let mut entry = vec![];
+            let mut refs: Vec<&Blas> = vec![];
+            let mut at = 0;
+            for (d, blas) in draws.iter().zip(&blases) {
+                let n = d.instances.len();
+                let open = covered.is_empty() || covered[at..at + n].iter().any(|&c| !c);
+                at += n;
+                entry.push(open.then(|| {
+                    refs.push(&**blas);
+                    refs.len() - 1
+                }));
+            }
+            let world = self.gi.world.as_ref().filter(|_| !covered.is_empty());
+            if let Some(w) = world {
+                refs.push(&w.blas);
+            }
             let (offsets, near, total) = gi_bvh::layout(&refs, instances);
             let words = gi_bvh::mesh_words(&refs, &offsets, &near, total);
             let bytes = (words.len() * 4) as u64;
@@ -1202,6 +1401,8 @@ impl Renderer {
             let packed = Packed {
                 meshes,
                 instances,
+                covered,
+                entry,
                 offsets,
                 near,
                 near_bytes,
@@ -1223,9 +1424,25 @@ impl Renderer {
         }
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
-        for (((d, blas), offsets), near) in draws.iter().zip(&blases).zip(&p.offsets).zip(&p.near) {
+        if !p.covered.is_empty() {
+            let w = &self.gi.world.as_ref().unwrap().blas;
+            records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
+        }
+        let mut at = 0;
+        for ((d, blas), entry) in draws.iter().zip(&blases).zip(&p.entry) {
             for model in &d.instances.state.models {
-                records.push((*model, &**blas, *offsets, blas.near_base(model, near)));
+                let covered = p.covered.get(at).copied().unwrap_or(false);
+                at += 1;
+                if covered {
+                    continue;
+                }
+                let e = entry.unwrap();
+                records.push((
+                    *model,
+                    &**blas,
+                    p.offsets[e],
+                    blas.near_base(model, &p.near[e]),
+                ));
             }
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
@@ -1264,9 +1481,11 @@ impl Renderer {
         header[0] = u32::from(run);
         header[1] = r.slots - 1;
         let field = self.environment.selected.is_some();
+        // Probe statistics (GI_F_STATS) on profiled frames only.
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
-            | (u32::from(s.rotate_directions) << 2);
+            | (u32::from(s.rotate_directions) << 2)
+            | (u32::from(self.gi.profile.is_some()) << 3);
         header[3] = self.gi.frame;
         let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32 * s.cell_pixels;
         header[4] = footprint.to_bits();
@@ -1431,8 +1650,8 @@ impl Renderer {
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
         let groups = [
-            (region[2] - region[0]).div_ceil(PROBE_TILE),
-            (region[3] - region[1]).div_ceil(PROBE_TILE),
+            (region[2] - region[0]).div_ceil(probe_tile()),
+            (region[3] - region[1]).div_ceil(probe_tile()),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
         // A view whose every input is unchanged has nothing to trace once its cells
@@ -1844,6 +2063,51 @@ mod tests {
         // L2 truncation alone under 0.01 (docs/m7-g1.md).
         eprintln!("G1 representation: worst relative error beside a wall {worst:.4}");
         assert!(worst < 0.07, "wall representation error {worst}");
+    }
+
+    /// The merged world (G1d) holds every placement's cut in world space, and a mirroring
+    /// placement keeps its triangles' source-winding normals pointing as the instance path's
+    /// inverse-transpose normals do, so inside tests read the same faces.
+    #[test]
+    fn world_merges_placements_and_keeps_winding() {
+        use crate::asset::near_field::{NearField, NearPlacement, Settings, build_bvh};
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        // Source winding normal: (b - a) x (c - a) = +x cross +z = -y.
+        let mesh = build_bvh(&positions, &[0, 1, 2]).unwrap();
+        let shift = Mat4::from_translation(glam::Vec3::new(5.0, 0.0, 0.0));
+        let mirror = Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0));
+        let field = NearField {
+            settings: Settings {
+                lod_error: 0.01,
+                reach: 0.0,
+                skip: 0.0,
+                bins: 0,
+            },
+            source: [7; 32],
+            meshes: vec![mesh],
+            placements: [shift, mirror]
+                .map(|m| NearPlacement {
+                    mesh: 0,
+                    transform: m.to_cols_array_2d(),
+                    masks: vec![],
+                })
+                .to_vec(),
+        };
+        let world = World::new(&field).unwrap();
+        let bvh = &world.blas.bvh;
+        assert_eq!(bvh.positions.len(), 6);
+        assert_eq!(bvh.indices.len(), 6);
+        assert_eq!(world.placements.len(), 2);
+        assert!(world.meshes.len() == 1 && world.meshes[0].is_none());
+        for t in bvh.indices.chunks_exact(3) {
+            let p = |i: u32| glam::Vec4::from(bvh.positions[i as usize]).truncate();
+            let n = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+            // Both placements keep the object's -y normal: the shift trivially, the mirror
+            // because its winding is reversed (its inverse transpose keeps -y too).
+            assert!(n.y < 0.0 && n.x.abs() < 1e-6, "world normal {n}");
+            let shifted = p(t[0]).x >= 4.0;
+            assert_eq!(shifted, (0..3).all(|k| p(t[k]).x >= 4.0));
+        }
     }
 }
 
