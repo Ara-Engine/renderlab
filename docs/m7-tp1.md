@@ -52,7 +52,7 @@ Shading is the material's own program. Its `surface` and `shade` are composed wi
 
 The composite:
 - a program declaring `fn transmittance(s: Surface, input: SurfaceInput) -> vec3<f32>` gets `shade + transmittance × behind`;
-- other programs get coverage blending, `mix(behind, shade, coverage)`, with `coverage = material_coverage(material, base alpha × texture alpha × vertex alpha)`.
+- other programs get coverage blending, `mix(behind, shade, coverage)`, with `coverage = transparent_coverage(material, base alpha × texture alpha × vertex alpha)`.
 
 The standard program declares the hook (marked TP1 edits in `shaders/programs/standard.wgsl`):
 - its `Surface` gains `alpha` (exactly 1 for opaque materials, so opaque images are unchanged);
@@ -63,7 +63,7 @@ Fresnel reflection is the program's own specular, from the sky, the ES1 lobes an
 
 **Refraction (thin slab):** the view ray refracts into the slab through the shading normal (`material_normal`, so normal maps and rippled vertex normals distort), crosses `thickness`, and leaves through the flat back face. It continues to the opaque depth behind, and the colour copy is read at that point's projection. A read that lands on something nearer than the slab falls back to the unshifted pixel. This is a visual effect on transparent surfaces only, not core lighting (allowed by the brief).
 
-New program API (shared `program_api.wgsl`): `material_transparent`, `material_opacity`, `material_ior`, `material_coverage`. The material's last uniform word packs opacity and IOR as two halves; opaque materials keep zero.
+New program API (shared `program_api.wgsl`): `transparent_material`, `transparent_opacity`, `transparent_ior`, `transparent_coverage`. The material's last uniform word packs opacity and IOR as two halves; opaque materials keep zero.
 
 ### 1.3 GPU particles
 

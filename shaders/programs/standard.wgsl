@@ -21,7 +21,7 @@ fn surface(input:SurfaceInput) -> Surface {
     // DC1: apply overlays to resolved inputs, before any BRDF or user shading.
     let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
     let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));
-    let alpha=material_coverage(material,material.base_color.a*sampled.a*input.color.a);
+    let alpha=transparent_coverage(material,material.base_color.a*sampled.a*input.color.a);
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);
 }
 
@@ -30,7 +30,7 @@ fn surface(input:SurfaceInput) -> Surface {
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var v=unit_normal(input.eye-input.world);
     if dot(v,v)<0.5 { v=s.n; }
-    let ior=material_ior(input.material);
+    let ior=transparent_ior(input.material);
     let f0=((ior-1.0)/(ior+1.0))*((ior-1.0)/(ior+1.0));
     let fresnel=f0+(1.0-f0)*pow(1.0-clamp(abs(dot(s.n,v)),0.0,1.0),5.0);
     return (1.0-s.alpha)*(1.0-fresnel)*s.base;

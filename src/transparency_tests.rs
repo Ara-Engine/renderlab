@@ -91,7 +91,7 @@ fn pre_tp1_standard() -> String {
         ("// alpha: TP1 coverage of transparent materials (docs/m7-tp1.md), exactly 1 for opaque ones.
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };",
          "struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };"),
-        ("    let alpha=material_coverage(material,material.base_color.a*sampled.a*input.color.a);
+        ("    let alpha=transparent_coverage(material,material.base_color.a*sampled.a*input.color.a);
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);",
          "    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);"),
         ("    // TP1: a transparent surface reflects diffusely over its coverage only.

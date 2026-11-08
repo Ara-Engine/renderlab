@@ -70,7 +70,7 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     let composite = if crate::program::declares_transmittance(program) {
         "lit+transmittance(surface_output,surface_input)*behind"
     } else {
-        "mix(behind,lit,material_coverage(material,material.base_color.a*sampled_alpha*input.color.a))"
+        "mix(behind,lit,transparent_coverage(material,material.base_color.a*sampled_alpha*input.color.a))"
     };
     format!(
         "{}\n{}{}{}",

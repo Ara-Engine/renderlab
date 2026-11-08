@@ -178,7 +178,7 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
     rl_indirect_prepare(surface_input);
     let lit=rl_finite(shade(surface_output,surface_input));
-    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,material_ior(material));
+    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));
     return vec4<f32>(rl_finite(TP_COMPOSITE),1.0);
 }
 // ---- end TP_GLASS ----

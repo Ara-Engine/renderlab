@@ -39,7 +39,7 @@ impl Transparency {
             && self.thickness.is_finite()
             && (0.0..=1.0).contains(&self.thickness)
     }
-    /// The material word the shaders unpack (`material_opacity`, `material_ior`): opacity
+    /// The material word the shaders unpack (`transparent_opacity`, `transparent_ior`): opacity
     /// and IOR as two halves. Opaque materials store zero, which no valid IOR packs to.
     pub(crate) fn word(material: Option<&Self>) -> u32 {
         material.map_or(0, |t| {
