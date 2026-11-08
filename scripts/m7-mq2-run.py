@@ -9,7 +9,7 @@ D:/Coding/renderlab-work/mq2.
     py -3 -B scripts/m7-mq2-run.py LABEL MINUTES GIVE_UP_MINUTES [--after UNIT,UNIT] -- powershell -NoProfile -File batch.ps1
 
 Root orders: unlike MQ1's runner, it takes the lock only once every `--after` unit (a release
-line's prefix, e.g. `m7-lc2` or `root root-gate-b6`) has written a release line after the
+line's prefix, e.g. `m7-lc2` or `root root-gate-b6`; `UNIT:N` for N lines) has released after the
 latest `[root order]`, and it exits with code 5 if a newer `[root order]` appears while it
 waits, so the caller re-reads it before queuing again.
 """
@@ -45,7 +45,11 @@ def root_state(after):
         return None, False
     order = max((i for i, l in enumerate(lines) if l.startswith("[root order]")), default=-1)
     since = lines[order + 1:]
-    return order, all(any(l.startswith(u) and "window released" in l for l in since) for u in after)
+    # UNIT or UNIT:N (N release lines, e.g. "m7-ara1:2" for its second).
+    def released(spec):
+        unit, _, count = spec.partition(":")
+        return sum(l.startswith(unit) and "window released" in l for l in since) >= int(count or 1)
+    return order, all(released(u) for u in after)
 
 
 def main():
@@ -86,11 +90,17 @@ def main():
                 g.schedule_line(f"m7-mq2 request {label} withdrawn {g.utc().isoformat()} (a newer "
                                 f"[root order] appeared; no lease taken; re-reading it).")
                 return 5
-        # The root order is read again just before the lease: it may have changed since.
-        if cleared and not r1.LOCK.exists() and not r1.schedule_read_retry(runner.quiet_active, g, any_lease=True) \
+        # The guard's lease waits for its RAM threshold before reserving, so wait for it here,
+        # where the root order is still read; then read the order again just before the lease.
+        if cleared and not r1.LOCK.exists() and g.E2E.available_gib() >= g.START_GIB \
+                and not r1.schedule_read_retry(runner.quiet_active, g, any_lease=True) \
                 and r1.schedule_read_retry(runner.hold_state, g) != "hold" and root_state(after) == (first_order, True):
             try:
                 with g.lease(label, minutes) as owner:
+                    # A memory wait inside the lease call can outlast a new root order.
+                    if root_state(after) != (first_order, True):
+                        print(f"{label}: the root order changed while the lease waited; released unused", flush=True)
+                        return 5
                     out = OUT / "lease" / label
                     g.guarded(command, out, timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
                     print(f"{label} done; log {out / 'stdout.log'}", flush=True)
