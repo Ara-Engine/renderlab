@@ -754,6 +754,7 @@ impl Renderer {
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));
             hash.update(self.environment.uniform());
+            hash.update(self.environment.content_revision.to_le_bytes());
             hash.update(self.lighting.decals.hash);
             if let Some(map) = &self.environment.selected {
                 hash.update(map.0.hash);

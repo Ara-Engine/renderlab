@@ -5,7 +5,8 @@ use crate::{
 use renderlab_asset::environment::{CubeLevel, PreparedEnvironment};
 use std::sync::Arc;
 
-/// Immutable renderer-affine f32 cubes. Cloning retains ownership, without an upload.
+/// Renderer-affine f32 cubes. Uploaded maps are immutable; the renderer updates its
+/// internal procedural sky in place. Cloning retains ownership, without an upload.
 #[derive(Clone)]
 pub struct EnvironmentMap(pub(crate) Arc<EnvironmentInner>);
 pub(crate) struct EnvironmentInner {
@@ -90,6 +91,8 @@ pub(crate) struct EnvironmentState {
     /// Primary misses show the selected map (Renderer::set_visible_environment).
     pub visible: bool,
     pub generation: u64,
+    /// In-place procedural pixels changed; bindings and geometric visibility stay valid.
+    pub content_revision: u64,
     pub limits: EnvironmentLimits,
     pub uploading: Vec<(u64, EnvironmentMap)>,
 }
