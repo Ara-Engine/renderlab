@@ -367,9 +367,9 @@ def qsun(args):
             continue
         if shutil.disk_usage(REFS).free < 7 * 1024 ** 3:
             raise SystemExit("deferred: less than 7 GiB free")
-        # The quarry tracer holds the whole asset in memory: start its lease only with room,
-        # or the 2 GiB guard stops it.
-        while available_gib() < 9:
+        # The quarry tracer holds the whole asset in memory: start its lease only with room;
+        # a run the 2 GiB guard stops leaves its state pending for a later pass.
+        while available_gib() < 6.5:
             time.sleep(5)
         label = f"qsun-{uuid.uuid4().hex[:8]}"
         work = REFS / "work" / label
