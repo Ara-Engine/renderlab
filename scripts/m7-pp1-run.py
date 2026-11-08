@@ -4,6 +4,7 @@ py -3 -B scripts/m7-pp1-run.py gpu label -- <test binary> <test args>
 py -3 -B scripts/m7-pp1-run.py build
 """
 import datetime as dt
+import ctypes
 import importlib.util
 import os
 from pathlib import Path
@@ -23,6 +24,18 @@ g1.TARGET = OUT / "target"
 g1.BINARY = OUT / "bin/pp1-tests.exe"
 OUT.mkdir(parents=True, exist_ok=True)
 
+class MemoryStatus(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32),
+                ("total", ctypes.c_uint64), ("available", ctypes.c_uint64),
+                ("unused", ctypes.c_uint64 * 5)]
+
+def available_mb():
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise ctypes.WinError()
+    return status.available // (1024 * 1024)
+
 if sys.argv[1] == "build":
     g1.build(SimpleNamespace(release=False, beside_leases=True, name=sys.argv[2] if len(sys.argv)>2 else "pp1-tests"))
 else:
@@ -37,6 +50,11 @@ else:
     env = dict(os.environ, N8_OWNER="m7-pp1", N8_OUT=str(OUT))
     attempt = 0
     while time.monotonic() < deadline:
+        # Full quarry loads need more headroom while other units compile. This only
+        # raises launch admission; n8's live 4/2 GiB guard remains unchanged.
+        if available_mb() < int(os.environ.get("M7_PP1_MIN_AVAILABLE_MB", "4096")):
+            time.sleep(1)
+            continue
         blocking = g1.window_open(u)
         # Queue at the atomic lock while another functional lease is running.
         # QUIET windows, game holds and future/request reservations still block.

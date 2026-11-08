@@ -10,7 +10,7 @@ summary = {}
 for path in ("rt", "nonrt", "raster"):
     for scene in ("quarry", "bright-sky"):
         directory = root / path / scene
-        if not directory.exists():
+        if not (directory / "timing.json").exists():
             continue
         data = json.loads((directory / "timing.json").read_text())
         values = {name: statistics.median(f["post_tone_ms"] for f in row["frames"]
