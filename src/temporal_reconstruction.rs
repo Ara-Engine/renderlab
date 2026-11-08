@@ -6,17 +6,19 @@
 //! frame through the unused `PrimaryFrame.sided.y` word. After the program's shading, one
 //! pass (shaders/temporal_resolve.wgsl) continues each pixel's history where its current
 //! sample's surface point was in the previous frame, accepted by surface identity and
-//! engine events only, and starts revealed pixels from this frame's samples.
+//! engine events only, and starts revealed pixels from this frame's samples. Every colour
+//! history is one surface's; a silhouette pixel keeps a second slot for the other surface of
+//! its 3x3 and the occluder's coverage of its footprint (TR1b, docs/m7-tr1b.md).
 //!
-//! Its history, weights, anchors and silhouette bits are read only by that pass, next frame
+//! Its histories, weights, coverages and anchors are read only by that pass, next frame
 //! (P0's W5); no later stage takes them as input.
 use super::*;
 
 /// Temporal reconstruction settings (TR1). The default is off: frames are unjittered and
 /// keep no history. Enabled, traced and visibility-buffer lit frames at 1x accumulate;
-/// raster and diagnostic frames are unaffected. History costs 24 bytes per pixel plus an
+/// raster and diagnostic frames are unaffected. History costs 40 bytes per pixel plus an
 /// 8-byte copy of the frame's samples. The other defaults are the variant measured best on
-/// the Q-walk screens (docs/m7-tr1.md §5); TR1 is not the renderer default.
+/// the Q-walk screens (docs/m7-tr1b.md); TR1 is not the renderer default.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reconstruction {
     pub enabled: bool,
@@ -28,16 +30,14 @@ pub struct Reconstruction {
     /// Window of moving pixels whose 4x4 history taps are all accepted, which resample by
     /// Catmull-Rom (second-moment blur free) instead of bilinear.
     pub sharp_window: f32,
-    /// Window at moving silhouettes: pixels whose 3x3 samples show more than one surface.
-    /// Still silhouettes use `window`: their coverage is unchanged.
-    pub silhouette_window: f32,
+    /// Window of a moving silhouette's occluder coverage, which the occluder's motion
+    /// carries; still silhouettes use `window`.
+    pub coverage_window: f32,
     /// Largest effective sample count a revealed pixel's spatial start may claim.
     pub start_window: f32,
     /// Tent radius (pixels) of a revealed pixel's spatial start over the 3x3 samples of its
     /// surface; 0 starts from its own sample.
     pub start_radius: f32,
-    /// The same at silhouettes, over every 3x3 sample: wider radii blur the edge.
-    pub silhouette_start_radius: f32,
     /// Sun turn (radians per frame) at which the window falls to one frame; smaller turns
     /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn.
     pub turn_angle: f32,
@@ -49,18 +49,12 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
-    /// Moving silhouette pixels also continue other surfaces' silhouette (mixed) history,
-    /// which keeps an edge's coverage under motion; it can leak within the one-pixel
-    /// silhouette band, never beyond. Off, a moving pixel continues only its own surface's.
-    pub silhouette_mix: bool,
-    /// Limit continued history to the plain min/max box of this frame's 3x3 samples, all
-    /// of them (no mean, variance or excluded sample: docs/m7-tr1.md). It reads program
-    /// output colour, so it is the design's last option (m7-design §9.1 B), off by default.
-    pub box_clamp: bool,
-    /// Moving silhouette pixels blend this frame's spatial estimate over every 3x3 sample
-    /// (tent radius `silhouette_start_radius`) instead of their single sample, so a frame's
-    /// coverage of the edge is not one sample's.
-    pub silhouette_spatial: bool,
+    /// When no bilinear tap shows a surface, continue it from the 4x4 ring's taps that do
+    /// (the design's +-1 px reverse search), at half weight.
+    pub reverse_search: bool,
+    /// A moving silhouette observes the occluder's coverage as this frame's tent-weighted
+    /// 3x3 share instead of its own sample's hit.
+    pub coverage_share: bool,
 }
 impl Default for Reconstruction {
     fn default() -> Self {
@@ -69,17 +63,15 @@ impl Default for Reconstruction {
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
-            silhouette_window: 2.0,
+            coverage_window: 16.0,
             start_window: 4.0,
             start_radius: 2.0,
-            silhouette_start_radius: 1.0,
             turn_angle: 0.004,
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
-            silhouette_mix: true,
-            box_clamp: false,
-            silhouette_spatial: true,
+            reverse_search: false,
+            coverage_share: false,
         }
     }
 }
@@ -95,20 +87,18 @@ impl Reconstruction {
         let windows = [
             self.window,
             self.sharp_window,
-            self.silhouette_window,
+            self.coverage_window,
             self.start_window,
         ];
         let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
             && (0.0..=f32::MAX).contains(&self.blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
-            && [self.start_radius, self.silhouette_start_radius]
-                .iter()
-                .all(|r| (0.0..=2.0).contains(r));
+            && (0.0..=2.0).contains(&self.start_radius);
         if valid {
             Ok(())
         } else {
             Err(Error::InvalidInput(
-                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radii in [0, 2]",
+                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radius in [0, 2]",
             ))
         }
     }
@@ -195,6 +185,8 @@ impl PrimaryState {
                     image(44, F::Rgba32Float),
                     image(45, F::Rg32Uint),
                     image(46, F::Rgba16Float),
+                    texture(47, uint),
+                    image(48, F::Rgba32Uint),
                 ],
             }),
             ResourceKind::BindGroupLayout,
@@ -296,6 +288,8 @@ struct Previous {
 pub(in crate::renderer) struct ReconstructionState {
     colour: [Depth; 2],
     anchor: [Depth; 2],
+    /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
+    layer: [Depth; 2],
     sample: Depth,
     frame: Buffer,
     /// Resolve groups per written side, keyed by the textures and frame buffer they bind.
@@ -348,9 +342,11 @@ impl ReconstructionState {
         use wgpu::{TextureFormat as F, TextureUsages as U};
         let colour = || target("TR1 history colour", F::Rgba32Float, U::STORAGE_BINDING);
         let anchor = || target("TR1 history anchors", F::Rg32Uint, U::STORAGE_BINDING);
+        let layer = || target("TR1 silhouette slots", F::Rgba32Uint, U::STORAGE_BINDING);
         Self {
             colour: [colour(), colour()],
             anchor: [anchor(), anchor()],
+            layer: [layer(), layer()],
             sample: target("TR1 frame samples", F::Rgba16Float, U::COPY_DST),
             frame: Buffer::new(
                 r,
@@ -534,9 +530,8 @@ impl Renderer {
         state.parity = 1 - state.parity;
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from(settings.silhouette_mix) << 2
-            | u32::from(settings.box_clamp) << 3
-            | u32::from(settings.silhouette_spatial) << 4;
+            | u32::from(settings.reverse_search) << 2
+            | u32::from(settings.coverage_share) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -560,12 +555,12 @@ impl Renderer {
             1.0,
             settings.window,
             event_window.max(1.0),
-            settings.silhouette_window,
+            settings.coverage_window,
             settings.blur_budget,
             settings.sharp_window,
             settings.start_window,
             settings.start_radius,
-            settings.silhouette_start_radius,
+            0.0,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
@@ -631,6 +626,8 @@ impl Renderer {
                 (43, R::TextureView(&state.anchor[read].view)),
                 (44, R::TextureView(&state.colour[written].view)),
                 (45, R::TextureView(&state.anchor[written].view)),
+                (47, R::TextureView(&state.layer[read].view)),
+                (48, R::TextureView(&state.layer[written].view)),
                 (46, R::TextureView(&hdr.view)),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });

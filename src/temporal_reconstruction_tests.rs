@@ -23,11 +23,10 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     f("window", &mut s.window);
     f("blur_budget", &mut s.blur_budget);
     f("sharp_window", &mut s.sharp_window);
-    f("silhouette_window", &mut s.silhouette_window);
+    f("coverage_window", &mut s.coverage_window);
     f("start_window", &mut s.start_window);
     f("turn_angle", &mut s.turn_angle);
     f("start_radius", &mut s.start_radius);
-    f("silhouette_start_radius", &mut s.silhouette_start_radius);
     let b = |key: &str, value: &mut bool| {
         if let Some(x) = v[key].as_bool() {
             *value = x;
@@ -37,9 +36,8 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
-    b("silhouette_mix", &mut s.silhouette_mix);
-    b("box_clamp", &mut s.box_clamp);
-    b("silhouette_spatial", &mut s.silhouette_spatial);
+    b("reverse_search", &mut s.reverse_search);
+    b("coverage_share", &mut s.coverage_share);
     s
 }
 

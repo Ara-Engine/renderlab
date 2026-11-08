@@ -53,7 +53,7 @@ def main():
     # capture (cost runs).
     frames = {"reference": reference_frames,
               "checkpoints": lambda: json.loads((TR0 / "runs/t1b-black-b/manifest.json").read_text())["scored"],
-              "all": lambda: None, "none": lambda: []}[args.frames]()
+              "all": lambda: None, "none": lambda: []}.get(args.frames, lambda: [int(f) for f in args.frames.split(",")])()
     steps = []
     for step in args.paths.split(","):
         # A step is a path, optionally with a repeat suffix (rt-b) for cross-process identity.
