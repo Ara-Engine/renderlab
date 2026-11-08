@@ -337,12 +337,14 @@ impl WorldTracer {
         out
     }
 }
-/// Every placement's full-detail triangles in world space (positions, triangles).
+/// World-space positions and the triangles indexing them.
+type Soup = (Vec<[f32; 3]>, Vec<[u32; 3]>);
+/// Every placement's full-detail triangles in world space.
 fn world_triangles(
     package: &Package,
     limits: VirtualLimits,
     load_page: &mut impl FnMut(usize) -> Result<PageGeometry>,
-) -> Result<(Vec<[f32; 3]>, Vec<[u32; 3]>)> {
+) -> Result<Soup> {
     let mut positions = vec![];
     let mut triangles = vec![];
     let mut full: Vec<Option<Triangles>> = (0..package.meshes.len()).map(|_| None).collect();

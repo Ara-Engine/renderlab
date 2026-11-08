@@ -226,9 +226,6 @@ fn no_rt_device_with(large: bool) -> (wgpu::Device, wgpu::Queue) {
                 let a = adapter.limits();
                 limits.max_buffer_size = a.max_buffer_size;
                 limits.max_storage_buffer_binding_size = a.max_storage_buffer_binding_size;
-                // The quarry's full-radiance mode renders Virtual shadows, whose visibility
-                // pipeline binds 11 storage buffers (visibility_limits asks for 10).
-                limits.max_storage_buffers_per_shader_stage = a.max_storage_buffers_per_shader_stage;
             }
             limits
         },
@@ -2264,9 +2261,11 @@ fn gpu_gi_quarry() {
         },
     )
     .unwrap();
-    let lighting: Json = full
-        .then(|| serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap())
-        .unwrap_or_default();
+    let lighting: Json = if full {
+        serde_json::from_slice(&std::fs::read(path_of("lighting")).unwrap()).unwrap()
+    } else {
+        Json::Null
+    };
     let v3 = |v: &Json| -> [f32; 3] { std::array::from_fn(|k| v[k].as_f64().unwrap() as f32) };
     let sun_travel = full.then(|| Vec3::from_array(v3(&lighting["lights"][0]["travel"])));
     let sun_lux = full.then(|| v3(&lighting["lights"][0]["lux"]));
@@ -2304,7 +2303,13 @@ fn gpu_gi_quarry() {
     let references: Vec<Option<reference::Image>> = (0..2)
         .map(|pose| {
             (sky_mode.is_some() || full).then(|| {
-                quarry_reference(&device, &queue, &content, &cameras.frames[pose], &reference_sky)
+                quarry_reference(
+                    &device,
+                    &queue,
+                    &content,
+                    &cameras.frames[pose],
+                    &reference_sky,
+                )
             })
         })
         .collect();
@@ -2567,7 +2572,11 @@ fn gpu_gi_quarry() {
                     .collect();
                 std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}.f32")), raw).unwrap();
                 // And the cache-off image (the unoccluded sky), for the full-mode attribution.
-                let raw: Vec<u8> = open.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                let raw: Vec<u8> = open
+                    .iter()
+                    .flatten()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect();
                 std::fs::write(
                     dir.join(format!("{path}-{variant}-pose{pose}-open.f32")),
                     raw,
@@ -2731,8 +2740,7 @@ fn gpu_gi_quarry() {
         // RENDERLAB_M7_G1_QUARRY_MOTION=n: n camera-moving frames from pose 0 (1 cm a frame
         // along x, as pose 1 steps), cache off then on (settled first), two visits each: the
         // frame span p50 over the last n-2 frames of each visit. Functional leases only.
-        if let Some(n) = env("RENDERLAB_M7_G1_QUARRY_MOTION").map(|n| n.parse::<usize>().unwrap())
-        {
+        if let Some(n) = env("RENDERLAB_M7_G1_QUARRY_MOTION").map(|n| n.parse::<usize>().unwrap()) {
             let target = color_target(&r, [cameras.frames[0].width, cameras.frames[0].height]);
             let mut run = |r: &mut Renderer, step: f32, frames: usize| -> Vec<f64> {
                 r.test_drain("G1 quarry motion");
