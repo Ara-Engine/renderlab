@@ -292,14 +292,14 @@ All values below are **milliseconds**. S2G uses its full registered 1 px/frame c
 
 **Retained whole-frame outlier:** `tq1-g-r-e-1`, first pair, CSV input index 19: **22.4824 ms**, paired no-AA 1.6452 ms, TSR pass **1.2277 ms**. Other named GPU counters do not explain that whole-frame spike; no cause is asserted. It remains in every percentile and maximum. The other seven configurations' measured maxima are 2.79–3.77 ms. This record does not certify a no-spike claim.
 
-Concrete **p50 ceilings for TR1**, in addition to beating Epic on every quality measure and the corresponding tail statistics:
+Concrete **p50 / p95 / p99 ceilings for TR1**, in addition to beating Epic on every quality measure. Values are milliseconds, with all three percentiles constrained separately:
 
 | Epic comparator | TR1 reconstruction increment ≤ | TR1 total frame ≤ |
 |---|---:|---:|
-| Q-walk, no RT | 0.78075 ms | 1.61565 ms |
-| Q-walk, HRT | 0.727325 ms | 1.618175 ms |
-| S2G, no RT | 0.700575 ms | 1.322625 ms |
-| S2G, HRT | 0.67495 ms | 1.497425 ms |
+| Q-walk, no RT | 0.780750 / 0.8188775 / 0.853032 | 1.615650 / 1.6455425 / 1.678611 |
+| Q-walk, HRT | 0.727325 / 0.7688275 / 0.816189 | 1.618175 / 1.650685 / 1.7088685 |
+| S2G, no RT | 0.700575 / 0.731025 / 0.7430125 | 1.322625 / 1.342575 / 1.3536725 |
+| S2G, HRT | 0.674950 / 0.7204375 / 0.734840 | 1.497425 / 1.5123625 / 1.533360 |
 
 `scripts/m7-tr0-bar.py` exports the retained per-measure physical-target comparisons to `E:/renderlab-work/m7-tr0/bar/physical-measures.csv` and pins their sources in `bar/tr1-bar.json`. The JSON also contains all four Epic **p50/p95/p99 half-cost ceilings**. It preserves missing S2G cases explicitly, keeps the historical frozen-target file separate, and never declares TR1 accepted. Colour RMS, absolute bias, highlight energy-ratio error, spatial drift, disocclusion-age pools, background extents and reference-subtracted flicker remain individual measures; improvement in one does not cancel a loss in another.
 
@@ -368,6 +368,7 @@ TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding i
 - All output is beneath `E:/renderlab-work/m7-tr0`. No private asset or capture enters Git. The original package remains available for the other units.
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
+- The additional provisional quarry disocclusion, sun-jump and sun-fast captures retain their recipes, runtime readbacks and inspected frame-32 PNGs. Their summarized raw dumps (1,202,688,000 bytes) are deleted; no historical T1b score or complete quality gate is claimed for those extras (`provisional-quarry-retention.json`).
 - `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. All six completed S2G camera inputs are deleted; the two Sun inputs remain until scoring and inspection finish.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 

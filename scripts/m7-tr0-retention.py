@@ -47,10 +47,10 @@ for run in (ROOT / "runs").iterdir():
             for name, value in data["deleted_raw"].items():
                 add(dict(value, path=str(path.parent / name)), path)
 
-geometry = ROOT / "s2g/geometry/deleted-raw.json"
-if geometry.exists():
-    for value in json.loads(geometry.read_text()):
-        add(value, geometry)
+for folder in (ROOT / "s2g/geometry", ROOT / "s2g/physical"):
+    for ledger in folder.rglob("deleted-raw.json"):
+        for value in json.loads(ledger.read_text(encoding="utf-8")):
+            add(value, ledger)
 result = dict(bytes=sum(x["bytes"] for x in records.values()), files=len(records),
     ledgers=[dict(path=path, sha256=identity) for path, identity in sorted(ledgers.items())],
     note="Unique owned path/content deletions: native/raw reference dumps, generated scene copies, transferred archives and redundant pinned executables. Imported provider deletion records excluded. Remaining pending inputs are not counted.",
