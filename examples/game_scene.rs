@@ -25,6 +25,7 @@ use renderlab::{asset, engine::*};
 use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
 
 const GAME_PROGRAM: &str = include_str!("game_scene.wgsl");
+const TOON_PROGRAM: &str = include_str!("game_toon.wgsl");
 const FPS: f32 = 30.0;
 
 struct Args {
@@ -186,8 +187,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg!(debug_assertions)
     );
 
-    // One program for the whole frame; the hero's material selects the toon style.
+    // Two programs in one frame: photoreal props and the toon hero (MP1).
     let program = engine.create_program("game", GAME_PROGRAM)?;
+    let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
         engine.create_material(&MaterialDesc {
             base_color: [color[0], color[1], color[2], 1.0],
@@ -204,14 +206,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paint = material(&mut engine, [0.1, 0.3, 0.85], 0.0, 0.35)?;
     let chrome = material(&mut engine, [0.95, 0.95, 0.97], 1.0, 0.02)?;
     let hero_style = [
-        ("style", Value::U32(1)),
         ("bands", Value::F32(3.0)),
         ("shadow_tint", Value::Vec3([0.22, 0.14, 0.38])),
         ("rim_color", Value::Vec3([0.35, 0.5, 0.7])),
     ];
     let toon = engine.create_material(&MaterialDesc {
         base_color: [0.95, 0.55, 0.2, 1.0],
-        program: Some(program),
+        program: Some(toon_program),
         parameters: &hero_style,
         ..Default::default()
     })?;
