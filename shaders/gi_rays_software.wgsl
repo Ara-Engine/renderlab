@@ -3,8 +3,10 @@
 // 20-word nodes (origin, step, four tagged children, axis-major byte planes, errors),
 // 8-word leaves, vec4 positions and leaf-local indices, packed by src/gi_bvh.rs into
 // one buffer behind a flat instance list (a top level rebuilt on the CPU when
-// transforms change). Each ray is its own work item, traversed from the top; no hits
-// are registered per node and no rays are launched per node (W8). Both faces block.
+// transforms change; a cooked near field's placements may instead be one merged world BVH,
+// an identity instance, src/gi_cache.rs World). Each ray is its own work item, traversed
+// from the top; no hits are registered per node and no rays are launched per node (W8). Both
+// faces block.
 //
 // Near fields (M7 G1c, docs/m7-g1c.md): a static mesh may be a cooked far-field cut, traced
 // like any other. An instance with cooked near-field masks (instance word 23, their base)

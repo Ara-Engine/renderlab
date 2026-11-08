@@ -780,8 +780,98 @@ fn profile_json(r: &mut Renderer) -> Json {
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
                      "ray_items": c.ray_items, "local_overflow": c.local_overflow,
                      "orphans_no_surface": c.orphans_no_surface, "orphans_inside": c.orphans_inside,
-                     "splits": c.splits},
+                     "splits": c.splits, "probe": probe_json(&c.probe)},
     })
+}
+fn probe_json(p: &crate::ProbeCounters) -> Json {
+    json!({"tiles": p.tiles, "pixels": p.pixels, "inserts": p.inserts, "steps": p.steps,
+        "cells": p.cells, "parents": p.parents, "refined": p.refined, "finds": p.finds,
+        "found": p.found, "walks": p.walks, "refine_tiles": p.refine_tiles,
+        "max_cells": p.max_cells, "tiles_by_cells": p.tiles_by_cells})
+}
+/// G1d: the per-stage cost of `frames` camera-moving frames (`render(ctx, t)` draws frame t;
+/// `renderer(ctx)` is its renderer) with the cache as currently set, in `visits + 2` passes
+/// over the same frames:
+/// - counters: each frame's kernel counters, read back after it (blocking, so not timed);
+/// - profiled: back to back, the per-pass times from the timestamp ring (about 0.05 ms a
+///   frame of timestamps);
+/// - `visits` unprofiled: back to back, the frame span and the shading pass.
+///
+/// p50s skip each pass's first two frames (the jump back to the first frame). Leaves
+/// profiling on.
+fn motion_breakdown<C>(
+    ctx: &mut C,
+    renderer: impl Fn(&mut C) -> &mut Renderer,
+    frames: usize,
+    visits: usize,
+    mut render: impl FnMut(&mut C, usize),
+) -> Json {
+    let tail = |v: Vec<f64>| quantiles(v.into_iter().skip(2).collect());
+    let gpu_json = |gpu: &[[f64; 2]]| {
+        json!({"span_ms": tail(gpu.iter().map(|g| g[0]).collect()),
+            "shading_ms": tail(gpu.iter().map(|g| g[1]).collect())})
+    };
+    renderer(ctx).set_indirect_profiling(true);
+    // Counters, frame by frame.
+    let mut counters = vec![];
+    renderer(ctx).test_drain("G1d breakdown");
+    renderer(ctx).poll().unwrap();
+    for t in 0..frames {
+        let cache_frames = renderer(ctx).indirect_stats().frames;
+        render(ctx, t);
+        let r = renderer(ctx);
+        let ran = r.indirect_stats().frames > cache_frames;
+        let mut row = profile_json(r)["counters"].clone();
+        row["ran"] = json!(ran);
+        counters.push(row);
+    }
+    // Profiled, back to back.
+    let cache_before = renderer(ctx).indirect_stats().frames;
+    let gpu = breakdown_frames(ctx, &renderer, frames, &mut render);
+    let r = renderer(ctx);
+    let cache_frames = (r.indirect_stats().frames - cache_before) as usize;
+    let profiles = r.indirect_profiles().unwrap();
+    let profiles: Vec<IndirectProfile> =
+        profiles[profiles.len().saturating_sub(cache_frames.min(64))..].to_vec();
+    let pass = |f: fn(&IndirectProfile) -> f64| tail(profiles.iter().map(f).collect());
+    let profiled = json!({"gpu": gpu_json(&gpu), "cache_frames": cache_frames, "cache_us": {
+        "total": pass(|p| p.total()), "probe": pass(|p| p.probe), "claim": pass(|p| p.claim),
+        "resolve": pass(|p| p.resolve), "scan": pass(|p| p.scan), "setup": pass(|p| p.setup),
+        "rays": pass(|p| p.rays), "finish": pass(|p| p.finish), "integrate": pass(|p| p.integrate)}});
+    // Unprofiled visits.
+    renderer(ctx).set_indirect_profiling(false);
+    let timed: Vec<Json> = (0..visits)
+        .map(|_| gpu_json(&breakdown_frames(ctx, &renderer, frames, &mut render)))
+        .collect();
+    renderer(ctx).set_indirect_profiling(true);
+    json!({"frames": frames, "counters": counters, "profiled": profiled, "timed": timed})
+}
+/// `frames` frames back to back, then each one's GPU span and shading pass, ms.
+fn breakdown_frames<C>(
+    ctx: &mut C,
+    renderer: &impl Fn(&mut C) -> &mut Renderer,
+    frames: usize,
+    render: &mut impl FnMut(&mut C, usize),
+) -> Vec<[f64; 2]> {
+    renderer(ctx).test_drain("G1d breakdown");
+    renderer(ctx).poll().unwrap();
+    for t in 0..frames {
+        render(ctx, t);
+    }
+    let r = renderer(ctx);
+    r.test_drain("G1d breakdown frames");
+    let gpu = r.poll().unwrap().gpu;
+    gpu.iter()
+        .rev()
+        .take(frames)
+        .rev()
+        .map(|g| {
+            [
+                g.render_span.as_secs_f64() * 1e3,
+                g.mesh_pass.as_secs_f64() * 1e3,
+            ]
+        })
+        .collect()
 }
 /// The shading pass and the whole span of the most recent completed frame, ms.
 fn frame_gpu(r: &mut Renderer) -> Json {
@@ -946,8 +1036,12 @@ fn gpu_gi_sky_visibility_sv() {
     } else {
         sv.poses.clone()
     };
+    // Cost-only runs (timing, breakdown, profile) need no reference (G1d).
+    let needs_refs = ["quality", "gates", "motion", "caster"]
+        .iter()
+        .any(|s| section(s));
     let mut references = vec![];
-    for (name, eye, target) in &poses {
+    for (name, eye, target) in poses.iter().filter(|_| needs_refs) {
         let image = cached_reference(&rt, &sv, &[], 0.0, *eye, *target, &settings(spp));
         png(
             &out.join(format!("{name}-reference.png")),
@@ -959,6 +1053,7 @@ fn gpu_gi_sky_visibility_sv() {
     }
     let standard_refs: Vec<_> = poses
         .iter()
+        .filter(|_| needs_refs)
         .map(|(_, eye, target)| cached_reference(&rt, &sv, &[], 1.0, *eye, *target, &settings(spp)))
         .collect();
     // Motion: a 2 cm-per-frame pan along x at the gaps pose, 9 frames.
@@ -966,6 +1061,7 @@ fn gpu_gi_sky_visibility_sv() {
     let pan = |t: usize| Vec3::new(0.02 * t as f32, 0.0, 0.0);
     let motion_frames = if quick { 3 } else { 9 };
     let motion_refs: Vec<_> = (0..motion_frames)
+        .filter(|_| needs_refs)
         .map(|t| {
             cached_reference(
                 &rt,
@@ -985,15 +1081,17 @@ fn gpu_gi_sky_visibility_sv() {
         .position(|m| m.name == "contact-sphere")
         .unwrap();
     let caster = |t: usize| Mat4::from_translation(Vec3::new(0.01 * t.min(8) as f32, 0.0, 0.0));
-    let caster_ref = cached_reference(
-        &rt,
-        &sv,
-        &[(sphere, caster(8))],
-        0.0,
-        poses[0].1,
-        poses[0].2,
-        &settings(spp),
-    );
+    let caster_ref = needs_refs.then(|| {
+        cached_reference(
+            &rt,
+            &sv,
+            &[(sphere, caster(8))],
+            0.0,
+            poses[0].1,
+            poses[0].2,
+            &settings(spp),
+        )
+    });
     let reference_seconds = start.elapsed().as_secs_f64();
     eprintln!("G1 references in {reference_seconds:.1} s");
 
@@ -1217,6 +1315,15 @@ fn gpu_gi_sky_visibility_sv() {
                         ..base
                     },
                 ),
+                // G1d: the refill over eight groups, the most the 8-frame settle limit allows.
+                (
+                    "spread8-4px",
+                    IndirectSettings {
+                        rotate_directions: true,
+                        cut_phases: 8,
+                        ..base
+                    },
+                ),
             ]);
         }
         // RENDERLAB_M7_G1_CONFIGS: a comma list of the configurations to score (all by default).
@@ -1247,9 +1354,15 @@ fn gpu_gi_sky_visibility_sv() {
                 let still = profile_json(&mut rig.r);
                 let still_gpu = frame_gpu(&mut rig.r);
                 let second = rig.radiance(&sv);
-                // Settled: three more frames (W1 form 2 needs its phases); then a still
-                // frame, which runs no cache pass once inputs repeat.
-                for _ in 0..3 {
+                // Settled: three more frames (W1 form 2 needs its phases; an eight-group refill
+                // needs eight in all); then a still frame, which runs no cache pass once inputs
+                // repeat.
+                let settle = if s.cut_phases > 4 {
+                    s.cut_phases - 2
+                } else {
+                    3
+                };
+                for _ in 0..settle {
                     rig.frame(&sv, *eye, *target, &materials);
                 }
                 let image = rig.radiance(&sv);
@@ -1487,13 +1600,13 @@ fn gpu_gi_sky_visibility_sv() {
             );
             let placements = rig.placements(&sv);
             let sets = labels(&sv, &placements, *eye, *target);
-            let open = open_luminance(&sv, &sets, &caster_ref);
+            let open = open_luminance(&sv, &sets, caster_ref.as_ref().unwrap());
             let all = sets.last().unwrap().clone();
             path_json["caster"] = json!({
                 "frames": costs, "rolled_equals_fresh": hash_image(&rolled) == hash_image(&fresh),
                 "rolled_max_abs_difference": max_diff,
                 "rolled_pixels_differing": rolled.iter().zip(&fresh).filter(|(a, b)| a != b).count(),
-                "rolled_score": score(&rolled, &caster_ref, open, &all),
+                "rolled_score": score(&rolled, caster_ref.as_ref().unwrap(), open, &all),
             });
             // Rotation alone (exact invalidation off): staleness by frames since the stop.
             if !quick {
@@ -1514,7 +1627,7 @@ fn gpu_gi_sky_visibility_sv() {
                     let c = rig.r.indirect_counters().unwrap().unwrap_or_default();
                     stale.push(json!({"age": age, "pixels_differing_from_fresh": d,
                         "traces": c.traces, "refreshed": c.refreshed, "invalidated": c.invalidated,
-                        "score": score(&image, &caster_ref, open, &all)}));
+                        "score": score(&image, caster_ref.as_ref().unwrap(), open, &all)}));
                 }
                 path_json["rotation-staleness"] = json!(stale);
                 rig.settings(base);
@@ -1648,6 +1761,40 @@ fn gpu_gi_sky_visibility_sv() {
                 "rotating_lag": lag, "still_frames_to_fresh": settled_after, "still_after_rotation": settle});
             rig.r.set_environment(None, Default::default()).unwrap();
             rig.settings(base);
+        }
+        // G1d breakdown: the camera-moving cost per stage (`motion_breakdown`), 48 frames at
+        // 1 cm a frame along x from the overview pose, cache off then the shipping default
+        // (rotated, the path's default cut refill), each settled still first.
+        if section("breakdown") {
+            let (_, eye, target) = poses[0].clone();
+            let mut breakdown = json!({"step_m": 0.01});
+            for (state, s) in [
+                ("off", IndirectSettings::default()),
+                (
+                    "on",
+                    IndirectSettings {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                ),
+            ] {
+                rig.settings(s);
+                rig.r.reset_indirect();
+                for _ in 0..12 {
+                    rig.frame(&sv, eye, target, &materials);
+                }
+                breakdown[state] = motion_breakdown(
+                    &mut rig,
+                    |rig| &mut rig.r,
+                    48,
+                    2,
+                    |rig, t| {
+                        let d = Vec3::new(0.01 * t as f32, 0.0, 0.0);
+                        rig.frame(&sv, eye + d, target + d, &materials);
+                    },
+                );
+            }
+            path_json["breakdown"] = breakdown;
         }
         // Timing: continuous sequences for the cache off (the pre-M7 frame), unrotated,
         // rotated (the default), serial tracing and the best-quality variant, visited in
@@ -2212,9 +2359,19 @@ fn gpu_gi_quarry() {
     let source = crate::asset::decode(&bytes, limits).unwrap();
     drop(bytes);
     // Object-space geometry per uploaded mesh (source mesh/primitive order).
+    // Only full-detail software variants need a CPU copy of every triangle (about 1.5 GB on
+    // the quarry); hardware and cooked near-field runs skip it.
+    let needs_geometry = env("RENDERLAB_M7_G1_QUARRY_VARIANTS").map_or(
+        env("RENDERLAB_M7_G1_PATHS").as_deref() == Some("nonrt"),
+        |v| {
+            v.split(',')
+                .any(|x| matches!(x.trim(), "full" | "software-full"))
+        },
+    );
     let geometry: Vec<(Vec<[f32; 3]>, Vec<u32>)> = source
         .meshes
         .iter()
+        .filter(|_| needs_geometry)
         .flat_map(|m| {
             m.primitives.iter().map(|p| {
                 (
@@ -2224,7 +2381,12 @@ fn gpu_gi_quarry() {
             })
         })
         .collect();
-    let triangles: usize = geometry.iter().map(|g| g.1.len() / 3).sum();
+    let triangles: usize = source
+        .meshes
+        .iter()
+        .flat_map(|m| &m.primitives)
+        .map(|p| p.indices.len() / 3)
+        .sum();
     let placements: Vec<Json> = source
         .placements
         .iter()
@@ -2300,9 +2462,11 @@ fn gpu_gi_quarry() {
     } else {
         ReferenceScene::Gate(&source)
     };
+    // RENDERLAB_M7_G1_QUARRY_NOREF=1: no reference (cost-only runs, G1d).
+    let no_reference = env("RENDERLAB_M7_G1_QUARRY_NOREF").as_deref() == Some("1");
     let references: Vec<Option<reference::Image>> = (0..2)
         .map(|pose| {
-            (sky_mode.is_some() || full).then(|| {
+            ((sky_mode.is_some() || full) && !no_reference).then(|| {
                 quarry_reference(
                     &device,
                     &queue,
@@ -2473,7 +2637,14 @@ fn gpu_gi_quarry() {
         }
         let geometry_seconds = geometry_start.elapsed().as_secs_f64();
         let mut variant_json = json!({"geometry_seconds": geometry_seconds});
-        for pose in [0usize, 1] {
+        // RENDERLAB_M7_G1_QUARRY_POSES: the scored poses, a comma list (default "0,1"; "none"
+        // skips scoring, for cost-only and trace runs).
+        let poses: Vec<usize> = env("RENDERLAB_M7_G1_QUARRY_POSES")
+            .unwrap_or_else(|| "0,1".into())
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
+        for pose in poses {
             let frame = &cameras.frames[pose];
             let camera = frame.camera().unwrap();
             let size = [frame.width, frame.height];
@@ -2684,6 +2855,8 @@ fn gpu_gi_quarry() {
                 force_software: variant == "software-full",
                 directions,
                 cell_pixels,
+                // The shipping refill unless RENDERLAB_M7_G1_QUARRY_SETTINGS names one (G1d).
+                cut_phases: tuned["cut_phases"].as_u64().map_or(0, |p| p as u32),
                 ..Default::default()
             })
             .unwrap();
@@ -2799,6 +2972,96 @@ fn gpu_gi_quarry() {
             eprintln!("G1 quarry {path} {variant} motion: {motion}");
             variant_json["motion"] = motion;
         }
+        // One frame from pose 0 moved `dx` metres along x (as pose 1 steps).
+        let moving_target = color_target(&r, [cameras.frames[0].width, cameras.frames[0].height]);
+        let mut draw_at = |r: &mut Renderer, dx: f32| {
+            let mut pose = cameras.frames[0].clone();
+            pose.eye[0] += dx;
+            pose.target[0] += dx;
+            let camera = pose.camera().unwrap();
+            let target = &moving_target;
+            let mut draws: Vec<Draw<'_>> = asset
+                .draws(Visibility::Frustum)
+                .into_iter()
+                .map(|d| if full { d } else { d.with_material(&gate) })
+                .collect();
+            while r
+                .try_render_view(target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("G1d quarry admission");
+            }
+        };
+        let moving = IndirectSettings {
+            enabled: true,
+            force_software: variant == "software-full",
+            directions,
+            cell_pixels,
+            ..tuned_settings(&tuned)
+        };
+        // RENDERLAB_M7_G1_QUARRY_BREAKDOWN=n (G1d): the camera-moving cost per stage
+        // (`motion_breakdown`): n frames from pose 0 at 1 cm a frame along x, cache off, then
+        // on with the default settings and RENDERLAB_M7_G1_QUARRY_SETTINGS, each settled
+        // still at pose 0 first.
+        if let Some(n) =
+            env("RENDERLAB_M7_G1_QUARRY_BREAKDOWN").map(|n| n.parse::<usize>().unwrap())
+        {
+            let mut breakdown = json!({"step_m": 0.01});
+            for (state, enabled) in [("off", false), ("on", true)] {
+                r.set_indirect(IndirectSettings { enabled, ..moving })
+                    .unwrap();
+                r.reset_indirect();
+                for _ in 0..10 {
+                    draw_at(&mut r, 0.0);
+                }
+                breakdown[state] =
+                    motion_breakdown(&mut r, |r| r, n, 2, |r, t| draw_at(r, 0.01 * t as f32));
+            }
+            eprintln!(
+                "G1d quarry {path} {variant} breakdown: on {} off {}",
+                breakdown["on"]["timed"], breakdown["off"]["timed"]
+            );
+            variant_json["breakdown"] = breakdown;
+        }
+        // RENDERLAB_M7_G1_QUARRY_TRACE=n (G1d): n camera frames moving back and forth from
+        // pose 0 at 1 cm a frame, cache on and unprofiled, for an Nsight GPU trace window inside
+        // camera motion (the motion's start is printed in process seconds). Each sweep is
+        // RENDERLAB_M7_G1_QUARRY_SWEEP frames (default 24): short sweeps revisit existing cells
+        // (the probe and lookup alone); sweeps longer than the eviction age keep creating cells.
+        // RENDERLAB_M7_G1_QUARRY_TRACE_CUTS=k resets the cache every k frames (cut frames).
+        if let Some(n) = env("RENDERLAB_M7_G1_QUARRY_TRACE").map(|n| n.parse::<usize>().unwrap()) {
+            r.set_indirect(moving).unwrap();
+            r.set_indirect_profiling(false);
+            r.reset_indirect();
+            for _ in 0..10 {
+                draw_at(&mut r, 0.0);
+            }
+            eprintln!(
+                "G1d trace motion starts at {:.1} s",
+                start.elapsed().as_secs_f64()
+            );
+            let sweep: usize =
+                env("RENDERLAB_M7_G1_QUARRY_SWEEP").map_or(24, |s| s.parse().unwrap());
+            let cuts: Option<usize> =
+                env("RENDERLAB_M7_G1_QUARRY_TRACE_CUTS").map(|s| s.parse().unwrap());
+            for t in 0..n {
+                if cuts.is_some_and(|k| t % k == 0) {
+                    r.reset_indirect();
+                }
+                let k = t % (2 * sweep);
+                draw_at(&mut r, 0.01 * k.min(2 * sweep - k) as f32);
+                if t % 256 == 0 {
+                    r.collect().unwrap();
+                    r.poll().unwrap();
+                }
+            }
+            eprintln!(
+                "G1d trace motion ends at {:.1} s",
+                start.elapsed().as_secs_f64()
+            );
+            r.set_indirect_profiling(true);
+        }
         results["variants"][variant] = variant_json;
         std::fs::write(
             out.join("g1-quarry.json"),
@@ -2812,6 +3075,26 @@ fn gpu_gi_quarry() {
         serde_json::to_vec_pretty(&results).unwrap(),
     )
     .unwrap();
+}
+
+/// Cache settings from RENDERLAB_M7_G1_QUARRY_SETTINGS beyond `directions`, `cut_phases`
+/// and `cell_pixels`: `slots_log2`, `level_blend` and `lookup` ("nearest"), over the defaults.
+fn tuned_settings(tuned: &Json) -> IndirectSettings {
+    let base = IndirectSettings::default();
+    IndirectSettings {
+        slots_log2: tuned["slots_log2"]
+            .as_u64()
+            .map_or(base.slots_log2, |v| v as u32),
+        level_blend: tuned["level_blend"]
+            .as_f64()
+            .map_or(base.level_blend, |v| v as f32),
+        lookup: if tuned["lookup"].as_str() == Some("nearest") {
+            IndirectLookup::Nearest
+        } else {
+            base.lookup
+        },
+        ..base
+    }
 }
 
 /// Software rays report world-space hit normals through the instance's inverse transpose,

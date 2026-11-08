@@ -3,11 +3,12 @@
 // source (gi_rays_hardware.wgsl or gi_rays_software.wgsl); src/gi_cache.rs owns the
 // buffers and the per-frame order:
 //   gi_probe    covered pixels list the cells they read (bin from the interpolated
-//               vertex normal), deduplicated per 16x16 tile; each tile then finds its
+//               vertex normal), deduplicated per 8x8 tile; each tile then finds its
 //               unique cells once, marks them seen, and lists the missing ones in the
-//               frame's request table (once per frame); a found orphan adds its parent
-//               level's cells, up to two levels, so the lookup falls back to them; a
-//               pixel whose cells are split also lists its finer levels' (G1c);
+//               frame's request table (once per frame); then each pixel walks what its
+//               lookup will read: the coarser level's cells where its level has no value
+//               but an orphan (up to two levels), and the finer level's where its cells
+//               are split (G1c, G1d);
 //   gi_claim    each miss picks a free slot as the table stands and raises the slot's
 //               claim word to its priority (atomicMax, C4);
 //   gi_resolve  the highest claim writes the cell and queues it for tracing; claim and
@@ -74,9 +75,28 @@ const GI_W_ORPHAN_NONE:u32=13u;
 const GI_W_ORPHAN_INSIDE:u32=14u;
 // Cells probed this frame that are split.
 const GI_W_SPLITS:u32=15u;
+// Probe statistics on profiled frames (GI_F_STATS; G1d): tiles with a covered pixel, covered
+// pixels, tile-table insert calls and their probe steps, unique cells from pixels, added for
+// orphans' parents and by refinement, finds and how many found a cell, refinement walks
+// (pixel, bin and level), tiles that refined, the most unique cells in one tile, and tiles
+// by unique cells (< 32, < 64, < GI_LOCAL, full).
+const GI_W_P_TILES:u32=16u;
+const GI_W_P_PIXELS:u32=17u;
+const GI_W_P_INSERTS:u32=18u;
+const GI_W_P_STEPS:u32=19u;
+const GI_W_P_CELLS:u32=20u;
+const GI_W_P_PARENTS:u32=21u;
+const GI_W_P_REFINED:u32=22u;
+const GI_W_P_FINDS:u32=23u;
+const GI_W_P_FOUND:u32=24u;
+const GI_W_P_WALKS:u32=25u;
+const GI_W_P_REFINE_TILES:u32=26u;
+const GI_W_P_MAX:u32=27u;
+const GI_W_P_HIST:u32=28u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
-const GI_W_CLAIMS:u32=16u;
+// Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
+const GI_W_CLAIMS:u32=32u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -117,14 +137,17 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
 }
 
 // ---- probe: per-tile unique cells, then one lookup each ----
-// Pixels per probe tile side (src/gi_cache.rs PROBE_TILE): 16x16 tiles find each
-// unique cell once per tile, a quarter as many tiles as 8x8 and about 40% fewer finds.
-const GI_PROBE_TILE:u32=16u;
+// Pixels per probe tile side (src/gi_cache.rs PROBE_TILE). 16x16 tiles found each unique cell
+// once per tile with about 40% fewer finds than 8x8 on SV (G1b), but on the quarry the probe
+// waits mostly at its barriers (G1d's trace: about a third of its samples), and 8x8 tiles sync
+// two warps instead of eight: the quarry probe is about 8% faster at 8x8 with 256 entries,
+// and SV unchanged (docs/m7-g1d.md).
+const GI_PROBE_TILE:u32=8u;
 const GI_PROBE_LANES:u32=GI_PROBE_TILE*GI_PROBE_TILE;
-// Entries of the tile's cell table. A 16x16 tile reads about 40-100 unique cells on SV, but
-// scanned rock reads more (its normals spread over several bins): 256 overflowed about
-// 550 times a frame on the quarry, so 512 (GI_W_LOCAL_OVERFLOW counts any cell it drops).
-const GI_LOCAL:u32=512u;
+// Entries of the tile's cell table (GI_W_LOCAL_OVERFLOW counts any cell it drops). An 8x8 tile
+// on scanned rock lists up to about 150 cells (its normals spread over several bins); 128
+// entries overflowed on the quarry, 256 do not.
+const GI_LOCAL:u32=256u;
 var<workgroup> gi_local_key:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_priority:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
@@ -134,25 +157,49 @@ var<workgroup> gi_local_list:array<u32,GI_LOCAL>;
 var<workgroup> gi_local_count:atomic<u32>;
 // The end of this round's entries (lane 0 reads the count after the barrier).
 var<workgroup> gi_local_end:u32;
-// Per entry: found split this frame (written by the one lane that finds it); and whether
-// any entry so far is, which starts the pixels' refinement walks.
-var<workgroup> gi_local_split:array<u32,GI_LOCAL>;
-var<workgroup> gi_local_any_split:u32;
-// Rounds of finds: each finds what the last added. Parents of orphans are added in the
-// first GI_PARENT_ROUNDS; finer levels under split cells one level a round.
+// Per entry: its GI_LS_* state once found this frame (written by the one lane that finds it);
+// and whether any entry so far is split or an orphan, which starts the pixels' walks.
+var<workgroup> gi_local_state:array<u32,GI_LOCAL>;
+var<workgroup> gi_local_any_flag:u32;
+const GI_LS_SPLIT:u32=1u;
+const GI_LS_VALID:u32=2u;
+const GI_LS_ORPHAN:u32=4u;
+// Rounds of finds: each finds what the last added. Pixels' walks add coarser levels where a
+// level has no value but an orphan (up to GI_PARENT_ROUNDS levels, one a round), and the finer
+// level under split cells (GI_REFINE levels, round 0).
 const GI_PROBE_ROUNDS:u32=4u;
 const GI_PARENT_ROUNDS:u32=2u;
+// Probe statistics (GI_F_STATS): each lane counts in private scalars and adds them to the
+// workgroup's once; lane 0 adds the tile's to the work counters. gi_cause says which kind of
+// request the current inserts are (0 pixels, 1 orphans' parents, 2 refinement).
+var<private> gi_stats:bool;
+var<private> gi_cause:u32;
+var<private> gi_n_inserts:u32;
+var<private> gi_n_steps:u32;
+var<private> gi_n_pixel:u32;
+var<private> gi_n_parent:u32;
+var<private> gi_n_refine:u32;
+var<private> gi_n_finds:u32;
+var<private> gi_n_found:u32;
+var<private> gi_n_walks:u32;
+var<workgroup> gi_wg_stats:array<atomic<u32>,9>;
+var<workgroup> gi_wg_stats_on:u32;
 
 // Adds one cell to the tile's set; the lowest pixel priority that wants it is kept.
 fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
     let key=gi_key(level,bin,cell);
     var h=key.x%GI_LOCAL;
+    if gi_stats { gi_n_inserts+=1u; }
     for(var i=0u;i<GI_LOCAL;i+=1u) {
+        if gi_stats { gi_n_steps+=1u; }
         let r=atomicCompareExchangeWeak(&gi_local_key[h],0u,key.x);
         if r.exchanged {
             gi_local_def[h]=vec4<u32>(level|(bin<<8u),bitcast<vec3<u32>>(cell));
             atomicMin(&gi_local_priority[h],priority);
             gi_local_list[atomicAdd(&gi_local_count,1u)]=h;
+            if gi_stats {
+                if gi_cause==0u { gi_n_pixel+=1u; } else if gi_cause==1u { gi_n_parent+=1u; } else { gi_n_refine+=1u; }
+            }
             return;
         }
         if r.old_value==key.x {
@@ -215,61 +262,90 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         }
     }
 }
-// Whether the tile's set lists `key` and found it split this frame.
-fn gi_local_flag(key:u32) -> bool {
+// A listed cell's GI_LS_* state (0 when unlisted, or listed but not found).
+fn gi_local_lookup(key:u32) -> u32 {
     var h=key%GI_LOCAL;
     for(var i=0u;i<GI_LOCAL;i+=1u) {
         let k=atomicLoad(&gi_local_key[h]);
-        if k==key { return gi_local_split[h]!=0u; }
-        if k==0u { return false; }
+        if k==key { return gi_local_state[h]; }
+        if k==0u { return 0u; }
         h=(h+1u)%GI_LOCAL;
     }
-    return false;
+    return 0u;
 }
-// Whether any cell the lookup reads at this level (the four bilinear corners of the
-// point's layer, or its containing cell) is listed and found split.
-fn gi_local_split_at(world:vec3<f32>, level:u32, bin:u32) -> bool {
+// The cells the lookup reads at one level (the four bilinear corners of the point's layer, or
+// its containing cell), from the tile's set: x the bilinear weight of those found with a value,
+// y their GI_LS_SPLIT and GI_LS_ORPHAN bits ORed.
+fn gi_local_state_at(world:vec3<f32>, level:u32, bin:u32) -> vec2<f32> {
     let u=gi_lattice(world,gi_edge(level),bin);
     if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u {
-        return gi_local_flag(gi_key(level,bin,vec3<i32>(floor(u))).x);
+        let st=gi_local_lookup(gi_key(level,bin,vec3<i32>(floor(u))).x);
+        return vec2<f32>(select(0.0,1.0,(st&GI_LS_VALID)!=0u),f32(st&(GI_LS_SPLIT|GI_LS_ORPHAN)));
     }
     let corners=gi_corners(u,bin);
+    var w=0.0;
+    var bits=0u;
     for(var c=0u;c<4u;c+=1u) {
-        if gi_local_flag(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)).x) { return true; }
+        let st=gi_local_lookup(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)).x);
+        if (st&GI_LS_VALID)!=0u { w+=gi_corner_weight(corners.f,bin,c); }
+        bits|=st&(GI_LS_SPLIT|GI_LS_ORPHAN);
     }
+    return vec2<f32>(w,f32(bits));
+}
+// A pixel's walk after round `round` along one chain (one of its levels and bins), as shading's
+// lookup reads (gi_api.wgsl indirect_irradiance):
+// - at its own level, a split cell lists the next finer level's cells (round 0; GI_REFINE 1),
+//   which the refined lookup reads;
+// - a level whose corners have no value but include an orphan lists the next coarser level's
+//   cells around the point (up to GI_PARENT_ROUNDS levels), which the fallback reads.
+// Round r checks level `level`+r: the levels before it had no value and an orphan (otherwise the
+// chain ended), and found cells keep their state across rounds. Returns whether the chain ended:
+// a level with a value, cells only unlisted (new this frame, traced before shading), or no
+// deeper level. Pixels request parents only where shading falls back to them: four parents per
+// found orphan (G1b-G1c) listed about as many parents as pixel cells on scans and overflowed
+// tile tables (docs/m7-g1d.md).
+fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, levels:u32) -> bool {
+    let l=level+round;
+    if l>=levels { return true; }
+    if gi_stats { gi_n_walks+=1u; }
+    let st=gi_local_state_at(world,l,bin);
+    let bits=u32(st.y);
+    if round<GI_REFINE && (bits&GI_LS_SPLIT)!=0u && l>0u {
+        gi_cause=2u;
+        gi_request_cells(gi_request_desc(world,l-1u,bin),priority);
+    }
+    if st.x>1e-4 || (bits&GI_LS_ORPHAN)==0u || round>=GI_PARENT_ROUNDS || l+1u>=levels { return true; }
+    gi_cause=1u;
+    gi_request_cells(gi_request_desc(world,l+1u,bin),priority);
     return false;
 }
-// A pixel's refinement walk at one level and bin: while the cells it reads are split, it
-// lists the next finer level's (up to GI_REFINE levels), as shading's lookup reads them.
-// Each round's walk deepens by the level the last round found.
-fn gi_refine_requests(world:vec3<f32>, level:u32, bin:u32, priority:u32) {
-    var l=level;
-    for(var r=0u;r<GI_REFINE && l>0u;r+=1u) {
-        if !gi_local_split_at(world,l,bin) { return; }
-        l-=1u;
-        gi_request_cells(gi_request_desc(world,l,bin),priority);
-    }
-}
-@compute @workgroup_size(16,16) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(8,8) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     for(var i=lane;i<GI_LOCAL;i+=GI_PROBE_LANES) {
         atomicStore(&gi_local_key[i],0u);
         atomicStore(&gi_local_priority[i],0xffffffffu);
-        gi_local_split[i]=0u;
+        gi_local_state[i]=0u;
     }
     if lane==0u {
         atomicStore(&gi_local_count,0u);
-        gi_local_any_split=0u;
+        gi_local_any_flag=0u;
+        gi_wg_stats_on=gi_word(GI_H_FLAGS)&GI_F_STATS;
     }
-    workgroupBarrier();
+    if lane<9u { atomicStore(&gi_wg_stats[lane],0u); }
+    gi_cause=0u;
+    // Uniform (the load carries the barrier), so the statistics' barrier is legal.
+    let stats=workgroupUniformLoad(&gi_wg_stats_on)!=0u;
+    gi_stats=stats;
     let p=grid.xy+gi_frame.region.xy;
     let size=textureDimensions(primary_hit);
     var record=vec4<u32>(0u);
     if all(p<gi_frame.region.zw) && all(p<size) && textureLoad(primary_tiles,p/PRIMARY_TILE,0).x!=0u {
         record=textureLoad(primary_hit,vec2<i32>(p),0);
     }
-    // The pixel's receiver, bins and levels, kept for its refinement walks.
+    // The pixel's receiver, bins and levels, kept for its walks, and the chains (bin, low or
+    // high level) whose walk has ended.
     var world=vec3<f32>(0.0);
     var bins=0u;
+    var walked=0u;
     var pick=GiLevels(0u,0u,0.0);
     // The pixel's priority: lower wins. Unique per pixel; its cells share it.
     let priority=p.y*size.x+p.x;
@@ -302,12 +378,12 @@ fn gi_refine_requests(world:vec3<f32>, level:u32, bin:u32, priority:u32) {
     }
     workgroupBarrier();
     // Each unique cell once, in rounds: found cells are marked seen and missing ones are
-    // listed. A found orphan (no query point) adds its parent level's cells around its
-    // centre, which the next round finds or lists, so a pixel whose cells are all orphans
-    // reads the coarser level (the lookup's fallback) instead of the open sky.
+    // listed. After each round the pixels walk their chains (gi_pixel_walk), adding the finer
+    // and coarser cells their lookups will read, which the next round finds or lists.
     let capacity=gi_frame.counts.w;
     let levels=gi_word(GI_H_LEVELS);
     var begin=0u;
+    gi_cause=1u;
     for(var round=0u;round<GI_PROBE_ROUNDS;round+=1u) {
         if lane==0u { gi_local_end=min(atomicLoad(&gi_local_count),GI_LOCAL); }
         // Uniform across the workgroup (the load carries the barrier), so a round that adds
@@ -321,22 +397,22 @@ fn gi_refine_requests(world:vec3<f32>, level:u32, bin:u32, priority:u32) {
             // only fixes a new cell's rotation, which resolve hashes from the definition).
             let key=vec2<u32>(atomicLoad(&gi_local_key[i]),0u);
             let slot=gi_find(key);
+            if gi_stats {
+                gi_n_finds+=1u;
+                if slot!=0xffffffffu { gi_n_found+=1u; }
+            }
             if slot!=0xffffffffu {
                 // Tiles sharing a cell store the same frame: the race is benign. The store
                 // is unconditional: reading the stamp first stalled the probe on a second
                 // dependent load per cell.
                 gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
-                let level=def.x&0xffu;
-                // A split cell (its hot record's last word, in the line the key read).
-                if (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u {
-                    gi_local_split[i]=1u;
-                    gi_local_any_split=1u;
-                }
-                // Only an invalid hot key reads the cold state (orphan or not yet traced).
-                if round<GI_PARENT_ROUNDS && level+1u<levels && (gi_word(gi_hot(slot))&GI_VALID)==0u
-                    && (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u {
-                    gi_request_cells(gi_request_desc(gi_cell(slot).centre,level+1u,(def.x>>8u)&7u),atomicLoad(&gi_local_priority[i]));
-                }
+                // Split (its hot record's last word, in the line the key read), and valid or an
+                // orphan: a found cell was traced the frame it was made, so one without a value
+                // has no query point.
+                var st=select(GI_LS_ORPHAN,GI_LS_VALID,(gi_word(gi_hot(slot))&GI_VALID)!=0u);
+                if (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { st|=GI_LS_SPLIT; }
+                gi_local_state[i]=st;
+                if (st&(GI_LS_SPLIT|GI_LS_ORPHAN))!=0u { gi_local_any_flag=1u; }
                 continue;
             }
             // Tiles share cells: the frame's request table lists each missing cell once and
@@ -358,17 +434,53 @@ fn gi_refine_requests(world:vec3<f32>, level:u32, bin:u32, priority:u32) {
         }
         begin=to;
         workgroupBarrier();
-        // Pixels reading split cells list their finer levels' cells, which the next round
-        // finds or requests. Tiles with no split cell skip this (a uniform flag).
-        if round+1u<GI_PROBE_ROUNDS && workgroupUniformLoad(&gi_local_any_split)!=0u {
+        // Pixels walk their open chains. Tiles with no split or orphan cell skip this (a
+        // uniform flag).
+        if round+1u<GI_PROBE_ROUNDS && workgroupUniformLoad(&gi_local_any_flag)!=0u {
+            if gi_stats && lane==0u && round==0u { atomicAdd(&gi_work[GI_W_P_REFINE_TILES],1u); }
             for(var b=0u;b<6u;b+=1u) {
                 if (bins&(1u<<b))==0u { continue; }
-                gi_refine_requests(world,pick.lo,b,priority);
-                if pick.hi!=pick.lo { gi_refine_requests(world,pick.hi,b,priority); }
+                if (walked&(1u<<(2u*b)))==0u && gi_pixel_walk(world,pick.lo,b,priority,round,levels) {
+                    walked|=1u<<(2u*b);
+                }
+                if pick.hi!=pick.lo && (walked&(2u<<(2u*b)))==0u && gi_pixel_walk(world,pick.hi,b,priority,round,levels) {
+                    walked|=2u<<(2u*b);
+                }
             }
             workgroupBarrier();
         }
     }
+    if stats { gi_probe_stats(lane,record.x!=0u); }
+}
+// Adds a tile's probe statistics to the work counters (GI_F_STATS frames only, a uniform
+// condition: the header flag).
+fn gi_probe_stats(lane:u32, covered:bool) {
+    atomicAdd(&gi_wg_stats[0],gi_n_inserts);
+    atomicAdd(&gi_wg_stats[1],gi_n_steps);
+    atomicAdd(&gi_wg_stats[2],gi_n_pixel);
+    atomicAdd(&gi_wg_stats[3],gi_n_parent);
+    atomicAdd(&gi_wg_stats[4],gi_n_refine);
+    atomicAdd(&gi_wg_stats[5],gi_n_finds);
+    atomicAdd(&gi_wg_stats[6],gi_n_found);
+    atomicAdd(&gi_wg_stats[7],gi_n_walks);
+    if covered { atomicAdd(&gi_wg_stats[8],1u); }
+    workgroupBarrier();
+    if lane!=0u { return; }
+    let cells=atomicLoad(&gi_local_count);
+    if cells==0u { return; }
+    atomicAdd(&gi_work[GI_W_P_TILES],1u);
+    atomicAdd(&gi_work[GI_W_P_PIXELS],atomicLoad(&gi_wg_stats[8]));
+    atomicAdd(&gi_work[GI_W_P_INSERTS],atomicLoad(&gi_wg_stats[0]));
+    atomicAdd(&gi_work[GI_W_P_STEPS],atomicLoad(&gi_wg_stats[1]));
+    atomicAdd(&gi_work[GI_W_P_CELLS],atomicLoad(&gi_wg_stats[2]));
+    atomicAdd(&gi_work[GI_W_P_PARENTS],atomicLoad(&gi_wg_stats[3]));
+    atomicAdd(&gi_work[GI_W_P_REFINED],atomicLoad(&gi_wg_stats[4]));
+    atomicAdd(&gi_work[GI_W_P_FINDS],atomicLoad(&gi_wg_stats[5]));
+    atomicAdd(&gi_work[GI_W_P_FOUND],atomicLoad(&gi_wg_stats[6]));
+    atomicAdd(&gi_work[GI_W_P_WALKS],atomicLoad(&gi_wg_stats[7]));
+    atomicMax(&gi_work[GI_W_P_MAX],cells);
+    let bucket=select(select(select(3u,2u,cells<GI_LOCAL),1u,cells<64u),0u,cells<32u);
+    atomicAdd(&gi_work[GI_W_P_HIST+bucket],1u);
 }
 // The request-table entry of key a (linear probing; zero is empty), and whether this
 // call inserted it. (0xffffffff, 0) when the table is full.
