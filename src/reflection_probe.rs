@@ -919,6 +919,7 @@ fn gpu_r0b_program_primary() {
     scene.sun = None;
     let root = std::env::var("RENDERLAB_M7_REFERENCE_OUT").unwrap();
     let root = Path::new(&root);
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
     let mut renderer = Renderer::new_with_hardware_shadows(
         device.clone(),
         queue.clone(),

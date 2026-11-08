@@ -374,3 +374,5 @@ Functional lease x40, both paths, final binary `g1c-m` (main `dc2e3c8` merged):
 - Variant naga checks ran on a renamed binary copy outside `renderlab-work`.
 - Functional leases overlapped foreign stillkit builds; the cost claims are quiet window `q10-1` and `q10-2`, per step (section 3.1) only.
 - Quiet attempt `q8-1` deferred on the 5 GiB output-disk guard (E: at 4.96 GiB). G1c's superseded dumps (3.1 GB) were hashed and deleted before `q10`.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's gates rendered 1x with TR1 off and anisotropy 1, the shipping default, so every population, edges included, is an un-anti-aliased image scored against pixel-integrated references. Islam's pinholes and grain in this unit's quarry image come from that missing pixel integration, not from the cache (IQ1 §2).

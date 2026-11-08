@@ -295,3 +295,5 @@ package C/source Content for later units; original U0/U0b packages are preserved
 Patent policy: independent path tracing, numerical ordering and optional fixed proposals stay
 in measurement overrides. No WRC, reservoir reuse, common projected-ray reuse, production
 denoiser or patented fallback is introduced, and no runtime shading constraint is added.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's current captures rendered 1x with TR1 off and anisotropy 1, the shipping default (un-anti-aliased).

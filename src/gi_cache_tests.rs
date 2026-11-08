@@ -274,6 +274,7 @@ struct Rig {
 }
 fn rig(sv: &Sv, path: Path_, device: (wgpu::Device, wgpu::Queue)) -> Rig {
     let (device, queue) = device;
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
     let options = RendererOptions {
         samples: SampleCount::One,
         ..Default::default()
@@ -2478,6 +2479,7 @@ fn gpu_gi_quarry() {
         })
         .collect();
     drop(content);
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
     let options = RendererOptions {
         samples: SampleCount::One,
         ..Default::default()
