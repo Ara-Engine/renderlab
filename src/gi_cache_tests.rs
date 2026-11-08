@@ -1608,7 +1608,44 @@ fn gpu_gi_sky_visibility_sv() {
                 yaw(rig, t as f32);
                 (eye, target)
             });
-            path_json["environment"] = json!({"steps": steps, "rotating": rotating});
+            // The last rotated frame against a fresh cache at its yaw (a changing map
+            // re-integrates one fixed slot group a frame, so cells lag by up to seven
+            // frames), then the still frames until the rolled cache equals a fresh one.
+            let rolled = rig.radiance(&sv);
+            rig.r.reset_indirect();
+            for _ in 0..3 {
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let fresh = rig.radiance(&sv);
+            let compare = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+                let rel: Vec<f64> = a
+                    .iter()
+                    .zip(b)
+                    .filter(|(_, b)| luminance(**b) > 0.0)
+                    .map(|(a, b)| (luminance(*a) - luminance(*b)) / luminance(*b))
+                    .collect();
+                let n = rel.len().max(1) as f64;
+                json!({"pixels_differing": a.iter().zip(b).filter(|(a, b)| a != b).count(),
+                    "relative_rms": (rel.iter().map(|x| x * x).sum::<f64>() / n).sqrt(),
+                    "relative_max": rel.iter().fold(0.0f64, |m, x| m.max(x.abs()))})
+            };
+            let lag = compare(&rolled, &fresh);
+            rig.r.reset_indirect();
+            for t in 0..48 {
+                yaw(&mut rig, t as f32);
+                rig.frame(&sv, eye, target, &materials);
+            }
+            let mut settle = vec![];
+            for _ in 0..10 {
+                rig.frame(&sv, eye, target, &materials);
+                settle.push(compare(&rig.radiance(&sv), &fresh));
+            }
+            let settled_after = settle
+                .iter()
+                .position(|s| s["pixels_differing"] == 0)
+                .map(|k| k + 1);
+            path_json["environment"] = json!({"steps": steps, "rotating": rotating,
+                "rotating_lag": lag, "still_frames_to_fresh": settled_after, "still_after_rotation": settle});
             rig.r.set_environment(None, Default::default()).unwrap();
             rig.settings(base);
         }

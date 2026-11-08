@@ -42,7 +42,9 @@ struct GiFrame {
     // x: slots, y: miss list offset, z: trace queue offset, w: integrate queue offset.
     offsets:vec4<u32>,
     // x: request table offset, y: its entry mask (two words per entry), z: ray item
-    // list offset (GI_RAY_ITEMS words, then the staged visibility bits, one per item).
+    // list offset (GI_RAY_ITEMS words, then the staged visibility bits, one per item), w:
+    // the environment's slot group: period (bits 0-7; 0: every slot), phase (bits 8-15),
+    // and bit 31 when the scan visits only that group (environment-only frames).
     requests:vec4<u32>,
     // Swept world bounds of moved placements: lo.xyz then hi.xyz.
     boxes:array<vec4<f32>,64>,
@@ -1172,7 +1174,13 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
     return any_ray;
 }
 @compute @workgroup_size(64) fn gi_scan(@builtin(global_invocation_id) id:vec3<u32>) {
-    let slot=id.x;
+    // Environment-only frames (requests.w bit 31) visit only this frame's slot group.
+    let group=gi_frame.requests.w;
+    let period=group&0xffu;
+    var slot=id.x;
+    if (group&0x80000000u)!=0u {
+        slot=id.x*period+(period-((group>>8u)&0xffu)%period)%period;
+    }
     if slot>=gi_frame.offsets.x { return; }
     if gi_table[gi_hot(slot)]==0u || gi_evictable(slot) { return; }
     let cold=gi_cold(slot);
@@ -1195,7 +1203,10 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         gi_queue_trace(slot);
         return;
     }
-    if (flags&GI_SCAN_ENVIRONMENT)!=0u && (state&GI_ORPHAN)==0u {
+    // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
+    // ENVIRONMENT_PERIOD): a fixed rotation, never a ranking (W2).
+    if (flags&GI_SCAN_ENVIRONMENT)!=0u && (state&GI_ORPHAN)==0u
+        && (period==0u || (slot+((group>>8u)&0xffu))%period==0u) {
         gi_queue_integrate(slot);
     }
 }

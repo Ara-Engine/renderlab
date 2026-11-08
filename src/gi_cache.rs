@@ -52,6 +52,13 @@ const PROFILE_STRIDE: u64 = 256;
 /// appear one a frame after it (up to GI_REFINE), and claims lost on the last retry on
 /// the next two.
 const IDLE_AFTER: u32 = 8;
+/// Slot groups a changing environment map spreads its re-integration over: on frames where
+/// the map changed again (a rotating sky), each frame re-integrates the slots with
+/// (slot + phase) % ENVIRONMENT_PERIOD == 0, a fixed rotation (W2), and it keeps going for
+/// ENVIRONMENT_PERIOD frames after the last change, so every cell is exact again within the
+/// 8-frame settle limit. A single change after a still frame re-integrates every cell at
+/// once (the next frame equals a fresh cache).
+const ENVIRONMENT_PERIOD: u32 = 8;
 /// Entries of the frame's request table: twice the miss capacity (a power of two).
 fn requests(misses: u32) -> u32 {
     misses * 2
@@ -302,10 +309,15 @@ struct Profile {
 /// What `prepare_gi` decided for this frame.
 struct Plan {
     groups: [u32; 2],
+    /// Scan workgroups: every slot, or one environment slot group.
+    scan_groups: u32,
     scan: bool,
     /// The environment changed: cells re-integrate their stored bits.
     integrate: bool,
     clear: bool,
+    /// Only the environment changed, with the view and scene otherwise idle: only the scan
+    /// and integrate passes run.
+    environment_only: bool,
 }
 enum Retired {
     Resources(#[allow(dead_code)] Resources),
@@ -341,6 +353,14 @@ pub(super) struct GiState {
     /// frames in a row they have been unchanged; idle frames run no cache pass.
     idle_key: Option<[u8; 32]>,
     idle_frames: u32,
+    /// The idle key without the environment, and its count of identical frames.
+    view_key: Option<[u8; 32]>,
+    view_frames: u32,
+    /// The environment changed on the last cache frame; spread re-integrations left after
+    /// the last change; and the slot group the next spread frame re-integrates.
+    environment_streak: bool,
+    environment_catchup: u32,
+    environment_phase: u32,
     plan: Option<Plan>,
     profile: Option<Profile>,
     groups: Option<Groups>,
@@ -378,6 +398,11 @@ impl GiState {
             since_clear: u32::MAX,
             idle_key: None,
             idle_frames: 0,
+            view_key: None,
+            view_frames: 0,
+            environment_streak: false,
+            environment_catchup: 0,
+            environment_phase: 0,
             plan: None,
             profile: None,
             groups: None,
@@ -1350,7 +1375,27 @@ impl Renderer {
         if s.rotation_period != 0 {
             flags |= 2;
         }
-        if environment_changed {
+        // A step after a still frame re-integrates every cell; a map changing on
+        // consecutive frames, and the ENVIRONMENT_PERIOD frames after it last changed,
+        // re-integrate one fixed slot group a frame (ENVIRONMENT_PERIOD).
+        let integrate_all = environment_changed && !self.gi.environment_streak;
+        let spread = !integrate_all && (environment_changed || self.gi.environment_catchup > 0);
+        self.gi.environment_catchup = if integrate_all {
+            0
+        } else if environment_changed {
+            ENVIRONMENT_PERIOD
+        } else {
+            self.gi.environment_catchup.saturating_sub(1)
+        };
+        self.gi.environment_streak = environment_changed;
+        let integrate = integrate_all || spread;
+        let environment_group = if spread {
+            self.gi.environment_phase = (self.gi.environment_phase + 1) % ENVIRONMENT_PERIOD;
+            ENVIRONMENT_PERIOD | (self.gi.environment_phase << 8)
+        } else {
+            0
+        };
+        if integrate {
             flags |= 4;
         }
         let region = self.primary.as_ref().unwrap().scene;
@@ -1375,6 +1420,9 @@ impl Renderer {
         put(12, items + RAY_ITEMS + RAY_ITEMS / 32);
         put(13, requests(r.misses) - 1);
         put(14, items);
+        // The environment's slot group: period (0: every slot) and phase; bit 31 is set
+        // below on environment-only frames, whose scan visits only that group.
+        put(15, environment_group);
         for (i, b) in boxes.iter().enumerate() {
             for k in 0..3 {
                 put(16 + i * 8 + k, b[k].to_bits());
@@ -1405,21 +1453,50 @@ impl Renderer {
             self.gi.idle_frames = 0;
         }
         self.gi.idle_key = Some(idle_key);
+        // The same view and scene with only the environment changing (a rotating sky over a
+        // still camera): once that view is idle, no cell is new, so only the scan and the
+        // integrate passes run. Such frames do not advance the cache frame, so seen stamps
+        // do not age toward eviction while nothing is probed.
+        let view_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(&self.gi.arrays.as_ref().unwrap().instances);
+            h.update(format!("{s:?}").as_bytes());
+            h.update(region.map(u32::to_le_bytes).concat());
+            h.finalize().into()
+        };
+        if self.gi.view_key == Some(view_key) && !clear {
+            self.gi.view_frames = self.gi.view_frames.saturating_add(1);
+        } else {
+            self.gi.view_frames = 0;
+        }
+        self.gi.view_key = Some(view_key);
         if self.gi.idle_frames >= IDLE_AFTER && flags == 0 {
             self.gi.stats.idle_frames += 1;
             return Ok(());
         }
+        let environment_only = self.gi.view_frames >= IDLE_AFTER && flags == 4;
+        let mut scan_groups = r.slots.div_ceil(64);
+        if environment_only && spread {
+            let word = (environment_group | (1 << 31)).to_le_bytes();
+            self.queue.write_buffer(&r.frame, 60, &word);
+            scan_groups = (r.slots / ENVIRONMENT_PERIOD).div_ceil(64);
+        }
         self.gi.plan = Some(Plan {
             groups,
+            scan_groups,
             scan: flags != 0,
-            integrate: environment_changed,
+            integrate,
             clear,
+            environment_only,
         });
         self.prepare_gi_groups(software, scene_generation)?;
-        self.gi.since_clear = since_clear.saturating_add(1);
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
-        self.gi.frame = self.gi.frame.wrapping_add(1);
+        if !environment_only {
+            self.gi.since_clear = since_clear.saturating_add(1);
+            self.gi.frame = self.gi.frame.wrapping_add(1);
+        }
         Ok(())
     }
 
@@ -1553,31 +1630,39 @@ impl GiState {
         // with no work this frame (scan and integrate without an event) are not encoded;
         // when profiling they are empty passes, so every stamp is written.
         let profiling = queries.is_some();
-        main_pass(
-            encoder,
-            "indirect cache probe",
-            &p.probe,
-            0,
-            Some(plan.groups),
-        );
-        for k in 0..CLAIM_ROUNDS {
-            let grid = Some([CLAIM_GROUPS, 1]);
-            main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
-            let last = k + 1 == CLAIM_ROUNDS;
-            let resolve = if last { &p.resolve_last } else { &p.resolve };
-            main_pass(encoder, "indirect cache resolve", resolve, 2 + 2 * k, grid);
+        // Environment-only frames run only scan and integrate; when profiling, the other
+        // passes are empty, so every stamp is written.
+        let traced = !plan.environment_only;
+        if traced || profiling {
+            main_pass(
+                encoder,
+                "indirect cache probe",
+                &p.probe,
+                0,
+                traced.then_some(plan.groups),
+            );
+            for k in 0..CLAIM_ROUNDS {
+                let grid = traced.then_some([CLAIM_GROUPS, 1]);
+                main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
+                let last = k + 1 == CLAIM_ROUNDS;
+                let resolve = if last { &p.resolve_last } else { &p.resolve };
+                main_pass(encoder, "indirect cache resolve", resolve, 2 + 2 * k, grid);
+            }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
         if plan.scan || profiling {
-            let groups = plan.scan.then(|| [r.slots.div_ceil(64), 1]);
+            let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
         }
-        let setup = Some([SETUP_GROUPS, 1]);
-        main_pass(encoder, "indirect cache setup", &p.setup, s + 1, setup);
-        let rays = Some([RAY_GROUPS, 1]);
-        main_pass(encoder, "indirect cache rays", &p.rays, s + 2, rays);
         let cells = Some([CELL_GROUPS, 1]);
-        main_pass(encoder, "indirect cache finish", &p.finish, s + 3, cells);
+        if traced || profiling {
+            let setup = traced.then_some([SETUP_GROUPS, 1]);
+            main_pass(encoder, "indirect cache setup", &p.setup, s + 1, setup);
+            let rays = traced.then_some([RAY_GROUPS, 1]);
+            main_pass(encoder, "indirect cache rays", &p.rays, s + 2, rays);
+            let finish = cells.filter(|_| traced);
+            main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
+        }
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
             main_pass(
