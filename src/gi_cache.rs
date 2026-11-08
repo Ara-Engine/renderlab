@@ -18,20 +18,27 @@ use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
 /// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
-const SLOT_WORDS: u64 = 16 + 28;
+const SLOT_WORDS: u64 = 24 + 32;
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-const COUNTER_WORDS: u64 = 32;
+const COUNTER_WORDS: u64 = 44;
 const MISS_WORDS: u64 = 6;
-/// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
-const FRAME_BYTES: usize = 64 + 64 * 16;
+/// WGSL GiFrame: region, counts, offsets, requests, bounce, then 64 vec4 box corners.
+const FRAME_BYTES: usize = 80 + 64 * 16;
 const MAX_BOXES: usize = 32;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
 const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
 /// traced in parallel. A frame wanting more traces the rest in setup, eight lanes a cell.
 const RAY_ITEMS: u32 = 1 << 21;
-/// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate.
-const PROFILE_STAMPS: u32 = 2 * (6 + 2 * CLAIM_ROUNDS);
+/// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate, then
+/// bounce's gather, light and cell shading (G2).
+const PROFILE_STAMPS: u32 = 2 * (9 + 2 * CLAIM_ROUNDS);
+/// Gather and light workgroups (eight and 64 cells each), fixed grids like the others.
+const GATHER_GROUPS: u32 = 4096;
+const LIGHT_GROUPS: u32 = 1024;
+/// Slot groups a lighting, environment or caster change spreads relighting over while it
+/// keeps changing (and for as many frames after), as ENVIRONMENT_PERIOD does for the sky.
+const RELIGHT_PERIOD: u32 = 8;
 /// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
 const PROBE_TILE: u32 = 8;
 /// The probe tile side; test builds that screen shader variants (RENDERLAB_GI_SHADERS) may
@@ -65,6 +72,10 @@ const PROFILE_STRIDE: u64 = 256;
 /// appear one a frame after it (up to GI_REFINE), and claims lost on the last retry on
 /// the next two.
 const IDLE_AFTER: u32 = 8;
+/// With bounce (G2) the cells a cut or view change makes still gather on later frames: the
+/// software refill completes visibility by frame 4, then each cell gathers `gathers` times (and
+/// once more if its hits had no value yet), and so do the hit cells its first gather made.
+const IDLE_AFTER_BOUNCE: u32 = 16;
 /// Slot groups a changing environment map spreads its re-integration over: on frames where
 /// the map changed again (a rotating sky), each frame re-integrates the slots with
 /// (slot + phase) % ENVIRONMENT_PERIOD == 0, a fixed rotation (W2), and it keeps going for
@@ -75,6 +86,36 @@ const ENVIRONMENT_PERIOD: u32 = 8;
 /// Entries of the frame's request table: twice the miss capacity (a power of two).
 fn requests(misses: u32) -> u32 {
     misses * 2
+}
+/// Word offsets in the work buffer, in its order (`set_indirect` sizes it): the miss list,
+/// the trace queue (the integrate queue follows it), the ray items (their staged bits follow),
+/// the request table, bounce's two gather queues (a count, then slots) and its cell shading
+/// queue (G2).
+#[derive(Clone, Copy)]
+struct WorkLayout {
+    misses: u32,
+    traces: u32,
+    items: u32,
+    requests: u32,
+    queues: [u32; 2],
+    shade: u32,
+}
+impl WorkLayout {
+    fn of(r: &Resources) -> Self {
+        let misses = COUNTER_WORDS as u32 + r.slots;
+        let traces = misses + r.misses * MISS_WORDS as u32;
+        let items = traces + 2 * r.slots;
+        let requests_at = items + RAY_ITEMS + RAY_ITEMS / 32;
+        let queues = requests_at + 2 * requests(r.misses);
+        Self {
+            misses,
+            traces,
+            items,
+            requests: requests_at,
+            queues: [queues, queues + 1 + r.slots],
+            shade: queues + 2 * (1 + r.slots),
+        }
+    }
 }
 /// Blocking readbacks for measurement helpers.
 const WAIT: wgpu::PollType = wgpu::PollType::Wait {
@@ -137,6 +178,15 @@ pub struct IndirectSettings {
     /// traces every direction of a new cell at once; 0 (the default) picks 4 for software
     /// rays, where a cut costs the most, and 1 for hardware rays (docs/m7-g1b.md).
     pub cut_phases: u32,
+    /// Bounce light (M7 G2, docs/m7-g2.md): cells gather the outgoing radiance of the cells
+    /// their blocked directions hit, which the frame's program gives through its optional
+    /// `scatter`/`emission`. Off, or for programs that declare neither, the cache holds sky
+    /// visibility alone, as at G1.
+    pub bounce: bool,
+    /// Gathers an event schedules for each cell it reaches (1-7): new and re-traced cells,
+    /// and every cell at a lighting, environment or program step. Each gather reads the
+    /// outgoing radiance the previous ones produced, so G gathers carry G + 1 bounces.
+    pub gathers: u32,
 }
 impl Default for IndirectSettings {
     fn default() -> Self {
@@ -160,6 +210,8 @@ impl Default for IndirectSettings {
             level_blend: 0.0,
             parallel_rays: true,
             cut_phases: 0,
+            bounce: true,
+            gathers: 3,
         }
     }
 }
@@ -175,7 +227,8 @@ impl IndirectSettings {
             && (1..=64).contains(&self.direction_phases)
             && [64, 128].contains(&self.directions)
             && (0.0..=0.5).contains(&self.level_blend)
-            && self.cut_phases <= 8;
+            && self.cut_phases <= 8
+            && (1..=7).contains(&self.gathers);
         if valid {
             Ok(())
         } else {
@@ -201,6 +254,11 @@ pub struct IndirectStats {
     pub software: bool,
     /// Frames whose unchanged inputs ran no cache pass.
     pub idle_frames: u64,
+    /// Cache frames that ran the bounce passes (G2).
+    pub bounce_frames: u64,
+    /// The outgoing-radiance, draw-table and queue buffers bounce adds (in `work_bytes`
+    /// for the queues), in bytes.
+    pub bounce_bytes: u64,
 }
 
 /// GPU microseconds per cache pass of the last profiled frame.
@@ -215,13 +273,26 @@ pub struct IndirectProfile {
     pub rays: f64,
     pub finish: f64,
     pub integrate: f64,
+    /// Bounce (G2): gathers, light visibility, then the program's cell shading.
+    pub gather: f64,
+    pub light: f64,
+    pub shade: f64,
 }
 impl IndirectProfile {
     pub fn trace(&self) -> f64 {
         self.setup + self.rays + self.finish
     }
+    pub fn bounce(&self) -> f64 {
+        self.gather + self.light + self.shade
+    }
     pub fn total(&self) -> f64 {
-        self.probe + self.claim + self.resolve + self.scan + self.trace() + self.integrate
+        self.probe
+            + self.claim
+            + self.resolve
+            + self.scan
+            + self.trace()
+            + self.integrate
+            + self.bounce()
     }
 }
 
@@ -253,6 +324,21 @@ pub struct IndirectCounters {
     pub splits: u32,
     /// The probe's work, counted on profiled frames only (zero otherwise).
     pub probe: ProbeCounters,
+    /// Bounce (G2): cells shaded, cells gathered, their rays, rays whose hit cell had no
+    /// value yet, hit cells they requested, light visibility rays, and cells queued for a
+    /// gather next frame.
+    pub shades: u32,
+    pub gathers: u32,
+    pub gather_rays: u32,
+    pub gather_misses: u32,
+    pub gather_requests: u32,
+    pub light_rays: u32,
+    pub bounce_queued: u32,
+    /// Gather rays without a value, by cause: no cell at the hit's level (requested), a
+    /// cell not shaded yet, and an orphan whose coarser levels had no value either.
+    pub gather_absent: u32,
+    pub gather_unshaded: u32,
+    pub gather_orphans: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -281,15 +367,22 @@ struct Resources {
     table: Owned<wgpu::Buffer>,
     work: Owned<wgpu::Buffer>,
     frame: Owned<wgpu::Buffer>,
+    /// Bounce (G2): per slot, its outgoing radiance (vec4, w 1 once written); per draw, its
+    /// stable id, first placement and instance count (shaders/gi_cache.wgsl gi_draws).
+    outgoing: Owned<wgpu::Buffer>,
+    draws: Owned<wgpu::Buffer>,
     slots: u32,
     misses: u32,
-    _allocations: [Allocation; 2],
+    _allocations: [Allocation; 4],
 }
 struct Layouts {
     /// Hardware (TLAS at 34) and software (geometry at 35).
     main: [Owned<wgpu::BindGroupLayout>; 2],
     arrays: Owned<wgpu::BindGroupLayout>,
     pipelines: [Owned<wgpu::PipelineLayout>; 2],
+    /// Cell shading's group 0 (G2): the work buffer read-only, the outgoing radiance and
+    /// the draw table.
+    shade: Owned<wgpu::BindGroupLayout>,
 }
 struct Pipelines {
     software: bool,
@@ -303,6 +396,15 @@ struct Pipelines {
     rays: Owned<wgpu::ComputePipeline>,
     finish: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
+    gather: Owned<wgpu::ComputePipeline>,
+    light: Owned<wgpu::ComputePipeline>,
+}
+/// One program's cell shading pipeline (G2), keyed by everything its module and layout
+/// depend on: the program and its source, the prelude, the ray path and the material
+/// group's layout (streamed or not).
+struct ShadePipeline {
+    key: (u64, [u8; 32], bool, bool),
+    pipeline: Owned<wgpu::ComputePipeline>,
 }
 /// Group 1: the traced shading ABI's geometry tables, built from the same draws in
 /// TLAS placement order, so hit records decode to the receivers shading sees.
@@ -323,6 +425,10 @@ struct Packed {
     instances: usize,
     /// Per (draw, instance) in draw order, whether the world BVH covers it (empty: no world).
     covered: Vec<bool>,
+    /// The draws' stable ids it was packed for, and the world's placement map (word offset,
+    /// placements), G2.
+    ids: Vec<u32>,
+    map: (u32, u32),
     /// Per draw, its mesh's index among the packed meshes (None: every instance is covered).
     entry: Vec<Option<usize>>,
     offsets: Vec<[u32; 4]>,
@@ -347,11 +453,15 @@ struct World {
     placements: Vec<(u32, [u32; 16])>,
     /// Per field mesh, the renderer mesh (vertex buffer) registered for it.
     meshes: Vec<Option<wgpu::Buffer>>,
+    /// Per placement, its first position in the merged BVH: a software hit's position index
+    /// names the placement whose material it shades (G2).
+    bases: Vec<u32>,
 }
 impl World {
     fn new(field: &crate::asset::near_field::NearField) -> Result<Self, Error> {
         let mut positions = vec![];
         let mut indices = vec![];
+        let mut bases = vec![];
         for p in &field.placements {
             let model = Mat4::from_cols_array_2d(&p.transform);
             let mesh = field
@@ -359,6 +469,7 @@ impl World {
                 .get(p.mesh as usize)
                 .ok_or(Error::InvalidInput("near-field placement mesh"))?;
             let base = positions.len() as u32;
+            bases.push(base);
             positions.extend(mesh.positions.iter().map(|q| {
                 model
                     .transform_point3(glam::Vec3::new(q[0], q[1], q[2]))
@@ -380,11 +491,14 @@ impl World {
                 .map(|p| (p.mesh, transform_bits(&p.transform)))
                 .collect(),
             meshes: vec![None; field.meshes.len()],
+            bases,
         })
     }
     /// Per (draw, instance) of `draws`, whether the world covers it, when its placements
-    /// are exactly the drawn instances of the field's meshes; None otherwise.
-    fn covers(&self, draws: &[PreparedDraw<'_>]) -> Option<Vec<bool>> {
+    /// are exactly the drawn instances of the field's meshes, and per placement the (draw,
+    /// instance) it is; None otherwise.
+    #[allow(clippy::type_complexity)]
+    fn covers(&self, draws: &[PreparedDraw<'_>]) -> Option<(Vec<bool>, Vec<(usize, usize)>)> {
         let mut wanted: Vec<Option<(&wgpu::Buffer, [u32; 16])>> = self
             .placements
             .iter()
@@ -394,17 +508,19 @@ impl World {
             .map(Some)
             .collect();
         let mut covered = vec![];
-        for d in draws {
+        let mut drawn = vec![(0, 0); wanted.len()];
+        for (di, d) in draws.iter().enumerate() {
             let key: &wgpu::Buffer = &d.mesh.vertex;
             let field_mesh = self.meshes.iter().any(|m| m.as_ref() == Some(key));
-            for model in &d.instances.state.models {
+            for (ii, model) in d.instances.state.models.iter().enumerate() {
                 let bits = model.to_cols_array().map(f32::to_bits);
                 let hit = wanted
-                    .iter_mut()
-                    .find(|w| w.is_some_and(|(k, b)| k == key && b == bits));
+                    .iter()
+                    .position(|w| w.is_some_and(|(k, b)| k == key && b == bits));
                 match hit {
-                    Some(w) => {
-                        *w = None;
+                    Some(at) => {
+                        wanted[at] = None;
+                        drawn[at] = (di, ii);
                         covered.push(true);
                     }
                     // A field mesh drawn elsewhere: its BVH would double the world's.
@@ -413,7 +529,18 @@ impl World {
                 }
             }
         }
-        wanted.iter().all(Option::is_none).then_some(covered)
+        wanted
+            .iter()
+            .all(Option::is_none)
+            .then_some((covered, drawn))
+    }
+}
+/// A placement's material identity + 1 (shaders/gi_cells.wgsl GI_C_MATERIAL): its draw's
+/// stable id and its instance; 0 (none: it reflects nothing) when either does not fit.
+fn draw_identity(ids: &[u32], draw: usize, instance: usize) -> u32 {
+    match (ids.get(draw), u32::try_from(instance)) {
+        (Some(&id), Ok(i)) if id != 0 && id < 0xffff && i < 0x10000 => ((id << 16) | i) + 1,
+        _ => 0,
     }
 }
 /// A placement transform's exact bits, column-major (as `Mat4::to_cols_array`).
@@ -425,6 +552,8 @@ fn transform_bits(t: &[[f32; 4]; 4]) -> [u32; 16] {
 struct Groups {
     key: (wgpu::Texture, wgpu::Texture, u64, bool),
     main: Owned<wgpu::BindGroup>,
+    /// Cell shading's group 0 (G2).
+    shade: Owned<wgpu::BindGroup>,
 }
 /// Pass timestamps of the last PROFILE_RING cache frames, resolved per frame into a
 /// ring and read back only on request, so measured frames never wait for the CPU.
@@ -446,8 +575,12 @@ struct Plan {
     integrate: bool,
     clear: bool,
     /// Only the environment changed, with the view and scene otherwise idle: only the scan
-    /// and integrate passes run.
+    /// and integrate passes run (and bounce's, which relight).
     environment_only: bool,
+    /// Bounce (G2) runs this frame: gathers, light visibility and cell shading. The work
+    /// offset (in bytes) of next frame's gather queue count, cleared before the passes.
+    bounce: bool,
+    next_queue_at: u64,
 }
 enum Retired {
     Resources(#[allow(dead_code)] Resources),
@@ -498,6 +631,26 @@ pub(super) struct GiState {
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
+    /// Bounce (G2). Stable draw ids: a draw's vertex buffer at index id - 1, so a cell's
+    /// material names its placement across draw-order changes (shaders/gi_cells.wgsl
+    /// GI_C_MATERIAL); the draw table last uploaded.
+    draw_ids: Vec<(wgpu::Buffer, wgpu::Buffer)>,
+    draw_table: Vec<u32>,
+    /// Whether the last cache frame ran bounce: a change empties the table, so no cell keeps
+    /// bounce light its program no longer reflects.
+    bounce_last: Option<bool>,
+    /// Cache frames a relight's scheduled gathers still need, idle view or not.
+    bounce_busy: u32,
+    shade: Option<ShadePipeline>,
+    /// Which gather queue this frame reads (the other collects next frame's).
+    parity: bool,
+    /// The last cache frame's lighting key (lights, environment, program and materials),
+    /// whether it changed on that frame, the relight frames left after the last change, and
+    /// the slot group the next spread frame relights (RELIGHT_PERIOD).
+    light_key: Option<[u8; 32]>,
+    light_streak: bool,
+    relight_catchup: u32,
+    relight_phase: u32,
 }
 
 impl GiState {
@@ -541,6 +694,16 @@ impl GiState {
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
+            draw_ids: vec![],
+            draw_table: vec![],
+            bounce_last: None,
+            bounce_busy: 0,
+            shade: None,
+            parity: false,
+            light_key: None,
+            light_streak: false,
+            relight_catchup: 0,
+            relight_phase: 0,
         }
     }
     /// The table shading binds (lighting group 3, binding 20).
@@ -675,14 +838,19 @@ impl Renderer {
             let misses = slots;
             let table_bytes = (HEADER_WORDS + u64::from(slots) * SLOT_WORDS) * 4;
             // Counters, claims, misses, trace and integrate queues, ray items and their
-            // staged bits, then the request table (the frame offsets follow this order).
+            // staged bits, the request table, then bounce's two gather queues (a count, then
+            // slots) and the cell shading queue (the frame offsets follow this order).
             let work_bytes = (COUNTER_WORDS
                 + u64::from(slots)
                 + u64::from(misses) * MISS_WORDS
                 + 2 * u64::from(slots)
                 + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
-                + 2 * u64::from(requests(misses)))
+                + 2 * u64::from(requests(misses))
+                + 2 * (1 + u64::from(slots))
+                + u64::from(slots))
                 * 4;
+            let outgoing_bytes = u64::from(slots) * 16;
+            let draws_bytes = u64::from(TRACED_DRAWS) * 16;
             let buffer = |label, size, usage| {
                 self.ledger.own(
                     self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -711,15 +879,26 @@ impl Renderer {
                     FRAME_BYTES as u64,
                     wgpu::BufferUsages::UNIFORM,
                 ),
+                outgoing: buffer(
+                    "indirect cache outgoing radiance",
+                    outgoing_bytes,
+                    storage | wgpu::BufferUsages::COPY_SRC,
+                ),
+                draws: buffer("indirect cache draw table", draws_bytes, storage),
                 slots,
                 misses,
                 _allocations: [
                     self.ledger.allocate(AllocationKind::Light, table_bytes),
                     self.ledger.allocate(AllocationKind::Light, work_bytes),
+                    self.ledger.allocate(AllocationKind::Light, outgoing_bytes),
+                    self.ledger.allocate(AllocationKind::Light, draws_bytes),
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
             self.gi.stats.work_bytes = work_bytes;
+            self.gi.stats.bounce_bytes =
+                outgoing_bytes + draws_bytes + (2 * (1 + u64::from(slots)) + u64::from(slots)) * 4;
+            self.gi.draw_table.clear();
             if let Some(old) = self.gi.resources.replace(resources) {
                 self.gi
                     .retired
@@ -740,6 +919,8 @@ impl Renderer {
             || self.gi.settings.direction_phases != settings.direction_phases
             || self.gi.settings.directions != settings.directions
             || self.gi.settings.rotate_directions != settings.rotate_directions
+            // Bounce values left by an earlier setting would still be read.
+            || self.gi.settings.bounce != settings.bounce
         {
             // Keys change meaning: start from an empty table.
             self.gi.pending_clear = true;
@@ -963,6 +1144,9 @@ impl Renderer {
                     rays: pass(3 + 2 * rounds),
                     finish: pass(4 + 2 * rounds),
                     integrate: pass(5 + 2 * rounds),
+                    gather: pass(6 + 2 * rounds),
+                    light: pass(7 + 2 * rounds),
+                    shade: pass(8 + 2 * rounds),
                 }
             })
             .collect())
@@ -1022,6 +1206,16 @@ impl Renderer {
                 max_cells: w[27],
                 tiles_by_cells: [w[28], w[29], w[30], w[31]],
             },
+            shades: w[32],
+            gathers: w[33],
+            gather_rays: w[34],
+            gather_misses: w[35],
+            gather_requests: w[36],
+            light_rays: w[37],
+            bounce_queued: w[38],
+            gather_absent: w[39],
+            gather_unshaded: w[40],
+            gather_orphans: w[41],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1051,6 +1245,36 @@ impl Renderer {
         Ok(Some(words))
     }
 
+    /// Blocks until the GPU is idle and copies every slot's outgoing radiance (G2: rgb, w 1
+    /// once cell shading wrote it), for diagnostics beside `indirect_table`.
+    pub fn indirect_outgoing(&mut self) -> Result<Option<Vec<[f32; 4]>>, Error> {
+        let Some(r) = self.gi.resources.as_ref() else {
+            return Ok(None);
+        };
+        let size = r.outgoing.size();
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("indirect cache outgoing readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&r.outgoing, 0, &readback, 0, size);
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(WAIT).map_err(Error::Poll)?;
+        let values = slice
+            .get_mapped_range()
+            .map_err(|_| Error::InvalidInput("indirect cache readback map"))?
+            .chunks_exact(16)
+            .map(|b| {
+                std::array::from_fn(|k| f32::from_le_bytes(b[4 * k..4 * k + 4].try_into().unwrap()))
+            })
+            .collect();
+        Ok(Some(values))
+    }
+
     /// Whether any draw's program reads the cache (naga-free token check of its source).
     fn gi_callers(&self, draws: &[PreparedDraw<'_>]) -> bool {
         let standard = self.standard.id();
@@ -1058,6 +1282,113 @@ impl Renderer {
             let id = d.material.map_or(standard, |m| m.program.id());
             crate::program::uses_indirect(&self.program_slot(id).source)
         })
+    }
+
+    /// Each draw's stable id (G2): an index + 1 into the (vertex buffer, material) pairs the
+    /// cache has seen, so a cell's material names its placement whatever the frame's draw
+    /// order. The list only grows; past 0xfffe pairs new ones get 0 and reflect nothing.
+    fn gi_draw_ids(&mut self, draws: &[PreparedDraw<'_>]) -> Vec<u32> {
+        let default = self.default_material.as_ref();
+        let keys: Vec<(wgpu::Buffer, wgpu::Buffer)> = draws
+            .iter()
+            .filter_map(|d| {
+                let m = d.material.or(default)?;
+                Some(((**d.mesh.vertex).clone(), (*m._uniform).clone()))
+            })
+            .collect();
+        if keys.len() != draws.len() {
+            return vec![0; draws.len()];
+        }
+        keys.into_iter()
+            .map(|key| {
+                let ids = &mut self.gi.draw_ids;
+                match ids.iter().position(|k| *k == key) {
+                    Some(i) => i as u32 + 1,
+                    None if ids.len() < 0xfffe => {
+                        ids.push(key);
+                        ids.len() as u32
+                    }
+                    None => 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Compiles the frame's program's cell shading (G2) when it declares `scatter` or
+    /// `emission`; false when it declares neither (it blocks light but reflects none) or the
+    /// frame has no traced shading groups.
+    fn ensure_gi_shade(&mut self, software: bool) -> Result<bool, Error> {
+        let Some(state) = self.primary.as_ref() else {
+            return Ok(false);
+        };
+        if state.shading_groups().is_none() {
+            return Ok(false);
+        }
+        let id = state.program;
+        let streamed = state.requests;
+        let source = self.program_slot(id).source.clone();
+        if !crate::program::reflects(&source) {
+            return Ok(false);
+        }
+        let hash: [u8; 32] = Sha256::new()
+            .chain_update(source.as_bytes())
+            .chain_update(self.source.as_bytes())
+            .finalize()
+            .into();
+        let key = (id, hash, software, streamed);
+        if self.gi.shade.as_ref().is_some_and(|p| p.key == key) {
+            return Ok(true);
+        }
+        self.ensure_gi_layouts();
+        let heads = if self.hardware_shadows.is_some() {
+            super::primary_ray_gpu::shading_heads(&self.source)?
+        } else {
+            super::primary_ray_gpu::non_rt_sources(&self.source)?.1
+        };
+        let parameters = crate::program::declares_parameters(&source);
+        let composed =
+            crate::program::compose(&heads[1], &source, crate::program::Stage::Cell, parameters);
+        let scopes = OperationScopes::new(&self.device);
+        let module = self.ledger.own(
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("indirect cache cell shading"),
+                    source: wgpu::ShaderSource::Wgsl(composed.source.into()),
+                }),
+            ResourceKind::ShaderModule,
+        );
+        let state = self.primary.as_ref().unwrap();
+        let layout = self.ledger.own(
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("indirect cache cell shading ABI"),
+                    bind_group_layouts: &[
+                        Some(&self.gi.layouts.as_ref().unwrap().shade),
+                        Some(state.array_layout()),
+                        Some(state.material_layout()),
+                        Some(&self.lighting.bindings),
+                    ],
+                    immediate_size: 0,
+                }),
+            ResourceKind::PipelineLayout,
+        );
+        let pipeline = self.ledger.own(
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("gi_shade_cells"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some("gi_shade_cells"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+            ResourceKind::ComputePipeline,
+        );
+        if let Some(error) = scopes.finish() {
+            return Err(Error::Shader(error.to_string()));
+        }
+        self.gi.shade = Some(ShadePipeline { key, pipeline });
+        Ok(true)
     }
 
     fn ensure_gi_layouts(&mut self) {
@@ -1087,6 +1418,8 @@ impl Renderer {
                     min_binding_size: wgpu::BufferSize::new(FRAME_BYTES as u64),
                 },
             ),
+            storage(33, false),
+            storage(36, true),
         ];
         let tlas = entry(
             34,
@@ -1146,10 +1479,15 @@ impl Renderer {
                 &[Some(&main[1]), Some(&arrays), None, Some(lighting)],
             ),
         ];
+        let shade = group(
+            "indirect cache cell shading",
+            &[storage(31, true), storage(33, false), storage(36, true)],
+        );
         self.gi.layouts = Some(Layouts {
             main,
             arrays,
             pipelines,
+            shade,
         });
     }
 
@@ -1201,6 +1539,8 @@ impl Renderer {
             rays: compute("gi_rays", main),
             finish: compute("gi_finish", main),
             integrate: compute("gi_integrate", main),
+            gather: compute("gi_gather", main),
+            light: compute("gi_light", main),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
@@ -1335,7 +1675,13 @@ impl Renderer {
     }
 
     /// Packs every draw's software geometry; false when a draw has none.
-    fn prepare_gi_geometry(&mut self, draws: &[PreparedDraw<'_>]) -> Result<bool, Error> {
+    /// Packs every draw's software geometry; false when a draw has none. `ids` are the draws'
+    /// stable ids (`gi_draw_ids`), which name each instance's material (G2).
+    fn prepare_gi_geometry(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        ids: &[u32],
+    ) -> Result<bool, Error> {
         let mut blases = vec![];
         for d in draws {
             let key: &wgpu::Buffer = &d.mesh.vertex;
@@ -1345,7 +1691,7 @@ impl Renderer {
             blases.push(blas.clone());
         }
         let meshes: Vec<wgpu::Buffer> = draws.iter().map(|d| (**d.mesh.vertex).clone()).collect();
-        let covered = self
+        let (covered, drawn) = self
             .gi
             .world
             .as_ref()
@@ -1356,12 +1702,9 @@ impl Renderer {
         let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
             - covered.iter().filter(|&&c| c).count()
             + usize::from(!covered.is_empty());
-        if self
-            .gi
-            .packed
-            .as_ref()
-            .is_none_or(|p| p.meshes != meshes || p.instances != instances || p.covered != covered)
-        {
+        if self.gi.packed.as_ref().is_none_or(|p| {
+            p.meshes != meshes || p.instances != instances || p.covered != covered || p.ids != ids
+        }) {
             // Pack each draw's mesh unless the world covers all its instances, then the world.
             let mut entry = vec![];
             let mut refs: Vec<&Blas> = vec![];
@@ -1380,7 +1723,17 @@ impl Renderer {
                 refs.push(&w.blas);
             }
             let (offsets, near, total) = gi_bvh::layout(&refs, instances);
-            let words = gi_bvh::mesh_words(&refs, &offsets, &near, total);
+            let mut words = gi_bvh::mesh_words(&refs, &offsets, &near, total);
+            // The merged world's placement map after everything else (G2): per placement, its
+            // first position and material identity + 1, in position order
+            // (shaders/gi_rays_software.wgsl gi_hit_identity).
+            let mut map = (0, 0);
+            if let Some(w) = world {
+                map = (words.len() as u32, w.bases.len() as u32);
+                for (base, &(d, i)) in w.bases.iter().zip(&drawn) {
+                    words.extend([*base, draw_identity(ids, d, i)]);
+                }
+            }
             let bytes = (words.len() * 4) as u64;
             let near_bytes = refs
                 .iter()
@@ -1402,6 +1755,8 @@ impl Renderer {
                 meshes,
                 instances,
                 covered,
+                ids: ids.to_vec(),
+                map,
                 entry,
                 offsets,
                 near,
@@ -1424,13 +1779,17 @@ impl Renderer {
         }
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
+        // Per record, instance words 24-26 (G2): its material identity + 1, or for the merged
+        // world zero and its placement map's offset and length.
+        let mut identities = vec![];
         if !p.covered.is_empty() {
             let w = &self.gi.world.as_ref().unwrap().blas;
             records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
+            identities.push([0, p.map.0, p.map.1]);
         }
         let mut at = 0;
-        for ((d, blas), entry) in draws.iter().zip(&blases).zip(&p.entry) {
-            for model in &d.instances.state.models {
+        for (di, ((d, blas), entry)) in draws.iter().zip(&blases).zip(&p.entry).enumerate() {
+            for (ii, model) in d.instances.state.models.iter().enumerate() {
                 let covered = p.covered.get(at).copied().unwrap_or(false);
                 at += 1;
                 if covered {
@@ -1443,10 +1802,15 @@ impl Renderer {
                     p.offsets[e],
                     blas.near_base(model, &p.near[e]),
                 ));
+                identities.push([draw_identity(ids, di, ii), 0, 0]);
             }
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
-        let head = gi_bvh::instance_words(&records)?;
+        let mut head = gi_bvh::instance_words(&records)?;
+        for (i, words) in identities.iter().enumerate() {
+            let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
+            head[r..r + 3].copy_from_slice(words);
+        }
         if p.head != head {
             let raw: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();
             self.queue.write_buffer(&p.buffer, 0, &raw);
@@ -1473,10 +1837,21 @@ impl Renderer {
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
         let software = !hardware;
-        let run = run && (hardware || self.prepare_gi_geometry(draws)?);
+        let ids = self.gi_draw_ids(draws);
+        let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
+        // Bounce (G2): the setting is on and this frame's program reflects light. A change
+        // empties the table, so no cell keeps bounce light from another program's frames.
+        let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
+        if run {
+            if self.gi.bounce_last.is_some_and(|b| b != bounce) {
+                self.gi.pending_clear = true;
+            }
+            self.gi.bounce_last = Some(bounce);
+        }
         let eye = camera.view().inverse().w_axis.truncate();
         let s = self.gi.settings;
         let r = self.gi.resources.as_ref().unwrap();
+        let layout = WorkLayout::of(r);
         let mut header = [0u32; HEADER_WORDS as usize];
         header[0] = u32::from(run);
         header[1] = r.slots - 1;
@@ -1515,10 +1890,27 @@ impl Renderer {
         if software {
             header[16] = self.gi.near_bins;
         }
+        header[17] = u32::from(bounce);
+        header[18] = layout.shade;
+        header[19] = s.gathers;
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
             return Ok(());
+        }
+        // Per draw (batch), its stable id, first placement and instance count, which cell
+        // shading and hardware setup map cells' materials through (G2).
+        let mut table = vec![0u32; TRACED_DRAWS as usize * 4];
+        let mut first = 0u32;
+        for (b, d) in draws.iter().enumerate().take(TRACED_DRAWS as usize) {
+            let n = d.instances.len() as u32;
+            table[b * 4..b * 4 + 3].copy_from_slice(&[ids[b], first, n]);
+            first += n;
+        }
+        if self.gi.draw_table != table {
+            let raw: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
+            self.queue.write_buffer(&r.draws, 0, &raw);
+            self.gi.draw_table = table;
         }
         self.ensure_gi_pipelines(software)?;
         self.prepare_gi_arrays(draws)?;
@@ -1617,6 +2009,53 @@ impl Renderer {
         if integrate {
             flags |= 4;
         }
+        // Bounce (G2): lighting events. The lights, the environment, the frame's program and
+        // its draws' materials (stable ids) form the lighting key. A step after still frames
+        // relights every cell (shaded this frame, then `gathers` gathers); a change on
+        // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
+        // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
+        let light_key: Option<[u8; 32]> = bounce.then(|| {
+            let program = self.primary.as_ref().unwrap().program;
+            let mut h = Sha256::new();
+            h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
+            h.update(environment);
+            h.update(self.program_slot(program).source.as_bytes());
+            h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
+            h.finalize().into()
+        });
+        let mut relight = 0u32;
+        if bounce {
+            let changed = self.gi.light_key.is_some() && self.gi.light_key != light_key;
+            let caster = !boxes.is_empty() && s.invalidate_casters;
+            let all = changed && !self.gi.light_streak;
+            let spread = !all && (changed || caster || self.gi.relight_catchup > 0);
+            self.gi.relight_catchup = if all {
+                0
+            } else if changed || caster {
+                RELIGHT_PERIOD
+            } else {
+                self.gi.relight_catchup.saturating_sub(1)
+            };
+            self.gi.light_streak = changed;
+            if all {
+                relight = 1 << 31;
+            } else if spread {
+                self.gi.relight_phase = (self.gi.relight_phase + 1) % RELIGHT_PERIOD;
+                relight = RELIGHT_PERIOD | (self.gi.relight_phase << 8);
+            }
+            if relight != 0 {
+                flags |= 16;
+            }
+        }
+        self.gi.light_key = light_key;
+        // Gathers scheduled by a relight run on the frames after it, even where the view is
+        // otherwise idle.
+        let busy = bounce && self.gi.bounce_busy > 0;
+        self.gi.bounce_busy = if bounce && relight != 0 {
+            s.gathers + 2
+        } else {
+            self.gi.bounce_busy.saturating_sub(1)
+        };
         let region = self.primary.as_ref().unwrap().scene;
         let r = self.gi.resources.as_ref().unwrap();
         let mut frame = vec![0u8; FRAME_BYTES];
@@ -1629,23 +2068,31 @@ impl Renderer {
         put(5, s.rotation_period);
         put(6, flags);
         put(7, r.misses);
-        let misses = COUNTER_WORDS as u32 + r.slots;
-        let traces = misses + r.misses * MISS_WORDS as u32;
         put(8, r.slots);
-        put(9, misses);
-        put(10, traces);
-        put(11, traces + r.slots);
-        let items = traces + 2 * r.slots;
-        put(12, items + RAY_ITEMS + RAY_ITEMS / 32);
+        put(9, layout.misses);
+        put(10, layout.traces);
+        put(11, layout.traces + r.slots);
+        put(12, layout.requests);
         put(13, requests(r.misses) - 1);
-        put(14, items);
+        put(14, layout.items);
         // The environment's slot group: period (0: every slot) and phase; bit 31 is set
         // below on environment-only frames, whose scan visits only that group.
         put(15, environment_group);
+        // Bounce (G2): this frame's and next frame's gather queues, the relight event (its
+        // request bit is set below once the claim rounds are known to run), the shading queue.
+        let [queue, next] = if self.gi.parity {
+            [layout.queues[1], layout.queues[0]]
+        } else {
+            layout.queues
+        };
+        put(16, queue);
+        put(17, next);
+        put(18, relight);
+        put(19, layout.shade);
         for (i, b) in boxes.iter().enumerate() {
             for k in 0..3 {
-                put(16 + i * 8 + k, b[k].to_bits());
-                put(16 + i * 8 + 4 + k, b[k + 3].to_bits());
+                put(20 + i * 8 + k, b[k].to_bits());
+                put(20 + i * 8 + 4 + k, b[k + 3].to_bits());
             }
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
@@ -1690,16 +2137,29 @@ impl Renderer {
             self.gi.view_frames = 0;
         }
         self.gi.view_key = Some(view_key);
-        if self.gi.idle_frames >= IDLE_AFTER && flags == 0 {
+        let idle_after = if bounce {
+            IDLE_AFTER_BOUNCE
+        } else {
+            IDLE_AFTER
+        };
+        if self.gi.idle_frames >= idle_after && flags == 0 && !busy {
             self.gi.stats.idle_frames += 1;
             return Ok(());
         }
+        // With bounce a changing environment relights (flags 16), so frames that are
+        // environment-only never run bounce.
         let environment_only = self.gi.view_frames >= IDLE_AFTER && flags == 4;
         let mut scan_groups = r.slots.div_ceil(64);
         if environment_only && spread {
             let word = (environment_group | (1 << 31)).to_le_bytes();
             self.queue.write_buffer(&r.frame, 60, &word);
             scan_groups = (r.slots / ENVIRONMENT_PERIOD).div_ceil(64);
+        }
+        let bounce = bounce && !environment_only;
+        if bounce {
+            // Gathers may request hit cells: the claim rounds run after them.
+            let word = (relight | 0x2000_0000).to_le_bytes();
+            self.queue.write_buffer(&r.frame, 72, &word);
         }
         self.gi.plan = Some(Plan {
             groups,
@@ -1708,7 +2168,13 @@ impl Renderer {
             integrate,
             clear,
             environment_only,
+            bounce,
+            next_queue_at: u64::from(next) * 4,
         });
+        if bounce {
+            self.gi.parity = !self.gi.parity;
+            self.gi.stats.bounce_frames += 1;
+        }
         self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
@@ -1761,6 +2227,14 @@ impl Renderer {
                 binding: 32,
                 resource: r.frame.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 33,
+                resource: r.outgoing.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 36,
+                resource: r.draws.as_entire_binding(),
+            },
         ];
         if software {
             entries.push(wgpu::BindGroupEntry {
@@ -1783,7 +2257,28 @@ impl Renderer {
             }),
             ResourceKind::BindGroup,
         );
-        if let Some(old) = self.gi.groups.replace(Groups { key, main }) {
+        let shade = self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("indirect cache cell shading"),
+                layout: &layouts.shade,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 31,
+                        resource: r.work.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 33,
+                        resource: r.outgoing.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 36,
+                        resource: r.draws.as_entire_binding(),
+                    },
+                ],
+            }),
+            ResourceKind::BindGroup,
+        );
+        if let Some(old) = self.gi.groups.replace(Groups { key, main, shade }) {
             self.gi
                 .retired
                 .push((self.submissions, Retired::Groups(old)));
@@ -1792,10 +2287,24 @@ impl Renderer {
     }
 }
 
+/// What cell shading (G2) binds besides its own group 0: traced shading's geometry (group 1)
+/// and materials (group 2), and lighting's shading group, whose binding 20 is the real table.
+pub(super) struct ShadeGroups<'a> {
+    pub arrays: &'a wgpu::BindGroup,
+    pub materials: &'a wgpu::BindGroup,
+    pub lighting: &'a wgpu::BindGroup,
+}
+
 impl GiState {
     /// The cache passes, after the primaries' hit records and before shading. `lighting`
-    /// is lighting's kernel group (the header-only table at binding 20).
-    pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder, lighting: &wgpu::BindGroup) {
+    /// is lighting's kernel group (the header-only table at binding 20); `shade` the groups
+    /// cell shading runs the frame's program on (G2).
+    pub fn encode(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        lighting: &wgpu::BindGroup,
+        shade: Option<ShadeGroups<'_>>,
+    ) {
         let Some(plan) = self.plan.take() else {
             return;
         };
@@ -1803,18 +2312,23 @@ impl GiState {
         let p = self.pipelines.as_ref().unwrap();
         let g = self.groups.as_ref().unwrap();
         let arrays = &self.arrays.as_ref().unwrap().bind;
+        let layout = WorkLayout::of(r);
         if plan.clear {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
+            encoder.clear_buffer(&r.outgoing, 0, None);
+            for at in layout.queues {
+                encoder.clear_buffer(&r.work, u64::from(at) * 4, Some(4));
+            }
         }
         encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
+        // Next frame's gather queue starts empty; this frame's holds last frame's appends.
+        if plan.bounce {
+            encoder.clear_buffer(&r.work, plan.next_queue_at, Some(4));
+        }
         // The staged ray bits, after the counters, claims, misses, both queues and the ray
         // items. The request table after them is left clean by the last resolve round
         // (and by finish after a miss-list overflow).
-        let staged_at = (COUNTER_WORDS
-            + u64::from(r.slots) * 3
-            + u64::from(r.misses) * MISS_WORDS
-            + u64::from(RAY_ITEMS))
-            * 4;
+        let staged_at = u64::from(layout.items + RAY_ITEMS) * 4;
         encoder.clear_buffer(&r.work, staged_at, Some(u64::from(RAY_ITEMS / 32) * 4));
         let queries = self.profile.as_ref().map(|p| &*p.queries);
         let ring = self
@@ -1860,6 +2374,15 @@ impl GiState {
                 0,
                 traced.then_some(plan.groups),
             );
+        }
+        // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
+        // for the claim rounds that follow.
+        let b = 6 + 2 * CLAIM_ROUNDS;
+        if plan.bounce || profiling {
+            let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
+            main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
+        }
+        if traced || profiling {
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
                 main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
@@ -1891,6 +2414,23 @@ impl GiState {
                 s + 4,
                 groups,
             );
+        }
+        // Light visibility at the cells to shade, then the program's cell shading (G2).
+        if plan.bounce || profiling {
+            let grid = plan.bounce.then_some([LIGHT_GROUPS, 1]);
+            main_pass(encoder, "indirect cache light", &p.light, b + 1, grid);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("indirect cache cell shading"),
+                timestamp_writes: stamps(b + 2),
+            });
+            if let (true, Some(shade), Some(pipeline)) = (plan.bounce, shade, self.shade.as_ref()) {
+                pass.set_pipeline(&pipeline.pipeline);
+                pass.set_bind_group(0, &*g.shade, &[]);
+                pass.set_bind_group(1, shade.arrays, &[]);
+                pass.set_bind_group(2, shade.materials, &[]);
+                pass.set_bind_group(3, shade.lighting, &[]);
+                pass.dispatch_workgroups(LIGHT_GROUPS, 1, 1);
+            }
         }
         if let Some(profile) = self.profile.as_mut() {
             let slot = profile.written % PROFILE_RING;
@@ -1950,6 +2490,105 @@ mod tests {
         assert!(uses_indirect(
             "fn f(i:SurfaceInput)->vec3<f32> { return indirect_irradiance(i,vec3<f32>(0.0,1.0,0.0)); }"
         ));
+    }
+
+    /// G2: cell shading composes for programs that declare the bounce hooks, on both ray
+    /// paths' shading heads, and validates; a hook with another signature is rejected when
+    /// the program is created; programs without hooks reflect nothing.
+    #[test]
+    fn cell_shading_composes_for_reflecting_programs() {
+        use crate::program::{analyse, reflects};
+        assert!(reflects(crate::STANDARD_PROGRAM));
+        assert!(!reflects(include_str!("../shaders/programs/toon.wgsl")));
+        assert!(!reflects("// fn scatter(\nfn surface() {}"));
+        let rt = super::primary_ray_gpu::shading_heads(PRELUDE).unwrap();
+        let nonrt = super::primary_ray_gpu::non_rt_sources(PRELUDE).unwrap().1;
+        for head in [&rt[1], &nonrt[1]] {
+            let cell = compose(head, crate::STANDARD_PROGRAM, Stage::Cell, false);
+            assert!(cell.source.contains("fn gi_shade_cells("));
+            validate("standard cell shading", &cell.source);
+            // Cell shading binds only its own group 0 (work, outgoing radiance, draw table):
+            // nothing it reaches may read traced shading's group 0 (camera, hit records).
+            let module = naga::front::wgsl::parse_str(&cell.source).unwrap();
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            let entry = module
+                .entry_points
+                .iter()
+                .position(|e| e.name == "gi_shade_cells")
+                .unwrap();
+            let uses = info.get_entry_point(entry);
+            for (handle, global) in module.global_variables.iter() {
+                if let Some(b) = global.binding.as_ref().filter(|_| !uses[handle].is_empty()) {
+                    assert!(
+                        b.group != 0 || [31, 33, 36].contains(&b.binding),
+                        "cell shading reaches group 0 binding {} ({:?})",
+                        b.binding,
+                        global.name
+                    );
+                }
+            }
+        }
+        let emissive = "struct Parameters { glow:vec3<f32> };\nstruct Surface { n:vec3<f32>, albedo:vec3<f32> };\nfn surface(input:SurfaceInput)->Surface { return Surface(input.geometric,sample_base_color(input).rgb); }\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> { return expose(indirect_irradiance(input,s.n)*s.albedo/PI+params.glow); }\nfn emission(s:Surface,input:SurfaceInput)->vec3<f32> { return params.glow; }\n";
+        assert!(reflects(emissive));
+        validate(
+            "emissive cell shading",
+            &compose(&rt[1], emissive, Stage::Cell, true).source,
+        );
+        analyse(
+            "emissive",
+            emissive,
+            &compose(PRELUDE, emissive, Stage::Raster, true),
+        )
+        .unwrap();
+        let wrong = emissive.replace(
+            "fn emission(s:Surface,input:SurfaceInput)",
+            "fn emission(s:Surface)",
+        );
+        let error = analyse(
+            "wrong",
+            &wrong,
+            &compose(PRELUDE, &wrong, Stage::Raster, true),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("bounce light"), "{error}");
+    }
+
+    /// G2: the gather's fixed weights (2 pi / K over the cell's hemisphere directions) make
+    /// its L1 SH exact for uniform bounce radiance: irradiance pi L at the cell normal, for
+    /// any normal and rotation, with no normalization by a count (W1, C8). Cell shading's
+    /// sixteen fixed directions give a Lambert program's albedo exactly (sum z_k = Q / 2).
+    #[test]
+    fn bounce_quadrature_is_exact_for_uniform_light_and_lambert() {
+        for (n, rotation) in [
+            ([0.0, 1.0, 0.0], 0.0),
+            ([0.6, 0.0, -0.8], 1.3),
+            ([0.0, 0.0, -1.0], 4.0),
+        ] {
+            let mut c = [0.0f64; 4];
+            for d in directions(n, rotation) {
+                let y = basis(d);
+                for i in 0..4 {
+                    c[i] += std::f64::consts::TAU / 64.0 * y[i];
+                }
+            }
+            let y = basis(n);
+            let e: f64 = (0..4).map(|i| band(i) * y[i] * c[i]).sum();
+            assert!((e - std::f64::consts::PI).abs() < 1e-5, "{n:?}: {e}");
+        }
+        let albedo = 0.37;
+        let response: f64 = (0..16)
+            .map(|k| {
+                let z = 1.0 - (k as f64 + 0.5) / 16.0;
+                std::f64::consts::TAU / 16.0 * albedo / std::f64::consts::PI * z
+            })
+            .sum();
+        assert!((response - albedo).abs() < 1e-12, "{response}");
     }
 
     /// CPU mirror of gi_direction, gi_sh_basis and the band weights (f64).

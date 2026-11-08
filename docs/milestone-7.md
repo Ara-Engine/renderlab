@@ -68,7 +68,7 @@ Islam's decisions on design draft 2 (2026-11-07):
 
 Root decisions:
 - **Cache code:** the GI cache code stays in its own M7 files, copied from the shadow cache. Once the shadow hillclimb ends, the two may be merged into a shared module.
-- **RT memory baseline:** M7 starts from the RT default path, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410.
+- **RT comparison memory baseline:** M7 measurements use the non-default fast setup, traced primaries with hardware Interactive shadows: 2,641 MiB reserved, against Unreal HRT's 5,410. The RT-device default remains raster plus Exact; [RT1c](rt1c-rt-default.md) and [RT1d](rt1d-shadow-filter.md) record the failed promotion gates.
 - **DLAA preset K:** if it's available in the installed Unreal, it may appear in the Unreal runs as an informative row only. It is never the pass bar, and DLSS is not linked into Renderlab.
 
 ## Patent policy (Islam, 2026-11-07)
@@ -151,3 +151,40 @@ Default anti-aliasing ruling (Islam, delegated, 2026-11-08). TR1 becomes the def
 4. Cost tails above the half-TSR ceiling stay recorded as a miss.
 5. Earlier quality gates are re-scored on the new default image, noting which numbers moved.
 IQ1 also found the RT-device code default is still raster primaries, which TR1 doesn't reconstruct. A TR1 default helps RT users only once traced primaries are the RT default (RT1d).
+
+TR1 visible-sky gate result and ruling (Islam, delegated, 2026-11-08). TR1b's 40-frame visible-sky quarry walk failed condition 3, so TR1 stays opt-in.
+- Against the path-traced reference, TR1 is worse than no-AA in 149 of 256 rows on both paths. Most of that comes from the lighting error both images share (unoccluded sky in shadow), not from AA.
+- Against each path's own 64-spp integrated image, TR1 wins 219 of 256 rows and loses 31. The losses are the cold first frame, revealed-pixel pockets at ages 2-4, rare single-pixel maxima while moving, and a still-frame settle step.
+
+Ruling:
+- Judge the AA change against each path's own 64-spp integral, because the shared lighting error isn't TR1's.
+- Flip only when no row is worse than no-AA, on both paths, static and moving.
+- Keep the path-traced comparison in the record, and re-score it once G2's sky occlusion and bounce make the cache the default, so the lighting gap shows separately.
+- Fix the losses in order of size, recording each fix's effect. If a row can't be fixed without hurting others, report it back; never relax the gate.
+- Build an Unreal quarry level with the sky visible as a separate short unit, with its package and captures on D:, then delete Unreal's derived data and build cache once the cook is verified.
+
+G2 ruling (Islam, delegated, 2026-11-08): keep the blocked (direct-visibility) sky specular, and keep the cache opt-in. The next unit, G2b:
+1. Fixes crevice mouths on both paths, preferring a short per-pixel visibility check or finer cells over any screen-space core-lighting trick. Study how Lumen and other engines handle near-field occlusion at cell boundaries before building.
+2. Cuts cost toward the ~0.45 ms budget, with camera cuts spread over frames and bounded in time, not just in frame count. Everything is timed on the quarry on both paths.
+3. Makes the cache the default only when it equals or beats both cache-off and the unblocked variant on every quarry population, both paths, static and moving, scored on TR1 frames. Any remaining miss is recorded and brought back; the gate is never relaxed.
+
+## Overnight complete-base push (Islam, 2026-11-08, about 19:00)
+
+"I want global illumination that's better than Lumen. I want every single feature that we talked about done… within 3 to 10 hours, by the time I wake up tomorrow… an engine that is ready to render games on the quality of Unreal… We can improve further after that, but everything should have a good base."
+
+Target by about 05:00 local: every feature built and on by default, on both paths.
+
+| Feature | Unit |
+|---|---|
+| TR1, plus an upscaling preset | TR1b |
+| GI: sky cache with bounce and ES1 | G2b |
+| Reflections | R1 |
+| Transparency, plus particles | TP1 |
+| Atmosphere and fog | AT1 |
+| Skinned meshes | SK1 |
+| Many lights | LC1 |
+| Decals | DC1 |
+| Post-processing | PP1 |
+| Engine-facing API freeze and example scene | API1 |
+
+The default rule, time-box and verification for this push are in AGENTS.md. They supersede the stricter default gates above for this push. Every gap to Unreal and to the reference is recorded in `docs/m7-gaps.md`.

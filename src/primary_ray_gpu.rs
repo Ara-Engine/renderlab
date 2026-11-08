@@ -11,6 +11,8 @@ use crate::shadow_plan::Bounds;
 #[path = "film_accumulation.rs"]
 pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
+#[path = "shadow_visibility_filter.rs"]
+mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
 pub(super) mod temporal_reconstruction;
 
@@ -199,6 +201,8 @@ pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
         1,
     );
     heads[0].push_str("\n@group(0) @binding(23) var primary_receiver_epsilon:texture_2d<f32>;\n");
+    // RT1d integration seam: visibility input only; no hit-record/shading changes.
+    shadow_visibility_filter::compose(&mut heads);
     finish_shading_heads(heads)
 }
 fn finish_shading_heads(heads: [String; 2]) -> Result<[String; 2], Error> {
@@ -772,6 +776,21 @@ impl PrimaryState {
         self.geometry
             .as_ref()
             .map(|g| (&*g.models.value, &*g.arrays))
+    }
+    /// The prepared frame's traced shading groups 1 (geometry tables) and 2 (materials), on
+    /// which the world radiance cache's cell shading runs the frame's program (M7 G2).
+    pub(super) fn shading_groups(&self) -> Option<(&wgpu::BindGroup, &wgpu::BindGroup)> {
+        let g = self.geometry.as_ref()?;
+        Some((&*g.arrays, &**g.materials.as_ref()?))
+    }
+    /// The layout of this frame's material group: with the texture residency bindings
+    /// while it streams textures.
+    pub(super) fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        if self.requests {
+            &self.streamed_bindings
+        } else {
+            &self.material_bindings
+        }
     }
 
     #[cfg(test)]
@@ -1459,7 +1478,15 @@ impl Renderer {
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
         // Visible sky (Renderer::set_visible_environment): misses sample the selected map.
         let visible = self.environment.visible && self.environment.selected.is_some();
-        bytes[88..92].copy_from_slice(&u32::from(visible).to_ne_bytes());
+        bytes[92..96].copy_from_slice(&u32::from(visible).to_ne_bytes());
+        // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
+        let filter = self.primary_mode == PrimaryVisibility::Traced
+            && self.soft_mode == SoftShadows::Interactive
+            && self
+                .hardware_shadows
+                .as_ref()
+                .is_some_and(|h| h.visibility_filter);
+        bytes[88..92].copy_from_slice(&u32::from(filter).to_ne_bytes());
         for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }

@@ -3,6 +3,11 @@
 2026-11-07 UTC. Branch `t3/rt1c-rt-default`, from main `dedc068`.
 Labels: **M** measured/replayed here; **R** retained evidence, audited here.
 
+Follow-up: [RT1d's fixed visibility filter](rt1d-shadow-filter.md) clears the
+disk-source display miss but fails quarry false-shadow/lit-darkened gates,
+S2 point-source phases and strict-solid gates. It stays opt-in. The RT-device
+default is still raster + Exact; RT1c's fast timing labels remain non-default.
+
 **Do not switch the RT default.** The [revised RT shadow floor](milestone-7.md)
 is HRT1, not VSM. Interactive passes the retained shadow-mask and visibility
 flicker comparisons against HRT1. However, S2's previously registered **+4-stop

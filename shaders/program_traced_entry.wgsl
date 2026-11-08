@@ -75,10 +75,10 @@ const PRIMARY_CLEAR_TILE=16u;
     primary_shade_pixel(id.xy,size);
 }
 // A primary miss: `clear` (the lit clear colour), or with the visible sky on
-// (primary_frame.sided.z, Renderer::set_visible_environment) the selected map along the
+// (primary_frame.sided.w, Renderer::set_visible_environment) the selected map along the
 // pixel's camera ray at level 0, exposed and scaled as the lighting it provides.
 fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {
-    if primary_frame.sided.z==0u {return clear;}
+    if primary_frame.sided.w==0u {return clear;}
     let ray=primary_ray(id,size);
     let d=normalize(ray.far-ray.near);
     return vec4<f32>(environment_product(environment_radiance(environment_direction(d),0.0),vec3<f32>(1.0)),1.0);

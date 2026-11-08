@@ -146,6 +146,35 @@ fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHi
 fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
     return !gi_traverse(origin,direction,0.0,1e20,true).hit;
 }
+// Visibility within tmax (a light's distance): any hit blocks it.
+fn gi_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
+    return !gi_traverse(origin,direction,0.0,tmax,true).hit;
+}
+// A hit's material identity + 1 (G2), from instance word 24 (src/gi_bvh.rs instance_words);
+// a merged world (word 24 zero) maps its positions to placements through the table at word
+// 25: word 26 pairs of (first position, identity + 1), in position order. Software geometry
+// keeps no render triangle (a cooked cut is not the drawn mesh), so cell shading evaluates
+// the placement's material over its whole texture (gi_hit_primitive: none).
+fn gi_hit_identity(inst:u32, tri:vec3<u32>) -> u32 {
+    if inst>=gi_geometry[0] { return 0u; }
+    let r=16u+inst*GI_INSTANCE_WORDS;
+    let own=gi_geometry[r+24u];
+    if own!=0u { return own; }
+    let map=gi_geometry[r+25u];
+    let n=gi_geometry[r+26u];
+    var found=0u;
+    for(var i=0u;i<n;i+=1u) {
+        if gi_geometry[map+2u*i]<=tri.x { found=gi_geometry[map+2u*i+1u]; }
+    }
+    return found;
+}
+fn gi_hit_primitive(tri:vec3<u32>) -> u32 { return GI_NO_PRIMITIVE; }
+// A gather hit's receiver: its point, and its plane normal turned toward the ray's origin as
+// the bin source (no vertex normals here).
+fn gi_hit_receiver(origin:vec3<f32>, d:vec3<f32>, h:GiHit) -> GiReceiver {
+    let viewed=select(-h.normal,h.normal,dot(h.normal,-d)>=0.0);
+    return GiReceiver(origin+d*h.t,viewed,viewed);
+}
 // The octahedral bin of d among bins x bins (renderlab_asset::near_field::bin).
 fn gi_near_bin(d:vec3<f32>, bins:u32) -> u32 {
     let p=d.xy/(abs(d.x)+abs(d.y)+abs(d.z));

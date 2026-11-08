@@ -9,33 +9,41 @@
 @group(3) @binding(10) var environment_lobe_table:texture_2d<f32>;
 const ES_BINS:f32=128.0;
 
-// The sky visibility a receiver's specular sees: the world radiance cache's occluded
+// The sky visibility a receiver's specular sees: the world radiance cache's occluded sky
 // irradiance over the open environment's, per channel, about the receiver's vertex normal
-// on its viewed side. A concentrated sky makes it the visibility of its dominant lobe; an
+// on its viewed side. Direct sky visibility only: bounce light is added to
+// `indirect_radiance` separately (G2), so it is never counted as sky (Islam's ruling,
+// docs/milestone-7.md). A concentrated sky makes it the visibility of its dominant lobe; an
 // even one, cosine-weighted sky visibility. 1 where the cache has no value or is off.
-// The generated entry computes it once per receiver, before `shade`, through
-// rl_indirect_prepare (src/program.rs): every input below shares that one cache lookup.
+// The generated entry computes it once per receiver, before `surface`, through
+// rl_indirect_prepare (src/program.rs), from the receiver's one blended lookup (gi_prepare).
 var<private> es_visibility:vec3<f32>;
 fn es_prepare(input:SurfaceInput) {
     es_visibility=vec3<f32>(1.0);
-    if gi_word(GI_H_ENABLED)==0u { return; }
+    if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid { return; }
     let n=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
     let open=gi_open_irradiance(n);
-    let ratio=clamp(indirect_irradiance(input,n)/max(open,vec3<f32>(1e-30)),vec3<f32>(0.0),vec3<f32>(1.0));
+    let ratio=clamp(gi_rx_sky_irradiance(n)/max(open,vec3<f32>(1e-30)),vec3<f32>(0.0),vec3<f32>(1.0));
     es_visibility=select(vec3<f32>(1.0),ratio,open>vec3<f32>(1e-20));
 }
 
 // Occluded incident radiance about `direction`, averaged over the N=V GGX lobe of
 // perceptual `roughness`: the prepared field's prefiltered radiance (or the constant
-// environment) times this receiver's sky visibility. Without the world radiance cache it
-// is exactly the open value. With a map bound it is in environment_reflection's units
-// (before intensity and exposure: combine with environment_product); otherwise in
+// environment) times this receiver's sky visibility, plus the cache's bounce light in that
+// lobe (G2: its L1 SH read with the lobe's band attenuation). Without the world radiance
+// cache it is exactly the open value. With a map bound it is in environment_reflection's
+// units (before intensity and exposure: combine with environment_product; the bounce light
+// is divided by the intensity to match, and is lost at intensity 0); otherwise in
 // environment_constant's (combine with exposed_product). No per-pixel ray.
 fn indirect_radiance(input:SurfaceInput, direction:vec3<f32>, roughness:f32) -> vec3<f32> {
     var open=lighting.environment;
     if lighting.map.w!=0.0 { open=environment_reflection(direction,roughness); }
     if gi_word(GI_H_ENABLED)==0u { return open; }
-    return open*es_visibility;
+    var bounce=gi_rx_bounce_radiance(direction,roughness);
+    if lighting.map.w!=0.0 {
+        bounce=select(vec3<f32>(0.0),bounce/lighting.map.z,lighting.map.z>0.0);
+    }
+    return open*es_visibility+bounce;
 }
 
 // A dominant source of the environment (a sun and its aureole) that the engine separates
