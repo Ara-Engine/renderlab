@@ -6,10 +6,13 @@
   build LABEL               cargo test --no-run, two jobs, own target on D:; stops for another
                             owner's QUIET window. Copies the test binary to OUT/bin/LABEL.exe.
   gpu LABEL STEPS...        one shared GPU lease for the listed steps, taken at the first free
-                            moment (the lock polled in-process); STEP is PATH:TEST[:SECTIONS[:VARIANT]],
-                            PATH rt or nonrt; TEST quarry (gpu_g2_quarry), sv (G1's SV harness),
-                            lib (the non-ignored lib suite) or an exact suite test name. VARIANT
-                            reads the shaders in OUT/variants/VARIANT (RENDERLAB_GI_SHADERS).
+                            moment (the lock polled in-process); STEP is
+                            PATH:TEST[:SECTIONS[:VARIANT[:SETTINGS]]], PATH rt or nonrt; TEST quarry
+                            (gpu_g2_quarry), trace (an Nsight GPU trace of its `trace` section), sv
+                            (G1's SV harness), lib (the non-ignored lib suite) or an exact suite test
+                            name. VARIANT reads the shaders in OUT/variants/VARIANT
+                            (RENDERLAB_GI_SHADERS); SETTINGS, comma-separated, replaces --variants
+                            (RENDERLAB_G2_VARIANTS) for that step.
 
 Leases reuse the shared lock, schedule lines and game/RAM/foreign-renderer guards of
 m7-u0-ue.py (through m7-u0b.py), as ES1 does. No window opens. Evidence goes to
@@ -19,6 +22,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,8 +30,13 @@ import time
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = Path("D:/Coding/renderlab-work/m7-g2")
+# The unit that owns leases and schedule lines, and its lease-label prefix. scripts/m7-g2b-run.py
+# reuses this runner with its own unit and output root (docs/m7-g2b.md).
+UNIT = "m7-g2"
+PREFIX = "g2-"
 TARGET = OUT / "target"
 LOCK = Path("D:/Coding/renderlab-work/gpu-slot.lock")
+NGFX = "C:/Program Files/NVIDIA Corporation/Nsight Graphics 2026.4.0/host/windows-desktop-nomad-x64/ngfx.exe"
 TESTS = {
     "quarry": "renderer::gi_cache::gpu_tests::gpu_g2_quarry",
     "sv": "renderer::gi_cache::gpu_tests::gpu_gi_sky_visibility_sv",
@@ -45,7 +54,7 @@ def guard():
     host = load("m7-u0b")
     host.OUT = OUT
     g = host.ue()
-    g.OWNER = "m7-g2"
+    g.OWNER = UNIT
     g.OUT = OUT
     return g
 
@@ -118,7 +127,7 @@ def gpu(args):
     if out.exists():
         raise SystemExit(f"label {args.label} already used")
     binary = OUT / "bin" / (args.binary + ".exe")
-    g.schedule_line(f"[m7-g2 request] owner=m7-g2 asks for one <={args.minutes} min lease \"g2-{args.label}\" "
+    g.schedule_line(f"[{UNIT} request] owner={UNIT} asks for one <={args.minutes} min lease \"{PREFIX}{args.label}\" "
                     f"({', '.join(args.steps)}; headless, {'QUIET timing' if args.quiet else 'functional, no timing claim'}); "
                     f"takes the lock at the next free moment. {g.utc().isoformat()}")
     deadline = time.time() + args.wait * 60
@@ -128,7 +137,7 @@ def gpu(args):
     if args.quiet:
         import threading
         query = ("@(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(rustc|cargo|clippy-driver|rustdoc)[.]exe$' "
-                 "-and $_.CommandLine -notmatch 'm7-g2' }).Count")
+                 f"-and $_.CommandLine -notmatch '{UNIT}' }}).Count")
 
         def sampler():
             while True:
@@ -152,7 +161,7 @@ def gpu(args):
                     (out / "contention.json").write_text(json.dumps(dict(
                         compiler_samples=len(seen), idle_before_seconds=args.idle, steps=classes,
                         timings="clean of foreign compilers" if not seen else "contended: a compiler ran inside"), indent=2))
-                    g.schedule_line(f"[m7-g2 QUIET completed] label=g2-{args.label} "
+                    g.schedule_line(f"[{UNIT} QUIET completed] label={PREFIX}{args.label} "
                                     f"({'clean' if not seen else f'compiler seen {len(seen)}x'}). {g.utc().isoformat()}")
                 return
             except SystemExit as e:
@@ -171,17 +180,24 @@ def run_steps(g, out, binary, args):
     for k, v in (args.env or []):
         base[k] = v
     done = []
-    with g.lease("g2-" + args.label, args.minutes) as owner:
+    with g.lease(PREFIX + args.label, args.minutes) as owner:
         out.mkdir(parents=True)
         if args.quiet:
             import datetime as dt
             now = g.utc()
-            g.schedule_line(f"[m7-g2 QUIET active] owner=m7-g2 label=g2-{args.label} start={now.isoformat()} "
+            g.schedule_line(f"[{UNIT} QUIET active] owner={UNIT} label={PREFIX}{args.label} start={now.isoformat()} "
                             f"end={(now + dt.timedelta(minutes=args.minutes)).isoformat()}; no other GPU lease or "
                             "compiler/heavy build inside. Headless only: no window, focus, input or capture.")
         for index, step in enumerate(args.steps):
-            path, test, *extra = step.replace("::", "@").split(":")
-            test = test.replace("@", "::")
+            # A short test name (quarry, trace, sv, lib, cpu=...) ends at the next ':'; an exact
+            # test name (a::b::c) keeps its '::'. Empty fields are allowed after either.
+            path, rest = step.split(":", 1)
+            short = rest.split(":")
+            if short[0] in TESTS or short[0] in ("trace", "lib") or short[0].startswith("cpu="):
+                test, extra = short[0], short[1:]
+            else:
+                m = re.match(r"(\w+(?:::\w+)*)(?::(.*))?$", rest)
+                test, extra = m.group(1), (m.group(2).split(":") if m.group(2) is not None else [])
             env = dict(base, RENDERLAB_G2_PATH=path, RENDERLAB_G2_OUT=str(out),
                        RENDERLAB_TEST_PRIMARY="traced" if path == "rt" else "raster",
                        RENDERLAB_M7_G1_PATHS="rt" if path == "rt" else "nonrt",
@@ -190,23 +206,51 @@ def run_steps(g, out, binary, args):
             if extra and extra[0]:
                 env["RENDERLAB_G2_SECTIONS"] = extra[0]
                 env["RENDERLAB_M7_G1_SECTIONS"] = extra[0]
-            if len(extra) > 1:
+            if len(extra) > 1 and extra[1]:
                 env["RENDERLAB_GI_SHADERS"] = str(OUT / "variants" / extra[1])
                 env["RENDERLAB_G2_TAG"] = extra[1]
+            # The lease's --variants, or this step's own list (a fifth field, comma-separated).
+            if args.variants:
+                env["RENDERLAB_G2_VARIANTS"] = args.variants
+            if len(extra) > 2 and extra[2]:
+                env["RENDERLAB_G2_VARIANTS"] = extra[2]
             name = TESTS.get(test, test)
+            traced = None
+            # "trace": an Nsight GPU Trace (real-time shader profiler, 200 ms) of the quarry
+            # test's `trace` section, the camera moving (G1d's headless recipe: Nsight's layer
+            # manifests only, never --platform; the traced image is killed afterwards). Its
+            # window starts RENDERLAB_G2_TRACE_START_MS (default 45,000) after launch.
+            if test == "trace":
+                traced = OUT / "bin" / f"{UNIT}-trace.exe"
+                shutil.copy2(binary, traced)
+                env["RENDERLAB_G2_SECTIONS"] = extra[0] if extra and extra[0] else "trace"
+                env["VK_IMPLICIT_LAYER_PATH"] = "E:/renderlab-work/n8f/layers"
+                passed = {k: v for k, v in env.items() if k.startswith(("RENDERLAB_", "VK_LOADER"))}
+                step_dir = out / f"trace-{index}-{path}"
+                step_dir.mkdir(parents=True, exist_ok=True)
+                command = [NGFX, "--activity", "GPU Trace Profiler", "--output-dir", str(step_dir),
+                           "--exe", str(traced), "--dir", str(traced.parent),
+                           "--args", f"{TESTS['quarry']} --ignored --exact --nocapture --test-threads=1",
+                           "--env", "; ".join(f"{k}={v}" for k, v in passed.items()),
+                           "--start-after-ms", env.get("RENDERLAB_G2_TRACE_START_MS", "45000"),
+                           "--limit-to-submits", "4", "--max-duration-ms", "200",
+                           "--set-gpu-clocks", "unaltered", "--collect-screenshot", "0", "--architecture", "Ada",
+                           "--metric-set-name", "Top-Level Triage", "--real-time-shader-profiler"]
             # "cpu=FILTER": the non-ignored lib tests whose names contain FILTER (naga checks).
-            if test.startswith("cpu="):
+            elif test.startswith("cpu="):
                 name = test[4:]
                 command = [binary, name, "--test-threads=2"]
             elif test == "lib":
                 command = [binary, "--test-threads=2"]
             else:
                 command = [binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"]
-            if args.variants:
-                env["RENDERLAB_G2_VARIANTS"] = args.variants
             start = time.time()
-            g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
-                      timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
+            try:
+                g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
+                          timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
+            finally:
+                if traced:
+                    subprocess.run(["taskkill", "/IM", traced.name, "/F", "/T"], capture_output=True)
             done.append((step, start, time.time()))
     return done
 
