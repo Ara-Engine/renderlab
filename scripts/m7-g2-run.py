@@ -181,7 +181,9 @@ def run_steps(g, out, binary, args):
         base[k] = v
     done = []
     with g.lease(PREFIX + args.label, args.minutes) as owner:
-        out.mkdir(parents=True)
+        # A deferred attempt (exit 3, e.g. a foreign build script at preflight) retries into
+        # the directory its first attempt made (GC1).
+        out.mkdir(parents=True, exist_ok=True)
         if args.quiet:
             import datetime as dt
             now = g.utc()

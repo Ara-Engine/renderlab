@@ -16,9 +16,11 @@ pub(crate) const HEADER_WORDS: usize = 16;
 /// instance's near-field mask base (0: none, the instance is traced over whole rays).
 pub(crate) const INSTANCE_WORDS: usize = 32;
 
-/// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf).
+/// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf), by binned
+/// SAH splits (GC1: software rays visit fewer nodes and triangles than over median splits; the
+/// same hits, docs/m7-gc1.md).
 pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh, Error> {
-    crate::asset::near_field::build_bvh(positions, indices)
+    crate::asset::near_field::build_bvh_sah(positions, indices)
         .map_err(|_| Error::InvalidInput("indirect geometry is not a valid triangle list"))
 }
 
@@ -234,6 +236,42 @@ mod tests {
             }
         }
         (p, i)
+    }
+
+    /// The SAH build (GC1) keeps every triangle in exactly one leaf of at most eight, within
+    /// the software traversal's stack depth, on an uneven scene (a dense patch beside a sparse
+    /// plane, where SAH and median planes differ).
+    #[test]
+    fn sah_build_partitions_every_triangle() {
+        use crate::asset::cluster_bvh::{EMPTY, LEAF_BIT};
+        use crate::asset::near_field::{LEAF_TRIANGLES, MAX_SAH_DEPTH};
+        let (mut p, mut i) = grid(40);
+        let (q, j) = grid(4);
+        let base = p.len() as u32;
+        p.extend(q.iter().map(|v| [v[0] * 30.0 + 2.0, v[1] + 0.5, v[2] * 30.0]));
+        i.extend(j.iter().map(|k| k + base));
+        let bvh = build(&p, &i).unwrap();
+        let mut seen = vec![0u32; i.len() / 3];
+        let mut stack = vec![(bvh.levels[0].root, 0usize)];
+        let mut deepest = 0;
+        while let Some((child, d)) = stack.pop() {
+            if child & LEAF_BIT != 0 {
+                let leaf = &bvh.leaves[(child & !LEAF_BIT) as usize];
+                assert!(leaf.indices.count as usize <= 3 * LEAF_TRIANGLES);
+                let span = leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
+                for t in bvh.indices[span].chunks_exact(3) {
+                    let at = i.chunks_exact(3).position(|s| s == t).unwrap();
+                    seen[at] += 1;
+                }
+                continue;
+            }
+            deepest = deepest.max(d + 1);
+            for &c in bvh.nodes[child as usize].children.iter().filter(|&&c| c != EMPTY) {
+                stack.push((c, d + 1));
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1));
+        assert!(deepest <= MAX_SAH_DEPTH);
     }
 
     #[test]
