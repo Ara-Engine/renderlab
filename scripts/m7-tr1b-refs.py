@@ -364,9 +364,12 @@ def tsr(args):
     tr0.ROOT = root
     tr0.U0.OUT, tr0.U0.OWNER = root, "m7-tr1"
     out = root / "runs" / args.label
-    if not (out / "capture-readback.json").exists():
+    if not (out / "profile.csv").exists():
         tr0.run(argparse.Namespace(label=args.label, track=args.track, path=args.path, quality=3, capture=True, smoke=False,
                                    program="full", minutes=args.minutes, wait_seconds=args.wait_seconds, package_dir=None))
+    if not (out / "capture-readback.json").exists():
+        # TR0's CPU readback: frame coverage, 60 Hz deltas, exposure and identity records.
+        tr0.summarize(argparse.Namespace(label=args.label))
     recipe = json.loads((out / "recipe.json").read_text())
     capture = json.loads((out / "capture-readback.json").read_text())
     if tr0.digest(tr0.U0.PACKAGE) != recipe["package_exe_sha256"] or not recipe["package_exe_sha256"].startswith("69d6f88a"):
