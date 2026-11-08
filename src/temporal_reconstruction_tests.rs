@@ -26,6 +26,8 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     f("silhouette_window", &mut s.silhouette_window);
     f("start_window", &mut s.start_window);
     f("turn_angle", &mut s.turn_angle);
+    f("start_radius", &mut s.start_radius);
+    f("silhouette_start_radius", &mut s.silhouette_start_radius);
     let b = |key: &str, value: &mut bool| {
         if let Some(x) = v[key].as_bool() {
             *value = x;
@@ -37,6 +39,7 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("rotate_directions", &mut s.rotate_directions);
     b("silhouette_mix", &mut s.silhouette_mix);
     b("box_clamp", &mut s.box_clamp);
+    b("silhouette_spatial", &mut s.silhouette_spatial);
     s
 }
 
@@ -150,6 +153,8 @@ fn gpu_tr1_sequence() {
         .map(|(name, v)| (name.clone(), reconstruction(v)))
         .collect();
     let visits = m["visits"].as_u64().unwrap_or(0) as usize;
+    // `write_frames: false` hashes the listed frames without writing them (repeats).
+    let write_frames = m["write_frames"].as_bool().unwrap_or(true);
     let color = target(&r, 1920, 1080);
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     // One complete track from cold: frame hashes, the requested HDRs, and per-frame spans.
@@ -160,6 +165,9 @@ fn gpu_tr1_sequence() {
                write: bool| {
         r.set_reconstruction(Reconstruction::default()).unwrap();
         r.set_reconstruction(settings).unwrap();
+        // Every run starts from the same shadow state: the non-RT Surface cache keeps cells
+        // across frames, so a replay after other runs would otherwise start warm.
+        r.reset_virtual_shadow_cache();
         let dir = out.join(name);
         if write {
             fs::create_dir_all(&dir).unwrap();
@@ -199,7 +207,7 @@ fn gpu_tr1_sequence() {
     let mut records = serde_json::Map::new();
     let mut first: Option<Vec<String>> = None;
     for (name, settings) in &variants {
-        let (hashes, spans) = run(&mut r, &mut asset, name, *settings, true);
+        let (hashes, spans) = run(&mut r, &mut asset, name, *settings, write_frames);
         r.test_drain("TR1 memory");
         memory_report(&r, &out, name);
         if first.is_none() {
@@ -244,5 +252,9 @@ fn gpu_tr1_sequence() {
         .unwrap(),
     )
     .unwrap();
-    assert_ne!(replay, Some(false), "TR1 replay differs");
+    // Recorded, not asserted, so one path's replay never cancels the plan's other paths;
+    // the F8 gate reads `replay_identical` (and cross-process hashes).
+    if replay == Some(false) {
+        eprintln!("TR1 replay differs");
+    }
 }

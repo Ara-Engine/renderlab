@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--binary", default="tr1a")
     parser.add_argument("--frames", default="reference")
     parser.add_argument("--no-replay", action="store_true")
+    parser.add_argument("--no-write", action="store_true", help="hash the frames without writing them")
     args = parser.parse_args()
     text = args.variants
     variants = json.loads(Path(text).read_text() if not text.lstrip().startswith("{") else text)
@@ -53,14 +54,17 @@ def main():
               "checkpoints": lambda: json.loads((TR0 / "runs/t1b-black-b/manifest.json").read_text())["scored"],
               "all": lambda: None}[args.frames]()
     steps = []
-    for path in args.paths.split(","):
-        manifest = dict(QUARRY, path=path, output=str(ROOT / "runs" / args.label / path / "data"),
-                        variants=variants, visits=args.visits, replay=not args.no_replay, validate=False)
+    for step in args.paths.split(","):
+        # A step is a path, optionally with a repeat suffix (rt-b) for cross-process identity.
+        path = step.split("-b")[0] if step.endswith("-b") else step
+        manifest = dict(QUARRY, path=path, output=str(ROOT / "runs" / args.label / step / "data"),
+                        variants=variants, visits=args.visits, replay=not args.no_replay, validate=False,
+                        write_frames=not (args.no_write or step.endswith("-b") or path == "nonrt-on-rt"))
         if frames is not None:
             manifest["frames"] = frames
-        target = plan_dir / f"manifest-{path}.json"
+        target = plan_dir / f"manifest-{step}.json"
         target.write_text(json.dumps(manifest, indent=1) + "\n")
-        steps.append(dict(name=path, binary=args.binary, test_name=TEST,
+        steps.append(dict(name=step, binary=args.binary, test_name=TEST,
                           env={"RENDERLAB_PRIMARY_MANIFEST": str(target)}))
     (plan_dir / "plan.json").write_text(json.dumps(steps, indent=1) + "\n")
     print(plan_dir / "plan.json")

@@ -15,7 +15,8 @@ use super::*;
 /// Temporal reconstruction settings (TR1). The default is off: frames are unjittered and
 /// keep no history. Enabled, traced and visibility-buffer lit frames at 1x accumulate;
 /// raster and diagnostic frames are unaffected. History costs 24 bytes per pixel plus an
-/// 8-byte copy of the frame's samples.
+/// 8-byte copy of the frame's samples. The other defaults are the variant measured best on
+/// the Q-walk screens (docs/m7-tr1.md §5); TR1 is not the renderer default.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reconstruction {
     pub enabled: bool,
@@ -27,10 +28,16 @@ pub struct Reconstruction {
     /// Window of moving pixels whose 4x4 history taps are all accepted, which resample by
     /// Catmull-Rom (second-moment blur free) instead of bilinear.
     pub sharp_window: f32,
-    /// Window at silhouettes: pixels whose 3x3 samples show more than one surface.
+    /// Window at moving silhouettes: pixels whose 3x3 samples show more than one surface.
+    /// Still silhouettes use `window`: their coverage is unchanged.
     pub silhouette_window: f32,
     /// Largest effective sample count a revealed pixel's spatial start may claim.
     pub start_window: f32,
+    /// Tent radius (pixels) of a revealed pixel's spatial start over the 3x3 samples of its
+    /// surface; 0 starts from its own sample.
+    pub start_radius: f32,
+    /// The same at silhouettes, over every 3x3 sample: wider radii blur the edge.
+    pub silhouette_start_radius: f32,
     /// Sun turn (radians per frame) at which the window falls to one frame; smaller turns
     /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn.
     pub turn_angle: f32,
@@ -42,14 +49,18 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
-    /// Silhouette pixels also continue other surfaces' silhouette (mixed) history, which
-    /// accumulates coverage across a moving edge but lets it leak one pixel into revealed
-    /// surfaces. Off, every pixel continues only its own surface's history.
+    /// Moving silhouette pixels also continue other surfaces' silhouette (mixed) history,
+    /// which keeps an edge's coverage under motion; it can leak within the one-pixel
+    /// silhouette band, never beyond. Off, a moving pixel continues only its own surface's.
     pub silhouette_mix: bool,
     /// Limit continued history to the plain min/max box of this frame's 3x3 samples, all
     /// of them (no mean, variance or excluded sample: docs/m7-tr1.md). It reads program
     /// output colour, so it is the design's last option (m7-design §9.1 B), off by default.
     pub box_clamp: bool,
+    /// Moving silhouette pixels blend this frame's spatial estimate over every 3x3 sample
+    /// (tent radius `silhouette_start_radius`) instead of their single sample, so a frame's
+    /// coverage of the edge is not one sample's.
+    pub silhouette_spatial: bool,
 }
 impl Default for Reconstruction {
     fn default() -> Self {
@@ -58,14 +69,17 @@ impl Default for Reconstruction {
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
-            silhouette_window: 4.0,
+            silhouette_window: 2.0,
             start_window: 4.0,
+            start_radius: 2.0,
+            silhouette_start_radius: 1.0,
             turn_angle: 0.004,
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
-            silhouette_mix: false,
+            silhouette_mix: true,
             box_clamp: false,
+            silhouette_spatial: true,
         }
     }
 }
@@ -84,20 +98,24 @@ impl Reconstruction {
             self.silhouette_window,
             self.start_window,
         ];
-        if windows.iter().any(|w| !(1.0..=65536.0).contains(w))
-            || !(self.blur_budget.is_finite() && self.blur_budget >= 0.0)
-            || !(self.turn_angle.is_finite() && self.turn_angle >= 0.0)
-        {
-            return Err(Error::InvalidInput(
-                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative",
-            ));
+        let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
+            && (0.0..=f32::MAX).contains(&self.blur_budget)
+            && (0.0..=f32::MAX).contains(&self.turn_angle)
+            && [self.start_radius, self.silhouette_start_radius]
+                .iter()
+                .all(|r| (0.0..=2.0).contains(r));
+        if valid {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(
+                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radii in [0, 2]",
+            ))
         }
-        Ok(())
     }
 }
 
 /// WGSL Tr1Frame.
-const FRAME_BYTES: usize = 240;
+const FRAME_BYTES: usize = 304;
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
 /// Interactive's disk directions continue by the frame's rotation word. The estimator body
@@ -265,6 +283,7 @@ impl PrimaryState {
 /// The previous reconstructed frame's inputs.
 struct Previous {
     matrix: Mat4,
+    jitter: [f32; 2],
     eye: Vec3,
     exposure: f32,
     /// Directional lights' travel directions.
@@ -495,7 +514,7 @@ impl Renderer {
                     // a rounded unit dot product is not.
                     .map(|(a, b)| 2.0 * (0.5 * (*a - *b).length()).min(1.0).asin())
                     .fold(0.0, f32::max);
-                (p.matrix, p.eye, p.exposure, turn)
+                (p.matrix, p.eye, p.exposure, turn, p.jitter)
             });
         // A sun turn caps the window at turn_angle / turn; a turn past turn_angle (any turn
         // when it is zero) restarts every pixel.
@@ -507,19 +526,21 @@ impl Renderer {
         };
         state.reset = continued.is_none() || state.cut || event_window < 1.0;
         state.cut = false;
-        let (previous_matrix, previous_eye, scale) = match continued {
-            Some((m, e, x, _)) if !state.reset => (m, e, exposure / x),
-            _ => (matrix, eye, 1.0),
+        let jitter = camera.jitter();
+        let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
+            Some((m, e, x, _, j)) if !state.reset => (m, e, exposure / x, j),
+            _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let jitter = camera.jitter();
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from(settings.silhouette_mix) << 2
-            | u32::from(settings.box_clamp) << 3;
+            | u32::from(settings.box_clamp) << 3
+            | u32::from(settings.silhouette_spatial) << 4;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
+        bytes.extend_from_slice(&matrix_bytes(previous_matrix.inverse()));
         let floats: [f32; 24] = [
             previous_eye.x,
             previous_eye.y,
@@ -528,11 +549,11 @@ impl Renderer {
             eye.x,
             eye.y,
             eye.z,
-            0.0,
+            previous_jitter[0],
             jitter[0],
             jitter[1],
             scale,
-            0.0,
+            previous_jitter[1],
             background[0],
             background[1],
             background[2],
@@ -543,13 +564,23 @@ impl Renderer {
             settings.blur_budget,
             settings.sharp_window,
             settings.start_window,
-            0.0,
-            0.0,
+            settings.start_radius,
+            settings.silhouette_start_radius,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        for w in [u32::from(state.reset), options, index as u32, 0] {
+        // Nothing moved: the unjittered view-projection is bit-equal (moved placements and
+        // every other scene edit restart through the key).
+        let still = !state.reset
+            && previous_matrix.to_cols_array().map(f32::to_bits)
+                == matrix.to_cols_array().map(f32::to_bits);
+        for w in [
+            u32::from(state.reset),
+            options,
+            u32::from(still),
+            index as u32,
+        ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
@@ -558,6 +589,7 @@ impl Renderer {
         self.uploads.write_calls += 1;
         state.previous = Some(Previous {
             matrix,
+            jitter,
             eye,
             exposure,
             suns,

@@ -15,29 +15,36 @@
 // Frame state written by the CPU (temporal_reconstruction.rs Frame). Storage, not uniform:
 // it feeds addressing (docs/m6-interactive-climb-2.md).
 struct Tr1Frame {
-    // Unjittered view-projections of the previous and this frame.
+    // Unjittered view-projections of the previous and this frame, and the inverse of the
+    // previous one.
     previous:mat4x4<f32>,
     current:mat4x4<f32>,
+    previous_inverse:mat4x4<f32>,
     // xyz: the previous eye; w: radians per pixel at the image centre.
     previous_eye:vec4<f32>,
-    // xyz: this frame's eye.
+    // xyz: this frame's eye; w: the previous frame's sample offset x.
     current_eye:vec4<f32>,
     // xy: this frame's sample offset from the pixel centre in pixels (y down); z: the
-    // factor that carries exposed history to this frame's exposure.
+    // factor that carries exposed history to this frame's exposure; w: the previous
+    // frame's sample offset y.
     jitter:vec4<f32>,
     // The exposed background (primary-miss) colour; stored samples are its f16 value.
     background:vec4<f32>,
     // x: static window; y: engine-event window cap; z: silhouette window; w: blur budget.
     windows:vec4<f32>,
-    // x: Catmull-Rom motion window; y: spatial-start window cap.
+    // x: Catmull-Rom motion window; y: spatial-start window cap; z, w: spatial-start tent
+    // radius inside a surface and at silhouettes (0: the pixel's own sample).
     starts:vec4<f32>,
-    // x: nonzero restarts every pixel (cut, first frame, reset events); y: TR1_* options.
+    // x: nonzero restarts every pixel (cut, first frame, reset events); y: TR1_* options;
+    // z: nonzero when nothing moved (bit-equal unjittered view-projections; moved placements
+    // restart), decided on the CPU: the GPU need not round two projections alike.
     flags:vec4<u32>,
 };
 const TR1_CATMULL_ROM:u32=1u;
 const TR1_SPATIAL_START:u32=2u;
 const TR1_SILHOUETTE_MIX:u32=4u;
 const TR1_BOX:u32=8u;
+const TR1_SILHOUETTE_SPATIAL:u32=16u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -72,15 +79,17 @@ fn tr1_id(p:vec2<i32>)->u32 {
 }
 
 // The current sample's surface: world point (w = 1) or background direction (w = 0), its
-// identity, view distance and the forward test's relative distance tolerance.
-struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, tolerance:f32 };
+// identity, view distance and unit geometric normal.
+struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32> };
+// Placement + 1 of each 3x3 sample of this frame (set once per pixel by tr1_resolve).
+var<private> tr1_ring:array<u32,9>;
 fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let id=tr1_id(p);
     if id==0u {
         // The sample's own camera ray: primary_ray inverts this frame's jittered projection.
         let ray=primary_ray(vec2<u32>(p),size);
         let d=ray.far-ray.near;
-        return Tr1Surface(vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0),0u,0u,0.0,0.0);
+        return Tr1Surface(vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0),0u,0u,0.0,vec3<f32>(0.0));
     }
     let record=textureLoad(primary_hit,p,0);
     let slot=id-1u;
@@ -94,11 +103,8 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let view=x-tr1.current_eye.xyz;
     let distance=sqrt(tr1_dot(view,view));
     let facing=tr1_dot(n,view);
-    // Distance varies by about one footprint over a pixel facing the eye and by
-    // 1/cos(incidence) of it at grazing views; allow four, as T1b's forward test did.
-    let cosine=abs(facing)*inverseSqrt(max(tr1_dot(n,n),1e-30))/max(distance,1e-30);
-    let tolerance=4.0*tr1.previous_eye.w/max(cosine,0.125);
-    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,tolerance);
+    let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
+    return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit);
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -108,25 +114,47 @@ fn tr1_pixel(m:mat4x4<f32>,p:vec4<f32>,size:vec2<f32>)->vec2<f32> {
     return fma(c.xy/c.w,centre*vec2<f32>(1.0,-1.0),centre);
 }
 
-// Whether the previous-frame tap `t` holds history this pixel's surface may continue. A
-// tap shows the surface when its latest sample has the same placement and viewed side and,
-// for a hit, a view distance from the previous eye within the forward tolerance of the
-// current point's. History that mixed surfaces (a silhouette pixel's) is continued only by
-// a silhouette pixel, so it never trails into interiors or open background. A silhouette
-// pixel continues another surface's mixed history only where nothing moved since it was
-// written (`still`: the edge's coverage is unchanged, so its running mean stays the
-// footprint integral), or with TR1_SILHOUETTE_MIX.
+// A previous-frame tap's latest sample point, rebuilt from its own camera ray (its pixel
+// and the previous frame's sample offset) and its anchor distance.
+fn tr1_anchor_point(t:vec2<i32>,distance:f32,size:vec2<f32>)->vec3<f32> {
+    let o=vec2<f32>(tr1.current_eye.w,tr1.jitter.w);
+    let ndc=fma((vec2<f32>(t)+vec2<f32>(0.5)+o)/size,vec2<f32>(2.0,-2.0),vec2<f32>(-1.0,1.0));
+    let m=tr1.previous_inverse;
+    let xy=fma(m[0],vec4<f32>(ndc.x),m[1]*ndc.y);
+    let near=xy+m[2]+m[3];
+    let far=xy+m[3];
+    let d=far.xyz/far.w-near.xyz/near.w;
+    return fma(d,vec3<f32>(distance*inverseSqrt(tr1_dot(d,d))),tr1.previous_eye.xyz);
+}
+
+// Whether the previous-frame tap `t` holds history this pixel's surface may continue.
+//
+// Still (nothing moved: the tap is the pixel itself): the pixel's history is the running
+// mean over its own footprint, continued while the tap's surface is still one of the 3x3
+// samples' (an edge's surfaces, or the pixel's own); a surface that left the neighbourhood
+// restarts it.
+//
+// Moving: the tap shows the surface when its latest sample has the same placement and
+// viewed side and, for a hit, its sample point (rebuilt from its own ray) lies within four
+// pixel footprints of the current point's tangent plane: a fold or ridge of the same mesh
+// in front of or behind the surface fails, at any viewing angle. History that mixed
+// surfaces (a silhouette pixel's) is continued only by a silhouette pixel, so it never
+// trails into interiors or open background; another surface's only with TR1_SILHOUETTE_MIX.
 fn tr1_accepts(t:vec2<i32>,s:Tr1Surface,silhouette:bool,still:bool,expected:f32,size:vec2<u32>)->bool {
     if any(t<vec2<i32>(0)) || any(t>=vec2<i32>(size)) {return false;}
     let a=textureLoad(tr1_anchor_in,t,0).xy;
-    let mixed=(a.x&TR1_MIXED)!=0u;
-    if (a.x&TR1_ID)!=s.id {
-        return mixed && silhouette && (still || (tr1.flags.y&TR1_SILHOUETTE_MIX)!=0u);
+    let id=a.x&TR1_ID;
+    if still {
+        for(var i=0;i<9;i+=1) {if tr1_ring[i]==id {return true;}}
+        return false;
     }
+    let mixed=(a.x&TR1_MIXED)!=0u;
+    if id!=s.id {return mixed && silhouette && (tr1.flags.y&TR1_SILHOUETTE_MIX)!=0u;}
     if mixed && !silhouette {return false;}
     if s.id==0u {return true;}
     if (primary_placements[s.id-1u]&0x20000000u)!=0u && ((a.x>>23u)&1u)!=s.side {return false;}
-    return abs(bitcast<f32>(a.y)-expected)<=s.tolerance*expected;
+    let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
+    return abs(tr1_dot(s.normal,point-s.point.xyz))<=4.0*tr1.previous_eye.w*expected;
 }
 
 // Catmull-Rom weights of taps -1, 0, 1, 2 at fractional offset t.
@@ -143,12 +171,12 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 struct Tr1History { colour:vec3<f32>, weight:f32, blur:f32, sharp:bool, still:bool };
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,silhouette:bool,size:vec2<u32>)->Tr1History {
     let fsize=vec2<f32>(size);
-    let motion=tr1_pixel(tr1.previous,s.point,fsize)-tr1_pixel(tr1.current,s.point,fsize);
+    let still=tr1.flags.z!=0u;
+    var motion=vec2<f32>(0.0);
+    if !still {motion=tr1_pixel(tr1.previous,s.point,fsize)-tr1_pixel(tr1.current,s.point,fsize);}
     let q=vec2<f32>(p)+motion;
     let base=vec2<i32>(floor(q));
     let f=q-floor(q);
-    // The point did not move: an unchanged camera and placement, at exactly zero motion.
-    let still=all(motion==vec2<f32>(0.0));
     var expected=0.0;
     if s.id!=0u {
         let v=s.point.xyz-tr1.previous_eye.xyz;
@@ -206,6 +234,8 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,silhouette:bool,size:vec2<u32>)->Tr1Hist
 // 3x3 samples showing its surface (every surface at a silhouette), each weighted at its
 // jittered position, and that estimate's effective sample count.
 fn tr1_spatial(p:vec2<i32>,id:u32,silhouette:bool,size:vec2<u32>)->vec4<f32> {
+    let radius=select(tr1.starts.z,tr1.starts.w,silhouette);
+    if radius<=0.0 {return vec4<f32>(textureLoad(tr1_sample,p,0).xyz,1.0);}
     var sum=vec3<f32>(0.0);
     var w1=0.0;
     var w2=0.0;
@@ -214,10 +244,10 @@ fn tr1_spatial(p:vec2<i32>,id:u32,silhouette:bool,size:vec2<u32>)->vec4<f32> {
         let t=p+o;
         if any(t<vec2<i32>(0)) || any(t>=vec2<i32>(size)) {continue;}
         if !silhouette && tr1_id(t)!=id {continue;}
-        // A two-pixel tent: at zero jitter the 3x3 [1,2,1] filter; a one-pixel tent would
-        // give every neighbour of an unjittered frame zero weight.
-        let d=abs(vec2<f32>(o)+tr1.jitter.xy);
-        let w=max(1.0-0.5*d.x,0.0)*max(1.0-0.5*d.y,0.0);
+        // At radius 2 and zero jitter, the 3x3 [1,2,1] filter; at radius 1 it interpolates
+        // the samples bilinearly at the pixel centre.
+        let d=abs(vec2<f32>(o)+tr1.jitter.xy)/radius;
+        let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         sum=fma(textureLoad(tr1_sample,t,0).xyz,vec3<f32>(w),sum);
         w1+=w;w2=fma(w,w,w2);
     }
@@ -233,7 +263,11 @@ fn tr1_spatial(p:vec2<i32>,id:u32,silhouette:bool,size:vec2<u32>)->vec4<f32> {
     var silhouette=false;
     for(var i=0;i<9;i+=1) {
         let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
-        if all(t>=vec2<i32>(0)) && all(t<vec2<i32>(size)) && tr1_id(t)!=s.id {silhouette=true;}
+        tr1_ring[i]=s.id;
+        if all(t>=vec2<i32>(0)) && all(t<vec2<i32>(size)) {
+            tr1_ring[i]=tr1_id(t);
+            if tr1_ring[i]!=s.id {silhouette=true;}
+        }
     }
     let anchor=vec2<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|select(0u,TR1_MIXED,silhouette),bitcast<u32>(s.distance));
     textureStore(tr1_anchor_out,p,vec4<u32>(anchor,0u,0u));
@@ -245,7 +279,7 @@ fn tr1_spatial(p:vec2<i32>,id:u32,silhouette:bool,size:vec2<u32>)->vec4<f32> {
         textureStore(tr1_output,p,vec4<f32>(background,1.0));
         return;
     }
-    let sample=textureLoad(tr1_sample,p,0).xyz;
+    var sample=textureLoad(tr1_sample,p,0).xyz;
     var h:Tr1History;
     if tr1.flags.x==0u {h=tr1_history(p,s,silhouette,size);}
     var mean=sample;
@@ -262,6 +296,9 @@ fn tr1_spatial(p:vec2<i32>,id:u32,silhouette:bool,size:vec2<u32>)->vec4<f32> {
         // Moving silhouettes cap the window: their coverage drifts by the parallax.
         if silhouette && !h.still {window=min(window,tr1.windows.z);}
         n=clamp(h.weight+1.0,1.0,max(window,1.0));
+        if silhouette && !h.still && (tr1.flags.y&TR1_SILHOUETTE_SPATIAL)!=0u {
+            sample=tr1_spatial(p,s.id,true,size).xyz;
+        }
         var history=h.colour;
         if (tr1.flags.y&TR1_BOX)!=0u {
             // The plain min/max box of every 3x3 sample of this frame: no statistic, and no
