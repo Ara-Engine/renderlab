@@ -153,6 +153,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var sum=vec3<f32>(0.0);
     var valid=0u;
     var shaded=false;
+    // PP1 integration: Naga 30 emits an illegal opaque null for loop-local queries.
+    // Reinitialize this query for each ray, without a loop-local zero initialization.
+    var query:ray_query;
     rl_reflection_hit=true;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
@@ -161,7 +164,6 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
-        var query:ray_query;
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);

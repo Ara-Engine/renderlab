@@ -23,10 +23,15 @@ for scale in scales:
         manifest.write_text(json.dumps(m, indent=2))
         commands.append((f"{scale}-{path}", [binary, "gpu_post_sweep", "--ignored", "--nocapture", "--test-threads=1"],
                          {"RENDERLAB_PRIMARY_MANIFEST": str(manifest)}))
+failures = []
 for name, command, extra in commands:
     print("PP1 starting", name, flush=True)
     with (root / f"{name}.log").open("w") as log:
         result = subprocess.run(command, env=dict(os.environ, **extra), stdout=log, stderr=subprocess.STDOUT)
     print("PP1 finished", name, "exit", result.returncode, flush=True)
     if result.returncode:
-        raise SystemExit(result.returncode)
+        if name == "lib" or not template_data.get("continue_on_failure", False):
+            raise SystemExit(result.returncode)
+        failures.append(name)
+if failures:
+    raise SystemExit("PP1 failed cases: " + ", ".join(failures))

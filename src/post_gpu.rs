@@ -746,7 +746,7 @@ impl Renderer {
         }
         let size = self.post_hdr().texture.size();
         let mut post = match self.post.take() {
-            Some(p) if p.size == size => p,
+            Some(p) if p.size == size && (!primary || p.primary_pipeline.is_some()) => p,
             old => {
                 if let Some(old) = old {
                     self.retired_post.push((self.submissions, old));

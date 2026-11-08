@@ -1,6 +1,63 @@
 //! PP1's one-process paired effect sweep. Run only through scripts/n8-run.py.
 use super::*;
 
+#[test]
+fn integrated_reflection_spirv_has_no_ray_query_null() {
+    let sources = primary_ray_gpu::shading_sources(
+        include_str!("../shaders/scene.wgsl"),
+        crate::STANDARD_PROGRAM,
+    )
+    .unwrap();
+    for (name, source) in ["hard", "soft"].into_iter().zip(sources) {
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        for entry in &module.entry_points {
+            let (module, info) = naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                Some((entry.stage, &entry.name)),
+                &Default::default(),
+            )
+            .unwrap();
+            let words = naga::back::spv::write_vec(
+                &module,
+                &info,
+                &naga::back::spv::Options {
+                    lang_version: (1, 6),
+                    ..Default::default()
+                },
+                Some(&naga::back::spv::PipelineOptions {
+                    shader_stage: entry.stage,
+                    entry_point: entry.name.clone(),
+                }),
+            )
+            .unwrap();
+            let mut at = 5;
+            let mut queries = vec![];
+            let mut nulls = vec![];
+            while at < words.len() {
+                let n = (words[at] >> 16) as usize;
+                match words[at] & 0xffff {
+                    4472 => queries.push(words[at + 1]), // OpTypeRayQueryKHR
+                    46 => nulls.push(words[at + 1]),     // OpConstantNull's result type
+                    _ => {}
+                }
+                at += n;
+            }
+            assert!(
+                !nulls.iter().any(|ty| queries.contains(ty)),
+                "{name}/{} contains an illegal ray-query null",
+                entry.name
+            );
+        }
+    }
+}
+
 fn neutral() -> PostSettings {
     PostSettings {
         bloom: 0.0,
@@ -298,6 +355,27 @@ fn gpu_post_sweep() {
             .unwrap()
         })
         .collect();
+    if path == "rt" && m["fixture_only"].as_bool() == Some(true) {
+        // A fixed-size raster -> traced switch must prepare the new post surface ABI.
+        let colour = target(&r, 1280, 720);
+        r.set_post_settings(PostSettings::default()).unwrap();
+        r.set_primary_visibility(PrimaryVisibility::Raster).unwrap();
+        render(
+            &mut r,
+            &colour,
+            &poses[0],
+            &mut [Draw::new(&mesh, &mut instances)],
+        );
+        r.test_drain("PP1 raster before path switch");
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        render(
+            &mut r,
+            &colour,
+            &poses[0],
+            &mut [Draw::new(&mesh, &mut instances)],
+        );
+        r.test_drain("PP1 traced after path switch");
+    }
     sweep(
         &mut r,
         &out.join("bright-sky"),
