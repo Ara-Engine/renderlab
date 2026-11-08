@@ -385,19 +385,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let boxed = |center: Vec3, size: Vec3| Mat4::from_translation(center) * Mat4::from_scale(size);
     // The arch: two pillars and a lintel.
     for x in [-2.2, 2.2] {
-        spawn(&mut engine, &mut placed, 
+        spawn(
+            &mut engine,
+            &mut placed,
             cube,
             stone,
             boxed(at(x, 2.0, -3.0), Vec3::new(0.8, 4.0, 0.8)),
         )?;
     }
-    spawn(&mut engine, &mut placed, 
+    spawn(
+        &mut engine,
+        &mut placed,
         cube,
         stone,
         boxed(at(0.0, 4.4, -3.0), Vec3::new(5.2, 0.8, 1.0)),
     )?;
     // A red wall beside it, whose colour should bleed onto the ground and hero.
-    spawn(&mut engine, &mut placed, 
+    spawn(
+        &mut engine,
+        &mut placed,
         cube,
         red,
         boxed(at(-5.5, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
@@ -409,16 +415,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (4.5, 1.5, 1.1, 0.4),
         (4.2, 0.5, 2.3, 0.0),
     ] {
-        spawn(&mut engine, &mut placed, 
+        spawn(
+            &mut engine,
+            &mut placed,
             cube,
             wood,
             Mat4::from_translation(at(x, y, z)) * Mat4::from_rotation_y(turn),
         )?;
     }
-    spawn(&mut engine, &mut placed, sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
+    spawn(
+        &mut engine,
+        &mut placed,
+        sphere,
+        gold,
+        boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)),
+    )?;
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
-    spawn(&mut engine, &mut placed, sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
-    let spinner = spawn(&mut engine, &mut placed, cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
+    spawn(
+        &mut engine,
+        &mut placed,
+        sphere,
+        chrome,
+        boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)),
+    )?;
+    let spinner = spawn(
+        &mut engine,
+        &mut placed,
+        cube,
+        paint,
+        Mat4::from_translation(at(-2.5, 0.6, 3.0)),
+    )?;
     let hero_body = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
     let hero_head = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
 

@@ -16,6 +16,7 @@ Per region (sphere interiors at 0.9 radius from MQ1's per-frame projection; the 
 
     py -3 -B scripts/m7-rq1-score.py score ROOT --ref REF --runs a,b --frames 16,32,47 --out score.json
     py -3 -B scripts/m7-rq1-score.py crops ROOT --ref REF --runs a,b --frame 47 --out DIR
+    py -3 -B scripts/m7-rq1-score.py rf BEFORE_RUN AFTER_RUN --out rf-bands.json
 """
 import argparse
 import importlib.util
@@ -125,6 +126,42 @@ def crops(args):
     print("crops", out, "order: reference," + args.runs)
 
 
+def rf(args):
+    """Per-population (roughness band) display RMS at -14 stops, before vs after, from two
+    `scripts/m7-r1-score.py` runs, plus each pose's shading-pass and frame-span medians (frames
+    5-16 of R1n's timed frames)."""
+    load_rows = lambda d: {(r["fixture"], r["pose"], r["config"]): r for r in
+                           json.loads((Path(d) / "rf-scores.json").read_text())["rows"]}
+    before, after = load_rows(args.before), load_rows(args.after)
+    out, lines = [], []
+    lines.append("| Fixture / pose | Path | Population | Before | After | Change |")
+    lines.append("|---|---|---|---:|---:|---:|")
+    for key, row in before.items():
+        if "measures" not in row or key not in after:
+            continue
+        for name, value in row["measures"].items():
+            if not (name == "reflector" or name.startswith("reflector-")) or "display_rms_-14" not in value:
+                continue
+            a, b = value["display_rms_-14"], after[key]["measures"][name]["display_rms_-14"]
+            out.append(dict(fixture=key[0], pose=key[1], path=key[2][10:], population=name, before=a, after=b))
+            lines.append(f"| {key[0]} {key[1]} | {key[2][10:]} | {name} | {a:.3f} | {b:.3f} | {b - a:+.3f} |")
+    timing = []
+    for label, root in (("before", args.before), ("after", args.after)):
+        for times in sorted(Path(root).glob("rf-*/*.times.json")):
+            t = json.loads(times.read_text())
+            med = lambda v: float(np.median(v[4:]))
+            timing.append(dict(run=label, path=times.parent.name, case=times.stem.split(".")[0],
+                               shading_ms=med(t["shading_ms"]), span_ms=med(t["span_ms"])))
+    Path(args.out).write_text(json.dumps(dict(bands=out, timing=timing), indent=1))
+    print("\n".join(lines))
+    print("\n| Case | Path | Shading before | after | Span before | after |\n|---|---|---:|---:|---:|---:|")
+    for t in timing:
+        if t["run"] != "before":
+            continue
+        a = next(x for x in timing if x["run"] == "after" and x["path"] == t["path"] and x["case"] == t["case"])
+        print(f"| {t['case']} | {t['path']} | {t['shading_ms']:.3f} | {a['shading_ms']:.3f} | {t['span_ms']:.3f} | {a['span_ms']:.3f} |")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -140,8 +177,12 @@ def main():
     c.add_argument("--runs", required=True)
     c.add_argument("--frame", type=int, default=47)
     c.add_argument("--out", required=True)
+    r = sub.add_parser("rf")
+    r.add_argument("before")
+    r.add_argument("after")
+    r.add_argument("--out", required=True)
     args = p.parse_args()
-    {"score": score, "crops": crops}[args.cmd](args)
+    {"score": score, "crops": crops, "rf": rf}[args.cmd](args)
 
 
 if __name__ == "__main__":

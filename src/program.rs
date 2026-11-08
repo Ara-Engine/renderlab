@@ -95,24 +95,13 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
     match scene.filter(|_| traced) {
-        Some(scene) => (reflection_source().replace("RL_SCENE", scene), true),
+        Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
         // M7-R1n: non-RT heads that declare the software geometry trace it instead.
         None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
             (software_reflection_api(), true)
         }
         None => (REFLECTION_STUB.to_owned(), false),
     }
-}
-/// RQ1 screen hook (debug builds only; removed at delivery): RENDERLAB_RQ1_REFLECTIONS names
-/// a replacement for shaders/reflections.wgsl, so one binary screens variants per process.
-fn reflection_source() -> std::borrow::Cow<'static, str> {
-    #[cfg(debug_assertions)]
-    if let Some(text) = std::env::var_os("RENDERLAB_RQ1_REFLECTIONS")
-        .and_then(|path| std::fs::read_to_string(path).ok())
-    {
-        return text.into();
-    }
-    REFLECTION_API.into()
 }
 // ---- end of M7-R1 reflections ----
 
@@ -139,7 +128,7 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
 /// reconstruction, decals and program shading, with no ray queries.
 fn software_reflection_api() -> String {
-    let mut api = format!("{SOFTWARE_REFLECTION_API}{}", reflection_source());
+    let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
         "R1 reflection seam moved"

@@ -29,6 +29,21 @@ def root_hold():
             break
         except PermissionError:
             time.sleep(0.2)
+    # A hold relayed outside the schedule: RENDERLAB_RQ1_AFTER=OWNER@LINE waits for OWNER's
+    # "released" line after schedule line LINE.
+    if os.environ.get("RENDERLAB_RQ1_AFTER"):
+        owner, _, line = os.environ["RENDERLAB_RQ1_AFTER"].partition("@")
+        later = "\n".join(text.splitlines()[int(line or 0):])
+        if not re.search(rf"^{re.escape(owner)}\b[^\n]*released", later, re.M):
+            return owner
+    # RENDERLAB_RQ1_AFTER_TEXT="OWNER TEXT@LINE" waits for a line after schedule line LINE that
+    # starts with OWNER and contains TEXT (quotes in other owners' lines do not count).
+    if os.environ.get("RENDERLAB_RQ1_AFTER_TEXT"):
+        literal, _, line = os.environ["RENDERLAB_RQ1_AFTER_TEXT"].rpartition("@")
+        owner, _, rest = literal.partition(" ")
+        later = "\n".join(text.splitlines()[int(line or 0):])
+        if not re.search(rf"^\W*{re.escape(owner)}\b[^\n]*{re.escape(rest)}", later, re.M):
+            return literal
     orders = list(re.finditer(r"^\[root order\]", text, re.M))
     if not orders:
         return None
