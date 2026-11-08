@@ -561,7 +561,7 @@ impl Renderer {
             self.atmosphere.generation += 1;
             self.atmosphere.previous = None;
         }
-        self.atmosphere_volume_groups(false);
+        self.atmosphere_volume_groups(false, 0);
         self.update_procedural_environment(eye);
         if uploads.geometry > 0
             || uploads.models > 0
@@ -859,8 +859,9 @@ impl Renderer {
     }
 
     /// Creates the camera volume's kernel groups that are missing (the injection's again
-    /// when the scene TLAS changed).
-    fn atmosphere_volume_groups(&mut self, injection: bool) {
+    /// when the scene TLAS changed). `scene` is the frame's TLAS generation
+    /// (`tlas_builds + hardware_build`), the key the other TLAS consumers use.
+    fn atmosphere_volume_groups(&mut self, injection: bool, scene: u64) {
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &mut self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -901,9 +902,11 @@ impl Renderer {
             .flatten();
         let key = VisibilityKey {
             virtual_map: virtual_buffers.is_some(),
-            generation: tlas.map_or(self.shadows.stats.resource_generation, |t| {
-                t as *const wgpu::Tlas as u64
-            }),
+            // API1b fix: the TLAS's address is not its identity. A new scene generation
+            // replaces it in place (`HardwareState::active`), so an address key kept binding
+            // the previous TLAS: stale fog shadows, and a validation fault once a skinned
+            // BLAS was refit after that TLAS's build. Key on the scene generation instead.
+            generation: tlas.map_or(self.shadows.stats.resource_generation, |_| scene),
             buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
         };
         if v.integrate.is_none() {
@@ -966,13 +969,13 @@ impl Renderer {
     /// The atmosphere kernels for this frame, after the TLAS build and before shading: the
     /// fixed LUTs when the medium changed, the sky view and its mean, the aerial
     /// perspective, then volumetric fog.
-    pub(super) fn encode_atmosphere(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn encode_atmosphere(&mut self, encoder: &mut wgpu::CommandEncoder, scene: u64) {
         if !self.atmosphere.active {
             return;
         }
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
-        self.atmosphere_volume_groups(true);
+        self.atmosphere_volume_groups(true, scene);
         let a = &mut self.atmosphere;
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
