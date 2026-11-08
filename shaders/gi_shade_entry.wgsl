@@ -168,8 +168,12 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     let queue=gi_word(GI_H_SHADE_QUEUE);
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=gi_shade_work[queue+i];
-        // GC1 (one line, shared with G2c's cell shading): a value whose cell still has gathers
-        // scheduled is marked as changing (w 0.75), so gathers that read it repeat (gi_gather).
-        gi_shade_out[slot]=gs_shade(slot)*select(vec4<f32>(1.0),vec4<f32>(1.0,1.0,1.0,0.75),(gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u);
+        gi_shade_out[slot]=gs_shade(slot);
+        // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose
+        // cell still has gathers scheduled is marked as changing (w 0.75), so gathers that read
+        // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
+        // dispatches agree whichever stored the value.
+        let gs_out=gi_shade_out[slot];
+        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
     }
 }

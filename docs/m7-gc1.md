@@ -1,10 +1,10 @@
 # M7-GC1: GI cost on the quarry
 
-Unit GC1, branch `t3/m7-gc1` (from main `fa3b74b`; main merged at `9f98869`, PP1). It continues [M7-G2b](m7-g2b.md)'s cost work on the world radiance cache, which has been on by default since G2b. Rules: Islam's overnight push (AGENTS.md, 2026-11-08). A change ships when it is clearly better and not visibly worse. Verification is lib tests inside a lease, inspected images on both paths and one timing run. Claim constraints are in [m7-p0-claims.md](m7-p0-claims.md) (W1-W3: no counter averaging, no ranked updates, no jitter, a fixed query point). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference. Gaps are listed under "GI" in [m7-gaps.md](m7-gaps.md).
+Unit GC1, branch `t3/m7-gc1` (from main `fa3b74b`; main merged at `9f98869` (PP1), `e5c4623` (G2c, TP1, VF1, RTDEF2) and `2d1c084` (MP1, MQ1)). It continues [M7-G2b](m7-g2b.md)'s cost work on the world radiance cache, which has been on by default since G2b. Rules: Islam's overnight push (AGENTS.md, 2026-11-08). A change ships when it is clearly better and not visibly worse. Verification is lib tests inside a lease, inspected images on both paths and one timing run. Claim constraints are in [m7-p0-claims.md](m7-p0-claims.md) (W1-W3: no counter averaging, no ranked updates, no jitter, a fixed query point). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference. Gaps are listed under "GI" in [m7-gaps.md](m7-gaps.md).
 
 ## 1. Status
 
-Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b4` (`b3` plus the slot clamp of section 3.1, lease `f3`: SV and the lib suite). Main's code is lease `a4` (binary `b1` with main's shaders). Functional leases on the shared GPU, not quiet windows: ranges, not certified timings. The cache-off frame in `f1` is 0.65-0.85 ms heavier than in `a4` because main gained PP1's post-processing between them, so the increments are what compare.
+Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b5`: `b3` plus the slot clamp of section 3.1, merged with main at `e5c4623` (G2c's cell shading and lookup fill): lease `f5`, the lib suite. Then `b6`: main at `2d1c084` (MP1's mixed-program cell shading, MQ1) merged, with the mark moved after MP1's store seam: lease `f6`, the lib suite, images and a timing check. Main's code is lease `a4` (binary `b1` with main's shaders). Functional leases on the shared GPU, not quiet windows: ranges, not certified timings. The cache-off frame in `f1` is 0.65-0.85 ms heavier than in `a4` because main gained PP1's post-processing between them, so the increments are what compare.
 
 | Camera moving, quarry pose 0, over the cache-off frame of the same visit | Main (`a4`) | **GC1** (`f1`) |
 |---|---:|---:|
@@ -190,11 +190,11 @@ Lease `f2` (M), `memory` section: the allocator after a settled pose 0, with the
 
 ## 7. Changes to shared lines
 
-- `shaders/gi_shade_entry.wgsl`: one marked line in `gi_shade_cells`'s loop (the w mark). G2c's `gs_shade` body is untouched.
+- `shaders/gi_shade_entry.wgsl`: two marked lines in `gi_shade_cells`'s loop, after the store (the w mark). G2c's `gs_shade` body and MP1's store seam (`gi_cache.rs` `CELL_STORE_SEAM`, which MP1's mixed-program entry rewrites) are unchanged. The mark depends only on the cell's state, so in a mixed frame every program's dispatch marks alike, whichever stored the value.
 - `src/program.rs`: the cell entry is read through `gi_shader`, so a lease can screen it. This is the same two-line change G2c made.
 - `scripts/m7-g2-run.py`: a deferred lease attempt (exit 3) now retries into its existing run directory instead of crashing, and `RENDERLAB_G2_TRACE_MS` sets the Nsight window.
 - `IndirectSettings::default().slots_log2` is 20. Harnesses that name G2's settings (`g2_variant("g2")`) keep 19.
 
 ## Evidence
 
-All under `D:/Coding/renderlab-work/m7-gc1`: `runs/a4` (baseline and variant cost, cut profiles, static captures, `score.log`), `runs/f1` (final code), `runs-sv/f1` (SV), `analysis/` (crops), `variants/` (screened shaders), `tools/` (`cost.py`, `compare.py`, `crop.py`, trace scripts). Raw captures over 5 MB are deleted once scored; hashes in `deleted-raw.txt`.
+All under `D:/Coding/renderlab-work/m7-gc1`: `runs/a4` (main and variants: cost, cut profiles, scores, `score.log`), `runs/f1` (final code: cost, RT cut profile), `runs/f2` (non-RT cut profile, images, memory, scores), `runs/f5` (merged code), `runs-sv/f2` and `runs-sv/f5` (SV), `analysis/` (crops), `variants/` (screened shaders), `tools/` (`cost.py`, `compare.py`, `crop.py`, trace scripts). Raw captures over 5 MB are deleted once scored; hashes in `deleted-raw.txt`.
