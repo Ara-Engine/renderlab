@@ -246,6 +246,7 @@ pub struct Engine {
 pub fn headless_adapter() -> Result<wgpu::Adapter, Error> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
