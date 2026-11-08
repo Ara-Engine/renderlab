@@ -5,8 +5,16 @@
 // one buffer behind a flat instance list (a top level rebuilt on the CPU when
 // transforms change). Each ray is its own work item, traversed from the top; no hits
 // are registered per node and no rays are launched per node (W8). Both faces block.
+//
+// Near fields (M7 G1c, docs/m7-g1c.md): an instance with a cooked near field (instance
+// word 23, its mask base) is a static far-field cut. Visibility rays from a cell whose
+// query point has a near field skip such instances before `near_start`: the cell's masks
+// already hold everything static within it. Other instances (movers, full-detail meshes)
+// are traced over the whole ray.
 @group(0) @binding(35) var<storage,read> gi_geometry:array<u32>;
-struct GiHit { hit:bool, t:f32, normal:vec3<f32> };
+// The source-winding normal; the hit's instance, its triangle's position indices (in the
+// mesh's array) and barycentrics (weights of the second and third vertices).
+struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
 const GI_BVH_LEAF:u32=0x80000000u;
 const GI_BVH_EMPTY:u32=0xffffffffu;
 const GI_BVH_STACK:u32=48u;
@@ -28,31 +36,40 @@ fn gi_slab_near(o:vec3<f32>, inv:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>, tmin:f32
     let far=min(min(min(max(a.x,b.x),max(a.y,b.y)),max(a.z,b.z)),tmax);
     return select(3.4028235e38,near,near<=far);
 }
-// Moller-Trumbore, both faces; t in (tmin, tmax).
-fn gi_triangle(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, tmin:f32, tmax:f32) -> f32 {
+// Moller-Trumbore, both faces: (t, u, v) with t in (tmin, tmax), or t = -1.
+fn gi_triangle(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, tmin:f32, tmax:f32) -> vec3<f32> {
+    let none=vec3<f32>(-1.0,0.0,0.0);
     let e1=b-a;let e2=c-a;
     let p=cross(d,e2);
     let det=dot(e1,p);
-    if abs(det)<1e-30 { return -1.0; }
+    if abs(det)<1e-30 { return none; }
     let inv=1.0/det;
     let s=o-a;
     let u=dot(s,p)*inv;
-    if u<0.0 || u>1.0 { return -1.0; }
+    if u<0.0 || u>1.0 { return none; }
     let q=cross(s,e1);
     let v=dot(d,q)*inv;
-    if v<0.0 || u+v>1.0 { return -1.0; }
+    if v<0.0 || u+v>1.0 { return none; }
     let t=dot(e2,q)*inv;
-    return select(-1.0,t,t>tmin && t<tmax);
+    if t>tmin && t<tmax { return vec3<f32>(t,u,v); }
+    return none;
 }
-// Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance.
-fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hit:bool) -> GiHit {
-    var best=GiHit(false,tmax,vec3<f32>(0.0));
+// The near-field mask base of instance `inst` (0: none).
+fn gi_near_base(inst:u32) -> u32 {
+    if inst>=gi_geometry[0] { return 0u; }
+    return gi_geometry[16u+inst*GI_INSTANCE_WORDS+23u];
+}
+// Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance; those
+// with a near field start at max(tmin, near_start).
+fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hit:bool, near_start:f32) -> GiHit {
+    var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
     let instances=gi_geometry[0];
     for(var i=0u;i<instances;i+=1u) {
         let r=16u+i*GI_INSTANCE_WORDS;
-        if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,best.t) { continue; }
+        let lo=select(tmin,max(tmin,near_start),gi_geometry[r+23u]!=0u);
+        if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),lo,best.t) { continue; }
         let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
         // Unnormalized object-space direction: t is the same parameter in both spaces.
         let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
@@ -70,15 +87,16 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                 let first=gi_geometry[l+4u];let count=gi_geometry[l+5u];
                 for(var k=0u;k<count;k+=3u) {
                     let x=indices+first+k;
-                    let a=gi_gv(positions+gi_geometry[x]*4u);
-                    let b=gi_gv(positions+gi_geometry[x+1u]*4u);
-                    let c=gi_gv(positions+gi_geometry[x+2u]*4u);
-                    let t=gi_triangle(o,d,a,b,c,tmin,best.t);
-                    if t>=0.0 {
+                    let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
+                    let a=gi_gv(positions+ia*4u);
+                    let b=gi_gv(positions+ib*4u);
+                    let c=gi_gv(positions+ic*4u);
+                    let h=gi_triangle(o,d,a,b,c,lo,best.t);
+                    if h.x>=0.0 {
                         // The source-winding normal through the inverse transpose. r0-r2 are
                         // the world-to-object rows, so the matrix with them as columns is it.
                         let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
-                        best=GiHit(true,t,unit_normal(n));
+                        best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
                         if any_hit { return best; }
                     }
                 }
@@ -99,7 +117,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                 let shift=8u*s;
                 let lq=vec3<f32>(vec3<u32>(lx>>shift,ly>>shift,lz>>shift)&vec3<u32>(0xffu));
                 let hq=vec3<f32>(vec3<u32>(hx>>shift,hy>>shift,hz>>shift)&vec3<u32>(0xffu));
-                let t=gi_slab_near(o,inv,origin_q+step*lq,origin_q+step*hq,tmin,best.t);
+                let t=gi_slab_near(o,inv,origin_q+step*lq,origin_q+step*hq,lo,best.t);
                 if s==0u { t0=t; } else if s==1u { t1=t; } else if s==2u { t2=t; } else { t3=t; }
             }
             // Four-element sorting network on (distance, child), descending. Distances are
@@ -123,8 +141,32 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     return best;
 }
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
-    return gi_traverse(origin,direction,tmin,tmax,false);
+    return gi_traverse(origin,direction,tmin,tmax,false,0.0);
 }
-fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
-    return !gi_traverse(origin,direction,0.0,1e20,true).hit;
+// Sky visibility along an unbounded ray; near-field instances only from `near_start`.
+fn gi_visible(origin:vec3<f32>, direction:vec3<f32>, near_start:f32) -> bool {
+    return !gi_traverse(origin,direction,0.0,1e20,true,near_start).hit;
+}
+// The octahedral bin of d among bins x bins (renderlab_asset::near_field::bin).
+fn gi_near_bin(d:vec3<f32>, bins:u32) -> u32 {
+    let p=d.xy/(abs(d.x)+abs(d.y)+abs(d.z));
+    let q=select((vec2<f32>(1.0)-abs(p.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0)),p,d.z>=0.0);
+    let n=f32(bins);
+    let cell=vec2<u32>(clamp(floor((q*0.5+vec2<f32>(0.5))*n),vec2<f32>(0.0),vec2<f32>(n-1.0)));
+    return cell.y*bins+cell.x;
+}
+// Whether direction d is blocked by static geometry within the near field at a point of a
+// hit triangle: a fixed barycentric vote of its three vertices' masks (on the back side
+// when the point is seen from behind its source winding).
+fn gi_near_blocked(base:u32, tri:vec3<u32>, bary:vec2<f32>, back:bool, d:vec3<f32>, bins:u32) -> bool {
+    let words=bins*bins/32u;
+    let b=gi_near_bin(d,bins);
+    let at=base+select(0u,words,back)+b/32u;
+    let bit=1u<<(b%32u);
+    let stride=2u*words;
+    var s=0.0;
+    if (gi_geometry[at+tri.x*stride]&bit)!=0u { s+=1.0-bary.x-bary.y; }
+    if (gi_geometry[at+tri.y*stride]&bit)!=0u { s+=bary.x; }
+    if (gi_geometry[at+tri.z*stride]&bit)!=0u { s+=bary.y; }
+    return s>=0.5;
 }

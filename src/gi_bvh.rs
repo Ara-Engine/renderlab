@@ -1,213 +1,75 @@
 //! Object-space software-ray geometry for the world radiance cache on the non-RT path
-//! (M7 G1). Regular meshes build a full-detail BVH4 in R0c's cluster-BVH record layout
-//! (`renderlab_asset::cluster_bvh`, docs/m7-r0c.md), so the one GPU traversal in
-//! shaders/gi_rays_software.wgsl also reads R0c's cooked LOD sidecars. `pack` lays out
-//! a scene's instances (a flat top level, rebuilt when transforms change) and the
-//! meshes' records in one storage buffer.
-use crate::asset::cluster_bvh::{Bvh, EMPTY, LEAF_BIT, Leaf, Level, Node};
-use crate::asset::virtual_mesh::Span;
+//! (M7 G1, G1c). Meshes trace a BVH4 in R0c's cluster-BVH record layout
+//! (`renderlab_asset::cluster_bvh`, docs/m7-r0c.md): a full-detail build made at load
+//! (`build`), or a cooked near field's far-field cut (`renderlab_asset::near_field`,
+//! docs/m7-g1c.md), whose placements also carry per-vertex near-field masks. `layout` and
+//! `mesh_words` pack the meshes' records and those masks into one storage buffer behind a
+//! flat instance list (a top level rebuilt on the CPU when transforms change,
+//! `instance_words`), which shaders/gi_rays_software.wgsl traverses.
+use crate::asset::cluster_bvh::Bvh;
 use crate::{Error, Mat4};
 
-/// Triangles per leaf.
-const LEAF_TRIANGLES: usize = 8;
 /// Words before the instance records; shaders/gi_rays_software.wgsl reads count at 0.
 pub(crate) const HEADER_WORDS: usize = 16;
-/// One instance record; WGSL GI_INSTANCE_WORDS must match.
+/// One instance record; WGSL GI_INSTANCE_WORDS must match. Words 0-11 world-to-object
+/// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
+/// instance's near-field mask base (0: none, the instance is traced over whole rays).
 pub(crate) const INSTANCE_WORDS: usize = 32;
 
-/// Builds a one-level, zero-error BVH over `indices` (triangle list) by deterministic
-/// median splits on the longest centroid axis, ties broken by triangle order. Child
-/// bounds are quantized outward so both fused and unfused f32 decodes enclose them.
+/// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf).
 pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh, Error> {
-    if indices.is_empty() || !indices.len().is_multiple_of(3) {
-        return Err(Error::InvalidInput(
-            "indirect geometry needs a nonempty triangle list",
-        ));
-    }
-    if indices.iter().any(|&i| i as usize >= positions.len())
-        || positions.iter().flatten().any(|v| !v.is_finite())
-    {
-        return Err(Error::InvalidInput(
-            "indirect geometry has an invalid index or position",
-        ));
-    }
-    let triangles: Vec<usize> = (0..indices.len() / 3).collect();
-    let centroid = |t: usize| -> [f32; 3] {
-        std::array::from_fn(|a| {
-            (0..3)
-                .map(|k| positions[indices[t * 3 + k] as usize][a])
-                .sum::<f32>()
-                / 3.0
-        })
-    };
-    let centroids: Vec<[f32; 3]> = triangles.iter().map(|&t| centroid(t)).collect();
-    let mut builder = Builder {
-        positions,
-        indices,
-        centroids: &centroids,
-        bvh: Bvh {
-            positions: positions.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect(),
-            ..Default::default()
-        },
-    };
-    let root = builder.subtree(triangles);
-    let mut bvh = builder.bvh;
-    let leaves = bvh.leaves.len() as u32;
-    bvh.level_leaves = (0..leaves).collect();
-    bvh.levels.push(Level {
-        mesh: 0,
-        root,
-        requested_error: 0.0,
-        max_error: 0.0,
-        leaves: Span {
-            offset: 0,
-            count: leaves,
-        },
-    });
-    bvh.validate(Default::default())
-        .map_err(|_| Error::InvalidInput("indirect geometry BVH failed validation"))?;
-    Ok(bvh)
+    crate::asset::near_field::build_bvh(positions, indices)
+        .map_err(|_| Error::InvalidInput("indirect geometry is not a valid triangle list"))
 }
 
-struct Builder<'a> {
-    positions: &'a [[f32; 3]],
-    indices: &'a [u32],
-    centroids: &'a [[f32; 3]],
-    bvh: Bvh,
+/// One cooked placement's near-field masks (two sides of `words` per BVH position) and the
+/// exact transform bits they were cooked under.
+pub(crate) struct NearMasks {
+    pub model: Mat4,
+    pub masks: Vec<u32>,
 }
-impl Builder<'_> {
-    /// Child ID of the subtree over `triangles` (a leaf, or a node in postorder).
-    fn subtree(&mut self, triangles: Vec<usize>) -> u32 {
-        if triangles.len() <= LEAF_TRIANGLES {
-            return self.leaf(&triangles);
-        }
-        let mut groups = vec![triangles];
-        // Two rounds of halving: at most four children.
-        for _ in 0..2 {
-            groups = groups
-                .into_iter()
-                .flat_map(|g| {
-                    if g.len() <= LEAF_TRIANGLES {
-                        return vec![g];
-                    }
-                    let (a, b) = self.split(g);
-                    vec![a, b]
-                })
-                .collect();
-        }
-        let children: Vec<u32> = groups.into_iter().map(|g| self.subtree(g)).collect();
-        self.node(&children)
+
+/// One mesh's records in the packed buffer, its object-space bounds, and the near-field
+/// masks of its cooked placements (empty for full-detail geometry).
+pub(crate) struct Blas {
+    pub bvh: Bvh,
+    pub root: u32,
+    pub lo: [f32; 3],
+    pub hi: [f32; 3],
+    pub near: Vec<NearMasks>,
+}
+impl Blas {
+    /// Level `level` of `bvh` (a zero-error regular build has one).
+    pub(crate) fn new(bvh: Bvh, level: usize) -> Result<Self, Error> {
+        let root = bvh
+            .levels
+            .get(level)
+            .ok_or(Error::InvalidInput("indirect geometry level"))?
+            .root;
+        let (lo, hi) = bounds(bvh.positions.iter().map(|p| [p[0], p[1], p[2]]));
+        Ok(Self {
+            bvh,
+            root,
+            lo,
+            hi,
+            near: vec![],
+        })
     }
-    fn split(&self, mut g: Vec<usize>) -> (Vec<usize>, Vec<usize>) {
-        let (lo, hi) = bounds(g.iter().map(|&t| self.centroids[t]));
-        let axis = (0..3)
-            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
-            .unwrap();
-        g.sort_by(|&a, &b| {
-            self.centroids[a][axis]
-                .total_cmp(&self.centroids[b][axis])
-                .then(a.cmp(&b))
-        });
-        let b = g.split_off(g.len() / 2);
-        (g, b)
+    fn words(&self) -> usize {
+        self.bvh.nodes.len() * 20
+            + self.bvh.leaves.len() * 8
+            + self.bvh.positions.len() * 4
+            + self.bvh.indices.len()
     }
-    fn leaf(&mut self, triangles: &[usize]) -> u32 {
-        let offset = self.bvh.indices.len() as u32;
-        for &t in triangles {
-            self.bvh
-                .indices
-                .extend_from_slice(&self.indices[t * 3..t * 3 + 3]);
-        }
-        let id = self.bvh.leaves.len() as u32;
-        self.bvh.leaves.push(Leaf {
-            mesh: 0,
-            cluster: id,
-            page: 0,
-            source_index_offset: (triangles[0] * 3) as u32,
-            indices: Span {
-                offset,
-                count: (triangles.len() * 3) as u32,
-            },
-            error: 0.0,
-            material: 0,
-        });
-        id | LEAF_BIT
-    }
-    fn child_bounds(&self, child: u32) -> ([f32; 3], [f32; 3]) {
-        if child & LEAF_BIT != 0 {
-            let leaf = &self.bvh.leaves[(child & !LEAF_BIT) as usize];
-            let span =
-                leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
-            bounds(
-                self.bvh.indices[span]
-                    .iter()
-                    .map(|&i| self.positions[i as usize]),
-            )
-        } else {
-            let n = &self.bvh.nodes[child as usize];
-            let mut lo = [f32::INFINITY; 3];
-            let mut hi = [f32::NEG_INFINITY; 3];
-            for slot in 0..4 {
-                if n.children[slot] == EMPTY {
-                    continue;
-                }
-                // Either decode may be used, so the parent encloses both.
-                for (a, b) in [n.child_bounds(slot), n.child_bounds_fused(slot)] {
-                    for axis in 0..3 {
-                        lo[axis] = lo[axis].min(a[axis] as f32);
-                        hi[axis] = hi[axis].max(b[axis] as f32);
-                    }
-                }
-            }
-            (lo, hi)
-        }
-    }
-    fn node(&mut self, children: &[u32]) -> u32 {
-        let boxes: Vec<_> = children.iter().map(|&c| self.child_bounds(c)).collect();
-        let (lo, hi) = boxes.iter().fold(
-            ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
-            |(lo, hi), (a, b)| {
-                (
-                    std::array::from_fn(|i| lo[i].min(a[i])),
-                    std::array::from_fn(|i| hi[i].max(b[i])),
-                )
-            },
-        );
-        let mut node = Node {
-            origin: lo,
-            step: [0.0; 3],
-            children: [EMPTY; 4],
-            ..Default::default()
-        };
-        for axis in 0..3 {
-            let extent = hi[axis] - lo[axis];
-            let mut step = (extent / 255.0).max(f32::MIN_POSITIVE.max(lo[axis].abs() * 1e-7));
-            // Grow until code 255 covers the top in both decodes.
-            while lo[axis] + step * 255.0 < hi[axis] || step.mul_add(255.0, lo[axis]) < hi[axis] {
-                step *= 1.0 + 1.0 / 1048576.0;
-            }
-            node.step[axis] = step;
-        }
-        for (slot, (&child, (a, b))) in children.iter().zip(&boxes).enumerate() {
-            node.children[slot] = child;
-            for axis in 0..3 {
-                let (o, s) = (node.origin[axis], node.step[axis]);
-                let decode = |q: u8| [o + s * f32::from(q), s.mul_add(f32::from(q), o)];
-                let mut low = (((a[axis] - o) / s).floor().clamp(0.0, 255.0)) as u8;
-                while low > 0 && decode(low).iter().any(|&v| v > a[axis]) {
-                    low -= 1;
-                }
-                let mut high = (((b[axis] - o) / s).ceil().clamp(0.0, 255.0)) as u8;
-                while high < 255 && decode(high).iter().any(|&v| v < b[axis]) {
-                    high += 1;
-                }
-                node.lower[axis][slot] = low;
-                node.upper[axis][slot] = high;
-            }
-        }
-        let id = self.bvh.nodes.len() as u32;
-        self.bvh.nodes.push(node);
-        id
+    /// The base word of the near-field masks cooked under exactly `model`, given this
+    /// mesh's mask bases in the packed buffer; 0 when none matches.
+    pub(crate) fn near_base(&self, model: &Mat4, bases: &[u32]) -> u32 {
+        let bits = |m: &Mat4| m.to_cols_array().map(f32::to_bits);
+        self.near
+            .iter()
+            .zip(bases)
+            .find(|(n, _)| bits(&n.model) == bits(model))
+            .map_or(0, |(_, &b)| b)
     }
 }
 fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
@@ -222,34 +84,9 @@ fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
     )
 }
 
-/// One mesh's records in the packed buffer and its object-space bounds.
-pub(crate) struct Blas {
-    pub bvh: Bvh,
-    pub root: u32,
-    pub lo: [f32; 3],
-    pub hi: [f32; 3],
-}
-impl Blas {
-    /// The finest level of `bvh` for mesh `mesh` (a zero-error regular build has one).
-    pub(crate) fn new(bvh: Bvh, level: usize) -> Result<Self, Error> {
-        let root = bvh
-            .levels
-            .get(level)
-            .ok_or(Error::InvalidInput("indirect geometry level"))?
-            .root;
-        let (lo, hi) = bounds(bvh.positions.iter().map(|p| [p[0], p[1], p[2]]));
-        Ok(Self { bvh, root, lo, hi })
-    }
-    fn words(&self) -> usize {
-        self.bvh.nodes.len() * 20
-            + self.bvh.leaves.len() * 8
-            + self.bvh.positions.len() * 4
-            + self.bvh.indices.len()
-    }
-}
-
-/// Word offsets of each mesh's arrays after the instance records.
-pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, usize) {
+/// Word offsets of each mesh's arrays after the instance records, then the base word of
+/// each of its near placements' masks, and the total.
+pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, Vec<Vec<u32>>, usize) {
     let mut at = HEADER_WORDS + instances * INSTANCE_WORDS;
     let offsets = meshes
         .iter()
@@ -262,13 +99,31 @@ pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, usiz
             [nodes, leaves, positions, indices].map(|v| v as u32)
         })
         .collect();
-    (offsets, at)
+    let near = meshes
+        .iter()
+        .map(|b| {
+            b.near
+                .iter()
+                .map(|n| {
+                    let base = at as u32;
+                    at += n.masks.len();
+                    base
+                })
+                .collect()
+        })
+        .collect();
+    (offsets, near, at)
 }
 
-/// Every mesh's records at `offsets` (from `layout`), as little-endian words.
-pub(crate) fn mesh_words(meshes: &[&Blas], offsets: &[[u32; 4]], total: usize) -> Vec<u32> {
+/// Every mesh's records and near masks at the offsets `layout` gave, as words.
+pub(crate) fn mesh_words(
+    meshes: &[&Blas],
+    offsets: &[[u32; 4]],
+    near: &[Vec<u32>],
+    total: usize,
+) -> Vec<u32> {
     let mut words = vec![0u32; total];
-    for (b, o) in meshes.iter().zip(offsets) {
+    for ((b, o), bases) in meshes.iter().zip(offsets).zip(near) {
         let mut at = o[0] as usize;
         for n in &b.bvh.nodes {
             let lane = |bytes: [u8; 4]| u32::from_le_bytes(bytes);
@@ -303,16 +158,21 @@ pub(crate) fn mesh_words(meshes: &[&Blas], offsets: &[[u32; 4]], total: usize) -
             at += 4;
         }
         words[at..at + b.bvh.indices.len()].copy_from_slice(&b.bvh.indices);
+        for (n, &base) in b.near.iter().zip(bases) {
+            words[base as usize..base as usize + n.masks.len()].copy_from_slice(&n.masks);
+        }
     }
     words
 }
 
 /// The header and instance records: per placement, world-to-object rows, the world
-/// bounds of its mesh, and that mesh's array offsets and root.
-pub(crate) fn instance_words(instances: &[(Mat4, &Blas, [u32; 4])]) -> Result<Vec<u32>, Error> {
+/// bounds of its mesh, that mesh's array offsets and root, and its near-field mask base.
+pub(crate) fn instance_words(
+    instances: &[(Mat4, &Blas, [u32; 4], u32)],
+) -> Result<Vec<u32>, Error> {
     let mut words = vec![0u32; HEADER_WORDS + instances.len() * INSTANCE_WORDS];
     words[0] = instances.len() as u32;
-    for (i, (model, blas, offsets)) in instances.iter().enumerate() {
+    for (i, (model, blas, offsets, near)) in instances.iter().enumerate() {
         let inverse = model.inverse();
         if !inverse.is_finite() {
             return Err(Error::InvalidInput(
@@ -348,6 +208,7 @@ pub(crate) fn instance_words(instances: &[(Mat4, &Blas, [u32; 4])]) -> Result<Ve
         }
         words[r + 18..r + 22].copy_from_slice(offsets);
         words[r + 22] = blas.root;
+        words[r + 23] = *near;
     }
     Ok(words)
 }
@@ -376,44 +237,34 @@ mod tests {
     }
 
     #[test]
-    fn builds_valid_deterministic_bvh4() {
-        let (p, i) = grid(24);
-        let a = build(&p, &i).unwrap();
-        let b = build(&p, &i).unwrap();
-        assert_eq!(a, b);
-        assert!(
-            a.nodes
-                .iter()
-                .all(|n| n.children.iter().filter(|&&c| c != EMPTY).count() >= 2)
-        );
-        assert_eq!(a.indices.len(), i.len());
-        // A single small mesh is one leaf root.
-        let small = build(&p, &i[..6]).unwrap();
-        assert!(small.nodes.is_empty() && small.levels[0].root & LEAF_BIT != 0);
-    }
-
-    #[test]
-    fn rejects_bad_geometry() {
-        assert!(build(&[[0.0; 3]], &[0, 0]).is_err());
-        assert!(build(&[[0.0; 3]], &[0, 0, 1]).is_err());
-        assert!(build(&[[f32::NAN; 3]; 3], &[0, 1, 2]).is_err());
-    }
-
-    #[test]
-    fn packs_instances_and_meshes() {
+    fn packs_instances_meshes_and_near_masks() {
         let (p, i) = grid(6);
-        let blas = Blas::new(build(&p, &i).unwrap(), 0).unwrap();
-        let (offsets, total) = layout(&[&blas], 2);
-        let words = mesh_words(&[&blas], &offsets, total);
+        let mut blas = Blas::new(build(&p, &i).unwrap(), 0).unwrap();
+        let model = Mat4::from_translation(glam::Vec3::new(5.0, 0.0, 0.0));
+        let masks: Vec<u32> = (0..blas.bvh.positions.len() as u32 * 16).collect();
+        blas.near.push(NearMasks {
+            model,
+            masks: masks.clone(),
+        });
+        let (offsets, near, total) = layout(&[&blas], 2);
+        let words = mesh_words(&[&blas], &offsets, &near, total);
         assert_eq!(words.len(), total);
         assert_eq!(offsets[0][0] as usize, HEADER_WORDS + 2 * INSTANCE_WORDS);
-        let model = Mat4::from_translation(glam::Vec3::new(5.0, 0.0, 0.0));
+        let base = near[0][0] as usize;
+        assert_eq!(&words[base..base + masks.len()], &masks[..]);
+        assert_eq!(base + masks.len(), total);
+        // Only the instance with the cooked transform's exact bits gets the masks.
+        let moved = Mat4::from_translation(glam::Vec3::new(5.0, 1e-3, 0.0));
+        assert_eq!(blas.near_base(&model, &near[0]), base as u32);
+        assert_eq!(blas.near_base(&moved, &near[0]), 0);
         let head = instance_words(&[
-            (model, &blas, offsets[0]),
-            (Mat4::IDENTITY, &blas, offsets[0]),
+            (model, &blas, offsets[0], base as u32),
+            (Mat4::IDENTITY, &blas, offsets[0], 0),
         ])
         .unwrap();
         assert_eq!(head[0], 2);
+        assert_eq!(head[HEADER_WORDS + 23], base as u32);
+        assert_eq!(head[HEADER_WORDS + INSTANCE_WORDS + 23], 0);
         let lo = f32::from_bits(head[HEADER_WORDS + 12]);
         assert!((lo - 5.0).abs() < 1e-3);
         // World-to-object of a translation by +5 maps x=5 to 0.
@@ -422,6 +273,7 @@ mod tests {
             .map(|&w| f32::from_bits(w))
             .collect();
         assert!((row0[0] * 5.0 + row0[3]).abs() < 1e-6);
-        assert!(instance_words(&[(Mat4::ZERO, &blas, offsets[0])]).is_err());
+        assert!(instance_words(&[(Mat4::ZERO, &blas, offsets[0], 0)]).is_err());
+        assert!(build(&[[0.0; 3]], &[0, 0]).is_err());
     }
 }

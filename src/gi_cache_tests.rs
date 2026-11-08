@@ -770,7 +770,8 @@ fn profile_json(r: &mut Renderer) -> Json {
                      "created": c.created, "orphans": c.orphans, "invalidated": c.invalidated,
                      "refreshed": c.refreshed, "full": c.full, "miss_overflow": c.miss_overflow, "lost": c.lost, "rays": c.rays,
                      "ray_items": c.ray_items, "local_overflow": c.local_overflow,
-                     "orphans_no_surface": c.orphans_no_surface, "orphans_inside": c.orphans_inside},
+                     "orphans_no_surface": c.orphans_no_surface, "orphans_inside": c.orphans_inside,
+                     "splits": c.splits},
     })
 }
 /// The shading pass and the whole span of the most recent completed frame, ms.
@@ -2230,16 +2231,30 @@ fn gpu_gi_quarry() {
     let cell_pixels = tuned["cell_pixels"]
         .as_f64()
         .map_or(base.cell_pixels, |p| p as f32);
+    // The cut refill groups; 1 (none) unless overridden, so the first frame is settled.
+    let cut_phases = tuned["cut_phases"].as_u64().map_or(1, |p| p as u32);
     let settle_frames: usize =
         env("RENDERLAB_M7_G1_QUARRY_FRAMES").map_or(4, |s| s.parse().unwrap());
     let mut results = json!({"path": path, "triangles": triangles, "load_seconds": load_seconds,
-        "constant_sky": constant_sky, "settings": {"directions": directions, "cell_pixels": cell_pixels},
+        "constant_sky": constant_sky, "settings": {"directions": directions, "cell_pixels": cell_pixels, "cut_phases": cut_phases},
         "shaders": env("RENDERLAB_GI_SHADERS"), "placements": placements, "variants": {}});
     for variant in &variants {
         let geometry_start = Instant::now();
         if variant == "full" || variant == "software-full" {
             for (mesh, (positions, indices)) in asset.meshes_mut().iter().zip(&geometry) {
                 r.set_indirect_geometry(mesh, positions, indices).unwrap();
+            }
+        } else if variant == "near" {
+            // A cooked near field (renderlab-cook m7-near, docs/m7-g1c.md): its package file,
+            // whose meshes are the asset's in order.
+            let field = crate::asset::near_field::decode(
+                &std::fs::read(env("RENDERLAB_M7_G1_NEAR").unwrap()).unwrap(),
+                crate::asset::near_field::Limits::default(),
+            )
+            .unwrap();
+            assert_eq!(field.meshes.len(), asset.meshes_mut().len());
+            for (m, mesh) in asset.meshes_mut().iter().enumerate() {
+                r.set_indirect_near_field(mesh, &field, m).unwrap();
             }
         } else if let Some(n) = variant.strip_prefix("lod") {
             let n: usize = n.parse().unwrap();
@@ -2289,7 +2304,7 @@ fn gpu_gi_quarry() {
             let open = capture_radiance(&mut r, exposure);
             r.set_indirect(IndirectSettings {
                 enabled: true,
-                cut_phases: 1,
+                cut_phases,
                 force_software: variant == "software-full",
                 directions,
                 cell_pixels,
@@ -2372,7 +2387,8 @@ fn gpu_gi_quarry() {
                 "against_rt": quarry_score(&image, &exact, &hits),
                 "open_against_rt": quarry_score(&open, &exact, &hits),
                 "cut": cut, "settled": settled, "trail": trail, "image_hash": hash_image(&image),
-                "memory": {"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes, "geometry_bytes": r.indirect_stats().geometry_bytes},
+                "memory": {"table_bytes": stats.table_bytes, "work_bytes": stats.work_bytes, "geometry_bytes": stats.geometry_bytes,
+                    "near_bytes": stats.near_bytes, "near_instances": stats.near_instances},
             });
             if let Some(reference) = &references[pose] {
                 let pose_json = &mut variant_json[format!("pose{pose}")];
@@ -2442,9 +2458,9 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
         glam::Quat::from_euler(glam::EulerRot::XYZ, 0.7, 0.3, -0.4),
         Vec3::new(1.0, 2.0, -1.0),
     );
-    let (offsets, total) = gi_bvh::layout(&[&blas], 1);
-    let mut words = gi_bvh::mesh_words(&[&blas], &offsets, total);
-    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0])]).unwrap();
+    let (offsets, near, total) = gi_bvh::layout(&[&blas], 1);
+    let mut words = gi_bvh::mesh_words(&[&blas], &offsets, &near, total);
+    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0], 0)]).unwrap();
     words[..head.len()].copy_from_slice(&head);
     let normal = model
         .inverse()

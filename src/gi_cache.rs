@@ -17,8 +17,8 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
-/// Key, hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
-const SLOT_WORDS: u64 = 16 + 24;
+/// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
+const SLOT_WORDS: u64 = 16 + 28;
 const COUNTER_WORDS: u64 = 16;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
@@ -48,9 +48,10 @@ const CELL_GROUPS: u32 = 2048;
 const PROFILE_RING: u64 = 64;
 const PROFILE_STRIDE: u64 = 256;
 /// Consecutive identical frames after which a frame runs no cache pass: the orphan-parent
-/// chain completes on the third frame (gi_probe's rounds), and claims lost on it retry
-/// on the next two.
-const IDLE_AFTER: u32 = 5;
+/// chain completes on the third frame (gi_probe's rounds), a split cell's finer levels
+/// appear one a frame after it (up to GI_REFINE), and claims lost on the last retry on
+/// the next two.
+const IDLE_AFTER: u32 = 8;
 /// Entries of the frame's request table: twice the miss capacity (a power of two).
 fn requests(misses: u32) -> u32 {
     misses * 2
@@ -168,8 +169,12 @@ impl IndirectSettings {
 pub struct IndirectStats {
     pub table_bytes: u64,
     pub work_bytes: u64,
-    /// Software-ray geometry (non-RT path).
+    /// Software-ray geometry (non-RT path), near-field masks included.
     pub geometry_bytes: u64,
+    /// Of which cooked near-field masks.
+    pub near_bytes: u64,
+    /// Instances whose transform matched a cooked near field in the last software frame.
+    pub near_instances: u32,
     /// Frames that ran the cache passes.
     pub frames: u64,
     /// The last such frame traced software rays.
@@ -223,6 +228,9 @@ pub struct IndirectCounters {
     /// qualifying candidate lay inside a solid.
     pub orphans_no_surface: u32,
     pub orphans_inside: u32,
+    /// Cells probed this frame whose fixed probe lines each met two surface layers
+    /// (shaders/gi_cache.wgsl gi_probe_line); their pixels read finer levels.
+    pub splits: u32,
 }
 
 struct Resources {
@@ -263,11 +271,15 @@ struct Arrays {
     instances: Vec<u8>,
     bind: Owned<wgpu::BindGroup>,
 }
-/// Software-ray geometry: every draw's mesh records and the flat instance list.
+/// Software-ray geometry: every draw's mesh records and near masks, and the flat instance
+/// list.
 struct Packed {
     meshes: Vec<wgpu::Buffer>,
     instances: usize,
     offsets: Vec<[u32; 4]>,
+    /// Per draw, the base word of each of its mesh's cooked near placements' masks.
+    near: Vec<Vec<u32>>,
+    near_bytes: u64,
     head: Vec<u32>,
     buffer: Owned<wgpu::Buffer>,
     bytes: u64,
@@ -315,6 +327,8 @@ pub(super) struct GiState {
     pipelines: Option<Pipelines>,
     arrays: Option<Arrays>,
     meshes: Vec<(wgpu::Buffer, Arc<Blas>)>,
+    /// The near-field settings every cooked mesh shares (its far rays' start and bins).
+    near: Option<crate::asset::near_field::Settings>,
     packed: Option<Packed>,
     /// Last frame's world bounds per placement, for moved-caster boxes.
     bounds: Vec<[f32; 6]>,
@@ -355,6 +369,7 @@ impl GiState {
             pipelines: None,
             arrays: None,
             meshes: vec![],
+            near: None,
             packed: None,
             bounds: vec![],
             environment: None,
@@ -583,6 +598,7 @@ impl Renderer {
     pub fn indirect_stats(&self) -> IndirectStats {
         let mut stats = self.gi.stats;
         stats.geometry_bytes = self.gi.packed.as_ref().map_or(0, |p| p.bytes);
+        stats.near_bytes = self.gi.packed.as_ref().map_or(0, |p| p.near_bytes);
         stats
     }
     /// Empties the cache on the next frame: a camera cut or scene replacement that
@@ -612,13 +628,58 @@ impl Renderer {
         bvh: crate::asset::cluster_bvh::Bvh,
         level: usize,
     ) -> Result<(), Error> {
+        self.set_indirect_blas(mesh, Blas::new(bvh, level)?)
+    }
+    /// Software-ray geometry for `mesh` from mesh `index` of a cooked near field
+    /// (renderlab_asset::near_field, docs/m7-g1c.md): its far-field cut is traced at runtime,
+    /// and each instance whose transform has the exact bits of one of the field's placements
+    /// of this mesh reads that placement's near-field masks. A cell on such an instance takes
+    /// its near field (blocked within `near`) from the masks and traces the cuts of static
+    /// instances only from `near` on; other instances (movers) are traced over the whole ray.
+    /// Every cooked mesh must share the field's `near` and `bins`.
+    pub fn set_indirect_near_field(
+        &mut self,
+        mesh: &Mesh,
+        field: &crate::asset::near_field::NearField,
+        index: usize,
+    ) -> Result<(), Error> {
+        let settings = field.settings;
+        if self
+            .gi
+            .near
+            .is_some_and(|n| n.near != settings.near || n.bins != settings.bins)
+        {
+            return Err(Error::InvalidInput(
+                "near fields must share their near distance and bins",
+            ));
+        }
+        let bvh = field
+            .meshes
+            .get(index)
+            .ok_or(Error::InvalidInput("near-field mesh index"))?;
+        let mut blas = Blas::new(bvh.clone(), 0)?;
+        blas.near = field
+            .placements
+            .iter()
+            .filter(|p| p.mesh as usize == index)
+            .map(|p| gi_bvh::NearMasks {
+                model: Mat4::from_cols_array_2d(&p.transform),
+                masks: p.masks.clone(),
+            })
+            .collect();
+        self.gi.near = Some(settings);
+        self.set_indirect_blas(mesh, blas)
+    }
+    fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
         if !Arc::ptr_eq(&self.identity, &mesh.renderer) {
             return Err(Error::InvalidInput("mesh belongs to another renderer"));
         }
-        let blas = Arc::new(Blas::new(bvh, level)?);
         let key: wgpu::Buffer = (**mesh.vertex).clone();
         self.gi.meshes.retain(|(k, _)| *k != key);
-        self.gi.meshes.push((key, blas));
+        self.gi.meshes.push((key, Arc::new(blas)));
+        if self.gi.meshes.iter().all(|(_, b)| b.near.is_empty()) {
+            self.gi.near = None;
+        }
         if let Some(old) = self.gi.packed.take() {
             self.gi
                 .retired
@@ -765,6 +826,7 @@ impl Renderer {
             ray_items: w[12],
             orphans_no_surface: w[13],
             orphans_inside: w[14],
+            splits: w[15],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1096,9 +1158,14 @@ impl Renderer {
             .is_none_or(|p| p.meshes != meshes || p.instances != instances)
         {
             let refs: Vec<&Blas> = blases.iter().map(|b| &**b).collect();
-            let (offsets, total) = gi_bvh::layout(&refs, instances);
-            let words = gi_bvh::mesh_words(&refs, &offsets, total);
+            let (offsets, near, total) = gi_bvh::layout(&refs, instances);
+            let words = gi_bvh::mesh_words(&refs, &offsets, &near, total);
             let bytes = (words.len() * 4) as u64;
+            let near_bytes = refs
+                .iter()
+                .flat_map(|b| &b.near)
+                .map(|n| n.masks.len() as u64 * 4)
+                .sum();
             let buffer = self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("indirect cache software geometry"),
@@ -1114,6 +1181,8 @@ impl Renderer {
                 meshes,
                 instances,
                 offsets,
+                near,
+                near_bytes,
                 head: vec![],
                 buffer,
                 bytes,
@@ -1132,11 +1201,12 @@ impl Renderer {
         }
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
-        for ((d, blas), offsets) in draws.iter().zip(&blases).zip(&p.offsets) {
+        for (((d, blas), offsets), near) in draws.iter().zip(&blases).zip(&p.offsets).zip(&p.near) {
             for model in &d.instances.state.models {
-                records.push((*model, &**blas, *offsets));
+                records.push((*model, &**blas, *offsets, blas.near_base(model, near)));
             }
         }
+        self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
         let head = gi_bvh::instance_words(&records)?;
         if p.head != head {
             let raw: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -1200,6 +1270,12 @@ impl Renderer {
         };
         let spread = cut_phases > 1 && since_clear < cut_phases;
         header[14] = if spread { cut_phases } else { 0 };
+        // Software rays with cooked near fields: where static far rays start, and the
+        // masks' octahedral bins per side (0: no near field).
+        if let Some(n) = self.gi.near.filter(|_| software) {
+            header[15] = n.near.to_bits();
+            header[16] = n.bins;
+        }
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
