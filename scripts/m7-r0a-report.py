@@ -328,8 +328,12 @@ def shutters(args, r):
 def motion_qa(args, r):
     r.cpu_note("create motion witness and difference contact sheets from saved arrays"); r.no_quiet()
     codes = r.load("m7-u0b-score").codes
-    inventory = []
+    old_inventory = r.OUT/"qa"/args.label/"motion-inventory.json"
+    inventory = [entry for entry in json.loads(old_inventory.read_text())["images"]
+        if Path(entry["file"]).name.split("-")[0] not in args.fixtures] if old_inventory.exists() else []
     for fixture in ("RF3", "RF5"):
+        if fixture not in args.fixtures:
+            continue
         for config in ("sw-mesh-epic", "hw-sc-epic", "hw-hit-epic", "renderlab-nonrt", "renderlab-rt"):
             current = config.startswith("renderlab-")
             root = r.OUT/"current"/((args.current_label or args.label)+"-motion")/config.removeprefix("renderlab-") if current else r.OUT/"motion/capture"/args.label/fixture/config
@@ -395,9 +399,29 @@ def telemetry(args, r):
         timing_scope="functional runs under foreign compiler load; 64 CSV frames, one instrumented async-off ProfileGPU frame; no comparative performance claim"))
 
 
+def motion_overviews(args, r):
+    r.cpu_note("assemble every motion mode/witness into comparison contact sheets"); r.no_quiet()
+    root = r.OUT/"qa"/args.label
+    modes = ("sw-mesh-epic", "hw-sc-epic", "hw-hit-epic", "renderlab-nonrt", "renderlab-rt")
+    for fixture in ("RF3", "RF5"):
+        if fixture not in args.fixtures:
+            continue
+        for phase,count in (("start",5),("moving",3),("stop",5)):
+            for ev in (-14,-10):
+                sheet = Image.new("RGB",(1920,196*count),"#161a1f")
+                for col,mode in enumerate(modes):
+                    with Image.open(root/f"{fixture}-{mode}-{phase}-ev{ev}.png") as source:
+                        for row in range(count):
+                            bounds = (480,294*row,960,294*(row+1))
+                            sheet.paste(source.crop(bounds).resize((320,196)),(320*(col+1),196*row))
+                            if col==0:
+                                sheet.paste(source.crop((0,294*row,480,294*(row+1))).resize((320,196)),(0,196*row))
+                sheet.save(root/f"{fixture}-all-modes-{phase}-ev{ev}.png")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("qa", "tables", "quarry-histogram", "shutters", "motion-qa", "telemetry"))
+    p.add_argument("command", choices=("qa", "tables", "quarry-histogram", "shutters", "motion-qa", "motion-overviews", "telemetry"))
     p.add_argument("--label", default="b")
     p.add_argument("--reference-label", default="d")
     p.add_argument("--current-label")
@@ -405,7 +429,7 @@ def main():
     p.add_argument("--fixtures", nargs="+", default=[f"RF{i}" for i in range(1, 11)])
     p.add_argument("--configs", nargs="+", default=["sw-mesh-epic", "hw-sc-epic", "hw-hit-epic", "sw-mesh-cine", "hw-sc-cine", "hw-hit-cine", "ssr-off-informative", "ssr-on-informative"])
     args = p.parse_args(); {"qa":qa, "tables":tables, "quarry-histogram":quarry_histogram,
-        "shutters":shutters, "motion-qa":motion_qa, "telemetry":telemetry}[args.command](args, controller())
+        "shutters":shutters, "motion-qa":motion_qa, "motion-overviews":motion_overviews, "telemetry":telemetry}[args.command](args, controller())
 
 
 if __name__=="__main__":

@@ -18,12 +18,16 @@ def main():
     assert motion["complete"] and len(motion["rows"])==10
     manifest = read(out/"reference/final/manifest.json")
     assert manifest["complete"] and len(manifest["cases"])==13
+    equivalences = {fixture:read(out/"motion"/(fixture+"-static-equivalence.json")) for fixture in ("RF3","RF5")}
     for row in static["rows"]:
         case = row["fixture"]+"-"+row["pose"]
         if row.get("status")=="unsupported":
             assert row["fixture"]=="RF10" and row["config"].startswith("renderlab-")
             continue
         assert row["reference_archive_sha256"]==manifest["cases"][case]["archive_sha256"]
+        if row["scene_sha256"]!=r.sha(out/"scenes"/row["fixture"]/"scene.json"):
+            proof = equivalences[row["fixture"]]
+            assert proof["static_inputs_equal"] and row["scene_sha256"] in proof["equivalent_source_sha256"]
     modes = {}; capture_proofs = []; motion_proofs = []
     for path in sorted((out/"capture/c").rglob("complete.json")):
         root = path.parent; complete = read(path); settings = read(root/"readback.json")
@@ -40,6 +44,8 @@ def main():
     for path in sorted((out/"motion/capture/c").rglob("complete.json")):
         root = path.parent; complete = read(path); process = read(root/"process.json")
         assert all(complete[key] for key in ("camera_ok","settings_ok","motion_settings_qualified"))
+        fixture = root.parent.name
+        assert read(root/"recipe.json")["scene_sha256"]==r.sha(out/"scenes"/fixture/"scene.json")
         assert process["exit_code"]==0 and not process["failures"]
         assert Path(process["command"][0]).resolve()==(out/"ue-package-c/Windows/Engine/Binaries/Win64/UnrealGame.exe").resolve()
         transforms = read(root/"motion-readback.json")
@@ -92,6 +98,7 @@ def main():
         independent_controls=controls,checks=dict(cargo_exit=0,fmt_exit=0,library_passed=134,library_ignored=130,
             seconds=checks["seconds"],binary_sha256=checks["binary_sha256"],reference_binary_sha256=r.sha(r.REFERENCE_BINARY),
             default_reference_identical_arrays=60),
+        static_track_equivalences=equivalences,
         artifacts={name:r.sha(out/name) for name in ("scores/c-static.json","scores/c-motion.json","scores/shutter-summary.json","scores/native-telemetry.json","reference/final/manifest.json")},
         limits=["RF10 HDR floor remains noise-limited at 16384 spp; close rankings are not certified",
                 "current Renderlab RF10 produces no image on either path",

@@ -48,6 +48,12 @@ class Fixtures(unittest.TestCase):
         track = s["tracks"][0]["frames"]
         self.assertNotEqual(track[31]["movers"], track[32]["movers"])
         self.assertEqual(track[79]["movers"], track[80]["movers"])
+        red = next(m for m in s["meshes"] if m["name"]=="offscreen-red")
+        blue = next(m for m in s["meshes"] if m["name"]=="offscreen-blue")
+        red_max = np.asarray(red["positions"])[:,0].max()
+        blue_min = np.asarray(blue["positions"])[:,0].min()
+        self.assertTrue(all(red_max+f["movers"]["offscreen-red"][0]<blue_min for f in track),
+                        "moving slabs must not overlap on their shared front plane")
 
     def test_quiet_window_needs_its_own_release(self):
         r = load("m7-r0a")

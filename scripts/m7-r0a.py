@@ -28,6 +28,7 @@ SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 LOCK = Path("D:/Coding/renderlab-work/gpu-slot.lock")
 PINNED = Path("E:/renderlab-work/m7-u0b/bin/reference-tests.exe")
 REFERENCE_BINARY = OUT/"bin/r0a-reference-tests.exe"
+MOTION_SCORING_VERSION = 1
 
 
 def load(name):
@@ -370,7 +371,9 @@ def assemble_references(args):
         complete = json.loads((source_root/"complete.json").read_text())
         scene_path = OUT/"scenes"/fixture/"scene.json"; scene = json.loads(scene_path.read_text())
         if complete["scene_sha256"]!=sha(scene_path):
-            raise ValueError("static reference input changed")
+            proof = json.loads((OUT/"motion"/(fixture+"-static-equivalence.json")).read_text())
+            if not proof["static_inputs_equal"] or complete["scene_sha256"] not in proof.get("equivalent_source_sha256",[]):
+                raise ValueError("static reference input changed")
         for pose in scene["poses"]:
             case = fixture+"-"+pose["name"]
             source = source_root/str(spp)/(case+".npz")
@@ -1022,7 +1025,11 @@ def synchronize_motion_tracks(args=None):
             continue
         cpu_note("align "+name+" first motion with frame 32; preserve static-input equivalence proof"); no_quiet()
         old_sha = sha(path)
-        save(OUT/"motion"/(name+"-imported-source.json"), before)
+        imported_path = OUT/"motion"/(name+"-imported-source.json")
+        if not imported_path.exists():
+            save(imported_path, before)
+        proof_path = OUT/"motion"/(name+"-static-equivalence.json")
+        prior = json.loads(proof_path.read_text()) if proof_path.exists() else {}
         fixtures.generate(OUT/"scenes", [name])
         after = json.loads(path.read_text())
         old_static = {k:v for k,v in before.items() if k!="tracks"}
@@ -1030,8 +1037,13 @@ def synchronize_motion_tracks(args=None):
         if old_static!=new_static:
             raise ValueError("motion correction changed a baked/static input")
         digest = hashlib.sha256(json.dumps(old_static, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        save(OUT/"motion"/(name+"-static-equivalence.json"), dict(imported_source_sha256=old_sha,
+        if prior and prior["static_input_sha256"]!=digest:
+            raise ValueError("static-input equivalence chain changed")
+        equivalent = set(prior.get("equivalent_source_sha256",[]))|{old_sha,sha(path)}
+        equivalent.update(v for k,v in prior.items() if k in ("imported_source_sha256","corrected_source_sha256"))
+        save(proof_path, dict(imported_source_sha256=prior.get("imported_source_sha256",old_sha),
             corrected_source_sha256=sha(path), static_inputs_equal=True, static_input_sha256=digest,
+            equivalent_source_sha256=sorted(equivalent),
             difference="tracks only; native maps contain no authored track. Runtime macros and path snapshots both read corrected track"))
 
 
@@ -1066,6 +1078,8 @@ def motion_scenes(args):
 def motion_references(args):
     manifest = motion_scenes(args)
     for fixture, registration in manifest.items():
+        if fixture not in args.fixtures:
+            continue
         integrated = [OUT/"motion/reference"/f"{fixture}-f{frame:03d}-sh{nodes}.npz" for frame in (48, 64) for nodes in (8, 16)]
         finite_complete = all(p.exists() and p.with_suffix(".json").exists() for p in integrated)
         names = [s["name"] for s in registration["states"] if s["shutter"]=="zero"]
@@ -1240,6 +1254,22 @@ def motion_score(args):
                     raise ValueError("native motion group coverage mismatch")
                 for offset, record in enumerate(decoder):
                     native_frames[first+offset] = Path(record["archive"])
+            cache = OUT/"scores/motion-cache"/(fixture+"-"+config+".json")
+            cached = json.loads(cache.read_text()) if cache.exists() else {}
+            witnesses = scene["registration"]["witness_frames"]
+            valid = (cached.get("scoring_version")==MOTION_SCORING_VERSION and
+                cached.get("fixture")==fixture and cached.get("config")==config and
+                [f["frame"] for f in cached.get("frames",[])]==witnesses)
+            if valid:
+                for value in cached["frames"]:
+                    frame = value["frame"]; name = f"{fixture}-f{frame:03d}-zero"
+                    candidate_path = root/(name+"-centre.npz") if current else native_frames[frame]
+                    reference_path = OUT/"reference"/args.reference_label/name/str(args.spp*2)/(name+"-centre.npz")
+                    if not candidate_path.exists() or not reference_path.exists() or sha(candidate_path)!=value["native_sha256"] or sha(reference_path)!=value["reference_sha256"]:
+                        valid = False; break
+            if valid:
+                rows.append(cached); save(root/"scores.json",cached)
+                continue
             previous = None; frame_scores = []; residuals = []
             for frame in scene["registration"]["witness_frames"]:
                 name = f"{fixture}-f{frame:03d}-zero"
@@ -1281,11 +1311,12 @@ def motion_score(args):
                     features={k:v for k,v in populations.items() if k.startswith("reflected-")},
                     errors={stops:codes(candidate, stops)-codes(truth, stops) for stops in (-14, -10)})
             record = dict(fixture=fixture, config=config, frames=frame_scores, adjacent_motion_residuals=residuals,
+                scoring_version=MOTION_SCORING_VERSION,
                 candidate_scope="independent state snapshots, eight warm frames each; no continuous history claim" if current else "continuous 96-frame motion, verified transforms and sun",
                 ages={"motion-start":{str(age):32+age-1 for age in (1, 2, 4, 8)},
                       "motion-stop":{str(age):80+age-1 for age in (1, 2, 4, 8)}},
                 settled_age8_frame=87, missing_measures=[], timing_eligible_for_claim=False)
-            save(root/"scores.json", record); rows.append(record)
+            save(root/"scores.json", record); save(cache,record); rows.append(record)
     save(OUT/"scores"/(args.label+"-motion.json"), dict(rows=rows, complete=len(rows)==2*(len(args.configs)+2),
         scope="zero-shutter centres; finite-shutter references reported independently"))
 

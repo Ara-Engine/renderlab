@@ -40,7 +40,7 @@ def main():
         if old.resolve()!=Path("E:/renderlab-work/m7-r0a/ue-package-b").resolve():
             raise ValueError("unexpected obsolete package path")
         shutil.rmtree(old)
-    for name in ("capture/b", "motion/capture/b", "asprobe"):
+    for name in ("capture/b", "motion/capture/b", "asprobe", "motion/capture-before-overlap", "motion/reference-before-overlap", "current/b-motion-before-overlap"):
         for path in (root/name).rglob("*.npz"):
             if path.stat().st_size>5*1024**2:
                 # These are superseded matrices or repeated AS diagnostic dumps;

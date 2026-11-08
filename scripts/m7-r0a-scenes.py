@@ -78,7 +78,7 @@ def track(b, kind):
             eye[0] += .8*t; target[0] += .8*t
             movers["occluder"] = [2.8*t, 0, 0]
         elif kind == "object-sun":
-            movers["offscreen-red"] = [1.2*t, .3*math.sin(math.pi*t), 0]
+            movers["offscreen-red"] = [-1.2*t, .3*math.sin(math.pi*t), 0]
             sun = U0.to_light(145+30*t, 45)
         frames.append(dict(frame=frame, seconds=frame/60, eye=eye.tolist(), target=target.tolist(),
                            movers=movers, to_light=sun, phase="hold" if frame<32 else "motion" if frame<80 else "settled"))
