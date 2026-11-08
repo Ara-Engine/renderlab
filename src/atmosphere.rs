@@ -25,8 +25,9 @@ pub struct Atmosphere {
     /// Procedural environment source: while no captured map is selected
     /// (`Renderer::set_environment(None, ..)`), the renderer generates the environment from
     /// this sky (diffuse irradiance and a prefiltered specular chain, without the sun disk), so
-    /// image-based light and the world radiance cache take their sky from it. Regenerated when
-    /// the sun, the medium or the environment yaw changes. A selected captured map wins.
+    /// image-based light and the world radiance cache take their sky from it. Updated in place
+    /// when the sun, medium or camera altitude changes; GI relights progressively without
+    /// losing geometric visibility. A selected captured map wins.
     pub environment: bool,
     pub medium: AtmosphereMedium,
     /// None disables the analytic height fog.

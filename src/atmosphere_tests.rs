@@ -504,6 +504,21 @@ fn gpu_at1_quarry() {
         r.collect().unwrap();
     }
     r.test_drain("AT1 upload");
+    if env("AT2").is_some() && path == "nonrt" {
+        let bvh = crate::asset::cluster_bvh::decode(
+            &std::fs::read(path_of("cluster_bvh")).unwrap(),
+            crate::asset::cluster_bvh::Limits::default(),
+        )
+        .unwrap();
+        for (m, mesh) in asset.meshes_mut().iter().enumerate() {
+            let level = bvh
+                .levels
+                .iter()
+                .position(|l| l.mesh as usize == m)
+                .unwrap();
+            r.set_indirect_bvh(mesh, bvh.clone(), level).unwrap();
+        }
+    }
     let frame = &cameras.frames[0];
     let camera = frame.camera().unwrap();
     let size = [frame.width, frame.height];
@@ -533,6 +548,20 @@ fn gpu_at1_quarry() {
             r.test_drain("AT1 admission");
         }
     };
+    if env("AT2").is_some() {
+        at2::quarry(
+            &mut r,
+            &mut asset,
+            &camera,
+            size,
+            &out,
+            &path,
+            quarry_travel,
+            set_sun,
+            render,
+        );
+        return;
+    }
     let noon = sun_travel(quarry_travel, 65f32.to_radians());
     let low = sun_travel(quarry_travel, 4f32.to_radians());
     let space = [120_000.0f32; 3];
@@ -707,3 +736,6 @@ fn gpu_at1_quarry() {
     )
     .unwrap();
 }
+
+#[path = "atmosphere_at2_tests.rs"]
+mod at2;

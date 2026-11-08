@@ -1041,6 +1041,10 @@ impl Renderer {
         // Seen stamps restart too, so a reset sequence repeats bit for bit.
         self.gi.frame = 0;
     }
+    #[cfg(test)]
+    pub(crate) fn test_indirect_age(&self) -> u32 {
+        self.gi.since_clear
+    }
     /// Software-ray geometry for `mesh` on the non-RT path: a full-detail BVH built now
     /// from the mesh's object-space triangles. Hardware renderers ignore it unless
     /// `force_software` is set.
@@ -2140,6 +2144,7 @@ impl Renderer {
         let environment = {
             let mut h = Sha256::new();
             h.update(self.environment.generation.to_le_bytes());
+            h.update(self.environment.content_revision.to_le_bytes());
             let u = self.environment.uniform();
             h.update(&u[..8]);
             h.finalize().into()
