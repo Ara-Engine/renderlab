@@ -84,6 +84,41 @@ fn shadow_fit_maps_receivers_into_the_map() {
     assert!(far.z > near.z);
 }
 
+/// The standard program as it was before TP1's marked edits, rebuilt from the current one.
+fn pre_tp1_standard() -> String {
+    let mut s = crate::STANDARD_PROGRAM.to_owned();
+    for (from, to) in [
+        ("// alpha: TP1 coverage of transparent materials (docs/m7-tp1.md), exactly 1 for opaque ones.
+struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };",
+         "struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };"),
+        ("    let alpha=material_coverage(material,material.base_color.a*sampled.a*input.color.a);
+    return Surface(n,base,metal,rough,alpha);",
+         "    return Surface(n,base,metal,rough);"),
+        ("    // TP1: a transparent surface reflects diffusely over its coverage only.
+    let base=s.base*s.alpha;",
+         "    let base=s.base;"),
+    ] {
+        assert_eq!(s.matches(from).count(), 1, "{from}");
+        s = s.replace(from, to);
+    }
+    let start = s.find("
+// TP1: the share of the light behind").unwrap();
+    let end = start + s[start..].find("
+}
+").unwrap() + 3;
+    s.replace_range(start..end, "");
+    s
+}
+
+#[test]
+fn pre_tp1_standard_is_exact() {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(pre_tp1_standard().as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    // shaders/programs/standard.wgsl at 984a18b.
+    assert_eq!(hex, "2a3498a583a44fc45f9580decc5adb31c65ecc86b9efbb8f22aee7d3085b2dde");
+}
+
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -294,8 +329,8 @@ fn pane(width: f32, height: f32, cells: u32) -> (Vec<crate::Vertex>, Vec<u32>) {
         for i in 0..=cells {
             let (u, v) = (i as f32 / cells as f32, j as f32 / cells as f32);
             let (x, z) = ((u - 0.5) * width, v * height);
-            let nx = 0.06 * (x * 9.0 + z * 2.0).sin();
-            let nz = 0.06 * (z * 7.0).cos();
+            let nx = 0.15 * (x * 9.0 + z * 2.0).sin();
+            let nz = 0.15 * (z * 7.0).cos();
             let length = (nx * nx + 1.0 + nz * nz).sqrt();
             vertices.push(vertex([x, 0.0, z], [nx / length, -1.0 / length, nz / length], [u, 1.0 - v]));
         }
@@ -475,6 +510,18 @@ fn gpu_tp1_scene() {
             .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
             .collect()
     };
+    // The opaque depth itself, as an image (near white, far black) and statistics.
+    let finite: Vec<f32> = depth.iter().copied().filter(|d| d.is_finite() && *d < 1e20).collect();
+    let far = finite.iter().copied().fold(0.0f32, f32::max).max(1e-3);
+    let image: Vec<u8> = depth.iter().flat_map(|&d| {
+        let v = if d.is_finite() && d < 1e20 { (255.0 * (1.0 - d / far).clamp(0.0, 1.0)) as u8 } else if d.is_nan() { 0 } else { 32 };
+        [v, v, if d.is_nan() { 255 } else { v }, 255]
+    }).collect();
+    write_png(&out.join(format!("{path}-depth.png")), width, height, &image);
+    log["depth"] = serde_json::json!({"covered": finite.len(), "pixels": depth.len(),
+        "nan": depth.iter().filter(|d| d.is_nan()).count(), "max": far,
+        "min": finite.iter().copied().fold(f32::INFINITY, f32::min)});
+    eprintln!("tp1 depth {}", log["depth"]);
     let inverse_view = camera.view().inverse();
     let eye = inverse_view.w_axis.truncate();
     let forward = -inverse_view.z_axis.truncate().normalize();
@@ -485,13 +532,18 @@ fn gpu_tp1_scene() {
         let ndc = [(x as f32 + 0.5) / width as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / height as f32 * 2.0];
         let far = unproject * glam::Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
         let dir = (far.truncate() / far.w - eye).normalize();
-        (d < 1e20).then(|| eye + dir * (d / dir.dot(forward)))
+        // Misses fall back to a point 6 m along the ray, a metre below eye height.
+        Some(if d < 1e20 { eye + dir * (d / dir.dot(forward)) } else { eye + dir * 6.0 - up })
     };
-    let picks: Vec<(f32, f32)> = vec![(0.30, 0.80), (0.42, 0.86), (0.78, 0.78), (0.16, 0.74), (0.88, 0.88), (0.56, 0.90)];
+    // Pose 0 sees the quarry island over a black backdrop: bushes on its gravel and sand,
+    // the fire on the sand in front of the cliff.
+    let picks: Vec<(f32, f32)> = vec![(0.33, 0.57), (0.40, 0.69), (0.47, 0.73), (0.70, 0.68), (0.80, 0.60), (0.36, 0.62)];
     let bushes: Vec<Vec3> = picks.iter().filter_map(|&(x, y)| pick(x, y)).collect();
-    let fire_at = pick(0.64, 0.72).or_else(|| pick(0.6, 0.8)).unwrap_or(eye + forward * 6.0 - up);
+    let fire_at = pick(0.56, 0.67).unwrap();
     let centre = pick(0.5, 0.55).map_or(8.0, |p| (p - eye).dot(forward));
-    let glass_at = eye + forward * (centre * 0.4).clamp(1.5, 4.0) - up * 0.9 + inverse_view.x_axis.truncate() * -0.6;
+    // The pane stands halfway to the floor in front of the gravel, rising 1.6 m.
+    let floor = pick(0.42, 0.66).unwrap();
+    let glass_at = eye + (floor - eye) * 0.5 - up * 0.5;
     log["picks"] = serde_json::json!({"bushes": bushes.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
         "fire": fire_at.to_array(), "glass": glass_at.to_array(), "centre_depth": centre});
 
@@ -520,6 +572,7 @@ fn gpu_tp1_scene() {
             models.push(placement(at - up * 0.05, up, eye - at, k as f32 * 0.7 + c as f32 * 2.094, scale));
         }
     }
+    assert!(models.iter().all(|m| m.is_finite()), "TP1 foliage placements {:?}", log["picks"]);
     let mut foliage = upload_instances(&mut r, &models);
     log["foliage"] = serde_json::json!({"cards": models.len(), "cut_triangles": cut.indices.len() / 3,
         "cut_vertices": cut.vertices.len(), "cut_ms": cut_ms, "cells": 96});
@@ -533,7 +586,7 @@ fn gpu_tp1_scene() {
         roughness: 0.04,
         double_sided: true,
         thin: true,
-        transparency: Some(crate::Transparency { opacity: 0.0, ior: 1.5, thickness: 0.03 }),
+        transparency: Some(crate::Transparency { opacity: 0.0, ior: 1.5, thickness: 0.05 }),
         ..Default::default()
     });
     let mut glass_instances = upload_instances(&mut r, &[placement(glass_at, up, eye - glass_at, 0.25, 1.0)]);
@@ -545,20 +598,20 @@ fn gpu_tp1_scene() {
     let fire = EmitterDescriptor {
         position: fire_at + up * 0.1,
         spawn_radius: 0.12,
-        spawn_rate: 140.0,
-        lifetime: [0.35, 0.7],
-        velocity: up * 1.1,
-        velocity_spread: 0.35,
-        acceleration: up * 1.5,
+        spawn_rate: 220.0,
+        lifetime: [0.3, 0.65],
+        velocity: up * 1.4,
+        velocity_spread: 0.3,
+        acceleration: up * 2.0,
         drag: 0.8,
-        size: [0.35, 0.12],
+        size: [0.28, 0.06],
         color: [[1.0, 0.5, 0.15, 0.25], [0.6, 0.2, 0.05, 0.0]],
         // A flame several times brighter than the sunlit ground.
         emission: [[sun * 0.9, sun * 0.42, sun * 0.1], [sun * 0.25, sun * 0.06, 0.0]],
         fade: [0.15, 0.5],
         soft_distance: 0.15,
         texture: Some(&puff),
-        capacity: 128,
+        capacity: 192,
         seed: 7,
     };
     let smoke = EmitterDescriptor {
@@ -616,6 +669,20 @@ fn gpu_tp1_scene() {
             render(&mut r, &camera, &mut asset, None, None);
         }
         save(&mut r, "opaque");
+        // The opaque image with the pre-TP1 standard program: TP1 leaves it unchanged.
+        let current = read_texture(&r, &target, 4);
+        let standard = r.standard_program().clone();
+        r.reload_program(&standard, &pre_tp1_standard()).unwrap();
+        for _ in 0..3 {
+            render(&mut r, &camera, &mut asset, None, None);
+        }
+        r.test_drain("TP1 identity");
+        let before = read_texture(&r, &target, 4);
+        r.reload_program(&standard, crate::STANDARD_PROGRAM).unwrap();
+        let differing = current.chunks_exact(4).zip(before.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        log["identity"] = serde_json::json!({"differing_pixels": differing,
+            "note": "opaque quarry, TP1 standard program vs the pre-TP1 one, presented RGBA8"});
+        eprintln!("tp1 identity {}", log["identity"]);
         for _ in 0..3 {
             render(&mut r, &camera, &mut asset, Some(&mut foliage), None);
         }

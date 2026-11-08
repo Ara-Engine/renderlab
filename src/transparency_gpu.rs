@@ -127,8 +127,9 @@ struct Gpu {
     white: Owned<wgpu::TextureView>,
     _white: Owned<wgpu::Texture>,
     /// Indexed by RT (hardware sun rays) or not.
-    glass_bindings: [Owned<wgpu::BindGroupLayout>; 2],
-    glass_layouts: [Owned<wgpu::PipelineLayout>; 2],
+    /// Indexed as above; the RT entry exists only on hardware-shadow renderers.
+    glass_bindings: Vec<Owned<wgpu::BindGroupLayout>>,
+    glass_layouts: Vec<Owned<wgpu::PipelineLayout>>,
     shadow_group: Owned<wgpu::BindGroup>,
     shadow_pipeline: Owned<wgpu::RenderPipeline>,
     raster_depth_bindings: Owned<wgpu::BindGroupLayout>,
@@ -398,10 +399,11 @@ impl Renderer {
             }
             e
         };
-        let glass_bindings = [false, true].map(|rt| self.tp_layout("TP1 transparent group 0", &glass_entries(rt)));
-        let glass_layouts = [0, 1].map(|i| {
-            self.tp_pipeline_layout("TP1 transparent", &[&glass_bindings[i], &self.instance_bindings, &self.material_bindings, &self.lighting.bindings])
-        });
+        let paths: &[bool] = if self.hardware_shadows.is_some() { &[false, true] } else { &[false] };
+        let glass_bindings: Vec<_> = paths.iter().map(|&rt| self.tp_layout("TP1 transparent group 0", &glass_entries(rt))).collect();
+        let glass_layouts: Vec<_> = glass_bindings.iter().map(|bindings| {
+            self.tp_pipeline_layout("TP1 transparent", &[bindings, &self.instance_bindings, &self.material_bindings, &self.lighting.bindings])
+        }).collect();
         // Shadow map: depth only, every opaque instance.
         let shadow_bindings = self.tp_layout("TP1 shadow group 0", &[entry(30, all, uniform(false, FRAME_BYTES))]);
         let shadow_group = self.ledger.own(
