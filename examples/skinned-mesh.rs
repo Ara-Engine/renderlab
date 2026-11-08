@@ -313,16 +313,28 @@ pub fn run(source: &Path, out: &Path, quarry: Option<&Path>) -> Result<()> {
                     q.advance(&mut r)?;
                     drain(&mut r)?;
                 }
+                if !rt {
+                    let path = std::env::var("RENDERLAB_SK1_NEAR").map_err(
+                        |_| "non-RT quarry GI requires its cooked near field in RENDERLAB_SK1_NEAR",
+                    )?;
+                    let field = asset::near_field::decode(
+                        &std::fs::read(path)?,
+                        asset::near_field::Limits::default(),
+                    )?;
+                    if field.meshes.len() != q.meshes_mut().len() {
+                        return Err("near-field/scene mesh count mismatch".into());
+                    }
+                    for (index, mesh) in q.meshes_mut().iter().enumerate() {
+                        r.set_indirect_near_field(mesh, &field, index)?;
+                    }
+                }
                 quarry_scene = Some(q);
             }
             r.cut_reconstruction();
-            // Fixture exercises software GI rebuild + moving-caster invalidation too.
-            r.set_indirect(IndirectSettings {
-                enabled: scene == "fixture",
-                directions: 64,
-                bounce: false,
-                ..Default::default()
-            })?;
+            // Keep the merged product's GI/bounce defaults on in both scenes.
+            r.set_indirect(IndirectSettings::default())?;
+            let gi_before = r.indirect_stats().frames;
+            let mut invalidated = 0u64;
             let camera = if scene == "fixture" {
                 fixture_camera
             } else {
@@ -386,6 +398,11 @@ pub fn run(source: &Path, out: &Path, quarry: Option<&Path>) -> Result<()> {
                         gpu.push(sample.render_span.as_secs_f64() * 1000.);
                     }
                 }
+                if [8, 16, 24, 31].contains(&frame)
+                    && let Some(counters) = r.indirect_counters()?
+                {
+                    invalidated += u64::from(counters.invalidated);
+                }
                 if [0, 8, 16, 24, 31].contains(&frame) {
                     capture(
                         &mut r,
@@ -407,13 +424,19 @@ pub fn run(source: &Path, out: &Path, quarry: Option<&Path>) -> Result<()> {
                 );
             }
             let mean = |a: &[f64]| a.iter().sum::<f64>() / a.len().max(1) as f64;
+            let gi = r.indirect_stats();
+            if gi.frames <= gi_before || gi.software == rt || invalidated == 0 {
+                return Err(format!("GI did not run/invalidate moving casters: path={label} scene={scene} frames={} invalidated={invalidated}",gi.frames-gi_before).into());
+            }
             results.push(json!({
                 "path":label,"scene":scene,"size":[960,540],"frames":32,"warm_samples":cpu.len(),
                 "cpu_prepare_encode_submit_mean_ms":mean(&cpu),"gpu_render_span_mean_ms":mean(&gpu),
                 "synchronized_frame_wall_mean_ms":mean(&wall),
                 "gpu_render_span_excludes_skinning_and_as_build":true,
                 "skinning_gpu_component_samples_ms":skinning_gpu_ms,
-                "skinning_upload_bytes_per_frame":palette_bytes,"tr1":true,"gi":scene=="fixture",
+                "skinning_upload_bytes_per_frame":palette_bytes,"tr1":true,"gi":r.indirect().enabled,
+                "gi_frames":gi.frames-gi_before,"gi_software":gi.software,"gi_invalidated_cells_sampled":invalidated,
+                "atmosphere_default":true,"reflections_default":true,
                 "shadow_method":format!("{:?}",r.soft_shadows()),"cook":cooked.path,"build_debug":cfg!(debug_assertions)
             }));
         }

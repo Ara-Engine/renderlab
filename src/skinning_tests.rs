@@ -157,6 +157,13 @@ fn gpu_skinned_streams_history_and_paths() {
         // Compare the integrated visibility/shadow result to ordinary immutable
         // geometry with the exact observed deformed stream. The independent CPU
         // position/normal checks above establish what those observations mean.
+        // This byte oracle isolates geometry/direct shadows; the full walk test
+        // separately keeps product GI/bounce defaults on and checks invalidation.
+        r.set_indirect(IndirectSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
         r.set_reconstruction(Reconstruction {
             enabled: false,
             ..Default::default()
