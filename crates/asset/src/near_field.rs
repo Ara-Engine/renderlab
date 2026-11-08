@@ -1,14 +1,16 @@
 //! Cook-time near-field sky occlusion for the world radiance cache's software-ray path
 //! (M7 G1c, docs/m7-g1c.md). No GPU or shading-model dependency.
 //!
-//! For every vertex of a static mesh's far-field cut (a legal cluster-DAG cut, whose
-//! vertices are source vertices on the full-detail surface), the cook traces one exact ray
-//! per world-space octahedral direction bin, `reach` long, against every static
-//! placement's full-detail triangles, and keeps one blocked bit per bin. At runtime a cell
-//! whose query point lies on that cut reads its near field from the three vertex masks
-//! (a fixed barycentric vote per direction) and traces software rays against the cut only
-//! from `near` on; moving placements are traced over the whole ray. Masks store visibility,
-//! never a program's output, and there is no per-triangle grid (docs/m7-p0-claims.md 4.1).
+//! Each static mesh's far field is a legal cluster-DAG cut (R0c's selector) at `lod_error`,
+//! rebuilt as a BVH4 with eight triangles a leaf; runtime software rays trace it in place of
+//! full detail. Optionally (`bins` > 0), every vertex of the cut (a source vertex on the
+//! full-detail surface) also gets two masks: one exact ray per world-space octahedral bin,
+//! `reach` long, against every static placement's full-detail triangles, one blocked bit per
+//! bin and side. At runtime a cell whose query point lies on the cut blocks a direction its
+//! three vertex masks all block, in addition to its rays against the cut (additive: the cut
+//! is still traced from the query point). G1c measured these masks at no gain on the quarry,
+//! so cooks default to none (docs/m7-g1c.md). Masks store visibility, never a program's
+//! output, and there is no per-triangle grid (docs/m7-p0-claims.md 4.1).
 use crate::{
     Error, Result,
     cluster_bvh::{self, Bvh, EMPTY, LEAF_BIT, Leaf, Level, Node},
@@ -25,39 +27,31 @@ pub const LEAF_TRIANGLES: usize = 8;
 pub struct Settings {
     /// Object-space error of the far-field cut (cluster-DAG legal cut, as R0c selects).
     pub lod_error: f32,
-    /// World distance at which runtime far-field rays start against static placements.
-    pub near: f32,
-    /// World length of the cook's exact rays. At least `near`, and longer by about a
-    /// triangle, so a query point inside a triangle has every occluder its far rays skip
-    /// within reach of the triangle's vertices.
+    /// World length of the masks' exact rays.
     pub reach: f32,
-    /// World distance within which the cook's rays ignore hits: the far-field cut stands for
-    /// the surface around a vertex to within its own error, so a ray grazing the vertex's own
-    /// bumps is not an occluder the cut's query points would see (G1c measured masks without
-    /// it darker than exact visibility).
+    /// World distance within which the masks' rays ignore hits (a vertex's own surface).
     pub skip: f32,
-    /// Octahedral bins per side; a vertex mask holds bins² bits (a multiple of 32).
+    /// Octahedral bins per side; a vertex mask holds bins² bits (a multiple of 32). 0: no
+    /// masks, the cut alone.
     pub bins: u32,
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         let ok = self.lod_error.is_finite()
             && self.lod_error >= 0.
-            && self.near.is_finite()
-            && self.near > 0.
             && self.reach.is_finite()
-            && self.reach >= self.near
+            && self.reach > 0.
             && self.skip.is_finite()
             && self.skip >= 0.
-            && self.skip < self.near
-            && [8, 16, 32].contains(&self.bins);
+            && self.skip < self.reach
+            && [0, 8, 16, 32].contains(&self.bins);
         if ok {
             Ok(())
         } else {
             Err(Error("invalid near-field settings"))
         }
     }
-    /// u32 words per vertex mask.
+    /// u32 words per vertex mask (0 without masks).
     pub fn words(&self) -> usize {
         (self.bins * self.bins / 32) as usize
     }
@@ -379,11 +373,11 @@ fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
 }
 
 // ---- encoding: explicit little-endian fields, never Rust layout ----
-// Header: magic, version, mesh count, placement count, bins, then lod_error, near, reach and
-// skip (f32 bits), then the source digest. Each mesh: u64 length and an RLB blob
+// Header: magic, version, mesh count, placement count, bins, then lod_error, reach and skip
+// (f32 bits), then the source digest. Each mesh: u64 length and an RLB blob
 // (cluster_bvh::encode). Each placement: mesh, 16 transform floats, u64 mask word count,
 // then the mask words.
-const HEADER_BYTES: usize = 36 + 32;
+const HEADER_BYTES: usize = 32 + 32;
 
 pub fn encode(field: &NearField, limits: Limits) -> Result<Vec<u8>> {
     field.validate(limits)?;
@@ -395,7 +389,6 @@ pub fn encode(field: &NearField, limits: Limits) -> Result<Vec<u8>> {
         u32::try_from(field.placements.len()).map_err(|_| Error("near-field placement count"))?,
         s.bins,
         s.lod_error.to_bits(),
-        s.near.to_bits(),
         s.reach.to_bits(),
         s.skip.to_bits(),
     ] {
@@ -442,7 +435,6 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<NearField> {
     let settings = Settings {
         bins: r.u32()?,
         lod_error: f32::from_bits(r.u32()?),
-        near: f32::from_bits(r.u32()?),
         reach: f32::from_bits(r.u32()?),
         skip: f32::from_bits(r.u32()?),
     };
@@ -590,7 +582,6 @@ mod tests {
         let bvh = build_bvh(&p, &i).unwrap();
         let settings = Settings {
             lod_error: 1.,
-            near: 0.25,
             reach: 0.5,
             skip: 0.01,
             bins: 16,
@@ -626,7 +617,7 @@ mod tests {
         short.placements[0].masks.pop();
         assert!(encode(&short, Limits::default()).is_err());
         let mut bad = field.clone();
-        bad.settings.reach = 0.1;
+        bad.settings.skip = 1.0;
         assert!(encode(&bad, Limits::default()).is_err());
         assert!(encode(&field, Limits { max_bytes: 64 }).is_err());
     }

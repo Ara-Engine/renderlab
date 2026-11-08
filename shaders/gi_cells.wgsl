@@ -48,9 +48,8 @@ const GI_H_ITEMS:u32=13u;
 // group of directions k % S == g that is still untraced, one group a frame, so a cut's
 // rays spread over S frames (src/gi_cache.rs IndirectSettings::cut_phases).
 const GI_H_SPREAD:u32=14u;
-// Software rays with cooked near fields (M7 G1c): where a near-field cell's static far rays
-// start (f32, metres), and the masks' octahedral bins per side (0: no near field).
-const GI_H_NEAR:u32=15u;
+// Software rays with cooked near-field masks (M7 G1c): their octahedral bins per side (0:
+// none).
 const GI_H_NEAR_BINS:u32=16u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
@@ -103,21 +102,19 @@ const GI_C_BITS:u32=12u;
 const GI_C_KNOWN:u32=16u;
 // Directions with ray items this frame, between setup and finish (GI_MAX_WORDS words).
 const GI_C_PENDING:u32=20u;
-// Directions the cooked near field blocks from the query point (GI_MAX_WORDS words; zero
-// without a near field): never traced, always blocked, whatever moves.
+// Directions the cooked near-field masks block at the query point (GI_MAX_WORDS words; zero
+// without masks): never traced, always blocked, whatever moves.
 const GI_C_NEAR:u32=24u;
 // State bits: the value is current; the cell has no canonical query point; some
 // directions are still untraced (counted as open sky until they are); queued for
-// tracing this frame; the query point has a cooked near field (GI_C_NEAR, and static far
-// rays start at GI_H_NEAR); the cell is split (read at finer levels). The last two are
-// properties of the query point and keep across re-traces until the next probe.
+// tracing this frame; the cell is split (read at finer levels), a property of its probe
+// that keeps across re-traces until the next probe.
 const GI_TRACED:u32=1u;
 const GI_ORPHAN:u32=2u;
 const GI_PARTIAL:u32=4u;
 const GI_QUEUED:u32=8u;
-const GI_NEAR:u32=16u;
 const GI_SPLIT:u32=32u;
-const GI_KEEP:u32=GI_NEAR|GI_SPLIT;
+const GI_KEEP:u32=GI_SPLIT;
 
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
 // shading a vec4 array (gi_api.wgsl) so records load whole.

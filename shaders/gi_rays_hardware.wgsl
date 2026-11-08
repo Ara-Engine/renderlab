@@ -20,7 +20,7 @@ fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHi
     return GiHit(true,hit.t,unit_normal(n),0x7fffffffu,vec3<u32>(0u),none);
 }
 // Sky visibility along an unbounded ray: any hit blocks it.
-fn gi_visible(origin:vec3<f32>, direction:vec3<f32>, near_start:f32) -> bool {
+fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
     var query:ray_query<vertex_return>;
     rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,0.0,1e20,origin,direction));
     while rayQueryProceed(&query) {}

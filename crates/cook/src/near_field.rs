@@ -2,12 +2,12 @@
 //! already-cooked virtual package, for the world radiance cache's non-RT path.
 //!
 //! Each mesh's far field is a legal cluster-DAG cut (R0c's selector), rebuilt as a BVH4 with
-//! eight triangles per leaf. The cut's vertices are source vertices, so they lie on the
-//! full-detail surface. Every vertex of every static placement then traces one exact ray per
-//! world-space octahedral bin, on each side of its normal, `reach` long, against the
-//! full-detail triangles of every placement (an f32 BVH2 in world space, built once). The
-//! result is one blocked bit per bin and side. Every vertex is traced, so nothing ranks where
-//! rays go (docs/m7-p0-claims.md 4.1). Results do not depend on thread count or order.
+//! eight triangles per leaf. With masks (`bins` > 0), the cut's vertices, which are source
+//! vertices on the full-detail surface, each trace one exact ray per world-space octahedral
+//! bin, on each side of their normal, `reach` long, against the full-detail triangles of every
+//! placement (an f32 BVH2 in world space, built once): one blocked bit per bin and side.
+//! Every vertex is traced, so nothing ranks where rays go (docs/m7-p0-claims.md 4.1). Results
+//! do not depend on thread count or order.
 use crate::{
     Error, Result,
     cache::{atomic_publish, hash, hex, immutable_entry, read_bounded},
@@ -450,6 +450,26 @@ pub fn prepare(
         far.push(bvh);
         far_normals.push(t.normals);
     }
+    if settings.bins == 0 {
+        // The cut alone: no masks, so no full-detail tracer.
+        report.gather_us = start.elapsed().as_micros();
+        let placements = package
+            .placements
+            .iter()
+            .map(|p| NearPlacement {
+                mesh: p.mesh,
+                transform: p.transform,
+                masks: vec![],
+            })
+            .collect();
+        let field = NearField {
+            settings,
+            source: [0; 32],
+            meshes: far,
+            placements,
+        };
+        return Ok((field, report));
+    }
     // Full-detail world triangles of every placement.
     let (positions, triangles) = world_triangles(package, limits, &mut load_page)?;
     report.full_triangles = triangles.len();
@@ -562,12 +582,7 @@ fn key(source: &GeometrySource, settings: &Settings) -> [u8; 32] {
     h.update(source.rla_version.to_le_bytes());
     h.update(source.rvg_version.to_le_bytes());
     h.update(format::VERSION.to_le_bytes());
-    for v in [
-        settings.lod_error,
-        settings.near,
-        settings.reach,
-        settings.skip,
-    ] {
+    for v in [settings.lod_error, settings.reach, settings.skip] {
         h.update(v.to_le_bytes());
     }
     h.update(settings.bins.to_le_bytes());

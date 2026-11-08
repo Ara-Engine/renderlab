@@ -2386,11 +2386,18 @@ fn gpu_gi_quarry() {
             if let Some(dir) = env("RENDERLAB_M7_G1_QUARRY_DUMP") {
                 let dir = PathBuf::from(dir);
                 std::fs::create_dir_all(&dir).unwrap();
-                let raw: Vec<u8> = image.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                let raw: Vec<u8> = image
+                    .iter()
+                    .flatten()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect();
                 std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}.f32")), raw).unwrap();
                 let mask: Vec<u8> = hits.iter().flat_map(|h| h.to_le_bytes()).collect();
-                std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}-hits.u32")), mask)
-                    .unwrap();
+                std::fs::write(
+                    dir.join(format!("{path}-{variant}-pose{pose}-hits.u32")),
+                    mask,
+                )
+                .unwrap();
             }
             let scale = exposure.exp2();
             png(

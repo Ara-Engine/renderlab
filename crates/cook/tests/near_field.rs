@@ -114,7 +114,6 @@ fn scene() -> Asset {
 fn settings() -> Settings {
     Settings {
         lod_error: 0.,
-        near: 0.25,
         reach: 0.5,
         skip: 0.0,
         bins: 16,
@@ -190,6 +189,42 @@ fn masks_follow_occluders_under_rotated_scaled_placements() {
     let toward = [-0.83, 0.55, 0.];
     let away = [0.83, 0.55, 0.];
     assert!(blocked(&front, toward) && !blocked(&front, away));
+}
+
+#[test]
+fn the_cut_alone_has_no_masks() {
+    let c = virtual_cook::prepare(
+        &scene(),
+        virtual_cook::Settings::default(),
+        VirtualLimits::default(),
+    )
+    .unwrap();
+    let f = near_field::prepare(
+        &c.package,
+        Settings {
+            bins: 0,
+            ..settings()
+        },
+        VirtualLimits::default(),
+        2,
+        |p| {
+            Ok(virtual_mesh::decode_page(
+                &c.package.pages[p],
+                &c.pages[p],
+                Sha256::digest(&c.pages[p]).into(),
+            )?)
+        },
+    )
+    .unwrap()
+    .0;
+    f.validate(format::Limits::default()).unwrap();
+    assert!(f.placements.iter().all(|p| p.masks.is_empty()));
+    assert_eq!(f.meshes, prepare(&c, 1).meshes);
+    let bytes = format::encode(&f, format::Limits::default()).unwrap();
+    assert_eq!(
+        format::decode(&bytes, format::Limits::default()).unwrap(),
+        f
+    );
 }
 
 #[test]
@@ -272,7 +307,7 @@ fn cook_is_deterministic_across_threads_and_cached() {
             &d,
             &manifest,
             Settings {
-                reach: 0.1,
+                skip: 1.0,
                 ..settings()
             },
             limits,

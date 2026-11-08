@@ -327,8 +327,8 @@ pub(super) struct GiState {
     pipelines: Option<Pipelines>,
     arrays: Option<Arrays>,
     meshes: Vec<(wgpu::Buffer, Arc<Blas>)>,
-    /// The near-field settings every cooked mesh shares (its far rays' start and bins).
-    near: Option<crate::asset::near_field::Settings>,
+    /// The octahedral bins per side every cooked mesh's near-field masks share (0: none).
+    near_bins: u32,
     packed: Option<Packed>,
     /// Last frame's world bounds per placement, for moved-caster boxes.
     bounds: Vec<[f32; 6]>,
@@ -369,7 +369,7 @@ impl GiState {
             pipelines: None,
             arrays: None,
             meshes: vec![],
-            near: None,
+            near_bins: 0,
             packed: None,
             bounds: vec![],
             environment: None,
@@ -631,26 +631,21 @@ impl Renderer {
         self.set_indirect_blas(mesh, Blas::new(bvh, level)?)
     }
     /// Software-ray geometry for `mesh` from mesh `index` of a cooked near field
-    /// (renderlab_asset::near_field, docs/m7-g1c.md): its far-field cut is traced at runtime,
-    /// and each instance whose transform has the exact bits of one of the field's placements
-    /// of this mesh reads that placement's near-field masks. A cell on such an instance takes
-    /// its near field (blocked within `near`) from the masks and traces the cuts of static
-    /// instances only from `near` on; other instances (movers) are traced over the whole ray.
-    /// Every cooked mesh must share the field's `near` and `bins`.
+    /// (renderlab_asset::near_field, docs/m7-g1c.md): its far-field cut, traced at runtime in
+    /// place of full detail. When the field has masks, each instance whose transform has the
+    /// exact bits of one of the field's placements of this mesh reads that placement's masks:
+    /// a cell on it also blocks the directions all three vertex masks block. Every cooked mesh
+    /// with masks must share the field's `bins`.
     pub fn set_indirect_near_field(
         &mut self,
         mesh: &Mesh,
         field: &crate::asset::near_field::NearField,
         index: usize,
     ) -> Result<(), Error> {
-        let settings = field.settings;
-        if self
-            .gi
-            .near
-            .is_some_and(|n| n.near != settings.near || n.bins != settings.bins)
-        {
+        let bins = field.settings.bins;
+        if bins != 0 && self.gi.near_bins != 0 && self.gi.near_bins != bins {
             return Err(Error::InvalidInput(
-                "near fields must share their near distance and bins",
+                "near-field masks must share their bins",
             ));
         }
         let bvh = field
@@ -661,13 +656,15 @@ impl Renderer {
         blas.near = field
             .placements
             .iter()
-            .filter(|p| p.mesh as usize == index)
+            .filter(|p| p.mesh as usize == index && !p.masks.is_empty())
             .map(|p| gi_bvh::NearMasks {
                 model: Mat4::from_cols_array_2d(&p.transform),
                 masks: p.masks.clone(),
             })
             .collect();
-        self.gi.near = Some(settings);
+        if bins != 0 {
+            self.gi.near_bins = bins;
+        }
         self.set_indirect_blas(mesh, blas)
     }
     fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
@@ -678,7 +675,7 @@ impl Renderer {
         self.gi.meshes.retain(|(k, _)| *k != key);
         self.gi.meshes.push((key, Arc::new(blas)));
         if self.gi.meshes.iter().all(|(_, b)| b.near.is_empty()) {
-            self.gi.near = None;
+            self.gi.near_bins = 0;
         }
         if let Some(old) = self.gi.packed.take() {
             self.gi
@@ -1270,11 +1267,9 @@ impl Renderer {
         };
         let spread = cut_phases > 1 && since_clear < cut_phases;
         header[14] = if spread { cut_phases } else { 0 };
-        // Software rays with cooked near fields: where static far rays start, and the
-        // masks' octahedral bins per side (0: no near field).
-        if let Some(n) = self.gi.near.filter(|_| software) {
-            header[15] = n.near.to_bits();
-            header[16] = n.bins;
+        // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
+        if software {
+            header[16] = self.gi.near_bins;
         }
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
