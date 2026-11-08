@@ -50,8 +50,11 @@ raster + Exact, including at ordinary exposure and at the registered +4-stop str
 The cold disk witness is 14.0832 display codes RMS versus raster + Exact's
 12.6000 and retained HRT1's 13.6655. Settled TR1 substantially improves it.
 
-- History restarts on scene-transform/instance uploads. Moving casters can
-  therefore retain eight-ray startup grain indefinitely; a long still hold
+- History restarted on scene-transform/instance uploads until MQ1
+  ([m7-mq1.md](m7-mq1.md)). Transform edits of existing placements now reproject
+  and clamp to a 3x3 min/max box instead. The moving-caster penumbra below was
+  measured before MQ1 and was not re-measured. New placements still restart.
+  Moving casters could therefore retain eight-ray startup grain indefinitely; a long still hold
   does not establish camera/reveal/caster-motion acceptance. In S2's moving
   blocker frame 63, the single-surface floor penumbra is 9.8755 codes RMS at
   +4 stops versus raster + Exact's 6.6179. This diagnostic does not replace
@@ -136,6 +139,12 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
 TR1 is the default on traced and visibility-buffer lit frames, both paths, from TR1b's overnight pass; `Reconstruction::off()` switches it off ([m7-tr1b.md](m7-tr1b.md)). It is never presented as meeting the Unreal bar.
 
 **Reach.** The RT device's code default is still raster primaries (RT1c/RT1d), which TR1 does not reconstruct: RT users get TR1 only with traced primaries. Temporal soft-shadow frames keep their own film history and are not reconstructed.
+
+**Animated scenes (MQ1, [m7-mq1.md](m7-mq1.md)).** Before MQ1, any transform edit restarted every pixel, so the example scene (and any game with a moving object) got no anti-aliasing and no glossy integration. Moved placements now reproject through their previous transforms, and frames where something moved clamp history to a plain 3x3 min/max box. Remaining gaps, measured on the example flight against a 2x2 supersampled TR1-off control:
+- **RT mirror and glossy reflections lag under camera motion**: chrome sphere 3.07 → 6.44 codes RMS and flicker 4.05 → 9.05 versus main's restart; gold sphere static 4.34 → 4.84, although its grain falls 62 %. Surface-identity history follows the surface, not the reflected image. The fix needs a program-declared view sensitivity (window capped by lobe width) or reflection hit distances. Static scenes under camera motion have the same lag without the box (TR1b's U1b failure).
+- **Skinned characters with GI on still restart every static pixel's history** on animated frames (SK1's scene-wide swept-volume widening). Recommended: set MQ1's box for skinned motion and keep the swept volume for direct shadows only.
+- Revealed pixels behind moving objects start from one jittered sample for about four frames; edges between two differently moving objects keep some stepping.
+- The example's `--quarry` mode fails on both paths (mixed programs, MP1).
 
 **Against no-AA, judged on each path's own 64-spp pixel integral** (Islam's ruling; the visible-sky quarry walk, 40 frames, every row pooled per segment). Before tonight TR1b lost 31 of 256 pooled rows on both paths. With the overnight changes (radius-1 spatial start with a radius-2 fallback, point-symmetric jitter pairs, exact single-layer output at whole coverage, sub-1e-3-px fetch snap) it loses 26 on both paths; the cold first frame now equals no-AA bit for bit (all start-age-0 rows tie). What still loses, by kind (RT; non-RT within a few rows of it):
 
