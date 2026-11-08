@@ -118,6 +118,10 @@ fn device(rt: bool) -> (wgpu::Device, wgpu::Queue) {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let a = adapter.limits();
     let mut features = crate::RECEIVER_FEATURES;
+    // M7-R1n: timed frames (RENDERLAB_R1N_TIMES) need GPU timestamps.
+    if std::env::var_os("RENDERLAB_R1N_TIMES").is_some() {
+        features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
     let mut limits = wgpu::Limits {
         max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
         max_buffer_size: a.max_buffer_size,
@@ -261,6 +265,17 @@ fn gpu_r0a_current() {
                 source: include_str!("../shaders/programs/toon.wgsl"),
             })
             .unwrap();
+        // M7-R1n (docs/m7-r1n.md): RENDERLAB_R1N_PROGRAM names a WGSL program that replaces
+        // the standard program on every non-toon material (the environment-only baseline).
+        let baseline = std::env::var_os("RENDERLAB_R1N_PROGRAM").map(|path| {
+            let source = std::fs::read_to_string(path).unwrap();
+            renderer
+                .try_create_program(&ProgramDescriptor {
+                    label: "R1n baseline",
+                    source: &source,
+                })
+                .unwrap()
+        });
         let materials: Vec<_> = bench
             .scene
             .materials
@@ -275,9 +290,13 @@ fn gpu_r0a_current() {
                         double_sided: true,
                         // MP1 diagnostic: RENDERLAB_R0A_TOON=standard draws the toon
                         // material on the standard program (a single-program frame).
-                        program: (json["materials"][i]["program"] == "toon"
-                            && std::env::var("RENDERLAB_R0A_TOON").as_deref() != Ok("standard"))
-                        .then_some(&toon),
+                        program: if json["materials"][i]["program"] == "toon"
+                            && std::env::var("RENDERLAB_R0A_TOON").as_deref() != Ok("standard")
+                        {
+                            Some(&toon)
+                        } else {
+                            baseline.as_ref()
+                        },
                         ..Default::default()
                     };
                     if let Some(m) = renderer.try_create_material(&descriptor).unwrap() {
@@ -371,6 +390,43 @@ fn gpu_r0a_current() {
             }
             let mut capture = renderer.try_capture_hdr().unwrap().unwrap();
             renderer.test_drain("R0a capture");
+            // M7-R1n: RENDERLAB_R1N_TIMES=N then renders N more frames of the pose and
+            // records each one's GPU shading pass and render span (functional, not QUIET).
+            if let Some(n) = std::env::var("RENDERLAB_R1N_TIMES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                renderer.poll().unwrap();
+                for _ in 0..n {
+                    let mut draws: Vec<_> = meshes
+                        .iter()
+                        .zip(instances.iter_mut())
+                        .zip(&bench.scene.instances)
+                        .map(|((mesh, instance), placement)| {
+                            Draw::new(mesh, instance).with_material(&materials[placement.material])
+                        })
+                        .collect();
+                    while renderer
+                        .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                        .unwrap()
+                        .is_none()
+                    {
+                        renderer.test_drain("R1n timing admission");
+                    }
+                }
+                renderer.test_drain("R1n timing frames");
+                let gpu = renderer.poll().unwrap().gpu;
+                let rows: Vec<_> = gpu.iter().rev().take(n).rev().collect();
+                std::fs::write(
+                    output.join(format!("{name}-{pose}.times.json")),
+                    serde_json::to_vec_pretty(&serde_json::json!({
+                        "shading_ms": rows.iter().map(|g| g.mesh_pass.as_secs_f64() * 1e3).collect::<Vec<_>>(),
+                        "span_ms": rows.iter().map(|g| g.render_span.as_secs_f64() * 1e3).collect::<Vec<_>>(),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
             let bytes = capture.try_read().unwrap().unwrap();
             let radiance: Vec<f32> = bytes
                 .chunks_exact(8)
@@ -397,7 +453,7 @@ fn gpu_r0a_current() {
                     "bench": name, "pose": pose, "scene_sha256": bench.sha256,
                     "width":view.width,"height":view.height,"exposure_stops":exposure,
                     "rt_device":rt,"primary_visibility":format!("{:?}",renderer.primary_visibility()),
-                    "reflection_implementation":"current production default: M7-R1 traced reflections on traced frames, environment only on non-RT; indirect cache remains disabled",
+                    "reflection_implementation":"current production default: M7-R1 traced reflections on traced frames, M7-R1n software reflection rays on non-RT visibility-buffer frames (RENDERLAB_R1N_PROGRAM may replace the standard program); indirect cache remains disabled",
                     "tr1":tr1,
                     "shadow_configuration":if rt {"hardware Interactive disk"} else {"Virtual disk; visibility-buffer non-RT default"},
                     "timing_eligible_for_claim":false

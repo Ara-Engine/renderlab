@@ -29,6 +29,7 @@ mod environment_controls;
 mod policy;
 
 use renderlab::{asset, engine::*};
+use sha2::{Digest, Sha256};
 use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
 
 const GAME_PROGRAM: &str = include_str!("game_scene.wgsl");
@@ -59,6 +60,8 @@ struct Args {
     sun_after: u32,
     still: bool,
     timing_frames: u32,
+    pipeline_cache: Option<PathBuf>,
+    reload_probe: bool,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -84,6 +87,12 @@ impl Args {
             sun_after: 0,
             still: false,
             timing_frames: 0,
+            pipeline_cache: Some(
+                std::env::var_os("RENDERLAB_PIPELINE_CACHE_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| "measurements/pipeline-cache".into()),
+            ),
+            reload_probe: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -107,6 +116,9 @@ impl Args {
                 }
                 "--exposure" => a.exposure = Some(value()?.parse()?),
                 "--quarry" => a.quarry = Some(value()?.into()),
+                "--pipeline-cache" => a.pipeline_cache = Some(value()?.into()),
+                "--no-pipeline-cache" => a.pipeline_cache = None,
+                "--reload-probe" => a.reload_probe = true,
                 "--no-gi" => a.gi = false,
                 "--sky" => {
                     a.uniform_sky = match value()?.as_str() {
@@ -166,6 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let args = Args::parse()?;
     let adapter = headless_adapter()?;
+    let adapter_seconds = start.elapsed().as_secs_f64();
     let capabilities = Capabilities::query(&adapter);
     let path = match args.path {
         Some(path) => path,
@@ -202,12 +215,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|m| m["exposure_stops"].as_f64())
             .map_or(if args.hour < 16.0 { -14.5 } else { -11.0 }, |s| s as f32)
     });
+    let mut preparation = Vec::new();
 
     let mut engine = Engine::new(
         &adapter,
         EngineDescriptor {
             path,
             experimental_ray_query,
+            pipeline_cache: args.pipeline_cache.clone(),
             settings: Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
@@ -231,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
+    let engine_seconds = start.elapsed().as_secs_f64();
     engine.resize(args.size[0], args.size[1])?;
     eprintln!(
         "game_scene adapter={:?} path={path:?} capabilities=(rt {}, nonrt {}) size={}x{} debug_build={}",
@@ -245,6 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Two programs in one frame: photoreal props and the toon hero (MP1).
     let program = engine.create_program("game", GAME_PROGRAM)?;
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
+    let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
         engine.create_material(&MaterialDesc {
             base_color: [color[0], color[1], color[2], 1.0],
@@ -309,7 +326,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let limits = policy.prepared();
             let loaded = Instant::now();
             let asset = asset::decode(&fs::read(manifest_path("asset")?)?, limits)?;
+            preparation.push(serde_json::json!({"phase":"asset_read_decode", "seconds":loaded.elapsed().as_secs_f64()}));
+            let upload = Instant::now();
             let handles = engine.add_asset(asset)?;
+            preparation.push(serde_json::json!({"phase":"asset_prepare_upload", "seconds":upload.elapsed().as_secs_f64()}));
+            let environment = Instant::now();
             let map = environment_controls::load_environment(
                 &manifest_path("environment")?,
                 asset::environment::Limits {
@@ -325,6 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 intensity: 1.0,
                 background: Background::Sky,
             })?;
+            preparation.push(serde_json::json!({"phase":"environment_read_upload", "seconds":environment.elapsed().as_secs_f64()}));
             eprintln!(
                 "game_scene quarry objects={} load_seconds={:.1}",
                 handles.objects.iter().map(Vec::len).sum::<usize>(),
@@ -573,6 +595,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
+    let mut first_image_seconds = None;
+    let mut reload = None;
     for frame in 0..args.frames {
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
@@ -614,8 +638,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let report = engine.render(&camera)?;
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
         let written = frame % args.every == 0 || frame + 1 == args.frames;
+        let mut image_hash = None;
         if written {
             let image = engine.capture()?;
+            first_image_seconds.get_or_insert_with(|| start.elapsed().as_secs_f64());
+            image_hash = Some(format!("{:x}", Sha256::digest(&image.rgba8)));
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
         }
         frames.push(serde_json::json!({
@@ -623,9 +650,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sun_hour": hour, "cpu_sun_update_ms": sun_update_ms,
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
+            "rgba8_sha256": image_hash,
         }));
         last_camera = Some(camera);
+        // PC1 diagnostic only: a real, visible program edit, then a rejected edit
+        // and restoration. These captures are separate from the ordinary frame hashes.
+        if args.reload_probe && frame + 1 == args.frames {
+            let edit =
+                GAME_PROGRAM.replace("return exposed;", "return exposed*vec3<f32>(0.83,1.0,1.0);");
+            let edited = Instant::now();
+            engine.reload_program(program, &edit)?;
+            let compiled_seconds = edited.elapsed().as_secs_f64();
+            engine.render(&camera)?;
+            let image = engine.capture()?;
+            let image_seconds = edited.elapsed().as_secs_f64();
+            write_png(&args.out.join("edited.png"), &image)?;
+            let rejected = engine
+                .reload_program(program, "this is invalid WGSL")
+                .is_err();
+            if !rejected {
+                return Err("invalid program reload was accepted".into());
+            }
+            engine.render(&camera)?;
+            let retained = engine.capture()?;
+            write_png(&args.out.join("rejected-retained.png"), &retained)?;
+            engine.reload_program(program, GAME_PROGRAM)?;
+            engine.render(&camera)?;
+            let restored = engine.capture()?;
+            write_png(&args.out.join("restored.png"), &restored)?;
+            reload = Some(serde_json::json!({"compile_seconds": compiled_seconds,
+                "edit_to_readback_seconds": image_seconds, "invalid_edit_rejected": rejected}));
+        }
     }
+    let compilation: Vec<_> = engine.take_compilation_timings().into_iter().map(|t|
+        serde_json::json!({"kind":t.kind,"label":t.label,"ms":t.duration.as_secs_f64()*1e3})).collect();
+    let driver: Vec<_> = renderlab::shader_compiler::take_timings(engine.device()).into_iter().map(|t|
+        serde_json::json!({"kind":t.kind,"ms":t.duration.as_secs_f64()*1e3,"cache_hit":t.application_cache_hit})).collect();
     let events = engine.poll()?;
     let spans: Vec<f64> = events
         .gpu
@@ -662,6 +722,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
+        "startup_to_first_image_seconds": first_image_seconds,
+        "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
+            "programs":programs_seconds-engine_seconds,"scene":ready.as_secs_f64()-programs_seconds},
+        "pipeline_cache": args.pipeline_cache, "compilation": compilation, "driver_compilation":driver,
+        "preparation":preparation,
+        "reload":reload,
         "gpu_render_span_ms": spans, "frames": frames, "timing":timing,
         "note": "shared-GPU diagnostic timings; debug_build records the build profile; not a performance claim",
     });

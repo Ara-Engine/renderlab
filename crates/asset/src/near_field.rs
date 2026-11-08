@@ -170,6 +170,40 @@ fn octahedral(d: [f32; 3]) -> [f32; 2] {
 /// LEAF_TRIANGLES per leaf. Child bounds are quantized outward so both fused and unfused
 /// f32 decodes enclose them (R0c's record layout and `Bvh::validate`).
 pub fn build_bvh(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh> {
+    build(positions, indices, false)
+}
+
+/// Software rays' deepest traversal: shaders/gi_rays_software.wgsl keeps a 48-entry stack, and
+/// a BVH4 node pushes at most four children after popping one, so 15 node levels fit.
+pub const MAX_SAH_DEPTH: usize = 15;
+/// As `build_bvh`, but each binary split takes the binned surface-area-heuristic plane (16
+/// bins per axis over the centroids, ties to the lower axis and bin), which runtime software
+/// rays traverse with fewer node and triangle tests than median splits. Deterministic. A tree
+/// deeper than MAX_SAH_DEPTH node levels falls back to the median build. Cooked packages keep
+/// `build_bvh` (their bytes are cache keys); runtime builds use this (M7-GC1, docs/m7-gc1.md).
+pub fn build_bvh_sah(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh> {
+    let bvh = build(positions, indices, true)?;
+    if depth(&bvh, bvh.levels[0].root) > MAX_SAH_DEPTH {
+        return build_bvh(positions, indices);
+    }
+    Ok(bvh)
+}
+/// Node levels below `child` (0 for a leaf).
+fn depth(bvh: &Bvh, child: u32) -> usize {
+    if child & LEAF_BIT != 0 {
+        return 0;
+    }
+    let node = &bvh.nodes[child as usize];
+    1 + node
+        .children
+        .iter()
+        .filter(|&&c| c != EMPTY)
+        .map(|&c| depth(bvh, c))
+        .max()
+        .unwrap_or(0)
+}
+
+fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<Bvh> {
     if indices.is_empty() || !indices.len().is_multiple_of(3) {
         return Err(Error("BVH geometry needs a nonempty triangle list"));
     }
@@ -190,10 +224,18 @@ pub fn build_bvh(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh> {
             })
         })
         .collect();
+    let boxes: Vec<([f32; 3], [f32; 3])> = if sah {
+        (0..indices.len() / 3)
+            .map(|t| bounds((0..3).map(|k| positions[indices[t * 3 + k] as usize])))
+            .collect()
+    } else {
+        vec![]
+    };
     let mut builder = Builder {
         positions,
         indices,
         centroids: &centroids,
+        boxes: &boxes,
         bvh: Bvh {
             positions: positions.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect(),
             ..Default::default()
@@ -223,7 +265,21 @@ struct Builder<'a> {
     positions: &'a [[f32; 3]],
     indices: &'a [u32],
     centroids: &'a [[f32; 3]],
+    /// Per triangle, its bounds: present for SAH builds (`build_bvh_sah`), empty for median.
+    boxes: &'a [([f32; 3], [f32; 3])],
     bvh: Bvh,
+}
+/// Bins per axis of the SAH split.
+const SAH_BINS: usize = 16;
+fn half_area(lo: [f32; 3], hi: [f32; 3]) -> f32 {
+    let e: [f32; 3] = std::array::from_fn(|a| (hi[a] - lo[a]).max(0.0));
+    e[0] * e[1] + e[1] * e[2] + e[2] * e[0]
+}
+fn merge(a: ([f32; 3], [f32; 3]), b: ([f32; 3], [f32; 3])) -> ([f32; 3], [f32; 3]) {
+    (
+        std::array::from_fn(|i| a.0[i].min(b.0[i])),
+        std::array::from_fn(|i| a.1[i].max(b.1[i])),
+    )
 }
 impl Builder<'_> {
     /// Child ID of the subtree over `triangles` (a leaf, or a node in postorder).
@@ -248,7 +304,67 @@ impl Builder<'_> {
         let children: Vec<u32> = groups.into_iter().map(|g| self.subtree(g)).collect();
         self.node(&children)
     }
-    fn split(&self, mut g: Vec<usize>) -> (Vec<usize>, Vec<usize>) {
+    fn split(&self, g: Vec<usize>) -> (Vec<usize>, Vec<usize>) {
+        if !self.boxes.is_empty()
+            && let Some(halves) = self.split_sah(&g)
+        {
+            return halves;
+        }
+        self.split_median(g)
+    }
+    /// The binned SAH plane over `g`'s centroids, or None when every centroid shares one bin
+    /// on every axis (the median split then decides).
+    fn split_sah(&self, g: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+        let (lo, hi) = bounds(g.iter().map(|&t| self.centroids[t]));
+        let empty = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        let mut best: Option<(f32, usize, usize)> = None;
+        for axis in 0..3 {
+            let extent = hi[axis] - lo[axis];
+            // Flat (or non-finite) along this axis: no plane separates the centroids.
+            if extent.is_nan() || extent <= 0.0 {
+                continue;
+            }
+            let bin = |t: usize| {
+                let f = (self.centroids[t][axis] - lo[axis]) / extent * SAH_BINS as f32;
+                (f as usize).min(SAH_BINS - 1)
+            };
+            let mut count = [0usize; SAH_BINS];
+            let mut boxes = [empty; SAH_BINS];
+            for &t in g {
+                let b = bin(t);
+                count[b] += 1;
+                boxes[b] = merge(boxes[b], self.boxes[t]);
+            }
+            // Costs of the planes after bins 0..SAH_BINS-1: area(L) n(L) + area(R) n(R).
+            let mut right = [0.0f32; SAH_BINS];
+            let (mut acc, mut n) = (empty, 0usize);
+            for b in (1..SAH_BINS).rev() {
+                acc = merge(acc, boxes[b]);
+                n += count[b];
+                right[b] = half_area(acc.0, acc.1) * n as f32;
+            }
+            let (mut acc, mut n) = (empty, 0usize);
+            for b in 0..SAH_BINS - 1 {
+                acc = merge(acc, boxes[b]);
+                n += count[b];
+                if n == 0 || n == g.len() {
+                    continue;
+                }
+                let cost = half_area(acc.0, acc.1) * n as f32 + right[b + 1];
+                if best.is_none_or(|(c, _, _)| cost < c) {
+                    best = Some((cost, axis, b));
+                }
+            }
+        }
+        let (_, axis, plane) = best?;
+        let extent = hi[axis] - lo[axis];
+        let (a, b): (Vec<usize>, Vec<usize>) = g.iter().partition(|&&t| {
+            let f = (self.centroids[t][axis] - lo[axis]) / extent * SAH_BINS as f32;
+            (f as usize).min(SAH_BINS - 1) <= plane
+        });
+        Some((a, b))
+    }
+    fn split_median(&self, mut g: Vec<usize>) -> (Vec<usize>, Vec<usize>) {
         let (lo, hi) = bounds(g.iter().map(|&t| self.centroids[t]));
         let axis = (0..3)
             .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))

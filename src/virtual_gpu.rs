@@ -184,6 +184,8 @@ impl Renderer {
                         min: [0.; 3],
                         max: [0.; 3],
                     },
+                    // M7-R1n: virtual geometry has no software reflection geometry yet.
+                    reflection: None,
                 }));
             }
             let mesh = pool.chunks[chunk].clone();
@@ -237,6 +239,7 @@ impl Renderer {
                 index: Arc::new(index),
                 index_count: data.indices.len() as u32,
                 bounds: Aabb::from_positions(data.vertices.iter().map(|v| v.position)).unwrap(),
+                reflection: None,
             };
             (Arc::new(mesh), 0)
         };

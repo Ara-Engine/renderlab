@@ -4,7 +4,9 @@
 //! materials are descriptor-indexed, so each stage is one dispatch over the image.
 //! Trace and visibility kernels hold no program code and compile once per prelude; each
 //! program compiles only its own shading modules (`shading_heads`).
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
 use crate::shadow_plan::Bounds;
 
@@ -20,10 +22,11 @@ pub(super) mod temporal_reconstruction;
 pub(super) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
-/// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags and the
-/// `scene_pixels` rectangle.
+/// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
+/// `scene_pixels` rectangle, the sampling words and the reflection bands
+/// (`ReflectionSettings::frame_words`).
 // TP2 integration: post-processing shares this ABI instead of freezing its byte size.
-pub(super) const FRAME_BYTES: usize = 128;
+pub(super) const FRAME_BYTES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -81,7 +84,10 @@ pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
 pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
     let heads = non_rt_heads(wgsl)?;
     let kernels = heads.clone().map(|h| format!("{h}\noverride FRESH_DIRECTIONS:u32=256u;\n@compute @workgroup_size(1) fn primary_trace() {{}}\n@compute @workgroup_size(1) fn primary_trace_receivers() {{}}\n@compute @workgroup_size(1) fn primary_trace_interactive() {{}}\n@compute @workgroup_size(1) fn fresh_compute() {{}}"));
-    Ok((kernels, finish_shading_heads(heads)?))
+    // M7-R1n: non-RT shading heads declare the software reflection geometry.
+    let shading = finish_shading_heads(heads)?
+        .map(|h| format!("{h}\n{}", crate::program::SOFTWARE_REFLECTION_GEOMETRY));
+    Ok((kernels, shading))
 }
 
 /// The engine's trace and visibility kernel modules: hard (camera rays and exact
@@ -291,7 +297,7 @@ pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u3
 }
 
 /// Whether `device` enables the binding arrays traced visibility indexes per draw.
-pub(super) fn supported(device: &wgpu::Device) -> bool {
+pub(super) fn supported(device: &PipelineDevice) -> bool {
     let limits = device.limits();
     device.features().contains(TRACED_FEATURES) && traced_limits(limits.clone()) == limits
 }
@@ -382,6 +388,16 @@ impl Renderer {
     }
     pub fn reconstruction(&self) -> Reconstruction {
         self.reconstruction
+    }
+    /// Global reflection controls (src/reflections.rs): R1's traced reflections and R1n's
+    /// software rays trace only while enabled, and only up to `max_roughness`. Default on.
+    pub fn set_reflections(&mut self, settings: crate::ReflectionSettings) -> Result<(), Error> {
+        settings.validate()?;
+        self.reflections = settings;
+        Ok(())
+    }
+    pub fn reflections(&self) -> crate::ReflectionSettings {
+        self.reflections
     }
     /// The next reconstructed frame restarts every pixel: a camera cut the engine cannot
     /// infer from the camera alone.
@@ -550,6 +566,9 @@ fn image(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayoutEntr
 }
 /// WGSL binding of the camera rays' TLAS view, with hit-triangle positions.
 const TRACE_SCENE: u32 = 19;
+/// M7-R1n: non-RT shading's software reflection geometry
+/// (`program::SOFTWARE_REFLECTION_GEOMETRY`).
+const SOFTWARE_REFLECTIONS: u32 = 36;
 /// The shared TLAS: binding 2 for shadow rays, `TRACE_SCENE` for camera rays.
 fn scene(binding: u32) -> wgpu::BindGroupLayoutEntry {
     entry(
@@ -635,11 +654,13 @@ pub(super) struct Targets {
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
-    /// Hit records, HDR, fresh targets, TLAS and list-buffer generations.
+    /// Hit records, HDR, fresh targets, TLAS and list-buffer generations, then M7-R1n's
+    /// software reflection geometry generation.
     key: (
         wgpu::Texture,
         wgpu::Texture,
         Option<wgpu::Texture>,
+        u64,
         u64,
         u64,
     ),
@@ -758,6 +779,8 @@ pub(super) struct PrimaryState {
     bins: Option<Owned<wgpu::ComputePipeline>>,
     pub targets: Option<Targets>,
     geometry: Option<Geometry>,
+    /// M7-R1n: non-RT frames' software reflection geometry (reflection_software.rs).
+    reflections: Option<SoftwareReflections>,
     bindings: Option<Bindings>,
     /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
     geometry_generation: u64,
@@ -783,7 +806,7 @@ impl PrimaryState {
     #[cfg(test)]
     pub(super) fn test_film_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         kernels: &str,
         shading: &str,
     ) -> [wgpu::ComputePipeline; 3] {
@@ -847,7 +870,7 @@ impl PrimaryState {
         )
     }
     /// `lighting` is the group-3 layout shared with raster shading.
-    pub fn new(device: &wgpu::Device, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
         use wgpu::TextureFormat as F;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let entries: Vec<_> = entries
@@ -953,6 +976,13 @@ impl PrimaryState {
             } else {
                 // M7-R1: Soft shading traces reflection rays on the shared TLAS.
                 entries.push(scene(2));
+            }
+            // M7-R1n: non-RT shading traces them in software (reflection_software.rs).
+            if !device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            {
+                entries.push(read(SOFTWARE_REFLECTIONS, 4));
             }
             entries
         });
@@ -1128,6 +1158,7 @@ impl PrimaryState {
             bins: None,
             targets: None,
             geometry: None,
+            reflections: None,
             bindings: None,
             geometry_generation: 0,
             bindings_generation: 0,
@@ -1142,7 +1173,7 @@ impl PrimaryState {
     /// `sources` are `shader_sources` output: hard kernels first, soft kernels second.
     pub fn compile(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         sources: &[String; 2],
     ) -> PrimaryPipelines {
@@ -1238,7 +1269,7 @@ impl PrimaryState {
     /// `film_accumulation::kernel_source` module.
     pub fn film_kernel(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         source: &str,
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
@@ -1272,7 +1303,7 @@ impl PrimaryState {
     /// module, through `cache` when given.
     pub fn film_shade_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         cache: Option<&wgpu::PipelineCache>,
@@ -1294,7 +1325,7 @@ impl PrimaryState {
     #[cfg(test)]
     pub fn shade_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         modules: [&wgpu::ShaderModule; 2],
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
@@ -1304,7 +1335,7 @@ impl PrimaryState {
     /// concurrently, through `cache` when given.
     pub fn shade_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         shading: usize,
@@ -1315,7 +1346,7 @@ impl PrimaryState {
     /// `shade_pipeline` of a streamed (`Stage::TracedStreamed`) module.
     pub fn streamed_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         shading: usize,
@@ -1331,7 +1362,7 @@ impl PrimaryState {
     }
     fn shading_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         layout: &wgpu::PipelineLayout,
@@ -1354,7 +1385,7 @@ impl PrimaryState {
     /// replace the estimator through `constants` and variant modules.
     pub fn fresh_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         entry: &str,
@@ -1380,7 +1411,7 @@ impl PrimaryState {
     /// the estimator through `constants`.
     pub fn interactive_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         constants: &[(&str, f64)],
@@ -1395,7 +1426,7 @@ impl PrimaryState {
     }
     fn interactive_entry(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         entry: &str,
@@ -1558,7 +1589,24 @@ impl Renderer {
                 .as_ref()
                 .is_some_and(|h| h.visibility_filter);
         bytes[88..92].copy_from_slice(&u32::from(filter).to_ne_bytes());
-        for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
+        for (dst, value) in bytes[96..112].chunks_exact_mut(4).zip(scene) {
+            dst.copy_from_slice(&value.to_ne_bytes());
+        }
+        // M7-R1/R1n: the global reflection bands, on both paths. A non-RT frame traces only
+        // when every drawn mesh has software geometry: a ray through an uncovered mesh would
+        // show the sky behind it, a leak worse than the untraced estimate. Skinned meshes
+        // (SK1) are left out of the software geometry, not counted as uncovered: their GPU
+        // vertices move every frame, so a bind-pose tree would reflect them in the wrong place.
+        let covered = self.hardware_shadows.is_some()
+            || draws
+                .iter()
+                .all(|d| d.mesh.reflection.is_some() || d.mesh.skin.is_some());
+        let bands = if covered {
+            self.reflections.frame_words()
+        } else {
+            crate::ReflectionSettings::off().frame_words()
+        };
+        for (dst, value) in bytes[128..144].chunks_exact_mut(4).zip(bands) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
         if self.primary.as_ref().unwrap().frame.is_none() {
@@ -1717,6 +1765,10 @@ impl Renderer {
             g.instances = instances;
         }
         self.prepare_primary_materials(draws, uploads);
+        // M7-R1n: non-RT frames trace reflections in software.
+        if self.hardware_shadows.is_none() {
+            self.prepare_software_reflections(draws, uploads);
+        }
         // Only traced Interactive visibility dispatches deferred edge repair. Other
         // modes bind ABI-sized placeholders; switching back restores full capacity.
         let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
@@ -1825,6 +1877,7 @@ impl Renderer {
             fresh.map(|f| (*f.world.texture).clone()),
             scene_generation,
             lists.map_or(0, |l| l.generation),
+            state.reflections.as_ref().map_or(0, |r| r.generation),
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             let reconstruction_changed = state
@@ -1891,6 +1944,9 @@ impl Renderer {
                 }),
             ];
             let reflection_scene = scene.clone();
+            let reflection_geometry = hardware
+                .is_none()
+                .then(|| &*state.reflections.as_ref().unwrap().buffer.value);
             let shade = |shading: Shading,
                          visibility: (u32, R<'_>)|
              -> [Option<Owned<wgpu::BindGroup>>; 2] {
@@ -1908,6 +1964,10 @@ impl Renderer {
                 } else {
                     // M7-R1: reflection rays (shaders/reflections.wgsl).
                     entries.push(reflection_scene.clone());
+                }
+                // M7-R1n: software reflection geometry on non-RT renderers.
+                if let Some(geometry) = &reflection_geometry {
+                    entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
@@ -2466,3 +2526,114 @@ impl Renderer {
         pass.dispatch_workgroups(x.max(bx), y + by, 1);
     }
 }
+
+// ---- M7-R1n software reflections (docs/m7-r1n.md) ----
+/// Non-RT frames' packed software reflection geometry (`crate::reflection_software`): each
+/// distinct drawn mesh's BVH once, behind the frame's instance records. Repacked when the
+/// drawn meshes or the number of traced instances change; transform edits rewrite only the
+/// records.
+pub(super) struct SoftwareReflections {
+    buffer: Buffer,
+    meshes: Vec<Arc<crate::reflection_software::Blas>>,
+    bases: Vec<[u32; 2]>,
+    records: Vec<u32>,
+    /// Counts repacks; shading groups rebind on a change.
+    generation: u64,
+}
+impl Renderer {
+    fn prepare_software_reflections(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        uploads: &mut UploadBytes,
+    ) {
+        let mut meshes: Vec<Arc<crate::reflection_software::Blas>> = vec![];
+        let mut traced = vec![];
+        let mut slot = 0u32;
+        for d in draws {
+            // Skinned meshes neither appear in nor block non-RT reflection rays (gap).
+            let rigid = d.mesh.reflection.as_ref().filter(|_| d.mesh.skin.is_none());
+            let mesh = rigid.map(|b| {
+                meshes
+                    .iter()
+                    .position(|m| Arc::ptr_eq(m, b))
+                    .unwrap_or_else(|| {
+                        meshes.push(b.clone());
+                        meshes.len() - 1
+                    })
+            });
+            for model in &d.instances.state.models {
+                if let Some(mesh) = mesh {
+                    traced.push((slot, *model, mesh));
+                }
+                slot += 1;
+            }
+        }
+        let state = self.primary.as_ref().unwrap();
+        let same = state.reflections.as_ref().is_some_and(|r| {
+            r.meshes.len() == meshes.len()
+                && r.meshes.iter().zip(&meshes).all(|(a, b)| Arc::ptr_eq(a, b))
+                && r.records.len()
+                    == crate::reflection_software::HEADER_WORDS
+                        + traced.len() * crate::reflection_software::INSTANCE_WORDS
+        });
+        let records = |bases: &[[u32; 2]]| {
+            let rows: Vec<_> = traced
+                .iter()
+                .map(|&(slot, model, mesh)| (slot, model, &*meshes[mesh], bases[mesh]))
+                .collect();
+            let mut words = crate::reflection_software::instance_words(&rows);
+            // Records of singular models stay reserved (and untraced).
+            words.resize(
+                crate::reflection_software::HEADER_WORDS
+                    + traced.len() * crate::reflection_software::INSTANCE_WORDS,
+                0,
+            );
+            words
+        };
+        if same {
+            let r = self.primary.as_ref().unwrap().reflections.as_ref().unwrap();
+            let words = records(&r.bases);
+            if words != r.records {
+                let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+                self.queue.write_buffer(&r.buffer.value, 0, &bytes);
+                uploads.geometry += (words.len() * 4) as u64;
+                uploads.write_calls += 1;
+                self.primary
+                    .as_mut()
+                    .unwrap()
+                    .reflections
+                    .as_mut()
+                    .unwrap()
+                    .records = words;
+            }
+            return;
+        }
+        let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
+        let mut packed = crate::reflection_software::pack(&refs, traced.len());
+        let words = records(&packed.bases);
+        packed.words[..words.len()].copy_from_slice(&words);
+        let buffer = Buffer::new(
+            self,
+            "software reflection geometry",
+            (packed.words.len() * 4) as u64,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let bytes: Vec<u8> = packed.words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        self.queue.write_buffer(&buffer.value, 0, &bytes);
+        uploads.geometry += (packed.words.len() * 4) as u64;
+        uploads.write_calls += 1;
+        let state = self.primary.as_mut().unwrap();
+        let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
+        state.reflections = Some(SoftwareReflections {
+            buffer,
+            meshes,
+            bases: packed.bases,
+            records: words,
+            generation,
+        });
+    }
+}
+// ---- end of M7-R1n software reflections ----
+#[cfg(test)]
+#[path = "reflection_software_tests.rs"]
+mod reflection_software_tests;

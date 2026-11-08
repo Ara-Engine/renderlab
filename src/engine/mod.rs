@@ -31,9 +31,9 @@ pub use crate::cutout::{AlphaMask, CutoutMesh, cutout};
 pub use crate::{
     AtmosphereMedium, Camera, ColourLut, Decal, DecalBlend, DecalTexture, DecalTextureKind,
     DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, FrameId, FrameReport, HeightFog,
-    Light, Limits, LocalShadows, MAX_PARTICLES, Mat4, MeshData, PostSettings, ReloadError,
-    ReloadReport, RenderScale, Renderer, Tonemapper, Transparency, Value, Vec3, Vertex,
-    VolumetricFog,
+    Light, Limits, LocalShadows, MAX_PARTICLES, Mat4, MeshData, PostSettings, ReflectionSettings,
+    ReloadError, ReloadReport, RenderScale, Renderer, Tonemapper, Transparency, Value, Vec3,
+    Vertex, VolumetricFog,
 };
 
 use crate::{
@@ -74,8 +74,9 @@ pub struct EngineDescriptor {
     /// Anisotropic filtering of all-linear mipmapped textures, 1 (off) to 16. Fixed for
     /// the engine's lifetime.
     pub texture_anisotropy: u16,
-    /// Directory for the persistent program pipeline cache, so a relaunch or a reverted
-    /// shader edit is a cache hit. None keeps the cache in memory only.
+    /// Directory for the persistent shared pipeline cache, so a relaunch or a reverted
+    /// shader edit can reuse driver compilation. Includes first-use engine kernels.
+    /// None retains only the in-memory program cache; cache I/O failures fall back to empty.
     pub pipeline_cache: Option<PathBuf>,
 }
 impl Default for EngineDescriptor {
@@ -275,33 +276,29 @@ impl Engine {
             anisotropy_clamp: descriptor.texture_anisotropy,
         };
         let format = descriptor.output_format;
-        let mut renderer = match path {
-            RenderPath::HardwareRt => {
-                let mut r = Renderer::new_with_hardware_shadows(
-                    device,
-                    queue,
-                    format,
-                    descriptor.limits,
-                    options,
-                    HardwareShadowOptions {
-                        max_estimated_bytes: Some(8 << 30),
-                    },
-                    PRELUDE,
-                )?;
-                r.set_primary_visibility(PrimaryVisibility::Traced)?;
-                r
-            }
-            // A device with the visibility-buffer and Virtual-shadow features selects
-            // both at creation.
-            RenderPath::NonRt => Renderer::new_with_options(
-                device,
-                queue,
-                format,
-                descriptor.limits,
-                options,
-                PRELUDE,
-            )?,
-        };
+        // PC1: load the shared driver cache before any renderer pipeline is built.
+        let info = adapter.get_info();
+        let device = crate::pipeline_compilation::PipelineDevice::new(
+            device,
+            descriptor
+                .pipeline_cache
+                .as_deref()
+                .map(|directory| (directory, &info)),
+        );
+        let mut renderer = crate::Renderer::new_configured(
+            device,
+            queue,
+            format,
+            descriptor.limits,
+            options,
+            (path == RenderPath::HardwareRt).then_some(HardwareShadowOptions {
+                max_estimated_bytes: Some(8 << 30),
+            }),
+            PRELUDE,
+        )?;
+        if path == RenderPath::HardwareRt {
+            renderer.set_primary_visibility(PrimaryVisibility::Traced)?;
+        }
         let expected = match path {
             RenderPath::HardwareRt => PrimaryVisibility::Traced,
             RenderPath::NonRt => PrimaryVisibility::VisibilityBuffer,
@@ -310,12 +307,6 @@ impl Engine {
             return Err(Error::InvalidInput(
                 "renderer did not select the path's primary visibility",
             ));
-        }
-        let info = adapter.get_info();
-        if let Some(directory) = &descriptor.pipeline_cache {
-            renderer
-                .set_program_cache_directory(directory, &info)
-                .map_err(|_| Error::InvalidInput("pipeline cache directory is unreadable"))?;
         }
         let mut programs = Slots::new("unknown or removed program");
         let standard = programs.insert(renderer.standard_program().clone());
@@ -353,6 +344,11 @@ impl Engine {
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
     }
+    /// Drain opt-in CPU compilation timings (`RENDERLAB_STARTUP_PROFILE=1`).
+    pub fn take_compilation_timings(&self) -> Vec<crate::pipeline_compilation::CompilationTiming> {
+        self.renderer.take_compilation_timings()
+    }
+
     /// The engine's device, for creating surfaces' configurations and the game's own
     /// resources. Submit nothing to its queue that the engine's frames depend on.
     pub fn device(&self) -> &wgpu::Device {

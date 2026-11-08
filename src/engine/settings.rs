@@ -185,6 +185,10 @@ pub struct Settings {
     /// LUT's strength. On by default; `PostSettings { enabled: false, .. }` presents the
     /// plain tone-mapped image.
     pub post: PostSettings,
+    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
+    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
+    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
+    pub reflections: crate::ReflectionSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -199,6 +203,7 @@ impl Default for Settings {
             volumetric_fog: Some(VolumetricFog::default()),
             local_shadows: LocalShadows::default(),
             post: PostSettings::default(),
+            reflections: crate::ReflectionSettings::default(),
         }
     }
 }
@@ -314,6 +319,7 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
     } else {
         Reconstruction::off()
     })?;
+    r.set_reflections(settings.reflections)?;
     match path {
         RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {
             Quality::Realtime => SoftShadows::Interactive,

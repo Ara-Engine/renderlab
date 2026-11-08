@@ -168,7 +168,14 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
 
-1. **Non-RT has no traced reflections.** Mirror and glossy surfaces reflect only the environment, through ES1's `indirect_radiance` (occluded, with bounce, once the world radiance cache is on). RF1-RF9 are unchanged and miss UE SW Epic on every fixture: RF1 46.1 vs 37.2, RF2 21.0 vs 15.9, RF3 45.8 vs 32.2, RF4 45.7 vs 40.6, RF6 52.3 vs 12.3, RF7 48.0 vs 35.6, RF8 9.9 vs 5.2, RF9 46.2 vs 37.0. Local objects never appear in non-RT reflections. The fix is R1n's LOD-BVH software rays (design 5.2, R0c's BVH), which did not fit the time-box. The patent-fallback trigger (`NonRtReflections::CoherentHybrid`) has not been evaluated, because no design-around tier has been measured yet.
+1. **Non-RT reflections (R1n, [m7-r1n.md](m7-r1n.md)) trace in software, with limits.** R1's rays now run on non-RT visibility-buffer frames over per-mesh software BVHs, on by default. They beat UE SW Epic on RF1-RF7 and RF9 (RF1 4.15 vs 37.2, RF2 13.8 vs 15.9, RF6 6.7 vs 12.3, RF7 23.3 vs 35.6) and miss it on RF8 (7.96 vs 5.24, the untraced rough band, item 5). Against UE HW-Hit Epic they miss RF7 and RF8, as R1 does. They match R1's RT scores within 0.04 codes. What is still missing:
+   - **Large and virtual meshes have no software geometry.** Meshes over 2^19 triangles and streamed clusterLOD meshes get none, and a frame drawing any such mesh traces nothing (the coverage rule, so no ray leaks sky through a missing mesh). The quarry (twelve ~1 M-triangle scans) therefore keeps the environment estimate. The fix is R0c's cooked cluster-LOD cut chosen by ray-cone footprint, carrying drawn-triangle identity (or position-free leaves into the draw's own buffers), so hit shading keeps R1's contract.
+   - **Skinned meshes (SK1) are absent from non-RT reflections.** Their vertices move on the GPU every frame, so they are left out of the software geometry: they neither appear in nor block non-RT reflection rays, and frames that draw them still trace the rest. The fix is a per-frame CPU skin or a GPU-built tree for skinned meshes.
+   - **No LOD selection by ray cone.** Full detail is the only level; R0c's `select_cone_level` is not used yet.
+   - **Cost on reflective content is high** (m7-r1n.md §3): +1.6 to +3.5 ms of shading at 1080p on the mirror and puddle fixtures, +6.7 ms on RF8's glossy rocks (functional, contended), against Lumen's 0.07/0.22 ms reflection pass (U0, A). A flat instance loop, a 32-entry stack in the shading kernel and hit shading inlined beside it are the likely causes (I); a separate trace pass, a two-level tree and wider nodes are the levers.
+   - **Quarry with the cache on (the default): +0.30 to +0.52 ms of shading although nothing is traced** (m7-r1n.md §4), R1's codegen effect on RT now on the default path too. Images are bit-identical (cache on) with TR1 off. Fix as R1's item 11: a separate hit-shading pass or an open-only composition.
+   - **Edge slack.** Möller–Trumbore is not watertight; a 4e-6 barycentric slack closes shared-edge seams (the identity quad leaked sky without it). Hits can lie up to that fraction outside their triangle.
+   - **Transforms are rewritten whole** each frame they change; there is no refit and no moving-object special case.
 2. **Raster primaries get no traced reflections.** The RT device's code default is still raster primaries (IQ1, RT1d), and only traced-primary frames trace reflections. Raster frames keep the environment estimate, as non-RT does.
 3. **Hits on another program's object** (MP1, [m7-mp1.md](m7-mp1.md)): mixed-program frames now render on both paths, but such a hit is shaded by the reflecting surface's program with the hit's material inputs, not by the hit's own program (Programs, below). The toon program is still untested as a reflection-hit program in production; only R0b's probe has tested it.
 4. **One bounce.** Hits take their own untraced specular. RF7 (facing glossy panels) misses at 23.3 vs UE HW-Hit Epic 20.2; its recursive panel-to-panel reflections are missing.
@@ -248,8 +255,11 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
 
-- **Cost against Lumen.** One functional timing run with the camera moving: +1.32-1.62 ms on RT and +2.59-2.83 ms on non-RT over the cache-off frame. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target misses by about 2.2-2.6x (RT) and 4.3-4.7x (non-RT), and the ~0.45 ms budget by 3-6x. Largest items: the shading lookup (+0.6 ms on both paths) and the probe (0.43 ms); on non-RT also gathers (0.74 ms) and query points for new cells (0.53 ms). The run was not quiet-classified.
-- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 28 frames (RT) and 2-4 s (non-RT), not 8 frames. While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
+- **Cost against Lumen** (GC1, [m7-gc1.md](m7-gc1.md); functional runs, not quiet-classified). With the camera moving after a cut has drained, the default cache adds +1.60-2.01 ms on RT and +1.90-2.98 ms on non-RT (p50 1.68 / 2.51) over the cache-off frame, down from +1.98-2.22 / +2.75-2.95 on main before GC1. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target still misses by about 2.6-3.2x (RT) and 3.1-4.9x (non-RT).
+  - **Largest stage: the shading pass's increment**, +1.01 ms (RT) and +0.78-0.88 ms (non-RT). It grew since G2b's +0.6 as main's shading grew, and is codegen-sensitive (a lookup variant that saved 0.1 ms on RT cost 0.07 ms with the cache off and lost on non-RT).
+  - Next: the probe (0.43-0.45 ms on both paths), and on non-RT the query points of new cells (0.34 ms), gathers (0.22 ms) and their visibility rays (0.14 ms).
+  - Not built: a half-resolution lookup with geometry-aware upsampling (a separate pass would take the lookup's registers out of the shading shader), level hysteresis, and an on-screen-first cut gather order.
+- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 23 frames (RT) and 93 frames, about 1.5 s (non-RT), not 8 frames (GC1: gathers whose hits are all final stop early, a fifth fewer cut gathers; G2b read 28 frames and 2-4 s). While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
 - **Crevice mouths.** Dark streaks and pinholes at crevice mouths remain (TR1x64 pinholes on the merged TR1b default: RT 142 and non-RT 128, against cache-off's 74). Measured fix: 2 px cells (pinholes at the cache-off level, every quarry population better), opt-in only: it speckles flat surfaces on SV and needs a 448 MiB table, over the non-RT device's 256 MiB buffer limit. No per-pixel short-ray check was built.
 - **Enclosed cavities.** A coarse per-cell mottle shows in cavities lit through narrow openings (the quarry's cave and hollow) where the reference is smooth. The hollow is also about 5.5 codes too dark: es1open beats the cache there by 3.6-4.5 codes. More gathers (up to 7) do not change it. It needs a fixed-weight cell-space filter or more directions per cell.
 - **Other losses kept from G2.** On isolated rocks and background-centre the cache loses to cache-off at TR1x64. Against ES1's unoccluded diagnostic it loses on 10-16 populations by 0.1-0.6 codes. It loses to Lumen HW on edge and multi-surface.
@@ -294,3 +304,30 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 8. **Unverified:** mixed frames with streamed textures (`TextureResidency` other than `Full`; composed and naga-checked, never rendered), mixed frames with RT1d's visibility filter, motion and disocclusion across program boundaries under TR1 (only static frames and the example's fly path were inspected), and Hard (inline-ray) shading in mixed frames (the gates use Interactive and Virtual).
 9. **Memory with many photoreal programs.** The eight-standard-program quarry run took available memory below the lease guard's 2 GiB twice (32 GB machine, other units running), where the toon-program run bottomed at 5.1 GiB. Not diagnosed: concurrent list-pipeline compiles, per-program GI cell pipelines and per-switch material churn are candidates.
 10. **No Unreal comparison** of per-object materials: Unreal assigns materials per mesh natively; the 2x speed gate on matched workloads was not measured for mixed frames.
+
+
+## Startup
+
+PC1 ([m7-pc1.md](m7-pc1.md)) persists engine and program Vulkan pipeline caches before
+initialization. Full-image identity passes on game/quarry, RT/non-RT, dev/release.
+The shared-machine release RT game sample falls from 48.771 s with an empty application
+cache to 0.745 s with a populated one. These are single diagnostic samples with an
+uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window claim.
+
+- Cold startup remains expensive: release RT game was 48.771 s empty-cache versus
+  37.497 s with persistence off. A real unseen program edit still took 31.335 s to
+  readback; 95.7 ms of module work was followed by a 31.081 s first-use mixed-program
+  list pipeline compile. Background/prewarmed creation of unseen variants remains open.
+- A driver-private-cache hit can already make startup fast. The dev matrix shows no
+  consistent extra benefit from persistence, and one non-RT warm sample is slower.
+- Warm quarry preparation remains 9.479/27.306 s in dev and 4.415/15.236 s in release
+  (RT/non-RT); resource/geometry/ray preparation and upload dominate non-RT. This unit
+  changes no GI, acceleration-structure or asset-cooking algorithms.
+- The timed quarry is the engine example with the complete registered scan asset and
+  game props, using its game camera. Startup of the low-level viewer/quarry walk was
+  not measured; its legacy program-only cache setter does not persist all startup kernels.
+- The program edit check uses the API, without GI/TR1, on RT. File-watch debounce,
+  physical scanout, a separate non-RT reload timing and native-only driver/SPIR-V
+  attribution were not measured. Corrupt-file/key tests pass on CPU; GPU replay after
+  corruption or an actual driver update remains untested. Cache files are bounded to
+  64 MiB and concurrent writers retain the last complete snapshot.

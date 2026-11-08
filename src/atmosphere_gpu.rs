@@ -3,8 +3,10 @@
 //! kernels and the raster sky. Lit frames with any atmosphere part on prepare it before the
 //! lighting group binds it and encode its kernels before shading; every other frame skips
 //! it entirely. The shading side is shaders/atmosphere_api.wgsl.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
 use crate::atmosphere::{Atmosphere, AtmosphereMedium};
+use crate::pipeline_compilation::PipelineDevice;
 
 const COMMON: &str = include_str!("../shaders/atmosphere_common.wgsl");
 const KERNELS: &str = include_str!("../shaders/atmosphere.wgsl");
@@ -63,7 +65,7 @@ pub(super) struct Lut {
     pub view: Owned<wgpu::TextureView>,
     _allocation: Allocation,
 }
-fn lut(device: &wgpu::Device, ledger: &Ledger, label: &str, size: [u32; 3], d3: bool) -> Lut {
+fn lut(device: &PipelineDevice, ledger: &Ledger, label: &str, size: [u32; 3], d3: bool) -> Lut {
     let texture = ledger.own(
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -111,7 +113,7 @@ pub(super) struct Volume {
     inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
 }
 impl Volume {
-    fn new(device: &wgpu::Device, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
+    fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
         Self {
             grid,
             camera: lut(
@@ -197,7 +199,7 @@ pub(super) struct AtmosphereGpu {
     pub generation: u64,
 }
 impl AtmosphereGpu {
-    pub fn new(device: &wgpu::Device, ledger: &Ledger) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         let uniform = ledger.own(
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("AT1 atmosphere uniform"),
@@ -278,7 +280,7 @@ impl AtmosphereGpu {
 
 /// One kernel pipeline with its derived layout.
 fn kernel(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     module: &wgpu::ShaderModule,
     entry: &str,
@@ -296,7 +298,7 @@ fn kernel(
     )
 }
 fn group(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     ledger: &Ledger,
     pipeline: &wgpu::ComputePipeline,
     entries: &[wgpu::BindGroupEntry<'_>],
