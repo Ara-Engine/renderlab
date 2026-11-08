@@ -19,7 +19,15 @@ def batch(label, binary, steps):
     import json
     plan = OUT / ('batch-' + label + '.json')
     rows = json.loads(plan.read_text()) if plan.exists() else [dict(binary=binary, step=step) for step in steps]
+    tp1 = load('m7-tp1-run')
+    g = tp1.guard()
+    g.OWNER = 'm7-tp2'
     for index, row in enumerate(rows):
+        if not turn_ready(g, tp1):
+            remaining = OUT / ('remaining-' + label + '.json')
+            remaining.write_text(json.dumps(rows[index:], indent=2))
+            print(f'yielding GPU after completed step; {len(rows) - index} steps remain in {remaining}', flush=True)
+            return
         binary, step = row['binary'], row['step']
         path, section, profile = step.split(':')
         out = OUT / 'runs' / label / f'{index}-{path}-{profile or "final"}'
@@ -42,24 +50,28 @@ def batch(label, binary, steps):
 
 def turn_ready(g, tp1):
     lines = tp1.schedule_read_retry(lambda: g.SCHEDULE.read_text(encoding='utf-8')).splitlines()
+    order = next((line for line in reversed(lines) if line.startswith('[root order]')), '')
     after = OUT / 'gpu-after.json'
+    gate = {}
     if after.exists():
         import json
         gate = json.loads(after.read_text())
+    # A release from an earlier order never authorizes a newer one. The agent reads
+    # and acknowledges the exact latest line in gpu-after.json before proceeding.
+    if order and gate.get('root_order') != order:
+        seen = OUT / 'latest-root-order.txt'
+        if not seen.exists() or seen.read_text() != order:
+            seen.write_text(order)
+            print('HELD for latest root order: ' + order, flush=True)
+        return False
+    if gate.get('after'):
         anchors = [i for i, line in enumerate(lines) if gate['after'] in line]
         if not anchors:
             return False
         releases = [line for line in lines[anchors[-1] + 1:] if 'window released' in line and not line.startswith('[')]
         if not all(any(token in line for line in releases) for token in gate['requires']):
             return False
-    orders = [i for i, line in enumerate(lines) if '[root order]' in line and 'tp2-p5' in line]
-    if not orders:
-        return True
-    later = lines[orders[-1] + 1:]
-    released = [line for line in later if 'window released' in line and not line.startswith('[')]
-    return (any('root-gate-b4' in line for line in released)
-            and any(line.startswith('m7-lc2 ') for line in released)
-            and any('r1n-g1' in line for line in released))
+    return True
 
 if __name__ == '__main__':
     command, *args = sys.argv[1:]
@@ -112,11 +124,13 @@ if __name__ == '__main__':
         os.environ.update(N8_OWNER='m7-tp2', N8_OUT=str(OUT))
         n8 = load('n8-run')
         deadline = time.monotonic() + 45 * 60
-        g.schedule_line(f'[m7-tp2 request] owner=m7-tp2 label=tp2-{label} functional headless batch {g.utc().isoformat()}')
+        g.schedule_line(f'[m7-tp2 request] owner=m7-tp2 label=tp2-{label} <=15 min functional headless batch ({", ".join(steps)}); honours gpu-after.json release gates. {g.utc().isoformat()}')
         while True:
             if ((OUT / 'bin' / (binary + '.exe')).exists() and turn_ready(g, tp1)
                     and not tp1.schedule_read_retry(runner.quiet_active, g)
                     and tp1.schedule_read_retry(runner.hold_state, g) != 'hold' and not tp1.LOCK.exists()):
+                if not turn_ready(g, tp1):
+                    continue
                 sys.argv = [str(REPO / 'scripts/n8-run.py'), '--label', 'tp2-' + label,
                     '--minutes', '15', '--fast-check', '--', sys.executable, '-B', __file__, 'batch', label,
                     str(OUT / 'bin' / (binary + '.exe')), *steps]

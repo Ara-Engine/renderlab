@@ -43,23 +43,23 @@ PP1 provides bloom, camera motion blur, camera-requested near/far gather DOF, to
 
 ## Transparency
 
-TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent materials draw in a forward pass after reconstruction.
+TP1 ([m7-tp1.md](m7-tp1.md)) and TP2 ([m7-tp2.md](m7-tp2.md)). Cutout foliage is load-time geometry; transparent materials draw in a forward pass after reconstruction. TP2 adds coloured sun transmission on both paths, R1 reflections on traced RT frames and four-sample geometric coverage.
 
-- **Shadows from transparent surfaces.** Glass casts no shadow: it isn't in the TLAS, the clipmap, the surface cache or the radiance cache. Unreal's translucent shadows (Lumen and VSM opacity) aren't matched: no tinted or coverage shadow.
+- **Shadows from transparent surfaces.** A cached 1024-square layered map filters the first directional sun by tint, coverage and Fresnel on both paths. Each draw stores only its nearest sheet; overlapping sheets/instances in that draw do not compound. Other lights, environment visibility and GI traversal still omit transparent intersections. No volumetric absorption, caustics or finite-sun transmission penumbra. The map uses engine material inputs rather than an arbitrary program's transmission model.
 - **Order.** Sorting is per object: one key per draw, from its visible instances' mean bounds centre. Instances inside a draw, and intersecting transparent objects, aren't sorted per pixel, and no OIT fallback exists. Unreal sorts per primitive with optional OIT.
 - **Refraction** is screen-space and thin-slab only. Content off screen or behind a nearer occluder falls back to the unshifted pixel. No thick or volumetric refraction, no dispersion, no rough (blurred) refraction: the colour copy has no mip chain. Each transparent draw copies the full HDR target before it draws.
-- **Anti-aliasing.** The pass runs after TR1 at one sample per pixel, so transparent edges alias. Unreal composites translucency before TSR, with responsive AA.
+- **Anti-aliasing.** TP2's four-sample coverage resolves geometric edges after TR1. Texture/shading aliasing, intersections and particles still need broader treatment; glass has no temporal history. The seed/resolve and additional attachments have a cost.
 - **Frames that skip the pass.**
   - 4x raster frames: there is no single-sample depth to read.
   - TR1b upscaled frames (`RenderScale` below native): hit records are at the internal size and presentation reads the output HDR.
 
   1x raster, traced and visibility-buffer frames at native scale run it.
-- **Cost** (M, quarry, main `f159fcd` defaults, functional lease).
-  - One glass pane: +0.22 ms on non-RT, but **+1.02 ms on RT traced**. That is unprofiled; the same pane cost +0.17 ms before the radiance cache and AT1 became defaults. Suspects: cache lookups at points with no cells, and the per-fragment hardware sun ray.
-  - Each transparent draw copies the full HDR target.
-  - TP1 in total adds +0.83 to +1.59 ms on the test scene.
-- **No traced reflections on glass.** Transparent surfaces compose the raster stage, so R1's `specular_incident` is untraced there: glass reflects the sky, the ES1 lobes and the sun, not traced scene reflections.
-- **Lighting inputs.** Transparent surfaces read the same lights, sky, ES1 lobes and radiance-cache lookups as opaque ones. The cache holds no cells of its own for transparent surfaces, so they read nearby opaque cells or the open sky. Non-RT sun visibility is a 2048² map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1.
+- **Cost** (M, quarry, TP2 `eb0f4a2`, functional lease, not QUIET-certified).
+  - Cache searches at glass receivers caused the regression: isolating an open-environment input reduced the glass increment from 1.123 to 0.173 ms. Retained RT sun rays and atmosphere.
+  - With TP2 reflections, transmission shadows and AA enabled, the measured pane increment is **0.421 ms RT traced / 0.123 ms non-RT**. Cold pipelines and moving-sun map updates are not priced by these steady-state rows.
+  - Each transparent draw still copies the full HDR target. Full data and contention limits are in the TP2 report.
+- **Reflections on glass.** Traced RT frames now run R1 for the glass program's lobe. RT raster and non-RT retain the environment fallback (R1n was not merged at this checkpoint). Hits see only opaque geometry, with no recursive glass. Glossy strata are fixed without a history denoiser; mixed-program hits retain MP1's response fallback.
+- **Lighting inputs.** Glass now uses the open environment: the radiance cache creates no cells for it, and receiver searches were expensive. Non-RT sun visibility remains a 2048² opaque map over the transparent receivers' footprint, not the Virtual clipmap: it's harder-edged than the sun's disk and its texel size scales with the footprint. Other lights' visibility on non-RT transparent surfaces is 1. Skinned transparent casters and palette-based invalidation of TP1's auxiliary opaque map remain unverified.
 - **Programmability.** A program shades transparent surfaces through its own `surface` and `shade`, plus an optional `transmittance` hook. Without the hook, it blends by coverage. Refraction uses the engine's `material_normal`, not a program normal. Streamed (non-resident) textures on transparent materials bind their resident levels without feedback.
 - **Cutout foliage.**
   - The cut is static: no alpha animation, no runtime change of cutoff or texture.
@@ -74,7 +74,7 @@ TP1 ([m7-tp1.md](m7-tp1.md)). Cutout foliage is load-time geometry; transparent 
 TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 - **Lighting.**
-  - Each particle carries one irradiance value per step, at its centre: directional lights with the sun map's visibility, plus the environment's six-axis mean irradiance.
+  - Each particle carries one irradiance value per step, at its centre: directional lights with the sun map's visibility and TP2's coloured transmission, plus the environment's six-axis mean irradiance.
   - No point or spot lights, no radiance cache, and no self-shadowing or volumetric shadowing between particles.
   - Particles cast no shadows.
   - The phase function is a fixed isotropic half.
