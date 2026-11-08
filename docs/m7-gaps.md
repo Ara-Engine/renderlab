@@ -132,6 +132,8 @@ settings and the old recorded gates remain available.
 
 AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md). The sky, aerial perspective, height fog, sun transmittance, procedural environment and shadowed volumetric fog are on by default on both paths.
 
+- **No distinct light shafts.** Islam's review of VF1's sheets (2026-11-08): at low sun the fog shows only soft haze, with no distinct shafts even at "dense". Likely causes to measure: froxel resolution (16 px columns, 7.8 m first slice), the 0.9 history blend, phase-function anisotropy and the default density. Next-level item.
+
 - **Non-RT volumetric coverage is bounded by resident shadow pages.** VF1 reads Virtual's top depth layer without triangle walks or new page requests. Missing or stale fine pages fall back through coarser valid levels, then to sunlight. Fog in a volume with no resident pages can still leak sunlight. Depth-map resolution, the caster LOD and sun-basis hysteresis can differ from the RT fog's exact centre-sun rays. Conventional raster fog has the sun cascades' coverage limit. Dedicated fog page demand and a measured soft sun disk remain open.
 - **The analytic height fog's sun term is unshadowed** beyond the volumetric range, and everywhere while volumetric fog is off, as in Unreal's exponential height fog. Under the default density (about 2 % per 100 m) it isn't visible on the quarry (10 m scale). Dense fog in shadowed spaces will glow.
 - **No matched Unreal comparison.** Neither Unreal's SkyAtmosphere nor its ExponentialHeightFog was measured tonight (no new Unreal campaigns). The medium is Hillaire 2020's Earth, the same model Unreal's SkyAtmosphere implements, but no image or timing comparison exists.
