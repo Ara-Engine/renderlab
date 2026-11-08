@@ -228,10 +228,12 @@ def static_floor(args):
         score(argparse.Namespace(reference=args.reference,candidate=output,
               pre_exposure=native[0]["pre_exposure"],stops=args.stops,out=result))
         with np.load(args.reference) as reference,np.load(output) as candidate:
-            ref=codes((reference["L0"]+reference["L1"])/2,args.stops)
-            estimate=codes(candidate["hdr"][...,:3]/native[0]["pre_exposure"],args.stops)
-            pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
-            Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/"physical.png")
+            for offset in (0,4):
+                ref=codes((reference["L0"]+reference["L1"])/2,args.stops+offset)
+                estimate=codes(candidate["hdr"][...,:3]/native[0]["pre_exposure"],args.stops+offset)
+                pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
+                name="physical.png" if offset==0 else "physical-L4.png"
+                Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/name)
         rows.append(dict(config=runtime["config"],effective_mode=runtime["effective_mode"],
                          case=str(directory),**json.loads(result.read_text())))
         print("scored static",runtime["config"],flush=True)
@@ -319,9 +321,10 @@ def floor(args):
                     residuals.append(dict(frames=[index-1,index],offset=offset,phase=pose.get("phase"),
                         static_camera=key(pose)==key(recipe["frames"][index-1]),
                         measures=measures(residual,noise,mask)))
-                if offset==0 and index in (0,1,48,64,120,128,160):
+                if index in (0,1,48,64,120,128,160):
                     pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
-                    Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/f"physical-{index:03}.png")
+                    suffix="" if offset==0 else "-L4"
+                    Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/f"physical-{index:03}{suffix}.png")
             previous=dict(frame=index,covered=populations["all-covered"],hit=hit,
                           display={o:(codes(hdr,args.stops+o),codes(mean,args.stops+o),
                               [codes(h,args.stops+o) for h in halves]) for o in (0,4)})

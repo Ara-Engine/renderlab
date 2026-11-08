@@ -1,12 +1,12 @@
 # M7-U0b: textured quarry reference and Unreal follow-through
 
-Implementation unit on main `708e87c`, branch `t3/m7-u0b`, 2026-11-07.
+Implementation unit on main `708e87c`, branch `t3/m7-u0b`, 2026-11-07–08.
 Contract: [M7](milestone-7.md), [design](m7-design.md), [U0 evidence and misses](m7-u0.md).
 
 **Work in progress.** Textured/environment validation, four 4,096-spp quarry references,
 the new packaged benches and the completed static/camera/Sun quiet timing campaign are retained.
-The full **76/76 Unreal bench matrix** is retained; motion references and the expanded
-physical floor table remain incomplete.
+The full **76/76 Unreal bench matrix** and **88/88 unit motion-reference states** are retained;
+the expanded physical floor table remains incomplete.
 The S2G replay failure and a small-sun precision error are fixed and qualified. No new 2x
 or integrated quality-pass claim is made.
 
@@ -209,6 +209,24 @@ on pixels above 0.01% of peak luminance. They are noisy per-pixel estimates, not
 intervals. All four images have zero invalid pixels. Render-call time includes resource
 creation, AS construction, trace and readback; compaction adds approximately 3-5 seconds.
 These are reference-production costs, not optimized renderer timings.
+
+Reference coverage is complete for the registered selections below: **123 canonical archives**
+represent **162 rows**. `reference-coverage.json` retains every source/alias, archive hash,
+sample count and noise estimate. All **88 new unit states** pass strict independent-AS replay;
+none requires bounded acceptance. The four earlier static references and 70 earlier zero-shutter
+witness rows keep their **earlier-validation** label; the newer per-state replay gate is not
+retroactively claimed for them.
+
+| Selection | Rows / canonical archives | spp | Median relative noise range | p95 range | p99 range |
+|---|---:|---:|---:|---:|---:|
+| Static full/sky, both poses | 4 / 4 | 4,096 | 0.289–0.293% | 1.213–1.224% | 3.218–3.385% |
+| Q-walk zero-shutter witnesses | 70 / 31 | 1,024 | 0.578–0.584% | 2.409–2.508% | 6.391–7.217% |
+| Pan, zero and finite shutters | 8 / 8 | 256 | 1.163–1.309% | 4.850–5.684% | 13.035–17.326% |
+| Contiguous finite-shutter Q-walk | 32 / 32 | 512 | 0.821–0.831% | 3.406–3.523% | 8.984–9.814% |
+| Zero-shutter Q-disocclusion | 48 / 48 | 1,024 | 0.578–0.591% | 2.412–2.614% | 6.392–7.718% |
+
+Ranges span the registered images, not uncertainty in the quantiles. Functional production
+times under game/foreign-CPU contention are ineligible for speed claims.
 
 The prepared asset SHA256 is `1ce53c381b467345addc1dce5a25fad45435bd90cb12ad2a0d14bb7a593257f3`;
 the RLE2 is `3ccd61b142d26b7c04571242eb620729366847674522ef990b06661bd54c1764`.
@@ -654,20 +672,21 @@ measure deliberately missing occlusion, not a calibration error.
 Separate uninstrumented cost processes retain **r.OneFrameThreadLag 1**, verified from
 their timed CVar dump. The following attribution processes disable both RDG and Lumen async
 compute, also read back at frame 95. Values are milliseconds. They are functional exclusive
-slots, not quiet-window speed evidence. The async-on CSV gather scope is only 0.015–0.142 ms
+samples for software and quiet replacement visits for hardware, with one process per pose;
+they do not establish a repeated-process speed ratio. The async-on CSV gather scope is only 0.015–0.142 ms
 here and omits the concurrent gather work; it must not be used as the full Lumen cost.
 
 | Path / initial pose | Gather static | Gather first-cut | Gather pan mean/range | Warm GI tree total |
 |---|---:|---:|---:|---:|
-| sv-sky-hw / gaps | 1.0149 | 1.0138 | 1.0154 / 1.0086–1.0259 | 1.3930 |
-| sv-sky-hw / overview | 0.8971 | 0.8672 | 1.0188 / 1.0086–1.0332 | 1.4540 |
+| sv-sky-hw, quiet / gaps | 1.0219 | 1.0312 | 1.0208 / 1.0096–1.0383 | 1.3860 |
+| sv-sky-hw, quiet / overview | 0.8764 | 0.8662 | 1.0050 / 0.9922–1.0219 | 1.2460 |
 | sv-sky-sw-mesh / gaps | 1.1838 | 1.4952 | 1.2571 / 1.1704–1.6086 | 2.4970 |
 | sv-sky-sw-mesh / overview | 1.0321 | 1.0261 | 1.2229 / 1.1785–1.4736 | 1.4180 |
 
 The warm GI total sums only outermost matched nodes in the separate frame-64 ProfileGPU
 tree. It is not the first-cut cost. Frame-96 static, frame-97 cut and all nine pan frames
 retain individual scene-buffer/update/lighting/gather/TSR CSV scopes in
-`sv-sky/timing-async-off/*/g1-costs.json`; no inclusive groups are blindly added. Every selected
+`sv-sky/timing-async-off{,-retry}/*/g1-costs.json`; no inclusive groups are blindly added. Every selected
 GPU CSV row has the registered camera position within **0.001 cm**. The ordinary `GPUTime`
 counter can lag/repeat across adjacent frames and is not used as an exact cut-frame duration.
 Default async-on totals and component fields remain separately in `sv-sky/timing`; the
@@ -676,13 +695,23 @@ instrumented quality-process costs remain under `sv-sky/{a,b}`.
 **Foreign CPU-load exclusion.** Root identified stillkit's independent nightly builds. The
 oldest still-running Cargo in the read-only snapshot began **20:31:39.041Z**. Both hardware
 async-off attribution process intervals overlap it (the overview process spans the onset),
-so those two rows above are **contended and ineligible for cost gates or timing claims**.
-`foreign-cpu-control.json` records the intervals; replacements are queued after 60 observed
-seconds without stillkit Cargo/rustc. No foreign process is paused or killed. The earlier
+so those two original rows are **contended and ineligible for cost gates or timing claims**.
+`foreign-cpu-control.json` records the intervals. Their replacements require 60 observed
+compiler-free seconds. No foreign process is paused or killed. The earlier
 quarry quiet campaign ended before this load and is unaffected. Functional references and
 captures retain strict validation, longer process guards and the normal memory abort guard;
-near the start threshold the controller waits outside the GPU lock until the foreign build
-has left sufficient RAM headroom. Timing rows also require 60 compiler-free seconds.
+near the start threshold the controller waits outside the GPU lock until available RAM
+reaches the start floor. Timing rows also require 60 compiler-free seconds.
+
+The two original hardware rows are superseded in the table by the **2026-11-08 quiet
+replacements**, retained separately under `sv-sky/timing-async-off-retry`. Overview runs
+**01:50:27.559Z–01:50:36.638Z**, gaps **01:54:48.497Z–01:54:53.663Z**. Their observed
+compiler-free intervals are **60.167 / 60.162 seconds**, GPU utilization at launch is **0%**,
+wallpaper pause/restoration is recorded, and runtime/camera/process/monitor checks pass.
+Minimum available RAM is **15.021 / 14.556 GiB**. Both read back async off and default
+`r.OneFrameThreadLag 1`. Each cost JSON retains its validated quiet-control proof. These are
+single-process attribution visits, not a repeated-process or 2x speed claim. The old
+contended hardware records remain excluded and are not deleted or relabelled.
 
 The current controller also follows TR0 `79bcfc5`: `nvidia-smi` inventory is required at
 synchronous preflight and omitted from the live conflict poll. Game/renderer process
