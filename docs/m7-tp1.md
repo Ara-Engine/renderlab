@@ -16,6 +16,12 @@ Unit TP1 of the overnight complete-base push (Islam, 2026-11-08; rules in [AGENT
 Evidence is under `D:/Coding/renderlab-work/m7-tp1/`:
 - `runs/g10`: the final build `b9`, merged with main `f159fcd` (DC1, TR1b, R1, G2b's radiance cache on by default, AT1's atmosphere on by default); the final verification and images;
 - `runs/g11`: build `b10`, the same code with the settled timing protocol; the final timing;
+- `runs/g13`-`g15`: build `b11`, merged with main `f870cb4` (API1), the pushed head's code:
+  - TP1 CPU tests;
+  - the lib suite, 170 passed;
+  - RT traced and non-RT scenes: identity 0 differing pixels, and full frames byte-identical to `runs/g10`.
+
+  The memory guard (other units' builds) stopped two attempts before they ran.
 - `runs/g6` and `runs/g7`: earlier merges (main `ae95d3a`); the earlier timing and the window-glass images before GI and AT1 became defaults;
 - `inspect/`: brightened crops (×2.2) and diffs.
 
