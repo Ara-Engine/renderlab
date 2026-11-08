@@ -265,7 +265,7 @@ Against Unreal, as G1c: RT 2,641 + 122.3 = 2,763 MiB against Lumen HW Epic's 6,4
 - `runs/b1`-`b14`: per-stage breakdowns, variant screens, cut screens and traces (`b7`, `b9`: `.ngfx-gputrace`); `runs/g2`-`g5`: final gates; `runs/q1-1` and `runs/q2-*`: the quiet windows, with `samples.json` and `classification.json`.
 - `analysis/`: trace analyses (`b7-rt-probe`, `b7-nonrt-setup`, `b9-*`), full-image scores (`g5`).
 - `variants/`: every shader variant above; `scripts/`: `mk_p1.py`, `mk_w.py`, `mk_fp.py`, `mk_sf.py`, `mk_lazy.py`, `mk_probe.py`, `mk_diag.py` (variant generators), `port_p1w.py`, `port_world.py`, `table.py`, `quality.py`, `cmp.py`, `classify.py`, `quiet-poll.py` (now samples every foreign compiler and RAM), `ram-lease.py`, `metrics.py`, `fullscore.py`.
-- Deleted at close (hashes in `deleted-raw.txt`): the Cargo target, staged binaries, raw image dumps, exact images and cached references.
+- Deleted at close (hashes in `deleted-raw.txt`): the Cargo target, staged binaries, raw image dumps, exact images and the Nsight traces (their analyses are kept). The cached path-traced references (`refs/`, 17 files, about 0.8 GB: the quarry's map and constant-sky depth-2 references and SV's sky-only set) are kept under root's 2026-11-08 retention rule; the tests regenerate them on a cache miss.
 
 **Code.** `shaders/gi_cache.wgsl` (probe statistics, pixel walks, 8x8 tiles), `shaders/gi_cells.wgsl` (`GI_F_STATS`), `shaders/gi_rays_software.wgsl` (comment), `src/gi_cache.rs` (`ProbeCounters`, 32 counter words, `World`, probe tile), `src/gi_cache_tests.rs` (breakdowns, trace modes, `spread8-4px`, cut settings), `src/lib.rs` and `src/renderer.rs` (exports), `scripts/m7-g1d-run.py`.
 
