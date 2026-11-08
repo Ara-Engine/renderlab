@@ -35,8 +35,13 @@ pub(super) fn target_bytes(width: u32, height: u32) -> Result<u64, Error> {
 }
 
 pub(super) fn admit_targets(settings: &Shadows, width: u32, height: u32) -> Result<(), Error> {
-    let views = match settings.requests.as_slice() {
-        [ShadowRequest::Directional { split_ends }] => split_ends.len() as u64,
+    // LC1: requests after the first must be None (validate_shadow_settings).
+    let views = match settings.requests.split_first() {
+        Some((ShadowRequest::Directional { split_ends }, rest))
+            if rest.iter().all(|r| matches!(r, ShadowRequest::None)) =>
+        {
+            split_ends.len() as u64
+        }
         _ => {
             return Err(Error::InvalidInput(
                 "fresh shadows require one directional request",

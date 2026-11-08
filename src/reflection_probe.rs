@@ -73,6 +73,8 @@ fn shader() -> String {
     source.push_str(
         "struct LightSample {index:u32,direction:vec3<f32>,attenuation:f32,intensity:vec3<f32>};\n",
     );
+    // LC1: the probe walks every light, unshadowed beyond its own hard_shadow.
+    source.push_str("fn rl_light_total()->u32 {return lighting.count;}\nfn rl_light_index(i:u32)->u32 {return i;}\nfn rl_local_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {return 1.0;}\n");
     for name in [
         "light_count",
         "light_sample",

@@ -179,3 +179,20 @@ G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both 
 - **Path-traced re-score not done.** TR1's visible-sky walk was not re-scored against the path-traced reference with the cache on: no new reference campaign tonight. The shared lighting error should shrink with the cache's sky occlusion; this is unmeasured.
 - **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each.
 - **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.
+
+## Lights
+
+LC1 ([m7-lc1.md](m7-lc1.md)): clustered culling of point and spot lights, plus shadows for the 4 most important local lights (rays where the frame binds an acceleration structure, pooled PCF maps otherwise), on by default on both paths. The soft sun now renders with any number of further lights. Measured on the quarry at night with 260 lights; no Unreal or path-traced comparison was run tonight.
+
+- **Raster RT default cost.** Forward raster shading runs the light loop for every rasterized fragment. The quarry's overdraw and quad overshading on 13 M scan triangles make 256 lights cost +24.7 ms there (16.8 to 41.5 ms), against about +1.2-1.8 ms on the deferred traced and VB paths. The fix is a depth prepass or deferred primaries on the RT default. RTDEF kept raster + Exact as the RT default.
+- **Only N lights are shadowed** (default 4, at most 16). All other local lights leak light through geometry. Unreal's VSM shadows every movable local light, with page caching.
+- **Selection by illuminance at the camera** (candela / d², d >= 1 m, frustum-tested, 25 % hysteresis). It is not screen-coverage weighted: in the test it picked two dim lights near the camera over the two bright points. Selection changes pop shadows on and off with no fade.
+- **Hard local shadows.** The Light API has no source radius. Rays give point-source hard shadows, and map PCF gives a fixed 3x3-texel softening, not a physical penumbra. Unreal has source-radius soft shadows on both paths.
+- **Maps draw full-detail meshes** (no cluster-LOD raster) and only regular draws. Virtual-geometry casters are missing from local maps. Moving shadowed lights redraw every frame: +5.7 ms for 4 spot faces on the quarry, more for cube lights. PCF clamps at cube-face edges (no cross-face filtering). The 0.02 m near plane drops casters closer to the light (rays have no near plane).
+- **Unclassified map/ray differences.** Fine speckle on the gravel pile with maps (pebble shadows or acne), and one region behind the large rock that rays shadow and maps don't. Neither was classified tonight.
+- **GI bounce takes only the first 32 lights** in the lighting vector: the cache's per-cell light bits. Later lights add direct light only; in the test scene that includes the four bright ones. Importance-ordered GI lights would need cache-stable reindexing.
+- **Unculled stages walk every light:** R1 reflection hits, which run before the cluster is prepared; film accumulation (Temporal soft mode, opt-in); and cell shading. Their cost grows with the total light count on reflective content. Reflection hits shadow unselected local lights not at all (R1's hit shadow skips lights without shadow views).
+- **Cluster capacity.** 128 lights per cluster (the test's longest was 99); beyond that, a cluster drops its highest-indexed lights, and the dropped count is recorded in the list. Sets above 65,535 lights walk every light.
+- **Programmability constraints:** implicit-derivative sampling inside the light loop is rejected (per-receiver loop bound), and fixed-index light addressing now means "the cluster's i-th light".
+- **Memory:** pooled maps take 96 MB at the default 4 slots x 6 faces x 1024² Depth32Float, allocated on the first map frame (cube layers are reserved even for spot slots), plus 3.6 MB of lists and a 6 KB uniform.
+- **Timing** is one contended drained-frame run (median and min of 24), not a quiet-window measurement.
