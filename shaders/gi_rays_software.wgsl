@@ -75,8 +75,9 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                     let c=gi_gv(positions+gi_geometry[x+2u]*4u);
                     let t=gi_triangle(o,d,a,b,c,tmin,best.t);
                     if t>=0.0 {
-                        // The source-winding normal through the inverse transpose.
-                        let n=transpose(mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz))*cross(b-a,c-a);
+                        // The source-winding normal through the inverse transpose. r0-r2 are
+                        // the world-to-object rows, so the matrix with them as columns is it.
+                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
                         best=GiHit(true,t,unit_normal(n));
                         if any_hit { return best; }
                     }

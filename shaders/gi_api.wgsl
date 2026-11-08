@@ -100,7 +100,8 @@ fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
 fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     if gi_word(GI_H_ENABLED)==0u { return gi_open_irradiance(n); }
     let world=input.receiver.world;
-    let bin=gi_bin(gi_viewed_normal(world,input.receiver.geometric));
+    // The bin comes from the interpolated vertex normal, as gi_probe requests it.
+    let bin=gi_bin(gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal));
     let levels=gi_word(GI_H_LEVELS);
     let pick=gi_levels(world,0.0);
     gi_sh_basis(n);

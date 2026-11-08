@@ -217,6 +217,10 @@ pub struct IndirectCounters {
     pub rays: u32,
     /// Rays requested as parallel items; past RAY_ITEMS the rest trace in setup.
     pub ray_items: u32,
+    /// Orphans whose candidates found no qualifying surface, and orphans whose every
+    /// qualifying candidate lay inside a solid.
+    pub orphans_no_surface: u32,
+    pub orphans_inside: u32,
 }
 
 struct Resources {
@@ -757,6 +761,8 @@ impl Renderer {
             lost: w[10],
             rays: w[11],
             ray_items: w[12],
+            orphans_no_surface: w[13],
+            orphans_inside: w[14],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).

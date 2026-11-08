@@ -2,9 +2,11 @@
 // Composed after the built-in prelude, primary_rays.wgsl, gi_cells.wgsl and one ray
 // source (gi_rays_hardware.wgsl or gi_rays_software.wgsl); src/gi_cache.rs owns the
 // buffers and the per-frame order:
-//   gi_probe    covered pixels list the cells they read, deduplicated per 16x16 tile;
-//               each tile then finds its unique cells once, marks them seen, and lists
-//               the missing ones in the frame's request table (once per frame);
+//   gi_probe    covered pixels list the cells they read (bin from the interpolated
+//               vertex normal), deduplicated per 16x16 tile; each tile then finds its
+//               unique cells once, marks them seen, and lists the missing ones in the
+//               frame's request table (once per frame); a found orphan adds its parent
+//               level's cells, up to two levels, so the lookup falls back to them;
 //   gi_claim    each miss picks a free slot as the table stands and raises the slot's
 //               claim word to its priority (atomicMax, C4);
 //   gi_resolve  the highest claim writes the cell and queues it for tracing; claim and
@@ -61,6 +63,10 @@ const GI_W_LOST:u32=10u;
 const GI_W_RAYS:u32=11u;
 // Ray items allocated this frame (may pass the capacity: those cells trace in setup).
 const GI_W_ITEMS:u32=12u;
+// Orphans by cause: no candidate qualified (no hit, another bin or outside the cube; 13),
+// or every qualifying candidate lay inside a solid (14).
+const GI_W_ORPHAN_NONE:u32=13u;
+const GI_W_ORPHAN_INSIDE:u32=14u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 const GI_W_CLAIMS:u32=16u;
@@ -81,9 +87,10 @@ struct GiU32s { data:array<u32> };
 @group(1) @binding(3) var<storage,read> gi_indices:binding_array<GiU32s,PRIMARY_BATCHES>;
 
 // ---- the shared receiver of one covered pixel ----
-struct GiReceiver { world:vec3<f32>, geometric:vec3<f32> };
+struct GiReceiver { world:vec3<f32>, geometric:vec3<f32>, vertex:vec3<f32> };
 // The same receiver the traced shading entry builds (program_traced_entry.wgsl):
-// receiver_point on the hit triangle in the placement's frame, and its plane normal.
+// receiver_point on the hit triangle in the placement's frame, its plane normal, and the
+// interpolated vertex normal it passes as SurfaceInput.normal (the pixel's bin source).
 fn gi_receiver(record:vec4<u32>) -> GiReceiver {
     let placement=record.x-1u;
     let batch=primary_placements[placement]&0x1fffffffu;
@@ -93,7 +100,13 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
     let bary=bitcast<vec2<f32>>(record.zw);
     let w=vec3<f32>(1.0-bary.x-bary.y,bary);
     let world=world_position(receiver_point(a,b,c,w),placement).xyz;
-    return GiReceiver(world,primary_geometric(a,b,c,placement));
+    // The interpolated vertex normal, as the traced shading entry forms SurfaceInput.normal.
+    let m=normals[placement];
+    let basis=mat3x3<f32>(m.x.xyz,m.y.xyz,m.z.xyz);
+    let na=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ia*3u].w,gi_vertices[batch].data[ia*3u+1u].xy)));
+    let nb=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ib*3u].w,gi_vertices[batch].data[ib*3u+1u].xy)));
+    let nc=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ic*3u].w,gi_vertices[batch].data[ic*3u+1u].xy)));
+    return GiReceiver(world,primary_geometric(a,b,c,placement),na*w.x+nb*w.y+nc*w.z);
 }
 
 // ---- probe: per-tile unique cells, then one lookup each ----
@@ -101,9 +114,10 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
 // unique cell once per tile, a quarter as many tiles as 8x8 and about 40% fewer finds.
 const GI_PROBE_TILE:u32=16u;
 const GI_PROBE_LANES:u32=GI_PROBE_TILE*GI_PROBE_TILE;
-// Entries of the tile's cell table: a 16x16 tile reads about 40-100 unique cells, so 256
-// keeps linear probing short (GI_W_LOCAL_OVERFLOW counts any cell it could not hold).
-const GI_LOCAL:u32=256u;
+// Entries of the tile's cell table. A 16x16 tile reads about 40-100 unique cells on SV, but
+// scanned rock reads more (its normals spread over several bins): 256 overflowed about
+// 550 times a frame on the quarry, so 512 (GI_W_LOCAL_OVERFLOW counts any cell it drops).
+const GI_LOCAL:u32=512u;
 var<workgroup> gi_local_key:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_priority:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
@@ -111,6 +125,9 @@ var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
 // only occupied entries (one pass for up to GI_PROBE_LANES cells).
 var<workgroup> gi_local_list:array<u32,GI_LOCAL>;
 var<workgroup> gi_local_count:atomic<u32>;
+// The end of this round's entries (lane 0 reads the count after the barrier).
+var<workgroup> gi_local_end:u32;
+const GI_PROBE_ROUNDS:u32=3u;
 
 // Adds one cell to the tile's set; the lowest pixel priority that wants it is kept.
 fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
@@ -199,7 +216,7 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
     }
     if record.x!=0u {
         let r=gi_receiver(record);
-        let n=gi_viewed_normal(r.world,r.geometric);
+        let n=gi_bin_source(gi_viewed_normal(r.world,r.geometric),r.vertex);
         // The pixel's priority: lower wins. Unique per pixel; its cells share it.
         let priority=p.y*size.x+p.x;
         // Both levels around a switch: inside the blend band, and within rounding of
@@ -226,39 +243,58 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         }
     }
     workgroupBarrier();
-    // Each unique cell once: found cells are marked seen, missing ones are listed.
+    // Each unique cell once, in rounds: found cells are marked seen and missing ones are
+    // listed. A found orphan (no query point) adds its parent level's cells around its
+    // centre, which the next round finds or lists, so a pixel whose cells are all orphans
+    // reads the coarser level (the lookup's fallback) instead of the open sky.
     let capacity=gi_frame.counts.w;
-    let unique=min(atomicLoad(&gi_local_count),GI_LOCAL);
-    for(var k=lane;k<unique;k+=GI_PROBE_LANES) {
-        let i=gi_local_list[k];
-        let def=gi_local_def[i];
-        // Key a is the tile table's own key; finds and requests need nothing else (key b
-        // only fixes a new cell's rotation, which resolve hashes from the definition).
-        let key=vec2<u32>(atomicLoad(&gi_local_key[i]),0u);
-        let slot=gi_find(key);
-        if slot!=0xffffffffu {
-            // Tiles sharing a cell store the same frame: the race is benign. The store is
-            // unconditional: reading the stamp first stalled the probe on a second
-            // dependent load per cell.
-            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
-            continue;
+    let levels=gi_word(GI_H_LEVELS);
+    var begin=0u;
+    for(var round=0u;round<GI_PROBE_ROUNDS;round+=1u) {
+        if lane==0u { gi_local_end=min(atomicLoad(&gi_local_count),GI_LOCAL); }
+        // Uniform across the workgroup (the load carries the barrier), so a round that adds
+        // nothing ends the loop for every lane: tiles without orphans pay one round.
+        let to=workgroupUniformLoad(&gi_local_end);
+        if to==begin { break; }
+        for(var k=begin+lane;k<to;k+=GI_PROBE_LANES) {
+            let i=gi_local_list[k];
+            let def=gi_local_def[i];
+            // Key a is the tile table's own key; finds and requests need nothing else (key b
+            // only fixes a new cell's rotation, which resolve hashes from the definition).
+            let key=vec2<u32>(atomicLoad(&gi_local_key[i]),0u);
+            let slot=gi_find(key);
+            if slot!=0xffffffffu {
+                // Tiles sharing a cell store the same frame: the race is benign. The store
+                // is unconditional: reading the stamp first stalled the probe on a second
+                // dependent load per cell.
+                gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
+                let level=def.x&0xffu;
+                // Only an invalid hot key reads the cold state (orphan or not yet traced).
+                if round+1u<GI_PROBE_ROUNDS && level+1u<levels && (gi_word(gi_hot(slot))&GI_VALID)==0u
+                    && (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u {
+                    gi_request_cells(gi_request_desc(gi_cell(slot).centre,level+1u,(def.x>>8u)&7u),atomicLoad(&gi_local_priority[i]));
+                }
+                continue;
+            }
+            // Tiles share cells: the frame's request table lists each missing cell once and
+            // keeps the lowest priority of every tile that wants it (inverted, so the
+            // cleared table's zero is no request). Any listing order gives the same set.
+            let entry=gi_request_entry(key.x);
+            if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
+            atomicMax(&gi_work[gi_frame.requests.x+entry.x*2u+1u],0xffffffffu-atomicLoad(&gi_local_priority[i]));
+            if entry.y==0u { continue; }
+            let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
+            if at>=capacity { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
+            let base=gi_frame.offsets.y+at*GI_MISS_WORDS;
+            atomicStore(&gi_work[base],def.x);
+            atomicStore(&gi_work[base+1u],def.y);
+            atomicStore(&gi_work[base+2u],def.z);
+            atomicStore(&gi_work[base+3u],def.w);
+            atomicStore(&gi_work[base+4u],entry.x);
+            atomicStore(&gi_work[base+5u],GI_UNCLAIMED);
         }
-        // Tiles share cells: the frame's request table lists each missing cell once and
-        // keeps the lowest priority of every tile that wants it (inverted, so the
-        // cleared table's zero is no request). Any listing order gives the same set.
-        let entry=gi_request_entry(key.x);
-        if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
-        atomicMax(&gi_work[gi_frame.requests.x+entry.x*2u+1u],0xffffffffu-atomicLoad(&gi_local_priority[i]));
-        if entry.y==0u { continue; }
-        let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
-        if at>=capacity { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
-        let base=gi_frame.offsets.y+at*GI_MISS_WORDS;
-        atomicStore(&gi_work[base],def.x);
-        atomicStore(&gi_work[base+1u],def.y);
-        atomicStore(&gi_work[base+2u],def.z);
-        atomicStore(&gi_work[base+3u],def.w);
-        atomicStore(&gi_work[base+4u],entry.x);
-        atomicStore(&gi_work[base+5u],GI_UNCLAIMED);
+        begin=to;
+        workgroupBarrier();
     }
 }
 // The request-table entry of key a (linear probing; zero is empty), and whether this
@@ -447,10 +483,12 @@ fn gi_sh_component(j:u32) -> f32 {
 const GI_PROBES:u32=5u;
 // A deterministic probe from the key alone (W2): from a fixed point on the cube's
 // face along its bin normal, straight down through the cube. The first hit is the
-// query point when its viewed side faces the bin, it lies in the cube, and a ray
-// from it along its normal does not leave through the inside of a closed surface.
+// query point when its viewed normal lies within about 70 degrees of the bin normal (not
+// only in the bin itself: scan triangles are about a pixel wide and their plane normals
+// scatter across bins), it lies in the cube, and a ray from it along its normal does not
+// leave through the inside of a closed surface.
 // Candidate j's down ray: its hit point (w 1) and viewed normal, or zero when the hit
-// does not qualify (no hit, another bin, outside the cube).
+// does not qualify (no hit, too far from the bin normal, outside the cube).
 struct GiCandidate { q:vec4<f32>, n:vec4<f32> };
 fn gi_probe_down(c:GiCell, j:u32) -> GiCandidate {
     let nb=gi_bin_normal(c.bin);
@@ -467,7 +505,7 @@ fn gi_probe_down(c:GiCell, j:u32) -> GiCandidate {
     let down=gi_closest(start,-nb,0.0,c.edge+2.0*margin);
     if !down.hit { return none; }
     let n=select(-down.normal,down.normal,dot(down.normal,nb)>=0.0);
-    if gi_bin(n)!=c.bin { return none; }
+    if dot(n,nb)<0.34 { return none; }
     let q=start-nb*down.t;
     let inside=abs(q-c.centre)<=vec3<f32>(0.5*c.edge+margin);
     if !all(inside) { return none; }
@@ -552,10 +590,10 @@ fn gi_point(cold:u32) -> vec3<f32> {
 // Eight lanes per queued cell, eight cells per workgroup: the canonical query point
 // when the cell has none, then one ray item per direction to trace (gi_rays),
 // contiguous per cell in direction order. Lane 0 tries candidate 0; only when it does not
-// qualify do lanes 1-4 trace candidates 1-4 together, and lane 0 takes the first that
-// qualifies, in fixed order (the same point as trying them in turn). The lanes then write
-// the items, or past the item capacity trace the cell's directions themselves: the same
-// rays and bits either way.
+// qualify do lanes 1-4 trace candidates 1-4 together, each with its own inside test, and
+// lane 0 takes the first that qualifies, in fixed order (the same point as trying them in
+// turn). The lanes then write the items, or past the item capacity trace the cell's
+// directions themselves: the same rays and bits either way.
 const GI_SETUP_LANES:u32=8u;
 const GI_SETUP_CELLS:u32=8u;
 var<workgroup> gi_wg_candidates:array<GiCandidate,64>;
@@ -567,6 +605,8 @@ const GI_SETUP_ITEMS:u32=2u;
 const GI_SETUP_TRACE:u32=3u;
 var<workgroup> gi_wg_state:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_base:array<u32,GI_SETUP_CELLS>;
+// Per cell: candidate 0 qualified but lay inside a solid (orphan counters only).
+var<workgroup> gi_wg_inside:array<u32,GI_SETUP_CELLS>;
 var<workgroup> gi_wg_pending:array<u32,GI_SETUP_CELLS*GI_MAX_WORDS>;
 var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
 @compute @workgroup_size(64) fn gi_setup(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) index:u32) {
@@ -584,24 +624,36 @@ var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
             var fresh=true;
             for(var w=0u;w<GI_WORDS;w+=1u) { fresh=fresh && gi_table[cold+GI_C_KNOWN+w]==0u; }
             var state=GI_SETUP_ITEMS;
+            gi_wg_inside[cell]=0u;
             if fresh {
                 let r=gi_probe_down(c,0u);
-                if r.q.w!=0.0 && !gi_probe_inside(r,c.edge) { gi_setup_point(slot,r); } else { state=GI_SETUP_PROBE; }
+                if r.q.w!=0.0 && !gi_probe_inside(r,c.edge) {
+                    gi_setup_point(slot,r);
+                } else {
+                    state=GI_SETUP_PROBE;
+                    gi_wg_inside[cell]=select(0u,1u,r.q.w!=0.0);
+                }
             }
             gi_wg_state[cell]=state;
         }
         workgroupBarrier();
         // Candidates 1-4 together, only for cells whose candidate 0 failed.
         let probing=live && gi_wg_state[cell]==GI_SETUP_PROBE;
-        if probing && lane>=1u && lane<GI_PROBES { gi_wg_candidates[index]=gi_probe_down(c,lane); }
+        if probing && lane>=1u && lane<GI_PROBES {
+            var r=gi_probe_down(c,lane);
+            if r.q.w!=0.0 && gi_probe_inside(r,c.edge) { r.n.w=1.0; }
+            gi_wg_candidates[index]=r;
+        }
         workgroupBarrier();
         if live && lane==0u {
             var state=gi_wg_state[cell];
             if state==GI_SETUP_PROBE {
                 state=GI_SETUP_NONE;
+                var qualified=gi_wg_inside[cell]!=0u;
                 for(var j=1u;j<GI_PROBES;j+=1u) {
                     let r=gi_wg_candidates[index+j];
-                    if r.q.w==0.0 || gi_probe_inside(r,c.edge) { continue; }
+                    qualified=qualified || r.q.w!=0.0;
+                    if r.q.w==0.0 || r.n.w!=0.0 { continue; }
                     gi_setup_point(slot,r);
                     state=GI_SETUP_ITEMS;
                     break;
@@ -610,6 +662,7 @@ var<workgroup> gi_wg_traced:array<atomic<u32>,GI_SETUP_CELLS*GI_MAX_WORDS>;
                     gi_table[gi_hot(slot)]=c.key.x;
                     gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN;
                     atomicAdd(&gi_work[GI_W_ORPHANS],1u);
+                    atomicAdd(&gi_work[select(GI_W_ORPHAN_NONE,GI_W_ORPHAN_INSIDE,qualified)],1u);
                 }
             }
             if state==GI_SETUP_ITEMS {

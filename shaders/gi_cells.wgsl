@@ -141,6 +141,13 @@ fn gi_axis_mask(bin:u32) -> vec3<f32> {
     let a=bin>>1u;
     return vec3<f32>(f32(a==0u),f32(a==1u),f32(a==2u));
 }
+// The normal a pixel's bin comes from: its interpolated vertex normal turned to the
+// viewed side, or the viewed plane normal where that normal vanishes. On scans, triangles
+// are about a pixel wide and their plane normals flip bins from pixel to pixel.
+fn gi_bin_source(viewed:vec3<f32>, vertex:vec3<f32>) -> vec3<f32> {
+    if dot(vertex,vertex)<=1e-12 { return viewed; }
+    return select(-vertex,vertex,dot(vertex,viewed)>=0.0);
+}
 // The receiver's geometric normal on the side the camera sees.
 fn gi_viewed_normal(world:vec3<f32>, geometric:vec3<f32>) -> vec3<f32> {
     let eye=vec3<f32>(gi_header_f32(GI_H_EYE),gi_header_f32(GI_H_EYE+1u),gi_header_f32(GI_H_EYE+2u));

@@ -88,7 +88,7 @@ def build(args):
     inconsistent (LNK1120); rerun later."""
     import time
     command = ["cargo", "test", "-p", "renderlab", "--lib", "--no-run", "-j", "2", "--target-dir", str(TARGET),
-               "--message-format=json"]
+               "--message-format=json"] + (["--release"] if args.release else [])
     u = ue()
     # Never inside a quiet window; with --beside-leases, other owners' functional (non-quiet)
     # leases do not block a two-job build (CPU only, no GPU work).
@@ -343,7 +343,8 @@ def plan(args):
                     command = [binary, step["test"], "--test-threads=2"]
                 else:
                     command = ([binary, "--test-threads=2"] if step.get("lib") else
-                               [binary, TEST, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
+                               [binary, step.get("test_name", TEST), "--ignored", "--exact", "--nocapture",
+                                "--test-threads=1"])
                 try:
                     u.guarded(command, target / "run", timeout=max(60, int(u.remaining_seconds(owner)) - 30),
                               cwd=REPO, env=env)
@@ -380,6 +381,7 @@ def main():
     p = sub.add_parser("build")
     p.add_argument("--as", dest="name", default=BINARY.stem, help="staged name under bin/ (variants for a paired A/B)")
     p.add_argument("--beside-leases", action="store_true", help="start beside other owners' non-quiet leases")
+    p.add_argument("--release", action="store_true", help="optimized test binary (quarry runs)")
     p = sub.add_parser("gpu")
     p.add_argument("label")
     p.add_argument("--minutes", type=int, default=10)
