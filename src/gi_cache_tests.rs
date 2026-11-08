@@ -117,6 +117,9 @@ fn reference_scene(sv: &Sv, moved: &[(usize, Mat4)], specular: f32) -> reference
                 positions: m.positions.clone(),
                 normals: m.normals.clone(),
                 indices: m.indices.clone(),
+                uvs: vec![],
+                tangents: vec![],
+                colors: vec![],
             })
             .collect(),
         materials: sv
@@ -128,6 +131,9 @@ fn reference_scene(sv: &Sv, moved: &[(usize, Mat4)], specular: f32) -> reference
                 roughness: m[4],
                 specular,
                 emission: [0.0; 3],
+                base_color_texture: None,
+                metallic_roughness_texture: None,
+                normal_texture: None,
             })
             .collect(),
         instances: sv
@@ -145,6 +151,9 @@ fn reference_scene(sv: &Sv, moved: &[(usize, Mat4)], specular: f32) -> reference
             .collect(),
         sun: None,
         sky: sv.sky,
+        textures: vec![],
+        environment: None,
+        camera_background: None,
     }
 }
 fn reference_view(sv: &Sv, eye: Vec3, target: Vec3) -> reference::View {
@@ -835,6 +844,8 @@ fn cached_reference(
             mean: decode(&bytes[..pixels * 12]),
             standard_error: decode(&bytes[pixels * 12..]),
             invalid_pixels: 0,
+            halves: [vec![], vec![]],
+            geometry: vec![],
         };
     }
     let image = reference::render(
@@ -1998,6 +2009,8 @@ fn quarry_reference(
             mean: decode(&bytes[..pixels * 12]),
             standard_error: decode(&bytes[pixels * 12..]),
             invalid_pixels: 0,
+            halves: [vec![], vec![]],
+            geometry: vec![],
         };
     }
     // One reference mesh per source primitive; one instance per placement and primitive.
@@ -2010,6 +2023,9 @@ fn quarry_reference(
                 positions: p.vertices.iter().map(|v| v.position).collect(),
                 normals: p.vertices.iter().map(|v| v.normal).collect(),
                 indices: p.indices.clone(),
+                uvs: vec![],
+                tangents: vec![],
+                colors: vec![],
             });
         }
     }
@@ -2035,10 +2051,16 @@ fn quarry_reference(
             roughness: 1.0,
             specular: 0.0,
             emission: [0.0; 3],
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            normal_texture: None,
         }],
         instances,
         sun: None,
         sky: [sky; 3],
+        textures: vec![],
+        environment: None,
+        camera_background: None,
     };
     let at = |p: [f32; 3]| Vec3::from_array(p);
     let pose_ = reference::Pose {

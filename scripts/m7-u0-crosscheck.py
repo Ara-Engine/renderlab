@@ -22,6 +22,8 @@ def mitsuba(args):
     import mitsuba as mi
     import numpy as np
     mi.set_variant("scalar_rgb")
+    import drjit as dr
+    dr.set_thread_count(2)
     start = time.perf_counter()
     scene = mi.load_file(str(args.scene / "mitsuba" / "scene.xml"))
     image = np.array(mi.render(scene, spp=args.spp, seed=args.seed), dtype=np.float32)[..., :3]
@@ -54,7 +56,9 @@ def compare(args):
     signal = mb > 1e-3 * mb.max()
     z = ((ob - mb) / np.maximum(sigma, 1e-30))[signal]
     total_o, total_m = ours.sum(), mits.sum()
-    total_sigma = np.sqrt((ours_se ** 2).sum() + (mits_se_pixel ** 2).sum())
+    # RGB shares a path. Sum channel error bounds within each pixel before pooling
+    # independent pixels; the old formula understated grayscale uncertainty by sqrt(3).
+    total_sigma = np.sqrt((ours_se.sum(-1) ** 2).sum() + (mits_se_pixel.sum(-1) ** 2).sum())
     report = dict(
         case=args.name, ours_samples=meta["samples"], mitsuba=[json.loads(Path(p).with_suffix(".json").read_text()) for p in args.mitsuba],
         global_relative_bias=float((total_o - total_m) / total_m), global_bias_sigma=float((total_o - total_m) / total_sigma),
