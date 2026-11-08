@@ -1,22 +1,26 @@
-//! TR1 temporal reconstruction of the final lit image (docs/m7-tr1.md), opt-in through
-//! `Renderer::set_reconstruction`. Each traced or visibility-buffer lit frame samples every
+//! TR1 temporal reconstruction of the final lit image (docs/m7-tr1.md), on by default and set
+//! through `Renderer::set_reconstruction`. Each traced or visibility-buffer lit frame samples every
 //! pixel at one sub-pixel offset of a rank-1 lattice, carried by the camera projection
 //! (`Camera::jittered`), so both primary paths and every program's shading follow it with
 //! no shader edit. On RT renderers, Interactive's eight disk directions also rotate by the
 //! frame through the unused `PrimaryFrame.sided.y` word. After the program's shading, one
 //! pass (shaders/temporal_resolve.wgsl) continues each pixel's history where its current
 //! sample's surface point was in the previous frame, accepted by surface identity and
-//! engine events only, and starts revealed pixels from this frame's samples.
+//! engine events only, and starts revealed pixels from this frame's samples. Every colour
+//! history is one surface's; a silhouette pixel keeps a second slot for the other surface of
+//! its 3x3 and the occluder's coverage of its footprint (TR1b, docs/m7-tr1b.md).
 //!
-//! Its history, weights, anchors and silhouette bits are read only by that pass, next frame
+//! Its histories, weights, coverages and anchors are read only by that pass, next frame
 //! (P0's W5); no later stage takes them as input.
 use super::*;
 
-/// Temporal reconstruction settings (TR1). The default is off: frames are unjittered and
-/// keep no history. Enabled, traced and visibility-buffer lit frames at 1x accumulate;
-/// raster and diagnostic frames are unaffected. History costs 24 bytes per pixel plus an
-/// 8-byte copy of the frame's samples. The other defaults are the variant measured best on
-/// the Q-walk screens (docs/m7-tr1.md §5); TR1 is not the renderer default.
+/// Temporal reconstruction settings (TR1). On by default since TR1b (docs/m7-tr1b.md):
+/// traced and visibility-buffer lit frames at 1x are jittered and accumulate; raster,
+/// diagnostic and Temporal-shadow frames are unaffected. `Reconstruction::off()` is the named
+/// switch back to unjittered single frames with no history. History costs 40 bytes per pixel
+/// plus an 8-byte copy of the frame's samples. The other defaults are the variant measured
+/// best on the Q-walk and visible-sky screens (docs/m7-tr1b.md); the default still misses
+/// TSR Epic on moving edges and revealed pixels (docs/m7-gaps.md).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reconstruction {
     pub enabled: bool,
@@ -28,18 +32,20 @@ pub struct Reconstruction {
     /// Window of moving pixels whose 4x4 history taps are all accepted, which resample by
     /// Catmull-Rom (second-moment blur free) instead of bilinear.
     pub sharp_window: f32,
-    /// Window at moving silhouettes: pixels whose 3x3 samples show more than one surface.
-    /// Still silhouettes use `window`: their coverage is unchanged.
-    pub silhouette_window: f32,
+    /// Window of a moving silhouette's occluder coverage, which the occluder's motion
+    /// carries; still silhouettes use `window`.
+    pub coverage_window: f32,
     /// Largest effective sample count a revealed pixel's spatial start may claim.
     pub start_window: f32,
     /// Tent radius (pixels) of a revealed pixel's spatial start over the 3x3 samples of its
-    /// surface; 0 starts from its own sample.
+    /// surface; 0 starts from its own sample. 1 (the default) interpolates to the pixel
+    /// centre, so a cold first frame (k = 0, unjittered) is the unreconstructed image; 2
+    /// blurs it (docs/m7-tr1b.md §4.6).
     pub start_radius: f32,
-    /// The same at silhouettes, over every 3x3 sample: wider radii blur the edge.
-    pub silhouette_start_radius: f32,
     /// Sun turn (radians per frame) at which the window falls to one frame; smaller turns
-    /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn.
+    /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn. 0.064 rad:
+    /// Q-sun-fast's 10°/s turns keep about 22 frames (docs/m7-tr1b.md §4.3); TR1's 0.004
+    /// restarted them every frame.
     pub turn_angle: f32,
     /// Catmull-Rom history resampling where all 16 taps are accepted.
     pub catmull_rom: bool,
@@ -49,45 +55,77 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
-    /// Moving silhouette pixels also continue other surfaces' silhouette (mixed) history,
-    /// which keeps an edge's coverage under motion; it can leak within the one-pixel
-    /// silhouette band, never beyond. Off, a moving pixel continues only its own surface's.
-    pub silhouette_mix: bool,
-    /// Limit continued history to the plain min/max box of this frame's 3x3 samples, all
-    /// of them (no mean, variance or excluded sample: docs/m7-tr1.md). It reads program
-    /// output colour, so it is the design's last option (m7-design §9.1 B), off by default.
-    pub box_clamp: bool,
-    /// Moving silhouette pixels blend this frame's spatial estimate over every 3x3 sample
-    /// (tent radius `silhouette_start_radius`) instead of their single sample, so a frame's
-    /// coverage of the edge is not one sample's.
-    pub silhouette_spatial: bool,
+    /// Internal resolution of reconstructed frames: every pass renders at this fraction of
+    /// the target size and TR1 reconstructs the target from the jittered samples.
+    pub scale: RenderScale,
+}
+
+/// Upscaling presets of reconstructed frames (TR1b). Raster, diagnostic and unreconstructed
+/// frames always render at the target size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderScale {
+    /// The target size.
+    #[default]
+    Native,
+    /// Two thirds of the target in each axis (about 44 % of its pixels).
+    Quality,
+    /// Half the target in each axis (a quarter of its pixels).
+    Performance,
+}
+impl RenderScale {
+    /// The internal size for a target size, each axis rounded to the nearest pixel.
+    pub fn internal_size(self, width: u32, height: u32) -> [u32; 2] {
+        let (n, d) = match self {
+            Self::Native => (1, 1),
+            Self::Quality => (2, 3),
+            Self::Performance => (1, 2),
+        };
+        [width, height].map(|v| ((v * n + d / 2) / d).max(1))
+    }
 }
 impl Default for Reconstruction {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
-            silhouette_window: 2.0,
+            coverage_window: 16.0,
             start_window: 4.0,
-            start_radius: 2.0,
-            silhouette_start_radius: 1.0,
-            turn_angle: 0.004,
+            start_radius: 1.0,
+            turn_angle: 0.064,
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
-            silhouette_mix: true,
-            box_clamp: false,
-            silhouette_spatial: true,
+            scale: RenderScale::Native,
         }
     }
 }
 impl Reconstruction {
-    /// TR1 with its measured settings (docs/m7-tr1.md).
+    /// TR1 with its measured settings: the default, named for harnesses that enable it
+    /// whatever the default is.
     pub fn identity() -> Self {
+        Self::default()
+    }
+    /// No temporal reconstruction: unjittered single frames with no history (the pre-TR1b
+    /// default, and every exact-repeat certification's setting).
+    pub fn off() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
+            ..Self::default()
+        }
+    }
+    /// The quality upscaling preset: TR1 reconstructing the target from two thirds of it.
+    pub fn quality() -> Self {
+        Self {
+            scale: RenderScale::Quality,
+            ..Self::default()
+        }
+    }
+    /// The performance upscaling preset: TR1 reconstructing the target from half of it.
+    pub fn performance() -> Self {
+        Self {
+            scale: RenderScale::Performance,
             ..Self::default()
         }
     }
@@ -95,20 +133,18 @@ impl Reconstruction {
         let windows = [
             self.window,
             self.sharp_window,
-            self.silhouette_window,
+            self.coverage_window,
             self.start_window,
         ];
         let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
             && (0.0..=f32::MAX).contains(&self.blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
-            && [self.start_radius, self.silhouette_start_radius]
-                .iter()
-                .all(|r| (0.0..=2.0).contains(r));
+            && (0.0..=2.0).contains(&self.start_radius);
         if valid {
             Ok(())
         } else {
             Err(Error::InvalidInput(
-                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radii in [0, 2]",
+                "reconstruction windows in [1, 65536]; blur budget and turn angle finite and nonnegative; start radius in [0, 2]",
             ))
         }
     }
@@ -118,6 +154,30 @@ impl Reconstruction {
 const FRAME_BYTES: usize = 336;
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
+/// The lattice's shifts in 1/256 px: x as T1's; y chosen so the 256 points are
+/// point-symmetric about the pixel centre (point j's partner is 239 - j).
+const SHIFT: [u32; 2] = [8, 91];
+/// Lattice point of each sample k = 1..=254: T1's visiting order (bit-reversed k, the first
+/// three swapped), each newly visited point followed by its point-symmetric partner.
+const SEQUENCE: [u8; 254] = {
+    let mut out = [0u8; 254];
+    let mut used = [false; 256];
+    let (mut n, mut k) = (0, 1u32);
+    while n < 254 {
+        let order = if k < 4 { (0x0231 >> (4 * k)) & 0xf } else { k };
+        let j = order.reverse_bits() >> 24;
+        let partner = (239 + 256 - j) & 0xff;
+        if !used[j as usize] {
+            used[j as usize] = true;
+            used[partner as usize] = true;
+            out[n] = j as u8;
+            out[n + 1] = partner as u8;
+            n += 2;
+        }
+        k += 1;
+    }
+    out
+};
 /// Interactive's disk directions continue by the frame's rotation word. The estimator body
 /// is otherwise production's; only the reconstruction's own trace modules carry this edit.
 const ROTATION_SEAM: (&str, &str) = (
@@ -126,17 +186,20 @@ const ROTATION_SEAM: (&str, &str) = (
 );
 const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 
-/// Sample k's offset from the pixel centre in pixels (y down): T1's corner-free 256-point
-/// lattice (film_accumulation.wgsl `film_offset`) with one symmetry for the whole image,
-/// which a projection can carry. k = 0 is the centre.
+/// Sample k's offset from the pixel centre in pixels (y down), one offset for the whole
+/// image, which a projection can carry. k = 0 and 255 are the centre; k = 1..=254 are 127
+/// point-symmetric pairs (odd k, then its negation) of a 256-point rank-1 lattice, in T1's
+/// lattice order (film_accumulation.wgsl `film_offset`). Every odd-length prefix from k = 0
+/// has a mean offset of exactly zero, so a still pixel's mean is first-order exact on smooth
+/// shading (the sky's glow) every other frame, and off by at most one offset over n
+/// otherwise (docs/m7-tr1b.md §4.6).
 pub(in crate::renderer) fn sample_offset(k: u64) -> [f32; 2] {
-    let k = (k & 0xff) as u32;
-    if k == 0 {
+    let k = (k & 0xff) as usize;
+    if k == 0 || k == 255 {
         return [0.0; 2];
     }
-    let order = if k < 4 { (0x0231 >> (4 * k)) & 0xf } else { k };
-    let j = order.reverse_bits() >> 24;
-    [j, (GENERATOR * j) & 0xff].map(|v| (((v + 8) & 0xff) as f32 + 0.5) / 256.0 - 0.5)
+    let j = u32::from(SEQUENCE[k - 1]);
+    [j + SHIFT[0], GENERATOR * j + SHIFT[1]].map(|v| ((v & 0xff) as f32 + 0.5) / 256.0 - 0.5)
 }
 /// Interactive's direction rotation for sample k: directions 8 (k mod 32) onward.
 pub(in crate::renderer) fn rotation(k: u64) -> u32 {
@@ -195,6 +258,8 @@ impl PrimaryState {
                     image(44, F::Rgba32Float),
                     image(45, F::Rg32Uint),
                     image(46, F::Rgba16Float),
+                    texture(47, uint),
+                    image(48, F::Rgba32Uint),
                 ],
             }),
             ResourceKind::BindGroupLayout,
@@ -298,6 +363,8 @@ struct Previous {
 pub(in crate::renderer) struct ReconstructionState {
     colour: [Depth; 2],
     anchor: [Depth; 2],
+    /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
+    layer: [Depth; 2],
     sample: Depth,
     frame: Buffer,
     /// Resolve groups per written side, keyed by the textures and frame buffer they bind.
@@ -312,48 +379,72 @@ pub(in crate::renderer) struct ReconstructionState {
 }
 type GroupKey = (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Buffer);
 
+/// A sampled 2D target owned through the ledger (copyable in tests).
+fn target(
+    r: &Renderer,
+    label: &str,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> Depth {
+    let texture = r.ledger.own(
+        r.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | usage
+                | if cfg!(test) {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
+            view_formats: &[],
+        }),
+        ResourceKind::Texture,
+    );
+    let view = r.ledger.own(
+        texture.create_view(&Default::default()),
+        ResourceKind::TextureView,
+    );
+    let bytes = u64::from(size.width)
+        * u64::from(size.height)
+        * u64::from(format.block_copy_size(None).unwrap());
+    Depth {
+        texture,
+        view,
+        _allocation: r.ledger.allocate(AllocationKind::Target, bytes),
+    }
+}
+
+/// An upscaled frame's targets (`RenderScale`): the internal colour target every pass renders
+/// into in place of the caller's, and the reconstruction's output HDR at the caller's size,
+/// which present tone-maps into the caller's target.
+pub(in crate::renderer) struct Upscale {
+    color: Depth,
+    hdr: Depth,
+    pub present: Owned<wgpu::BindGroup>,
+    /// This frame's caller target, which present writes.
+    pub output: wgpu::Texture,
+}
+
 impl ReconstructionState {
-    fn new(r: &Renderer, size: wgpu::Extent3d) -> Self {
-        let target = |label, format: wgpu::TextureFormat, usage| {
-            let texture = r.ledger.own(
-                r.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | usage
-                        | if cfg!(test) {
-                            wgpu::TextureUsages::COPY_SRC
-                        } else {
-                            wgpu::TextureUsages::empty()
-                        },
-                    view_formats: &[],
-                }),
-                ResourceKind::Texture,
-            );
-            let view = r.ledger.own(
-                texture.create_view(&Default::default()),
-                ResourceKind::TextureView,
-            );
-            let bytes = u64::from(size.width)
-                * u64::from(size.height)
-                * u64::from(format.block_copy_size(None).unwrap());
-            Depth {
-                texture,
-                view,
-                _allocation: r.ledger.allocate(AllocationKind::Target, bytes),
-            }
-        };
+    /// Histories at the output size; the copy of the frame's samples at the internal size
+    /// (equal at native resolution).
+    fn new(r: &Renderer, size: wgpu::Extent3d, output: wgpu::Extent3d) -> Self {
         use wgpu::{TextureFormat as F, TextureUsages as U};
-        let colour = || target("TR1 history colour", F::Rgba32Float, U::STORAGE_BINDING);
-        let anchor = || target("TR1 history anchors", F::Rg32Uint, U::STORAGE_BINDING);
+        let history = |label, format| target(r, label, output, format, U::STORAGE_BINDING);
+        let colour = || history("TR1 history colour", F::Rgba32Float);
+        let anchor = || history("TR1 history anchors", F::Rg32Uint);
+        let layer = || history("TR1 silhouette slots", F::Rgba32Uint);
         Self {
             colour: [colour(), colour()],
             anchor: [anchor(), anchor()],
-            sample: target("TR1 frame samples", F::Rgba16Float, U::COPY_DST),
+            layer: [layer(), layer()],
+            sample: target(r, "TR1 frame samples", size, F::Rgba16Float, U::COPY_DST),
             frame: Buffer::new(
                 r,
                 "TR1 frame state",
@@ -370,9 +461,76 @@ impl ReconstructionState {
     fn size(&self) -> wgpu::Extent3d {
         self.sample.texture.size()
     }
+    fn output(&self) -> wgpu::Extent3d {
+        self.colour[0].texture.size()
+    }
 }
 
 impl Renderer {
+    /// This frame's internal colour target when an upscaling preset applies to it (a
+    /// reconstructed frame below native scale), allocated for the caller's `color`; None
+    /// renders at the caller's size and releases the upscaling targets.
+    pub(in crate::renderer) fn upscale_target(
+        &mut self,
+        color: &wgpu::Texture,
+    ) -> Option<wgpu::Texture> {
+        let [width, height] = self
+            .reconstruction
+            .scale
+            .internal_size(color.width(), color.height());
+        if self.reconstruction_frame.is_none() || [width, height] == [color.width(), color.height()]
+        {
+            self.upscale = None;
+            return None;
+        }
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        if self
+            .upscale
+            .as_ref()
+            .is_none_or(|u| u.color.texture.size() != size || u.hdr.texture.size() != color.size())
+        {
+            use wgpu::{TextureFormat as F, TextureUsages as U};
+            let internal = target(
+                self,
+                "upscaled frame colour",
+                size,
+                self.format,
+                U::RENDER_ATTACHMENT | U::COPY_SRC,
+            );
+            let hdr = target(
+                self,
+                "upscaled reconstruction HDR",
+                color.size(),
+                F::Rgba16Float,
+                U::STORAGE_BINDING | U::COPY_SRC,
+            );
+            let present = self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscaled HDR presentation"),
+                    layout: &self.lighting.present_bindings,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&hdr.view),
+                    }],
+                }),
+                ResourceKind::BindGroup,
+            );
+            self.upscale = Some(Upscale {
+                color: internal,
+                hdr,
+                present,
+                output: color.clone(),
+            });
+        }
+        let upscale = self.upscale.as_mut().unwrap();
+        upscale.output = color.clone();
+        Some((*upscale.color.texture).clone())
+    }
+
     /// Identity of every input a reconstructed frame depends on besides the camera, the
     /// eye, exposure and directional-light directions, which TR1 follows: a change restarts
     /// every pixel. Programs, prelude, geometry, bindings, materials, textures, transforms,
@@ -406,7 +564,8 @@ impl Renderer {
                     .map(u32::to_ne_bytes)
                     .concat(),
             )
-            .chain_update(self.environment.uniform());
+            .chain_update(self.environment.uniform())
+            .chain_update([u8::from(self.environment.visible)]);
         for v in [
             u.environment,
             u.geometry,
@@ -480,13 +639,14 @@ impl Renderer {
         draws: &[PreparedDraw<'_>],
     ) {
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
         if self
             .reconstruction_state
             .as_ref()
-            .is_none_or(|s| s.size() != size)
+            .is_none_or(|s| s.size() != size || s.output() != output)
         {
             let cut = self.reconstruction_state.as_ref().is_some_and(|s| s.cut);
-            let mut next = ReconstructionState::new(self, size);
+            let mut next = ReconstructionState::new(self, size, output);
             next.cut = cut;
             self.reconstruction_state = Some(next);
         }
@@ -505,7 +665,8 @@ impl Renderer {
             })
             .collect();
         let background = self.lit_clear().map(|v| v as f32);
-        let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / size.height as f32;
+        let visible_sky = self.environment.visible && self.environment.selected.is_some();
+        let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
         // SK1: vertex motion reprojects the character, but its changing shadow also
         // changes otherwise-static receivers. Reject those receivers' lighting history
         // in a conservative world-space swept shadow volume, never a screen-space
@@ -611,11 +772,7 @@ impl Renderer {
             _ => (matrix, eye, 1.0, jitter),
         };
         state.parity = 1 - state.parity;
-        let options = u32::from(settings.catmull_rom)
-            | u32::from(settings.spatial_start) << 1
-            | u32::from(settings.silhouette_mix) << 2
-            | u32::from(settings.box_clamp) << 3
-            | u32::from(settings.silhouette_spatial) << 4;
+        let options = u32::from(settings.catmull_rom) | u32::from(settings.spatial_start) << 1;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -636,15 +793,17 @@ impl Renderer {
             background[0],
             background[1],
             background[2],
-            1.0,
+            // 1: misses show the constant clear colour; 0: the visible sky, which misses
+            // reconstruct like a surface keyed by direction.
+            if visible_sky { 0.0 } else { 1.0 },
             settings.window,
             event_window.max(1.0),
-            settings.silhouette_window,
+            settings.coverage_window,
             settings.blur_budget,
             settings.sharp_window,
             settings.start_window,
             settings.start_radius,
-            settings.silhouette_start_radius,
+            0.0,
         ];
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
@@ -681,14 +840,16 @@ impl Renderer {
             skin_bounds,
             skin_revisions,
         });
+        // The resolve writes the frame's HDR target, or the upscaled output.
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         let primary = self.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let group_key: GroupKey = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
-            (*hdr.texture).clone(),
+            (*out.texture).clone(),
             (**frame).clone(),
         );
         let state = self.reconstruction_state.as_ref().unwrap();
@@ -705,6 +866,7 @@ impl Renderer {
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -717,7 +879,9 @@ impl Renderer {
                 (43, R::TextureView(&state.anchor[read].view)),
                 (44, R::TextureView(&state.colour[written].view)),
                 (45, R::TextureView(&state.anchor[written].view)),
-                (46, R::TextureView(&hdr.view)),
+                (47, R::TextureView(&state.layer[read].view)),
+                (48, R::TextureView(&state.layer[written].view)),
+                (46, R::TextureView(&out.view)),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
             self.ledger.own(
@@ -732,7 +896,8 @@ impl Renderer {
     }
 
     /// The reconstruction pass after the frame's shading: copies the shaded samples, then
-    /// resolves every pixel into the HDR target and the written history side.
+    /// resolves every target pixel into the HDR target (the upscaled output when a preset
+    /// applies) and the written history side.
     pub(in crate::renderer) fn encode_reconstruction(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -740,12 +905,12 @@ impl Renderer {
     ) {
         let state = self.reconstruction_state.as_ref().unwrap();
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let size = state.size();
         encoder.copy_texture_to_texture(
             hdr.texture.as_image_copy(),
             state.sample.texture.as_image_copy(),
-            size,
+            state.size(),
         );
+        let size = state.output();
         let primary = self.primary.as_ref().unwrap();
         let pipelines = self.pipeline.primary.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -764,18 +929,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn samples_are_the_film_lattice_with_one_symmetry() {
+    fn samples_are_balanced_lattice_pairs() {
         assert_eq!(sample_offset(0), [0.0; 2]);
-        // T1's 16-point prefix (rows 8, 12, 4, 0, then bit-reversed), moved off the edges.
-        let rows = [8u32, 12, 4, 0, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15];
-        for (k, row) in rows.into_iter().enumerate().skip(1) {
-            let expected = [16 * row, 16 * (7 * row % 16)]
-                .map(|v| ((v + 8) & 0xff) as f32 / 256.0 + 0.5 / 256.0 - 0.5);
-            assert_eq!(sample_offset(k as u64), expected, "k={k}");
-        }
+        assert_eq!(sample_offset(255), [0.0; 2]);
+        let mut seen = std::collections::HashSet::new();
+        let mut sum = [0.0f64; 2];
         for k in 0..512 {
-            assert!(sample_offset(k).iter().all(|v| v.abs() < 0.5), "k={k}");
-            assert_eq!(sample_offset(k), sample_offset(k + 256));
+            let o = sample_offset(k);
+            assert!(o.iter().all(|v| v.abs() < 0.5), "k={k}");
+            assert_eq!(o, sample_offset(k + 256));
+            if k % 2 == 1 && k < 255 {
+                assert_eq!(sample_offset(k + 1), o.map(|v| -v), "k={k}");
+            }
+            if (1..255).contains(&k) {
+                assert!(seen.insert(o.map(f32::to_bits)), "repeated offset at k={k}");
+            }
+            sum = [sum[0] + f64::from(o[0]), sum[1] + f64::from(o[1])];
+            // Every odd-length prefix of the cycle is balanced.
+            if k < 256 && k % 2 == 0 {
+                assert!(sum.iter().all(|s| s.abs() < 1e-9), "k={k}: {sum:?}");
+            }
         }
         assert_eq!(rotation(0), 0);
         assert_eq!(rotation(33), 8);
@@ -850,10 +1023,25 @@ mod tests {
     }
 
     #[test]
+    fn render_scales() {
+        assert_eq!(RenderScale::Native.internal_size(1920, 1080), [1920, 1080]);
+        assert_eq!(RenderScale::Quality.internal_size(1920, 1080), [1280, 720]);
+        assert_eq!(
+            RenderScale::Performance.internal_size(1920, 1080),
+            [960, 540]
+        );
+        assert_eq!(RenderScale::Performance.internal_size(1, 3), [1, 2]);
+        assert_eq!(Reconstruction::quality().scale, RenderScale::Quality);
+        assert_eq!(Reconstruction::default().scale, RenderScale::Native);
+    }
+
+    #[test]
     fn settings_validate() {
         assert!(Reconstruction::default().validate().is_ok());
-        assert!(!Reconstruction::default().enabled);
-        assert!(Reconstruction::identity().enabled);
+        assert!(Reconstruction::default().enabled);
+        assert_eq!(Reconstruction::identity(), Reconstruction::default());
+        assert!(!Reconstruction::off().enabled);
+        assert!(Reconstruction::off().validate().is_ok());
         for bad in [
             Reconstruction {
                 window: 0.5,

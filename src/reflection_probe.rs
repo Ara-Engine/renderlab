@@ -59,6 +59,13 @@ fn shader() -> String {
         "{reference}\n{input}\n{}\n",
         include_str!("../shaders/reflection_probe.wgsl")
     );
+    // DC1: this frozen reflection experiment has no decal scene. Supply only the
+    // surface value type and material helpers, with identity decal inputs.
+    let decals = include_str!("../shaders/decals.wgsl");
+    source.push_str(
+        &decals[decals.find("struct DecalInput {").unwrap()..decals.find("fn dc_texel(").unwrap()],
+    );
+    source.push_str(&decals[decals.find("fn decal_base_color(").unwrap()..]);
     for name in ["exposed_product", "brdf"] {
         source.push_str(&function(scene, name));
         source.push('\n');
@@ -919,7 +926,9 @@ fn gpu_r0b_program_primary() {
     scene.sun = None;
     let root = std::env::var("RENDERLAB_M7_REFERENCE_OUT").unwrap();
     let root = Path::new(&root);
-    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off (explicit since TR1b made it the
+    // default: this test compares exact single frames with a pixel-centre oracle),
+    // anisotropy 1.
     let mut renderer = Renderer::new_with_hardware_shadows(
         device.clone(),
         queue.clone(),
@@ -932,6 +941,9 @@ fn gpu_r0b_program_primary() {
     .unwrap();
     renderer
         .set_primary_visibility(PrimaryVisibility::Traced)
+        .unwrap();
+    renderer
+        .set_reconstruction(crate::Reconstruction::off())
         .unwrap();
     renderer
         .set_lighting(&Lighting {

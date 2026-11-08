@@ -19,7 +19,8 @@ REPO = Path(__file__).resolve().parent.parent
 # The owning unit: m7-g1, or a follow-up such as m7-g1b (scripts/m7-g1b-run.py), with its
 # own schedule owner name and evidence root.
 UNIT = os.environ.get("M7_G1_UNIT", "m7-g1")
-OUT = Path("E:/renderlab-work") / UNIT
+# M7_G1_ROOT moves a unit's evidence, binaries and target (bulk output belongs on D:).
+OUT = Path(os.environ.get("M7_G1_ROOT", "E:/renderlab-work")) / UNIT
 TARGET = OUT / "target"
 BINARY = OUT / "bin/g1-tests.exe"
 BENCH = Path("E:/renderlab-work/m7-u0/scenes/SV/scene.json")

@@ -387,6 +387,13 @@ impl Renderer {
         self.check_fault()?;
         Ok(Some(map))
     }
+    /// Opt-in visible sky: primary misses on traced and visibility-buffer frames show the
+    /// selected map along each pixel's camera ray (level 0, exposed and scaled like the
+    /// lighting it provides) instead of `Lighting::environment`. Off by default; raster
+    /// frames and renderers without a selected map keep the clear colour.
+    pub fn set_visible_environment(&mut self, visible: bool) {
+        self.environment.visible = visible;
+    }
     /// Atomic CPU selection. None restores Lighting::environment. Admitted frames publish changes.
     /// The renderer retains the selected map; parameter edits never clone or reupload its pixels.
     pub fn set_environment(
