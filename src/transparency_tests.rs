@@ -152,6 +152,10 @@ struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };
             .unwrap()
         + 3;
     s.replace_range(start..end, "");
+    // MQ2's `view_dependence` hook (docs/m7-mq2.md), added after TP1 below `reflection_lobe`.
+    let start = s.find("\n\n// TR1's history hint (MQ2").unwrap();
+    let end = start + s[start..].find("\n}").unwrap() + 2;
+    s.replace_range(start..end, "");
     s
 }
 
