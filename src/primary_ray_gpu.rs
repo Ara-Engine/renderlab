@@ -1457,6 +1457,9 @@ impl Renderer {
             .filter(|_| self.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
+        // Visible sky (Renderer::set_visible_environment): misses sample the selected map.
+        let visible = self.environment.visible && self.environment.selected.is_some();
+        bytes[88..92].copy_from_slice(&u32::from(visible).to_ne_bytes());
         for (dst, value) in bytes[96..].chunks_exact_mut(4).zip(scene) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }

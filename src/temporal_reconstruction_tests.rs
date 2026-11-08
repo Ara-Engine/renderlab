@@ -281,6 +281,8 @@ fn gpu_tr1_sequence() {
         }
         r.set_soft_shadows(SoftShadows::Virtual);
     }
+    // `visible_environment`: primary misses show the bound map (the visible-sky walk).
+    r.set_visible_environment(m["visible_environment"].as_bool().unwrap_or(false));
     let suns = sequence_suns(&PathBuf::from(m["sequence"].as_str().unwrap()));
     let load_seconds = started.elapsed().as_secs_f64();
     let path_cameras: Vec<Camera> =

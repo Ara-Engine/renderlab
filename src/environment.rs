@@ -87,6 +87,8 @@ impl EnvironmentParameters {
 pub(crate) struct EnvironmentState {
     pub selected: Option<EnvironmentMap>,
     pub parameters: EnvironmentParameters,
+    /// Primary misses show the selected map (Renderer::set_visible_environment).
+    pub visible: bool,
     pub generation: u64,
     pub limits: EnvironmentLimits,
     pub uploading: Vec<(u64, EnvironmentMap)>,

@@ -11,7 +11,8 @@ import argparse
 import json
 from pathlib import Path
 
-ROOT = Path("E:/renderlab-work/m7-tr1")
+# Plans and runs on D: since TR1b (bulk output; milestone-7.md). Earlier evidence stays in E:/renderlab-work/m7-tr1.
+ROOT = Path("D:/Coding/renderlab-work/m7-tr1")
 TR0 = Path("E:/renderlab-work/m7-tr0")
 S2G_SCENE = "E:/renderlab-work/m7-u0b/scenes/S2G/scene.json"
 TEST = ("renderer::fresh_shadow_tests::primary_ray_gpu_tests::visibility_buffer_tests::"

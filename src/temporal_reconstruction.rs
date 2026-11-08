@@ -394,7 +394,8 @@ impl Renderer {
                     .map(u32::to_ne_bytes)
                     .concat(),
             )
-            .chain_update(self.environment.uniform());
+            .chain_update(self.environment.uniform())
+            .chain_update([u8::from(self.environment.visible)]);
         for v in [
             u.environment,
             u.geometry,
@@ -488,6 +489,7 @@ impl Renderer {
             })
             .collect();
         let background = self.lit_clear().map(|v| v as f32);
+        let visible_sky = self.environment.visible && self.environment.selected.is_some();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / size.height as f32;
         let state = self.reconstruction_state.as_mut().unwrap();
         let continued = state
@@ -543,7 +545,9 @@ impl Renderer {
             background[0],
             background[1],
             background[2],
-            1.0,
+            // 1: misses show the constant clear colour; 0: the visible sky, which misses
+            // reconstruct like a surface keyed by direction.
+            if visible_sky { 0.0 } else { 1.0 },
             settings.window,
             event_window.max(1.0),
             settings.coverage_window,

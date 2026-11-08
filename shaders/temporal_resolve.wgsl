@@ -32,7 +32,9 @@ struct Tr1Frame {
     // factor that carries exposed history to this frame's exposure; w: the previous
     // frame's sample offset y.
     jitter:vec4<f32>,
-    // The exposed background (primary-miss) colour; stored samples are its f16 value.
+    // xyz: the exposed background (primary-miss) colour; stored samples are its f16 value.
+    // w: 1 when every miss shows it; 0 when misses show the visible sky
+    // (Renderer::set_visible_environment) and reconstruct like a surface keyed by direction.
     background:vec4<f32>,
     // x: static window; y: engine-event window cap; z: coverage window under motion; w: blur
     // budget.
@@ -393,7 +395,7 @@ fn tr1_share(id:u32)->f32 {
 // One surface's history continued with this frame's sample (the pixel's own surface), or
 // started from this frame's samples when nothing continues it.
 fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<f32> {
-    if s.id==0u {return vec4<f32>(quantizeToF16(tr1.background.xyz),tr1.windows.x);}
+    if s.id==0u && tr1.background.w!=0.0 {return vec4<f32>(quantizeToF16(tr1.background.xyz),tr1.windows.x);}
     var h:Tr1History;
     if tr1.flags.x==0u {h=tr1_history(p,s,size);}
     if h.weight>0.0 {
@@ -474,8 +476,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         }
     }
     if other<0 && kept.id==TR1_NONE {
-        // One surface: open background is the background exactly; an interior continues
-        // its surface's history from either slot of the previous frame.
+        // One surface: open constant background is the background exactly; an interior (or
+        // the visible sky) continues its surface's history from either slot of the previous
+        // frame.
         tr1_store_single(p,s,tr1_continue(p,s,sample,size));
         return;
     }
@@ -499,7 +502,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // The other surface keeps its history (no sample of it this frame), or starts from this
     // frame's samples of it.
     var theirs=vec4<f32>(quantizeToF16(tr1.background.xyz),tr1.windows.x);
-    if u.id!=0u {
+    if u.id!=0u || tr1.background.w==0.0 {
         var h:Tr1History;
         if tr1.flags.x==0u {h=tr1_history(p,u,size);}
         if h.weight>0.0 {
