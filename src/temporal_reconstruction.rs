@@ -39,7 +39,9 @@ pub struct Reconstruction {
     /// surface; 0 starts from its own sample.
     pub start_radius: f32,
     /// Sun turn (radians per frame) at which the window falls to one frame; smaller turns
-    /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn.
+    /// cap it at `turn_angle / turn`. Zero restarts every pixel on any sun turn. 0.064 rad:
+    /// Q-sun-fast's 10°/s turns keep about 22 frames (docs/m7-tr1b.md §4.3); TR1's 0.004
+    /// restarted them every frame.
     pub turn_angle: f32,
     /// Catmull-Rom history resampling where all 16 taps are accepted.
     pub catmull_rom: bool,
@@ -60,7 +62,7 @@ impl Default for Reconstruction {
             coverage_window: 16.0,
             start_window: 4.0,
             start_radius: 2.0,
-            turn_angle: 0.004,
+            turn_angle: 0.064,
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
