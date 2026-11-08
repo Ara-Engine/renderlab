@@ -12,7 +12,9 @@
 //!
 //! Its histories, weights, coverages and anchors are read only by that pass, next frame
 //! (P0's W5); no later stage takes them as input.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 
 /// Temporal reconstruction settings (TR1). On by default since TR1b (docs/m7-tr1b.md):
 /// traced and visibility-buffer lit frames at 1x are jittered and accumulate; raster,
@@ -314,7 +316,7 @@ pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
 
 impl PrimaryState {
     pub(super) fn reconstruction_layout(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         arrays: &wgpu::BindGroupLayout,
     ) -> (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>) {
@@ -356,7 +358,7 @@ impl PrimaryState {
     /// production entries `production` has.
     pub(super) fn reconstruction_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         resolve: &str,
         trace: Option<(&str, &PrimaryPipelines)>,

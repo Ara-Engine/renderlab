@@ -4,7 +4,9 @@
 //! describes the cells, which ones a pixel may show, when a cell stays current, and why every
 //! write is order-independent; this module owns the table and its claim words, the epochs its
 //! frame uniform carries, and the probe, queued-walk and two insert passes.
+// PC1: only module/pipeline creation uses the shared compiler; cache logic is unchanged.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Hash-table buckets, four 8-byte slots each (32 MiB): about two cells per 1080p pixel.
@@ -87,7 +89,7 @@ pub(super) struct SurfaceCache {
 
 impl SurfaceCache {
     pub(super) fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         lighting: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -308,7 +310,7 @@ impl SurfaceCache {
     /// lookup's and this module's overrides; the queued walk uses the exact lookup's layout.
     pub(super) fn ensure_pipelines(
         &mut self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         lookup_layout: &wgpu::PipelineLayout,
         constants: &[(&'static str, f64)],

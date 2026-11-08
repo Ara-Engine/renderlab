@@ -6,7 +6,9 @@
 //! one transaction or frame are created concurrently, one thread each, since the driver
 //! compiles on the creating thread. Engine kernels stay in `Pipelines`. Per-material
 //! parameter blocks live here too.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use crate::program::{
     self, Composed, MaterialParameters, ParameterLayout, ProgramShared, STANDARD_PROGRAM, Stage,
 };
@@ -141,18 +143,23 @@ pub(super) struct ProgramCache {
 impl ProgramCache {
     /// About 93 KB of driver data per lit pipeline was measured (fast-shader-reload.md).
     const LIMIT: u64 = 512;
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &PipelineDevice) -> Self {
         Self {
             cache: device
                 .features()
                 .contains(wgpu::Features::PIPELINE_CACHE)
-                .then(|| Self::create(device)),
+                .then(|| {
+                    device
+                        .pipeline_cache()
+                        .cloned()
+                        .unwrap_or_else(|| Self::create(device))
+                }),
             pipelines: 0,
             path: None,
             modules: Arc::default(),
         }
     }
-    fn create(device: &wgpu::Device) -> wgpu::PipelineCache {
+    fn create(device: &PipelineDevice) -> wgpu::PipelineCache {
         // SAFETY: no initial data is supplied, so nothing unvalidated reaches the driver.
         unsafe {
             device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
@@ -163,7 +170,7 @@ impl ProgramCache {
         }
     }
     /// Replaces a full cache before the next pipelines go through it.
-    pub fn refresh(&mut self, device: &wgpu::Device) {
+    pub fn refresh(&mut self, device: &PipelineDevice) {
         if self.cache.is_some() && self.pipelines >= Self::LIMIT {
             self.cache = Some(Self::create(device));
             self.pipelines = 0;
@@ -357,7 +364,7 @@ pub(super) struct Preludes<'a> {
 
 /// The pipeline layouts each program variant compiles on.
 pub(super) struct ProgramAbi<'a> {
-    pub device: &'a wgpu::Device,
+    pub device: &'a PipelineDevice,
     pub ledger: &'a Ledger,
     pub samples: SampleCount,
     pub lit: &'a wgpu::PipelineLayout,
@@ -480,7 +487,7 @@ pub(super) fn compile_program(
 /// Runs `jobs` concurrently, one scoped thread each, and returns their values in order,
 /// each with the first error its own scopes captured (wgpu error scopes are per thread).
 pub(super) fn in_parallel<T: Send, F: FnOnce() -> T + Send>(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     jobs: impl IntoIterator<Item = F>,
 ) -> Vec<(T, Option<wgpu::Error>)> {
     std::thread::scope(|s| {

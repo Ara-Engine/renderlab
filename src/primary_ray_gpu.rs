@@ -4,7 +4,9 @@
 //! materials are descriptor-indexed, so each stage is one dispatch over the image.
 //! Trace and visibility kernels hold no program code and compile once per prelude; each
 //! program compiles only its own shading modules (`shading_heads`).
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
 use crate::shadow_plan::Bounds;
 
@@ -291,7 +293,7 @@ pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u3
 }
 
 /// Whether `device` enables the binding arrays traced visibility indexes per draw.
-pub(super) fn supported(device: &wgpu::Device) -> bool {
+pub(super) fn supported(device: &PipelineDevice) -> bool {
     let limits = device.limits();
     device.features().contains(TRACED_FEATURES) && traced_limits(limits.clone()) == limits
 }
@@ -783,7 +785,7 @@ impl PrimaryState {
     #[cfg(test)]
     pub(super) fn test_film_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         kernels: &str,
         shading: &str,
     ) -> [wgpu::ComputePipeline; 3] {
@@ -847,7 +849,7 @@ impl PrimaryState {
         )
     }
     /// `lighting` is the group-3 layout shared with raster shading.
-    pub fn new(device: &wgpu::Device, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
         use wgpu::TextureFormat as F;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let entries: Vec<_> = entries
@@ -1142,7 +1144,7 @@ impl PrimaryState {
     /// `sources` are `shader_sources` output: hard kernels first, soft kernels second.
     pub fn compile(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         sources: &[String; 2],
     ) -> PrimaryPipelines {
@@ -1238,7 +1240,7 @@ impl PrimaryState {
     /// `film_accumulation::kernel_source` module.
     pub fn film_kernel(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         source: &str,
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
@@ -1272,7 +1274,7 @@ impl PrimaryState {
     /// module, through `cache` when given.
     pub fn film_shade_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         cache: Option<&wgpu::PipelineCache>,
@@ -1294,7 +1296,7 @@ impl PrimaryState {
     #[cfg(test)]
     pub fn shade_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         modules: [&wgpu::ShaderModule; 2],
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
@@ -1304,7 +1306,7 @@ impl PrimaryState {
     /// concurrently, through `cache` when given.
     pub fn shade_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         shading: usize,
@@ -1315,7 +1317,7 @@ impl PrimaryState {
     /// `shade_pipeline` of a streamed (`Stage::TracedStreamed`) module.
     pub fn streamed_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         shading: usize,
@@ -1331,7 +1333,7 @@ impl PrimaryState {
     }
     fn shading_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         layout: &wgpu::PipelineLayout,
@@ -1354,7 +1356,7 @@ impl PrimaryState {
     /// replace the estimator through `constants` and variant modules.
     pub fn fresh_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         entry: &str,
@@ -1380,7 +1382,7 @@ impl PrimaryState {
     /// the estimator through `constants`.
     pub fn interactive_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         constants: &[(&str, f64)],
@@ -1395,7 +1397,7 @@ impl PrimaryState {
     }
     fn interactive_entry(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
         entry: &str,
