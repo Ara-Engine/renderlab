@@ -512,6 +512,20 @@ fn gpu_lc1_quarry_night() {
         r.collect().unwrap();
     }
     r.test_drain("LC1 upload");
+    // LC2: the low-level non-RT renderer needs explicit software GI geometry. LC1's
+    // original night harness omitted it, so its non-RT GI-on capture was a fallback.
+    if lc2 && path == "nonrt" {
+        let field = crate::asset::near_field::decode(
+            &std::fs::read(env("LC2_NEAR").expect("LC2_NEAR names G1c's cooked near field"))
+                .unwrap(),
+            crate::asset::near_field::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(field.meshes.len(), asset.meshes_mut().len());
+        for (i, mesh) in asset.meshes_mut().iter().enumerate() {
+            r.set_indirect_near_field(mesh, &field, i).unwrap();
+        }
+    }
     let frame = &cameras.frames[0];
     let camera = frame.camera().unwrap();
     let viewport = [frame.width, frame.height];
@@ -900,6 +914,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
         if let Some(m) = r
             .try_create_material(&MaterialDescriptor {
                 program: Some(&program),
+                double_sided: true,
                 ..Default::default()
             })
             .unwrap()

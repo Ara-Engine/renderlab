@@ -44,11 +44,12 @@ def main():
     steps = sys.argv[3:] or ["lib", "fixture", "quarry"]
     log = []
     for step in steps:
-        for path in ([None] if step == "lib" else ["traced", "nonrt", "raster"]):
+        for path in ([None] if step == "lib" else os.environ.get("LC2_PATHS", "traced,nonrt,raster").split(",")):
             target = root / (step if path is None else f"{step}-{path}")
             target.mkdir(exist_ok=True)
             env = dict(os.environ, LC2="1", LC1_PATH=path or "traced", LC1_OUT=str(target),
                        LC1_QUARRY="E:/renderlab-work/m7-g1c/quarry/manifest.json", LC1_FRAMES="8",
+                       LC2_NEAR="E:/renderlab-work/m7-g1c/near-cache/near-field-v1/rla1-rvg1/packages/743a2fce42fdf444407e23c2b00c0586ff0438806eeb023bfc19d91979c502f3",
                        VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
             env.pop("VK_INSTANCE_LAYERS", None)
             command = [str(binary), "--test-threads=2"] if step == "lib" else [
@@ -57,7 +58,7 @@ def main():
                 "--ignored", "--exact", "--nocapture", "--test-threads=1"]
             start = time.monotonic()
             with (target / "run.log").open("w") as output:
-                result = subprocess.run(command, cwd=REPO, env=env, stdout=output, stderr=subprocess.STDOUT)
+                result = subprocess.run(command, cwd=REPO, env=env, stdout=output, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
             log.append(dict(step=step, path=path, seconds=time.monotonic()-start, exit=result.returncode))
             (root / "batch.json").write_text(json.dumps(log, indent=2))
             print(log[-1], flush=True)

@@ -340,7 +340,9 @@ impl Renderer {
         let mut header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
         // LC2 source sampling rotates only with TR1; comparisons with history off remain
         // deterministic. Raster map filtering is deterministic on every frame.
-        let sample = self.reconstruction_frame.map_or(0, |k| k.wrapping_add(1));
+        let sample = self
+            .reconstruction_frame
+            .map_or(0u32, |k| k.wrapping_add(1) as u32);
         header[88..92].copy_from_slice(&sample.to_ne_bytes());
         header[100..104].copy_from_slice(&state.settings.near.to_ne_bytes());
         if let Some(span) = crate::lighting::dirty_span(&state.published, &header) {
