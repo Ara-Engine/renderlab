@@ -1,14 +1,15 @@
-"""M7-R1: build and run the reflection measurements (docs/m7-r1.md). Adapted from
-scripts/m7-es1-run.py: the same shared lock, schedule lines and game/RAM/foreign-renderer
-guards (m7-u0-ue.py through m7-u0b.py). No window opens.
+"""M7-MP1: build and run the per-program dispatch checks (docs/m7-mp1.md). R1's runner
+(scripts/m7-r1-run.py) under MP1's owner and evidence root: the same shared lock, schedule
+lines and game/RAM/foreign-renderer guards. No window opens.
 
   quiet                another owner's window in force? (exit 1 when one is)
   build LABEL          cargo test --no-run, two jobs, own target on D:; stops for another
                        owner's QUIET window. Never inside a lease. Stages the test binary as
                        OUT/bin/LABEL.exe.
   gpu LABEL STEPS...   one lease for the listed steps, taken at the first free moment (the
-                       lock polled in-process). STEP is PATH:TEST[:SECTIONS], PATH rt or
-                       nonrt, TEST one of:
+                       lock polled in-process). STEP is PATH:TEST[:SECTIONS[:BINARY]], PATH
+                       rt or nonrt, BINARY a staged label replacing --binary, TEST one of:
+                         mp1       MP1's mixed-program identity and function gate
                          lib       the non-ignored lib suite
                          identity  the production mirror-camera identity (rt only)
                          rf        R0a's RF1-RF10 current-renderer capture with this build
@@ -17,7 +18,7 @@ guards (m7-u0-ue.py through m7-u0b.py). No window opens.
                                    baseline) then this build's; SECTIONS as ES1's
                          or an exact test name.
 
-Evidence goes to D:/Coding/renderlab-work/m7-r1/runs/LABEL; R0a's fixtures and
+Evidence goes to D:/Coding/renderlab-work/m7-mp1/runs/LABEL; R0a's fixtures and
 references on E: are read only.
 """
 import argparse
@@ -41,6 +42,7 @@ TESTS = {
     "rf": "reference::r0a_tests::gpu_r0a_current",
     "rftr1": "reference::r0a_tests::gpu_r0a_current",
     "quarry": "tests::environment_tests::specular::gpu_es1_quarry",
+    "mp1": "renderer::primary_ray_gpu::program_lists::gpu_tests::gpu_mp1_mixed_programs",
 }
 
 
@@ -154,6 +156,7 @@ def run_steps(g, out, binary, baseline, args):
                        RENDERLAB_EVIDENCE_DIR=str(out / "fixtures"), RENDERLAB_R1_OUT=str(out / "identity"))
             if extra and extra[0]:
                 env["RENDERLAB_ES1_SECTIONS"] = extra[0]
+            step_binary = OUT / "bin" / (extra[1] + ".exe") if len(extra) > 1 else binary
             if test in ("rf", "rftr1"):
                 tag = path + ("-tr1" if test == "rftr1" else "")
                 env.update(RENDERLAB_M7_R0A_SCENES=";".join(str(R0A / "scenes" / f) for f in FIXTURES),
@@ -164,9 +167,11 @@ def run_steps(g, out, binary, baseline, args):
                 manifest["out"] = str(out)
                 (out / "quarry-manifest.json").write_text(json.dumps(manifest, indent=2))
                 env["RENDERLAB_ES1_QUARRY"] = str(out / "quarry-manifest.json")
+                # Each binary's quarry rows in their own directory (ES1's tag).
+                env["RENDERLAB_ES1_TAG"] = extra[1] if len(extra) > 1 else args.binary
             name = TESTS.get(test, test)
-            command = ([binary, "--test-threads=2"] if test == "lib" else
-                       [binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
+            command = ([step_binary, "--test-threads=2"] if test == "lib" else
+                       [step_binary, name, "--ignored", "--exact", "--nocapture", "--test-threads=1"])
             g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
                       timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
 
