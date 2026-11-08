@@ -1,4 +1,6 @@
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 
 /// Receiver pixels per `fresh_compute` workgroup; WGSL `FRESH_TILE` must match.
 pub(super) const TILE: [u32; 2] = [2, 2];
@@ -90,7 +92,7 @@ pub(super) struct FreshState {
 }
 impl FreshState {
     pub fn new(
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         groups: [&wgpu::BindGroupLayout; 4],
     ) -> Self {
@@ -212,7 +214,12 @@ impl FreshState {
         }
     }
     /// The engine pipelines from the fresh composition of the prelude.
-    pub fn compile(&self, device: &wgpu::Device, ledger: &Ledger, source: &str) -> FreshPipelines {
+    pub fn compile(
+        &self,
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        source: &str,
+    ) -> FreshPipelines {
         let shader = ledger.own(
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("fresh receivers and visibility compute"),
@@ -231,7 +238,7 @@ impl FreshState {
     #[cfg(test)]
     pub fn shade_pipelines(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
     ) -> [Owned<wgpu::RenderPipeline>; 2] {
@@ -241,7 +248,7 @@ impl FreshState {
     /// when given.
     pub fn shade_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
         tangent: bool,
@@ -251,7 +258,7 @@ impl FreshState {
     }
     fn mesh(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
         tangent: bool,
@@ -335,7 +342,7 @@ impl FreshState {
     /// pipeline-constant overrides (tests seed or replace the production estimator).
     pub fn compute_pipeline(
         &self,
-        device: &wgpu::Device,
+        device: &PipelineDevice,
         ledger: &Ledger,
         shader: &wgpu::ShaderModule,
         entry: &str,

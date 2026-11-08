@@ -25,8 +25,9 @@ pub struct Atmosphere {
     /// Procedural environment source: while no captured map is selected
     /// (`Renderer::set_environment(None, ..)`), the renderer generates the environment from
     /// this sky (diffuse irradiance and a prefiltered specular chain, without the sun disk), so
-    /// image-based light and the world radiance cache take their sky from it. Regenerated when
-    /// the sun, the medium or the environment yaw changes. A selected captured map wins.
+    /// image-based light and the world radiance cache take their sky from it. Updated in place
+    /// when the sun, medium or camera altitude changes; GI relights progressively without
+    /// losing geometric visibility. A selected captured map wins.
     pub environment: bool,
     pub medium: AtmosphereMedium,
     /// None disables the analytic height fog.
@@ -280,11 +281,11 @@ fn sphere(p: glam::DVec3, d: glam::DVec3, radius: f64) -> Option<f64> {
     [-b - s, -b + s].into_iter().find(|t| *t >= 0.0)
 }
 
-/// Each directional light record's lux scaled by `scale` (lighting.rs packs 64-byte records:
+/// Each directional light record's lux scaled by `scale` (lighting.rs packs 80-byte records:
 /// rgb at bytes 32..44, kind 0 = directional at 48..52).
 pub(crate) fn scale_directional(records: &[u8], scale: [f32; 3]) -> Vec<u8> {
     let mut out = records.to_vec();
-    for record in out.chunks_exact_mut(64) {
+    for record in out.chunks_exact_mut(crate::lighting::LIGHT_BYTES) {
         if u32::from_ne_bytes(record[48..52].try_into().unwrap()) != 0 {
             continue;
         }

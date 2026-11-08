@@ -227,7 +227,8 @@ impl PostGpu {
                 "post primary surface",
                 &[
                     sampled(7, T::Uint),
-                    uniform(10, 112),
+                    // TP2 integration: RTDEF2 grew PrimaryFrame to include sampling.
+                    uniform(10, primary_ray_gpu::FRAME_BYTES as u64),
                     sampled(21, T::Uint),
                     uniform(40, 272),
                     storage(41, F::Rgba32Float),

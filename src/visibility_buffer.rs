@@ -5,7 +5,9 @@
 //! receivers into the primary hit ABI. Meshes without an attached hierarchy are one
 //! level of original-geometry clusters. No lighting-model decisions, acceleration
 //! structures or ray-query instructions.
+// PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
+use crate::pipeline_compilation::PipelineDevice;
 use primary_ray_gpu::Buffer;
 use rayon::prelude::*;
 
@@ -222,7 +224,7 @@ impl Renderer {
     }
 }
 
-pub(super) fn supported(device: &wgpu::Device) -> bool {
+pub(super) fn supported(device: &PipelineDevice) -> bool {
     let limits = device.limits();
     device
         .features()
@@ -324,7 +326,10 @@ pub(super) struct VisibilityBuffer {
     hit: wgpu::Texture,
     world: wgpu::Texture,
 }
-fn layout(device: &wgpu::Device, entries: &[wgpu::BindGroupLayoutEntry]) -> wgpu::BindGroupLayout {
+fn layout(
+    device: &PipelineDevice,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("N1c ABI"),
         entries,
@@ -422,7 +427,7 @@ fn target(
     }
 }
 fn bind(
-    device: &wgpu::Device,
+    device: &PipelineDevice,
     layout: &wgpu::BindGroupLayout,
     entries: &[(u32, wgpu::BindingResource<'_>)],
 ) -> wgpu::BindGroup {
