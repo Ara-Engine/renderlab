@@ -120,3 +120,5 @@ Implementation wall was not instrumented separately; coding/preparation overlapp
 Canonical reference archives and Unreal packages remain untouched until integrated M7 acceptance. Compact candidate archives support CPU rescoring; JSON and inspected comparison PNGs remain under `E:/renderlab-work/m7-r0b/`. Disposable f32 staging images and superseded pilot intermediates are pruned. The owned Cargo target is removed at handoff. `docs/milestones-5-6-decisions.tsv`, standard/GI/environment/temporal/shadow files and production defaults are unchanged.
 
 Reproduce with `py -3 scripts/m7-r0b.py checks --full`; guarded `run --label identity-final --test gpu_r0b_identity`; `run --label final --test gpu_r0b_program_primary,gpu_r0b_fixtures,gpu_r0b_quarry`; `score --label final`; and `py -3 scripts/m7-r0b-report.py`. All run commands block on their own leases and finish or fail within the turn. See the retained recipes for exact binary and scene identities.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's quarry and fixture captures rendered 1x with TR1 off and anisotropy 1, the shipping default (un-anti-aliased).

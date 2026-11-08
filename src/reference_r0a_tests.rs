@@ -166,6 +166,7 @@ fn gpu_r0a_current() {
     let (device, queue) = device(rt);
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let source = include_str!("../shaders/scene.wgsl");
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
     let mut renderer = if rt {
         Renderer::new_with_hardware_shadows(
             device,

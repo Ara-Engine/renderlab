@@ -580,3 +580,5 @@ the hold. The remaining integration note, push and cleanup are CPU-only. The
 next GPU qualification step is deferred to a quiet period: optimized paired
 costs and actual normal-mapped quarry residency/quality, alongside TR1's proposed
 amortized footprint. No active GPU job or lease is left behind.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's fixtures rendered 1x with TR1 off and anisotropy 1, the shipping default.

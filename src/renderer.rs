@@ -3568,3 +3568,7 @@ mod fresh_shadow_tests;
 #[cfg(test)]
 #[path = "specular_aa_tests.rs"]
 mod specular_aa_tests;
+
+#[cfg(test)]
+#[path = "iq1_tests.rs"]
+mod iq1_tests;

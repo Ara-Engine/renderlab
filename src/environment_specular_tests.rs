@@ -232,6 +232,7 @@ fn es1_device() -> (wgpu::Device, wgpu::Queue) {
 /// Each path's shipping renderer: traced primaries with Interactive shadows on RT, the
 /// visibility buffer with its creation-time Virtual shadows on non-RT (G1c's protocol).
 fn es1_renderer(device: wgpu::Device, queue: wgpu::Queue, limits: Limits) -> Renderer {
+    // AA state (docs/iq1-quarry-image.md): 1x, TR1 off, anisotropy 1, the shipping default.
     let options = RendererOptions {
         samples: SampleCount::One,
         ..Default::default()
