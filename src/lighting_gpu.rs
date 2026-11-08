@@ -6,6 +6,8 @@ pub(super) struct LightBuffer {
     environment_generation: u64,
     indirect_generation: u64,
     atmosphere_generation: u64,
+    // DC1: rebind only when an admitted frame publishes a new decal table.
+    decal_generation: u64,
     _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
@@ -25,6 +27,7 @@ pub(super) struct Hdr {
     pub lighting_hash: [u8; 32],
 }
 pub(super) struct LightingGpu {
+    pub(super) decals: super::decal_gpu::DecalState,
     pub bindings: Owned<wgpu::BindGroupLayout>,
     pub layout: Owned<wgpu::PipelineLayout>,
     pub present_bindings: Owned<wgpu::BindGroupLayout>,
@@ -71,6 +74,7 @@ impl LightingGpu {
                 label: Some("lighting group 3"),
                 // Compute visibility serves fresh visibility and traced deferred shading.
                 entries: &[
+                    super::decal_gpu::layout_entry(),
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
@@ -239,6 +243,7 @@ impl LightingGpu {
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
         Self {
+            decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
             layout,
             present_bindings,
@@ -275,6 +280,7 @@ impl LightingGpu {
         &self.active.as_ref().unwrap().kernel
     }
     pub fn collect(&mut self, completed: u64) {
+        self.decals.collect(completed);
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
     }
@@ -413,6 +419,9 @@ impl Renderer {
             .sun_scale(eye)
             .map(|t| crate::atmosphere::scale_directional(&self.lighting.pending.records, t));
         let state = &mut self.lighting;
+        state
+            .decals
+            .publish(&self.device, &self.ledger, self.submissions, uploads);
         let records = scaled.as_ref().unwrap_or(&state.pending.records);
         let needed = records.len().max(64) as u64;
         if state.active.as_ref().is_none_or(|active| {
@@ -421,6 +430,7 @@ impl Renderer {
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
                 || active.atmosphere_generation != self.atmosphere.generation
+                || active.decal_generation != state.decals.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -438,6 +448,10 @@ impl Renderer {
                         label: Some(label),
                         layout: &state.bindings,
                         entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 21,
+                                resource: state.decals.active.buffer.as_entire_binding(),
+                            },
                             wgpu::BindGroupEntry {
                                 binding: 20,
                                 resource: table.as_entire_binding(),
@@ -544,6 +558,7 @@ impl Renderer {
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
                 atmosphere_generation: self.atmosphere.generation,
+                decal_generation: state.decals.generation,
                 _environment: self.environment.selected.clone(),
                 buffer,
                 bind,
@@ -677,6 +692,7 @@ impl Renderer {
             hash.update(&self.lighting.pending.records);
             hash.update(self.lighting.pending.uniform(Vec3::ZERO));
             hash.update(self.environment.uniform());
+            hash.update(self.lighting.decals.hash);
             if let Some(map) = &self.environment.selected {
                 hash.update(map.0.hash);
             }

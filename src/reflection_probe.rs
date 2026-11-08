@@ -59,6 +59,13 @@ fn shader() -> String {
         "{reference}\n{input}\n{}\n",
         include_str!("../shaders/reflection_probe.wgsl")
     );
+    // DC1: this frozen reflection experiment has no decal scene. Supply only the
+    // surface value type and material helpers, with identity decal inputs.
+    let decals = include_str!("../shaders/decals.wgsl");
+    source.push_str(
+        &decals[decals.find("struct DecalInput {").unwrap()..decals.find("fn dc_texel(").unwrap()],
+    );
+    source.push_str(&decals[decals.find("fn decal_base_color(").unwrap()..]);
     for name in ["exposed_product", "brdf"] {
         source.push_str(&function(scene, name));
         source.push('\n');

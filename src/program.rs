@@ -13,6 +13,8 @@ use std::{
 pub const STANDARD_PROGRAM: &str = include_str!("../shaders/programs/standard.wgsl");
 const SPECULAR_API: &str = include_str!("../shaders/specular_filter.wgsl");
 const COMMON_API: &str = include_str!("../shaders/program_api.wgsl");
+// DC1: resolved decal inputs are available to every user program on every stage.
+const DECAL_API: &str = include_str!("../shaders/decals.wgsl");
 const RASTER_API: &str = include_str!("../shaders/program_raster.wgsl");
 const RASTER_ENTRY: &str = include_str!("../shaders/program_raster_entry.wgsl");
 const TRACED_API: &str = include_str!("../shaders/program_traced.wgsl");
@@ -378,7 +380,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         crate::atmosphere::api_source()
     };
     let mut source = format!(
-        "{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{DECAL_API}{SPECULAR_API}{api}{indirect}{atmosphere}{binding}// ---- program ----\n"
     );
     let start = source.len();
     source.push_str(program);
