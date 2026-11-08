@@ -3014,7 +3014,17 @@ impl Renderer {
                 if streaming {
                     self.encode_request_clear(&mut encoder);
                 }
-                self.gi.encode(&mut encoder, self.lighting.kernel_bind());
+                let shade = self
+                    .primary
+                    .as_ref()
+                    .and_then(|p| p.shading_groups())
+                    .map(|(arrays, materials)| gi_cache::ShadeGroups {
+                        arrays,
+                        materials,
+                        lighting: self.lighting.bind(),
+                    });
+                self.gi
+                    .encode(&mut encoder, self.lighting.kernel_bind(), shade);
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
             if reconstructed {

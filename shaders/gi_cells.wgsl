@@ -1,21 +1,26 @@
-// ---- renderlab world radiance cache (M7 G1): cell keys, records and SH, shared ----
-// Shared by the engine's cache kernels (gi_cache.wgsl) and the program input
-// `indirect_irradiance` (gi_api.wgsl). Each module declares `gi_table` itself: the
-// kernels read and write it, shading only reads it. src/gi_cache.rs owns the layout.
+// ---- renderlab world radiance cache (M7 G1, G2): cell keys, records and SH, shared ----
+// Shared by the engine's cache kernels (gi_cache.wgsl), the program inputs
+// (`indirect_irradiance`, gi_api.wgsl) and the cell shading entry (gi_shade_entry.wgsl).
+// Each module declares `gi_table` itself: the kernels read and write it, shading and cell
+// shading only read it. src/gi_cache.rs owns the layout.
 //
 // Cells are cubes of edge GI_MIN_EDGE*2^level, keyed by level, integer cube and a
 // six-way normal bin (dominant axis of the receiver's geometric normal on its viewed
 // side). Positions are never projected (C2), cells stay cubic (C3). Each slot has a
 // hot record that shading reads (key, valid bit, the fixed-weight L2 SH of the
-// occluded sky, a constant sky's at unit radiance, in f16 with one f32 scale) and a cold record only the kernels touch
-// (definition, fixed query point, one visibility bit per fixed direction: the
-// per-direction slots of W1). Values are replaced on update; no field counts samples
-// (W1, C8).
+// occluded sky, a constant sky's at unit radiance, in f16 with one f32 scale, then the
+// L1 SH of the bounce light its blocked directions see, G2) and a cold record only the
+// kernels touch (definition, fixed query point, one visibility bit per fixed direction:
+// the per-direction slots of W1, the query point's material and light visibility). Values
+// are replaced on update; no field counts samples (W1, C8).
 
 // Header words, then every hot record, then every cold record.
 const GI_HEADER:u32=64u;
-const GI_HOT_WORDS:u32=16u;
-const GI_COLD_WORDS:u32=28u;
+const GI_HOT_WORDS:u32=24u;
+const GI_COLD_WORDS:u32=32u;
+// Hot words 16-22 (G2): the bounce SH's f32 scale (0: no bounce), then its 12 halves (L1,
+// coefficient i*3+c for band index i, channel c), divided by the scale. Word 23 is unused.
+const GI_HOT_BOUNCE:u32=16u;
 // Slots searched per key, from an offset the key picks.
 const GI_BUCKET:u32=8u;
 // Fixed directions per cell: a uniform Fibonacci hemisphere about the query normal.
@@ -51,6 +56,12 @@ const GI_H_SPREAD:u32=14u;
 // Software rays with cooked near-field masks (M7 G1c): their octahedral bins per side (0:
 // none).
 const GI_H_NEAR_BINS:u32=16u;
+// Bounce light (M7 G2): bit 0 when this frame's program reflects light (declares `scatter`
+// or `emission`) and the setting is on; the work-buffer offset of the cell shading queue;
+// and the gathers an event schedules for each cell it reaches (G).
+const GI_H_BOUNCE:u32=17u;
+const GI_H_SHADE_QUEUE:u32=18u;
+const GI_H_GATHERS:u32=19u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
 // last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly
@@ -109,6 +120,15 @@ const GI_C_PENDING:u32=20u;
 // Directions the cooked near-field masks block at the query point (GI_MAX_WORDS words; zero
 // without masks): never traced, always blocked, whatever moves.
 const GI_C_NEAR:u32=24u;
+// The query point's material (G2), fixed with the point: its placement's identity + 1 (0:
+// none; a draw's stable id << 16 | instance, src/gi_cache.rs `draw_ids`), the hit triangle's
+// primitive (0xffffffff when the ray source cannot name it: software rays against a cooked
+// cut), its barycentrics (pack2x16unorm), then one visibility bit per light at the point.
+const GI_C_MATERIAL:u32=28u;
+const GI_C_PRIMITIVE:u32=29u;
+const GI_C_BARY:u32=30u;
+const GI_C_LIGHTS:u32=31u;
+const GI_NO_PRIMITIVE:u32=0xffffffffu;
 // State bits: the value is current; the cell has no canonical query point; some
 // directions are still untraced (counted as open sky until they are); queued for
 // tracing this frame; the cell is split (read at finer levels), a property of its probe
@@ -118,7 +138,19 @@ const GI_ORPHAN:u32=2u;
 const GI_PARTIAL:u32=4u;
 const GI_QUEUED:u32=8u;
 const GI_SPLIT:u32=32u;
-const GI_KEEP:u32=GI_SPLIT;
+// Bounce (G2): queued for cell shading this frame; queued for a gather next frame; made for a
+// gather's hit (it requests no further cells); and the gathers still scheduled (bits 12-14),
+// set by the event that reached it: a schedule, never a count of samples (W1, C8).
+const GI_SHADE:u32=64u;
+const GI_BQUEUED:u32=128u;
+const GI_SECONDARY:u32=256u;
+const GI_GATHER_SHIFT:u32=12u;
+const GI_GATHER_MASK:u32=0x7000u;
+// A gather met hit cells without a value and was given one more.
+const GI_RETRY:u32=512u;
+// Made for a secondary cell's gather: requests nothing (GI_SECONDARY is set too).
+const GI_TERTIARY:u32=1024u;
+const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK;
 
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
 // shading a vec4 array (gi_api.wgsl) so records load whole.
@@ -261,6 +293,54 @@ fn gi_band_weight(i:u32) -> f32 {
     if i==0u { return 3.141592653589793; }
     if i<4u { return 2.0943951023931953; }
     return 0.7853981633974483;
+}
+// Bounce coefficient j (L1: band index j / 3, channel j % 3) of a hot record, before its scale.
+fn gi_bounce_half(hot:u32, j:u32) -> f32 {
+    let pair=unpack2x16float(gi_word(hot+GI_HOT_BOUNCE+1u+(j>>1u)));
+    return select(pair.x,pair.y,(j&1u)!=0u);
+}
+// A cell's irradiance about n from its own hot record: the occluded sky in cached units
+// (unit radiance for a constant sky, the map's radiance before intensity: apply
+// gi_sky_scale's rule) and the bounce light in lux. Overwrites gi_y.
+fn gi_cell_sky_irradiance(hot:u32, n:vec3<f32>) -> vec3<f32> {
+    gi_sh_basis(n);
+    var e=vec3<f32>(0.0);
+    for(var i=0u;i<9u;i+=1u) {
+        e+=gi_band_weight(i)*gi_y[i]*vec3<f32>(gi_half(hot,3u*i),gi_half(hot,3u*i+1u),gi_half(hot,3u*i+2u));
+    }
+    return max(e*bitcast<f32>(gi_word(hot+1u)),vec3<f32>(0.0));
+}
+fn gi_cell_bounce_irradiance(hot:u32, n:vec3<f32>) -> vec3<f32> {
+    let scale=bitcast<f32>(gi_word(hot+GI_HOT_BOUNCE));
+    if scale<=0.0 { return vec3<f32>(0.0); }
+    gi_sh_basis(n);
+    var e=vec3<f32>(0.0);
+    for(var i=0u;i<4u;i+=1u) {
+        e+=gi_band_weight(i)*gi_y[i]*vec3<f32>(gi_bounce_half(hot,3u*i),gi_bounce_half(hot,3u*i+1u),gi_bounce_half(hot,3u*i+2u));
+    }
+    return max(e*scale,vec3<f32>(0.0));
+}
+// Branchless orthonormal basis (Duff et al. 2017); the third column is n.
+fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
+    let s=select(-1.0,1.0,n.z>=0.0);
+    let a=-1.0/(s+n.z);
+    let b=n.x*n.y*a;
+    return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
+}
+fn gi_unpack_normal(w:u32) -> vec3<f32> {
+    let q=unpack2x16snorm(w);
+    var n=vec3<f32>(q,1.0-abs(q.x)-abs(q.y));
+    let t=max(-n.z,0.0);
+    n=vec3<f32>(n.x+select(t,-t,n.x>=0.0),n.y+select(t,-t,n.y>=0.0),n.z);
+    return normalize(n);
+}
+// Band-1 attenuation of a GGX lobe of perceptual roughness r about a direction, through its
+// Phong equivalent cos^s (s = 2/alpha^2 - 2): (s + 1)/(s + 2), 1 for a mirror and 1/2 for a
+// lobe as wide as the hemisphere. Used to read L1 bounce radiance in a specular lobe.
+fn gi_lobe_band1(roughness:f32) -> f32 {
+    let alpha=max(roughness*roughness,1e-4);
+    let s=max(2.0/(alpha*alpha)-2.0,0.0);
+    return (s+1.0)/(s+2.0);
 }
 
 // ---- end of the shared cache definitions ----

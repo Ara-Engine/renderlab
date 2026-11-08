@@ -3218,3 +3218,374 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
     let n = Vec3::new(got[2], got[3], got[4]);
     assert!(n.dot(normal) > 0.9999, "normal {n} against {normal}");
 }
+
+// ---- M7 G2: bounce light on the registered quarry (docs/m7-g2.md) ----
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../examples/m4/cameras.rs"]
+mod g2_cameras;
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../viewer/src/prepared.rs"]
+mod g2_prepared;
+
+/// RENDERLAB_G2_PATH: "rt" (hardware rays, traced primaries) or "nonrt" (a device without ray
+/// queries, visibility-buffer primaries).
+fn g2_nonrt() -> bool {
+    env("RENDERLAB_G2_PATH").as_deref() == Some("nonrt")
+}
+/// The variants a G2 quarry process renders, in RENDERLAB_G2_VARIANTS order (default
+/// "off,g2,es1"): the cache off (the default image), the cache with bounce (the default
+/// candidate), and the cache without bounce (ES1's image on this code; "es1open" is the same
+/// settings in a process whose shaders hold ES1's unoccluded diagnostic). The names are the
+/// capture prefixes scripts/m7-g2-score.py reads.
+fn g2_variant(name: &str) -> IndirectSettings {
+    match name {
+        "off" => IndirectSettings::default(),
+        "g2" => IndirectSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        "es1" | "es1open" => IndirectSettings {
+            enabled: true,
+            bounce: false,
+            ..Default::default()
+        },
+        other => panic!("unknown G2 variant {other}"),
+    }
+}
+/// The registered quarry under U0b's full-radiance protocol, as ES1 measured it
+/// (docs/m7-es1.md 4.1): the quarry's own materials, the RLE2 sky, the sun on the 4/12/40 m
+/// splits, a black backdrop, exposure -14; Interactive shadows and traced primaries on RT,
+/// Virtual shadows and the visibility buffer with G1c's cooked near field on non-RT. One
+/// path per process. RENDERLAB_G2_QUARRY: ES1's manifest (asset, cameras, environment,
+/// lighting, near). RENDERLAB_G2_SECTIONS, in order (default static,pan):
+/// - static: poses 0 and 1 per variant, a reset and twelve frames;
+/// - pan: per variant, settled at pose 0, then U0b's pan at 2 cm a frame, captured at its
+///   witness frames 97, 112, 128 and 159;
+/// - settle: the first variant after a reset at pose 0, captured at frames 1-8 and 12;
+/// - sun: settled at pose 0, the sun turned 10 degrees, captured at frames 1, 2, 4 and 8 after
+///   the step, then a reset under the new sun settled (the fresh image);
+/// - cost: every variant in each of five visits (the last profiled): a cut of twelve frames,
+///   then 24 frames moving 1 cm a frame; frame and shading spans, the profiled visit's
+///   passes and the kernels' counters.
+/// Captures are raw little-endian f32 radiance (VARIANT-pP, VARIANT-pan-FFF, ...) for the CPU
+/// scorer; nothing is scored here. Timing here is functional unless the lease is quiet.
+#[test]
+#[ignore = "GPU lease; RENDERLAB_G2_PATH, RENDERLAB_G2_QUARRY, RENDERLAB_G2_OUT"]
+fn gpu_g2_quarry() {
+    let start = Instant::now();
+    let manifest: Json =
+        serde_json::from_slice(&std::fs::read(env("RENDERLAB_G2_QUARRY").unwrap()).unwrap())
+            .unwrap();
+    let file = |k: &str| PathBuf::from(manifest[k].as_str().unwrap());
+    let path = if g2_nonrt() { "nonrt" } else { "rt" };
+    let out = PathBuf::from(env("RENDERLAB_G2_OUT").unwrap())
+        .join(env("RENDERLAB_G2_TAG").map_or(path.to_string(), |t| format!("{path}-{t}")));
+    std::fs::create_dir_all(&out).unwrap();
+    let sections: Vec<String> = env("RENDERLAB_G2_SECTIONS")
+        .unwrap_or_else(|| "static,pan".into())
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let variants: Vec<String> = env("RENDERLAB_G2_VARIANTS")
+        .unwrap_or_else(|| "off,g2,es1".into())
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let source = crate::asset::decode(
+        &std::fs::read(file("asset")).unwrap(),
+        crate::asset::Limits::unlimited(),
+    )
+    .unwrap();
+    let cameras = g2_cameras::Cameras::load(&file("cameras")).unwrap();
+    let map = crate::asset::environment::decode(
+        &std::fs::read(file("environment")).unwrap(),
+        crate::asset::environment::Limits::unbounded(),
+    )
+    .unwrap();
+    let lighting: Json = serde_json::from_slice(&std::fs::read(file("lighting")).unwrap()).unwrap();
+    let v3 = |v: &Json| Vec3::from_array(std::array::from_fn(|k| v[k].as_f64().unwrap() as f32));
+    let (device, queue) = if g2_nonrt() {
+        no_rt_device_with(true)
+    } else {
+        rt_device()
+    };
+    let options = RendererOptions {
+        samples: SampleCount::One,
+        ..Default::default()
+    };
+    let limits = Limits {
+        max_mesh_bytes: 134217728,
+        max_texture_bytes: 134217728,
+        ..Default::default()
+    };
+    let mut r = if g2_nonrt() {
+        Renderer::new_with_options(device, queue, FORMAT, limits, options, SOURCE).unwrap()
+    } else {
+        let mut r = Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            limits,
+            options,
+            HardwareShadowOptions {
+                max_estimated_bytes: Some(8 * 1024 * 1024 * 1024),
+            },
+            SOURCE,
+        )
+        .unwrap();
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+        r
+    };
+    let exposure = -14.0;
+    let travel = v3(&lighting["lights"][0]["travel"]);
+    let lux = v3(&lighting["lights"][0]["lux"]).to_array();
+    let set_sun = |r: &mut Renderer, travel: Vec3| {
+        r.set_lighting_and_shadows(
+            &Lighting {
+                lights: vec![Light::Directional { travel, lux }],
+                environment: [0.0; 3],
+                exposure_stops: exposure,
+            },
+            &Shadows {
+                directional_disk_angle: 0.04,
+                requests: vec![ShadowRequest::Directional {
+                    split_ends: vec![4., 12., 40.],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    set_sun(&mut r, travel);
+    if !g2_nonrt() {
+        r.set_soft_shadows(SoftShadows::Interactive);
+    }
+    let sky = loop {
+        if let Some(sky) = r.try_upload_environment(&map).unwrap() {
+            break sky;
+        }
+        r.test_drain("G2 quarry environment");
+    };
+    r.set_environment(Some(&sky), Default::default()).unwrap();
+    drop(map);
+    let mut asset = g2_prepared::Prepared::new_with_limits(
+        source,
+        crate::asset::Limits::unlimited(),
+        1_000_000,
+    )
+    .unwrap();
+    while !asset.ready() {
+        asset.advance(&mut r).unwrap();
+        r.collect().unwrap();
+    }
+    r.test_drain("G2 quarry upload");
+    if g2_nonrt() {
+        let field = crate::asset::near_field::decode(
+            &std::fs::read(file("near")).unwrap(),
+            crate::asset::near_field::Limits::default(),
+        )
+        .unwrap();
+        for (m, mesh) in asset.meshes_mut().iter().enumerate() {
+            r.set_indirect_near_field(mesh, &field, m).unwrap();
+        }
+    }
+    // RENDERLAB_G2_PROGRAM: a diagnostic program in place of the standard one.
+    if let Some(program) = env("RENDERLAB_G2_PROGRAM") {
+        r.test_reload_standard(&std::fs::read_to_string(program).unwrap())
+            .unwrap();
+    }
+    let frame0 = &cameras.frames[0];
+    let target = color_target(&r, [frame0.width, frame0.height]);
+    let camera_at = |pose: usize, dx: f32| {
+        let mut f = cameras.frames[pose].clone();
+        f.eye[0] += dx;
+        f.target[0] += dx;
+        f.camera().unwrap()
+    };
+    let write = |name: &str, image: &[[f32; 3]]| {
+        let raw: Vec<u8> = image
+            .iter()
+            .flatten()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        std::fs::write(out.join(format!("{name}.f32")), raw).unwrap();
+    };
+    let mut draw = |r: &mut Renderer, camera: &Camera| {
+        let mut draws = asset.draws(Visibility::Frustum);
+        let until = Instant::now() + Duration::from_secs(60);
+        while r
+            .try_render_view(&target, camera, &mut draws, ViewMode::Lit)
+            .unwrap()
+            .is_none()
+        {
+            assert!(Instant::now() < until, "G2 frame admission");
+            r.test_drain("G2 admission");
+        }
+    };
+    let counters = |r: &mut Renderer| {
+        r.indirect_counters().unwrap().map_or(Json::Null, |c| {
+            json!({"created": c.created, "traces": c.traces, "rays": c.rays, "shades": c.shades,
+                "gathers": c.gathers, "gather_rays": c.gather_rays, "gather_misses": c.gather_misses,
+                "gather_requests": c.gather_requests, "light_rays": c.light_rays,
+                "bounce_queued": c.bounce_queued, "orphans": c.orphans, "full": c.full,
+                "miss_overflow": c.miss_overflow, "lost": c.lost, "gather_absent": c.gather_absent,
+                "gather_unshaded": c.gather_unshaded, "gather_orphans": c.gather_orphans,
+                "misses": c.misses})
+        })
+    };
+    let mut results = json!({"path": path, "variants": variants, "sections": sections});
+    for section in &sections {
+        match section.as_str() {
+            "static" => {
+                for v in &variants {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    for pose in 0..2 {
+                        let camera = camera_at(pose, 0.0);
+                        r.reset_indirect();
+                        for _ in 0..12 {
+                            draw(&mut r, &camera);
+                        }
+                        write(&format!("{v}-p{pose}"), &capture_radiance(&mut r, exposure));
+                        results["counters"][format!("{v}-p{pose}")] = counters(&mut r);
+                        // RENDERLAB_G2_DUMP=1: the table and outgoing radiance after pose 0
+                        // (diagnostics; tens of MB, deleted once summarized).
+                        if pose == 0 && env("RENDERLAB_G2_DUMP").as_deref() == Some("1") {
+                            if let Some(words) = r.indirect_table().unwrap() {
+                                let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                                std::fs::write(out.join(format!("{v}-table.u32")), raw).unwrap();
+                            }
+                            if let Some(o) = r.indirect_outgoing().unwrap() {
+                                let raw: Vec<u8> = o.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                                std::fs::write(out.join(format!("{v}-outgoing.f32")), raw).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            "pan" => {
+                // U0b's pan: frame f >= 96 is pose 0 moved 2 cm a frame in x.
+                for v in &variants {
+                    r.set_indirect(g2_variant(v)).unwrap();
+                    r.reset_indirect();
+                    for _ in 0..12 {
+                        draw(&mut r, &camera_at(0, 0.0));
+                    }
+                    for f in 97..=159 {
+                        draw(&mut r, &camera_at(0, 0.02 * (f - 96) as f32));
+                        if [97, 112, 128, 159].contains(&f) {
+                            write(&format!("{v}-pan-{f:03}"), &capture_radiance(&mut r, exposure));
+                        }
+                    }
+                }
+            }
+            "settle" => {
+                let v = &variants[0];
+                r.set_indirect(g2_variant(v)).unwrap();
+                r.reset_indirect();
+                let mut rows = vec![];
+                for f in 1..=12 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                    if f <= 8 || f == 12 {
+                        write(&format!("{v}-settle-{f:02}"), &capture_radiance(&mut r, exposure));
+                        rows.push(json!({"frame": f, "counters": counters(&mut r)}));
+                    }
+                }
+                results["settle"] = json!(rows);
+            }
+            "sun" => {
+                // A 10 degree turn of the sun about the vertical axis at a settled view.
+                let v = &variants[0];
+                r.set_indirect(g2_variant(v)).unwrap();
+                r.reset_indirect();
+                for _ in 0..12 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                }
+                let turned = Mat4::from_rotation_y(10f32.to_radians()).transform_vector3(travel);
+                set_sun(&mut r, turned);
+                for f in 1..=8 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                    if [1, 2, 4, 8].contains(&f) {
+                        write(&format!("{v}-sun-{f:02}"), &capture_radiance(&mut r, exposure));
+                    }
+                }
+                r.reset_indirect();
+                for _ in 0..12 {
+                    draw(&mut r, &camera_at(0, 0.0));
+                }
+                write(&format!("{v}-sun-fresh"), &capture_radiance(&mut r, exposure));
+                set_sun(&mut r, travel);
+            }
+            "cost" => {
+                let mut timing = json!({});
+                for visit in 0..5 {
+                    // The last visit is profiled: per-pass times and counters.
+                    let profiled = visit == 4;
+                    r.set_indirect_profiling(profiled);
+                    for v in &variants {
+                        r.set_indirect(g2_variant(v)).unwrap();
+                        r.test_drain("G2 cost");
+                        r.poll().unwrap();
+                        r.reset_indirect();
+                        for _ in 0..12 {
+                            draw(&mut r, &camera_at(0, 0.0));
+                        }
+                        r.test_drain("G2 cut frames");
+                        let cut = g2_frame_times(&mut r, 12, 0);
+                        for t in 0..24 {
+                            draw(&mut r, &camera_at(0, 0.01 * t as f32));
+                        }
+                        r.test_drain("G2 motion frames");
+                        let motion = g2_frame_times(&mut r, 24, 2);
+                        let slot = &mut timing[v.as_str()];
+                        if slot.is_null() {
+                            *slot = json!({"cuts": [], "motion": []});
+                        }
+                        if profiled {
+                            let profiles = r.indirect_profiles().unwrap();
+                            let tail = &profiles[profiles.len().saturating_sub(22)..];
+                            let pass = |f: fn(&IndirectProfile) -> f64| {
+                                quantiles(tail.iter().map(f).collect())
+                            };
+                            slot["passes_us"] = json!({
+                                "total": pass(|p| p.total()), "probe": pass(|p| p.probe),
+                                "claim": pass(|p| p.claim + p.resolve), "scan": pass(|p| p.scan),
+                                "setup": pass(|p| p.setup), "rays": pass(|p| p.rays),
+                                "finish": pass(|p| p.finish), "gather": pass(|p| p.gather),
+                                "light": pass(|p| p.light), "shade": pass(|p| p.shade),
+                            });
+                            slot["counters"] = counters(&mut r);
+                        } else {
+                            slot["cuts"].as_array_mut().unwrap().push(cut);
+                            slot["motion"].as_array_mut().unwrap().push(motion);
+                        }
+                    }
+                }
+                r.set_indirect_profiling(false);
+                results["cost"] = timing;
+            }
+            other => panic!("unknown G2 section {other}"),
+        }
+        results["stats"] = json!(format!("{:?}", r.indirect_stats()));
+        std::fs::write(
+            out.join("quarry.json"),
+            serde_json::to_vec_pretty(&results).unwrap(),
+        )
+        .unwrap();
+    }
+    results["seconds"] = json!(start.elapsed().as_secs_f64());
+    std::fs::write(
+        out.join("quarry.json"),
+        serde_json::to_vec_pretty(&results).unwrap(),
+    )
+    .unwrap();
+}
+/// The last `frames` GPU samples after skipping `skip`: per frame, the render span and the
+/// shading pass in milliseconds.
+fn g2_frame_times(r: &mut Renderer, frames: usize, skip: usize) -> Json {
+    let gpu = r.poll().unwrap().gpu;
+    let rows: Vec<_> = gpu.iter().rev().take(frames).rev().skip(skip).collect();
+    json!({
+        "span_ms": rows.iter().map(|g| g.render_span.as_secs_f64() * 1e3).collect::<Vec<_>>(),
+        "shading_ms": rows.iter().map(|g| g.mesh_pass.as_secs_f64() * 1e3).collect::<Vec<_>>(),
+    })
+}

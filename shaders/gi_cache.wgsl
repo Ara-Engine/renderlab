@@ -29,6 +29,21 @@
 //               SH over every slot, replacing the value (W1); after a miss-list
 //               overflow it also clears the whole request table;
 //   gi_integrate the SH again from the stored bits, with no rays (environment frames).
+// With bounce light (M7 G2, docs/m7-g2.md), when the frame's program declares `scatter` or
+// `emission`:
+//   gi_gather   after the probe, eight lanes per cell of last frame's gather queue: one
+//               closest-hit ray along each of its blocked fixed directions, reading the
+//               hit cell's outgoing radiance (the cache-terminated path: that radiance
+//               carries the hit's own bounce, so bounces add up over gathers) and requesting
+//               a hit cell that does not exist yet; the L1 SH of those radiances replaces
+//               the cell's bounce value (W1). Cells it reaches go to cell shading;
+//   gi_light    one thread per cell to shade: one visibility ray per light at its query
+//               point, through this module's ray source;
+//   then each program's cell shading (gi_shade_entry.wgsl) writes the cells' outgoing
+//   radiance from the program's own `surface`, `scatter` and `emission`.
+// A gather is scheduled for each cell an event reaches (new or re-traced cells, lighting
+// and environment steps, a fixed slot group per frame while lighting, the environment or
+// casters keep changing), a fixed number of times: unconditional, never ranked (W2).
 // Every pass is a direct dispatch of a fixed grid that reads its count in the kernel and
 // loops (src/gi_cache.rs *_GROUPS): no indirect dispatch, so no argument passes and no
 // indirect-call validation. src/gi_cache.rs skips scan and integrate without an event.
@@ -47,6 +62,11 @@ struct GiFrame {
     // the environment's slot group: period (bits 0-7; 0: every slot), phase (bits 8-15),
     // and bit 31 when the scan visits only that group (environment-only frames).
     requests:vec4<u32>,
+    // Bounce (G2): x this frame's gather queue (its count, then slots), y next frame's,
+    // z the relight event (GI_RELIGHT_*: bit 31 every cell, else a slot group's period in
+    // bits 0-7 and phase in bits 8-15; bit 29 when gathers may request cells, which is
+    // whenever the claim rounds run), w the cell shading queue (its count is GI_W_SHADES).
+    bounce:vec4<u32>,
     // Swept world bounds of moved placements: lo.xyz then hi.xyz.
     boxes:array<vec4<f32>,64>,
 };
@@ -54,6 +74,10 @@ const GI_SCAN_CASTER:u32=1u;
 const GI_SCAN_ROTATION:u32=2u;
 const GI_SCAN_ENVIRONMENT:u32=4u;
 const GI_SCAN_PARTIAL:u32=8u;
+// Lighting, environment or program changed (G2): cells relight (bounce.z says which).
+const GI_SCAN_RELIGHT:u32=16u;
+const GI_RELIGHT_ALL:u32=0x80000000u;
+const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
 const GI_W_MISSES:u32=0u;
 const GI_W_TRACES:u32=1u;
@@ -93,10 +117,25 @@ const GI_W_P_WALKS:u32=25u;
 const GI_W_P_REFINE_TILES:u32=26u;
 const GI_W_P_MAX:u32=27u;
 const GI_W_P_HIST:u32=28u;
+// Bounce (G2): cells queued for cell shading (gi_shade_entry.wgsl reads this word), cells
+// gathered, their rays, rays whose hit cell had no value yet, cells they requested, light
+// visibility rays, and appends to next frame's gather queue.
+const GI_W_SHADES:u32=32u;
+const GI_W_GATHERS:u32=33u;
+const GI_W_GATHER_RAYS:u32=34u;
+const GI_W_GATHER_MISSES:u32=35u;
+const GI_W_GATHER_REQUESTS:u32=36u;
+const GI_W_LIGHT_RAYS:u32=37u;
+const GI_W_BQUEUE:u32=38u;
+// Gather rays without a value, by cause: no cell at the hit's level (requested), a cell not
+// shaded yet, an orphan whose coarser levels had none either.
+const GI_W_GATHER_ABSENT:u32=39u;
+const GI_W_GATHER_UNSHADED:u32=40u;
+const GI_W_GATHER_ORPHANS:u32=41u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=32u;
+const GI_W_CLAIMS:u32=44u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -108,6 +147,12 @@ const GI_ENV_ROUGHNESS:f32=0.35;
 fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 @group(0) @binding(31) var<storage,read_write> gi_work:array<atomic<u32>>;
 @group(0) @binding(32) var<uniform> gi_frame:GiFrame;
+// Bounce (G2): each slot's outgoing radiance (rgb; w 1 once cell shading wrote it, 0 before),
+// written by cell shading, read by gathers, cleared when a slot takes a new cell.
+@group(0) @binding(33) var<storage,read_write> gi_outgoing:array<vec4<f32>>;
+// Per draw (batch) of this frame: its stable id (0: none), first placement and instance
+// count, so a cell's material names its placement whatever the draw order (src/gi_cache.rs).
+@group(0) @binding(36) var<storage,read> gi_draws:array<vec4<u32>>;
 struct GiVec4s { data:array<vec4<f32>> };
 struct GiU32s { data:array<u32> };
 @group(1) @binding(2) var<storage,read> gi_vertices:binding_array<GiVec4s,PRIMARY_BATCHES>;
@@ -166,9 +211,12 @@ const GI_LS_VALID:u32=2u;
 const GI_LS_ORPHAN:u32=4u;
 // Rounds of finds: each finds what the last added. Pixels' walks add coarser levels where a
 // level has no value but an orphan (up to GI_PARENT_ROUNDS levels, one a round), and the finer
-// level under split cells (GI_REFINE levels, round 0).
-const GI_PROBE_ROUNDS:u32=4u;
-const GI_PARENT_ROUNDS:u32=2u;
+// level under split cells (GI_REFINE levels, round 0). Four parent levels (G2; two before):
+// pixels whose cells and two coarser levels were all orphans fell back to the open sky, bright
+// specks in the quarry's hollows (196 pixels at pose 0 against 38, and none in the hollow
+// under the central slab, docs/m7-g2.md); rounds end early where a tile adds nothing.
+const GI_PROBE_ROUNDS:u32=6u;
+const GI_PARENT_ROUNDS:u32=4u;
 // Probe statistics (GI_F_STATS): each lane counts in private scalars and adds them to the
 // workgroup's once; lane 0 adds the tile's to the work counters. gi_cause says which kind of
 // request the current inserts are (0 pixels, 1 orphans' parents, 2 refinement).
@@ -564,10 +612,16 @@ fn gi_resolve_miss(index:u32) {
     let key=gi_miss_key(base);
     let cold=gi_cold(slot);
     gi_table[gi_hot(slot)]=key.x;
-    // No split flag from the slot's last occupant.
+    // No split flag, bounce value or outgoing radiance from the slot's last occupant.
     gi_table[gi_hot(slot)+15u]=0u;
+    gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
+    gi_outgoing[slot]=vec4<f32>(0.0);
     gi_table[cold+GI_C_KEY_B]=key.y;
-    gi_table[cold+GI_C_STATE]=GI_QUEUED;
+    // Cells only gathers requested (G2: priorities below every pixel's) are secondary, or
+    // tertiary when a secondary cell's gather requested them (gi_gather).
+    let priority=gi_miss_priority(base);
+    let generation=select(select(0u,GI_SECONDARY,priority<0x80000000u),GI_SECONDARY|GI_TERTIARY,priority<0x40000000u);
+    gi_table[cold+GI_C_STATE]=GI_QUEUED|generation;
     gi_table[cold+GI_C_SEEN]=gi_word(GI_H_FRAME);
     gi_table[cold+GI_C_DEF]=atomicLoad(&gi_work[base]);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_CELL+i]=atomicLoad(&gi_work[base+1u+i]); }
@@ -575,6 +629,10 @@ fn gi_resolve_miss(index:u32) {
         gi_table[cold+GI_C_KNOWN+w]=0u;
         gi_table[cold+GI_C_NEAR+w]=0u;
     }
+    gi_table[cold+GI_C_MATERIAL]=0u;
+    gi_table[cold+GI_C_PRIMITIVE]=GI_NO_PRIMITIVE;
+    gi_table[cold+GI_C_BARY]=0u;
+    gi_table[cold+GI_C_LIGHTS]=0u;
     gi_queue_trace(slot);
     atomicAdd(&gi_work[GI_W_CREATED],1u);
 }
@@ -587,6 +645,36 @@ fn gi_queue_trace(slot:u32) {
 fn gi_queue_integrate(slot:u32) {
     let at=atomicAdd(&gi_work[GI_W_INTEGRATES],1u);
     if at<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.offsets.w+at],slot); }
+}
+// ---- bounce scheduling (G2) ----
+// Whether this frame's program reflects light, so gathers and cell shading run.
+fn gi_bounce_on() -> bool { return gi_word(GI_H_BOUNCE)!=0u; }
+// Queues a cell for this frame's cell shading once (GI_SHADE, cleared by gi_light). Every
+// caller handles the cell in one thread.
+fn gi_queue_shade(slot:u32) {
+    let cold=gi_cold(slot);
+    let state=gi_table[cold+GI_C_STATE];
+    if (state&GI_SHADE)!=0u { return; }
+    gi_table[cold+GI_C_STATE]=state|GI_SHADE;
+    let at=atomicAdd(&gi_work[GI_W_SHADES],1u);
+    if at<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.w+at],slot); }
+}
+// Schedules at least `gathers` gathers of a cell on the next frames, queueing it for next
+// frame's once (GI_BQUEUED). An event reaching the cell sets the schedule; it is not a count
+// of samples (W1, C8), and no cell is compared with another (W2).
+fn gi_schedule(slot:u32, gathers:u32) {
+    if gathers==0u { return; }
+    let cold=gi_cold(slot);
+    let state=gi_table[cold+GI_C_STATE];
+    let left=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,min(gathers,7u));
+    var next=(state&~GI_GATHER_MASK)|(left<<GI_GATHER_SHIFT);
+    if (state&GI_BQUEUED)==0u {
+        next|=GI_BQUEUED;
+        let at=atomicAdd(&gi_work[gi_frame.bounce.y],1u);
+        if at<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.y+1u+at],slot); }
+        atomicAdd(&gi_work[GI_W_BQUEUE],1u);
+    }
+    gi_table[cold+GI_C_STATE]=next;
 }
 
 // ---- the fixed directions of one cell ----
@@ -603,13 +691,6 @@ fn gi_cell(slot:u32) -> GiCell {
     return GiCell(level,bin,cell,(vec3<f32>(cell)+vec3<f32>(0.5)+shift)*edge,edge,
         vec2<u32>(gi_table[gi_hot(slot)]&GI_KEY_BITS,gi_table[cold+GI_C_KEY_B]));
 }
-// Branchless orthonormal basis (Duff et al. 2017).
-fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
-    let s=select(-1.0,1.0,n.z>=0.0);
-    let a=-1.0/(s+n.z);
-    let b=n.x*n.y*a;
-    return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
-}
 // Direction k of GI_DIRECTIONS: equal solid angles of the hemisphere about the
 // query normal, optionally rotated about it by an angle the key fixes.
 fn gi_direction(frame:mat3x3<f32>, key:vec2<u32>, k:u32) -> vec3<f32> {
@@ -623,13 +704,6 @@ fn gi_pack_normal(n:vec3<f32>) -> u32 {
     let p=n.xy/(abs(n.x)+abs(n.y)+abs(n.z));
     let q=select((vec2<f32>(1.0)-abs(p.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0)),p,n.z>=0.0);
     return pack2x16snorm(q);
-}
-fn gi_unpack_normal(w:u32) -> vec3<f32> {
-    let q=unpack2x16snorm(w);
-    var n=vec3<f32>(q,1.0-abs(q.x)-abs(q.y));
-    let t=max(-n.z,0.0);
-    n=vec3<f32>(n.x+select(t,-t,n.x>=0.0),n.y+select(t,-t,n.y>=0.0),n.z);
-    return normalize(n);
 }
 fn gi_origin_offset(q:vec3<f32>, edge:f32) -> f32 {
     let m=max(max(abs(q.x),abs(q.y)),abs(q.z));
@@ -936,7 +1010,9 @@ const GI_SETUP_CHOSEN:u32=7u;
                 if state==GI_SETUP_NONE {
                     gi_table[gi_hot(slot)]=c.key.x;
                     gi_table[gi_hot(slot)+15u]=select(0u,GI_SPLIT_HOT,split);
-                    gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN|select(0u,GI_SPLIT,split);
+                    gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
+                    gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN|select(0u,GI_SPLIT,split)
+                        |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
                     atomicAdd(&gi_work[GI_W_ORPHANS],1u);
                     atomicAdd(&gi_work[select(GI_W_ORPHAN_NONE,GI_W_ORPHAN_INSIDE,qualified)],1u);
                 }
@@ -1020,14 +1096,20 @@ const GI_SETUP_CHOSEN:u32=7u;
         workgroupBarrier();
     }
 }
-// A fresh cell's canonical query point and normal, and whether it is split. Its near words
-// are cleared until stage 5 stores them.
+// A fresh cell's canonical query point and normal, whether it is split, and the point's
+// material (G2: the placement and, where the ray source names it, the hit triangle). Its near
+// words are cleared until stage 5 stores them. The bounce bits survive a re-probe.
 fn gi_setup_point(slot:u32, r:GiCandidate, split:bool) {
     let cold=gi_cold(slot);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
     gi_table[cold+GI_C_NORMAL]=gi_pack_normal(r.n.xyz);
-    gi_table[cold+GI_C_STATE]=GI_QUEUED|select(0u,GI_SPLIT,split);
+    gi_table[cold+GI_C_STATE]=GI_QUEUED|select(0u,GI_SPLIT,split)
+        |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
     for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_NEAR+w]=0u; }
+    let inst=r.tri.w&0x7fffffffu;
+    gi_table[cold+GI_C_MATERIAL]=gi_hit_identity(inst,r.tri.xyz);
+    gi_table[cold+GI_C_PRIMITIVE]=gi_hit_primitive(r.tri.xyz);
+    gi_table[cold+GI_C_BARY]=pack2x16unorm(r.bary);
 }
 // Lane 0's part of setup for a cell with a query point: the pending directions (into the
 // workgroup's copy too) and the item allocation. Directions its near-field masks block become
@@ -1220,6 +1302,12 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             gi_table[cold+GI_C_BASE]=0u;
             gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known)|(gi_table[cold+GI_C_STATE]&GI_KEEP);
             gi_table[gi_hot(slot)]=gi_table[gi_hot(slot)]|GI_VALID;
+            // Bounce (G2): a traced cell's sky changed, so it is shaded again; once every
+            // direction is known its blocked directions are gathered GI_H_GATHERS times.
+            if gi_bounce_on() {
+                gi_queue_shade(slot);
+                if all_known { gi_schedule(slot,gi_word(GI_H_GATHERS)); }
+            }
         }
         // Lane 0 of each cell has read its bits before the next cells clear them.
         workgroupBarrier();
@@ -1339,10 +1427,243 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         gi_queue_trace(slot);
         return;
     }
+    // Bounce (G2), for cells with a value: a lighting, environment or program change relights
+    // every cell (a step after still frames: shaded now, then GI_H_GATHERS gathers) or one
+    // fixed slot group a frame while it keeps changing (one gather each); a moved caster
+    // crossing a light's ray from the query point reshades it. Fixed rotations by slot index,
+    // never a ranking (W2).
+    if gi_bounce_on() && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED {
+        if (flags&GI_SCAN_RELIGHT)!=0u {
+            let relight=gi_frame.bounce.z;
+            let all=(relight&GI_RELIGHT_ALL)!=0u;
+            let p=relight&0xffu;
+            if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
+                gi_queue_shade(slot);
+                gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
+            }
+        }
+        if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) { gi_queue_shade(slot); }
+    }
     // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
     // ENVIRONMENT_PERIOD): a fixed rotation, never a ranking (W2).
     if (flags&GI_SCAN_ENVIRONMENT)!=0u && (state&GI_ORPHAN)==0u
         && (period==0u || (slot+((group>>8u)&0xffu))%period==0u) {
         gi_queue_integrate(slot);
+    }
+}
+
+// ---- bounce light (G2): gathers and light visibility ----
+// The direction a cell's query point sees light l in, and how far the light is (1e20 for a
+// directional light), as light_sample computes it from a receiver.
+fn gi_light_direction(l:u32, q:vec3<f32>) -> vec4<f32> {
+    let light=lights[l];
+    if light.kind.x==0u { return vec4<f32>(-light.travel_outer.xyz,1e20); }
+    let delta=light.position_range.xyz-q;
+    let distance=length(delta);
+    return vec4<f32>(delta/max(distance,1e-30),distance);
+}
+// Whether a moved caster's swept box meets a light's ray from a cell's query point.
+fn gi_light_reached(slot:u32) -> bool {
+    let cold=gi_cold(slot);
+    let q=gi_point(cold);
+    let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+    let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
+    let origin=q+n*gi_origin_offset(q,edge);
+    let lights_n=min(lighting.count,32u);
+    for(var b=0u;b<gi_frame.counts.x;b+=1u) {
+        let pad=vec3<f32>(1e-3*edge+1e-4);
+        let lo=gi_frame.boxes[b*2u].xyz-pad;let hi=gi_frame.boxes[b*2u+1u].xyz+pad;
+        for(var l=0u;l<lights_n;l+=1u) {
+            if gi_box_hit(origin,gi_light_direction(l,q).xyz,lo,hi) { return true; }
+        }
+    }
+    return false;
+}
+// One thread per cell queued for shading: one visibility ray per light (up to 32) from its
+// query point, as bits for cell shading; clears its shading flag for the next frame.
+@compute @workgroup_size(64) fn gi_light(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
+        let cold=gi_cold(slot);
+        gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_SHADE;
+        let q=gi_point(cold);
+        let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+        let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
+        let origin=q+n*gi_origin_offset(q,edge);
+        var bits=0u;
+        let lights_n=min(lighting.count,32u);
+        for(var l=0u;l<lights_n;l+=1u) {
+            let d=gi_light_direction(l,q);
+            if dot(n,d.xyz)<=0.0 { continue; }
+            if gi_visible_within(origin,d.xyz,d.w) { bits|=1u<<l; }
+        }
+        atomicAdd(&gi_work[GI_W_LIGHT_RAYS],lights_n);
+        gi_table[cold+GI_C_LIGHTS]=bits;
+    }
+}
+// Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
+// miss, at a priority below every pixel's (resolve marks it secondary).
+fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
+    let key=gi_key(level,bin,cell);
+    let entry=gi_request_entry(key.x);
+    if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); return; }
+    atomicMax(&gi_work[gi_frame.requests.x+entry.x*2u+1u],priority);
+    if entry.y==0u { return; }
+    let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
+    if at>=gi_frame.counts.w { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); return; }
+    let base=gi_frame.offsets.y+at*GI_MISS_WORDS;
+    let c=bitcast<vec3<u32>>(cell);
+    atomicStore(&gi_work[base],level|(bin<<8u));
+    atomicStore(&gi_work[base+1u],c.x);
+    atomicStore(&gi_work[base+2u],c.y);
+    atomicStore(&gi_work[base+3u],c.z);
+    atomicStore(&gi_work[base+4u],entry.x);
+    atomicStore(&gi_work[base+5u],GI_UNCLAIMED);
+    atomicAdd(&gi_work[GI_W_GATHER_REQUESTS],1u);
+}
+// The outgoing radiance a gather ray meets at its hit: the containing cell of the hit's
+// point, bin and level (the same cell a pixel there reads first), or else the first of the
+// next coarser levels' containing cells with a value (a deterministic coarser fallback, as
+// the lookup's, W3). w is 1 for the hit level's own value, 0.5 for a coarser level's (the
+// gather is then repeated once the hit level's cell has one), 0 for none (the ray adds
+// nothing). A hit level without a cell is requested when `priority` is nonzero, for the
+// claim rounds that follow this pass.
+fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, priority:u32) -> vec4<f32> {
+    let r=gi_hit_receiver(origin,d,h);
+    let world=r.world;
+    let bin=gi_bin(r.vertex);
+    let levels=gi_word(GI_H_LEVELS);
+    let base=gi_level(world);
+    var cause=0u;
+    for(var l=base;l<min(base+1u+GI_PARENT_ROUNDS,levels);l+=1u) {
+        let cell=vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)));
+        let slot=gi_find(gi_key(l,bin,cell));
+        if slot==0xffffffffu {
+            if l==base && priority!=0u { gi_request_one(l,bin,cell,priority); }
+            if l==base { cause=GI_W_GATHER_ABSENT; }
+            continue;
+        }
+        // A gather keeps the cells it reads alive, like a pixel (the race is benign).
+        gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
+        let o=gi_outgoing[slot];
+        if o.w>0.0 { return vec4<f32>(o.rgb,select(0.5,1.0,l==base)); }
+        if l==base && (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)==0u { cause=GI_W_GATHER_UNSHADED; }
+    }
+    atomicAdd(&gi_work[select(GI_W_GATHER_ORPHANS,cause,cause!=0u)],1u);
+    return vec4<f32>(0.0);
+}
+// Eight lanes per queued cell, eight cells per workgroup (as setup): lane j traces the
+// cell's blocked directions k = j, j+8, ... with closest-hit rays, each adding its hit's
+// outgoing radiance times the fixed weight 2 pi / K to the L1 SH; a fixed tree sums the
+// lanes, and the sum replaces the cell's bounce value (W1). Cells read their own and other
+// cells' last outgoing radiance, which cell shading rewrites only after this pass, so the
+// result does not depend on thread order.
+const GI_GATHER_LANES:u32=8u;
+const GI_GATHER_CELLS:u32=8u;
+var<workgroup> gi_wg_bounce:array<f32,GI_GATHER_CELLS*12u*GI_GATHER_LANES>;
+var<workgroup> gi_wg_missing:array<atomic<u32>,GI_GATHER_CELLS>;
+var<private> gi_gather_sh:array<vec3<f32>,4>;
+@compute @workgroup_size(64) fn gi_gather(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) index:u32) {
+    let cell=index/GI_GATHER_LANES;
+    let lane=index%GI_GATHER_LANES;
+    if index==0u { gi_wg_count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x); }
+    let count=workgroupUniformLoad(&gi_wg_count);
+    let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;
+    for(var first=group.x*GI_GATHER_CELLS;first<count;first+=groups.x*GI_GATHER_CELLS) {
+        if lane==0u { atomicStore(&gi_wg_missing[cell],0u); }
+        var slot=0u;
+        var live=first+cell<count;
+        if live {
+            slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+first+cell]);
+            let state=gi_table[gi_cold(slot)+GI_C_STATE];
+            live=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
+                && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+        }
+        workgroupBarrier();
+        for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
+        let cold=gi_cold(slot);
+        if live {
+            let c=gi_cell(slot);
+            let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+            let q=gi_point(cold);
+            let frame=gi_basis(n);
+            let origin=q+n*gi_origin_offset(q,c.edge);
+            // Cells pixels made request at priorities in [2^30, 2^31), cells their gathers made
+            // in [1, 2^30) (resolve marks what they make tertiary), tertiary cells request none:
+            // two generations of hit cells beyond what pixels see. All below every pixel's.
+            let state=gi_table[cold+GI_C_STATE];
+            let secondary=(state&GI_SECONDARY)!=0u;
+            let tertiary=(state&GI_TERTIARY)!=0u;
+            let rank=min(slot,0x3ffffffeu);
+            let priority=select(select(0x7fffffffu-rank,0x3fffffffu-rank,secondary),0u,!requests || tertiary);
+            var missing=0u;
+            var rays=0u;
+            for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
+                if (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
+                let d=gi_direction(frame,c.key,k);
+                let h=gi_closest(origin,d,0.0,1e20);
+                rays+=1u;
+                if !h.hit { continue; }
+                let o=gi_hit_radiance(origin,d,h,priority);
+                if o.w<1.0 { missing+=1u; }
+                if o.w==0.0 { continue; }
+                gi_sh_basis(d);
+                let radiance=o.rgb*(6.283185307179586/f32(GI_DIRECTIONS));
+                for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
+            }
+            if missing!=0u {
+                atomicAdd(&gi_wg_missing[cell],1u);
+                atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing);
+            }
+            atomicAdd(&gi_work[GI_W_GATHER_RAYS],rays);
+        }
+        // The lanes' sums into lane 0 in a fixed tree order (no atomics on values).
+        let at=cell*12u*GI_GATHER_LANES+lane;
+        for(var i=0u;i<4u;i+=1u) {
+            gi_wg_bounce[at+(i*3u)*GI_GATHER_LANES]=gi_gather_sh[i].x;
+            gi_wg_bounce[at+(i*3u+1u)*GI_GATHER_LANES]=gi_gather_sh[i].y;
+            gi_wg_bounce[at+(i*3u+2u)*GI_GATHER_LANES]=gi_gather_sh[i].z;
+        }
+        workgroupBarrier();
+        for(var stride=GI_GATHER_LANES/2u;stride>0u;stride/=2u) {
+            if lane<stride {
+                for(var j=0u;j<12u;j+=1u) {
+                    gi_wg_bounce[at+j*GI_GATHER_LANES]+=gi_wg_bounce[at+j*GI_GATHER_LANES+stride];
+                }
+            }
+            workgroupBarrier();
+        }
+        if live && lane==0u {
+            atomicAdd(&gi_work[GI_W_GATHERS],1u);
+            var m=0.0;
+            for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[at+j*GI_GATHER_LANES])); }
+            let hot=gi_hot(slot);
+            if m<=0.0 {
+                gi_table[hot+GI_HOT_BOUNCE]=0u;
+            } else {
+                for(var w=0u;w<6u;w+=1u) {
+                    let a=gi_wg_bounce[at+(2u*w)*GI_GATHER_LANES];
+                    let b=gi_wg_bounce[at+(2u*w+1u)*GI_GATHER_LANES];
+                    gi_table[hot+GI_HOT_BOUNCE+1u+w]=pack2x16float(vec2<f32>(a,b)/m);
+                }
+                gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(m);
+            }
+            // The schedule: one gather done. A gather that met hit cells without a value yet
+            // (new this frame, or requested now) is repeated once more.
+            let state=gi_table[cold+GI_C_STATE];
+            var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
+            left=select(0u,left-1u,left>0u);
+            var retry=state&GI_RETRY;
+            if atomicLoad(&gi_wg_missing[cell])!=0u {
+                if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
+            } else {
+                retry=0u;
+            }
+            gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
+            gi_queue_shade(slot);
+            gi_schedule(slot,left);
+        }
+        workgroupBarrier();
     }
 }
