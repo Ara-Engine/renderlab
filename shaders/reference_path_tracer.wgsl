@@ -18,14 +18,17 @@ struct Frame {
     // rgb: disk radiance (cd/m^2), or illuminance (lux) for a delta sun; w: 1 if a sun exists.
     sun_value:vec4<f32>,
     sky:vec4<f32>,
+    environment:vec4<f32>, // cos(yaw), sin(yaw), intensity
+    background:vec4<f32>, // rgb camera-only backdrop, w enabled
     // x width, y height, z first sample index of this dispatch, w samples this dispatch.
     size:vec4<u32>,
     // x max path depth (Mitsuba semantics: 1 = emitters only, 2 = direct), y seed, z smith (0 correlated, 1 separable).
     options:vec4<u32>,
+    measurement:vec4<u32>, // x visibility rays per primary; y precise 1-cos(sun radius), bitcast f32
 };
-struct Vertex {a:vec4<f32>, b:vec4<f32>};  // a: position xyz, normal x; b: normal yz, uv
+struct Vertex {a:vec4<f32>, b:vec4<f32>, tangent:vec4<f32>, color:vec4<f32>};
 struct Instance {offsets:vec4<u32>, n0:vec4<f32>, n1:vec4<f32>, n2:vec4<f32>};  // vertex, index, material
-struct Material {base:vec4<f32>, emission:vec4<f32>, params:vec4<f32>};  // base rgb + metallic; params: roughness, specular
+struct Material {base:vec4<f32>, emission:vec4<f32>, params:vec4<f32>, base_map:vec4<u32>, mr_map:vec4<u32>, normal_map:vec4<u32>};
 
 @group(0) @binding(0) var<uniform> frame:Frame;
 @group(0) @binding(1) var scene:acceleration_structure;
@@ -35,6 +38,109 @@ struct Material {base:vec4<f32>, emission:vec4<f32>, params:vec4<f32>};  // base
 @group(0) @binding(5) var<storage,read> materials:array<Material>;
 // Two running sums per pixel (even and odd samples) give the mean and a split-half noise estimate.
 @group(0) @binding(6) var<storage,read_write> sums:array<vec4<f32>>;
+@group(0) @binding(7) var<storage,read> texture_texels:array<u32>;
+@group(0) @binding(8) var<storage,read> texture_info:array<vec4<u32>>;
+@group(0) @binding(9) var<storage,read> environment_texels:array<vec4<f32>>;
+struct Geometry {world:vec4<f32>, normal:vec4<f32>, ids:vec4<u32>, direct_even:vec4<f32>, direct_odd:vec4<f32>};
+@group(0) @binding(10) var<storage,read_write> geometry:array<Geometry>;
+
+fn address(i:i32, size:i32, wrap:u32)->i32 {
+    if wrap==0u {return clamp(i,0,size-1);}
+    if wrap==1u {let j=((i%(2*size))+2*size)%(2*size); return select(2*size-1-j,j,j<size);}
+    return ((i%size)+size)%size;
+}
+fn texture_value(mip:vec4<u32>, p:vec2<i32>, binding:vec4<u32>, srgb:bool)->vec4<f32> {
+    let xy=vec2<u32>(vec2<i32>(address(p.x,i32(mip.y),binding.y),address(p.y,i32(mip.z),binding.z)));
+    let packed=texture_texels[mip.x+xy.y*mip.y+xy.x];
+    var value=vec4<f32>(f32(packed&255u),f32((packed>>8u)&255u),f32((packed>>16u)&255u),f32(packed>>24u))/255.0;
+    if srgb {value=vec4<f32>(select(pow((value.rgb+0.055)/1.055,vec3<f32>(2.4)),value.rgb/12.92,value.rgb<=vec3<f32>(0.04045)),value.a);}
+    return value;
+}
+fn texture_sample_level(binding:vec4<u32>, uv:vec2<f32>, level:u32)->vec4<f32> {
+    if binding.x==0u {return vec4<f32>(1.0);}
+    let info=texture_info[binding.x-1u];
+    // Level zero is integrated by the path samples' pixel jitter, not preblurred a second time.
+    let mip=texture_info[info.x+min(level,info.y-1u)];
+    let p=uv*vec2<f32>(mip.yz)-0.5;
+    let xy=vec2<i32>(floor(p));
+    if binding.w==0u {return texture_value(mip,vec2<i32>(floor(p+0.5)),binding,info.z!=0u);}
+    let f=fract(p);
+    return mix(mix(texture_value(mip,xy,binding,info.z!=0u),texture_value(mip,xy+vec2<i32>(1,0),binding,info.z!=0u),f.x),
+               mix(texture_value(mip,xy+vec2<i32>(0,1),binding,info.z!=0u),texture_value(mip,xy+vec2<i32>(1,1),binding,info.z!=0u),f.x),f.y);
+}
+fn texture_sample(binding:vec4<u32>, uv:vec2<f32>)->vec4<f32> {
+    let lod=max(bitcast<f32>(frame.options.w),0.0);
+    return mix(texture_sample_level(binding,uv,u32(lod)),texture_sample_level(binding,uv,u32(lod)+1u),fract(lod));
+}
+fn environment_direction(face:u32, uv:vec2<f32>)->vec3<f32> {
+    switch face {
+        case 0u: {return normalize(vec3<f32>(1.0,-uv.y,-uv.x));}
+        case 1u: {return normalize(vec3<f32>(-1.0,-uv.y,uv.x));}
+        case 2u: {return normalize(vec3<f32>(uv.x,1.0,uv.y));}
+        case 3u: {return normalize(vec3<f32>(uv.x,-1.0,-uv.y));}
+        case 4u: {return normalize(vec3<f32>(uv.x,-uv.y,1.0));}
+        default: {return normalize(vec3<f32>(-uv.x,-uv.y,-1.0));}
+    }
+}
+fn environment_rotate(d:vec3<f32>, inverse:bool)->vec3<f32> {
+    let c=frame.environment.x; let s=select(-frame.environment.y,frame.environment.y,inverse);
+    return vec3<f32>(c*d.x+s*d.z,d.y,-s*d.x+c*d.z);
+}
+// face, u, v in [-1,1]
+fn environment_uv(d:vec3<f32>)->vec3<f32> {
+    let a=abs(d);
+    if a.x>=a.y && a.x>=a.z {
+        if d.x>=0.0 {return vec3<f32>(0.0,-d.z/a.x,-d.y/a.x);}
+        return vec3<f32>(1.0,d.z/a.x,-d.y/a.x);
+    }
+    if a.y>=a.z {
+        if d.y>=0.0 {return vec3<f32>(2.0,d.x/a.y,d.z/a.y);}
+        return vec3<f32>(3.0,d.x/a.y,-d.z/a.y);
+    }
+    if d.z>=0.0 {return vec3<f32>(4.0,d.x/a.z,-d.y/a.z);}
+    return vec3<f32>(5.0,-d.x/a.z,-d.y/a.z);
+}
+fn environment_index(uv:vec3<f32>)->u32 {
+    let n=u32(frame.sky.w);
+    let p=vec2<u32>(clamp((uv.yz*0.5+0.5)*f32(n),vec2<f32>(0.0),vec2<f32>(f32(n)-1.0)));
+    return u32(uv.x)*n*n+p.y*n+p.x;
+}
+fn environment_remap(face:u32, xy:vec2<i32>)->vec3<f32> {
+    let n=frame.sky.w;
+    // Project out-of-face bilinear taps onto their neighbouring face (seam-aware cube lookup).
+    let d=environment_direction(face,(vec2<f32>(xy)+0.5)*(2.0/n)-1.0);
+    return environment_texels[environment_index(environment_uv(d))].rgb;
+}
+fn environment_tap(face:u32, xy:vec2<i32>)->vec3<f32> {
+    let n=i32(frame.sky.w);
+    if (xy.x<0 || xy.x>=n) && (xy.y<0 || xy.y>=n) {
+        let q=clamp(xy,vec2<i32>(0),vec2<i32>(n-1));
+        return (environment_remap(face,q)+environment_remap(face,vec2<i32>(xy.x,q.y))+environment_remap(face,vec2<i32>(q.x,xy.y)))/3.0;
+    }
+    return environment_remap(face,xy);
+}
+fn sky_radiance(d:vec3<f32>)->vec3<f32> {
+    if frame.sky.w==0.0 {return frame.sky.rgb;}
+    let uv=environment_uv(environment_rotate(d,false));
+    let p=(uv.yz*0.5+0.5)*frame.sky.w-0.5;
+    let xy=vec2<i32>(floor(p)); let f=fract(p); let face=u32(uv.x);
+    return frame.environment.z*mix(mix(environment_tap(face,xy),environment_tap(face,xy+vec2<i32>(1,0)),f.x),
+        mix(environment_tap(face,xy+vec2<i32>(0,1)),environment_tap(face,xy+vec2<i32>(1,1)),f.x),f.y);
+}
+fn environment_pdf(d:vec3<f32>)->f32 {
+    let uv=environment_uv(environment_rotate(d,false));
+    let i=environment_index(uv);
+    var prev=0.0; if i>0u {prev=environment_texels[i-1u].w;}
+    let mass=environment_texels[i].w-prev;
+    return mass*frame.sky.w*frame.sky.w*0.25*pow(1.0+dot(uv.yz,uv.yz),1.5);
+}
+fn sample_environment()->vec3<f32> {
+    let u=rand(); var lo=0u; var hi=arrayLength(&environment_texels)-1u;
+    while lo<hi {let mid=(lo+hi)/2u; if u<environment_texels[mid].w {hi=mid;} else {lo=mid+1u;}}
+    let n=u32(frame.sky.w); let p=lo%(n*n);
+    let uv=(vec2<f32>(f32(p%n),f32(p/n))+vec2<f32>(rand(),rand()))*(2.0/f32(n))-1.0;
+    return environment_rotate(environment_direction(lo/(n*n),uv),true);
+}
 
 // PCG hash (Jarzynski and Olano 2020): stateless, so any sample replays bit-identically.
 fn pcg(v:u32)->u32 {
@@ -56,30 +162,64 @@ fn basis(n:vec3<f32>)->mat3x3<f32> {
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
 
-struct Hit {hit:bool, p:vec3<f32>, n:vec3<f32>, ng:vec3<f32>, material:u32};
+struct Hit {hit:bool, p:vec3<f32>, n:vec3<f32>, ng:vec3<f32>, material:u32, uv:vec2<f32>, color:vec3<f32>, identity:vec2<u32>};
 
 fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     var query:ray_query;
     rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,0.0,1e30,origin,direction));
     while rayQueryProceed(&query) {}
     let h=rayQueryGetCommittedIntersection(&query);
-    if h.kind==0u {return Hit(false,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0u);}
+    if h.kind==0u {return Hit(false,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0u,vec2<f32>(0.0),vec3<f32>(1.0),vec2<u32>(0u));}
     let inst=instances[h.instance_custom_data];
     let base=inst.offsets.y+3u*h.primitive_index;
     let v0=vertices[inst.offsets.x+indices[base]];
     let v1=vertices[inst.offsets.x+indices[base+1u]];
     let v2=vertices[inst.offsets.x+indices[base+2u]];
-    let w=vec3<f32>(1.0-h.barycentrics.x-h.barycentrics.y,h.barycentrics);
+    var w=vec3<f32>(1.0-h.barycentrics.x-h.barycentrics.y,h.barycentrics);
+    // Hardware chooses the closest primitive. Recompute its interpolation from the
+    // source triangle so AS-layout-dependent barycentric rounding cannot change shading.
+    let ro=h.world_to_object*vec4<f32>(origin,1.0);
+    let rd=h.world_to_object*vec4<f32>(direction,0.0);
+    let e1=v1.a.xyz-v0.a.xyz;let e2=v2.a.xyz-v0.a.xyz;
+    let pvec=cross(rd,e2);let det=dot(e1,pvec);
+    if abs(det)>1e-20 {
+        let tvec=ro-v0.a.xyz;let qvec=cross(tvec,e1);
+        let u=dot(tvec,pvec)/det;let v=dot(rd,qvec)/det;
+        w=vec3<f32>(1.0-u-v,u,v);
+    }
     let local=v0.a.xyz*w.x+v1.a.xyz*w.y+v2.a.xyz*w.z;
     let p=h.object_to_world*vec4<f32>(local,1.0);
     let normal_matrix=mat3x3<f32>(inst.n0.xyz,inst.n1.xyz,inst.n2.xyz);
     var ng=normalize(normal_matrix*cross(v1.a.xyz-v0.a.xyz,v2.a.xyz-v0.a.xyz));
     let ns=vec3<f32>(v0.a.w,v0.b.xy)*w.x+vec3<f32>(v1.a.w,v1.b.xy)*w.y+vec3<f32>(v2.a.w,v2.b.xy)*w.z;
-    var n=normalize(normal_matrix*ns);
-    // Two-sided: shade the side the ray arrived from; keep the shading normal in that hemisphere.
-    if dot(ng,direction)>0.0 {ng=-ng;}
-    if dot(n,ng)<0.0 {n=-n;}
-    return Hit(true,p,n,ng,inst.offsets.z);
+    var n=normal_matrix*ns;
+    if dot(n,n)<=1e-12 {n=ng;} else {n=normalize(n);}
+    let uv=v0.b.zw*w.x+v1.b.zw*w.y+v2.b.zw*w.z;
+    // Affine differences preserve a constant attribute exactly; summing three
+    // rounded barycentric weights can spuriously modulate even constant white.
+    let color=v0.color.rgb+(v1.color.rgb-v0.color.rgb)*w.y+(v2.color.rgb-v0.color.rgb)*w.z;
+    let m=materials[inst.offsets.z];
+    if m.normal_map.x!=0u {
+        let tangent=v0.tangent*w.x+v1.tangent*w.y+v2.tangent*w.z;
+        let world_t=h.object_to_world*vec4<f32>(tangent.xyz,0.0);
+        let projected=world_t-n*dot(n,world_t);
+        var t=normalize(projected);
+        if dot(projected,projected)<=1e-12 {
+            let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(n.x)>0.9);
+            t=normalize(axis-n*dot(n,axis));
+        }
+        let determinant=dot(cross(h.object_to_world[0],h.object_to_world[1]),h.object_to_world[2]);
+        let b=tangent.w*sign(determinant)*cross(n,t);
+        let sampled=texture_sample(m.normal_map,uv).xyz*2.0-1.0;
+        let scale=max(abs(m.params.z),1.0);
+        let decoded=vec3<f32>(sampled.xy*(m.params.z/scale),sampled.z/scale);
+        var mapped=vec3<f32>(0.0,0.0,1.0);
+        if length(decoded)>1e-6/scale {mapped=normalize(decoded);}
+        n=normalize(t*mapped.x+b*mapped.y+n*mapped.z);
+    }
+    // Match material_normal: a source-back face reverses the complete perturbed frame.
+    if dot(ng,direction)>0.0 {ng=-ng;n=-n;}
+    return Hit(true,p,n,ng,inst.offsets.z,uv,color,vec2<u32>(h.instance_custom_data+1u,h.primitive_index+1u));
 }
 fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
     var query:ray_query;
@@ -91,10 +231,32 @@ fn offset(p:vec3<f32>, ng:vec3<f32>)->vec3<f32> {
     let m=max(max(abs(p.x),abs(p.y)),abs(p.z));
     return p+ng*(1e-4+4e-7*m);
 }
+fn sun_height()->f32 {return bitcast<f32>(frame.measurement.y);}
+fn sample_sun()->vec3<f32> {
+    if sun_height()==0.0 {return frame.sun.xyz;}
+    let h=rand()*sun_height();let phi=2.0*PI*rand();
+    let r=sqrt(h*(2.0-h));
+    return basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),1.0-h);
+}
+fn primary_visibility(hit:Hit)->f32 {
+    if frame.sun_value.w==0.0 {return 0.0;}
+    var total=0.0;
+    let start=offset(hit.p,hit.ng);
+    let n=frame.measurement.x;
+    for (var k=0u;k<n;k+=1u) {
+        let wi=sample_sun();
+        if dot(hit.ng,wi)>0.0 && !occluded(start,wi) {total+=1.0;}
+    }
+    return total/f32(n);
+}
 
 // Radiance arriving from an escaped direction: the sun disk inside its cone, else the sky.
-fn in_sun(d:vec3<f32>)->bool {return frame.sun_value.w>0.0 && frame.sun.w<1.0 && dot(d,frame.sun.xyz)>=frame.sun.w;}
-fn sun_pdf()->f32 {return 1.0/(2.0*PI*(1.0-frame.sun.w));}
+fn in_sun(d:vec3<f32>)->bool {
+    let s=cross(d,frame.sun.xyz);
+    return frame.sun_value.w>0.0 && sun_height()>0.0 && dot(d,frame.sun.xyz)>0.0
+        && dot(s,s)<=sun_height()*(2.0-sun_height());
+}
+fn sun_pdf()->f32 {return 1.0/(2.0*PI*sun_height());}
 
 struct Lobe {alpha:f32, a2:f32, f0:vec3<f32>, diffuse:vec3<f32>, spec:f32, p_spec:f32};
 fn lobe(m:Material, nv:f32)->Lobe {
@@ -165,8 +327,7 @@ fn sample_vndf(l:Lobe, v:vec3<f32>, u:vec2<f32>)->vec3<f32> {
 }
 fn power(a:f32, b:f32)->f32 {return a*a/max(a*a+b*b,1e-30);}
 
-fn camera_ray(pixel:vec2<f32>)->array<vec3<f32>,2> {
-    let t=rand();
+fn camera_ray_time(pixel:vec2<f32>, t:f32)->array<vec3<f32>,2> {
     let eye=mix(frame.eye0.xyz,frame.eye1.xyz,t);
     let forward=normalize(mix(frame.forward0.xyz,frame.forward1.xyz,t));
     let right=normalize(mix(frame.right0.xyz,frame.right1.xyz,t));
@@ -177,6 +338,11 @@ fn camera_ray(pixel:vec2<f32>)->array<vec3<f32>,2> {
     let tan_x=tan_y*size.x/size.y;
     return array<vec3<f32>,2>(eye,normalize(forward+ndc.x*tan_x*right+ndc.y*tan_y*up));
 }
+fn camera_ray(pixel:vec2<f32>)->array<vec3<f32>,2> {return camera_ray_time(pixel,rand());}
+var<private> reference_centre:Hit;
+var<private> sample_direct:vec3<f32>;
+var<private> sample_visibility:f32;
+var<private> sample_accepted:u32;
 
 fn radiance(pixel:vec2<u32>)->vec3<f32> {
     let jitter=vec2<f32>(rand(),rand());
@@ -189,19 +355,33 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
     let max_depth=frame.options.x;
     for (var depth=1u; depth<=max_depth; depth+=1u) {
         let hit=trace(origin,direction);
+        if depth==1u && frame.environment.w>0.0 && hit.hit && reference_centre.hit {
+            let dc=dot(reference_centre.p-frame.eye0.xyz,frame.forward0.xyz);
+            let ds=dot(hit.p-frame.eye0.xyz,frame.forward0.xyz);
+            // T1b's registered centre-surface condition: placement plus 2% camera-depth band.
+            sample_accepted=select(0u,1u,hit.identity.x==reference_centre.identity.x && abs(ds-dc)<=0.02*dc);
+            if sample_accepted!=0u {sample_visibility=primary_visibility(hit);}
+        }
         if !hit.hit {
+            if depth==1u && frame.background.w>0.0 {return frame.background.rgb;}
             if in_sun(direction) {
                 let w=select(power(pdf_prev,sun_pdf()),1.0,pdf_prev==0.0);
                 total+=throughput*frame.sun_value.rgb*w;
-            } else {
+                if depth==2u {sample_direct+=throughput*frame.sun_value.rgb*w;}
+            }
+            if frame.sky.w>0.0 || !in_sun(direction) {
                 // Constant-sky light sampling is cosine-weighted about the previous normal; its pdf
                 // for this direction equals the diffuse part, so the weight uses the stored value.
                 let w=select(power(pdf_prev,sky_pdf_prev),1.0,pdf_prev==0.0);
-                total+=throughput*frame.sky.rgb*w;
+                total+=throughput*sky_radiance(direction)*w;
             }
             break;
         }
-        let m=materials[hit.material];
+        var m=materials[hit.material];
+        m.base=vec4<f32>(clamp(m.base.rgb*hit.color*texture_sample(m.base_map,hit.uv).rgb,vec3<f32>(0.0),vec3<f32>(1.0)),m.base.w);
+        let mr=texture_sample(m.mr_map,hit.uv);
+        m.base.w=clamp(m.base.w*mr.b,0.0,1.0);
+        m.params.x=clamp(m.params.x*mr.g,0.0,1.0);
         total+=throughput*m.emission.rgb;
         if depth==max_depth {break;}
         let v=-direction;
@@ -211,38 +391,38 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
         let start=offset(hit.p,hit.ng);
         // Next-event estimation: sun.
         if frame.sun_value.w>0.0 {
-            var wi:vec3<f32>;
+            let wi=sample_sun();
             var light_pdf=0.0;
-            if frame.sun.w>=1.0 {
-                wi=frame.sun.xyz;
-            } else {
-                let z=1.0-rand()*(1.0-frame.sun.w);
-                let phi=2.0*PI*rand();
-                let r=sqrt(max(0.0,1.0-z*z));
-                wi=basis(frame.sun.xyz)*vec3<f32>(r*cos(phi),r*sin(phi),z);
-                light_pdf=sun_pdf();
-            }
+            if sun_height()>0.0 {light_pdf=sun_pdf();}
             let cos_l=dot(hit.n,wi);
-            if cos_l>0.0 && dot(hit.ng,wi)>0.0 && !occluded(start,wi) {
+            let visible=dot(hit.ng,wi)>0.0 && !occluded(start,wi);
+            if cos_l>0.0 && visible {
                 let f=bsdf(m,l,hit.n,v,wi);
                 if light_pdf==0.0 {
-                    total+=throughput*f*cos_l*frame.sun_value.rgb;
+                    let direct=throughput*f*cos_l*frame.sun_value.rgb;
+                    total+=direct;
+                    if depth==1u {sample_direct+=direct;}
                 } else {
                     let w=power(light_pdf,bsdf_pdf(l,hit.n,v,wi));
-                    total+=throughput*f*cos_l*frame.sun_value.rgb*w/light_pdf;
+                    let direct=throughput*f*cos_l*frame.sun_value.rgb*w/light_pdf;
+                    total+=direct;
+                    if depth==1u {sample_direct+=direct;}
                 }
             }
         }
         // Next-event estimation: constant sky, cosine-weighted about the shading normal.
-        if luminance(frame.sky.rgb)>0.0 {
-            let r=sqrt(rand());
-            let phi=2.0*PI*rand();
-            let wi=basis(hit.n)*vec3<f32>(r*cos(phi),r*sin(phi),sqrt(max(0.0,1.0-r*r)));
+        if frame.sky.w>0.0 || luminance(frame.sky.rgb)>0.0 {
+            var wi:vec3<f32>;
+            if frame.sky.w>0.0 {wi=sample_environment();} else {
+                let r=sqrt(rand()); let phi=2.0*PI*rand();
+                wi=basis(hit.n)*vec3<f32>(r*cos(phi),r*sin(phi),sqrt(max(0.0,1.0-r*r)));
+            }
             let cos_l=dot(hit.n,wi);
-            if cos_l>0.0 && dot(hit.ng,wi)>0.0 && !in_sun(wi) && !occluded(start,wi) {
-                let light_pdf=cos_l/PI;
+            if cos_l>0.0 && dot(hit.ng,wi)>0.0 && (frame.sky.w>0.0 || !in_sun(wi)) && !occluded(start,wi) {
+                var light_pdf=cos_l/PI;
+                if frame.sky.w>0.0 {light_pdf=environment_pdf(wi);}
                 let w=power(light_pdf,bsdf_pdf(l,hit.n,v,wi));
-                total+=throughput*bsdf(m,l,hit.n,v,wi)*cos_l*frame.sky.rgb*w/light_pdf;
+                total+=throughput*bsdf(m,l,hit.n,v,wi)*cos_l*sky_radiance(wi)*w/max(light_pdf,1e-30);
             }
         }
         // BSDF sampling for the continuation.
@@ -264,6 +444,7 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
         throughput*=bsdf(m,l,hit.n,v,wi)*cos_i/pdf;
         pdf_prev=pdf;
         sky_pdf_prev=select(0.0,cos_i/PI,luminance(frame.sky.rgb)>0.0);
+        if frame.sky.w>0.0 {sky_pdf_prev=environment_pdf(wi);}
         origin=start;
         direction=wi;
         // Russian roulette after three bounces keeps the estimator unbiased.
@@ -281,17 +462,33 @@ var<private> sky_pdf_prev:f32;
 fn trace_samples(@builtin(global_invocation_id) id:vec3<u32>) {
     if id.x>=frame.size.x || id.y>=frame.size.y {return;}
     let pixel=id.y*frame.size.x+id.x;
+    var aux:Geometry;
+    if frame.environment.w>0.0 {
+        let ray=camera_ray_time(vec2<f32>(id.xy)+0.5,0.5);
+        reference_centre=trace(ray[0],ray[1]);
+        aux=geometry[pixel];
+        aux.world=vec4<f32>(reference_centre.p,aux.world.w);
+        aux.normal=vec4<f32>(reference_centre.ng,dot(reference_centre.ng,frame.sun.xyz));
+        aux.ids=vec4<u32>(reference_centre.identity,reference_centre.material+1u,aux.ids.w);
+    }
     var even=vec3<f32>(0.0);
     var odd=vec3<f32>(0.0);
     for (var k=0u; k<frame.size.w; k+=1u) {
         let s=frame.size.z+k;
         rng_state=pcg(pixel^pcg(s^pcg(frame.options.y)));
         sky_pdf_prev=0.0;
+        sample_direct=vec3<f32>(0.0);sample_visibility=0.0;sample_accepted=0u;
         var value=radiance(id.xy);
         // A non-finite sample is a tracer bug; it is counted, not hidden.
         if any(value!=value) || any(abs(value)>vec3<f32>(3.0e38)) {value=vec3<f32>(-1.0e30);}
         if (s&1u)==0u {even+=value;} else {odd+=value;}
+        if frame.environment.w>0.0 {
+            aux.ids.w+=sample_accepted;
+            if (s&1u)==0u {aux.direct_even+=vec4<f32>(sample_direct,sample_visibility);aux.world.w+=f32(sample_accepted);}
+            else {aux.direct_odd+=vec4<f32>(sample_direct,sample_visibility);}
+        }
     }
     sums[2u*pixel]+=vec4<f32>(even,0.0);
     sums[2u*pixel+1u]+=vec4<f32>(odd,0.0);
+    if frame.environment.w>0.0 {geometry[pixel]=aux;}
 }

@@ -77,6 +77,14 @@ def lease(label, minutes):
     """Shared GPU lease for one bounded job. Never waits on, or removes, another owner's lock."""
     if not 1 <= minutes <= 45:
         raise ValueError("leases are 1-45 minutes")
+    defer = OUT / "gpu-defer.txt"
+    if defer.exists():
+        print("Waiting outside GPU lease:", defer.read_text(), flush=True)
+    deadline = time.monotonic() + 900
+    while defer.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("GPU acquisition deferred for 15 minutes")
+        time.sleep(.5)
     try:
         LOCK.mkdir()
     except FileExistsError:
@@ -129,11 +137,16 @@ def preflight(path, wait_seconds=180):
         if games or not foreign or time.monotonic() > deadline:
             break
         time.sleep(5)
+    record["output_free_gib"] = shutil.disk_usage(OUT).free / 2**30
     save(path, record)
-    if games or foreign or record["available_gib"] < START_GIB:
+    if games or foreign or record["available_gib"] < START_GIB or record["output_free_gib"] < 5:
         print("DEFERRED", json.dumps({k: record[k] for k in ("games", "foreign_renderers", "available_gib")}), flush=True)
         raise SystemExit(3)
     return record
+
+
+ABORT_REQUESTED = None
+MONITOR_STATE = None
 
 
 def guarded(command, out, timeout, cwd=None, env=None):
@@ -143,7 +156,7 @@ def guarded(command, out, timeout, cwd=None, env=None):
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 0
-    stop, samples, failures = threading.Event(), [], []
+    stop, samples, disk_samples, failures = threading.Event(), [], [], []
     record = dict(start_utc=utc().isoformat(), command=[str(c) for c in command], timeout_seconds=timeout)
     begin = time.perf_counter()
     with (out / "stdout.log").open("w", encoding="utf-8") as log:
@@ -152,26 +165,45 @@ def guarded(command, out, timeout, cwd=None, env=None):
 
         def kill(reason):
             failures.append(reason)
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=FLAGS)
+            if proc.poll() is None:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=FLAGS)
 
         def watch_memory():
-            while not stop.wait(0.25):
-                value = E2E.available_gib()
-                samples.append(round(value, 3))
-                if value < ABORT_GIB and proc.poll() is None:
-                    kill(dict(reason="available memory below 2 GiB", available_gib=value))
-                    return
+            try:
+                while not stop.wait(0.25):
+                    if ABORT_REQUESTED and (reason := ABORT_REQUESTED()):
+                        if proc.poll() is None:
+                            kill(dict(reason=reason))
+                        return
+                    value = E2E.available_gib()
+                    samples.append(round(value, 3))
+                    disk = shutil.disk_usage(OUT).free / 2**30
+                    disk_samples.append(round(disk, 3))
+                    if disk < 2 and proc.poll() is None:
+                        kill(dict(reason="output disk below 2 GiB", output_free_gib=disk))
+                        return
+                    if value < ABORT_GIB and proc.poll() is None:
+                        kill(dict(reason="available memory below 2 GiB", available_gib=value))
+                        return
+            except Exception as error:
+                kill(dict(reason="memory/hold monitor unavailable", error=repr(error)))
 
         def watch_conflicts():
-            while not stop.wait(2):
-                snapshot = E2E.state()
-                ours = {proc.pid}
-                foreign = [p for p in snapshot["foreign_renderers"] if p["ProcessId"] not in ours
-                           and not engine_tool(p)]
-                games = [p for p in snapshot["games"] if not engine_tool(p)]
-                if (games or foreign) and proc.poll() is None:
-                    kill(dict(reason="game or foreign renderer", games=games, foreign=foreign))
-                    return
+            try:
+                while not stop.wait(2):
+                    snapshot = MONITOR_STATE() if MONITOR_STATE else E2E.state()
+                    if snapshot.get("monitor_error"):
+                        kill(dict(reason="conflict monitor unavailable", error=snapshot["monitor_error"]))
+                        return
+                    ours = {proc.pid}
+                    foreign = [p for p in snapshot["foreign_renderers"] if p["ProcessId"] not in ours
+                               and not engine_tool(p)]
+                    games = [p for p in snapshot["games"] if not engine_tool(p)]
+                    if (games or foreign) and proc.poll() is None:
+                        kill(dict(reason="game or foreign renderer", games=games, foreign=foreign))
+                        return
+            except Exception as error:
+                kill(dict(reason="conflict monitor unavailable", error=repr(error)))
 
         threads = [threading.Thread(target=watch_memory), threading.Thread(target=watch_conflicts)]
         for thread in threads:
@@ -187,6 +219,7 @@ def guarded(command, out, timeout, cwd=None, env=None):
                 thread.join()
     record.update(end_utc=utc().isoformat(), elapsed_seconds=time.perf_counter() - begin, exit_code=proc.returncode,
                   failures=failures, minimum_available_gib=min(samples) if samples else None,
+                  minimum_output_free_gib=min(disk_samples) if disk_samples else None,
                   scope="whole process wall; not GPU frame time")
     save(out / "process.json", record)
     if failures or proc.returncode:
@@ -357,7 +390,7 @@ def workload_events(out, workload):
     return events
 
 
-def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160):
+def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160, level=None):
     c = CONFIGS[config]
     commands = BASE_COMMANDS + c["commands"] + READBACK + list(extra)
     settle = workload in SETTLE
@@ -377,7 +410,7 @@ def launch_ue(out, config, workload, pose=0, extra=(), events=None, frames=160):
     csv_events.sort(key=lambda e: e[0])
     command = [PACKAGE, "../../../M5Calibration/M5Calibration.uproject", *UE_FLAGS,
                f"-abslog={out / 'ue.log'}", *COMMON_INI, *c["ini"], "-dx12", "-sm6", "-RenderOffscreen",
-               f"/Game/M6Quarry/View{pose}", "-game", "-ResX=1920", "-ResY=1080", "-ForceRes", "-NoVSync",
+               level or f"/Game/M6Quarry/View{pose}", "-game", "-ResX=1920", "-ResY=1080", "-ForceRes", "-NoVSync",
                "-csvGpuStats", "-csvCompression=0", "-ExitAfterCsvProfiling",
                "-csvExecCmds=" + ",".join(f"{f}:{cmd}" for f, cmd in csv_events),
                "-ExecCmds=" + ",".join(commands + [f"csvprofile frames={frames}"])]
