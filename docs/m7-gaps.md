@@ -20,4 +20,8 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
    - there are no decals until DC1's interface merges.
 9. **Motion is unmeasured.** RF3/RF5 motion, trails and settle against R0a's continuous Unreal runs: no new campaign tonight.
 10. **Primary-miss background** (environment where the references are black) is R0a's registered renderer item, not a reflection error, but it dominates the full-image difference panels.
-11. **Cost against Lumen's reflection pass:** see m7-r1.md §4. The quarry traces no reflection rays (every material is roughness 0.85), so its increment is the composed code alone.
+11. **Cost.**
+   - On reflective content the cost is unmeasured; no comparison with Lumen's 0.07/0.22 ms reflection pass has been made.
+   - The quarry traces no reflection rays (every material is roughness 0.85). It pays nothing measurable with the cache off (the default) and **+0.29 ms of shading with the cache on**: the inlined hit shading's static cost (m7-r1.md §4). If G2b makes the cache the default, that becomes a default cost. The candidate fixes are a separate hit-shading pass, or a second program composition with open-only indirect inputs.
+12. **RT quarry with the cache on:** one `d1` capture differed from main's program by 309 small pixel clusters with no ray traced. They are presumed to be the cache's run-to-run variation, but no repeat confirmed it (m7-r1.md §4).
+13. **Programmability constraint:** in reflecting modules, `surface()` reads the open environment from the indirect inputs; `shade()` reads the prepared values. Reflection hits always read the open environment.

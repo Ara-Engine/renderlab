@@ -27,7 +27,12 @@ fn reflection_composition_contract() {
     let toon = include_str!("../shaders/programs/toon.wgsl");
     let standard = crate::STANDARD_PROGRAM;
     let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);";
-    for stage in [Stage::Raster, Stage::Traced, Stage::TracedStreamed, Stage::Cell] {
+    for stage in [
+        Stage::Raster,
+        Stage::Traced,
+        Stage::TracedStreamed,
+        Stage::Cell,
+    ] {
         let source = compose(hardware, toon, stage, true).source;
         assert!(!source.contains("SpecularLobe") && !source.contains("rl_reflection"));
     }
@@ -45,7 +50,12 @@ fn reflection_composition_contract() {
             assert_eq!(source.matches(call).count(), 1);
             assert!(source.contains(&format!("rayQueryInitialize(&query,{scene},")));
             assert!(!source.contains("RL_SCENE"));
-            assert_eq!(source.matches("if rl_reflection_hit {return rl_hit_shadow(").count(), 1);
+            assert_eq!(
+                source
+                    .matches("if rl_reflection_hit {return rl_hit_shadow(")
+                    .count(),
+                1
+            );
         }
     }
     // Both halves are needed to trace; either alone composes the stub.
@@ -53,7 +63,11 @@ fn reflection_composition_contract() {
         "let traced=specular_incident(input);",
         "let traced=vec4<f32>(0.0);",
     );
-    assert!(!compose(hardware, &lobe_only, Stage::Traced, false).source.contains(call));
+    assert!(
+        !compose(hardware, &lobe_only, Stage::Traced, false)
+            .source
+            .contains(call)
+    );
 }
 
 fn device() -> (wgpu::Device, wgpu::Queue) {
@@ -92,7 +106,12 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
 }
 
 fn quad(y: f32, colors: [[f32; 4]; 4]) -> (Vec<Vertex>, Vec<u32>) {
-    let corners = [[-8.0, y, -8.0], [8.0, y, -8.0], [8.0, y, 8.0], [-8.0, y, 8.0]];
+    let corners = [
+        [-8.0, y, -8.0],
+        [8.0, y, -8.0],
+        [8.0, y, 8.0],
+        [-8.0, y, 8.0],
+    ];
     let vertices = corners
         .iter()
         .zip(colors)
@@ -127,9 +146,7 @@ fn render(renderer: &mut Renderer, camera: &Camera, draws: &mut [Draw<'_>]) -> V
     let bytes = capture.try_read().unwrap().unwrap();
     (0..(WIDTH * HEIGHT) as usize * 4)
         .filter(|i| i % 4 != 3)
-        .map(|i| {
-            crate::decode_f16(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])) * 16384.0
-        })
+        .map(|i| crate::decode_f16(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])) * 16384.0)
         .collect()
 }
 
@@ -219,8 +236,15 @@ fn gpu_r1_mirror_identity() {
     // in both images (hits never trace further).
     let target = material([0.7, 0.5, 0.3, 1.0], 0.0, 0.6, &mut renderer);
     let fov = 0.7;
-    let above = Camera::look_at(Vec3::new(0.0, 2.0, 0.0), Vec3::ZERO, Vec3::Z, fov, 0.01, 100.0)
-        .unwrap();
+    let above = Camera::look_at(
+        Vec3::new(0.0, 2.0, 0.0),
+        Vec3::ZERO,
+        Vec3::Z,
+        fov,
+        0.01,
+        100.0,
+    )
+    .unwrap();
     let mirrored = Camera::look_at(
         Vec3::new(0.0, -2.0, 0.0),
         Vec3::new(0.0, 3.0, 0.0),
@@ -276,7 +300,10 @@ fn gpu_r1_mirror_identity() {
             for (name, image) in [("reflected", &reflected), ("camera", &camera)] {
                 std::fs::write(
                     out.join(format!("identity-{mode:?}-{name}.f32")),
-                    image.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+                    image
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap();
             }
