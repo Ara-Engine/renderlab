@@ -398,11 +398,6 @@ type GroupKey = (
     wgpu::Buffer,
 );
 
-/// MQ1 SCREEN (temporary, removed before delivery): RENDERLAB_MQ1_SCREEN names variants.
-fn mq1_screen(name: &str) -> bool {
-    std::env::var("RENDERLAB_MQ1_SCREEN").is_ok_and(|v| v.split(',').any(|v| v == name))
-}
-
 /// The frame-state buffer for `models` bytes of placement transforms.
 fn frame_buffer(r: &Renderer, models: usize) -> Buffer {
     Buffer::new(
@@ -606,6 +601,9 @@ impl Renderer {
             .chain_update([u8::from(self.environment.visible)])
             // AT1: the atmosphere sky on misses (atmosphere_gpu.rs).
             .chain_update([u8::from(self.atmosphere_sky_visible())]);
+        // Not `models` or `normals` (MQ1): transform edits of existing placements keep the
+        // primary tables, so placement slots are stable; new placements change `instances`
+        // and `geometry_generation`.
         for v in [
             u.environment,
             u.geometry,
@@ -615,14 +613,6 @@ impl Renderer {
             u.instances,
         ] {
             hash.update(v.to_ne_bytes());
-        }
-        // Not `models` or `normals` (MQ1): transform edits of existing placements keep the
-        // primary tables, so placement slots are stable; new placements change `instances`
-        // and `geometry_generation`.
-        // MQ1 SCREEN (temporary, removed before delivery): main's restart on transform edits.
-        if mq1_screen("restart") {
-            hash.update(u.models.to_ne_bytes());
-            hash.update(u.normals.to_ne_bytes());
         }
         hash.finalize().into()
     }
@@ -853,7 +843,7 @@ impl Renderer {
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from(moved) << 2
-            | u32::from(moved && settings.motion_box && !mq1_screen("nobox")) << 3;
+            | u32::from(moved && settings.motion_box) << 3;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));

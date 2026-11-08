@@ -9,6 +9,7 @@ path-traced reference. Regions follow the example's camera path and object place
     py -3 -B scripts/m7-mq1-score.py reference RAW_DIR OUT_DIR --factor 4   # downsample, then delete RAW pngs
     py -3 -B scripts/m7-mq1-score.py score RUN_ROOT --reference REF_DIR --variants a,b --path rt --out score.json
     py -3 -B scripts/m7-mq1-score.py sheet RUN_ROOT --reference REF_DIR --variants a,b --path rt --out DIR
+    py -3 -B scripts/m7-mq1-score.py identity RF_DIR_A RF_DIR_B --out identity.json [--delete-raw]
 """
 import argparse
 import json
@@ -152,6 +153,10 @@ def score(args):
         r = load(ref / f"frame-{f:03d}.png")
         masks = regions(f)
         masks["edges"] = edges(r)
+        # Geometric edges: reference edges outside both spheres (their reflections move with
+        # the view, not the surface).
+        spheres = sphere_mask(f, GOLD, 1.1)[0] | sphere_mask(f, CHROME, 1.1)[0]
+        masks["geo_edges"] = masks["edges"] & ~spheres
         masks["full"] = np.ones((H, W), bool)
         prev_ref = ref / f"frame-{f - 1:03d}.png"
         for v in variants:
@@ -162,21 +167,22 @@ def score(args):
                 # Motion-compensated flicker: the frame-to-frame change against the reference's.
                 dv = img - load(prev)
                 dr = r - load(prev_ref)
-                for k in ("full", "gold", "chrome", "crates", "arch", "edges"):
+                for k in ("full", "gold", "chrome", "crates", "arch", "edges", "geo_edges"):
                     row["flicker_" + k] = rms(dv, dr, masks[k])
             rows[v].append(row)
     summary = {}
     for v in variants:
-        keys = [k for k in rows[v][0] if k != "frame"] if rows[v] else []
+        keys = sorted({k for r in rows[v] for k in r if k != "frame"})
         summary[v] = {k: float(np.mean([r[k] for r in rows[v] if r.get(k) is not None]))
                       for k in keys if any(r.get(k) is not None for r in rows[v])}
     result = dict(path=args.path, reference=str(ref), frames=frames, summary=summary, rows=rows)
     Path(args.out).write_text(json.dumps(result, indent=1))
-    keys = ["full", "edges", "gold", "chrome", "crates", "arch", "flicker_full", "flicker_gold", "flicker_chrome", "flicker_crates", "flicker_edges"]
+    keys = ["full", "edges", "geo_edges", "gold", "chrome", "crates", "arch", "flicker_full", "flicker_gold",
+            "flicker_chrome", "flicker_crates", "flicker_geo_edges"]
     print(f"{args.path} frames={len(frames)} (display RMS codes vs {ref.name}; lower is better)")
-    print("variant".ljust(14) + "".join(k.replace("flicker_", "fl_").rjust(11) for k in keys))
+    print("variant".ljust(14) + "".join(k.replace("flicker_", "fl_").rjust(12) for k in keys))
     for v in variants:
-        print(v.ljust(14) + "".join((f"{summary[v][k]:.2f}" if k in summary[v] else "-").rjust(11) for k in keys))
+        print(v.ljust(14) + "".join((f"{summary[v][k]:.2f}" if k in summary[v] else "-").rjust(12) for k in keys))
 
 
 def crop_box(frame, name):
@@ -250,9 +256,47 @@ def sheet(args):
         seq[0].save(out / f"flight-{args.path}.gif", save_all=True, append_images=seq[1:], duration=33, loop=0)
 
 
+def identity(args):
+    """Byte comparison of two R0a capture directories (`*.f32` exposed radiance per pose)."""
+    import hashlib
+    a, b = Path(args.a), Path(args.b)
+    rows = []
+    for fa in sorted(a.glob("*.f32")):
+        fb = b / fa.name
+        if not fb.exists():
+            rows.append(dict(file=fa.name, status="missing"))
+            continue
+        da, db = fa.read_bytes(), fb.read_bytes()
+        row = dict(file=fa.name, sha256=hashlib.sha256(da).hexdigest(), identical=da == db)
+        if da != db:
+            x, y = np.frombuffer(da, np.float32), np.frombuffer(db, np.float32)
+            d = np.abs(x.astype(np.float64) - y)
+            row.update(differing=int((x != y).sum()), max_abs=float(d.max()),
+                       max_rel=float((d / np.maximum(np.abs(x), 1e-12)).max()))
+        rows.append(row)
+    unsupported = sorted(p.name for p in a.glob("*.unsupported.json"))
+    result = dict(a=str(a), b=str(b), poses=len(rows), identical=sum(r.get("identical", False) for r in rows),
+                  unsupported=unsupported, rows=rows)
+    Path(args.out).write_text(json.dumps(result, indent=1))
+    print(f"{a.name} vs {b.name}: {result['identical']}/{result['poses']} poses byte-identical; unsupported {unsupported}")
+    for r in rows:
+        if not r.get("identical"):
+            print("  ", r)
+    if args.delete_raw:
+        for d in (a, b):
+            for f in d.glob("*.f32"):
+                f.unlink()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+    i = sub.add_parser("identity")
+    i.add_argument("a")
+    i.add_argument("b")
+    i.add_argument("--out", required=True)
+    i.add_argument("--delete-raw", action="store_true")
+    i.set_defaults(run=identity)
     r = sub.add_parser("reference")
     r.add_argument("raw")
     r.add_argument("out")
