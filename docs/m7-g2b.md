@@ -11,7 +11,7 @@ Unit G2b continues [M7-G2](m7-g2.md) on branch `t3/m7-g2b` (from main `5e3b963`,
 | Camera cuts | The 12-64 ms gather frames of a cut are bounded by a per-frame gather cap (32,768 cells hardware, 8,192 software): section 4 | **Bounded**; the first cut frame (cell creation) is not, and bounce settles in more than 8 frames after a cut (recorded) |
 | Moving cost | Gather restructured to one lane per direction (non-RT gather 1.5 ms → 0.5 ms a moving frame); lookups stop at an empty slot (exact). Section 5 | **Improved; still over the ~0.45 ms budget** |
 | Crevice mouths | Diagnosed: cell size alone explains them. 2 px cells bring TR1x64 pinholes to the cache-off level (RT 103 → 41 against 40; non-RT 97 → 55) and beat G2, es1open and cache-off on every quarry population but the hollow. Not the default: 2 px speckles the flat SV test scene, settles it worse, and its 448 MiB table exceeds the non-RT device's 256 MiB buffer limit. Section 2 | **Opt-in fix recorded; default keeps G2's 4 px** |
-| Lib suite | `cargo test -p renderlab --lib` inside G2b leases: 147 passed, 0 failed (binaries `g2b-g`, `g2b-h`, `g2b-j`) | **Pass** |
+| Lib suite | `cargo test -p renderlab --lib` inside G2b leases, exit 0: 147 passed (`g2b-g`, `g2b-h`), 150 passed after main's DC1 merge (`g2b-j`, the pushed default) | **Pass**; fmt applied, clippy clean in G2b's files |
 
 ## 2. Crevice mouths (item 1 of the G2 ruling)
 
@@ -54,7 +54,16 @@ After both, four tables per path (two repetitions, two processes) are word-ident
 
 **Opt-in claim cap and coarse-first refill** (`claim_cells`): a frame creates at most N cells, by fixed key phase, and the first four frames after a cut read cells one level coarser. On SV the coarse-to-fine handover made frames 8-12 worse again and frame 1 reached 58% gaps-pose error: off by default.
 
-CUTTABLE
+**Cut frames with the default** (M, `runs/h1` cut profile, quarry pose 0 after a settled other pose, 64 frames, per-frame GPU span, functional lease):
+
+| | Frame 1 | Frame 2 | Frames 3-28 | After | Worst frame | Uncapped G2 (`d2`) |
+|---|---:|---:|---:|---:|---:|---|
+| RT | 6.5 ms | 11.3 ms | 5.4-8.8 ms | 2.2 ms from frame 29 | 11.3 ms | 8, 15, 21, 27, 26, 20, 11 ms (frames 1-7) |
+| Non-RT | 18.9 ms | 11.0 ms | 7.1-14.7 ms | still 6.7-10.1 ms at frame 40 | 18.9 ms | 18, 9, 7, 7, 43, 67, 63, 55, 39, 20 ms (frames 1-10) |
+
+- The 20-67 ms gather frames are gone on both paths. What remains above 10 ms is cell creation: the first cut frame (query points and rays for every visible cell; non-RT 18.9 ms) and RT's second frame (secondary cells created by the first gathers). The opt-in claim cap bounds those but settled SV worse.
+- **Settle interaction (recorded, not 8 frames):** RT gathers drain by frame 28 (deferred queue 26k → 143k → 0). Non-RT's queue was still 151k cells at frame 40: P reaches 32, so each cell is gathered once every 32 frames, about 2-4 s for a full cut's three gathers at 60 fps.
+- While the non-RT queue drains, cells already gathered have bounce and the rest do not: on SV's flat grey panels this shows as speckle at frame 48 (`analysis/h1-sv-gaps.png`; gaps-pose RMS 11.0% at frame 48, overview 1.76%, against G2's 2.62% / 1.59% at frame 8). On the textured quarry it is not visible at TR1x64. `gather_cells: u32::MAX` restores G2's behaviour (fast settle, 40-67 ms non-RT cut frames).
 
 ## 5. Cost (M)
 
@@ -66,11 +75,31 @@ CUTTABLE
 | Lookups stop at the first empty slot (a key is inserted in the first free or reusable slot from its start; slots are never emptied except by a whole-table clear) | Fewer loads per missing key in shading, the probe and gathers | Exact |
 | Gather stride S (`gather_stride`, opt-in) | Gathers trace 1/S of the blocked directions: no measurable quality change at 2 px on the quarry; untested at 4 px on SV, so the default keeps S = 1 | — |
 
-COSTTABLE
+**One timing run** (M, `runs/h1`, functional lease, development build, RTX 4070 SUPER, 1080p, TR1 off in this harness; camera moving 1 cm a frame after a cut has drained, four visits, p50 span per visit, increment over cache-off in the same visit):
+
+| | RT | Non-RT |
+|---|---:|---:|
+| Frame span, cache off | 0.93-1.13 ms | 2.11-2.30 ms |
+| **Increment, default cache** | **+1.32-1.62 ms** | **+2.59-2.83 ms** |
+| G2's increment (quiet window `q1`) | +1.68-1.77 ms | +3.20-3.74 ms |
+| Shading pass, off / on | 0.43 / 1.04 ms | 0.38 / 0.98 ms |
+| Cache passes p50 (p95) | 960 (1,545) µs | 2,535 (3,708) µs |
+| … probe / gather / setup / rays | 433 / 247 / 47 / 43 µs | 438 / 736 / 534 / 219 µs |
+| … finish / light / claims / cell shading | 57 / 15 / 34 / 17 µs | 56 / 132 / 39 / 12 µs |
+
+**Against Lumen** (A, [M7-U0](m7-u0.md), the same quarry, Epic): Lumen's GI pass is 1.24 ms (hardware) and 1.21 ms (software), reflections 0.07 ms. The cache's moving increment is about 1.1-1.3x Lumen HW's GI pass on RT and 2.1-2.3x Lumen SW's on non-RT: **the 2x performance target misses by about 2.2-2.6x (RT) and 4.3-4.7x (non-RT)**, and the stricter ~0.45 ms budget by 3-6x. The functional run was not classified for contention, so these are indicative; G2's quiet window is the last clean measurement.
+
+Measured while getting here (2 px candidate, runs `c2`, `d2`; functional): 2 px cells add about +0.4 ms (RT) and +1.0-1.4 ms (non-RT) per moving frame over 4 px, and roughly three times the cut work; gather stride 4 roughly halves their gather (RT 816 → 424 µs, non-RT 1,670 → 1,226 µs).
 
 ## 6. Inspected images (M)
 
-INSPECT
+Quarry, TR1 over 64 still frames, pose 0, both paths, −14 stops (`analysis/h1-{rt,nonrt}-crop.png`, `-wide.png`; reference | default | cache off):
+- Crevices, slab undersides and cavities darken as in the reference; cache-off leaves every cavity flat and far too bright. Lit surfaces match the reference's tone. RT and non-RT look alike.
+- **Visible defects:** enclosed cavities (the cave above the dark pyramid rock, the hollow under the central slab) show a coarse blotchy mottle where the reference is smooth (per-cell quadrature where light enters through narrow openings); narrow gaps keep G2's dark streaks at crevice mouths (TR1x64 pinholes RT 102 / non-RT 101 against cache-off's 40). Both are G2's, unchanged.
+
+SV test scene, frame 48, 1x (this rig renders without TR1; `analysis/h1-sv-{gaps,overview}.png`; reference | non-RT | RT | cache off): RT matches G2's smooth image; non-RT shows the draining speckle described in section 4. Overview-pose RMS non-RT 1.76% (G2 1.59%); cache off 46.2%.
+
+Scored (TR1x64, `runs/h1`, G2's comparators from its run `f1`): identical in kind to G2. Both paths lose to cache-off only on background-centre and isolated, and to es1open on 10-16 populations by 0.1-0.6 codes (hollow by 3.6-4.5). Twelve frames after a cut (1x), the capped gathers have not finished: RT also loses faint and multi-surface to cache-off; non-RT faint, hollow, isolated, multi-surface and wide6.
 
 ## 7. Claim notes
 
