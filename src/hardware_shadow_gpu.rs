@@ -4,9 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_RENDERER_LABEL: AtomicU64 = AtomicU64::new(1);
 
-/// Immutable source inputs are retained with the BLAS through builds and every TLAS
-/// generation. Safe wgpu owns submitted backend lifetimes.
+/// Source buffers are retained with the BLAS through builds and every TLAS generation.
+/// SK1 deforms them in queue order; ordinary meshes remain immutable. Safe wgpu owns
+/// submitted backend lifetimes.
 pub(crate) struct MeshAcceleration {
+    // SK1: dynamic structures are updated in-place in queue order, never compacted.
+    dynamic: bool,
     blas: Mutex<Arc<BlasAllocation>>,
     label: String,
     size: wgpu::BlasTriangleGeometrySizeDescriptor,
@@ -240,6 +243,7 @@ impl HardwareState {
         index: &Arc<Owned<wgpu::Buffer>>,
         index_count: u32,
         adjacency_bytes: u64,
+        dynamic: bool,
     ) -> Arc<MeshAcceleration> {
         let size = wgpu::BlasTriangleGeometrySizeDescriptor {
             vertex_format: wgpu::VertexFormat::Float32x3,
@@ -253,8 +257,18 @@ impl HardwareState {
             device.create_blas(
                 &wgpu::CreateBlasDescriptor {
                     label: Some(&label),
-                    flags: self.flags | wgpu::AccelerationStructureFlags::ALLOW_COMPACTION,
-                    update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                    flags: if dynamic {
+                        (self.flags - wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE)
+                            | wgpu::AccelerationStructureFlags::ALLOW_UPDATE
+                            | wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD
+                    } else {
+                        self.flags | wgpu::AccelerationStructureFlags::ALLOW_COMPACTION
+                    },
+                    update_mode: if dynamic {
+                        wgpu::AccelerationStructureUpdateMode::PreferUpdate
+                    } else {
+                        wgpu::AccelerationStructureUpdateMode::Build
+                    },
                 },
                 wgpu::BlasGeometrySizeDescriptors::Triangles {
                     descriptors: vec![size.clone()],
@@ -264,6 +278,7 @@ impl HardwareState {
         );
         let observed = self.observed(device, ledger, &label);
         Arc::new(MeshAcceleration {
+            dynamic,
             blas: Mutex::new(Arc::new(BlasAllocation {
                 blas,
                 _estimated: ledger.allocate(
@@ -287,11 +302,13 @@ impl HardwareState {
         mesh: Arc<MeshAcceleration>,
         submission: u64,
     ) {
-        mesh.blas
-            .lock()
-            .unwrap()
-            .blas
-            .prepare_compaction_async(|_| {});
+        if !mesh.dynamic {
+            mesh.blas
+                .lock()
+                .unwrap()
+                .blas
+                .prepare_compaction_async(|_| {});
+        }
         let scratch = mesh_estimate(u64::from(mesh.size.index_count.unwrap()) / 3)
             .unwrap()
             .1;
@@ -304,6 +321,18 @@ impl HardwareState {
         ));
         self.stats.blas_builds += 1;
         self.observe_scratch(device);
+    }
+    // SK1: retain and account each pose build's scratch through its submission.
+    pub fn dynamic_submitted(
+        &mut self,
+        device: &wgpu::Device,
+        ledger: &Ledger,
+        mesh: Arc<MeshAcceleration>,
+        submission: u64,
+    ) {
+        self.mesh_submitted(device, ledger, mesh, submission);
+        self.stats.blas_builds -= 1;
+        self.stats.blas_updates += 1;
     }
     /// `casters`: the placements also cast hardware shadows, which need double-sided
     /// opaque materials. Traced primary visibility alone culls single-sided back faces.
@@ -355,6 +384,9 @@ impl HardwareState {
         ledger: &Ledger,
         reserve: u64,
     ) {
+        if mesh.dynamic {
+            return;
+        }
         let mut current = mesh.blas.lock().unwrap();
         if !current.blas.ready_for_compaction() {
             return;
@@ -398,21 +430,32 @@ impl HardwareState {
         for placement in &mut placements {
             placement.blas = placement.mesh.blas.lock().unwrap().clone();
         }
-        if self.active.as_ref().is_some_and(|active| {
-            active.placements.len() == placements.len()
-                && active
-                    .placements
-                    .iter()
-                    .zip(&placements)
-                    .all(|(a, b)| a.same(b))
-        }) {
+        if !placements.iter().any(|p| p.mesh.dynamic)
+            && self.active.as_ref().is_some_and(|active| {
+                active.placements.len() == placements.len()
+                    && active
+                        .placements
+                        .iter()
+                        .zip(&placements)
+                        .all(|(a, b)| a.same(b))
+            })
+        {
             return Ok(false);
         }
         let (estimate, scratch) = scene_estimate(placements.len())?;
+        let mut dynamic = std::collections::HashSet::new();
+        let dynamic_scratch = placements
+            .iter()
+            .filter(|p| p.mesh.dynamic && dynamic.insert(Arc::as_ptr(&p.mesh)))
+            .try_fold(0u64, |n, p| {
+                n.checked_add(mesh_estimate(u64::from(p.mesh.size.index_count.unwrap()) / 3)?.1)
+                    .ok_or(Error::InvalidInput("dynamic BLAS scratch overflow"))
+            })?;
         self.admit(
             ledger,
             estimate
                 .checked_add(scratch)
+                .and_then(|n| n.checked_add(dynamic_scratch))
                 .ok_or(Error::InvalidInput("TLAS estimate overflow"))?,
         )?;
         let label = self.label("TLAS");
@@ -421,8 +464,16 @@ impl HardwareState {
         let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
             label: Some(&label),
             max_instances: placements.len().max(1) as u32,
-            flags: self.flags,
-            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            flags: if placements.iter().any(|p| p.mesh.dynamic) {
+                self.flags | wgpu::AccelerationStructureFlags::ALLOW_UPDATE
+            } else {
+                self.flags
+            },
+            update_mode: if placements.iter().any(|p| p.mesh.dynamic) {
+                wgpu::AccelerationStructureUpdateMode::PreferUpdate
+            } else {
+                wgpu::AccelerationStructureUpdateMode::Build
+            },
         });
         for (i, p) in placements.iter().enumerate() {
             let model = Mat4::from_cols_array(&p.model.map(f32::from_bits));

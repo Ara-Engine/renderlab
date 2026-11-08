@@ -9,6 +9,7 @@
 //! outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+pub mod animation;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 pub mod engine;
@@ -19,11 +20,14 @@ mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
 mod instances;
+mod light_cluster;
 mod lighting;
 mod material;
 mod mesh;
 mod normal;
 mod observe;
+// PP1 public camera/display settings; implementation stays in the tone stage.
+mod post;
 mod primary_ray;
 mod program;
 pub mod program_watch;
@@ -46,18 +50,21 @@ pub use environment::{EnvironmentLimits, EnvironmentMap, EnvironmentParameters};
 pub use glam::{Mat4, Vec3};
 pub use hardware_shadows::{HardwareShadowOptions, HardwareShadowStats};
 pub use instances::{Instances, Visibility};
+pub use light_cluster::{LightClusterStats, LocalShadows};
 pub use lighting::{Light, Lighting, decode_f16};
 pub use material::{
     Material, MaterialDescriptor, RendererOptions, SampleCount, Texture, TextureBinding, ViewMode,
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use observe::*;
+pub use post::{ColourLut, DepthOfField, PostSettings, Tonemapper};
 pub use primary_ray::{
     PrimaryVisibility, TRACED_DRAWS, TRACED_FEATURES, VISIBILITY_FEATURES,
     VISIBILITY_RASTER_FEATURES, traced_limits, visibility_limits,
 };
 pub use program::{Program, ProgramDescriptor, STANDARD_PROGRAM, Value};
 pub use receiver_adjacency::MeshUpload;
+pub use renderer::skinning::SkinnedMeshInstance;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,

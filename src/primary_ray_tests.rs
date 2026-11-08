@@ -110,7 +110,7 @@ fn primary_modules_compile_and_kernels_hold_no_program() {
                 &constants,
             )
             .unwrap();
-            naga::back::spv::write_vec(
+            let words = naga::back::spv::write_vec(
                 &module,
                 &info,
                 &naga::back::spv::Options {
@@ -123,6 +123,33 @@ fn primary_modules_compile_and_kernels_hold_no_program() {
                 }),
             )
             .unwrap();
+            // SK1 integration: WGSL validation accepts conditional ray-query
+            // declarations, but Naga 30 can lower their initialization to an
+            // illegal opaque null. Check the actual backend output as well.
+            let instructions = {
+                let mut offset = 5;
+                let mut instructions = Vec::new();
+                while offset < words.len() {
+                    let size = (words[offset] >> 16) as usize;
+                    assert!(size > 0 && offset + size <= words.len());
+                    instructions.push(&words[offset..offset + size]);
+                    offset += size;
+                }
+                instructions
+            };
+            let opaque: Vec<_> = instructions
+                .iter()
+                .filter_map(|i| {
+                    // SPIR-V OpTypeRayQueryKHR / OpTypeAccelerationStructureKHR.
+                    matches!(i[0] & 0xffff, 4472 | 5341).then(|| i[1])
+                })
+                .collect();
+            for i in instructions {
+                if i[0] & 0xffff == 46 {
+                    // OpConstantNull
+                    assert!(!opaque.contains(&i[1]), "opaque null in {name}");
+                }
+            }
         }
     }
     for source in &shading {

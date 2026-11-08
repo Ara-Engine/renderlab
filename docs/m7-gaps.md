@@ -2,6 +2,45 @@
 
 One section per feature. Each lists the measured or inspected gaps that remain after its overnight first pass (2026-11-08 push).
 
+## Skinning
+
+- SK1 uses ALLOW_UPDATE/PreferUpdate for animated BLASes and the frame's TLAS;
+  wgpu 30 currently rebuilds both. Actual incremental refit remains open.
+- The non-RT path skins full-detail source clusters. Skinned cluster LOD is
+  unavailable; bounds are conservative mesh-wide bounds. CPU software-GI BVHs
+  rebuild for changed poses, and caster invalidation is conservative. Replacing
+  animated geometry also repacks the static software scene each pose: the default
+  GI quarry run is currently too expensive for game frame rates (**242 ms CPU,
+  310 ms synchronized frame** in SK1's contended opt-level-1 diagnostic run).
+  Persistent dynamic geometry ranges are needed; see SK1's measured frame cost.
+- RLS v1 supports four influences, TRS nodes and one active sampled clip. Matrix
+  nodes, additional influence sets and morph targets are explicitly rejected.
+  Clip blending, events, dual-quaternion skinning and automatic root motion remain
+  outside the overnight base.
+- Existing TR1 model-transform edits still reset history. SK1 supplies previous
+  deformed vertex positions; its walk example puts translation in the palette.
+- SK1 exposes typed renderer upload/palette APIs and a clip player. API1's planned
+  `Engine` facade adapter (`MeshId`/`ObjectId` pose ownership) remains to be wired.
+- Moving-caster shadow regions reject old receiver lighting history to avoid
+  trailing shadows. With dynamic GI enabled the region is conservatively
+  scene-wide; finer rejection and stable shadow sampling remain open.
+- Hardware shadows retain the existing opaque, double-sided caster contract. The
+  example enables double-sided materials explicitly.
+- No new Unreal or path-traced comparison was run for this overnight unit. Its
+  visual and timing evidence, and their limits, are in [m7-sk1.md](m7-sk1.md).
+
+## Post
+
+PP1 provides bloom, camera motion blur, camera-requested near/far gather DOF, tone/white balance/contrast/saturation/3D LUT and optional lens effects on both paths. [Implementation and evidence](m7-pp1.md).
+
+- Motion vectors currently reconstruct camera motion over static geometry from TR1's hit/projection inputs. Prior object/skinned/particle transforms and transparent-layer velocities still need a shared attachment. Hidden/disoccluded colour cannot be reconstructed from one surface.
+- DOF needs better near-field coverage, hidden-background reconstruction, shaped apertures and temporal stability for large bokeh. MSAA raster depth/velocity uses sample zero.
+- The filmic option is an ACES-like fit, not full ACES; RGB white balance is approximate. Display-linear RGBA8 LUTs have no HDR/log shaper or file importer.
+- Bloom uses a fixed normalized six-level optical approximation. Grain is simple noise; lens dirt/diffraction/anamorphic calibration are absent. Post shader reload is not wired into the editable prelude transaction.
+- No new Unreal/reference campaign tonight; full post quality parity remains unproven. Final effect timings and image findings are in the PP1 report.
+- Optional DOF needs release profiling: the retained contended test-profile run reached 11.219 ms for non-RT quarry near DOF and 5.581 ms for raster far DOF. Camera-requested DOF remains off by default.
+- API1's planned `Settings::post` and engine-module re-exports still need wiring; the typed crate-root API works through `Engine::renderer_mut()`. Native final checks include AT1/GI defaults; upscale-preset evidence predates that merge.
+
 ## RT shadows
 
 [RTDEF](rtdef.md) compares raster + Exact with traced + Interactive + the latest
@@ -154,6 +193,23 @@ G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both 
 - **Path-traced re-score not done.** TR1's visible-sky walk was not re-scored against the path-traced reference with the cache on: no new reference campaign tonight. The shared lighting error should shrink with the cache's sky occlusion; this is unmeasured.
 - **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each.
 - **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.
+
+## Lights
+
+LC1 ([m7-lc1.md](m7-lc1.md)): clustered culling of point and spot lights, plus shadows for the 4 most important local lights (rays where the frame binds an acceleration structure, pooled PCF maps otherwise), on by default on both paths. The soft sun now renders with any number of further lights. Measured on the quarry at night with 260 lights; no Unreal or path-traced comparison was run tonight.
+
+- **Raster RT default cost.** Forward raster shading runs the light loop for every rasterized fragment. The quarry's overdraw and quad overshading on 13 M scan triangles make 256 lights cost +24.7 ms there (16.8 to 41.5 ms), against about +1.2-1.8 ms on the deferred traced and VB paths. The fix is a depth prepass or deferred primaries on the RT default. RTDEF kept raster + Exact as the RT default.
+- **Only N lights are shadowed** (default 4, at most 16). All other local lights leak light through geometry. Unreal's VSM shadows every movable local light, with page caching.
+- **Selection by illuminance at the camera** (candela / d², d >= 1 m, frustum-tested, 25 % hysteresis). It is not screen-coverage weighted: in the test it picked two dim lights near the camera over the two bright points. Selection changes pop shadows on and off with no fade.
+- **Hard local shadows.** The Light API has no source radius. Rays give point-source hard shadows, and map PCF gives a fixed 3x3-texel softening, not a physical penumbra. Unreal has source-radius soft shadows on both paths.
+- **Maps draw full-detail meshes** (no cluster-LOD raster) and only regular draws. Virtual-geometry casters are missing from local maps. Moving shadowed lights redraw every frame: +5.7 ms for 4 spot faces on the quarry, more for cube lights. PCF clamps at cube-face edges (no cross-face filtering). The 0.02 m near plane drops casters closer to the light (rays have no near plane).
+- **Unclassified map/ray differences.** Fine speckle on the gravel pile with maps (pebble shadows or acne), and one region behind the large rock that rays shadow and maps don't. Neither was classified tonight.
+- **GI bounce takes only the first 32 lights** in the lighting vector: the cache's per-cell light bits. Later lights add direct light only; in the test scene that includes the four bright ones. Importance-ordered GI lights would need cache-stable reindexing.
+- **Unculled stages walk every light:** R1 reflection hits, which run before the cluster is prepared; film accumulation (Temporal soft mode, opt-in); and cell shading. Their cost grows with the total light count on reflective content. Reflection hits shadow unselected local lights not at all (R1's hit shadow skips lights without shadow views).
+- **Cluster capacity.** 128 lights per cluster (the test's longest was 99); beyond that, a cluster drops its highest-indexed lights, and the dropped count is recorded in the list. Sets above 65,535 lights walk every light.
+- **Programmability constraints:** implicit-derivative sampling inside the light loop is rejected (per-receiver loop bound), and fixed-index light addressing now means "the cluster's i-th light".
+- **Memory:** pooled maps take 96 MB at the default 4 slots x 6 faces x 1024² Depth32Float, allocated on the first map frame (cube layers are reserved even for spot slots), plus 3.6 MB of lists and a 6 KB uniform.
+- **Timing** is one contended drained-frame run (median and min of 24), not a quiet-window measurement.
 
 ## Programs
 

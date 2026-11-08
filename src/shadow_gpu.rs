@@ -471,16 +471,20 @@ impl Renderer {
         lights: &[Light],
         shadows: &Shadows,
     ) -> Result<(), Error> {
+        // LC1: soft visibility reads lights[0] only, and every other light's record has no
+        // shadow views (kind.z 0), so further lights are allowed when they carry no request;
+        // the most important local lights get LC1's own shadows (light_cluster.rs).
         if shadows.directional_disk_angle > 0.0
             && (self.fresh.is_none()
-                || !matches!(lights, [Light::Directional { .. }])
+                || !matches!(lights.first(), Some(Light::Directional { .. }))
                 || !matches!(
-                    shadows.requests.as_slice(),
-                    [ShadowRequest::Directional { .. }]
+                    shadows.requests.split_first(),
+                    Some((ShadowRequest::Directional { .. }, rest))
+                        if rest.iter().all(|r| matches!(r, ShadowRequest::None))
                 ))
         {
             return Err(Error::InvalidInput(
-                "soft visibility requires hardware 1x and exactly one shadowed directional light",
+                "soft visibility requires hardware 1x and one shadowed directional light, first in the lighting vector; other lights take no shadow requests",
             ));
         }
         if self.hardware_shadows.is_none()

@@ -12,6 +12,8 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UploadBytes {
+    /// SK1 joint palettes and dispatch parameters, separate from static geometry edits.
+    pub skinning: u64,
     pub environment: u64,
     pub shadows: u64,
     pub geometry: u64,
@@ -36,6 +38,7 @@ pub struct UploadBytes {
 }
 impl UploadBytes {
     pub(crate) fn add(&mut self, other: Self) {
+        self.skinning += other.skinning;
         self.environment += other.environment;
         self.shadows += other.shadows;
         self.geometry += other.geometry;

@@ -760,8 +760,6 @@ impl Renderer {
     /// Creates the camera volume's kernel groups that are missing (the injection's again
     /// when the scene TLAS changed).
     fn atmosphere_volume_groups(&mut self) {
-        let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
-        let key = tlas.map_or(0, |t| t as *const wgpu::Tlas as usize);
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &mut self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
@@ -791,6 +789,9 @@ impl Renderer {
         let Some(scatter) = &v.scatter else {
             return;
         };
+        // PP1 integration: aerial perspective alone needs no shadow TLAS.
+        let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
+        let key = tlas.map_or(0, |t| t as *const wgpu::Tlas as usize);
         if v.integrate.is_none() {
             v.integrate = Some([0, 1].map(|i| {
                 group(

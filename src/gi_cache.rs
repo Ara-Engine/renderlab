@@ -890,6 +890,24 @@ fn uint_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Renderer {
+    // SK1: refresh software-ray geometry in the admitted pose. Keep local swept-box
+    // invalidation rather than clearing every cell merely because a mesh deformed.
+    pub(super) fn update_skinned_indirect(
+        &mut self,
+        mesh: &Mesh,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<bool, Error> {
+        if !self.gi.settings.enabled
+            || (self.hardware_shadows.is_some() && !self.gi.settings.force_software)
+        {
+            return Ok(false);
+        }
+        let pending = self.gi.pending_clear;
+        self.set_indirect_geometry(mesh, positions, indices)?;
+        self.gi.pending_clear = pending;
+        Ok(true)
+    }
     /// Selects world radiance cache settings. Enabling allocates the table (all
     /// slots empty); a new slot count reallocates it. Takes effect on the next lit
     /// traced or visibility-buffer frame whose programs call `indirect_irradiance`.
@@ -2077,7 +2095,13 @@ impl Renderer {
         if !previous.is_empty() {
             for i in 0..bounds.len().max(previous.len()) {
                 let (a, b) = (previous.get(i), bounds.get(i));
-                if a == b {
+                // A skinned caster can change within identical aggregate bounds.
+                let deforming = draws
+                    .iter()
+                    .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
+                    .nth(i)
+                    .unwrap_or(false);
+                if a == b && !deforming {
                     continue;
                 }
                 let mut swept = [
@@ -2267,6 +2291,12 @@ impl Renderer {
             h.update(environment);
             h.update(format!("{s:?}").as_bytes());
             h.update(region.map(u32::to_le_bytes).concat());
+            // SK1: a fixed camera and placement can still contain animated geometry.
+            for d in draws {
+                if let Some(s) = &d.mesh.skin {
+                    h.update(s.revision.to_le_bytes());
+                }
+            }
             h.finalize().into()
         };
         if self.gi.idle_key == Some(idle_key) && !clear {
