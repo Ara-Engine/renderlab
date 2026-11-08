@@ -372,6 +372,7 @@ pub(crate) struct Composed {
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
     let streamed;
+    let cell_entry;
     let (api, binding, entry) = match stage {
         Stage::Raster => (
             RASTER_API,
@@ -391,7 +392,8 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
                 TRACED_NO_PARAMETERS
             },
             if stage == Stage::Cell {
-                CELL_ENTRY
+                cell_entry = gi_shader("gi_shade_entry.wgsl", CELL_ENTRY);
+                &*cell_entry
             } else {
                 TRACED_ENTRY
             },

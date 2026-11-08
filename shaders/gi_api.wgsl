@@ -44,6 +44,12 @@ fn gi_hot_find(key:vec2<u32>) -> GiHot {
 // array costs a local-memory copy per call).
 var<private> gi_lv_sky:array<vec3<f32>,9>;
 var<private> gi_lv_bounce:array<vec3<f32>,4>;
+// The level sums' bounce weight: the part of the returned weight whose cells have had a
+// gather (G2c). While bounce is on, a cell is traced (its sky is valid) a few frames before
+// its first gather; until then it has no bounce value, not a zero one. G2 read it as zero,
+// and the cells a level switch creates as the camera closes in (the nearest surfaces first,
+// such as an arch's near edge) showed as dark streaks for those frames (docs/m7-g2c.md).
+var<private> gi_lv_bw:f32;
 // The receiver's bin-source normal (its viewed vertex normal), against which each cell's query
 // normal is weighed (gi_prepare).
 var<private> gi_rx_normal:vec3<f32>;
@@ -78,6 +84,7 @@ fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {
     gi_lv_sky[6]+=s*vec3<f32>(p9.x,p9.y,p10.x);
     gi_lv_sky[7]+=s*vec3<f32>(p10.y,p11.x,p11.y);
     gi_lv_sky[8]+=s*vec3<f32>(p12.x,p12.y,p13.x);
+    if h.r4.x!=0u { gi_lv_bw+=w; }
     let b=w*bitcast<f32>(h.r4.x);
     if b>0.0 {
         let q0=unpack2x16float(h.r4.y);let q1=unpack2x16float(h.r4.z);
@@ -105,6 +112,7 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     gi_sampled_split=false;
     for(var i=0u;i<9u;i+=1u) { gi_lv_sky[i]=vec3<f32>(0.0); }
     for(var i=0u;i<4u;i+=1u) { gi_lv_bounce[i]=vec3<f32>(0.0); }
+    gi_lv_bw=0.0;
     let u=gi_lattice(world,gi_edge(level),bin);
     if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u {
         let h=gi_hot_find(gi_key(level,bin,vec3<i32>(floor(u))));
@@ -158,9 +166,19 @@ fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
 var<private> gi_rx_sky:array<vec3<f32>,9>;
 var<private> gi_rx_bounce:array<vec3<f32>,4>;
 var<private> gi_rx_valid:bool;
-fn gi_rx_add(w:f32) {
+// Adds the level sums, the sky's with factor w and the bounce's with factor b.
+fn gi_rx_add(w:f32, b:f32) {
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]+=w*gi_lv_sky[i]; }
-    for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]+=w*gi_lv_bounce[i]; }
+    for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]+=b*gi_lv_bounce[i]; }
+}
+// The level sums' bounce weight (gi_lv_bw), or the sky weight s when bounce is off: then no
+// cell is ever gathered, and the bounce sums are zero whatever weight they take.
+fn gi_lv_bounce_weight(s:f32) -> f32 {
+    return select(s,gi_lv_bw,gi_word(GI_H_BOUNCE)!=0u);
+}
+// w / x, or 0 for a weight too small to normalize by.
+fn gi_share(w:f32, x:f32) -> f32 {
+    return select(0.0,w/x,x>1e-6);
 }
 fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
@@ -185,19 +203,30 @@ fn gi_prepare(input:SurfaceInput) {
         // Corners holding part of the weight (orphans, absent or disagreeing cells) keep it;
         // the next coarser level fills the rest, instead of the corners left taking all of
         // it (G2: renormalizing over one dark corner made isolated pinholes after TR1).
+        // Bounce fills the same way over its own weight bw <= s: a corner with sky but no
+        // gather yet is absent for bounce (G2c). Once every corner has been gathered, bw == s
+        // and every factor below equals G2's.
         total+=w;
-        if s>=0.999 || level+1u>=levels {
-            gi_rx_add(w/s);
+        let bw=gi_lv_bounce_weight(s);
+        let last=level+1u>=levels;
+        // A full term is normalized over its own corners; bounce full implies sky full.
+        let sky_full=s>=0.999 || last;
+        let bounce_full=bw>=0.999 || last;
+        if bounce_full {
+            gi_rx_add(w/s,gi_share(w,bw));
             continue;
         }
-        gi_rx_add(w);
+        gi_rx_add(select(w,w/s,sky_full),w);
         let c=gi_sample(world,level+1u,bin);
-        if c>1e-6 {
-            gi_rx_add(w*(1.0-s)/c);
-            continue;
-        }
-        // No coarser value: the level's own corners take the rest, as without the fill.
-        gi_rx_add(w*(1.0-s)/gi_sample_refined(world,level,bin));
+        let cb=gi_lv_bounce_weight(c);
+        let sky_fill=!sky_full && c>1e-6;
+        let bounce_fill=cb>1e-6;
+        gi_rx_add(select(0.0,w*(1.0-s)/c,sky_fill),select(0.0,w*(1.0-bw)/cb,bounce_fill));
+        if (sky_full || sky_fill) && bounce_fill { continue; }
+        // No coarser value for a term: the level's own corners take that term's rest, as
+        // without the fill.
+        _ = gi_sample_refined(world,level,bin);
+        gi_rx_add(select(w*(1.0-s)/s,0.0,sky_full || sky_fill),select(gi_share(w*(1.0-bw),bw),0.0,bounce_fill));
     }
     if total>0.0 {
         let inv=1.0/total;
@@ -211,14 +240,14 @@ fn gi_prepare(input:SurfaceInput) {
     // coarser levels, then the open environment.
     let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));
     if s2>1e-6 {
-        gi_rx_add(1.0/s2);
+        gi_rx_add(1.0/s2,gi_share(1.0,gi_lv_bounce_weight(s2)));
         gi_rx_valid=true;
         return;
     }
     for(var level=max(pick.lo,pick.hi)+1u;level<levels;level+=1u) {
         let s=gi_sample(world,level,bin);
         if s<=1e-6 { continue; }
-        gi_rx_add(1.0/s);
+        gi_rx_add(1.0/s,gi_share(1.0,gi_lv_bounce_weight(s)));
         gi_rx_valid=true;
         return;
     }
