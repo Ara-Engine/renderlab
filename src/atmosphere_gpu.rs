@@ -194,7 +194,7 @@ impl AtmosphereGpu {
                 Atmosphere::default()
             },
             uniform,
-            _uniform_allocation: ledger.allocate(AllocationKind::Light, UNIFORM_BYTES),
+            _uniform_allocation: ledger.allocate(AllocationKind::Lut, UNIFORM_BYTES),
             sampler,
             transmittance: lut(
                 device,
