@@ -159,4 +159,12 @@ G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both 
 
 From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by per-program tile lists.
 
-GAPS-PLACEHOLDER
+1. **Reflection hits on another program's object** are shaded by the reflecting surface's program, with the hit's material inputs and the receiver's parameters (m7-mp1.md 1.4). RF10's reflected toon sphere is smooth, not banded: RT 22.92 on that population against UE HW-Hit Epic 10.42 and SW Epic 12.99 (whole reflector 12.34, better than both floors). The fix is a per-program hit pass: trace and record hits, shade them in per-program lists by the hit's program, then let receivers read the result. It would also take R1's inlined hit shading out of the receiver's kernel (R1's cost gap 11).
+2. **Non-RT RF10** scores 62.27 against UE SW Epic 53.12: non-RT has no traced reflections yet (Reflections 1). R1n's software hits must use the same seam as R1's (`program::compose_list` replaces the hit's parameter load once); a second hit-shading site needs the same treatment.
+3. **Temporal film frames** (`SoftShadows::Temporal`, not a default) still admit one program per frame.
+4. **Limits.** 32 programs per frame (the binning mask is one u32); 64 draws per frame as before. Programs are per material, not per instance.
+5. **Compile hitches.** The first mixed frame compiles one list pipeline per program (the frame's shading variant only), concurrently, and a reload's list pipelines recompile at the next mixed frame rather than in the reload transaction. Debug example build, first frame: 49.0 s RT and 24.8 s non-RT for everything, against API1's 11.6-43.8 s with one program. Not measured in a release build.
+6. **Mixed tiles** run every present program's dispatch over the whole tile; the others' pixels return after one hit-record read. Overhead grows with the number of program boundaries on screen. Q-GAP
+7. **GI cells.** Each reflecting program's cell pipeline scans the whole cell queue, so cell shading grows linearly with the number of reflecting programs. Unmeasured beyond the quarry rows; the queue is bounded (32 slots).
+8. **Unverified:** mixed frames with streamed textures (`TextureResidency` other than `Full`; composed and naga-checked, never rendered), mixed frames with RT1d's visibility filter, motion and disocclusion across program boundaries under TR1 (only static frames and the example's fly path were inspected), and Hard (inline-ray) shading in mixed frames (the gates use Interactive and Virtual).
+9. **No Unreal comparison** of per-object materials: Unreal assigns materials per mesh natively; the 2x speed gate on matched workloads was not measured for mixed frames.

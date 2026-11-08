@@ -148,7 +148,8 @@ def run_steps(g, out, binary, baseline, args):
                 VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
     base.pop("VK_INSTANCE_LAYERS", None)
     with g.lease("mp1-" + args.label, args.minutes) as owner:
-        out.mkdir(parents=True)
+        # A deferred attempt (another unit's build) leaves only preflight files: reuse it.
+        out.mkdir(parents=True, exist_ok=True)
         for index, step in enumerate(args.steps):
             path, test, *extra = step.replace("::", "@").split(":")
             test = test.replace("@", "::")
@@ -180,7 +181,10 @@ def run_steps(g, out, binary, baseline, args):
             if test == "example":
                 # API1's game_scene example (BINARY: its staged exe), PNG frames per path.
                 command = [step_binary, "--path", path, "--out", str(out / f"example-{path}")]
-            g.guarded(command, out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}",
+            step_dir = out / f"step-{index}-{path}-{name.rsplit('::', 1)[-1]}"
+            if step_dir.exists() and not (step_dir / "process.json").exists():
+                shutil.rmtree(step_dir)
+            g.guarded(command, step_dir,
                       timeout=max(60, int(g.remaining_seconds(owner)) - 20), cwd=REPO, env=env)
 
 
