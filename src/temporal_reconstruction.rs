@@ -651,6 +651,15 @@ impl Renderer {
         let mut hash = Sha256::new()
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
+            // MP1: a mixed frame's other programs (none for single-program frames).
+            .chain_update(
+                state
+                    .programs
+                    .iter()
+                    .skip(1)
+                    .flat_map(|p| p.to_ne_bytes())
+                    .collect::<Vec<_>>(),
+            )
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.shadows.settings).as_bytes())

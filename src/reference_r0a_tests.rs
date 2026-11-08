@@ -273,7 +273,11 @@ fn gpu_r0a_current() {
                         metallic: m.metallic,
                         roughness: m.roughness,
                         double_sided: true,
-                        program: (json["materials"][i]["program"] == "toon").then_some(&toon),
+                        // MP1 diagnostic: RENDERLAB_R0A_TOON=standard draws the toon
+                        // material on the standard program (a single-program frame).
+                        program: (json["materials"][i]["program"] == "toon"
+                            && std::env::var("RENDERLAB_R0A_TOON").as_deref() != Ok("standard"))
+                        .then_some(&toon),
                         ..Default::default()
                     };
                     if let Some(m) = renderer.try_create_material(&descriptor).unwrap() {

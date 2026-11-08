@@ -232,11 +232,11 @@ fn emission(s: Surface, input: SurfaceInput) -> vec3<f32> { ... }
 
 Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` hook joins `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
 
-**One program per frame (current limit).** Both quality paths shade every pixel of a frame with one program: traced RT primaries and the non-RT visibility buffer reject frames whose materials use different programs. Per-program dispatch is planned (M7 design, R1). Until it lands, give per-object styles to materials of one program through a `Parameters` member, as the example does: examples/game_scene.wgsl is the standard program plus a toon branch selected by `style`, so the hero is toon-shaded and the props photoreal in the same frame. When per-program dispatch lands, separate programs per material will work with no API change.
+**Programs per object.** Each material names its program, and a frame may mix up to 32 programs on both quality paths: traced RT primaries and the non-RT visibility buffer shade each program's pixels with that program's own pipeline (MP1, [m7-mp1.md](m7-mp1.md)); raster frames switch pipelines per draw. The example's props use examples/game_scene.wgsl and its hero examples/game_toon.wgsl. Two limits remain: a reflection hit on another program's object is shaded by the reflecting surface's program with the hit's material inputs, and `SoftShadows::Temporal` frames still use one program.
 
 ## Current limits
 
-- One shading program per frame on both quality paths (above). MP1 lifts it, with no API change.
+- At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
 - Only the 4 most important local lights cast shadows (LC1); the rest are unshadowed. See the Lights section of [m7-gaps.md](m7-gaps.md#lights).
@@ -274,7 +274,7 @@ Each overnight unit lands in a named slot. Wired rows are on this branch; the ot
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
 | PP1 | post-processing | `Settings::post: PostSettings` (bloom, motion blur, depth of field, tone mapper, white balance, grading, vignette, grain), with `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported, following PP1's branch; an `Exposure::Auto { .. }` variant if PP1 adds auto exposure |
 | R1n | non-RT traced reflections, reflection switch | `Settings::reflections: ReflectionSettings` (`enabled`, `max_roughness`), re-exported; the program hooks are unchanged |
-| MP1 | per-program dispatch | no API change: materials of different programs share a frame. The example's hero moves to its own toon program, and the `style` workaround goes. |
+| MP1 | per-program dispatch | **Wired**, no API change: materials of different programs share a frame (see [Shading programs](#shading-programs)). The example's hero has its own toon program, examples/game_toon.wgsl. |
 | G2c | GI speckles and streaks | no API change |
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.
