@@ -257,6 +257,16 @@ While references arrive, `physical-batches/sun-first49-witness.json` scores **te
 
 The Sun turns continuously; the stationary camera does not make this a temporal hold. No stop/settle count is inferred. These are combined final-colour errors against the new physical reference, with no T1b Sun score available. Sun native inputs remain retained for the complete score and final inspection.
 
+The later `sun-input-change72.json` batch scores six selected frames per path (56, 57, 63, 64, 71, 72). Its frame-72 L0/L4 full-image/error sheets are inspected. The fixed **64→72 input-change mask contains 75,759 pixels**; this is eight frames of continuous Sun motion, not eight frames after a stop.
+
+| Later Sun witness | TSR Epic, no RT | TSR Epic, HRT |
+|---|---:|---:|
+| Frame 72 covered L0 / L4 RMS | 7.4194 / 6.0856 | 15.1664 / 8.2080 |
+| Frame 72 changed-mask L0 / L4 RMS | 16.4255 / 7.2054 | 31.7007 / 13.9933 |
+| Frame 72 changed-mask L0 signed mean / SE | -10.8862 / 0.04458 | -21.5073 / 0.08406 |
+| Frame 72 metal / dielectric highlight energy ratio | 0.05164 / 0.95985 | 0.11996 / 0.95147 |
+| F6 L0 residual, frames 71→72 | 0.79386 | 1.01393 |
+
 ## Cost method and quiet results
 
 Capture and timing use different processes. The timing process alternates **no AA and TSR on the same full input track**, with a reset per replay and eight leading track frames excluded from each measured block. Two adjacent A/B pairs fit per process; four processes provide eight pairs. One scene upload is reused within each process. UE's installed `FCommandLine` limit is **16 KiB**; a failed over-limit attempt is excluded, rather than treated as a timing sample.
