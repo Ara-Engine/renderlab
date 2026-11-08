@@ -31,13 +31,23 @@ else:
     with u.SCHEDULE.open("a", encoding="utf-8") as f:
         f.write(f"\n[m7-pp1 request] owner=m7-pp1 asks for one <=15 min lease {label} (PP1 offscreen lib/effect verification; diagnostic timings); {dt.datetime.now(dt.timezone.utc).isoformat()}\n")
     deadline = time.monotonic() + 90 * 60
-    while g1.window_open(u) or g1.quiet_active(u, any_lease=False) or g1.hold_state(u) == "hold":
-        if time.monotonic() > deadline:
-            raise SystemExit("PP1 timed out waiting for schedule/game hold")
-        time.sleep(1)
     command = sys.argv[3:]
     if command[:1] == ["--"]:
         command = command[1:]
     env = dict(os.environ, N8_OWNER="m7-pp1", N8_OUT=str(OUT))
-    raise SystemExit(subprocess.call([sys.executable, "-B", str(ROOT / "scripts/n8-run.py"),
-        "--label", label, "--minutes", "15", "--wait-seconds", "45", "--fast-check", "--", *command], cwd=ROOT, env=env))
+    attempt = 0
+    while time.monotonic() < deadline:
+        blocking = g1.window_open(u)
+        # Queue at the atomic lock while another functional lease is running.
+        # QUIET windows, game holds and future/request reservations still block.
+        if (g1.quiet_active(u, any_lease=False) or g1.hold_state(u) == "hold"
+                or (blocking and ("reservation" not in blocking.lower() or "quiet" in blocking.lower()))):
+            time.sleep(1)
+            continue
+        attempt += 1
+        result = subprocess.call([sys.executable, "-B", str(ROOT / "scripts/n8-run.py"),
+            "--label", f"{label}-{attempt}", "--minutes", "15", "--wait-seconds", "45", "--fast-check", "--", *command], cwd=ROOT, env=env)
+        if result != 3:
+            raise SystemExit(result)
+        time.sleep(1)
+    raise SystemExit("PP1 timed out waiting for schedule/game hold")

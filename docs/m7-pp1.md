@@ -1,6 +1,6 @@
 # PP1: post processing after reconstruction
 
-2026-11-08 overnight unit. Branch `t3/m7-pp1`, based on `984a18b`.
+2026-11-08 overnight unit. Branch `t3/m7-pp1`, initially based on `984a18b`, with main through `ae95d3a` (TR1b and DC1) merged at `ba3496f`.
 
 ## Implementation and API
 
@@ -28,13 +28,15 @@ Motion blur uses pixel velocity, a 16×16 tile maximum and a neighbouring tile m
 
 DOF uses signed thin-lens circles of confusion in output pixels and a 48-tap disc gather with separate near/far accumulation and foreground coverage. It remains off unless requested by the camera. The display stage keeps Reinhard and adds [Narkowicz's ACES-like fit](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/) (CC0 selected; attribution in `THIRD_PARTY_NOTICES.md`). The latter is not full ACES colour management. RGB white balance, a contrast power curve, luminance-preserving saturation control and a trilinear 3D display-linear Rec.709 LUT follow. LUT red varies fastest, then green and blue; its texture is RGBA8. Vignette is radial, grain is zero-mean changing noise, and optional chromatic aberration offsets red/blue radially by an output-pixel setting.
 
-Resources are owned and reused by size. Target replacements, disable and LUT replacements retire tracked allocations through their last submitted frame. Changing post settings or the LUT does not change the renderer revision or TR1 reset key. The post/tone interval is included in `GpuSample::present_pass`; the complete render span still ends after tone. Settings uploads are independent of scene/program/material semantics. No light-model-specific receiver ABI was introduced.
+Resources are owned and reused by size. Target replacements, disable and LUT replacements retire tracked allocations through their last submitted frame. Changing post settings or the LUT does not change the renderer revision or TR1 reset key. The post/tone interval is included in `GpuSample::present_pass`; the complete render span still ends after tone. Settings uploads are independent of scene/program/material semantics. No light-model-specific receiver ABI was introduced. The scratch textures are about 74 MiB at 1080p (including the currently reserved DOF scratch when DOF is off); this excludes driver/pipeline overhead.
+
+TR1b integration: post reads the target-size reconstructed HDR, including `RenderScale::Quality` and `Performance`, and writes the caller's target. Depth and velocity are generated at output size from nearest current internal hits, using the internal projection and output-pixel motion units. Lens radii remain output-pixel settings. The only production TR1-file change is restricted access to its output HDR image; post does not read its history, ages, weights or coverage layers. Disabling post still presents TR1b's upscaled output. The camera's focal length/sensor height controls do not change `Camera::fov_y`; callers should keep those optical settings consistent.
 
 ## Verification
 
 Evidence is under `D:/Coding/renderlab-work/m7-pp1/`. `scripts/m7-pp1-run.py` uses the shared schedule/game-hold guards and `scripts/n8-run.py` for every test binary. `scripts/m7-pp1-batch.py` runs the lib suite, then loads the quarry once per path and sweeps all configurations. The screen includes 1920×1080 quarry and a 1280×720 bright-sky fixture with dark near silhouettes, a far surface and a small HDR highlight. Each configuration has a still capture, a moving capture and eight moving-frame timestamp samples. CPU shader validation covers all four modules and the primary composition.
 
-Initial RT fixture smoke passed all effect variants with zero Vulkan validation errors. The paired post-off/neutral HDR byte comparison passed. Final both-path images, lib counts and per-effect times are recorded below when the final batch completes.
+The first retained sweep (`retained-a`) passed 149 lib tests and both full path sweeps with zero Vulkan validation errors. The hardware-filter/grain sweep (`retained-c`) also passed 149 tests and both paths. Every post variant produced the same reconstructed-HDR SHA-256 within each of its four scene/path sets. Inspection found and corrected diagonal grain correlation, then a hard inner edge in near bokeh. The corrected near-field fixture (`near-d`) passed on both paths with clean validation; its inspected images soften both sides of the silhouette. Final main-integrated evidence follows below.
 
 ## Gaps and limits
 
@@ -43,5 +45,5 @@ Initial RT fixture smoke passed all effect variants with zero Vulkan validation 
 - DOF is a first-pass gather, without layered hidden-background reconstruction, shaped aperture, temporal stabilization, highlight scatter or physically exact occlusion. Large near bokeh can show sampling and coverage errors. MSAA raster auxiliaries use sample zero.
 - White balance is a bounded RGB camera adaptation, not a full chromatic-adaptation transform; the optional filmic fit can oversaturate highlights. The LUT is SDR/display-linear RGBA8, without HDR/log shapers or `.cube` file import.
 - Bloom is a normalized pyramidal optical approximation with a fixed six-level shape. Lens dirt, diffraction, anamorphic profiles and lens calibration are absent. Grain is lightweight noise, not a scanned film model.
-- Post shaders are compiled library stages, not part of the existing editable prelude reload transaction. No upscaling-specific external output/depth attachment exists in `984a18b`; post follows the actual reconstructed HDR dimensions and must consume TR1b's final output seam when that lands.
+- Post shaders are compiled library stages, not part of the existing editable prelude reload transaction. Upscaled post depth comes from nearest current internal hits; there is no separate reconstructed depth or multi-layer attachment, so reduced-resolution depth edges can remain coarse.
 - No claim of Unreal-equivalent post quality, speed superiority, or film-accurate DOF/motion is established by this overnight unit.

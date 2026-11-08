@@ -189,7 +189,12 @@ fn gpu_post_sweep() {
     }
     r.set_reconstruction(Reconstruction::identity()).unwrap();
     if m["fixture_only"].as_bool() != Some(true) {
-        let (mut asset, cameras, _) = load_quarry_lod(&m, &mut r);
+        let (mut asset, cameras) = if path == "rt" || path == "raster" {
+            load_quarry(&m, &mut r)
+        } else {
+            let (asset, cameras, _) = load_quarry_lod(&m, &mut r);
+            (asset, cameras)
+        };
         let poses: Vec<_> = cameras
             .frames
             .iter()

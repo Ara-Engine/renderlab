@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 
 root = Path(sys.argv[1])
 summary = {}
-for path in ("rt", "nonrt"):
+for path in ("rt", "nonrt", "raster"):
     for scene in ("quarry", "bright-sky"):
         directory = root / path / scene
         if not directory.exists():

@@ -10,13 +10,19 @@ root = Path(root)
 root.mkdir(parents=True, exist_ok=True)
 commands = [("lib", [binary, "--test-threads=1"], {})]
 template_data = json.loads(Path(template).read_text(encoding="utf-8-sig"))
-for path in ("rt", "nonrt"):
-    m = dict(template_data)
-    m.update(path=path, output=str(root / path))
-    manifest = root / f"{path}.json"
-    manifest.write_text(json.dumps(m, indent=2))
-    commands.append((path, [binary, "gpu_post_sweep", "--ignored", "--nocapture", "--test-threads=1"],
-                     {"RENDERLAB_PRIMARY_MANIFEST": str(manifest)}))
+scales = template_data.get("render_scales", [template_data.get("render_scale", "native")])
+for scale in scales:
+    for path in template_data.get("paths", ["rt", "nonrt"]):
+        if path == "raster" and scale != "native":
+            continue
+        m = dict(template_data)
+        output = root / scale / path if "render_scales" in m else root / path
+        m.update(path=path, output=str(output), render_scale=scale,
+                 fixture_only=m.get("fixture_only", False) or scale != "native" or path == "raster")
+        manifest = root / f"{scale}-{path}.json"
+        manifest.write_text(json.dumps(m, indent=2))
+        commands.append((f"{scale}-{path}", [binary, "gpu_post_sweep", "--ignored", "--nocapture", "--test-threads=1"],
+                         {"RENDERLAB_PRIMARY_MANIFEST": str(manifest)}))
 for name, command, extra in commands:
     print("PP1 starting", name, flush=True)
     with (root / f"{name}.log").open("w") as log:
