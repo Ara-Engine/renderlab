@@ -3,9 +3,11 @@
 // its program, and both quality paths shade every program of a frame with its own
 // pipeline (MP1, docs/m7-mp1.md).
 // Materials request traced mirror and glossy reflections (M7-R1) through
-// `reflection_lobe` unless they set `reflect` to 0.
-struct Parameters { reflect:f32 };
-const DEFAULT_PARAMETERS:Parameters = Parameters(1.0);
+// `reflection_lobe` unless they set `reflect` to 0. `glow` is emitted radiance (cd/m²,
+// unexposed), as for lantern bulbs: it adds to the shaded colour and, through `emission`,
+// reaches other surfaces as GI bounce light.
+struct Parameters { glow:vec3<f32>, reflect:f32 };
+const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),1.0);
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {
@@ -26,6 +28,10 @@ fn surface(input:SurfaceInput) -> Surface {
 // asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
     return SpecularLobe(s.n,s.rough*s.rough,params.reflect);
+}
+
+fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {
+    return max(params.glow,vec3<f32>(0.0));
 }
 
 fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
@@ -93,5 +99,5 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         let response=brdf(n,v,light.direction,base,metal,rough);
         exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));
     }
-    return exposed;
+    return min(exposed+expose(max(params.glow,vec3<f32>(0.0))),vec3<f32>(65504.0));
 }

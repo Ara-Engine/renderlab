@@ -7,8 +7,8 @@
 use super::{EnvironmentId, RenderPath};
 use crate::{
     Atmosphere, AtmosphereMedium, Error, HeightFog, IndirectSettings, Light, Lighting,
-    Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows, SoftShadows, Vec3,
-    VirtualLookup, VirtualShadowSettings, VolumetricFog,
+    LocalShadows, PostSettings, Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows,
+    SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings, VolumetricFog,
 };
 
 /// The scene's sun: its one shadowed directional light.
@@ -138,6 +138,15 @@ pub struct Settings {
     /// On by default with a subtle 0.001/m haze. Sun visibility uses hardware rays or
     /// the non-RT path's cached shadow depth; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
+    /// Shadows for the most important point and spot lights, chosen every frame (LC1):
+    /// traced rays on `HardwareRt`, pooled maps on `NonRt`. Default: 4 lights; `count: 0`
+    /// turns local shadows off. Lights beyond the count still light the scene.
+    pub local_shadows: LocalShadows,
+    /// Presentation after reconstruction (PP1): bloom, motion blur, optional depth of field,
+    /// the tone mapper, white balance, contrast, saturation, vignette, grain and the colour
+    /// LUT's strength. On by default; `PostSettings { enabled: false, .. }` presents the
+    /// plain tone-mapped image.
+    pub post: PostSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -150,6 +159,8 @@ impl Default for Settings {
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
             volumetric_fog: Some(VolumetricFog::default()),
+            local_shadows: LocalShadows::default(),
+            post: PostSettings::default(),
         }
     }
 }
@@ -242,6 +253,10 @@ pub(crate) fn atmosphere(sky: Sky, settings: &Settings) -> Atmosphere {
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
+    // Validated setters first, so a rejected value changes nothing else.
+    settings.post.validate()?;
+    r.set_local_shadows(settings.local_shadows)?;
+    r.set_post_settings(settings.post)?;
     if !settings.temporal_reconstruction && settings.render_scale != RenderScale::Native {
         return Err(Error::InvalidInput(
             "render_scale below Native needs temporal_reconstruction",
