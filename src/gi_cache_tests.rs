@@ -2359,6 +2359,17 @@ fn gpu_gi_quarry() {
                 std::fs::write(&exact_path, raw).unwrap();
                 image.clone()
             };
+            // RENDERLAB_M7_G1_QUARRY_DUMP: the radiance image and the scored-pixel mask as raw
+            // little-endian f32 and u32, for per-pixel analysis against the reference.
+            if let Some(dir) = env("RENDERLAB_M7_G1_QUARRY_DUMP") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let raw: Vec<u8> = image.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}.f32")), raw).unwrap();
+                let mask: Vec<u8> = hits.iter().flat_map(|h| h.to_le_bytes()).collect();
+                std::fs::write(dir.join(format!("{path}-{variant}-pose{pose}-hits.u32")), mask)
+                    .unwrap();
+            }
             let scale = exposure.exp2();
             png(
                 &out.join(format!("{path}-{variant}-pose{pose}.png")),

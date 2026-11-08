@@ -235,8 +235,15 @@ impl Tracer {
         self.nodes[id as usize] = Node { lo, hi, a, b };
         id
     }
-    /// Whether the segment o + t d, t in (0, tmax), meets any triangle (either face).
-    fn occluded(&self, o: [f32; 3], d: [f32; 3], tmax: f32, stack: &mut Vec<u32>) -> bool {
+    /// Whether the segment o + t d, t in (tmin, tmax), meets any triangle (either face).
+    fn occluded(
+        &self,
+        o: [f32; 3],
+        d: [f32; 3],
+        tmin: f32,
+        tmax: f32,
+        stack: &mut Vec<u32>,
+    ) -> bool {
         let inv: [f32; 3] = std::array::from_fn(|a| {
             if d[a].abs() < 1e-30 {
                 1e30f32.copysign(d[a])
@@ -263,7 +270,7 @@ impl Tracer {
                 let first = n.a as usize;
                 for t in &self.triangles[first..first + (n.b & !LEAF) as usize] {
                     let [a, b, c] = t.map(|v| self.positions[v as usize]);
-                    if hit(o, d, a, b, c, tmax) {
+                    if hit(o, d, a, b, c, tmin, tmax) {
                         return true;
                     }
                 }
@@ -309,7 +316,7 @@ impl WorldTracer {
                 let first = n.a as usize;
                 for t in &self.0.triangles[first..first + (n.b & !LEAF) as usize] {
                     let [a, b, c] = t.map(|v| self.0.positions[v as usize]);
-                    if let Some(t) = intersect(o, d, a, b, c, tmax) {
+                    if let Some(t) = intersect(o, d, a, b, c, 0., tmax) {
                         let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
                         let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
                         let m = [
@@ -361,9 +368,17 @@ fn world_triangles(
     }
     Ok((positions, triangles))
 }
-/// Moller-Trumbore, both faces, t in (0, tmax).
-fn hit(o: [f32; 3], d: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3], tmax: f32) -> bool {
-    intersect(o, d, a, b, c, tmax).is_some()
+/// Moller-Trumbore, both faces, t in (tmin, tmax).
+fn hit(
+    o: [f32; 3],
+    d: [f32; 3],
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+    tmin: f32,
+    tmax: f32,
+) -> bool {
+    intersect(o, d, a, b, c, tmin, tmax).is_some()
 }
 fn intersect(
     o: [f32; 3],
@@ -371,6 +386,7 @@ fn intersect(
     a: [f32; 3],
     b: [f32; 3],
     c: [f32; 3],
+    tmin: f32,
     tmax: f32,
 ) -> Option<f32> {
     let sub = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
@@ -401,7 +417,7 @@ fn intersect(
         return None;
     }
     let t = dot(e2, q) * inv;
-    (t > 0. && t < tmax).then_some(t)
+    (t > tmin && t < tmax).then_some(t)
 }
 
 /// Builds the near field of every placement in `package` (all treated as static) with
@@ -493,7 +509,13 @@ pub fn prepare(
                                 let mask =
                                     &mut out[(j * 2 + side) * words..(j * 2 + side + 1) * words];
                                 for (b, d) in directions.iter().enumerate() {
-                                    if tracer.occluded(o, *d, settings.reach, &mut stack) {
+                                    if tracer.occluded(
+                                        o,
+                                        *d,
+                                        settings.skip,
+                                        settings.reach,
+                                        &mut stack,
+                                    ) {
                                         mask[b / 32] |= 1 << (b % 32);
                                         count += 1;
                                     }
@@ -540,7 +562,12 @@ fn key(source: &GeometrySource, settings: &Settings) -> [u8; 32] {
     h.update(source.rla_version.to_le_bytes());
     h.update(source.rvg_version.to_le_bytes());
     h.update(format::VERSION.to_le_bytes());
-    for v in [settings.lod_error, settings.near, settings.reach] {
+    for v in [
+        settings.lod_error,
+        settings.near,
+        settings.reach,
+        settings.skip,
+    ] {
         h.update(v.to_le_bytes());
     }
     h.update(settings.bins.to_le_bytes());

@@ -31,6 +31,11 @@ pub struct Settings {
     /// triangle, so a query point inside a triangle has every occluder its far rays skip
     /// within reach of the triangle's vertices.
     pub reach: f32,
+    /// World distance within which the cook's rays ignore hits: the far-field cut stands for
+    /// the surface around a vertex to within its own error, so a ray grazing the vertex's own
+    /// bumps is not an occluder the cut's query points would see (G1c measured masks without
+    /// it darker than exact visibility).
+    pub skip: f32,
     /// Octahedral bins per side; a vertex mask holds bins² bits (a multiple of 32).
     pub bins: u32,
 }
@@ -42,6 +47,9 @@ impl Settings {
             && self.near > 0.
             && self.reach.is_finite()
             && self.reach >= self.near
+            && self.skip.is_finite()
+            && self.skip >= 0.
+            && self.skip < self.near
             && [8, 16, 32].contains(&self.bins);
         if ok {
             Ok(())
@@ -371,11 +379,11 @@ fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
 }
 
 // ---- encoding: explicit little-endian fields, never Rust layout ----
-// Header: magic, version, mesh count, placement count, bins, then lod_error, near and reach
-// (f32 bits), then the source digest. Each mesh: u64 length and an RLB blob
+// Header: magic, version, mesh count, placement count, bins, then lod_error, near, reach and
+// skip (f32 bits), then the source digest. Each mesh: u64 length and an RLB blob
 // (cluster_bvh::encode). Each placement: mesh, 16 transform floats, u64 mask word count,
 // then the mask words.
-const HEADER_BYTES: usize = 32 + 32;
+const HEADER_BYTES: usize = 36 + 32;
 
 pub fn encode(field: &NearField, limits: Limits) -> Result<Vec<u8>> {
     field.validate(limits)?;
@@ -389,6 +397,7 @@ pub fn encode(field: &NearField, limits: Limits) -> Result<Vec<u8>> {
         s.lod_error.to_bits(),
         s.near.to_bits(),
         s.reach.to_bits(),
+        s.skip.to_bits(),
     ] {
         out.extend(v.to_le_bytes());
     }
@@ -435,6 +444,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<NearField> {
         lod_error: f32::from_bits(r.u32()?),
         near: f32::from_bits(r.u32()?),
         reach: f32::from_bits(r.u32()?),
+        skip: f32::from_bits(r.u32()?),
     };
     settings.validate()?;
     let source: [u8; 32] = r.take(32)?.try_into().unwrap();
@@ -582,6 +592,7 @@ mod tests {
             lod_error: 1.,
             near: 0.25,
             reach: 0.5,
+            skip: 0.01,
             bins: 16,
         };
         let words = settings.words();

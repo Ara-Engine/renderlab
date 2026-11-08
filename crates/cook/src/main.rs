@@ -67,15 +67,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}",json!({"algorithm":String::from_utf8_lossy(cluster_bvh::ALGORITHM),"source_digest":source.digest.iter().map(|v|format!("{v:02x}")).collect::<String>(),"source_rla_version":source.rla_version,"source_rvg_version":source.rvg_version,"bvh_version":format::VERSION,"digest":cooked.digest.iter().map(|v|format!("{v:02x}")).collect::<String>(),"cache_hit":cooked.cache_hit,"gpu_bytes":b.gpu_bytes(),"encoded_bytes":b.gpu_bytes()+32,"nodes":b.nodes.len(),"leaves":b.leaves.len(),"positions":b.positions.len(),"indices":b.indices.len(),"levels":levels,"deterministic_rebuild":deterministic,"timings_us":{"load_source":source_us,"build":cooked.build_us,"cook_including_publication":cooked.total_us,"verification":verify.elapsed().as_micros(),"total":start.elapsed().as_micros()},"validation":validation}));
         },
         // M7 G1c: the world radiance cache's near field (docs/m7-g1c.md). Settings: far-field
-        // cut error (object units), near and reach (world metres), octahedral bins per side.
-        ["m7-near",source_cache,source_manifest,cache,manifest,lod_error,near,reach,bins,threads] => {
+        // cut error (object units), near, reach and skip (world metres), octahedral bins per side.
+        ["m7-near",source_cache,source_manifest,cache,manifest,lod_error,near,reach,skip,bins,threads] => {
             use renderlab_cook::{cluster_bvh_cache,near_field};
             use renderlab_asset::near_field as format;
             let start = std::time::Instant::now();
             let source_cache = Path::new(source_cache);
             let source = cluster_bvh_cache::load_geometry(source_cache,Path::new(source_manifest),virtual_limits)?;
             let source_us = start.elapsed().as_micros();
-            let settings = format::Settings{lod_error:lod_error.parse()?,near:near.parse()?,reach:reach.parse()?,bins:bins.parse()?};
+            let settings = format::Settings{lod_error:lod_error.parse()?,near:near.parse()?,reach:reach.parse()?,skip:skip.parse()?,bins:bins.parse()?};
             let cooked = near_field::cook(&source,source_cache,Path::new(cache),Path::new(manifest),settings,virtual_limits,threads.parse()?)?;
             let f = &cooked.field;
             let r = &cooked.report;
@@ -84,7 +84,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "source_rla_version":source.rla_version,"source_rvg_version":source.rvg_version,"digest":hex(&cooked.digest),"key":hex(&cooked.key),
                 "cache_hit":cooked.cache_hit,"encoded_bytes":cooked.bytes,"gpu_bytes":f.gpu_bytes(),
                 "mask_bytes":f.placements.iter().map(|p|p.masks.len()*4).sum::<usize>(),"far_bytes":f.meshes.iter().map(|b|b.gpu_bytes()).sum::<usize>(),
-                "settings":{"lod_error":settings.lod_error,"near":settings.near,"reach":settings.reach,"bins":settings.bins},
+                "settings":{"lod_error":settings.lod_error,"near":settings.near,"reach":settings.reach,"skip":settings.skip,"bins":settings.bins},
                 "meshes":f.meshes.len(),"placements":f.placements.len(),
                 "report":{"far_triangles":r.far_triangles,"far_positions":r.far_positions,"full_triangles":r.full_triangles,"full_positions":r.full_positions,
                     "rays":r.rays,"blocked":r.blocked,"tracer_bytes":r.tracer_bytes},

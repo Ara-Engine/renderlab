@@ -116,6 +116,7 @@ fn settings() -> Settings {
         lod_error: 0.,
         near: 0.25,
         reach: 0.5,
+        skip: 0.0,
         bins: 16,
     }
 }
