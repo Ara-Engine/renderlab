@@ -439,8 +439,10 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             _ => "fn rl_indirect_open() {}\n",
         });
     }
+    // TP2: light_sample filters incident sun RGB through transparent caster layers.
+    let transmission = super::renderer::transparency_gpu::transmission_shadow::api_source();
     let mut source = format!(
-        "{head}\n{COMMON_API}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{transmission}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
@@ -548,6 +550,10 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 /// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
+}
+// TP2: the forward glass pass supplies the declared lobe to R1 separately.
+pub(crate) fn declares_reflection(program: &str) -> bool {
+    declares(program, "fn", "reflection_lobe") && tokens(program).contains(&"specular_incident")
 }
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")

@@ -49,6 +49,11 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
     Ok([hard, soft].map(|c| format!("{ENABLES}{c}\n{rays}")))
 }
 
+// TP2: glass reflection hits use R1's ordinary traced hit shading and geometry ABI.
+pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
+    Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
+}
+
 /// Same engine seams and material ABI, with no traversal declarations at all.
 pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     // Validate the affine/visibility seams even though this composition has no rays.

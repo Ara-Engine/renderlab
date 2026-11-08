@@ -81,7 +81,9 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
             attenuation*=cone*cone;
         }
     }
-    return LightSample(index,l,attenuation,light.rgb_inner.xyz);
+    // TP2: coloured transparent shadows filter sun incidence on both opaque paths.
+    let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(input.world,l),light.kind.x==0u);
+    return LightSample(index,l,attenuation,light.rgb_inner.xyz*transmission);
 }
 
 // World-space visibility of the sampled light from this receiver, 1 when unshadowed:

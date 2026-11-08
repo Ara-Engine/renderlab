@@ -17,6 +17,11 @@ use super::*;
 use crate::transparency::{Emitter, EmitterDescriptor, EmitterShared, TransparencyStats};
 use glam::Vec4;
 
+#[path = "transparency_shadow.rs"]
+pub(crate) mod transmission_shadow;
+#[path = "transparency_reflection.rs"]
+mod reflection;
+
 const SHADER: &str = include_str!("../shaders/transparency.wgsl");
 /// Square sun shadow map of the transparent receivers' footprint.
 const SHADOW_SIZE: u32 = 2048;
@@ -28,6 +33,12 @@ const FRAME_OFFSET: u64 = 256;
 const FRAME_BYTES: u64 = 336;
 const EMITTER_BYTES: u64 = 160;
 const PARTICLE_BYTES: u64 = 48;
+
+fn glass_samples() -> u32 {
+    #[cfg(test)]
+    if std::env::var("RENDERLAB_TP2_PROFILE").is_ok_and(|s| !s.is_empty()) {return 1;}
+    4
+}
 
 /// One `// ---- NAME ----` section of the shader.
 fn section(name: &str) -> &'static str {
@@ -67,13 +78,29 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     };
     let composed =
         crate::program::compose(&head, program, crate::program::Stage::Raster, parameters);
+    // TP2: paired profiling variants change only this pass, in the same test binary.
+    #[cfg(test)]
+    let composed = {
+        let mut composed = composed;
+        let variant = std::env::var("RENDERLAB_TP2_PROFILE").unwrap_or_default();
+        if variant.contains("open") && composed.source.contains("fn gi_prepare(") {
+            composed.source = replace_function(&composed.source, "gi_prepare", "fn gi_prepare(input:SurfaceInput) { gi_rx_valid=false; }");
+        }
+        if variant.contains("map") {
+            composed.source = replace_function(&composed.source, "hard_shadow", MAP_SHADOW);
+        }
+        if variant.contains("nofog") {
+            composed.source = replace_function(&composed.source, "atmosphere_surface", "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> { return c; }");
+        }
+        composed
+    };
     // The surface's own light and the per-channel share of the light behind it.
     let (surface, transmit) = if crate::program::declares_transmittance(program) {
         ("lit", "transmittance(surface_output,surface_input)")
     } else {
         ("lit*coverage", "vec3<f32>(1.0-coverage)")
     };
-    format!(
+    let source = format!(
         "{}\n{}{}{}",
         composed.source,
         section("TP_FRAME"),
@@ -81,7 +108,15 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
         section("TP_GLASS")
             .replace("TP_SURFACE", surface)
             .replace("TP_TRANSMIT", transmit)
-    )
+    );
+    // TP2: a material's own lobe is rasterized separately from its final composite.
+    let glass = section("TP_GLASS");
+    let body = &glass[glass.find("    let source_front=").unwrap()..glass.find("    rl_indirect_prepare(surface_input);").unwrap()];
+    let lobe = if crate::program::declares_reflection(program) { "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha));" } else { "discard; return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0));" };
+    let source = format!("{source}\nstruct TpLobeOutput {{ @location(0) position:vec4<f32>, @location(1) normal:vec4<f32> }};\n@fragment fn fs_tp_lobe(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool)->TpLobeOutput {{\n{body}\n{lobe}\n}}\n");
+    if crate::program::declares_reflection(program) {
+        replace_function(&source,"specular_incident","fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }")
+    } else {source}
 }
 /// The particle simulation and draw modules, after `prelude` for its environment helpers
 /// and AT1's camera fog and aerial perspective.
@@ -121,6 +156,7 @@ pub(super) struct TransparencyState {
     glass: Vec<GlassPipelines>,
     targets: Option<Targets>,
     shadow_key: Option<[u8; 32]>,
+    reflections: Option<reflection::GlassReflections>,
 }
 
 struct Gpu {
@@ -147,6 +183,9 @@ struct Gpu {
     particles: Option<ParticlePipelines>,
     empty: Owned<wgpu::BindGroup>,
     empty_bindings: Owned<wgpu::BindGroupLayout>,
+    // TP2: seed the multisampled glass attachment with its exact background.
+    aa_bindings: Owned<wgpu::BindGroupLayout>,
+    aa_seed: Owned<wgpu::RenderPipeline>,
 }
 struct ParticlePipelines {
     prelude: [u8; 32],
@@ -157,6 +196,7 @@ struct ParticlePipelines {
 struct Targets {
     color: Depth,
     depth: Depth,
+    aa: Depth,
     generation: u64,
 }
 struct GlassPipelines {
@@ -164,6 +204,7 @@ struct GlassPipelines {
     key: [u8; 32],
     /// By tangent stream.
     pipelines: [Owned<wgpu::RenderPipeline>; 2],
+    lobe: [Owned<wgpu::RenderPipeline>; 2],
 }
 struct EmitterSlot {
     id: u64,
@@ -398,6 +439,7 @@ impl Renderer {
                 }),
                 entry(35, FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)),
                 entry(37, FRAGMENT, uniform(true, 16)),
+                entry(38, FRAGMENT, texture(UNFILTERED)),
             ];
             if rt {
                 e.push(entry(2, FRAGMENT, wgpu::BindingType::AccelerationStructure { vertex_return: false }));
@@ -505,7 +547,18 @@ impl Renderer {
             }),
             ResourceKind::BindGroup,
         );
+        let aa_bindings = self.tp_layout("TP2 glass AA seed", &[entry(31, FRAGMENT, texture(FLOAT))]);
+        let aa_layout = self.tp_pipeline_layout("TP2 glass AA seed", &[&aa_bindings]);
+        let aa_module = self.tp_module("TP2 glass AA seed", section("TP_AA_SEED"));
+        let aa_seed = self.ledger.own(self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("TP2 glass AA seed"), layout: Some(&aa_layout),
+            vertex: wgpu::VertexState { module: &aa_module, entry_point: Some("tp_seed_vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &aa_module, entry_point: Some("tp_seed_fs"), compilation_options: Default::default(), targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())] }),
+            primitive: Default::default(), depth_stencil: None,
+            multisample: wgpu::MultisampleState { count: glass_samples(), ..Default::default() }, multiview_mask: None, cache: None,
+        }), ResourceKind::RenderPipeline);
         Gpu {
+            aa_bindings, aa_seed,
             frame,
             draws,
             sampler,
@@ -612,7 +665,8 @@ impl Renderer {
         let module = self.tp_module(&format!("TP1 transparent {}", slot.label), source);
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
-        let pipelines = [false, true].map(|tangent| {
+        let make = |tangent: bool, lobe: bool| {
+            let targets = if lobe { vec![Some(wgpu::TextureFormat::Rgba32Float.into()), Some(wgpu::TextureFormat::Rgba16Float.into())] } else {vec![Some(wgpu::TextureFormat::Rgba16Float.into())]};
             self.ledger.own(
                 self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("TP1 transparent"),
@@ -641,26 +695,28 @@ impl Renderer {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
-                        entry_point: Some("fs_transparent"),
+                        entry_point: Some(if lobe {"fs_tp_lobe"} else {"fs_transparent"}),
                         compilation_options: Default::default(),
-                        targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                        targets: &targets,
                     }),
                     primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
                     depth_stencil: None,
-                    multisample: Default::default(),
+                    multisample: wgpu::MultisampleState { count: if lobe {1} else {glass_samples()}, ..Default::default() },
                     multiview_mask: None,
                     cache: None,
                 }),
                 ResourceKind::RenderPipeline,
             )
-        });
+        };
+        let pipelines = [false,true].map(|t|make(t,false));
+        let lobe = [false,true].map(|t|make(t,true));
         if let Some(error) = scopes.finish() {
             return Err(match error {
                 wgpu::Error::Validation { .. } => Error::Shader(format!("program `{}`, transparent pipelines: {error}", slot.label)),
                 _ => Error::Fault(Fault(error.to_string())),
             });
         }
-        Ok(GlassPipelines { program, key, pipelines })
+        Ok(GlassPipelines { program, key, pipelines, lobe })
     }
 
     /// Creates a particle emitter. It simulates and draws in every lit frame until the
@@ -828,7 +884,14 @@ impl Renderer {
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, 8);
             let depth = self.tp_target("TP1 opaque view depth", size, wgpu::TextureFormat::R32Float,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC, 4);
-            self.transparency.targets = Some(Targets { color, depth, generation });
+            let texture = self.ledger.own(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("TP2 multisampled glass"), size, mip_level_count: 1, sample_count: 4,
+                dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[],
+            }), ResourceKind::Texture);
+            let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+            let aa = Depth { texture, view, _allocation: self.ledger.allocate(AllocationKind::Target, u64::from(size.width)*u64::from(size.height)*32) };
+            self.transparency.targets = Some(Targets { color, depth, aa, generation });
         }
         // The prelude-composed particle kernels follow prelude reloads.
         let prelude: [u8; 32] = Sha256::digest(self.source.as_bytes()).into();
@@ -857,6 +920,17 @@ impl Renderer {
         }
         // Transparent programs' pipelines, by program and sun-visibility path.
         let rt = self.hardware_shadows.as_ref().is_some_and(|h| h.active_scene().is_some());
+        let reflect = rt && traced && self.primary.as_ref().is_some_and(|p| crate::program::declares_reflection(&self.program_slot(p.program).source));
+        #[cfg(test)]
+        let reflect = reflect && std::env::var("RENDERLAB_TP2_PROFILE").map_or(true,|s|s.is_empty());
+        if reflect {
+            let primary = self.primary.as_ref().unwrap();
+            let program = self.program_slot(primary.program);
+            let key = reflection::key(&self.source,&program.source,program.layout.is_some());
+            if self.transparency.reflections.as_ref().is_none_or(|r|r.position.texture.size()!=size || r.key!=key) {
+                self.transparency.reflections = Some(self.tp_reflections(size)?);
+            }
+        }
         let default_program = self.standard.id();
         // Sources are composed once per program and frame; pipelines only when they change
         // (a program or prelude reload, or the TLAS appearing).
@@ -922,7 +996,7 @@ impl Renderer {
         let (toward, lux) = sun.map_or((Vec3::Z, [0.0; 3]), |(t, l)| (-t, l));
         frame[68..72].copy_from_slice(&toward.extend(f32::from(u8::from(fit.is_some()))).to_array());
         frame[72..76].copy_from_slice(&[lux[0], lux[1], lux[2], texel]);
-        frame[80..84].copy_from_slice(&[self.transparency.step, bias, SHADOW_SIZE as f32, 0.0]);
+        frame[80..84].copy_from_slice(&[self.transparency.step, bias, SHADOW_SIZE as f32, f32::from(u8::from(reflect))]);
         let mut bytes = vec![0u8; FRAME_BYTES as usize];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(frame) {
             dst.copy_from_slice(&v.to_ne_bytes());
@@ -1068,6 +1142,7 @@ impl Renderer {
             wgpu::BindGroupEntry { binding: 33, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
             wgpu::BindGroupEntry { binding: 34, resource: wgpu::BindingResource::TextureView(&gpu.shadow.view) },
             wgpu::BindGroupEntry { binding: 35, resource: wgpu::BindingResource::Sampler(&gpu.compare) },
+            wgpu::BindGroupEntry { binding: 38, resource: wgpu::BindingResource::TextureView(self.transparency.reflections.as_ref().filter(|_|reflect).map_or(&targets.color.view,|r|&r.radiance.view)) },
             wgpu::BindGroupEntry {
                 binding: 37,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &gpu.draws, offset: 0, size: wgpu::BufferSize::new(16) }),
@@ -1081,6 +1156,20 @@ impl Renderer {
                 label: Some("TP1 transparent group 0"),
                 layout: &gpu.glass_bindings[usize::from(rt)],
                 entries: &glass_entries,
+            })
+        });
+        // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
+        let reflection_group = reflect.then(|| {
+            let reflection = self.transparency.reflections.as_ref().unwrap();
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("TP2 glass reflections"), layout: &reflection.layout, entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &gpu.frame,offset:0,size:wgpu::BufferSize::new(80) }) },
+                    wgpu::BindGroupEntry { binding: 2, resource: rt_scene.unwrap().as_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: self.primary.as_ref().unwrap().frame_buffer().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&reflection.radiance.view) },
+                    wgpu::BindGroupEntry { binding: 31, resource: wgpu::BindingResource::TextureView(&reflection.position.view) },
+                    wgpu::BindGroupEntry { binding: 32, resource: wgpu::BindingResource::TextureView(&reflection.normal.view) },
+                ],
             })
         });
         let draw_groups: Vec<wgpu::BindGroup> = self
@@ -1106,21 +1195,55 @@ impl Renderer {
             .collect();
         // 4. Back to front. Each transparent draw first copies the colour behind it.
         let hdr_view = &hdr.resolved.view;
+        let aa_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TP2 glass AA seed"), layout: &gpu.aa_bindings,
+            entries: &[wgpu::BindGroupEntry { binding: 31, resource: wgpu::BindingResource::TextureView(&targets.color.view) }],
+        });
         let mut index = 0;
         while index < items.len() {
-            if let Item::Draw(_) = items[index].1 {
+            let glass = matches!(items[index].1, Item::Draw(_));
+            let aa = glass && glass_samples() == 4;
+            if glass {
                 encoder.copy_texture_to_texture(hdr.resolved.texture.as_image_copy(), targets.color.texture.as_image_copy(), size);
+                if let (Item::Draw(i), Some(group)) = (&items[index].1, &reflection_group) {
+                    let reflection = self.transparency.reflections.as_ref().unwrap();
+                    let draw = transparent[*i];
+                    let program = draw.material.map_or(default_program, |m|m.program.id());
+                    let set = self.transparency.glass.iter().find(|g|g.program==program).unwrap();
+                    {
+                        let attachments = [&reflection.position.view,&reflection.normal.view].map(|view|Some(wgpu::RenderPassColorAttachment {
+                            view,depth_slice:None,resolve_target:None,ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                        }));
+                        let mut pass=encoder.begin_render_pass(&wgpu::RenderPassDescriptor {label:Some("TP2 glass reflection lobe"),color_attachments:&attachments,..Default::default()});
+                        pass.set_pipeline(&set.lobe[usize::from(draw.mesh.tangent.is_some())]);
+                        pass.set_bind_group(0,glass_group.as_ref().unwrap(),&[(*i as u64*SLOT) as u32]);
+                        pass.set_bind_group(1,&*draw.instances.bind,&[]);pass.set_bind_group(2,&*draw.material.unwrap().bind,&[]);pass.set_bind_group(3,self.lighting.bind(),&[]);
+                        pass.set_vertex_buffer(0,draw.mesh.vertex.slice(..));pass.set_vertex_buffer(1,draw.instances.id_buffer.slice(..));
+                        if let Some(t)=&draw.mesh.tangent {pass.set_vertex_buffer(2,t.slice(..));}
+                        pass.set_index_buffer(draw.mesh.index.slice(..),wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..draw.mesh.index_count,0,0..draw.instances.state.ids.len() as u32);
+                    }
+                    let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("TP2 R1 glass reflection"),timestamp_writes:None});
+                    let (arrays,materials)=self.primary.as_ref().unwrap().shading_groups().unwrap();
+                    pass.set_pipeline(&reflection.pipeline);pass.set_bind_group(0,group,&[]);pass.set_bind_group(1,arrays,&[]);pass.set_bind_group(2,materials,&[]);pass.set_bind_group(3,self.lighting.bind(),&[]);
+                    pass.dispatch_workgroups(size.width.div_ceil(8),size.height.div_ceil(8),1);
+                }
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TP1 transparent"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: hdr_view,
+                    view: if aa { &targets.aa.view } else { hdr_view },
                     depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    resolve_target: aa.then_some(hdr_view),
+                    ops: wgpu::Operations { load: if aa { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load }, store: if aa { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } },
                 })],
                 ..Default::default()
             });
+            if aa {
+                pass.set_pipeline(&gpu.aa_seed);
+                pass.set_bind_group(0, &aa_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             loop {
                 match items[index].1 {
@@ -1152,7 +1275,7 @@ impl Renderer {
                 }
                 index += 1;
                 // A transparent draw next needs the colour this pass has written so far.
-                if index == items.len() || matches!(items[index].1, Item::Draw(_)) {
+                if index == items.len() || glass || matches!(items[index].1, Item::Draw(_)) {
                     break;
                 }
             }

@@ -1,0 +1,131 @@
+//! TP2 adapter to R1: rasterize the glass lobe, then trace it with the opaque
+//! frame's geometry/material tables and the opaque program's hit shading.
+use super::*;
+
+pub(super) struct GlassReflections {
+    pub position: Depth,
+    pub normal: Depth,
+    pub radiance: Depth,
+    pub layout: Owned<wgpu::BindGroupLayout>,
+    pub pipeline: Owned<wgpu::ComputePipeline>,
+    pub key: [u8; 32],
+}
+pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(head.as_bytes());
+    hash.update(program.as_bytes());
+    hash.update([u8::from(parameters)]);
+    hash.finalize().into()
+}
+pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
+    let mut s =
+        crate::program::compose(head, program, crate::program::Stage::Traced, parameters).source;
+    // Only the hit reconstruction helpers from the generated camera entry are needed.
+    s.truncate(s.find("// primary_frame.scene widened").unwrap());
+    s = s
+        .replace(
+            "fn rl_reflection_prepare(s:Surface,",
+            "fn rl_reflection_prepare(lobe:SpecularLobe,",
+        )
+        .replace("    let lobe=reflection_lobe(s,input);\n", "")
+        // Glass draws after TR1: fixed glossy strata avoid unfiltered frame rotation.
+        .replace("let frame=primary_frame.sided.y;", "let frame=0u;");
+    s.push_str(r#"
+@group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
+@group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
+@compute @workgroup_size(8,8) fn tp_reflect(@builtin(global_invocation_id) id:vec3<u32>) {
+    let size=textureDimensions(primary_hdr);
+    if any(id.xy>=size) {return;}
+    let p=textureLoad(tp_reflection_position,vec2<i32>(id.xy),0);
+    if p.w==0.0 {textureStore(primary_hdr,id.xy,vec4<f32>(0.0));return;}
+    let lobe=textureLoad(tp_reflection_normal,vec2<i32>(id.xy),0);
+    let n=unit_normal(lobe.xyz);
+    let receiver=Receiver(p.xyz,n,vec2<i32>(id.xy),0u,p.w,true);
+    let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),n,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
+        vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),true,lighting.eye,id.xy,primary_materials[0].value,receiver,decal_none());
+    rl_indirect_open();
+    rl_reflection_prepare(SpecularLobe(n,lobe.w,1.0),input,0u,id.xy,size);
+    textureStore(primary_hdr,id.xy,rl_specular);
+}
+"#);
+    s
+}
+impl Renderer {
+    pub(super) fn tp_reflections(&self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
+        let primary = self.primary.as_ref().unwrap();
+        let program = self.program_slot(primary.program);
+        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
+        let source = source(&head, &program.source, program.layout.is_some());
+        let key = key(&self.source, &program.source, program.layout.is_some());
+        let position = self.tp_target(
+            "TP2 glass world position",
+            size,
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            16,
+        );
+        let normal = self.tp_target(
+            "TP2 glass reflection lobe",
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            8,
+        );
+        let radiance = self.tp_target(
+            "TP2 glass reflection radiance",
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            8,
+        );
+        let layout = self.tp_layout(
+            "TP2 glass reflection",
+            &[
+                entry(0, COMPUTE, uniform(false, 80)),
+                entry(
+                    2,
+                    COMPUTE,
+                    wgpu::BindingType::AccelerationStructure {
+                        vertex_return: false,
+                    },
+                ),
+                entry(10, COMPUTE, uniform(false, 112)),
+                entry(
+                    18,
+                    COMPUTE,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+                entry(31, COMPUTE, texture(UNFILTERED)),
+                entry(32, COMPUTE, texture(UNFILTERED)),
+            ],
+        );
+        let pipeline_layout = self.tp_pipeline_layout(
+            "TP2 glass reflection",
+            &[
+                &layout,
+                primary.array_layout(),
+                primary.material_layout(),
+                &self.lighting.bindings,
+            ],
+        );
+        let module = self.tp_module("TP2 glass reflection", &source);
+        let pipeline = self.tp_compute(
+            "TP2 glass reflection",
+            &pipeline_layout,
+            &module,
+            "tp_reflect",
+        );
+        Ok(GlassReflections {
+            position,
+            normal,
+            radiance,
+            layout,
+            pipeline,
+            key,
+        })
+    }
+}

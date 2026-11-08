@@ -6,8 +6,8 @@ use crate::{Texture, Vec3};
 use std::sync::Arc;
 
 /// An alpha-blended material (`MaterialDescriptor::transparency`), drawn by the transparent
-/// pass instead of every opaque path. It casts no shadow and is invisible to the world
-/// radiance cache. Coverage is `opacity * base-colour alpha * texture alpha * vertex
+/// pass instead of every opaque path. TP2 adds a coloured coverage sun shadow on both
+/// paths; it remains outside the world radiance cache's receiver geometry. Coverage is `opacity * base-colour alpha * texture alpha * vertex
 /// alpha`. A program declaring `fn transmittance(s: Surface, input: SurfaceInput) ->
 /// vec3<f32>` returns the per-channel fraction of the light behind it that it passes to
 /// the eye; its `shade` is then added on top (the standard program: Fresnel, tint and its
