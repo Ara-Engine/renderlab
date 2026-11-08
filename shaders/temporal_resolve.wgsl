@@ -83,11 +83,43 @@ fn tr1_inside(t:vec2<i32>,size:vec2<u32>)->bool {
     return all(t>=vec2<i32>(0)) && all(t<vec2<i32>(size));
 }
 
-// The hit record's placement + 1 at a pixel, or zero: uncovered trace tiles keep stale
-// records, and every pixel there is background.
+// Upscaling (RenderScale): this frame's samples (tr1_sample, primary_hit, primary_tiles) may
+// lie on a coarser grid than the output and the histories (tr1_output). An output pixel takes
+// the sample nearest its centre. tr1_ratio is the sample grid's size over the output's, per
+// axis; at 1 (native) every mapping below is the identity and every weight 1.
+var<private> tr1_ratio:vec2<f32>;
+// The output pixel this invocation resolves.
+var<private> tr1_here:vec2<i32>;
+fn tr1_native()->bool {return all(tr1_ratio==vec2<f32>(1.0));}
+// The sample grid pixel whose sample (offset `jitter`) is nearest output pixel p's centre.
+fn tr1_nearest(p:vec2<i32>,jitter:vec2<f32>)->vec2<i32> {
+    let c=fma(vec2<f32>(p)+vec2<f32>(0.5),tr1_ratio,-jitter);
+    return clamp(vec2<i32>(floor(c)),vec2<i32>(0),vec2<i32>(textureDimensions(tr1_sample))-vec2<i32>(1));
+}
+fn tr1_map(p:vec2<i32>)->vec2<i32> {
+    if tr1_native() {return p;}
+    return tr1_nearest(p,tr1.jitter.xy);
+}
+// Output pixel p's sample offset from its centre in output pixels for a frame's jitter.
+fn tr1_sample_offset(p:vec2<i32>,jitter:vec2<f32>)->vec2<f32> {
+    if tr1_native() {return jitter;}
+    return (vec2<f32>(tr1_nearest(p,jitter))+vec2<f32>(0.5)+jitter)/tr1_ratio-vec2<f32>(p)-vec2<f32>(0.5);
+}
+fn tr1_offset(p:vec2<i32>)->vec2<f32> {return tr1_sample_offset(p,tr1.jitter.xy);}
+// This frame's sample weight at output pixel p: 1 at native resolution; upscaled, a tent of
+// one output pixel around p's centre (zero: p keeps its history this frame).
+fn tr1_weight(p:vec2<i32>)->f32 {
+    if tr1_native() {return 1.0;}
+    let o=abs(tr1_offset(p));
+    return max(1.0-o.x,0.0)*max(1.0-o.y,0.0);
+}
+
+// The hit record's placement + 1 at a pixel's sample, or zero: uncovered trace tiles keep
+// stale records, and every pixel there is background.
 fn tr1_id(p:vec2<i32>)->u32 {
-    if textureLoad(primary_tiles,vec2<u32>(p)/PRIMARY_TILE,0).x==0u {return 0u;}
-    return textureLoad(primary_hit,p,0).x;
+    let q=tr1_map(p);
+    if textureLoad(primary_tiles,vec2<u32>(q)/PRIMARY_TILE,0).x==0u {return 0u;}
+    return textureLoad(primary_hit,q,0).x;
 }
 
 // A sample's surface: world point (w = 1) or background direction (w = 0), its identity,
@@ -107,13 +139,14 @@ fn tr1_ring(i:i32)->u32 {
 }
 fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let id=tr1_id(p);
+    let q=tr1_map(p);
     if id==0u {
         // The sample's own camera ray: primary_ray inverts this frame's jittered projection.
-        let ray=primary_ray(vec2<u32>(p),size);
+        let ray=primary_ray(vec2<u32>(q),textureDimensions(tr1_sample));
         let d=ray.far-ray.near;
         return Tr1Surface(vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0),0u,0u,0.0,vec3<f32>(0.0));
     }
-    let record=textureLoad(primary_hit,p,0);
+    let record=textureLoad(primary_hit,q,0);
     let slot=id-1u;
     let batch=primary_placements[slot]&0x1fffffffu;
     let i=record.y*3u;
@@ -150,7 +183,7 @@ fn tr1_fetch_position(p:vec2<i32>,s:Tr1Surface,size:vec2<f32>)->vec2<f32> {
 // A previous-frame tap's latest sample point, rebuilt from its own camera ray (its pixel
 // and the previous frame's sample offset) and its anchor distance.
 fn tr1_anchor_point(t:vec2<i32>,distance:f32,size:vec2<f32>)->vec3<f32> {
-    let o=vec2<f32>(tr1.current_eye.w,tr1.jitter.w);
+    let o=tr1_sample_offset(t,vec2<f32>(tr1.current_eye.w,tr1.jitter.w));
     let ndc=fma((vec2<f32>(t)+vec2<f32>(0.5)+o)/size,vec2<f32>(2.0,-2.0),vec2<f32>(-1.0,1.0));
     let m=tr1.previous_inverse;
     let xy=fma(m[0],vec4<f32>(ndc.x),m[1]*ndc.y);
@@ -370,7 +403,7 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
 // tent misses (shown only farther out in the 3x3) starts from the radius-2 tent.
 fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
     let radius=tr1.starts.z;
-    if radius<=0.0 && tr1_id(p)==id {return vec4<f32>(textureLoad(tr1_sample,p,0).xyz,1.0);}
+    if radius<=0.0 && tr1_id(p)==id {return vec4<f32>(textureLoad(tr1_sample,tr1_map(p),0).xyz,1.0);}
     var sum=vec3<f32>(0.0);
     var w1=0.0;
     var w2=0.0;
@@ -381,8 +414,8 @@ fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
         let o=vec2<i32>(i%3,i/3)-vec2<i32>(1);
         let t=p+o;
         if !tr1_inside(t,size) || tr1_ring(i)!=id {continue;}
-        let a=abs(vec2<f32>(o)+tr1.jitter.xy);
-        let c=textureLoad(tr1_sample,t,0).xyz;
+        let a=abs(vec2<f32>(o)+tr1_offset(t));
+        let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
         let d=a/radius;
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         sum=fma(c,vec3<f32>(w),sum);
@@ -401,7 +434,8 @@ fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
 fn tr1_share(id:u32)->f32 {
     var hit=0.0;var all=0.0;
     for(var i=0;i<9;i+=1) {
-        let d=abs(vec2<f32>(vec2<i32>(i%3,i/3)-vec2<i32>(1))+tr1.jitter.xy);
+        let o=vec2<i32>(i%3,i/3)-vec2<i32>(1);
+        let d=abs(vec2<f32>(o)+tr1_offset(tr1_here+o));
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         all+=w;
         if tr1_ring(i)==id {hit+=w;}
@@ -416,9 +450,11 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     var h:Tr1History;
     if tr1.flags.x==0u {h=tr1_history(p,s,size);}
     if h.weight>0.0 {
-        let n=clamp(h.weight+1.0,1.0,max(h.window,1.0));
-        // m' = m + (x - m) / n', with the multiply-add pinned so replays are bit-identical.
-        return vec4<f32>(fma(sample-h.colour,vec3<f32>(1.0/n),h.colour),n);
+        // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
+        let w=tr1_weight(p);
+        let n=clamp(h.weight+w,1.0,max(h.window,1.0));
+        // m' = m + w (x - m) / n', with the multiply-add pinned so replays are bit-identical.
+        return vec4<f32>(fma(sample-h.colour,vec3<f32>(w/n),h.colour),n);
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
         let start=tr1_spatial(p,s.id,size);
@@ -437,6 +473,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
 @compute @workgroup_size(8,8) fn tr1_resolve(@builtin(global_invocation_id) id:vec3<u32>,
         @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) group:vec3<u32>) {
     let size=textureDimensions(tr1_output);
+    tr1_ratio=vec2<f32>(textureDimensions(tr1_sample))/vec2<f32>(size);
+    tr1_here=vec2<i32>(id.xy);
     // This frame's placements over the 10x10 tile, two loads per invocation at most.
     let corner=vec2<i32>(group.xy*8u)-vec2<i32>(1);
     for(var k=lane;k<100u;k+=64u) {
@@ -456,7 +494,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         let v=tr1_ring(i);
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
-    let sample=textureLoad(tr1_sample,p,0).xyz;
+    let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
     var kept:Tr1Second;
     kept.id=TR1_NONE;
     if tr1.flags.z!=0u && tr1.flags.x==0u {
@@ -540,8 +578,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     var coverage=tr1_share(o.id);
     var coverage_weight=1.0;
     if c.y>0.0 {
-        coverage_weight=clamp(c.y+1.0,1.0,max(c.z,1.0));
-        coverage=fma(select(0.0,1.0,occluder_is_s)-c.x,1.0/coverage_weight,c.x);
+        let w=tr1_weight(p);
+        coverage_weight=clamp(c.y+w,1.0,max(c.z,1.0));
+        coverage=fma(select(0.0,1.0,occluder_is_s)-c.x,w/coverage_weight,c.x);
     }
     var front=theirs.xyz;var back=mine.xyz;
     if occluder_is_s {front=mine.xyz;back=theirs.xyz;}

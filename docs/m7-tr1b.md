@@ -2,7 +2,9 @@
 
 2026-11-08, branch `t3/m7-tr1b` from main `bc6ba36` (TR1 merged opt-in), main `dc2e3c8` (FIX1) merged. Contract: [M7](milestone-7.md), [TR1](m7-tr1.md), the bar in [TR0](m7-tr0.md) (`E:/renderlab-work/m7-tr0/bar/tr1-bar.json`), [P0](m7-p0-claims.md).
 
-**Status: TR1b stays opt-in. It is not the default.** The default-AA ruling's condition 3 (TR1 no worse than no-AA on every population of the visible-sky quarry walk, both paths) **fails** (§4.5), so the default was not flipped and the decision is reported back. Against the path-traced reference TR1b is worse than no-AA in 149 of 256 pooled rows on both paths, almost all from a lighting error both images share in this backlit view. Against the renderer's own pixel integral (a lighting-matched control) it is better in 219 of 256, but still worse in 31: its cold first frame, small revealed-pixel pockets, single-pixel maxima, 0.02 codes of sky and the still-hold convergence step. Against TSR it beats Q-disocclusion's revealed pixels, Q-sun-fast's flicker and most S2G rows (§4), still misses moving edges and background-near-edge pixels on Q-walk, and fails U1b's gate (§7.2).
+**Status (overnight push, 2026-11-08 evening): TR1 is the default on both paths, with `Reconstruction::off()` as the named switch and quality (2/3) and performance (1/2) upscaling presets (§4.6).** Islam's overnight rules replaced the zero-loss gate below; TR1's remaining losses to no-AA and its gaps to TSR are listed in [m7-gaps.md](m7-gaps.md) under TR1, and the default is never presented as meeting the Unreal bar.
+
+Earlier the same day TR1b stayed opt-in: the default-AA ruling's condition 3 (TR1 no worse than no-AA on every population of the visible-sky quarry walk, both paths) **fails** (§4.5), so the default was not flipped and the decision is reported back. Against the path-traced reference TR1b is worse than no-AA in 149 of 256 pooled rows on both paths, almost all from a lighting error both images share in this backlit view. Against the renderer's own pixel integral (a lighting-matched control) it is better in 219 of 256, but still worse in 31: its cold first frame, small revealed-pixel pockets, single-pixel maxima, 0.02 codes of sky and the still-hold convergence step. Against TSR it beats Q-disocclusion's revealed pixels, Q-sun-fast's flicker and most S2G rows (§4), still misses moving edges and background-near-edge pixels on Q-walk, and fails U1b's gate (§7.2).
 
 Labels: **M** measured here, **R** retained evidence read here. All GPU runs are headless, under the shared lock and m7-tr1's own leases; RTX 4070 SUPER, NVIDIA 617.14, 1920×1080, 1x.
 
@@ -32,7 +34,7 @@ Interiors are unchanged from TR1: one history per surface, continued from either
 | `shaders/program_traced_entry.wgsl`, `src/environment.rs`, `src/environment_gpu.rs`, `src/primary_ray_gpu.rs`, `src/film_accumulation.rs` | opt-in visible sky (§4.5): `Renderer::set_visible_environment`, traced and visibility-buffer misses sample the bound RLE2 map; default off, T1a unchanged (its seam texts follow the new miss store) |
 | `src/reference_quarry_tests.rs` | an explicit `camera_background: null` leaves primary misses on the environment; every other manifest unchanged |
 
-No shadow, GI/cache, shader-reload or pipeline file is edited; `renderer.rs` equals main's (FIX1's still check). The primary-miss branches were IQ1's and passed to TR1b after IQ1 merged.
+No shadow, GI/cache, shader-reload or pipeline source is edited. `renderer.rs` has TR1b's marked overnight edits only (§4.6): the Temporal-shadow jitter condition, the upscale field, the internal-target substitution and the present redirect. Test harnesses of other units changed only to switch TR1 off explicitly or to restart it with `off()` (§4.6). The primary-miss branches were IQ1's and passed to TR1b after IQ1 merged; the visible-sky flag moved to `PrimaryFrame.sided.w` when RT1d took `sided.z`.
 
 ## 2. Moving silhouettes (item 1, M)
 
@@ -198,7 +200,38 @@ TR1b's covered-population RMS is lower in every segment except the first still f
 4. **The sky**, 0.020 vs 0.004 codes RMS far from edges.
 5. **The still-hold step** (0.80 codes at L0) against no-AA's exact zero while converging; signed means of the first still frames.
 
-**Decision: the default is not flipped** (condition 3 fails on both references). TR1b's revealed-pixel and cold-start rows are the work that continues. The TSR Epic capture on this walk was not made: U0's package has a black backdrop and a specified lighting cube, so a visible sky needs a new quarry level with an unlit sky sphere sampling the RLE2 cube, cooked as a separate package as U0b did for SV (`m7-u0b-sv-prepare.py`).
+**Decision: the default is not flipped** (condition 3 fails on both references). TR1b's revealed-pixel and cold-start rows are the work that continues. The TSR Epic capture on this walk was not made: U0's package has a black backdrop and a specified lighting cube, so a visible sky needs a new quarry level with an unlit sky sphere sampling the RLE2 cube, cooked as a separate package as U0b did for SV (`m7-u0b-sv-prepare.py`). UE-SKY has since captured TSR on this walk ([ue-sky.md](ue-sky.md); rows in [m7-gaps.md](m7-gaps.md)).
+
+### 4.6 Overnight pass: the default, cheap fixes and upscaling presets (M)
+
+Islam's overnight ruling (AGENTS.md, 2026-11-08): TR1 becomes the default on both paths now, with a named off-switch; fixing the losing rows continues only where it is cheap; upscaling ships as a quality preset.
+
+**Default.** `Reconstruction::default()` is enabled; `Reconstruction::off()` restores unjittered single frames with no history; `identity()` equals the default. Temporal soft-shadow frames are no longer jittered (they keep their own film history and never reconstruct; one marked condition in `renderer.rs`). The exact-repeat certifications switch TR1 off explicitly: the shared RT and no-RT test renderers (`fresh_shadow_tests.rs renderer_with_features`, which M6 film, RT1, N8, the quarry frame loop and primary-ray identity use; `visibility_buffer_tests.rs no_rt_renderer`), the traced suite renderer (`tests.rs`, U1b's hardware mode), R0b's program-primary test and IQ1's renderer (its 1x rows stay 1x). Harness restarts that used `default()` to mean off now use `off()` (IQ1, motion bench, U1b's `*-tr1` mode, TR1's harness, G2's `tr1xN` and `pan-tr1` rows, which also force a cold start before each TR1 run). G2's other gate rows now render the TR1 default; its SV rig's exact-repeat booleans (`image_repeat_equal` and the staleness checks) will see the jitter unless that rig switches TR1 off.
+
+**Cheap fixes, against each path's own 64-spp integral on the visible-sky walk** (worse rows of 256 pooled, RT; segment counts still start / moving / still end / aged pools):
+
+| Change | All | Segments |
+|---|---:|---|
+| TR1b as gated (`tr1b-k`) | 31 | 22 / 23 / 22 / 73 |
+| Point-symmetric jitter pairs (lattice y shift 91, pairs in T1's order, centre at k = 0 and 255) | 32 | 20 / 23 / 22 / 75 |
+| + spatial start at tent radius 1 (bilinear interpolation to the centre; radius-2 fallback when the tent misses the other surface) | 32 | 4 / 23 / 22 / 44 |
+| + exact single layer at whole coverage, + sub-1e-3-px fetch snap (the sky under translation was resampled with Catmull-Rom's 16-sample window) | **26** | **4 / 18 / 21 / 37** |
+| + pending pairs (hold a pair's first sample while still) | 26 | 2 / 18 / 21 / 43: rejected |
+
+The default keeps the fourth row (non-RT: 26; 8 / 16 / 23 / 37). The cold first frame now equals no-AA bit for bit on both paths (k = 0 is unjittered; radius 1 starts from the own sample; whole-coverage pixels take one layer exactly, where `mix` was off by up to 48 f16 ULP at bright-sky silhouettes). What remains, by kind, is in m7-gaps.md. Radius 1 without the fallback left a revealed surface black when it appeared only at the 3×3's far side (revealed sky, age 0: 37 vs 8.5 codes); the fallback fixes it. Q-walk, Q-disocclusion, Q-sun and S2G were not re-scored with these defaults.
+
+**Upscaling presets.** `RenderScale::{Native, Quality, Performance}` on `Reconstruction::scale` (`Reconstruction::quality()`, `performance()`): a reconstructed frame renders every pass at 2/3 or 1/2 of the target per axis into an internal colour target (`renderer.rs`: one marked substitution after the jitter, and present reads the reconstruction's output); TR1's histories and resolve run at the target size. Each target pixel takes the internal sample nearest its centre, weighted by a one-pixel tent on its offset (zero: the pixel keeps its history this frame); the spatial start, coverage share and anchor rebuild use each sample's own offset. At native scale every mapping is the identity and every weight exactly 1, so native frames are unchanged. Raster, diagnostic and unreconstructed frames always render at the target size.
+
+Inspected (`D:/Coding/renderlab-work/m7-tr1b/inspect/presets`, both paths): Q-walk frames 8, 40, 64, 96 and S2G (0.5 px/frame) frames 0, 16, 80, 159; off, native, quality, performance. All four register identically (no scale or offset error); quality and performance are slightly softer than native on the quarry and show no trails or holes in motion; on S2G's moving glossy reliefs both presets show stepped aliasing on the finest specular stripes that native does not.
+
+One timing run (functional lease, not QUIET; Q-walk, 1920×1080 target, 2 visits, 322 frames each; GPU frame span, ms):
+
+| Path | No AA p50 / p95 | TR1 native | Quality | Performance |
+|---|---:|---:|---:|---:|
+| RT (traced + Interactive) | 1.03 / 1.54 | 1.47 / 2.20 | **0.93 / 1.41** | **0.73 / 1.01** |
+| Non-RT (visibility buffer + Virtual) | 1.90 / 2.66 | 2.37 / 3.27 | **1.71 / 2.44** | **1.45 / 2.02** |
+
+The resolve pass itself (p50): RT 0.405 native, 0.289 quality, 0.249 performance. Lib suite (release test binary `tr1b-q`, inside a lease): **148 passed, 0 failed, 144 ignored**.
 
 ## 5. Claim-avoidance notes (engineering reading, not clearance)
 

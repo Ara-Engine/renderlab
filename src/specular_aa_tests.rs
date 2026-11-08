@@ -602,8 +602,7 @@ fn gpu_specular_aa_motion_screen() {
             ..Default::default()
         };
         for track in ["static", "camera", "light"] {
-            r.set_reconstruction(crate::Reconstruction::off())
-                .unwrap();
+            r.set_reconstruction(crate::Reconstruction::off()).unwrap();
             r.set_reconstruction(settings).unwrap();
             for _ in 0..warm {
                 let c = configure(&mut r, track, 0, size[0]);

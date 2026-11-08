@@ -55,6 +55,33 @@ pub struct Reconstruction {
     /// Rotate Interactive's eight disk directions through the pixel's 256-direction
     /// sequence, 8 per frame (RT renderers).
     pub rotate_directions: bool,
+    /// Internal resolution of reconstructed frames: every pass renders at this fraction of
+    /// the target size and TR1 reconstructs the target from the jittered samples.
+    pub scale: RenderScale,
+}
+
+/// Upscaling presets of reconstructed frames (TR1b). Raster, diagnostic and unreconstructed
+/// frames always render at the target size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderScale {
+    /// The target size.
+    #[default]
+    Native,
+    /// Two thirds of the target in each axis (about 44 % of its pixels).
+    Quality,
+    /// Half the target in each axis (a quarter of its pixels).
+    Performance,
+}
+impl RenderScale {
+    /// The internal size for a target size, each axis rounded to the nearest pixel.
+    pub fn internal_size(self, width: u32, height: u32) -> [u32; 2] {
+        let (n, d) = match self {
+            Self::Native => (1, 1),
+            Self::Quality => (2, 3),
+            Self::Performance => (1, 2),
+        };
+        [width, height].map(|v| ((v * n + d / 2) / d).max(1))
+    }
 }
 impl Default for Reconstruction {
     fn default() -> Self {
@@ -70,6 +97,7 @@ impl Default for Reconstruction {
             catmull_rom: true,
             spatial_start: true,
             rotate_directions: true,
+            scale: RenderScale::Native,
         }
     }
 }
@@ -84,6 +112,20 @@ impl Reconstruction {
     pub fn off() -> Self {
         Self {
             enabled: false,
+            ..Self::default()
+        }
+    }
+    /// The quality upscaling preset: TR1 reconstructing the target from two thirds of it.
+    pub fn quality() -> Self {
+        Self {
+            scale: RenderScale::Quality,
+            ..Self::default()
+        }
+    }
+    /// The performance upscaling preset: TR1 reconstructing the target from half of it.
+    pub fn performance() -> Self {
+        Self {
+            scale: RenderScale::Performance,
             ..Self::default()
         }
     }
@@ -335,50 +377,72 @@ pub(in crate::renderer) struct ReconstructionState {
 }
 type GroupKey = (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Buffer);
 
+/// A sampled 2D target owned through the ledger (copyable in tests).
+fn target(
+    r: &Renderer,
+    label: &str,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> Depth {
+    let texture = r.ledger.own(
+        r.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | usage
+                | if cfg!(test) {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
+            view_formats: &[],
+        }),
+        ResourceKind::Texture,
+    );
+    let view = r.ledger.own(
+        texture.create_view(&Default::default()),
+        ResourceKind::TextureView,
+    );
+    let bytes = u64::from(size.width)
+        * u64::from(size.height)
+        * u64::from(format.block_copy_size(None).unwrap());
+    Depth {
+        texture,
+        view,
+        _allocation: r.ledger.allocate(AllocationKind::Target, bytes),
+    }
+}
+
+/// An upscaled frame's targets (`RenderScale`): the internal colour target every pass renders
+/// into in place of the caller's, and the reconstruction's output HDR at the caller's size,
+/// which present tone-maps into the caller's target.
+pub(in crate::renderer) struct Upscale {
+    color: Depth,
+    hdr: Depth,
+    pub present: Owned<wgpu::BindGroup>,
+    /// This frame's caller target, which present writes.
+    pub output: wgpu::Texture,
+}
+
 impl ReconstructionState {
-    fn new(r: &Renderer, size: wgpu::Extent3d) -> Self {
-        let target = |label, format: wgpu::TextureFormat, usage| {
-            let texture = r.ledger.own(
-                r.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | usage
-                        | if cfg!(test) {
-                            wgpu::TextureUsages::COPY_SRC
-                        } else {
-                            wgpu::TextureUsages::empty()
-                        },
-                    view_formats: &[],
-                }),
-                ResourceKind::Texture,
-            );
-            let view = r.ledger.own(
-                texture.create_view(&Default::default()),
-                ResourceKind::TextureView,
-            );
-            let bytes = u64::from(size.width)
-                * u64::from(size.height)
-                * u64::from(format.block_copy_size(None).unwrap());
-            Depth {
-                texture,
-                view,
-                _allocation: r.ledger.allocate(AllocationKind::Target, bytes),
-            }
-        };
+    /// Histories at the output size; the copy of the frame's samples at the internal size
+    /// (equal at native resolution).
+    fn new(r: &Renderer, size: wgpu::Extent3d, output: wgpu::Extent3d) -> Self {
         use wgpu::{TextureFormat as F, TextureUsages as U};
-        let colour = || target("TR1 history colour", F::Rgba32Float, U::STORAGE_BINDING);
-        let anchor = || target("TR1 history anchors", F::Rg32Uint, U::STORAGE_BINDING);
-        let layer = || target("TR1 silhouette slots", F::Rgba32Uint, U::STORAGE_BINDING);
+        let history = |label, format| target(r, label, output, format, U::STORAGE_BINDING);
+        let colour = || history("TR1 history colour", F::Rgba32Float);
+        let anchor = || history("TR1 history anchors", F::Rg32Uint);
+        let layer = || history("TR1 silhouette slots", F::Rgba32Uint);
         Self {
             colour: [colour(), colour()],
             anchor: [anchor(), anchor()],
             layer: [layer(), layer()],
-            sample: target("TR1 frame samples", F::Rgba16Float, U::COPY_DST),
+            sample: target(r, "TR1 frame samples", size, F::Rgba16Float, U::COPY_DST),
             frame: Buffer::new(
                 r,
                 "TR1 frame state",
@@ -395,9 +459,76 @@ impl ReconstructionState {
     fn size(&self) -> wgpu::Extent3d {
         self.sample.texture.size()
     }
+    fn output(&self) -> wgpu::Extent3d {
+        self.colour[0].texture.size()
+    }
 }
 
 impl Renderer {
+    /// This frame's internal colour target when an upscaling preset applies to it (a
+    /// reconstructed frame below native scale), allocated for the caller's `color`; None
+    /// renders at the caller's size and releases the upscaling targets.
+    pub(in crate::renderer) fn upscale_target(
+        &mut self,
+        color: &wgpu::Texture,
+    ) -> Option<wgpu::Texture> {
+        let [width, height] = self
+            .reconstruction
+            .scale
+            .internal_size(color.width(), color.height());
+        if self.reconstruction_frame.is_none() || [width, height] == [color.width(), color.height()]
+        {
+            self.upscale = None;
+            return None;
+        }
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        if self
+            .upscale
+            .as_ref()
+            .is_none_or(|u| u.color.texture.size() != size || u.hdr.texture.size() != color.size())
+        {
+            use wgpu::{TextureFormat as F, TextureUsages as U};
+            let internal = target(
+                self,
+                "upscaled frame colour",
+                size,
+                self.format,
+                U::RENDER_ATTACHMENT | U::COPY_SRC,
+            );
+            let hdr = target(
+                self,
+                "upscaled reconstruction HDR",
+                color.size(),
+                F::Rgba16Float,
+                U::STORAGE_BINDING | U::COPY_SRC,
+            );
+            let present = self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscaled HDR presentation"),
+                    layout: &self.lighting.present_bindings,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&hdr.view),
+                    }],
+                }),
+                ResourceKind::BindGroup,
+            );
+            self.upscale = Some(Upscale {
+                color: internal,
+                hdr,
+                present,
+                output: color.clone(),
+            });
+        }
+        let upscale = self.upscale.as_mut().unwrap();
+        upscale.output = color.clone();
+        Some((*upscale.color.texture).clone())
+    }
+
     /// Identity of every input a reconstructed frame depends on besides the camera, the
     /// eye, exposure and directional-light directions, which TR1 follows: a change restarts
     /// every pixel. Programs, prelude, geometry, bindings, materials, textures, transforms,
@@ -500,14 +631,16 @@ impl Renderer {
     /// engine state, writes the frame words and binds the frame's targets. `camera` is the
     /// frame's jittered camera; `index` its sample.
     pub(in crate::renderer) fn prepare_reconstruction(&mut self, camera: &Camera, index: u64) {
+        // Samples at the frame's (internal) size; history and output at the target's.
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
         if self
             .reconstruction_state
             .as_ref()
-            .is_none_or(|s| s.size() != size)
+            .is_none_or(|s| s.size() != size || s.output() != output)
         {
             let cut = self.reconstruction_state.as_ref().is_some_and(|s| s.cut);
-            let mut next = ReconstructionState::new(self, size);
+            let mut next = ReconstructionState::new(self, size, output);
             next.cut = cut;
             self.reconstruction_state = Some(next);
         }
@@ -527,7 +660,7 @@ impl Renderer {
             .collect();
         let background = self.lit_clear().map(|v| v as f32);
         let visible_sky = self.environment.visible && self.environment.selected.is_some();
-        let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / size.height as f32;
+        let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
         let state = self.reconstruction_state.as_mut().unwrap();
         let continued = state
             .previous
@@ -622,14 +755,16 @@ impl Renderer {
             suns,
             key,
         });
+        // The resolve writes the frame's HDR target, or the upscaled output.
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         let primary = self.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let group_key: GroupKey = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
-            (*hdr.texture).clone(),
+            (*out.texture).clone(),
             (**frame).clone(),
         );
         let state = self.reconstruction_state.as_ref().unwrap();
@@ -646,6 +781,7 @@ impl Renderer {
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -660,7 +796,7 @@ impl Renderer {
                 (45, R::TextureView(&state.anchor[written].view)),
                 (47, R::TextureView(&state.layer[read].view)),
                 (48, R::TextureView(&state.layer[written].view)),
-                (46, R::TextureView(&hdr.view)),
+                (46, R::TextureView(&out.view)),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
             self.ledger.own(
@@ -675,7 +811,8 @@ impl Renderer {
     }
 
     /// The reconstruction pass after the frame's shading: copies the shaded samples, then
-    /// resolves every pixel into the HDR target and the written history side.
+    /// resolves every target pixel into the HDR target (the upscaled output when a preset
+    /// applies) and the written history side.
     pub(in crate::renderer) fn encode_reconstruction(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -683,12 +820,12 @@ impl Renderer {
     ) {
         let state = self.reconstruction_state.as_ref().unwrap();
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let size = state.size();
         encoder.copy_texture_to_texture(
             hdr.texture.as_image_copy(),
             state.sample.texture.as_image_copy(),
-            size,
+            state.size(),
         );
+        let size = state.output();
         let primary = self.primary.as_ref().unwrap();
         let pipelines = self.pipeline.primary.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -798,6 +935,19 @@ mod tests {
         }
         // Production modules never see the rotation.
         assert!(!kernels[1].contains("sided.y"));
+    }
+
+    #[test]
+    fn render_scales() {
+        assert_eq!(RenderScale::Native.internal_size(1920, 1080), [1920, 1080]);
+        assert_eq!(RenderScale::Quality.internal_size(1920, 1080), [1280, 720]);
+        assert_eq!(
+            RenderScale::Performance.internal_size(1920, 1080),
+            [960, 540]
+        );
+        assert_eq!(RenderScale::Performance.internal_size(1, 3), [1, 2]);
+        assert_eq!(Reconstruction::quality().scale, RenderScale::Quality);
+        assert_eq!(Reconstruction::default().scale, RenderScale::Native);
     }
 
     #[test]

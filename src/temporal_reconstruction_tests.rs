@@ -226,6 +226,14 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
+    if let Some(scale) = v["scale"].as_str() {
+        s.scale = match scale {
+            "native" => crate::RenderScale::Native,
+            "quality" => crate::RenderScale::Quality,
+            "performance" => crate::RenderScale::Performance,
+            other => panic!("unknown render scale {other}"),
+        };
+    }
     s
 }
 
@@ -307,6 +315,9 @@ fn gpu_tr1_sequence() {
     let visits = m["visits"].as_u64().unwrap_or(0) as usize;
     // `write_frames: false` hashes the listed frames without writing them (repeats).
     let write_frames = m["write_frames"].as_bool().unwrap_or(true);
+    // `write_color: true` captures the final tone-mapped target (`fNNN.rgba8`) instead of
+    // the HDR, which an upscaling preset holds at its internal size.
+    let write_color = m["write_color"].as_bool().unwrap_or(false);
     let color = target(&r, 1920, 1080);
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     // `integrate: n`: each listed frame's pixel integral of the renderer's own shading, the
@@ -407,10 +418,14 @@ fn gpu_tr1_sequence() {
             if written.contains(&f) {
                 // Frames between captures fill every flight; a capture needs a free one.
                 r.test_drain("TR1 capture");
-                let hdr = capture(r);
-                hashes.push(hex(&hdr));
+                let (bytes, name) = if write_color {
+                    (read_texture(r, &color), format!("f{f:03}.rgba8"))
+                } else {
+                    (capture(r), format!("f{f:03}.rgba16f"))
+                };
+                hashes.push(hex(&bytes));
                 if write {
-                    fs::write(dir.join(format!("f{f:03}.rgba16f")), &hdr).unwrap();
+                    fs::write(dir.join(name), &bytes).unwrap();
                 }
             }
             collect(r, &mut pending, &mut spans);
