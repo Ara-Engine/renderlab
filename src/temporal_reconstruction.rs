@@ -69,6 +69,18 @@ pub struct Reconstruction {
     /// surface-identity history does not trail them. Zero turns the cap off. Programs that
     /// declare nothing are unaffected.
     pub view_budget: f32,
+    /// TR2 (docs/m7-tr2.md): Catmull-Rom history resampling also where only outer taps are
+    /// rejected (pixels next to an edge or the image border). Each rejected outer tap takes
+    /// its nearest inner tap's value, and the result stays within the inner taps' range.
+    /// Without it those pixels resample bilinearly, whose blur budget holds their window to a
+    /// few samples while the view moves.
+    pub edge_catmull_rom: bool,
+    /// TR2: upscaled frames weight every internal sample of the pixel's surface by a tent
+    /// whose radius shrinks from the internal sample spacing (young history interpolates the
+    /// internal grid instead of repeating its nearest sample) to one output pixel as the
+    /// history reaches `sharp_window`. Off: the nearest sample alone (TR1b). Native frames
+    /// are unaffected.
+    pub upscale_interpolation: bool,
     /// Internal resolution of reconstructed frames: every pass renders at this fraction of
     /// the target size and TR1 reconstructs the target from the jittered samples.
     pub scale: RenderScale,
@@ -113,6 +125,8 @@ impl Default for Reconstruction {
             rotate_directions: true,
             motion_box: true,
             view_budget: 0.25,
+            edge_catmull_rom: true,
+            upscale_interpolation: true,
             scale: RenderScale::Native,
         }
     }
@@ -966,7 +980,9 @@ impl Renderer {
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from(moved) << 2
-            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3;
+            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3
+            | u32::from(settings.edge_catmull_rom) << 4
+            | u32::from(settings.upscale_interpolation) << 5;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -1041,9 +1057,12 @@ impl Renderer {
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
-        for value in shadow_bounds.map_or([0.; 8], |b| {
-            [b.min.x, b.min.y, b.min.z, 1., b.max.x, b.max.y, b.max.z, 0.]
-        }) {
+        // shadow_hi.w carries the sun turn (TR2): view-dependent highlights slide with it as
+        // with a view turn (MQ2's drift).
+        let sun_turn = if state.reset { 0.0 } else { turn };
+        let (lo, hi) = shadow_bounds.map_or((Vec3::ZERO, Vec3::ZERO), |b| (b.min, b.max));
+        let rejecting = if shadow_bounds.is_some() { 1. } else { 0. };
+        for value in [lo.x, lo.y, lo.z, rejecting, hi.x, hi.y, hi.z, sun_turn] {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
