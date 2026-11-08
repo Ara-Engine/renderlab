@@ -11,7 +11,7 @@ Unit G2b continues [M7-G2](m7-g2.md) on branch `t3/m7-g2b` (from main `5e3b963`,
 | Camera cuts | The 12-64 ms gather frames of a cut are bounded by a per-frame gather cap (32,768 cells hardware, 8,192 software): section 4 | **Bounded**; the first cut frame (cell creation) is not, and bounce settles in more than 8 frames after a cut (recorded) |
 | Moving cost | Gather restructured to one lane per direction (non-RT gather 1.5 ms → 0.5 ms a moving frame); lookups stop at an empty slot (exact). Section 5 | **Improved; still over the ~0.45 ms budget** |
 | Crevice mouths | Diagnosed: cell size alone explains them. 2 px cells bring TR1x64 pinholes to the cache-off level (RT 103 → 41 against 40; non-RT 97 → 55) and beat G2, es1open and cache-off on every quarry population but the hollow. Not the default: 2 px speckles the flat SV test scene, settles it worse, and its 448 MiB table exceeds the non-RT device's 256 MiB buffer limit. Section 2 | **Opt-in fix recorded; default keeps G2's 4 px** |
-| Lib suite | `cargo test -p renderlab --lib` inside G2b leases, exit 0: 147 passed (`g2b-g`, `g2b-h`), 150 passed after main's DC1 merge (`g2b-j`, the pushed default) | **Pass**; fmt applied, clippy clean in G2b's files |
+| Lib suite | `cargo test -p renderlab --lib` inside G2b leases, exit 0: 147 passed (`g2b-g`, `g2b-h`), 150 after main's DC1 merge (`g2b-j`) and 152 on the final merge with TR1b and R1 (`g2b-k`) | **Pass**; fmt applied, clippy clean in G2b's files |
 
 ## 2. Crevice mouths (item 1 of the G2 ruling)
 
@@ -98,6 +98,8 @@ Quarry, TR1 over 64 still frames, pose 0, both paths, −14 stops (`analysis/h1-
 - **Visible defects:** enclosed cavities (the cave above the dark pyramid rock, the hollow under the central slab) show a coarse blotchy mottle where the reference is smooth (per-cell quadrature where light enters through narrow openings); narrow gaps keep G2's dark streaks at crevice mouths (TR1x64 pinholes RT 102 / non-RT 101 against cache-off's 40). Both are G2's, unchanged.
 
 SV test scene, frame 48, 1x (this rig renders without TR1; `analysis/h1-sv-{gaps,overview}.png`; reference | non-RT | RT | cache off): RT matches G2's smooth image; non-RT shows the draining speckle described in section 4. Overview-pose RMS non-RT 1.76% (G2 1.59%); cache off 46.2%.
+
+On the final merged code (main with TR1b's TR1 default, binary `g2b-k`, run `k1`), TR1 over 64 frames, pose 0 (`analysis/k1-{rt,nonrt}-tr1-crop.png`): the same picture, with no specks at silhouettes; IQ1 pinholes RT 142 / non-RT 128 against cache-off's 74 (TR1b's TR1 counts more than G2's harness did: cache-off 74 against 40). In that run the 12-frame `p` captures after the first are 1x, because TR1b's harness leaves TR1 off after its TR1 captures: those crops show 1x pinholes on both images and are not the shipped frame.
 
 Scored (TR1x64, `runs/h1`, G2's comparators from its run `f1`): identical in kind to G2. Both paths lose to cache-off only on background-centre and isolated, and to es1open on 10-16 populations by 0.1-0.6 codes (hollow by 3.6-4.5). Twelve frames after a cut (1x), the capped gathers have not finished: RT also loses faint and multi-surface to cache-off; non-RT faint, hollow, isolated, multi-surface and wide6.
 
