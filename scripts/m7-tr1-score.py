@@ -75,6 +75,8 @@ def score(args):
     candidate_dir = Path(args.candidate)
     exposure = json.loads((candidate_dir / "exposure.json").read_text())["factors"] \
         if (candidate_dir / "exposure.json").exists() else None
+    # A retained TSR capture keeps its native frames losslessly in one compressed archive.
+    packed = np.load(candidate_dir / "frames.npz") if (candidate_dir / "frames.npz").exists() else None
     moving_light = any("to_light" in p for p in recipe["frames"])
     s2g = args.track.startswith("s2g-")
 
@@ -107,7 +109,7 @@ def score(args):
     candidates = {}
     for i, p in enumerate(recipe["frames"]):
         path = candidate_dir / f"f{i:03}.rgba16f"
-        if not path.exists():
+        if not path.exists() and (packed is None or f"f{i:03}" not in packed.files):
             previous = None
             continue
         source = references.get(camera_key(p))
@@ -120,7 +122,7 @@ def score(args):
         if (frame["width"], frame["height"]) != (W, H) or \
                 np.asarray(frame["fov_y"], dtype="<f4").tobytes() != np.asarray(p["fov_y_radians"], dtype="<f4").tobytes():
             raise ValueError("reference projection mismatch")
-        raw = path.read_bytes()
+        raw = path.read_bytes() if path.exists() else packed[f"f{i:03}"].astype("<f2").tobytes()
         candidates[i] = hashlib.sha256(raw).hexdigest()
         # Renderlab's HDR target is already exposed at the track's registered exposure.
         hdr = np.frombuffer(raw, dtype="<f2").reshape(H, W, 4)[..., :3].astype("f4")

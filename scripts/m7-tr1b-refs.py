@@ -438,6 +438,23 @@ def tsr(args):
     print("TSR frames", len(factors), frames_dir, flush=True)
 
 
+def pack_tsr(args):
+    """A scored TSR capture's native frames into one compressed archive (byte-identical frames,
+    checked), then the loose frames removed; scripts/m7-tr1-score.py reads either form."""
+    frames = REFS / "tsr/runs" / args.label / "frames"
+    loose = sorted(frames.glob("f*.rgba16f"))
+    arrays = {f.stem: np.frombuffer(f.read_bytes(), "<f2").reshape(1080, 1920, 4) for f in loose}
+    np.savez_compressed(frames / "frames.npz", **arrays)
+    with np.load(frames / "frames.npz") as z:
+        if any(z[f.stem].astype("<f2").tobytes() != f.read_bytes() for f in loose):
+            raise ValueError("packed frames differ")
+    removed = [dict(path=str(f), bytes=f.stat().st_size, sha256=sha(f)) for f in loose]
+    for f in loose:
+        f.unlink()
+    save(frames / "packed.json", dict(archive_sha256=sha(frames / "frames.npz"), frames=removed))
+    print(args.label, "packed", len(loose), (frames / "frames.npz").stat().st_size, flush=True)
+
+
 def compact_check(args):
     with np.load(args.archive) as z:
         arrays = {k: z[k] for k in z.files}
@@ -463,11 +480,14 @@ def main():
     p.add_argument("--path", choices=("hrt", "vsm-nort"), required=True)
     p.add_argument("--minutes", type=int, default=10)
     p.add_argument("--wait-seconds", type=int, default=5400)
+    p = sub.add_parser("pack-tsr")
+    p.add_argument("label")
     p = sub.add_parser("compact-check")
     p.add_argument("archive")
     p.add_argument("--exposure", type=float, default=-14.0)
     args = parser.parse_args()
-    {"disocclusion": disocclusion, "s2g": s2g, "qsun": qsun, "tsr": tsr, "compact-check": compact_check}[args.command](args)
+    {"disocclusion": disocclusion, "s2g": s2g, "qsun": qsun, "tsr": tsr, "pack-tsr": pack_tsr,
+     "compact-check": compact_check}[args.command](args)
 
 
 if __name__ == "__main__":
