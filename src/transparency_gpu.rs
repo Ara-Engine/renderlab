@@ -78,8 +78,21 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     } else {
         replace_function(head, "hard_shadow", MAP_SHADOW)
     };
-    let composed =
+    let mut composed =
         crate::program::compose(&head, program, crate::program::Stage::Raster, parameters);
+    // TP2: transparent receivers create no cache cells. Searching unrelated opaque
+    // cells cost ~0.95 ms on the quarry; use the open environment, as R1 hit shading does.
+    #[cfg(not(test))]
+    let open = true;
+    #[cfg(test)]
+    let open = std::env::var("RENDERLAB_TP2_PROFILE").map_or(true, |v| v.is_empty());
+    if open && composed.source.contains("fn gi_prepare(") {
+        composed.source = replace_function(
+            &composed.source,
+            "gi_prepare",
+            "fn gi_prepare(input:SurfaceInput) { gi_rx_valid=false; }",
+        );
+    }
     // TP2: paired profiling variants change only this pass, in the same test binary.
     #[cfg(test)]
     let composed = {

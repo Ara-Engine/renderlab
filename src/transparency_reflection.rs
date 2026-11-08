@@ -21,8 +21,9 @@ pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
 }
 pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
     let program = crate::program::glass_hit_program(program);
-    let mut s =
-        crate::program::compose(head, &program, crate::program::Stage::Traced, parameters).source;
+    let mut s = crate::program::compose(head, &program, crate::program::Stage::Traced, parameters)
+        .source
+        .replace("\r\n", "\n");
     // Only the hit reconstruction helpers from the generated camera entry are needed.
     s.truncate(s.find("// primary_frame.scene widened").unwrap());
     s = s

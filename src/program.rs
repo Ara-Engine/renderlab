@@ -482,13 +482,14 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
-const LIST_HIT_PARAMETERS_SEAM: &str = "            rl_load_parameters(h.batch);\n";
+// TP2 integration: match the call independently of LF/CRLF checkout endings.
+const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
 /// In a mixed frame a reflection hit on another program's draw is shaded by this module's
 /// program with the hit's material inputs and the receiver's own parameter block: the
 /// recorded fallback (docs/m7-gaps.md, Programs), since another program's code is not in
 /// this module.
 const LIST_HIT_PARAMETERS: &str =
-    "            rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));\n";
+    "rl_load_parameters(select(batch,h.batch,rl_slot_of(h.batch)==rl_list.slot));";
 
 /// `compose` for the traced stages plus the tile-list entry of mixed-program frames. The
 /// single-program modules are composed by `compose` alone, so their text (and code) is

@@ -42,6 +42,16 @@ def batch(label, binary, steps):
 
 def turn_ready(g, tp1):
     lines = tp1.schedule_read_retry(lambda: g.SCHEDULE.read_text(encoding='utf-8')).splitlines()
+    after = OUT / 'gpu-after.json'
+    if after.exists():
+        import json
+        gate = json.loads(after.read_text())
+        anchors = [i for i, line in enumerate(lines) if gate['after'] in line]
+        if not anchors:
+            return False
+        releases = [line for line in lines[anchors[-1] + 1:] if 'window released' in line and not line.startswith('[')]
+        if not all(any(token in line for line in releases) for token in gate['requires']):
+            return False
     orders = [i for i, line in enumerate(lines) if '[root order]' in line and 'tp2-p5' in line]
     if not orders:
         return True
