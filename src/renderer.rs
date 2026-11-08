@@ -1,3 +1,6 @@
+// AT1: atmosphere LUTs, camera volume and raster sky (docs/m7-at1.md).
+#[path = "atmosphere_gpu.rs"]
+mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
 #[path = "lighting_gpu.rs"]
@@ -581,6 +584,8 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// AT1 sky, aerial perspective and fog (`atmosphere_gpu.rs`).
+    atmosphere: atmosphere_gpu::AtmosphereGpu,
     /// TR1 temporal reconstruction settings, its history (created by its first frame), the
     /// next frame's sample index, and the index of the frame being prepared while that frame
     /// reconstructs (`temporal_reconstruction.rs`).
@@ -865,6 +870,7 @@ impl Renderer {
         );
         let shadows = ShadowState::new(&device, &ledger, &instance_bindings, &material_bindings);
         let gi = gi_cache::GiState::new(&device, &ledger);
+        let atmosphere = atmosphere_gpu::AtmosphereGpu::new(&device, &ledger);
         // Traced visibility reads hit-triangle positions back from the shared AS.
         let traced = hardware.is_some()
             && options.samples == SampleCount::One
@@ -1024,6 +1030,7 @@ impl Renderer {
             soft_mode: crate::SoftShadows::Exact,
             virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
+            atmosphere,
             gi,
             reconstruction: Reconstruction::default(),
             reconstruction_state: None,
@@ -2796,6 +2803,8 @@ impl Renderer {
             if shadow_frame.is_some() {
                 cpu.shadow_upload = shadow_start.elapsed();
             }
+            // AT1: the camera volume and uniform the lighting group binds.
+            self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
         }
         cpu.upload += start.elapsed() - cpu.shadow_upload;
@@ -2960,6 +2969,10 @@ impl Renderer {
             let shadow_start = Instant::now();
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
+        }
+        // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
+        if lit {
+            self.encode_atmosphere(&mut encoder);
         }
         if fresh {
             self.encode_fresh(&mut encoder, draws, slot, timed);
@@ -3159,6 +3172,12 @@ impl Renderer {
                 }
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
+            // AT1: the sky on every sample no surface covered.
+            if let Some(sky) = self.atmosphere.raster_sky().filter(|_| lit) {
+                pass.set_pipeline(sky);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         if hdr.is_some() {
             self.encode_hdr_present(
@@ -3243,6 +3262,9 @@ impl Renderer {
         let index = self.queue.submit([commands]);
         let submit = submitted_at.elapsed();
         self.submissions += 1;
+        if lit {
+            self.atmosphere_submitted(camera, [color.width(), color.height()]);
+        }
         if hardware_build {
             self.hardware_shadows.as_mut().unwrap().scene_submitted(
                 &self.device,
@@ -3482,6 +3504,7 @@ impl Renderer {
         }
         self.residency.prune();
         self.lighting.collect(self.completed_submission);
+        self.atmosphere.collect(self.completed_submission);
         self.gi.collect(self.completed_submission);
         self.environment
             .uploading

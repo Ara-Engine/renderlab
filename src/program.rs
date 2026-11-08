@@ -370,8 +370,16 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
-    let mut source =
-        format!("{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{binding}// ---- program ----\n");
+    // AT1: camera-pixel entries apply the sky and fog (shaders/atmosphere_api.wgsl); cell
+    // shading's bounce light carries none.
+    let atmosphere = if stage == Stage::Cell {
+        String::new()
+    } else {
+        crate::atmosphere::api_source()
+    };
+    let mut source = format!(
+        "{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{atmosphere}{binding}// ---- program ----\n"
+    );
     let start = source.len();
     source.push_str(program);
     let program_range = start..source.len();

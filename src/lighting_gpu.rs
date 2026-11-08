@@ -5,6 +5,7 @@ pub(super) struct LightBuffer {
     shadow_generation: u64,
     environment_generation: u64,
     indirect_generation: u64,
+    atmosphere_generation: u64,
     _environment: Option<EnvironmentMap>,
     buffer: Owned<wgpu::Buffer>,
     bind: Owned<wgpu::BindGroup>,
@@ -122,6 +123,32 @@ impl LightingGpu {
                             min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
                         },
                         count: None,
+                    },
+                    // AT1 (shaders/atmosphere_api.wgsl): the atmosphere uniform, the
+                    // transmittance LUT (with its fog-ambient row), the sky-view LUT and the
+                    // camera volume. No storage buffer: the Virtual lookup uses all 11.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 50,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                super::atmosphere_gpu::UNIFORM_BYTES,
+                            ),
+                        },
+                        count: None,
+                    },
+                    computed(texture_entry(51)),
+                    computed(texture_entry(52)),
+                    {
+                        let mut entry = computed(texture_entry(53));
+                        entry.ty = wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        };
+                        entry
                     },
                     // The world radiance cache table, read by `indirect_irradiance`
                     // (shaders/gi_api.wgsl); only modules whose program calls it use it.
@@ -381,13 +408,19 @@ impl Renderer {
         }
     }
     pub(super) fn upload_lighting(&mut self, eye: Vec3, uploads: &mut UploadBytes) {
+        // AT1: directional lux through the atmosphere's transmittance, when it applies.
+        let scaled = self
+            .sun_scale(eye)
+            .map(|t| crate::atmosphere::scale_directional(&self.lighting.pending.records, t));
         let state = &mut self.lighting;
-        let needed = state.pending.records.len().max(64) as u64;
+        let records = scaled.as_ref().unwrap_or(&state.pending.records);
+        let needed = records.len().max(64) as u64;
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.shadows.stats.resource_generation
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
+                || active.atmosphere_generation != self.atmosphere.generation
         }) {
             // Exact growth is device bounded; no next_power_of_two overshoot.
             let buffer = self.ledger.own(
@@ -477,6 +510,28 @@ impl Renderer {
                                 binding: 5,
                                 resource: self.shadows.records().as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 50,
+                                resource: self.atmosphere.uniform().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 51,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.transmittance.view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 52,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.skyview.view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 53,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.atmosphere.volume.camera.view,
+                                ),
+                            },
                         ],
                     }),
                     ResourceKind::BindGroup,
@@ -488,6 +543,7 @@ impl Renderer {
                 shadow_generation: self.shadows.stats.resource_generation,
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
+                atmosphere_generation: self.atmosphere.generation,
                 _environment: self.environment.selected.clone(),
                 buffer,
                 bind,
@@ -500,18 +556,18 @@ impl Renderer {
             state.generation += 1;
             state.published.clear();
         }
-        if let Some(span) = dirty_span(&state.published, &state.pending.records) {
+        if let Some(span) = dirty_span(&state.published, records) {
             self.queue.write_buffer(
                 &state.active.as_ref().unwrap().buffer,
                 span.start as u64,
-                &state.pending.records[span.clone()],
+                &records[span.clone()],
             );
             uploads.lights += (span.end - span.start) as u64;
             uploads.light_writes += 1;
             uploads.write_calls += 1;
         }
-        if state.published != state.pending.records {
-            state.published.clone_from(&state.pending.records);
+        if state.published != *records {
+            state.published.clone_from(records);
         }
         let mut uniform = [0; 48];
         uniform[..32].copy_from_slice(&state.pending.uniform(eye));

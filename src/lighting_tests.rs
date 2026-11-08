@@ -758,7 +758,7 @@ fn gpu_lit_photometry_1x_4x() {
                     "@fragment fn fs_lit(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool, @builtin(sample_index) sample:u32)",
                 ),
                 (
-                    "return vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0);",
+                    "return vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),1.0);",
                     "return vec4<f32>(vec3<f32>(select(0.0,16.0,sample==3u)),1.0);",
                 ),
             ]
