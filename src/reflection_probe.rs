@@ -73,6 +73,10 @@ fn shader() -> String {
         "expose",
         "rl_finite",
         "material_normal",
+        // TP1: the standard program's transparency inputs.
+        "material_opacity",
+        "material_ior",
+        "material_coverage",
     ] {
         source.push_str(&function(api, name));
         source.push('\n');

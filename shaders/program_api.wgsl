@@ -102,6 +102,16 @@ fn environment_reflection(direction:vec3<f32>, roughness:f32) -> vec3<f32> {
     return environment_radiance(environment_direction(direction),roughness);
 }
 
+// TP1 transparency (docs/m7-tp1.md): the material's last word packs a transparent
+// material's opacity and IOR as halves; opaque materials store zero.
+fn material_transparent(material:Material) -> bool { return material.pad!=0u; }
+fn material_opacity(material:Material) -> f32 { return select(1.0,unpack2x16float(material.pad).x,material.pad!=0u); }
+fn material_ior(material:Material) -> f32 { return select(1.5,unpack2x16float(material.pad).y,material.pad!=0u); }
+// Coverage of a transparent material from its sampled alpha product; exactly 1 when opaque.
+fn material_coverage(material:Material, alpha:f32) -> f32 {
+    return select(1.0,clamp(material_opacity(material)*alpha,0.0,1.0),material.pad!=0u);
+}
+
 // Overflow-safe exposure of an unexposed radiance.
 fn expose(radiance:vec3<f32>) -> vec3<f32> { return exposed_product(radiance,vec3<f32>(1.0)); }
 

@@ -7,7 +7,8 @@
 // response, so the light it reflects reaches others as bounce light (M7-G2, docs/m7-g2.md).
 // Opt-in: the 256-sample filter passes quality, but misses the speed floor.
 const SPECULAR_AA:bool=false;
-struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32 };
+// alpha: TP1 coverage of transparent materials (docs/m7-tp1.md), exactly 1 for opaque ones.
+struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };
 
 fn surface(input:SurfaceInput) -> Surface {
     let material=input.material;
@@ -17,7 +18,19 @@ fn surface(input:SurfaceInput) -> Surface {
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
     let rough=clamp(material.roughness*mr.g,0.0,1.0);
-    return Surface(n,base,metal,rough);
+    let alpha=material_coverage(material,material.base_color.a*sampled.a*input.color.a);
+    return Surface(n,base,metal,rough,alpha);
+}
+
+// TP1: the share of the light behind a transparent surface that reaches the eye: what
+// its coverage and Fresnel reflectance leave, filtered by the base colour as tint.
+fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let ior=material_ior(input.material);
+    let f0=((ior-1.0)/(ior+1.0))*((ior-1.0)/(ior+1.0));
+    let fresnel=f0+(1.0-f0)*pow(1.0-clamp(abs(dot(s.n,v)),0.0,1.0),5.0);
+    return (1.0-s.alpha)*(1.0-fresnel)*s.base;
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its
@@ -57,7 +70,8 @@ fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f3
 
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let n=s.n;
-    let base=s.base;
+    // TP1: a transparent surface reflects diffusely over its coverage only.
+    let base=s.base*s.alpha;
     let metal=s.metal;
     let rough=s.rough;
     var v=unit_normal(input.eye-input.world);

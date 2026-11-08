@@ -726,7 +726,7 @@ fn gpu_reload_edit_to_image() {
                 "program",
                 &program_path,
                 STANDARD.replace(
-                    "return Surface(n,base,metal,rough);",
+                    "return Surface(n,base,metal,rough,alpha);",
                     "return Surface(n,base,metal);",
                 ),
                 STANDARD,

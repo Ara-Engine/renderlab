@@ -3,6 +3,8 @@
 //! Use a dedicated device and queue. External queue clones/submissions are outside accounting.
 #[cfg(test)]
 extern crate self as renderlab;
+/// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
+pub mod cutout;
 mod environment;
 mod environment_lobes;
 mod gi_bvh;
@@ -24,6 +26,7 @@ mod renderer;
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
+mod transparency;
 pub mod virtual_geometry;
 mod visibility;
 
@@ -56,6 +59,9 @@ pub use renderer::{
 };
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
+pub use transparency::{
+    Emitter, EmitterDescriptor, MAX_PARTICLES, Transparency, TransparencyStats,
+};
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 
