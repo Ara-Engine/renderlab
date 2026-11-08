@@ -224,34 +224,70 @@ impl EmitterParams {
             + (self.velocity.length() + self.velocity_spread) * life
             + 0.5 * self.acceleration.length() * life * life
             + 0.5 * self.size[0].max(self.size[1]);
-        (self.position - Vec3::splat(reach), self.position + Vec3::splat(reach))
+        (
+            self.position - Vec3::splat(reach),
+            self.position + Vec3::splat(reach),
+        )
     }
     fn uniform(&self, first: u32, spawned: u32, textured: bool) -> [u8; EMITTER_BYTES as usize] {
         let mut f = [0f32; 40];
         let v4 = |f: &mut [f32; 40], at: usize, v: [f32; 4]| f[at..at + 4].copy_from_slice(&v);
-        v4(&mut f, 0, self.position.extend(self.spawn_radius).to_array());
-        v4(&mut f, 4, self.velocity.extend(self.velocity_spread).to_array());
+        v4(
+            &mut f,
+            0,
+            self.position.extend(self.spawn_radius).to_array(),
+        );
+        v4(
+            &mut f,
+            4,
+            self.velocity.extend(self.velocity_spread).to_array(),
+        );
         v4(&mut f, 8, self.acceleration.extend(self.drag).to_array());
         v4(&mut f, 12, self.color[0]);
         v4(&mut f, 16, self.color[1]);
         let [e0, e1] = self.emission;
         v4(&mut f, 20, [e0[0], e0[1], e0[2], self.size[0]]);
         v4(&mut f, 24, [e1[0], e1[1], e1[2], self.size[1]]);
-        v4(&mut f, 28, [self.lifetime[0], self.lifetime[1], self.fade[0], self.fade[1]]);
+        v4(
+            &mut f,
+            28,
+            [
+                self.lifetime[0],
+                self.lifetime[1],
+                self.fade[0],
+                self.fade[1],
+            ],
+        );
         let sorted = self.capacity.next_power_of_two() as f32;
-        v4(&mut f, 36, [self.soft_distance, sorted, f32::from(u8::from(textured)), 0.0]);
+        v4(
+            &mut f,
+            36,
+            [
+                self.soft_distance,
+                sorted,
+                f32::from(u8::from(textured)),
+                0.0,
+            ],
+        );
         let mut bytes = [0u8; EMITTER_BYTES as usize];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(f) {
             dst.copy_from_slice(&v.to_ne_bytes());
         }
-        for (k, v) in [self.capacity, first, spawned, self.seed].into_iter().enumerate() {
+        for (k, v) in [self.capacity, first, spawned, self.seed]
+            .into_iter()
+            .enumerate()
+        {
             bytes[128 + 4 * k..132 + 4 * k].copy_from_slice(&v.to_ne_bytes());
         }
         bytes
     }
 }
 
-fn entry(binding: u32, visibility: wgpu::ShaderStages, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+fn entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BindingType,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -286,45 +322,63 @@ const FRAGMENT: wgpu::ShaderStages = wgpu::ShaderStages::FRAGMENT;
 const COMPUTE: wgpu::ShaderStages = wgpu::ShaderStages::COMPUTE;
 
 impl Renderer {
-    fn tp_layout(&self, label: &str, entries: &[wgpu::BindGroupLayoutEntry]) -> Owned<wgpu::BindGroupLayout> {
+    fn tp_layout(
+        &self,
+        label: &str,
+        entries: &[wgpu::BindGroupLayoutEntry],
+    ) -> Owned<wgpu::BindGroupLayout> {
         self.ledger.own(
-            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(label),
-                entries,
-            }),
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(label),
+                    entries,
+                }),
             ResourceKind::BindGroupLayout,
         )
     }
-    fn tp_pipeline_layout(&self, label: &str, groups: &[&wgpu::BindGroupLayout]) -> Owned<wgpu::PipelineLayout> {
+    fn tp_pipeline_layout(
+        &self,
+        label: &str,
+        groups: &[&wgpu::BindGroupLayout],
+    ) -> Owned<wgpu::PipelineLayout> {
         let groups: Vec<_> = groups.iter().map(|g| Some(*g)).collect();
         self.ledger.own(
-            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &groups,
-                immediate_size: 0,
-            }),
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(label),
+                    bind_group_layouts: &groups,
+                    immediate_size: 0,
+                }),
             ResourceKind::PipelineLayout,
         )
     }
     fn tp_module(&self, label: &str, source: &str) -> Owned<wgpu::ShaderModule> {
         self.ledger.own(
-            self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            }),
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                }),
             ResourceKind::ShaderModule,
         )
     }
-    fn tp_compute(&self, label: &str, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str) -> Owned<wgpu::ComputePipeline> {
+    fn tp_compute(
+        &self,
+        label: &str,
+        layout: &wgpu::PipelineLayout,
+        module: &wgpu::ShaderModule,
+        entry: &str,
+    ) -> Owned<wgpu::ComputePipeline> {
         self.ledger.own(
-            self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            }),
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
             ResourceKind::ComputePipeline,
         )
     }
@@ -342,8 +396,16 @@ impl Renderer {
                 ResourceKind::Buffer,
             )
         };
-        let frame = buffer("TP1 frame", FRAME_OFFSET + FRAME_BYTES, wgpu::BufferUsages::UNIFORM);
-        let draws = buffer("TP1 draws", SLOT * MAX_TRANSPARENT_DRAWS as u64, wgpu::BufferUsages::UNIFORM);
+        let frame = buffer(
+            "TP1 frame",
+            FRAME_OFFSET + FRAME_BYTES,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let draws = buffer(
+            "TP1 draws",
+            SLOT * MAX_TRANSPARENT_DRAWS as u64,
+            wgpu::BufferUsages::UNIFORM,
+        );
         let sampler = self.ledger.own(
             self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("TP1 linear clamp"),
@@ -363,12 +425,25 @@ impl Renderer {
             }),
             ResourceKind::Sampler,
         );
-        let shadow = self.tp_target("TP1 sun shadow map", wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
-            wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, 4);
+        let shadow = self.tp_target(
+            "TP1 sun shadow map",
+            wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            4,
+        );
         let white_texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("TP1 white sprite"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -378,10 +453,24 @@ impl Renderer {
             }),
             ResourceKind::Texture,
         );
-        self.queue.write_texture(white_texture.as_image_copy(), &[255; 4],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
-        let white = self.ledger.own(white_texture.create_view(&Default::default()), ResourceKind::TextureView);
+        self.queue.write_texture(
+            white_texture.as_image_copy(),
+            &[255; 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let white = self.ledger.own(
+            white_texture.create_view(&Default::default()),
+            ResourceKind::TextureView,
+        );
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let all = vf | COMPUTE;
         let glass_entries = |rt: bool| {
@@ -390,27 +479,66 @@ impl Renderer {
                 entry(30, all, uniform(false, FRAME_BYTES)),
                 entry(31, FRAGMENT, texture(FLOAT)),
                 entry(32, FRAGMENT, texture(UNFILTERED)),
-                entry(33, FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
-                entry(34, FRAGMENT, wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                }),
-                entry(35, FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)),
+                entry(
+                    33,
+                    FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                entry(
+                    34,
+                    FRAGMENT,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    35,
+                    FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                ),
                 entry(37, FRAGMENT, uniform(true, 16)),
             ];
             if rt {
-                e.push(entry(2, FRAGMENT, wgpu::BindingType::AccelerationStructure { vertex_return: false }));
+                e.push(entry(
+                    2,
+                    FRAGMENT,
+                    wgpu::BindingType::AccelerationStructure {
+                        vertex_return: false,
+                    },
+                ));
             }
             e
         };
-        let paths: &[bool] = if self.hardware_shadows.is_some() { &[false, true] } else { &[false] };
-        let glass_bindings: Vec<_> = paths.iter().map(|&rt| self.tp_layout("TP1 transparent group 0", &glass_entries(rt))).collect();
-        let glass_layouts: Vec<_> = glass_bindings.iter().map(|bindings| {
-            self.tp_pipeline_layout("TP1 transparent", &[bindings, &self.instance_bindings, &self.material_bindings, &self.lighting.bindings])
-        }).collect();
+        let paths: &[bool] = if self.hardware_shadows.is_some() {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        let glass_bindings: Vec<_> = paths
+            .iter()
+            .map(|&rt| self.tp_layout("TP1 transparent group 0", &glass_entries(rt)))
+            .collect();
+        let glass_layouts: Vec<_> = glass_bindings
+            .iter()
+            .map(|bindings| {
+                self.tp_pipeline_layout(
+                    "TP1 transparent",
+                    &[
+                        bindings,
+                        &self.instance_bindings,
+                        &self.material_bindings,
+                        &self.lighting.bindings,
+                    ],
+                )
+            })
+            .collect();
         // Shadow map: depth only, every opaque instance.
-        let shadow_bindings = self.tp_layout("TP1 shadow group 0", &[entry(30, all, uniform(false, FRAME_BYTES))]);
+        let shadow_bindings = self.tp_layout(
+            "TP1 shadow group 0",
+            &[entry(30, all, uniform(false, FRAME_BYTES))],
+        );
         let shadow_group = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TP1 shadow"),
@@ -426,76 +554,120 @@ impl Renderer {
             }),
             ResourceKind::BindGroup,
         );
-        let shadow_layout = self.tp_pipeline_layout("TP1 shadow", &[&shadow_bindings, &self.instance_bindings]);
-        let module = self.tp_module("TP1 shadow", &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")));
+        let shadow_layout =
+            self.tp_pipeline_layout("TP1 shadow", &[&shadow_bindings, &self.instance_bindings]);
+        let module = self.tp_module(
+            "TP1 shadow",
+            &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
+        );
         let shadow_pipeline = self.ledger.own(
-            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("TP1 shadow"),
-                layout: Some(&shadow_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("tp_shadow_vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: 48,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                    })],
-                },
-                fragment: None,
-                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("TP1 shadow"),
+                    layout: Some(&shadow_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("tp_shadow_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: 48,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                        })],
+                    },
+                    fragment: None,
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: wgpu::DepthBiasState {
+                            constant: 2,
+                            slope_scale: 2.0,
+                            clamp: 0.0,
+                        },
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
                 }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            }),
             ResourceKind::RenderPipeline,
         );
-        let raster_depth_bindings = self.tp_layout("TP1 raster depth", &[
-            entry(30, all, uniform(false, FRAME_BYTES)),
-            entry(52, COMPUTE, wgpu::BindingType::StorageTexture {
-                access: wgpu::StorageTextureAccess::WriteOnly,
-                format: wgpu::TextureFormat::R32Float,
-                view_dimension: wgpu::TextureViewDimension::D2,
-            }),
-            entry(53, COMPUTE, wgpu::BindingType::Texture {
+        let raster_depth_bindings = self.tp_layout(
+            "TP1 raster depth",
+            &[
+                entry(30, all, uniform(false, FRAME_BYTES)),
+                entry(
+                    52,
+                    COMPUTE,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+                entry(
+                    53,
+                    COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+            ],
+        );
+        let layout = self.tp_pipeline_layout("TP1 raster depth", &[&raster_depth_bindings]);
+        let module = self.tp_module(
+            "TP1 raster depth",
+            &format!("{}{}", section("TP_FRAME"), section("TP_DEPTH_RASTER")),
+        );
+        let raster_depth = self.tp_compute("TP1 raster depth", &layout, &module, "tp_depth_raster");
+        let depth_entry = entry(
+            34,
+            all,
+            wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Depth,
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
-            }),
-        ]);
-        let layout = self.tp_pipeline_layout("TP1 raster depth", &[&raster_depth_bindings]);
-        let module = self.tp_module("TP1 raster depth", &format!("{}{}", section("TP_FRAME"), section("TP_DEPTH_RASTER")));
-        let raster_depth = self.tp_compute("TP1 raster depth", &layout, &module, "tp_depth_raster");
-        let depth_entry = entry(34, all, wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Depth,
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        });
-        let compare_entry = entry(35, all, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison));
-        let sim_bindings = self.tp_layout("TP1 particle simulation", &[
-            entry(30, all, uniform(false, FRAME_BYTES)),
-            depth_entry,
-            compare_entry,
-            entry(40, COMPUTE, storage(false)),
-            entry(41, COMPUTE, storage(false)),
-            entry(42, all, uniform(false, EMITTER_BYTES)),
-        ]);
-        let draw_bindings = self.tp_layout("TP1 particle draw", &[
-            entry(30, all, uniform(false, FRAME_BYTES)),
-            entry(32, FRAGMENT, texture(UNFILTERED)),
-            entry(33, FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
-            entry(36, FRAGMENT, texture(FLOAT)),
-            entry(40, wgpu::ShaderStages::VERTEX, storage(true)),
-            entry(41, wgpu::ShaderStages::VERTEX, storage(true)),
-            entry(42, all, uniform(false, EMITTER_BYTES)),
-        ]);
+            },
+        );
+        let compare_entry = entry(
+            35,
+            all,
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+        );
+        let sim_bindings = self.tp_layout(
+            "TP1 particle simulation",
+            &[
+                entry(30, all, uniform(false, FRAME_BYTES)),
+                depth_entry,
+                compare_entry,
+                entry(40, COMPUTE, storage(false)),
+                entry(41, COMPUTE, storage(false)),
+                entry(42, all, uniform(false, EMITTER_BYTES)),
+            ],
+        );
+        let draw_bindings = self.tp_layout(
+            "TP1 particle draw",
+            &[
+                entry(30, all, uniform(false, FRAME_BYTES)),
+                entry(32, FRAGMENT, texture(UNFILTERED)),
+                entry(
+                    33,
+                    FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                entry(36, FRAGMENT, texture(FLOAT)),
+                entry(40, wgpu::ShaderStages::VERTEX, storage(true)),
+                entry(41, wgpu::ShaderStages::VERTEX, storage(true)),
+                entry(42, all, uniform(false, EMITTER_BYTES)),
+            ],
+        );
         let empty_bindings = self.tp_layout("TP1 empty", &[]);
         let empty = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -528,7 +700,14 @@ impl Renderer {
         }
     }
 
-    fn tp_target(&self, label: &str, size: wgpu::Extent3d, format: wgpu::TextureFormat, usage: wgpu::TextureUsages, texel: u64) -> Depth {
+    fn tp_target(
+        &self,
+        label: &str,
+        size: wgpu::Extent3d,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+        texel: u64,
+    ) -> Depth {
         let texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -542,11 +721,17 @@ impl Renderer {
             }),
             ResourceKind::Texture,
         );
-        let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+        let view = self.ledger.own(
+            texture.create_view(&Default::default()),
+            ResourceKind::TextureView,
+        );
         Depth {
             texture,
             view,
-            _allocation: self.ledger.allocate(AllocationKind::Target, u64::from(size.width) * u64::from(size.height) * texel),
+            _allocation: self.ledger.allocate(
+                AllocationKind::Target,
+                u64::from(size.width) * u64::from(size.height) * texel,
+            ),
         }
     }
 
@@ -555,37 +740,54 @@ impl Renderer {
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let [sim, draw] = particle_sources(&self.source);
         let sim = self.tp_module("TP1 particle simulation", &sim);
-        let layout = self.tp_pipeline_layout("TP1 particle simulation", &[&gpu.sim_bindings, &gpu.empty_bindings, &gpu.empty_bindings, &self.lighting.bindings]);
+        let layout = self.tp_pipeline_layout(
+            "TP1 particle simulation",
+            &[
+                &gpu.sim_bindings,
+                &gpu.empty_bindings,
+                &gpu.empty_bindings,
+                &self.lighting.bindings,
+            ],
+        );
         let update = self.tp_compute("TP1 particle update", &layout, &sim, "tp_particles_update");
         let sort = self.tp_compute("TP1 particle sort", &layout, &sim, "tp_particles_sort");
         let module = self.tp_module("TP1 particle draw", &draw);
-        let layout = self.tp_pipeline_layout("TP1 particle draw", &[&gpu.draw_bindings, &gpu.empty_bindings, &gpu.empty_bindings, &self.lighting.bindings]);
+        let layout = self.tp_pipeline_layout(
+            "TP1 particle draw",
+            &[
+                &gpu.draw_bindings,
+                &gpu.empty_bindings,
+                &gpu.empty_bindings,
+                &self.lighting.bindings,
+            ],
+        );
         let draw = self.ledger.own(
-            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("TP1 particle billboards"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("tp_particle_vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("tp_particle_fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("TP1 particle billboards"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("tp_particle_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("tp_particle_fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
                 }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            }),
             ResourceKind::RenderPipeline,
         );
         ParticlePipelines {
@@ -600,13 +802,23 @@ impl Renderer {
     /// sun-visibility path, and its identity.
     fn tp_glass_source(&self, program: u64, rt: bool) -> (String, [u8; 32]) {
         let slot = self.program_slot(program);
-        let head = if rt { self.hardware_source.as_deref().unwrap() } else { &self.source };
+        let head = if rt {
+            self.hardware_source.as_deref().unwrap()
+        } else {
+            &self.source
+        };
         let source = glass_source(head, rt, &slot.source, slot.layout.is_some());
         let key = Sha256::digest(source.as_bytes()).into();
         (source, key)
     }
     /// The transparent pipelines of `program` from its module source.
-    fn tp_glass_pipelines(&self, program: u64, rt: bool, source: &str, key: [u8; 32]) -> Result<GlassPipelines, Error> {
+    fn tp_glass_pipelines(
+        &self,
+        program: u64,
+        rt: bool,
+        source: &str,
+        key: [u8; 32],
+    ) -> Result<GlassPipelines, Error> {
         let slot = self.program_slot(program);
         let scopes = OperationScopes::new(&self.device);
         let module = self.tp_module(&format!("TP1 transparent {}", slot.label), source);
@@ -614,53 +826,64 @@ impl Renderer {
         let layout = &gpu.glass_layouts[usize::from(rt)];
         let pipelines = [false, true].map(|tangent| {
             self.ledger.own(
-                self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("TP1 transparent"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
-                        compilation_options: Default::default(),
-                        buffers: &[
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 48,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &VERTEX_ATTRIBUTES,
-                            }),
-                            Some(wgpu::VertexBufferLayout {
-                                array_stride: 4,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &MODEL_ATTRIBUTES,
-                            }),
-                            tangent.then_some(wgpu::VertexBufferLayout {
-                                array_stride: 16,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &TANGENT_ATTRIBUTES,
-                            }),
-                        ],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs_transparent"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("TP1 transparent"),
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
+                            compilation_options: Default::default(),
+                            buffers: &[
+                                Some(wgpu::VertexBufferLayout {
+                                    array_stride: 48,
+                                    step_mode: wgpu::VertexStepMode::Vertex,
+                                    attributes: &VERTEX_ATTRIBUTES,
+                                }),
+                                Some(wgpu::VertexBufferLayout {
+                                    array_stride: 4,
+                                    step_mode: wgpu::VertexStepMode::Instance,
+                                    attributes: &MODEL_ATTRIBUTES,
+                                }),
+                                tangent.then_some(wgpu::VertexBufferLayout {
+                                    array_stride: 16,
+                                    step_mode: wgpu::VertexStepMode::Vertex,
+                                    attributes: &TANGENT_ATTRIBUTES,
+                                }),
+                            ],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some("fs_transparent"),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: None,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: Default::default(),
+                        multiview_mask: None,
+                        cache: None,
                     }),
-                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                }),
                 ResourceKind::RenderPipeline,
             )
         });
         if let Some(error) = scopes.finish() {
             return Err(match error {
-                wgpu::Error::Validation { .. } => Error::Shader(format!("program `{}`, transparent pipelines: {error}", slot.label)),
+                wgpu::Error::Validation { .. } => Error::Shader(format!(
+                    "program `{}`, transparent pipelines: {error}",
+                    slot.label
+                )),
                 _ => Error::Fault(Fault(error.to_string())),
             });
         }
-        Ok(GlassPipelines { program, key, pipelines })
+        Ok(GlassPipelines {
+            program,
+            key,
+            pipelines,
+        })
     }
 
     /// Creates a particle emitter. It simulates and draws in every lit frame until the
@@ -668,8 +891,12 @@ impl Renderer {
     pub fn try_create_emitter(&mut self, d: &EmitterDescriptor<'_>) -> Result<Emitter, Error> {
         self.check_fault()?;
         d.validate()?;
-        if d.texture.is_some_and(|t| !Arc::ptr_eq(&self.identity, &t.0.renderer)) {
-            return Err(Error::InvalidInput("emitter texture belongs to another renderer"));
+        if d.texture
+            .is_some_and(|t| !Arc::ptr_eq(&self.identity, &t.0.renderer))
+        {
+            return Err(Error::InvalidInput(
+                "emitter texture belongs to another renderer",
+            ));
         }
         if self.transparency.gpu.is_none() {
             self.transparency.gpu = Some(self.tp_gpu());
@@ -691,8 +918,16 @@ impl Renderer {
             )
         };
         // wgpu zero-initializes buffers: every slot starts dead (lifetime 0).
-        let particles = buffer("TP1 particles", u64::from(d.capacity) * PARTICLE_BYTES, wgpu::BufferUsages::STORAGE);
-        let sorted = buffer("TP1 particle order", sorted_len * 4, wgpu::BufferUsages::STORAGE);
+        let particles = buffer(
+            "TP1 particles",
+            u64::from(d.capacity) * PARTICLE_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let sorted = buffer(
+            "TP1 particle order",
+            sorted_len * 4,
+            wgpu::BufferUsages::STORAGE,
+        );
         let uniform = buffer("TP1 emitter", EMITTER_BYTES, wgpu::BufferUsages::UNIFORM);
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let sim = self.ledger.own(
@@ -701,11 +936,26 @@ impl Renderer {
                 layout: &gpu.sim_bindings,
                 entries: &[
                     frame_entry(&gpu.frame),
-                    wgpu::BindGroupEntry { binding: 34, resource: wgpu::BindingResource::TextureView(&gpu.shadow.view) },
-                    wgpu::BindGroupEntry { binding: 35, resource: wgpu::BindingResource::Sampler(&gpu.compare) },
-                    wgpu::BindGroupEntry { binding: 40, resource: particles.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 41, resource: sorted.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 42, resource: uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 34,
+                        resource: wgpu::BindingResource::TextureView(&gpu.shadow.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 35,
+                        resource: wgpu::BindingResource::Sampler(&gpu.compare),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 40,
+                        resource: particles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 41,
+                        resource: sorted.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 42,
+                        resource: uniform.as_entire_binding(),
+                    },
                 ],
             }),
             ResourceKind::BindGroup,
@@ -715,7 +965,10 @@ impl Renderer {
         }
         let id = self.transparency.next_emitter;
         self.transparency.next_emitter += 1;
-        let shared = Arc::new(EmitterShared { id, renderer: self.identity.clone() });
+        let shared = Arc::new(EmitterShared {
+            id,
+            renderer: self.identity.clone(),
+        });
         self.transparency.emitters.push(EmitterSlot {
             id,
             handle: Arc::downgrade(&shared),
@@ -727,21 +980,35 @@ impl Renderer {
             sorted,
             spawned: 0,
             carry: 0.0,
-            _allocation: self.ledger.allocate(AllocationKind::Target, u64::from(d.capacity) * PARTICLE_BYTES + sorted_len * 4 + EMITTER_BYTES),
+            _allocation: self.ledger.allocate(
+                AllocationKind::Target,
+                u64::from(d.capacity) * PARTICLE_BYTES + sorted_len * 4 + EMITTER_BYTES,
+            ),
         });
         Ok(Emitter(shared))
     }
 
     /// Changes a live emitter's parameters; its particles continue. The capacity and
     /// texture presence must stay the same.
-    pub fn try_update_emitter(&mut self, emitter: &Emitter, d: &EmitterDescriptor<'_>) -> Result<(), Error> {
+    pub fn try_update_emitter(
+        &mut self,
+        emitter: &Emitter,
+        d: &EmitterDescriptor<'_>,
+    ) -> Result<(), Error> {
         d.validate()?;
         if !Arc::ptr_eq(&self.identity, &emitter.0.renderer) {
             return Err(Error::InvalidInput("emitter belongs to another renderer"));
         }
-        let slot = self.transparency.emitters.iter_mut().find(|s| s.id == emitter.0.id).unwrap();
+        let slot = self
+            .transparency
+            .emitters
+            .iter_mut()
+            .find(|s| s.id == emitter.0.id)
+            .unwrap();
         if slot.params.capacity != d.capacity || slot.sprite.is_some() != d.texture.is_some() {
-            return Err(Error::InvalidInput("emitter updates keep capacity and texture presence"));
+            return Err(Error::InvalidInput(
+                "emitter updates keep capacity and texture presence",
+            ));
         }
         slot.params = EmitterParams::new(d);
         if let Some(texture) = d.texture {
@@ -757,7 +1024,11 @@ impl Renderer {
             return Err(Error::InvalidInput("particle step must be in [0, 1] s"));
         }
         // Zero is stored as a tiny step so the default is not reapplied; spawns need dt>0.
-        self.transparency.step = if seconds == 0.0 { f32::MIN_POSITIVE } else { seconds };
+        self.transparency.step = if seconds == 0.0 {
+            f32::MIN_POSITIVE
+        } else {
+            seconds
+        };
         Ok(())
     }
 
@@ -766,24 +1037,44 @@ impl Renderer {
     }
 
     /// Visibility and ID publication for transparent draws, as opaque draws get them.
-    pub(super) fn tp_prepare_draws(&mut self, matrix: Mat4, transparent: &mut [Draw<'_>], uploads: &mut UploadBytes) -> Result<(), Error> {
+    pub(super) fn tp_prepare_draws(
+        &mut self,
+        matrix: Mat4,
+        transparent: &mut [Draw<'_>],
+        uploads: &mut UploadBytes,
+    ) -> Result<(), Error> {
         if transparent.iter().any(|d| {
-            !Arc::ptr_eq(&self.identity, &d.instances.renderer) || !Arc::ptr_eq(&self.identity, &d.mesh.renderer)
+            !Arc::ptr_eq(&self.identity, &d.instances.renderer)
+                || !Arc::ptr_eq(&self.identity, &d.mesh.renderer)
         }) {
-            return Err(Error::InvalidInput("draw resource belongs to another renderer"));
+            return Err(Error::InvalidInput(
+                "draw resource belongs to another renderer",
+            ));
         }
-        if transparent.iter().any(|d| d.material.is_some_and(|m| m.normal_mapped) && d.mesh.tangent.is_none()) {
-            return Err(Error::InvalidInput("normal-mapped draw requires tangent stream"));
+        if transparent
+            .iter()
+            .any(|d| d.material.is_some_and(|m| m.normal_mapped) && d.mesh.tangent.is_none())
+        {
+            return Err(Error::InvalidInput(
+                "normal-mapped draw requires tangent stream",
+            ));
         }
         let (mut packing, mut upload) = (Duration::ZERO, Duration::ZERO);
         for draw in transparent.iter_mut() {
-            let update = draw.instances.state.visibility(matrix, draw.mesh.bounds, draw.visibility);
+            let update = draw
+                .instances
+                .state
+                .visibility(matrix, draw.mesh.bounds, draw.visibility);
             if let Some(span) = update.changed_id_span {
                 self.scratch.clear();
                 for &id in &draw.instances.state.ids[span.clone()] {
                     self.scratch.extend_from_slice(&id.to_ne_bytes());
                 }
-                self.queue.write_buffer(&draw.instances.id_buffer, span.start as u64 * 4, &self.scratch);
+                self.queue.write_buffer(
+                    &draw.instances.id_buffer,
+                    span.start as u64 * 4,
+                    &self.scratch,
+                );
                 uploads.visible_ids += self.scratch.len() as u64;
                 uploads.visible_id_writes += 1;
                 uploads.write_calls += 1;
@@ -802,8 +1093,13 @@ impl Renderer {
         transparent: &[Draw<'_>],
         traced: bool,
     ) -> Result<(), Error> {
-        self.transparency.emitters.retain(|e| e.handle.strong_count() > 0);
-        let transparent: Vec<&Draw<'_>> = transparent.iter().filter(|d| !d.instances.state.ids.is_empty()).collect();
+        self.transparency
+            .emitters
+            .retain(|e| e.handle.strong_count() > 0);
+        let transparent: Vec<&Draw<'_>> = transparent
+            .iter()
+            .filter(|d| !d.instances.state.ids.is_empty())
+            .collect();
         if transparent.is_empty() && self.transparency.emitters.is_empty() {
             return Ok(());
         }
@@ -811,7 +1107,12 @@ impl Renderer {
         if !traced && self.options.samples != SampleCount::One {
             return Ok(());
         }
-        let Some(size) = self.lighting.hdr.as_ref().map(|h| h.resolved.texture.size()) else {
+        let Some(size) = self
+            .lighting
+            .hdr
+            .as_ref()
+            .map(|h| h.resolved.texture.size())
+        else {
             return Ok(());
         };
         if self.transparency.gpu.is_none() {
@@ -822,41 +1123,84 @@ impl Renderer {
         }
         let scopes = OperationScopes::new(&self.device);
         // Targets at the HDR size: the colour behind a transparent draw and opaque depth.
-        if self.transparency.targets.as_ref().is_none_or(|t| t.color.texture.size() != size) {
-            let generation = self.transparency.targets.as_ref().map_or(0, |t| t.generation + 1);
-            let color = self.tp_target("TP1 colour behind", size, wgpu::TextureFormat::Rgba16Float,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, 8);
-            let depth = self.tp_target("TP1 opaque view depth", size, wgpu::TextureFormat::R32Float,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC, 4);
-            self.transparency.targets = Some(Targets { color, depth, generation });
+        if self
+            .transparency
+            .targets
+            .as_ref()
+            .is_none_or(|t| t.color.texture.size() != size)
+        {
+            let generation = self
+                .transparency
+                .targets
+                .as_ref()
+                .map_or(0, |t| t.generation + 1);
+            let color = self.tp_target(
+                "TP1 colour behind",
+                size,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                8,
+            );
+            let depth = self.tp_target(
+                "TP1 opaque view depth",
+                size,
+                wgpu::TextureFormat::R32Float,
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                4,
+            );
+            self.transparency.targets = Some(Targets {
+                color,
+                depth,
+                generation,
+            });
         }
         // The prelude-composed particle kernels follow prelude reloads.
         let prelude: [u8; 32] = Sha256::digest(self.source.as_bytes()).into();
         if !self.transparency.emitters.is_empty()
-            && self.transparency.gpu.as_ref().unwrap().particles.as_ref().is_none_or(|p| p.prelude != prelude)
+            && self
+                .transparency
+                .gpu
+                .as_ref()
+                .unwrap()
+                .particles
+                .as_ref()
+                .is_none_or(|p| p.prelude != prelude)
         {
             let pipelines = self.tp_particle_pipelines();
             self.transparency.gpu.as_mut().unwrap().particles = Some(pipelines);
         }
         if traced && self.transparency.gpu.as_ref().unwrap().hit_depth.is_none() {
             let primary = self.primary.as_ref().unwrap();
-            let bindings = self.tp_layout("TP1 hit depth", &[
-                entry(30, COMPUTE, uniform(false, FRAME_BYTES)),
-                entry(50, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
-                entry(51, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
-                entry(52, COMPUTE, wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::R32Float,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                }),
-            ]);
-            let layout = self.tp_pipeline_layout("TP1 hit depth", &[&bindings, primary.array_layout()]);
+            let bindings = self.tp_layout(
+                "TP1 hit depth",
+                &[
+                    entry(30, COMPUTE, uniform(false, FRAME_BYTES)),
+                    entry(50, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
+                    entry(51, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
+                    entry(
+                        52,
+                        COMPUTE,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    ),
+                ],
+            );
+            let layout =
+                self.tp_pipeline_layout("TP1 hit depth", &[&bindings, primary.array_layout()]);
             let module = self.tp_module("TP1 hit depth", &hit_depth_source());
             let pipeline = self.tp_compute("TP1 hit depth", &layout, &module, "tp_depth_hits");
             self.transparency.gpu.as_mut().unwrap().hit_depth = Some((bindings, pipeline));
         }
         // Transparent programs' pipelines, by program and sun-visibility path.
-        let rt = self.hardware_shadows.as_ref().is_some_and(|h| h.active_scene().is_some());
+        let rt = self
+            .hardware_shadows
+            .as_ref()
+            .is_some_and(|h| h.active_scene().is_some());
         let default_program = self.standard.id();
         // Sources are composed once per program and frame; pipelines only when they change
         // (a program or prelude reload, or the TLAS appearing).
@@ -868,7 +1212,12 @@ impl Renderer {
         programs.dedup();
         for program in programs {
             let (source, key) = self.tp_glass_source(program, rt);
-            if self.transparency.glass.iter().any(|g| g.program == program && g.key == key) {
+            if self
+                .transparency
+                .glass
+                .iter()
+                .any(|g| g.program == program && g.key == key)
+            {
                 continue;
             }
             let pipelines = match self.tp_glass_pipelines(program, rt, &source, key) {
@@ -899,7 +1248,8 @@ impl Renderer {
         }
         receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
         let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, opaque));
-        let (shadow, bias, texel) = fit.map_or((Mat4::IDENTITY, 0.0, 0.0), |f| (f.matrix, f.bias, f.texel));
+        let (shadow, bias, texel) =
+            fit.map_or((Mat4::IDENTITY, 0.0, 0.0), |f| (f.matrix, f.bias, f.texel));
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
         for draw in opaque {
@@ -918,16 +1268,26 @@ impl Renderer {
         frame[52..56].copy_from_slice(&forward.extend(0.0).to_array());
         frame[56..60].copy_from_slice(&right.extend(0.0).to_array());
         frame[60..64].copy_from_slice(&up.extend(0.0).to_array());
-        frame[64..68].copy_from_slice(&[size.width as f32, size.height as f32, 1.0 / size.width as f32, 1.0 / size.height as f32]);
+        frame[64..68].copy_from_slice(&[
+            size.width as f32,
+            size.height as f32,
+            1.0 / size.width as f32,
+            1.0 / size.height as f32,
+        ]);
         let (toward, lux) = sun.map_or((Vec3::Z, [0.0; 3]), |(t, l)| (-t, l));
-        frame[68..72].copy_from_slice(&toward.extend(f32::from(u8::from(fit.is_some()))).to_array());
+        frame[68..72]
+            .copy_from_slice(&toward.extend(f32::from(u8::from(fit.is_some()))).to_array());
         frame[72..76].copy_from_slice(&[lux[0], lux[1], lux[2], texel]);
         frame[80..84].copy_from_slice(&[self.transparency.step, bias, SHADOW_SIZE as f32, 0.0]);
         let mut bytes = vec![0u8; FRAME_BYTES as usize];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(frame) {
             dst.copy_from_slice(&v.to_ne_bytes());
         }
-        let scene = if traced { self.primary.as_ref().unwrap().scene } else { [0; 4] };
+        let scene = if traced {
+            self.primary.as_ref().unwrap().scene
+        } else {
+            [0; 4]
+        };
         for (k, v) in scene.into_iter().enumerate() {
             bytes[304 + 4 * k..308 + 4 * k].copy_from_slice(&v.to_ne_bytes());
         }
@@ -947,7 +1307,10 @@ impl Renderer {
         for (i, draw) in transparent.iter().enumerate() {
             let mut centre = Vec3::ZERO;
             for &id in &draw.instances.state.ids {
-                let b = shadow_gpu::world_bounds(draw.mesh.bounds, draw.instances.state.models[id as usize])?;
+                let b = shadow_gpu::world_bounds(
+                    draw.mesh.bounds,
+                    draw.instances.state.models[id as usize],
+                )?;
                 centre += (b.min + b.max) * 0.5;
             }
             centre /= draw.instances.state.ids.len() as f32;
@@ -958,12 +1321,18 @@ impl Renderer {
         }
         items.sort_by(|a, b| b.0.total_cmp(&a.0));
         if transparent.len() > MAX_TRANSPARENT_DRAWS {
-            return Err(Error::InvalidInput("more than 64 transparent draws in one frame"));
+            return Err(Error::InvalidInput(
+                "more than 64 transparent draws in one frame",
+            ));
         }
         let mut draw_slots = vec![0u8; SLOT as usize * transparent.len().max(1)];
         for (i, draw) in transparent.iter().enumerate() {
-            let thickness = draw.material.and_then(|m| m.transparency).map_or(0.0, |t| t.thickness);
-            draw_slots[i * SLOT as usize..i * SLOT as usize + 4].copy_from_slice(&thickness.to_ne_bytes());
+            let thickness = draw
+                .material
+                .and_then(|m| m.transparency)
+                .map_or(0.0, |t| t.thickness);
+            draw_slots[i * SLOT as usize..i * SLOT as usize + 4]
+                .copy_from_slice(&thickness.to_ne_bytes());
         }
         self.queue.write_buffer(&gpu.draws, 0, &draw_slots);
         // Emitters' spawns for this step.
@@ -975,7 +1344,11 @@ impl Renderer {
             let first = e.spawned as u32;
             e.spawned += spawned;
             let textured = e.sprite.is_some();
-            self.queue.write_buffer(&e.uniform, 0, &e.params.uniform(first, spawned as u32, textured));
+            self.queue.write_buffer(
+                &e.uniform,
+                0,
+                &e.params.uniform(first, spawned as u32, textured),
+            );
         }
         // ---- GPU ----
         let hdr = self.lighting.hdr.as_ref().unwrap();
@@ -991,25 +1364,48 @@ impl Renderer {
                     layout: bindings,
                     entries: &[
                         frame_entry(&gpu.frame),
-                        wgpu::BindGroupEntry { binding: 50, resource: wgpu::BindingResource::TextureView(&t.hit.view) },
-                        wgpu::BindGroupEntry { binding: 51, resource: wgpu::BindingResource::TextureView(&t.tiles.view) },
-                        wgpu::BindGroupEntry { binding: 52, resource: wgpu::BindingResource::TextureView(&targets.depth.view) },
+                        wgpu::BindGroupEntry {
+                            binding: 50,
+                            resource: wgpu::BindingResource::TextureView(&t.hit.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 51,
+                            resource: wgpu::BindingResource::TextureView(&t.tiles.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 52,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth.view),
+                        },
                     ],
                 });
                 Some(group)
             } else {
-                let depth_view = self.depth.as_ref().unwrap().texture.create_view(&Default::default());
+                let depth_view = self
+                    .depth
+                    .as_ref()
+                    .unwrap()
+                    .texture
+                    .create_view(&Default::default());
                 Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("TP1 raster depth"),
                     layout: &gpu.raster_depth_bindings,
                     entries: &[
                         frame_entry(&gpu.frame),
-                        wgpu::BindGroupEntry { binding: 52, resource: wgpu::BindingResource::TextureView(&targets.depth.view) },
-                        wgpu::BindGroupEntry { binding: 53, resource: wgpu::BindingResource::TextureView(&depth_view) },
+                        wgpu::BindGroupEntry {
+                            binding: 52,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 53,
+                            resource: wgpu::BindingResource::TextureView(&depth_view),
+                        },
                     ],
                 }))
             };
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("TP1 opaque depth"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("TP1 opaque depth"),
+                timestamp_writes: None,
+            });
             if traced {
                 let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
                 pass.set_pipeline(&gpu.hit_depth.as_ref().unwrap().1);
@@ -1027,7 +1423,10 @@ impl Renderer {
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &gpu.shadow.view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -1043,7 +1442,10 @@ impl Renderer {
         }
         // 3. Particles: simulate, light and sort.
         if let Some(p) = &gpu.particles {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("TP1 particles"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("TP1 particles"),
+                timestamp_writes: None,
+            });
             pass.set_bind_group(1, &*gpu.empty, &[]);
             pass.set_bind_group(2, &*gpu.empty, &[]);
             pass.set_bind_group(3, self.lighting.bind(), &[]);
@@ -1056,25 +1458,55 @@ impl Renderer {
             }
         }
         // Per-frame groups: the TLAS, targets and shadow map they bind change between frames.
-        let rt_scene = self.hardware_shadows.as_ref().and_then(|h| h.active_scene()).filter(|_| rt);
+        let rt_scene = self
+            .hardware_shadows
+            .as_ref()
+            .and_then(|h| h.active_scene())
+            .filter(|_| rt);
         let mut glass_entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &gpu.frame, offset: 0, size: wgpu::BufferSize::new(80) }),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &gpu.frame,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(80),
+                }),
             },
             frame_entry(&gpu.frame),
-            wgpu::BindGroupEntry { binding: 31, resource: wgpu::BindingResource::TextureView(&targets.color.view) },
-            wgpu::BindGroupEntry { binding: 32, resource: wgpu::BindingResource::TextureView(&targets.depth.view) },
-            wgpu::BindGroupEntry { binding: 33, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
-            wgpu::BindGroupEntry { binding: 34, resource: wgpu::BindingResource::TextureView(&gpu.shadow.view) },
-            wgpu::BindGroupEntry { binding: 35, resource: wgpu::BindingResource::Sampler(&gpu.compare) },
+            wgpu::BindGroupEntry {
+                binding: 31,
+                resource: wgpu::BindingResource::TextureView(&targets.color.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 32,
+                resource: wgpu::BindingResource::TextureView(&targets.depth.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 33,
+                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 34,
+                resource: wgpu::BindingResource::TextureView(&gpu.shadow.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 35,
+                resource: wgpu::BindingResource::Sampler(&gpu.compare),
+            },
             wgpu::BindGroupEntry {
                 binding: 37,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &gpu.draws, offset: 0, size: wgpu::BufferSize::new(16) }),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &gpu.draws,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(16),
+                }),
             },
         ];
         if let Some(scene) = rt_scene {
-            glass_entries.push(wgpu::BindGroupEntry { binding: 2, resource: scene.as_binding() });
+            glass_entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: scene.as_binding(),
+            });
         }
         let glass_group = (!transparent.is_empty()).then(|| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1088,18 +1520,39 @@ impl Renderer {
             .emitters
             .iter()
             .map(|e| {
-                let sprite = e.sprite.as_ref().map_or(&*gpu.white, |t| self.texture_view(t));
+                let sprite = e
+                    .sprite
+                    .as_ref()
+                    .map_or(&*gpu.white, |t| self.texture_view(t));
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("TP1 particle draw"),
                     layout: &gpu.draw_bindings,
                     entries: &[
                         frame_entry(&gpu.frame),
-                        wgpu::BindGroupEntry { binding: 32, resource: wgpu::BindingResource::TextureView(&targets.depth.view) },
-                        wgpu::BindGroupEntry { binding: 33, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
-                        wgpu::BindGroupEntry { binding: 36, resource: wgpu::BindingResource::TextureView(sprite) },
-                        wgpu::BindGroupEntry { binding: 40, resource: e.particles.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 41, resource: e.sorted.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 42, resource: e.uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 32,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 33,
+                            resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 36,
+                            resource: wgpu::BindingResource::TextureView(sprite),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 40,
+                            resource: e.particles.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 41,
+                            resource: e.sorted.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 42,
+                            resource: e.uniform.as_entire_binding(),
+                        },
                     ],
                 })
             })
@@ -1109,7 +1562,11 @@ impl Renderer {
         let mut index = 0;
         while index < items.len() {
             if let Item::Draw(_) = items[index].1 {
-                encoder.copy_texture_to_texture(hdr.resolved.texture.as_image_copy(), targets.color.texture.as_image_copy(), size);
+                encoder.copy_texture_to_texture(
+                    hdr.resolved.texture.as_image_copy(),
+                    targets.color.texture.as_image_copy(),
+                    size,
+                );
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TP1 transparent"),
@@ -1117,7 +1574,10 @@ impl Renderer {
                     view: hdr_view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 ..Default::default()
             });
@@ -1127,10 +1587,21 @@ impl Renderer {
                     Item::Draw(i) => {
                         let draw = transparent[i];
                         let program = draw.material.map_or(default_program, |m| m.program.id());
-                        let set = self.transparency.glass.iter().find(|g| g.program == program).unwrap();
-                        let material = draw.material.unwrap_or(self.default_material.as_ref().unwrap());
+                        let set = self
+                            .transparency
+                            .glass
+                            .iter()
+                            .find(|g| g.program == program)
+                            .unwrap();
+                        let material = draw
+                            .material
+                            .unwrap_or(self.default_material.as_ref().unwrap());
                         pass.set_pipeline(&set.pipelines[usize::from(draw.mesh.tangent.is_some())]);
-                        pass.set_bind_group(0, glass_group.as_ref().unwrap(), &[(i as u64 * SLOT) as u32]);
+                        pass.set_bind_group(
+                            0,
+                            glass_group.as_ref().unwrap(),
+                            &[(i as u64 * SLOT) as u32],
+                        );
                         pass.set_bind_group(1, &*draw.instances.bind, &[]);
                         pass.set_bind_group(2, &*material.bind, &[]);
                         pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
@@ -1139,7 +1610,11 @@ impl Renderer {
                             pass.set_vertex_buffer(2, t.slice(..));
                         }
                         pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.state.ids.len() as u32);
+                        pass.draw_indexed(
+                            0..draw.mesh.index_count,
+                            0,
+                            0..draw.instances.state.ids.len() as u32,
+                        );
                     }
                     Item::Emitter(i) => {
                         let e = &self.transparency.emitters[i];
@@ -1167,7 +1642,12 @@ impl Renderer {
         let stats = &mut self.transparency.stats;
         stats.transparent_draws = transparent.len() as u32;
         stats.emitters = self.transparency.emitters.len() as u32;
-        stats.particle_capacity = self.transparency.emitters.iter().map(|e| e.params.capacity).sum();
+        stats.particle_capacity = self
+            .transparency
+            .emitters
+            .iter()
+            .map(|e| e.params.capacity)
+            .sum();
         stats.frames += 1;
         Ok(())
     }
@@ -1196,7 +1676,11 @@ struct ShadowFit {
 }
 /// An orthographic sun map over the receivers' footprint, deep enough toward the sun to
 /// hold every opaque caster: square texels, depth 0 at the most sunward caster.
-fn shadow_fit(travel: Vec3, receivers: &[(Vec3, Vec3)], opaque: &[PreparedDraw<'_>]) -> Option<ShadowFit> {
+fn shadow_fit(
+    travel: Vec3,
+    receivers: &[(Vec3, Vec3)],
+    opaque: &[PreparedDraw<'_>],
+) -> Option<ShadowFit> {
     if receivers.is_empty() || !travel.is_finite() {
         return None;
     }
@@ -1205,11 +1689,13 @@ fn shadow_fit(travel: Vec3, receivers: &[(Vec3, Vec3)], opaque: &[PreparedDraw<'
     let u = helper.cross(w).normalize();
     let v = w.cross(u);
     let corners = |(min, max): (Vec3, Vec3)| {
-        (0..8).map(move |i| Vec3::new(
-            if i & 1 == 0 { min.x } else { max.x },
-            if i & 2 == 0 { min.y } else { max.y },
-            if i & 4 == 0 { min.z } else { max.z },
-        ))
+        (0..8).map(move |i| {
+            Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            )
+        })
     };
     let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     for &r in receivers {

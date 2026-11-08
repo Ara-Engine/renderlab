@@ -193,9 +193,8 @@ impl MaterialDescriptor<'_> {
             });
         bytes[40..44].copy_from_slice(&variance.to_ne_bytes());
         // TP1: the last word, zero for opaque materials (WGSL `transparent_opacity`).
-        bytes[44..48].copy_from_slice(
-            &crate::Transparency::word(self.transparency.as_ref()).to_ne_bytes(),
-        );
+        bytes[44..48]
+            .copy_from_slice(&crate::Transparency::word(self.transparency.as_ref()).to_ne_bytes());
         bytes
     }
 }

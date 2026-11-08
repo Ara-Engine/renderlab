@@ -81,10 +81,10 @@ pub use renderer::{
 };
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
+pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use transparency::{
     Emitter, EmitterDescriptor, MAX_PARTICLES, Transparency, TransparencyStats,
 };
-pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use wgpu;
 
 /// Raster shadow receivers read the actual triangle's world-space vertices.
