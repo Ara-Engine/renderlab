@@ -1550,7 +1550,7 @@ def inspect(args):
             axes[1, column].set_title("Mean absolute RGB error" if column else "Reference half difference / 2")
             for axis in axes[:, column]:
                 axis.axis("off")
-        figure.suptitle(f"{track} frame {args.frame}, F0 L{stops}; fixed error scale 0â€“64 codes, saturates above 64; black primary")
+        figure.suptitle(f"{track} frame {args.frame}, F0 L{stops}; fixed error scale 0-64 codes, saturates above 64; black primary")
         figure.colorbar(heat, ax=axes[1, :].tolist(), location="bottom", fraction=.05, pad=.02, label="F0 codes (64+ saturated)")
         figure.savefig(destination / f"{track}-f{args.frame:03}-L{stops}.png", dpi=160)
         plt.close(figure)

@@ -2,7 +2,7 @@
 
 Measurements began 2026-11-07; updated 2026-11-08 UTC. Base `708e87c`, branch `t3/m7-tr0`. Measurement tooling only; no renderer or default changes. Contract: [M7](milestone-7.md), [design §6–8](m7-design.md), [U0](m7-u0.md) and [the recorded T1b experiment](m6-temporal-gpu.md#s2-t1b-camera-motion).
 
-**Status: captures, references and quiet costs complete; full Sun scoring in progress.** All 60 original T1b checkpoints have new black-primary physical-target comparisons, and all eight paired S2G native captures are complete. All three S2G camera tracks are fully scored on both paths (960 native frames). All **288 canonical S2G physical states** are strict-replay accepted, covering every registered frame; the two full Sun scorers are running on CPU. Missing scores are unknown, not zero or passes. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. A cheap temporal pass or a good hold image alone cannot establish this.
+**Status: measurement baseline complete.** All 60 original T1b checkpoints have new black-primary physical-target comparisons. All eight S2G native captures are fully scored: **1,280 frames**, all four registered tracks on both paths, with no missing S2G reference. All **288 canonical physical states** are strict-replay accepted. Quiet Epic/High costs and the per-measure TR1 bar are exported. TR1 must beat **TSR Epic on every measure, on both paths, at no more than half its measured cost** before it becomes the default. Original post-TSR visibility and frozen-film settle remain unavailable, and unknowns block a pass; TR0 makes no TR1 acceptance or default change.
 
 ## What is actually registered
 
@@ -89,7 +89,7 @@ The T1b column below is carried evidence from `b8fa1f3`, not a new render. `base
 | F6 moving residual, L0 | 3.1–3.8 codes, Exact 7.0–7.2 | Physical-target rows below | Physical-target rows below |
 | F6 hold steps L0 / L4 (covered pixels) | 0.2769 / 0.3297 codes | Same-population rows below | Same-population rows below |
 | Settle to the film bar after each event | Hold RMS passes at +8; F2 revealed age-7 **fails**; no universal passing settle count | Original Exact/reference gate unavailable | Same limit |
-| Q-disocclusion, Q-sun and S2-glossy | **Not run on T1b** | S2G reference scoring in progress; quarry extras provisional | Quiet cost curve complete |
+| Q-disocclusion, Q-sun and S2-glossy | **Not run on T1b** | All four S2G tracks scored on both paths; quarry extras provisional | Quiet cost curve complete |
 
 TSR's post-TSR colour must not be presented as film visibility `R_F`. A native shadow mask before TSR does not include TSR's reconstruction leakage and is not a substitute for it. Separate matched full, sun-only and visibility-output runs (or another validated equivalent) are needed for the original three estimands.
 
@@ -145,7 +145,7 @@ Silhouette and recovery measurements on that same new target:
 
 Distance bands use raw RMS (the reference is nearly black there); recovery rows subtract split-half reference noise. Revealed-age pools now contain **993, 729 and 3,738 pixels**, respectively, across all 60 original T1b checkpoints; start-geometry-age pools contain 346,557 / 346,488. These are the complete recovered checkpoint pools on the new physical target; they do not replace historical frozen-target scores. The 0–1.5 px band retains large true silhouette-integration error and is also recorded; a small wider-band RMS is not a zero-pixel trail-width claim. The return flicker comparison uses 346,275 shared pixels. Film-settle certification still cannot borrow the deleted Exact/reference bar. The measured fixed-population hold step is available above; the earlier self-residual diagnostic remains separately labelled.
 
-**Frame-56 witness is now ready.** A separate targeted CPU score (`physical-witness-scores.json`, preserving the full score) evaluates frames 64/72/80/81/96. The 56→64 physical changed mask contains **113,553 pixels**. At +8 after stop (frame 72):
+**Changed-mask witness.** A separate targeted CPU score (`physical-witness-scores.json`, preserving the full score) evaluates frames 64/72/80/81/96. The 56→64 physical changed mask contains **113,553 pixels**. At +8 after stop (frame 72):
 
 | Changed-pixel measure | T1b black replay | TSR Epic/HRT | TSR Epic/VSM, no RT |
 |---|---:|---:|---:|
@@ -242,30 +242,37 @@ F2 covered pools contain **98,629 / 95,359** age-3 / age-7 pixels; the age-7 bac
 
 The four full-frame/error sheets at 64 and 95 have been inspected. Reference-half noise is much smaller than the visible metal/front-edge discrepancies. The one-frame self-final proxy is not an independent film-settle result. Both native raw inputs are summarized and deleted (**2,654,208,000 bytes**); readbacks, hashes and inspected sheets remain.
 
-## S2G moving Sun: provisional witnesses
+## S2G moving Sun: complete physical-target scores
 
-While references arrive, `physical-batches/sun-first49-witness.json` scores **ten selected frames per path**: 0, 1, 7, 8, 31, 32, 39, 40, 47 and 48. This is not a full-track score or a substitute for the pending 160-frame result. Frame-32 full-image/error sheets at L0 and L4 are inspected.
+`gz-e-n-s1` and `gz-e-r-s1` each score **160/160 frames**, with no missing reference, using the same D8 target, black primary, registered exposure and fixed external age protocol. The camera stays fixed while the Sun turns continuously at 0.25 degrees per frame. These are combined final-colour errors, with no historical T1b Sun score.
 
-| Witness | TSR Epic, no RT | TSR Epic, HRT |
+| Measure | TSR Epic, no RT | TSR Epic, HRT |
 |---|---:|---:|
-| Frame 32 covered L0 / L4 RMS | 7.9580 / 6.1566 | 15.3010 / 8.2510 |
-| Frame 32 metal / dielectric highlight energy ratio | 0.06115 / 1.08560 | 0.16193 / 1.26292 |
-| Frame 48 covered L0 / L4 RMS | 7.8707 / 6.1292 | 15.5139 / 8.2749 |
-| Frame 48 metal / dielectric highlight energy ratio | 0.05416 / 0.98760 | 0.13230 / 1.01246 |
-| F6 L0 residual, frames 31→32 | 0.84754 | 1.06799 |
-| F6 L0 residual, frames 47→48 | 0.84491 | 0.98816 |
+| All-frame covered L0 RMS, p50 / p95 | 7.30291 / 8.02846 | 14.5238 / 15.5098 |
+| All-frame covered L4 RMS, p50 / p95 | 6.07872 / 6.18674 | 8.12393 / 8.26825 |
+| Frame 64 all-covered L0 / L4 RMS | 7.73503 / 6.11676 | 15.4144 / 8.24134 |
+| Frame 64 metal-0.1 L0 / L4 RMS | 18.9082 / 4.84518 | 38.8537 / 11.7359 |
+| Frame 64 dielectric-0.2 L0 / L4 RMS | 2.07946 / 0.337464 | 2.34724 / 0.378683 |
+| Frame 64 edge L0 / L4 RMS | 18.227 / 29.5099 | 21.771 / 29.8118 |
+| Frame 64 background-centre L0 / L4 RMS | 1.40261 / 3.25717 | 1.40313 / 3.25722 |
+| Revealed all-covered L0, age 3 / 7 | Not applicable (fixed camera) | Not applicable (fixed camera) |
+| Revealed background-centre L0, age 7 | Not applicable (fixed camera) | Not applicable (fixed camera) |
+| Frame 72 eight-frame changed-mask L0 / L4 RMS | 16.4255 / 7.2054 | 31.7007 / 13.9933 |
+| Frame 72 changed-mask L0 signed mean / SE | -10.8862 / 0.0445774 | -21.5073 / 0.0840598 |
+| Input-changing F6 L0 residual, p50 / p95 | 0.683122 / 0.87238 | 0.850344 / 1.04649 |
+| Input-changing F6 L4 residual, p50 / p95 | 0.379629 / 0.465734 | 0.425389 / 0.494167 |
+| Frame 64 metal / dielectric highlight energy ratio | 0.0469204 / 0.962169 | 0.103507 / 0.952645 |
+| Frame 64 metal-0.1 centroid / peak drift, pixels | 7.62426 / 205.779 | 5.27868 / 13.1529 |
+| Frame 64 dielectric-0.2 centroid / peak drift, pixels | 1.89621 / 535.709 | 1.12001 / 535.709 |
+| Frame 159 metal / dielectric highlight energy ratio | 0.818515 / 0.958365 | 0.733998 / 0.955634 |
+| Frame 159 metal-0.1 centroid / peak drift, pixels | 7.16412 / 185.777 | 9.00787 / 184.968 |
+| Frame 159 dielectric-0.2 centroid / peak drift, pixels | 0.31701 / 478.127 | 0.277475 / 478.127 |
+| Frame 64 age-at-least-32 background error pixels over 1 / 4 / 8 L0 codes | 0 / 0 / 0 | 0 / 0 / 0 |
+| Frame 64 age-at-least-32 background error pixels over 1 / 4 / 8 L4 codes | 0 / 0 / 0 | 0 / 0 / 0 |
 
-The Sun turns continuously; the stationary camera does not make this a temporal hold. No stop/settle count is inferred. These are combined final-colour errors against the new physical reference, with no T1b Sun score available. Sun native inputs remain retained for the complete score and final inspection.
+RMS subtracts split-half reference noise. F6 subtracts consecutive physical-reference changes on covered/same-instance pixels with external geometry age at least eight. The 64→72 input-change mask contains **75,759 pixels**. This is eight frames of continuous Sun motion, not eight frames after a stop. There is no camera reveal, lighting step or stop/hold event in this track, so no disocclusion-recovery or settle count is inferred.
 
-The later `sun-input-change72.json` batch scores six selected frames per path (56, 57, 63, 64, 71, 72). Its frame-72 L0/L4 full-image/error sheets are inspected. The fixed **64→72 input-change mask contains 75,759 pixels**; this is eight frames of continuous Sun motion, not eight frames after a stop.
-
-| Later Sun witness | TSR Epic, no RT | TSR Epic, HRT |
-|---|---:|---:|
-| Frame 72 covered L0 / L4 RMS | 7.4194 / 6.0856 | 15.1664 / 8.2080 |
-| Frame 72 changed-mask L0 / L4 RMS | 16.4255 / 7.2054 | 31.7007 / 13.9933 |
-| Frame 72 changed-mask L0 signed mean / SE | -10.8862 / 0.04458 | -21.5073 / 0.08406 |
-| Frame 72 metal / dielectric highlight energy ratio | 0.05164 / 0.95985 | 0.11996 / 0.95147 |
-| F6 L0 residual, frames 71→72 | 0.79386 | 1.01393 |
+The earlier ten-frame and six-frame witness batches remain separately identified. Their per-frame rows and overlapping adjacent-frame residuals match the complete scores exactly (`cpu-sun-final-readback.json`). Full-image/error sheets at **64 and 159**, L0 and L4, have been inspected, including the split-half-noise panels. Both native raw inputs are hash-recorded and deleted (**2,654,208,000 bytes**); recipes, runtime camera/light/exposure/jitter readbacks, score JSON and inspected sheets remain.
 
 ## Cost method and quiet results
 
@@ -301,7 +308,7 @@ Concrete **p50 / p95 / p99 ceilings for TR1**, in addition to beating Epic on ev
 | S2G, no RT | 0.700575 / 0.731025 / 0.7430125 | 1.322625 / 1.342575 / 1.3536725 |
 | S2G, HRT | 0.674950 / 0.7204375 / 0.734840 | 1.497425 / 1.5123625 / 1.533360 |
 
-`scripts/m7-tr0-bar.py` exports the retained per-measure physical-target comparisons to `E:/renderlab-work/m7-tr0/bar/physical-measures.csv` and pins their sources in `bar/tr1-bar.json`. The JSON also contains all four Epic **p50/p95/p99 half-cost ceilings**. It preserves missing S2G cases explicitly, keeps the historical frozen-target file separate, and never declares TR1 accepted. Colour RMS, absolute bias, highlight energy-ratio error, spatial drift, disocclusion-age pools, background extents and reference-subtracted flicker remain individual measures; improvement in one does not cancel a loss in another.
+`scripts/m7-tr0-bar.py` exports **480,074 unique per-measure rows** to `E:/renderlab-work/m7-tr0/bar/physical-measures.csv` and pins their sources in `bar/tr1-bar.json`. The final CPU readback verifies all **315 source hashes**, all eight full S2G cases and all 60 historical checkpoints in each quarry comparison (`bar/final-readback.json`). The JSON also contains all four Epic **p50/p95/p99 half-cost ceilings**. Any future missing case stays explicit. It keeps the historical frozen-target file separate and never declares TR1 accepted. Colour RMS, absolute bias, highlight energy-ratio error, spatial drift, disocclusion-age pools, background extents and reference-subtracted flicker remain individual measures; improvement in one does not cancel a loss in another.
 
 These ceilings use the paired **end-to-end increment**, not half the standalone TSR marker. No TR1 implementation has been timed or qualified here. `cost-per-frame.csv` retains **1,220 per-input-frame rows** with eight paired samples each, median/p95 frame and pass costs; the first eight cold-repeat frames are excluded as registered and remain in raw CSV. `cost-summary.json` keeps `quiet` and earlier `screen` rows separate. Capture processes and the memory-aborted earlier block are excluded. All game-time timing is ineligible; none supplies this table.
 
@@ -309,13 +316,13 @@ Cost rows are keyed to the registered **CSV input chronology**. Installed `Launc
 
 T1b's recorded total span was 1.108–1.128 ms, +0.203–0.223 ms over Interactive, on its separate Vulkan run. Those historical measurements and U0's earlier 1.41–1.59 ms TSR-pass screen are not pooled into the quiet denominator.
 
-## Settle diagnostics and remaining work
+## Settle limits and reference qualification
 
 `hold-diagnostic.json` reports full-image consecutive-frame changes and residuals to the **last held frame** after the F0 transform. That is useful for capture diagnostics but uses neither an independent reference nor T1b's covered/changed populations. Its settle threshold (mean <0.5 code and p99 <4, sustained to the end) is labelled as a self-residual proxy and cannot pass the eight-frame film gate.
 
 On Q-walk, High/VSM's full-image median hold step is **0.1349 code**, with the proxy threshold first sustained 3 frames after the hold starts. Epic/HRT's is **0.1770 code**, already below that proxy threshold at the first held frame. These include the large black background and compare with the final hold; they are **not** directly comparable to T1b's covered-pixel 0.2769 / 0.3297 values, and are not film-settle results.
 
-U0b now supplies quarry textures/RLE2 illumination and black-primary references. T1b's age masks have been recovered and verified above. All original checkpoints, the frame-56 changed-mask dependency and adjacent return witnesses around 120/128 are now scored. Pose 64 supplies every held frame 65–96. Original frozen raw references and Exact images remain deleted. The new physical target and old recorded bars stay separate. Quiet costs and the eight-run S2G native matrix are complete; full S2G reference scoring, the post-TSR visibility estimand and every-event film settle remain incomplete.
+U0b now supplies quarry textures/RLE2 illumination and black-primary references. T1b's age masks have been recovered and verified above. All original checkpoints, the frame-56 changed-mask dependency and adjacent return witnesses around 120/128 are now scored. Pose 64 supplies every held frame 65–96. Original frozen raw references and Exact images remain deleted. The new physical target and old recorded bars stay separate. Quiet costs and all eight full S2G scores are complete. The post-TSR visibility estimand, original frozen-film settle, 68 intervening Q-walk references and connected trail-width certification remain unavailable; the measured background-error extents do not replace them.
 
 **S2G reference qualification:** `gr-1p-64-a` failed its original strict replay and remains rejected. U0b traced the at-most-two-ULP secondary RGB variation to acceleration-structure rebuilds; fixed-AS runs were identical, including after pipeline recreation, and all geometry/D/V/count records were identical. Its qualified tracer now deterministically reconstructs barycentrics from the hardware-selected triangle and precisely encodes the small sun cone height. The latter removes the earlier 0.2108% S2G irradiance loss. Eight independent-AS/pipeline 1024-spp rebuilds of the original S2G frame-64 repro are bit-identical on mean, both halves and every geometry/D/V/count byte, with zero invalid pixels. Final Mitsuba checks pass: X3 bias +0.000443% / 0.107 sigma and finite-disk X2 +0.005112% / 1.212 sigma. Qualified executable SHA256 is `bf169ef7f8599bbff53bc8edcdb1875e8c117b09630e1c912e0f0f5d73335dfb`, pinned under TR0's `binaries/`. TR0 reuses U0b's qualified `s2g-camera-1px-064` archive (SHA256 `a283b188bd1057f12978a712f6a3423fbac3274b0c1ac55211026416941643a7`), rather than rendering it again. Rejected probe raw output/generated source have been hashed and deleted (154,723,570 bytes); its summaries/process/replay remain.
 
@@ -353,14 +360,14 @@ Targeted scores of the synchronized 1-pixel captures against **D8 f64** retain t
 
 All **129 canonical camera references** are strict-replay accepted, covering every one of the 480 registered camera frames through exact aliases. The final one-pixel age pass extends the protocol to **640/640 frames**, including the static-camera Sun geometry. Hash-checked geometry cleanup removed **1,276,597,727 bytes**; per-frame masks, geometry identities and deletion hashes remain. `s2g/camera-completion.json` records this milestone. The remaining **159 Sun radiance states** also completed, one state per process, with strict mean/half/geometry/D/V/count identity and zero invalid pixels. `s2g/physical-completion.json` audits all **288 canonical states** and pins each metadata/archive/replay identity. The two imported qualification controls each passed eight independent rebuilds. TR0 never used U0b's later bounded-AS acceptance policy.
 
-After all six camera captures were scored and inspected, every related alias on both paths was checked against its reference hash, then the archive bytes were hashed before cleanup. **128 summarized camera archives, 6,793,920,757 bytes**, are deleted under the raw-retention policy. The shared frame-zero archive remains for Sun frame 0. Metadata, per-array/archive identities, recipes, scores and `s2g/camera-retention-plan.json` remain; re-scoring those camera inputs requires regenerating the deleted raw data. Provider-owned qualification archives are untouched.
+After all six camera captures were scored and inspected, every related alias on both paths was checked against its reference hash, then the archive bytes were hashed before cleanup. **128 summarized camera archives, 6,793,920,757 bytes**, were deleted at that stage. The shared frame-zero archive was retained until the Sun scores finished, then included in the final **160-archive cleanup, 8,540,649,555 bytes**. All 288 summarized owned corpus bodies are now deleted. Metadata, per-array/archive identities, recipes, scores and both `s2g/camera-retention-plan.json` / `s2g/final-retention-plan.json` remain; re-scoring requires regenerating the deleted raw data. Provider-owned qualification archives are untouched.
 
-TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding its 45-second contention cutoff with only 3.117 GiB available RAM, and continued CPU scoring. Short native captures resumed after headroom improved. The **game hold was released at 15:36:21Z**. TR0 explicitly reserved the second quiet window after rt1c, before dl3 and U0b's long timings. The queued `tq1` cost matrix uses one exclusive lease; old screens and any game-time timings remain separate and cannot supply the final speed denominator.
+TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding its 45-second contention cutoff with only 3.117 GiB available RAM, and continued CPU scoring. Short native captures resumed after headroom improved. The **game hold was released at 15:36:21Z**. TR0 explicitly reserved the second quiet window after rt1c, before dl3 and U0b's long timings. The completed `tq1` cost matrix used one exclusive lease; old screens and any game-time timings remain separate and cannot supply the final speed denominator.
 
 ## Safety, provenance and retention
 
 - Shared atomic directory lock: `D:/Coding/renderlab-work/gpu-slot.lock`, with token-checked release and reservation/release lines in `E:/renderlab-work/gpu-schedule.md`. Each own run is blocked to completion. A busy lock defers the run; it never removes another worker's lock.
-- Normal preflight requires ≥4 GiB available memory and no game/foreign renderer; live guards abort below 2 GiB. During the explicit **GAME HOLD RELAXED**, TR0 allows only headless work, leases ≤3 minutes, child timeouts ≤120 seconds and a higher **6 GiB launch headroom**. Unreal is limited to two CPU cores. All timings during play are contended and ineligible for speed claims; a quiet rerun is queued. No windows/viewers, focus/input automation, desktop/game captures, heavy build or Nsight work occurs. The latest anchored schedule control is checked before acquiring a lease; a strict hold defers before reservation. The one `t1b-black-a` preflight caught `cs2.exe`, launched no GPU child and released immediately; the schedule hold arrived during that attempt.
+- Normal preflight requires ≥4 GiB available memory and no game/foreign renderer; live guards abort below 2 GiB. During the explicit **GAME HOLD RELAXED**, TR0 allows only headless work, leases ≤3 minutes, child timeouts ≤120 seconds and a higher **6 GiB launch headroom**. Unreal is limited to two CPU cores. All timings during play are contended and ineligible for speed claims; the completed quiet `tq1` rerun supplies the cost bar. No windows/viewers, focus/input automation, desktop/game captures, heavy build or Nsight work occurs. The latest anchored schedule control is checked before acquiring a lease; a strict hold defers before reservation. The one `t1b-black-a` preflight caught `cs2.exe`, launched no GPU child and released immediately; the schedule hold arrived during that attempt.
 - Other foreign renderers remain conflicts. Preflight records free/available memory and GPU/process inventory. `build-script-build.exe` is recognized as a CPU build helper after a false smoke abort. No Cargo was run by TR0, during or outside a lease.
 - Functional reference states additionally require at least **5 GiB free disk at preflight**. This is a launch check; it is not a live two-GiB disk-abort claim. Available RAM is monitored live with the separate two-GiB abort threshold.
 - Under foreign compiler load, an inherited WMI memory query timed out and its conflict-monitor thread exited. TR0 now reads physical memory through `GlobalMemoryStatusEx`, retaining the PDH available-memory launch/live thresholds. Other inventory-query failures become an explicit stop condition for **only the owned child**; failed or nonfinite live-memory readings also fail closed. A CPU child-stop control passes. Initially `resource-pause.json` required 60 Cargo-free seconds after a resource/monitor failure. Islam's later T3-recovery instruction explicitly removes that wait for **correctness-only reference states**. Only the reference entry point bypasses it; the RAM, disk, game-policy, defer/foreign-lock, live-monitor and strict-replay guards remain active. The CPU queue control verifies this boundary without a GPU launch (`cpu-correctness-queue-readback.json`). Normal functional references may use the explicitly authorized 600-second guard; game-play limits remain 120 seconds/three minutes. No reference duration supplies a speed claim, and the earlier qualified quiet timing data is unchanged.
@@ -370,7 +377,8 @@ TR0 paused new launches after U0b's quarry frame took 52.41 seconds, exceeding i
 - No patented reconstruction/denoising method is implemented or adopted. TSR is measured as the installed Unreal binary; no Epic implementation is copied. Renderlab's default and its patent-policy gates remain unchanged.
 - `clean` removes owned raw `.bin/.npz/.npy/.exr` files larger than 5 MB only after a capture summary exists, recording sizes and SHA256s. Pending scoring inputs are retained until scored. No TR0 Cargo target exists.
 - The additional provisional quarry disocclusion, sun-jump and sun-fast captures retain their recipes, runtime readbacks and inspected frame-32 PNGs. Their summarized raw dumps (1,202,688,000 bytes) are deleted; no historical T1b score or complete quality gate is claimed for those extras (`provisional-quarry-retention.json`).
-- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. All six completed S2G camera inputs are deleted; the two Sun inputs remain until scoring and inspection finish.
+- `prune` removes unused large native resource slices/outputs after readback, preserving the exact Tonemap-consumed HDR input and small exposure/parameter buffers for pending reference scoring. All completed Q-walk/T1b replay, retired S2G variants and sun-only diagnostic raw dumps are summarized and deleted. `scripts/m7-tr0-retention.py` rebuilds `retention-summary.json` from unique owned path/content deletions, including compactor raw arrays, transferred archives, generated scenes and duplicate executables; imported provider deletion records are excluded. Every deletion is hashed. All eight completed S2G native inputs are deleted after scoring and inspection. All summarized owned physical/geometry archives and the old generated failing-repro scene are also hash-recorded and deleted; immutable executables, metadata, masks, summaries and inspected PNGs remain. Provider-owned qualification archives are untouched.
+- Final retention accounting records **223,647,511,603 bytes across 10,993 owned file/content deletions**, cumulatively, not simultaneous peak disk occupancy. The last Sun/native cleanup removes 8,540,649,555 / 2,654,208,000 bytes after score/alias/hash checks. A final inventory finds no owned raw `.bin/.npz/.npy/.exr/.rgba16f/.u32/.f32` dump above 5 MB. Large JSON/CSV summaries remain as required.
 - `docs/milestones-5-6-decisions.tsv` is untouched.
 
 ## Reproduce
