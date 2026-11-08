@@ -4,14 +4,30 @@ Unit GC1, branch `t3/m7-gc1` (from main `fa3b74b`; main merged at `9f98869`, PP1
 
 ## 1. Status
 
-FINAL_STATUS
+Final code: binary `b3` (lease `f1`, timing; `f2`, images and memory), then `b4` (`b3` plus the slot clamp of section 3.1, lease `f3`: SV and the lib suite). Main's code is lease `a4` (binary `b1` with main's shaders). Functional leases on the shared GPU, not quiet windows: ranges, not certified timings. The cache-off frame in `f1` is 0.65-0.85 ms heavier than in `a4` because main gained PP1's post-processing between them, so the increments are what compare.
 
-**Kept (all quality-neutral on the quarry, section 4):**
-1. **2^20 table slots** (was 2^19). On the quarry, buckets had filled. About 280 claims a moving frame failed on RT (1,100 on non-RT), those cells were requested again every frame, and lookups walked crowded buckets, which was the shading pass's largest hotspot in G2b's trace. The table is 224 MiB, under the non-RT device's 256 MiB buffer limit.
+| Camera moving, quarry pose 0, over the cache-off frame of the same visit | Main (`a4`) | **GC1** (`f1`) |
+|---|---:|---:|
+| **RT increment** (p50 of 4 visits) | +1.98-2.22 ms (2.08) | **+1.60-2.01 ms (1.68)** |
+| … shading pass on / off | 1.84 / 0.59 ms | **1.60** / 0.59 ms |
+| … cache passes p50 | 831 µs | **645 µs** |
+| **Non-RT increment** (p50 of 4 visits) | +2.75-2.95 ms (2.84) | **+1.90-2.98 ms (2.51)** |
+| … shading pass on / off | 1.47-1.66 / 0.54 ms | **1.32-1.43** / 0.54 ms |
+| … cache passes p50 | 1,534 µs | **1,332 µs** |
+| Cut: gather queue empty at frame (RT / non-RT) | 29 / 115 | **23 / 93** |
+| Cut: gathers in 160 frames (RT / non-RT) | 671k / 652k | **540k / 528k** |
+| Quarry TR1x64, all-covered RMS at −14 (RT / non-RT, pose 0) | 7.388 / 7.242 | 7.390 / 7.241 |
+
+**Against Lumen** (A, [M7-U0](m7-u0.md): Lumen Epic's GI pass on the quarry is 1.24 ms HW and 1.21 ms SW). The 2x target needs 0.62 / 0.61 ms. GC1 still misses by about 2.6-3.2x on RT and 3.1-4.9x on non-RT (G2b's reading: 2.2-2.6x and 4.3-4.7x, on frames that still carried the cut's drain). Section 2 explains why main's moving cost read higher than G2b's.
+
+**Verdict.** About −0.4 ms (RT) and −0.3 ms (non-RT) a moving frame, and cuts settle about a fifth sooner, at the same quarry and SV image. **The GI budget is still missed.** The largest remaining stage is the shading pass's +1.0 ms (RT) / +0.8 ms (non-RT) increment.
+
+**Kept (quality-neutral on the quarry and SV, section 4):**
+1. **2^20 table slots** (was 2^19). On the quarry, buckets had filled. About 280 claims a moving frame failed on RT (1,100 on non-RT), those cells were requested again every frame, and lookups walked crowded buckets, which was the shading pass's largest hotspot in G2b's trace. The table is 224 MiB. A device whose storage-binding limit is wgpu's default 128 MiB gets 2^19 (section 3.1).
 2. **Gathers stop once every hit value they read is final** (`gstop2`). A cell's next gather would re-trace the same fixed rays against the same values and replace its value with itself.
 3. **Binned-SAH runtime software BVHs** (the non-RT merged world and full-detail meshes): the same hits, fewer node and triangle tests (section 3.3).
 
-**Screened and recorded:** gather stride 2 (half the gather rays; same quarry image; section 3.4), parallel bucket-key loads and a probe load-before-compare-exchange (section 3.5).
+**Screened and rejected:** gather stride 2 as the default (half the gather rays and the same quarry image, but a visibly finer mottle on SV's flat panels; section 3.4); parallel bucket-key loads and a probe load-before-compare-exchange (not clearly better on both paths; section 3.5).
 
 **Not done (recorded in the gaps):** a half-resolution lookup with geometry-aware upsampling (a new pass, buffer and shading binding, over this time box), level hysteresis, and an on-screen-first cut gather order.
 
@@ -53,6 +69,7 @@ Same lease, same process, interleaved visits (M, `a4`):
 - **Why.** A cut fills the table with every visible cell, its parents, and two generations of gather hit cells. At 2^19 slots, 8-slot buckets filled: claims failed, the same cells were listed as misses every frame, and a lookup for a missing key walked to the bucket's end. Every lookup that isn't at its key's start slot pays one dependent load per step, in shading, the probe and the gathers.
 - **Cost.** Memory: +112 MiB of table, +12 MiB of queues, +8 MiB of outgoing radiance (section 5). A cut also clears a larger table.
 - **Image.** Same as 2^19 on every quarry population (section 4).
+- **Device limits.** Shading binds the whole table, so a device must allow a 224 MiB storage binding. The SV rig's non-RT device keeps wgpu's default 128 MiB limit, and the first SV run failed to create the lighting bind group (lease `f2`). The quarry harness's devices request higher limits. `gi_slots` now clamps the slot count to the largest power of two whose table fits the device's binding and buffer limits, so such a device gets 2^19, G2b's table. That also covers the opt-in 2^21, which G2b found failing on the non-RT device.
 
 ### 3.2 Gathers stop on final hits (kept)
 
@@ -92,7 +109,17 @@ That is about 18-22% off each software-ray pass. The comparison crosses two leas
 
 ### 3.4 Gather stride 2 (screened; not the default)
 
-GS2_RESULT
+`gather_stride: 2` (G2b's opt-in) traces the blocked directions k % 2 == 0 at twice the weight: a fixed subset, no ranking.
+
+| (M) | Default | Stride 2 |
+|---|---:|---:|
+| Gather pass, moving (RT / non-RT, `f1`) | 52 / 223 µs | 39 / 183 µs |
+| Gather rays a moving frame (RT / non-RT) | 12.7k / 11.6k | 6.4k / 5.0k |
+| Cut worst frame (RT / non-RT, `f1`, `f2`) | 12.4 / 13.4 ms | 10.7 / 12.7 ms |
+| Quarry TR1x64 all-covered, pose 0 (RT / non-RT, `a4`) | 7.388 / 7.242 | 7.393 / 7.227 |
+| SV frame RMS at frame 48, gaps / overview pose (RT, `f2`) | 2.86 / 1.54% | 2.97 / 1.66% |
+
+**Not the default.** The quarry can't tell the two apart, but SV's flat panels show a finer, slightly more visible mottle at stride 2 (`analysis/f2-sv-gaps-gs2.png`: default | stride 2). Each cell's fixed-direction quadrature error grows with fewer directions, as G2b found for finer cells. It stays an opt-in setting.
 
 ### 3.5 Lookup and probe micro-changes (screened)
 
@@ -107,7 +134,7 @@ Lease `f1` (M, binary `b3`, the variant's shaders in their own process; cache-on
 | `lkw` | **1.501-1.514** / 0.655 ms | — | 430 µs |
 | `lkw` + `plc` | 1.501-1.509 / 0.654 ms | 1.409-1.437 / 0.540 ms | 435 / 448 µs |
 
-- **`lkw`: rejected.** It cuts RT's cache-on shading by 0.1 ms but makes the cache-off shading 0.066 ms slower (the same code is composed either way). On non-RT it reads 0.05-0.09 ms slower on three visits of four. Not clearly better on both paths: a codegen effect of the kind [shader-codegen hazards](m7-r1.md) records.
+- **`lkw`: rejected.** It cuts RT's cache-on shading by 0.1 ms but makes the cache-off shading 0.066 ms slower (the same code is composed either way). On non-RT it reads 0.05-0.09 ms slower on three visits of four. Not clearly better on both paths: a code-generation effect like the one R1 recorded for its inlined hit shading ([m7-r1.md](m7-r1.md) section 4).
 - **`plc`: rejected.** No measurable probe change.
 
 ## 4. Quality (M)
@@ -126,11 +153,33 @@ Lease `f1` (M, binary `b3`, the variant's shaders in their own process; cache-on
 - **Inspected** (`analysis/a4-{rt,nonrt}-crop.png`: reference | main | `gstop2` | 2^20 | stride 2, Islam's crop at −14 stops): no visible difference on either path. The cave above the dark pyramid rock keeps G2's blotchy mottle in all of them.
 - **1x captures.** The first static capture of each process is taken while TR1 is still on (TR1b's harness leaves TR1 off only after its first TR1 capture, as G2b recorded). Its 209 / 263 pinholes against 1,459 / 1,900 are that artifact, not a variant's. The later 1x captures match main within 0.02 codes.
 
-FINAL_QUALITY
+**Final code** (lease `f2`, binary `b3`, TR1x64; `tools/compare.py` against main in `a4`):
+
+| All-covered RMS −14 / −10, pinholes | RT pose 0 | RT pose 1 | Non-RT pose 0 | Non-RT pose 1 |
+|---|---:|---:|---:|---:|
+| Main | 7.388 / 142 | 7.387 / 126 | 7.242 / 128 | 7.232 / 125 |
+| GC1 | 7.390 / 142 | 7.389 / 127 | 7.241 / 127 | 7.231 / 125 |
+
+- **Non-RT:** no population worse than main's by more than 0.05 codes.
+- **RT:** the same everywhere except the hollow under the central slab, +0.04 / +0.14 codes (pose 0) and +0.05 / +0.19 (pose 1), against main's 13.53 / 26.7 and cache-off's 22.84 / 31.08.
+  - It is systematic, and comes from the early stop's settled-none rule. A tertiary cell no longer retries a hit whose cell another request creates a frame later, so a little multi-bounce goes missing in the enclosed hollow.
+  - Not visible: `analysis/f2-rt-hollow.png` shows reference | main | GC1 at −10 stops, 5x.
+- **Inspected:** `analysis/f2-{rt,nonrt}-crop.png` (reference | main | GC1 | cache off, Islam's crop at −14 stops) are indistinguishable from main.
+
+SV_RESULT
 
 ## 5. Memory
 
-MEMORY_RESULT
+Lease `f2` (M), `memory` section: the allocator after a settled pose 0, with the cache's buffers live.
+
+| | RT off | RT GC1 | Non-RT off | Non-RT GC1 |
+|---|---:|---:|---:|---:|
+| Allocator reserved (allocated) | 2,734 (2,554) MiB | **3,022 (2,850) MiB** | 3,370 (3,218) MiB | **3,722 (3,553) MiB** |
+| Cache table / work / bounce buffers | — | 224.0 / 56.2 / 28.0 MiB | — | 224.0 / 56.2 / 28.0 MiB |
+| Software ray geometry (merged world, SAH) | — | — | — | 38.7 MiB |
+| Unreal, quarry, DXGI LocalUsedMB (N8h, A) | | VSM RT on 3,946 MiB | | VSM no-RT 3,912 MiB |
+
+**Below Unreal's on both paths,** by 924 MiB (RT) and 190 MiB (non-RT), compared as G2 did (our allocator against Unreal's DXGI total, which was measured without Lumen, so the margin is conservative, I). The 2^20 table adds about 132 MiB over G2b's cache. The non-RT margin is now thin: a device or scene that needs the room can set `slots_log2: 19` at the 2^19 cost of section 3.1.
 
 ## 6. Claim notes
 
