@@ -108,7 +108,7 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
 /// declares nothing). TR1 shortens such pixels' history while their view direction turns,
 /// so reflections do not trail across their surfaces. The struct is composed on every stage
 /// of a declaring program; only traced shading entries call the hook.
-const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
+pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
 const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
 /// The traced entry's hint for programs that declare nothing: view-independent.
 const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 { return 1.0; }\n";

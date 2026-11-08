@@ -201,6 +201,14 @@ The standard program requests them for every material. The example's program sho
 
 R1 records three constraints. The hook is GGX-shaped, so a non-GGX style gives its nearest GGX lobe or weight 0. Hits read the open environment, not the GI cache. A program that declares the hook but not the input, or the reverse, traces nothing.
 
+Reflections move across their surfaces when the view turns, so TR1's surface history would trail them. A program says how much of its output does so with a second optional hook (MQ2, [m7-mq2.md](m7-mq2.md)), on both paths:
+
+```wgsl
+fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence  // ViewDependence { alpha, share }
+```
+
+`share` (0-1) is the part of `shade`'s output that moves with the view like a GGX reflection of `alpha`. TR1 caps such pixels' history while their view direction turns (`Reconstruction::view_budget`), so mirrors and glossy reflections stay sharp in motion; still views keep full history. The standard and example programs return their specular albedo's share under uniform light. A program that declares nothing (the toon programs) is treated as view-independent.
+
 ## Frames
 
 | Call | Meaning |
@@ -228,9 +236,10 @@ struct Parameters { ... };                               // f32, vecN<f32>, u32,
 const DEFAULT_PARAMETERS: Parameters = Parameters(...);
 fn scatter(s: Surface, input: SurfaceInput, wi: vec3<f32>, wo: vec3<f32>) -> vec3<f32> { ... } // bounce light
 fn emission(s: Surface, input: SurfaceInput) -> vec3<f32> { ... }
+fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence { ... } // TR1 history hint
 ```
 
-Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` hook joins `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
+Engine inputs a program may call include `sample_base_color`, `sample_metallic_roughness`, `material_normal`, `light_count`, `light_sample`, `light_visibility` (world-space, never screen-space), `indirect_irradiance` and `indirect_radiance` (GI-occluded sky and bounce), `environment_lobe*`, `specular_incident` (traced reflections), `decal_base_color` and `decal_metallic_roughness`, `brdf`, `expose` and `exposed_product`. The optional `reflection_lobe` and `view_dependence` hooks join `scatter` and `emission` (see [Reflections](#reflections) and [Decals](#decals)). shaders/programs/standard.wgsl and toon.wgsl are complete references. A program without `scatter`/`emission` still blocks light but reflects no bounce light.
 
 **Programs per object.** Each material names its program, and a frame may mix up to 32 programs on both quality paths: traced RT primaries and the non-RT visibility buffer shade each program's pixels with that program's own pipeline (MP1, [m7-mp1.md](m7-mp1.md)); raster frames switch pipelines per draw. The example's props use examples/game_scene.wgsl and its hero examples/game_toon.wgsl. Two limits remain: a reflection hit on another program's object is shaded by the reflecting surface's program with the hit's material inputs, and `SoftShadows::Temporal` frames still use one program.
 
@@ -289,7 +298,7 @@ These notes are final for everything wired above. Rows still marked planned beco
 - Handle semantics: `Copy` typed `Id<T>`, stale handles rejected, the batching of objects by mesh and material.
 - `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Atmosphere`/`Uniform`/`Map`, `Background::Color`/`Sky`, `AtmosphereMedium`, `HeightFog`, `VolumetricFog`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
 - `set_decals(&[Decal])` and the re-exported decal types.
-- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, and the documented engine inputs.
+- The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, `view_dependence`, and the documented engine inputs.
 
 **May grow** (additive only): new `Settings` fields with defaults, new variants of the `#[non_exhaustive]` enums (`Sky`, `Background`, `Exposure`, `Quality`), new engine calls and handle kinds, new engine inputs for programs.
 
