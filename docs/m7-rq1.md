@@ -1,6 +1,6 @@
 # M7-RQ1: soft, smeared glossy reflections
 
-2026-11-08 overnight unit. Branch `t3/m7-rq1` from main `2d1c084`, with main `4c8ef7d` (R1n) and `dc3fa11` merged. Islam, after the example frames in `D:/Coding/renderlab-work/mq1/deliver/final-pp1/`: "reflections still look mushy and low quality specially on the golden ball", then "not just the golden sphere it is just way more visible there". The root coordinator scoped this to every glossy surface on both paths, judged against path-traced references. Rules: AGENTS.md's overnight push, [P0](m7-p0-claims.md). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
+2026-11-08 overnight unit. Branch `t3/m7-rq1` from main `2d1c084`, with main `4c8ef7d` (R1n), `dc3fa11` and `577b4aa` (MQ2, API1b) merged. Islam, after the example frames in `D:/Coding/renderlab-work/mq1/deliver/final-pp1/`: "reflections still look mushy and low quality specially on the golden ball", then "not just the golden sphere it is just way more visible there". The root coordinator scoped this to every glossy surface on both paths, judged against path-traced references. Rules: AGENTS.md's overnight push, [P0](m7-p0-claims.md). Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
 
 **Status: shipped on both paths. Glossy rays now scale with roughness** (`shaders/reflections.wgsl`): 4 strata up to roughness 0.08, 12 at 0.25 (the gold sphere), 16 from 0.33. Mirrors still trace one ray, and the fade to the untraced estimate is unchanged.
 
@@ -9,23 +9,24 @@
 - With four glossy rays, each frame's grain makes that box wide, so lagging history passes through it in blocks.
 - That is the blocky, smeared look on the gold sphere, and a speckled smear on non-RT.
 
-**Effect** (M; matched example against a 16,384-spp path-traced reference, frame 47 of the 48-frame flight):
+**Effect** (M; matched example against a 16,384-spp path-traced reference, frame 47 of the 48-frame flight). On the final merged code (main `577b4aa` with MQ2's history cap, §4.5):
 
-| Path | Gold-sphere error | Fine-band error |
-|---|---|---|
-| RT | 6.30 → 5.68 | 1.60 → 1.16 |
-| Non-RT | 5.97 → 5.08 | 2.06 → 1.32 |
+| Path | Gold-sphere error | Fine-band error | Mid-band error |
+|---|---|---|---|
+| RT | 5.87 → 5.27 | 1.70 → 1.18 | 1.27 → 1.05 |
+| Non-RT | 5.87 → 5.27 | 1.70 → 1.18 | 1.27 → 1.05 |
 
+- Before MQ2 merged: RT 6.30 → 5.68 and non-RT 5.97 → 5.08 (§4.1).
 - Frames 16 and 32 improve the same way.
 - RF2 per band: roughness 0.3 goes 10.71 → 10.05 and 0.4 goes 9.97 → 9.43 on both paths. Mirror bands are unchanged.
 
 **Cost** (M; functional, contended):
-- Example at 1280×720 (GPU span p50): RT +1.5 ms, non-RT +3.1 ms.
+- Example at 1280×720 (GPU span p50, merged code): RT 9.12 → 11.07 ms (+1.95), non-RT 13.17 → 16.15 ms (+3.0).
 - RF fixtures at 1080p (shading pass): up to +2.1 ms on RT and **+13.6 ms on non-RT** when glossy roughness 0.3–0.5 fills the screen (RF8).
 - Recorded as a miss rather than lowering quality (AGENTS.md). Section 5 gives the 8-ray alternative's numbers.
 
 **What is not R1's** (M; recorded as gaps):
-- the remaining softness in motion: surface-reprojected TR1 history, which is MQ2's;
+- the remaining softness in motion: TR1 history (MQ2's cap, merged, trades lag for grain, which these rays now supply);
 - the post stack's motion blur and bloom: 15–27 % of the spheres' fine band, 3–5 % of the mid band;
 - one-bounce content: the gold sphere seen in chrome is olive;
 - hit lighting from the open environment;
@@ -183,6 +184,35 @@ The quarry traces no reflection ray: every material is roughness 0.85, and non-R
 | Built-in shader vs screened variant | final matched and shipped frames byte-identical to the screened `scaled` runs, both paths |
 | `cargo fmt --check`; Clippy on the example | clean |
 
+### 4.5 Final merged code (main `577b4aa`: MQ2, API1b) (M)
+
+Main merged MQ2 while RQ1 was in verification. MQ2 makes programs declare a view-dependent share, and TR1 caps those pixels' history while the view turns. It also found that R1n's per-frame instance-record rewrite counted as a geometry upload, so non-RT TR1 restarted every pixel of animated frames on main `4c8ef7d`. Main's gap list records that fix as shipping in RQ1, so this branch carries MQ2's one-line change in `src/primary_ray_gpu.rs`: the records count as transform edits.
+
+The earlier non-RT flight rows in §4.1 were measured without that fix, so non-RT had no TR1 history in motion there.
+
+Lease `rq1-g2` ran two builds of this merged code: 4 glossy rays (`RL_GLOSSY_MAX` 4) against RQ1's scaled rays. Both used the frozen `reflection_matched` scene and the same references.
+
+| Path | Frame | Gold rms | Gold fine err | Gold mid err | Chrome rms | Frame rms |
+|---|---:|---|---|---|---|---|
+| RT | 47 still | 4.83 → **4.76** | 1.23 → **0.97** | 0.87 → 0.86 | 7.79 → 7.79 | 2.38 → 2.37 |
+| RT | 16 / 32 flight | 8.21 → **7.72** / 6.84 → **6.53** | 3.11 → 2.96 / 2.77 → 2.54 | 2.70 → 2.54 / 2.14 → 2.05 | unchanged | 2.42 → 2.40 / 3.04 → 3.04 |
+| RT | 47 flight | 5.87 → **5.27** | 1.70 → **1.18** | 1.27 → **1.05** | 8.41 → 8.41 | 3.66 → 3.63 |
+| Non-RT | 47 still | 4.83 → **4.76** | 1.23 → **0.97** | 0.87 → 0.86 | 7.79 → 7.79 | 3.08 → 3.07 |
+| Non-RT | 16 / 32 flight | 8.21 → **7.72** / 6.84 → **6.53** | as RT | as RT | unchanged | 2.88 → 2.86 / 3.24 → 3.23 |
+| Non-RT | 47 flight | 5.87 → **5.27** | 1.70 → **1.18** | 1.27 → **1.05** | 8.41 → 8.41 | 4.06 → 4.04 |
+
+- **MQ2 already improved the 4-ray base** (6.30 → 5.87 on RT). With its history cap, the 4-ray grain shows as a speckled smear rather than blocks (`deliver/gold-merged-047.png`: reference | RT before | RT after | non-RT before | non-RT after). The scaled rays remove it on both paths.
+- **The two paths are now identical** on both spheres in motion: non-RT TR1 keeps history with the fix.
+- **Timing** (96 drained frames, one visit each):
+
+  | Path | Wall, ms per frame | GPU span p50, ms |
+  |---|---|---|
+  | RT | 5.27 → 7.34 | 9.12 → 11.07 |
+  | Non-RT | 8.34 → 11.93 | 13.17 → 16.15 |
+
+- **Lib suite** (`bin/g-scaled`): **193 passed, 0 failed, 158 ignored; exit 0**.
+- **Not run:** the new dusk `game_scene`. The batch passed `--write-frames`, which only `reflection_matched` has, so the four dusk runs exited at argument parsing. The dusk scene's own gold-sphere view is not inspected here.
+
 ## 5. Trade-off for Islam: 16 strata or 8
 
 | Glossy cap | RT gold, flight 47 | Non-RT gold, flight 47 | Cost |
@@ -230,7 +260,7 @@ Everything is under `D:/Coding/renderlab-work/rq1/`; nothing was written to E:.
 - `runs/d1/`: the first references (2,048 and 16,384 spp) and partial runs.
 - `runs/d2/`: the diagnosis and candidate renders, the references (`ref/`), `score-47.json`, `score-motion.json`, `crops-*`.
 - `runs/f1/`: RF scores and sheets (`base/`, `scaled/`), `rf-bands.{md,json}`, timed segments, final flights (`*-final-*`), `lib.log`.
-- `bin/f1/`: the verified binaries (`game_scene.exe`, `renderlab-lib.exe`).
+- `bin/f1/`: the binaries verified before the MQ2 merge (`game_scene.exe`, `renderlab-lib.exe`); `bin/g-scaled/` and `bin/g-base/`: the merged code's after and 4-ray before builds; `runs/g1/`: their renders, timings, scores, crops and lib log.
 - `variants/`: the screened shaders.
 - `d*.ps1`, `f1.ps1`, `rf.ps1`: the lease batches.
 
@@ -265,7 +295,8 @@ With `RENDERLAB_RQ1_FUNCTIONAL=1`, the image-only leases ignore the Ara unit's `
   - `rq1-d2-1` 22:02–22:07: RAM stop;
   - `rq1-d2-2` 22:27–22:34: stopped for root's MV1 order;
   - `rq1-v1` 22:40–22:45: stopped for root's order;
-  - `rq1-v2` 22:58–23:02: RF, timing, final flights, lib.
+  - `rq1-v2` 22:58–23:02: RF, timing, final flights, lib;
+  - `rq1-g2` 23:20–23:26: the merged-code A/B and lib.
 - Scoring and the document: 22:45–23:30.
 - Implementation took about 1 h 10 min; verification, including about 1 h of lease waits, about 1 h 20 min. Development builds were 0.3–2.5 min each with two jobs.
 
