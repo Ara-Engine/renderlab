@@ -51,6 +51,9 @@ pub use texture_residency::{ResidencyStats, TextureResidency};
 mod gi_cache;
 #[path = "skinning.rs"]
 pub(crate) mod skinning;
+// TP1 transparent pass and particles (docs/m7-tp1.md).
+#[path = "transparency_gpu.rs"]
+mod transparency_gpu;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -610,6 +613,8 @@ pub struct Renderer {
     reconstruction_frame: Option<u64>,
     /// TR1b upscaling: the scaled frame's internal colour target and output HDR.
     upscale: Option<temporal_reconstruction::Upscale>,
+    /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
+    transparency: transparency_gpu::TransparencyState,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -1058,6 +1063,7 @@ impl Renderer {
             reconstruction_index: 0,
             reconstruction_frame: None,
             upscale: None,
+            transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2181,6 +2187,7 @@ impl Renderer {
             renderer: self.identity.clone(),
             double_sided: data.double_sided,
             thin: data.thin,
+            transparency: data.transparency,
             streamed: textures.iter().any(streamed),
             margins,
             bind,
@@ -2326,8 +2333,28 @@ impl Renderer {
         draws: &mut [Draw<'_>],
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
+        // TP1: transparent draws leave every opaque path for the transparent pass. The
+        // split is stable and the caller's order comes back afterwards.
+        let (opaque, order) = transparency_gpu::split(draws);
+        let (front, transparent) = draws.split_at_mut(opaque);
+        let result = self.render_view(color, camera, front, transparent, view_mode);
+        if let Some(order) = order {
+            transparency_gpu::restore(draws, &order);
+        }
+        result
+    }
+    fn render_view(
+        &mut self,
+        color: &wgpu::Texture,
+        camera: &Camera,
+        draws: &mut [Draw<'_>],
+        transparent: &mut [Draw<'_>],
+        view_mode: ViewMode,
+    ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
         let preparation_start = Instant::now();
+        // TP1: the transparent pass runs after reconstruction, with the unjittered camera.
+        self.transparency.camera = Some(*camera);
         self.validate_color(color)?;
         // Temporal reconstruction samples traced and visibility-buffer lit frames at the
         // next lattice offset: every matrix of this frame comes from the jittered camera.
@@ -2545,6 +2572,8 @@ impl Renderer {
             scene.draws += u64::from(visible > 0);
             scene.triangles += visible * u64::from(draw.mesh.index_count / 3);
         }
+        // TP1: transparent draws get the same visibility and ID publication.
+        self.tp_prepare_draws(matrix, transparent, &mut uploads)?;
         // The per-slot oracle intentionally bypasses the production ID publication buffer.
         #[cfg(test)]
         let reference_ids: Vec<_> = if self.reference_draws {
@@ -2633,6 +2662,7 @@ impl Renderer {
             camera,
             view_mode,
             &prepared,
+            transparent,
             shadow_frame,
             &shadow_draws,
             hardware_build,
@@ -2721,6 +2751,7 @@ impl Renderer {
             camera,
             view_mode,
             draws,
+            &[],
             shadow_frame,
             shadow_draws,
             hardware_build,
@@ -2783,6 +2814,7 @@ impl Renderer {
         camera: &Camera,
         view_mode: ViewMode,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
         shadow_frame: Option<ShadowFrame>,
         shadow_draws: &[ShadowDraw<'_>],
         hardware_build: bool,
@@ -2898,6 +2930,7 @@ impl Renderer {
                     sample_count: self.options.samples as u32,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
+                    // TP1: the transparent pass reads 1x raster depth.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
                         | if cfg!(test) && self.options.samples == SampleCount::One {
@@ -3267,12 +3300,17 @@ impl Renderer {
                 pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
             }
         }
+        // TP1: transparent draws and particles, after opaque shading and reconstruction.
+        // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
+        if lit && self.upscale.is_none() {
+            self.encode_transparency(&mut encoder, draws, transparent, traced)?;
+        }
         // TR1b upscaling: present writes the caller's target, not the internal one.
         let output_view = self.upscale.as_ref().map(|u| {
             self.ledger
                 .attachment(u.output.create_view(&Default::default()))
         });
-        if hdr.is_some() {
+        if lit && self.lighting.hdr.is_some() {
             self.encode_hdr_present(
                 &mut encoder,
                 output_view.as_ref().unwrap_or(&view),
