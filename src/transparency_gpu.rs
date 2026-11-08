@@ -67,23 +67,28 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     };
     let composed =
         crate::program::compose(&head, program, crate::program::Stage::Raster, parameters);
-    let composite = if crate::program::declares_transmittance(program) {
-        "lit+transmittance(surface_output,surface_input)*behind"
+    // The surface's own light and the per-channel share of the light behind it.
+    let (surface, transmit) = if crate::program::declares_transmittance(program) {
+        ("lit", "transmittance(surface_output,surface_input)")
     } else {
-        "mix(behind,lit,transparent_coverage(material,material.base_color.a*sampled_alpha*input.color.a))"
+        ("lit*coverage", "vec3<f32>(1.0-coverage)")
     };
     format!(
         "{}\n{}{}{}",
         composed.source,
         section("TP_FRAME"),
         section("TP_SUN"),
-        section("TP_GLASS").replace("TP_COMPOSITE", composite)
+        section("TP_GLASS")
+            .replace("TP_SURFACE", surface)
+            .replace("TP_TRANSMIT", transmit)
     )
 }
-/// The particle simulation and draw modules, after `prelude` for its environment helpers.
+/// The particle simulation and draw modules, after `prelude` for its environment helpers
+/// and AT1's camera fog and aerial perspective.
 fn particle_sources(prelude: &str) -> [String; 2] {
     let common = format!(
-        "{prelude}\n{}{}{}",
+        "{prelude}\n{}{}{}{}",
+        crate::atmosphere::api_source(),
         section("TP_FRAME"),
         section("TP_SUN"),
         section("TP_PARTICLES")

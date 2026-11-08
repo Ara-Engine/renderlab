@@ -246,6 +246,10 @@ fn gpu_r0a_current() {
                 .unwrap(),
             _ => {}
         }
+        // The GI cache is on by default since G2b; R0a's protocol scores it off.
+        renderer
+            .set_indirect(crate::IndirectSettings::off())
+            .unwrap();
         assert!(!renderer.indirect().enabled);
         let toon = renderer
             .try_create_program(&ProgramDescriptor {

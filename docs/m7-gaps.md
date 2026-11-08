@@ -47,6 +47,60 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
   - Soft fading uses opaque depth only: particles don't fade against glass.
 - **No Unreal (Niagara) comparison** this push (rule 3).
 
+## RT shadows
+
+[RTDEF](rtdef.md) compares raster + Exact with traced + Interactive + the latest
+default TR1b on main `ae95d3a`. The quarry improves, but **the RT default is not
+promoted**: S2's cold and moving disk penumbrae are visibly grainier than
+raster + Exact, including at ordinary exposure and at the registered +4-stop stress.
+The cold disk witness is 14.0832 display codes RMS versus raster + Exact's
+12.6000 and retained HRT1's 13.6655. Settled TR1 substantially improves it.
+
+- History restarts on scene-transform/instance uploads. Moving casters can
+  therefore retain eight-ray startup grain indefinitely; a long still hold
+  does not establish camera/reveal/caster-motion acceptance. In S2's moving
+  blocker frame 63, the single-surface floor penumbra is 9.8755 codes RMS at
+  +4 stops versus raster + Exact's 6.6179. This diagnostic does not replace
+  the complete-image scorer.
+- All 24 S2 phase pools beat retained HRT1 in linear HDR and +0/+4 display
+  RMS. Per-frame +4 RMS still loses on **10/1,280 frames**: all eight cold
+  frame-0 cases, camera .25 px/point frame 1 and camera 1 px/point frame 122
+  (return/reveal). Linear HDR and +0 RMS win on all 1,280 frames. The HRT
+  comparison is non-blocking tonight; the default decision is held by the
+  visible regression against raster + Exact, not by these HRT rows.
+- The previous unfiltered Interactive visibility/flicker results in
+  [RT1c](rt1c-rt-default.md) still apply only to those registered masks.
+  Post-reconstruction visibility is not separately measured by the diagnostic
+  shadow shader, and is not inferred from its raw eight-ray visibility.
+- RT1d's fixed spatial filter remains opt-in: its quarry false-shadow,
+  lit-darkened and strict-solid losses were not repaired by this unit. No
+  film/Unreal quality floor or combined 2× performance floor is claimed here.
+- RT library and viewer defaults remain raster + Exact, so the RT default
+  still receives no TR1 anti-aliasing. Traced primaries and Interactive remain
+  settings; their historical TR1-off speed labels remain explicitly scoped.
+
+## Atmosphere
+
+AT1, [m7-at1.md](m7-at1.md). The sky, aerial perspective, height fog, sun transmittance and procedural environment are on by default. Volumetric fog is opt-in.
+
+- **Non-RT volumetric shadows are missing.** Froxels on renderers without ray queries see the sun unshadowed, so fog in a shadowed canyon glows. This is why volumetric fog is not a default on either path. Candidates:
+  - the Virtual clipmap's top layer (needs a read accessor in the shadow-owned files and a rule for unrequested pages);
+  - the radiance cache's software BVH (exists only with the cache on; one ray per froxel is too slow, so it needs visibility amortized over frames);
+  - a cached low-resolution fog shadow map.
+- **The analytic height fog's sun term is unshadowed** beyond the volumetric range, and everywhere while volumetric fog is off, as in Unreal's exponential height fog. Under the default density (about 2 % per 100 m) it isn't visible on the quarry (10 m scale). Dense fog in shadowed spaces will glow.
+- **No matched Unreal comparison.** Neither Unreal's SkyAtmosphere nor its ExponentialHeightFog was measured tonight (no new Unreal campaigns). The medium is Hillaire 2020's Earth, the same model Unreal's SkyAtmosphere implements, but no image or timing comparison exists.
+- **No path-traced reference** for the sky or the fog. The reference path tracer has no participating media.
+- **A captured sky with a non-physical sun shows a dim backdrop.** The procedural sky scales with the first directional light's lux. The quarry's captured-sky protocol (a 1000 lux sun beside an RLE2 sky) therefore shows a near-black sky on misses, as it did before AT1 (a black clear colour). Scenes with a captured sky should turn on `set_visible_environment` until misses follow the selected map automatically.
+- **Only one sun.** Only the first directional light drives the sky, the sun disk, the fog and transmittance. A second directional light (a moon) gets none.
+- **The procedural environment regenerates on every sun change.** Each regeneration is a new map, so the radiance cache flushes too. A moving sun (time of day) therefore flushes GI every frame it moves, and time of day needs in-place updates the cache can track. The environment ignores camera altitude changes after generation.
+- **No temporal visibility on the sky or fog.** Volumetric reprojection uses plain history blending (0.9) with no rejection. Fast camera moves or a moving sun leave froxel lag (not measured tonight).
+- **Transparent surfaces:** `atmosphere_surface` is ready for TP1's transparent entry. It isn't wired there in this unit.
+- **Film accumulation (`SoftShadows::Temporal`)** fogs its hits, but its misses keep `film_background()` (no sky).
+- **Slice resolution:** the aerial perspective's first slice ends at 7.8 m, and froxels are 16 px columns. Neither was screened for banding or aliasing in motion.
+- **The sun disk has a hard, unfiltered edge** (true 0.00465 rad radius, saturating at the HDR ceiling). Its rim aliases, and raster and deferred misses differ on 117 rim pixels. It needs an analytic coverage edge, or TR1 on misses.
+- **The procedural environment uses the legacy mip-chain layout** (no ES1 lobes; the sun is the directional light, so no lobe is lost). Its smallest face is 8 texels: at 1 texel, rough lookups cost +0.47 ms of quarry shading. Roughness is quantized in 0.25 steps between levels.
+- **The planet ground below the horizon** is a flat Lambertian albedo (0.3) lit only by the sun through the atmosphere. Misses below the horizon show that, not terrain.
+
 ## Decals
 
 DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before programmable shading on both paths. The API includes typed textures, alpha/multiply/add colour blends, stable sort order, angle fade, opacity and channel strengths. Placement activates them without another feature toggle.
@@ -132,3 +186,16 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 - The viewer renders raster primaries, so it gets neither TR1 nor the presets.
 
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
+
+## GI
+
+G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
+
+- **Cost against Lumen.** One functional timing run with the camera moving: +1.32-1.62 ms on RT and +2.59-2.83 ms on non-RT over the cache-off frame. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target misses by about 2.2-2.6x (RT) and 4.3-4.7x (non-RT), and the ~0.45 ms budget by 3-6x. Largest items: the shading lookup (+0.6 ms on both paths) and the probe (0.43 ms); on non-RT also gathers (0.74 ms) and query points for new cells (0.53 ms). The run was not quiet-classified.
+- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 28 frames (RT) and 2-4 s (non-RT), not 8 frames. While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
+- **Crevice mouths.** Dark streaks and pinholes at crevice mouths remain (TR1x64 pinholes on the merged TR1b default: RT 142 and non-RT 128, against cache-off's 74). Measured fix: 2 px cells (pinholes at the cache-off level, every quarry population better), opt-in only: it speckles flat surfaces on SV and needs a 448 MiB table, over the non-RT device's 256 MiB buffer limit. No per-pixel short-ray check was built.
+- **Enclosed cavities.** A coarse per-cell mottle shows in cavities lit through narrow openings (the quarry's cave and hollow) where the reference is smooth. The hollow is also about 5.5 codes too dark: es1open beats the cache there by 3.6-4.5 codes. More gathers (up to 7) do not change it. It needs a fixed-weight cell-space filter or more directions per cell.
+- **Other losses kept from G2.** On isolated rocks and background-centre the cache loses to cache-off at TR1x64. Against ES1's unoccluded diagnostic it loses on 10-16 populations by 0.1-0.6 codes. It loses to Lumen HW on edge and multi-surface.
+- **Path-traced re-score not done.** TR1's visible-sky walk was not re-scored against the path-traced reference with the cache on: no new reference campaign tonight. The shared lighting error should shrink with the cache's sky occlusion; this is unmeasured.
+- **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each.
+- **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.

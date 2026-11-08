@@ -10,7 +10,9 @@
 //               but an orphan (up to two levels), and the finer level's where its cells
 //               are split (G1c, G1d);
 //   gi_claim    each miss picks a free slot as the table stands and raises the slot's
-//               claim word to its priority (atomicMax, C4);
+//               claim word to its claim value (atomicMax, C4): its generation band, then
+//               a rank from its key that no other key of its bucket shares, so exactly one
+//               miss wins a slot whatever the thread order (gi_miss_claim);
 //   gi_resolve  the highest claim writes the cell and queues it for tracing; claim and
 //               resolve repeat in rounds, so collisions retry within the frame; the
 //               last round (gi_resolve_last) also clears each miss's request entry;
@@ -132,6 +134,10 @@ const GI_W_BQUEUE:u32=38u;
 const GI_W_GATHER_ABSENT:u32=39u;
 const GI_W_GATHER_UNSHADED:u32=40u;
 const GI_W_GATHER_ORPHANS:u32=41u;
+// Queued cells a capped gather frame left for next frame (gi_gather).
+const GI_W_GATHER_DEFERRED:u32=42u;
+// Listed misses a capped claim left for a later frame (gi_claim, GI_H_CLAIM_CELLS).
+const GI_W_CLAIM_DEFERRED:u32=43u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
@@ -194,7 +200,6 @@ const GI_PROBE_LANES:u32=GI_PROBE_TILE*GI_PROBE_TILE;
 // entries overflowed on the quarry, 256 do not.
 const GI_LOCAL:u32=256u;
 var<workgroup> gi_local_key:array<atomic<u32>,GI_LOCAL>;
-var<workgroup> gi_local_priority:array<atomic<u32>,GI_LOCAL>;
 var<workgroup> gi_local_def:array<vec4<u32>,GI_LOCAL>;
 // The tile's unique cells as hash slots, in insertion order, so the find loop visits
 // only occupied entries (one pass for up to GI_PROBE_LANES cells).
@@ -233,8 +238,8 @@ var<private> gi_n_walks:u32;
 var<workgroup> gi_wg_stats:array<atomic<u32>,9>;
 var<workgroup> gi_wg_stats_on:u32;
 
-// Adds one cell to the tile's set; the lowest pixel priority that wants it is kept.
-fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
+// Adds one cell to the tile's set.
+fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>) {
     let key=gi_key(level,bin,cell);
     var h=key.x%GI_LOCAL;
     if gi_stats { gi_n_inserts+=1u; }
@@ -243,17 +248,13 @@ fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
         let r=atomicCompareExchangeWeak(&gi_local_key[h],0u,key.x);
         if r.exchanged {
             gi_local_def[h]=vec4<u32>(level|(bin<<8u),bitcast<vec3<u32>>(cell));
-            atomicMin(&gi_local_priority[h],priority);
             gi_local_list[atomicAdd(&gi_local_count,1u)]=h;
             if gi_stats {
                 if gi_cause==0u { gi_n_pixel+=1u; } else if gi_cause==1u { gi_n_parent+=1u; } else { gi_n_refine+=1u; }
             }
             return;
         }
-        if r.old_value==key.x {
-            atomicMin(&gi_local_priority[h],priority);
-            return;
-        }
+        if r.old_value==key.x { return; }
         // A weak exchange may fail spuriously with the slot still empty: retry it.
         if r.old_value!=0u { h=(h+1u)%GI_LOCAL; }
     }
@@ -284,7 +285,7 @@ fn gi_request_desc(world:vec3<f32>, level:u32, bin:u32) -> vec4<u32> {
     return vec4<u32>(level|(bin<<8u)|(flags<<11u),bitcast<vec3<u32>>(base));
 }
 // Adds a descriptor's cells to the tile's set.
-fn gi_request_cells(desc:vec4<u32>, priority:u32) {
+fn gi_request_cells(desc:vec4<u32>) {
     let level=desc.x&0xffu;
     let bin=(desc.x>>8u)&7u;
     let flags=(desc.x>>11u)&63u;
@@ -295,7 +296,7 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
         for(var layer=-1;layer<=1;layer+=1) {
             if (layer==-1 && (flags&1u)==0u) || (layer==1 && (flags&2u)==0u) { continue; }
             for(var k=0u;k<4u;k+=1u) {
-                gi_local_insert(level,bin,base+gi_corner_offset(bin,k)+axis*layer,priority);
+                gi_local_insert(level,bin,base+gi_corner_offset(bin,k)+axis*layer);
             }
         }
         return;
@@ -305,7 +306,7 @@ fn gi_request_cells(desc:vec4<u32>, priority:u32) {
     for(var x=lo.x;x<=hi.x;x+=1) {
         for(var y=lo.y;y<=hi.y;y+=1) {
             for(var z=lo.z;z<=hi.z;z+=1) {
-                gi_local_insert(level,bin,base+vec3<i32>(x,y,z),priority);
+                gi_local_insert(level,bin,base+vec3<i32>(x,y,z));
             }
         }
     }
@@ -352,7 +353,7 @@ fn gi_local_state_at(world:vec3<f32>, level:u32, bin:u32) -> vec2<f32> {
 // deeper level. Pixels request parents only where shading falls back to them: four parents per
 // found orphan (G1b-G1c) listed about as many parents as pixel cells on scans and overflowed
 // tile tables (docs/m7-g1d.md).
-fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, levels:u32) -> bool {
+fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> bool {
     let l=level+round;
     if l>=levels { return true; }
     if gi_stats { gi_n_walks+=1u; }
@@ -360,17 +361,16 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
     let bits=u32(st.y);
     if round<GI_REFINE && (bits&GI_LS_SPLIT)!=0u && l>0u {
         gi_cause=2u;
-        gi_request_cells(gi_request_desc(world,l-1u,bin),priority);
+        gi_request_cells(gi_request_desc(world,l-1u,bin));
     }
     if st.x>1e-4 || (bits&GI_LS_ORPHAN)==0u || round>=GI_PARENT_ROUNDS || l+1u>=levels { return true; }
     gi_cause=1u;
-    gi_request_cells(gi_request_desc(world,l+1u,bin),priority);
+    gi_request_cells(gi_request_desc(world,l+1u,bin));
     return false;
 }
 @compute @workgroup_size(8,8) fn gi_probe(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     for(var i=lane;i<GI_LOCAL;i+=GI_PROBE_LANES) {
         atomicStore(&gi_local_key[i],0u);
-        atomicStore(&gi_local_priority[i],0xffffffffu);
         gi_local_state[i]=0u;
     }
     if lane==0u {
@@ -395,8 +395,6 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
     var bins=0u;
     var walked=0u;
     var pick=GiLevels(0u,0u,0.0);
-    // The pixel's priority: lower wins. Unique per pixel; its cells share it.
-    let priority=p.y*size.x+p.x;
     if record.x!=0u {
         let r=gi_receiver(record);
         world=r.world;
@@ -420,8 +418,8 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
         // requests the identical cells is exact but measured only ~5 us faster.)
         for(var b=0u;b<6u;b+=1u) {
             if (bins&(1u<<b))==0u { continue; }
-            gi_request_cells(gi_request_desc(r.world,pick.lo,b),priority);
-            if pick.hi!=pick.lo { gi_request_cells(gi_request_desc(r.world,pick.hi,b),priority); }
+            gi_request_cells(gi_request_desc(r.world,pick.lo,b));
+            if pick.hi!=pick.lo { gi_request_cells(gi_request_desc(r.world,pick.hi,b)); }
         }
     }
     workgroupBarrier();
@@ -441,8 +439,8 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
         for(var k=begin+lane;k<to;k+=GI_PROBE_LANES) {
             let i=gi_local_list[k];
             let def=gi_local_def[i];
-            // Key a is the tile table's own key; finds and requests need nothing else (key b
-            // only fixes a new cell's rotation, which resolve hashes from the definition).
+            // Key a is the tile table's own key; finds need nothing else (a request computes
+            // key b, which picks one cell among those sharing key a: gi_request_list).
             let key=vec2<u32>(atomicLoad(&gi_local_key[i]),0u);
             let slot=gi_find(key);
             if gi_stats {
@@ -464,12 +462,12 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
                 continue;
             }
             // Tiles share cells: the frame's request table lists each missing cell once and
-            // keeps the lowest priority of every tile that wants it (inverted, so the
+            // keeps the highest generation band that wants it (pixels' over gathers'; the
             // cleared table's zero is no request). Any listing order gives the same set.
             let entry=gi_request_entry(key.x);
             if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
-            atomicMax(&gi_work[gi_frame.requests.x+entry.x*2u+1u],0xffffffffu-atomicLoad(&gi_local_priority[i]));
-            if entry.y==0u { continue; }
+            atomicMax(&gi_work[gi_frame.requests.x+entry.x*GI_REQUEST_WORDS+1u],GI_BAND_PIXEL);
+            if !gi_request_list(entry.x,gi_key(def.x&0xffu,def.x>>8u,bitcast<vec3<i32>>(def.yzw)).y) { continue; }
             let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
             if at>=capacity { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
             let base=gi_frame.offsets.y+at*GI_MISS_WORDS;
@@ -488,10 +486,10 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, priority:u32, round:u32, l
             if gi_stats && lane==0u && round==0u { atomicAdd(&gi_work[GI_W_P_REFINE_TILES],1u); }
             for(var b=0u;b<6u;b+=1u) {
                 if (bins&(1u<<b))==0u { continue; }
-                if (walked&(1u<<(2u*b)))==0u && gi_pixel_walk(world,pick.lo,b,priority,round,levels) {
+                if (walked&(1u<<(2u*b)))==0u && gi_pixel_walk(world,pick.lo,b,round,levels) {
                     walked|=1u<<(2u*b);
                 }
-                if pick.hi!=pick.lo && (walked&(2u<<(2u*b)))==0u && gi_pixel_walk(world,pick.hi,b,priority,round,levels) {
+                if pick.hi!=pick.lo && (walked&(2u<<(2u*b)))==0u && gi_pixel_walk(world,pick.hi,b,round,levels) {
                     walked|=2u<<(2u*b);
                 }
             }
@@ -530,22 +528,60 @@ fn gi_probe_stats(lane:u32, covered:bool) {
     let bucket=select(select(select(3u,2u,cells<GI_LOCAL),1u,cells<64u),0u,cells<32u);
     atomicAdd(&gi_work[GI_W_P_HIST+bucket],1u);
 }
+// Request-table entries: key a, the highest generation band that wants it, and the highest
+// inverted key b among the cells requested under it (gi_request_list).
+const GI_REQUEST_WORDS:u32=3u;
 // The request-table entry of key a (linear probing; zero is empty), and whether this
 // call inserted it. (0xffffffff, 0) when the table is full.
 fn gi_request_entry(key:u32) -> vec2<u32> {
     let mask=gi_frame.requests.y;
     var h=key&mask;
     for(var j=0u;j<64u;j+=1u) {
-        let r=atomicCompareExchangeWeak(&gi_work[gi_frame.requests.x+h*2u],0u,key);
+        let r=atomicCompareExchangeWeak(&gi_work[gi_frame.requests.x+h*GI_REQUEST_WORDS],0u,key);
         if r.exchanged { return vec2<u32>(h,1u); }
         if r.old_value==key { return vec2<u32>(h,0u); }
         if r.old_value!=0u { h=(h+1u)&mask; }
     }
     return vec2<u32>(0xffffffffu,0u);
 }
-// A listed miss's winning priority, already inverted (higher wins).
-fn gi_miss_priority(base:u32) -> u32 {
-    return atomicLoad(&gi_work[gi_frame.requests.x+atomicLoad(&gi_work[base+4u])*2u+1u]);
+// Whether a request of the cell with key b `key_b` under `entry` lists a miss. Different cells
+// can share key a (31 bits: a cut's ~90k new keys meet about twice a frame), and the table
+// holds one of them. The entry keeps the highest inverted key b of the cells requested under
+// it, and a request lists a miss only when it raises that value; the claim takes only the miss
+// whose key b is the final value (gi_miss_chosen). So the same cell is inserted whatever the
+// thread order (G2's listing-order choice made tables, and once an image, differ across
+// processes: docs/m7-g2b.md). The same cell requested again lists nothing.
+fn gi_request_list(entry:u32, key_b:u32) -> bool {
+    let v=max(~key_b,1u);
+    return atomicMax(&gi_work[gi_frame.requests.x+entry*GI_REQUEST_WORDS+2u],v)<v;
+}
+// Generation bands of a request (the request table keeps the highest that wants a cell):
+// pixels' cells, cells a pixel-made cell's gather requests (made secondary), and cells a
+// secondary cell's gather requests (made tertiary; they request nothing). 0 is no request.
+const GI_BAND_PIXEL:u32=3u;
+const GI_BAND_SECONDARY:u32=2u;
+const GI_BAND_TERTIARY:u32=1u;
+// A listed miss's generation band.
+fn gi_miss_band(base:u32) -> u32 {
+    return atomicLoad(&gi_work[gi_frame.requests.x+atomicLoad(&gi_work[base+4u])*GI_REQUEST_WORDS+1u]);
+}
+// Whether a listed miss is its entry's chosen cell (gi_request_list).
+fn gi_miss_chosen(base:u32) -> bool {
+    let v=max(~gi_miss_key(base).y,1u);
+    return v==atomicLoad(&gi_work[gi_frame.requests.x+atomicLoad(&gi_work[base+4u])*GI_REQUEST_WORDS+2u]);
+}
+// A listed miss's claim value (higher wins a slot): its band in the top two bits, then the
+// bits of key a that do not pick its bucket (those above the slot mask, and the three that
+// pick the start offset within it). Keys of one bucket differ in exactly those bits, so no
+// two misses that can meet at a slot tie, and exactly one wins it whatever the thread order.
+// (G2's gather requests from one cell shared a priority, and two could both write a slot:
+// tables then differed across processes, docs/m7-g2b.md.) The rank is fixed by the key
+// alone, as the start slot is: it orders inserts within a frame's claim, never which rays are
+// cast (W2). It fits below bit 30 for any table of at least 16 slots.
+fn gi_miss_claim(base:u32) -> u32 {
+    let key=gi_miss_key(base).x;
+    let s=countOneBits(gi_word(GI_H_MASK));
+    return (gi_miss_band(base)<<30u)|((key>>s)<<3u)|(key&(GI_BUCKET-1u));
 }
 
 // ---- claim and resolve: deterministic inserts, in rounds ----
@@ -564,9 +600,30 @@ fn gi_miss_count() -> u32 { return min(atomicLoad(&gi_work[GI_W_MISSES]),gi_fram
     let count=gi_miss_count();
     for(var i=id.x;i<count;i+=groups.x*64u) { gi_claim_miss(i); }
 }
+// The claim period P for this frame's listed misses (1 without a cap; gi_claim).
+fn gi_claim_period() -> u32 {
+    let cap=gi_word(GI_H_CLAIM_CELLS);
+    var p=1u;
+    if cap==0u { return p; }
+    let count=gi_miss_count();
+    while p<64u && count>cap*p { p*=2u; }
+    return p;
+}
 fn gi_claim_miss(index:u32) {
     let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     if atomicLoad(&gi_work[base+5u])==GI_CREATED { return; }
+    // Outside this frame's key phase (GI_H_CLAIM_CELLS): left for a later frame.
+    let period=gi_claim_period();
+    if period>1u && gi_mix(gi_miss_key(base).x)%period!=gi_word(GI_H_FRAME)%period {
+        atomicStore(&gi_work[base+5u],GI_CREATED);
+        atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u);
+        return;
+    }
+    // A cell another cell with the same key a superseded this frame: never claims.
+    if !gi_miss_chosen(base) {
+        atomicStore(&gi_work[base+5u],GI_CREATED);
+        return;
+    }
     let key=gi_miss_key(base);
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
@@ -574,7 +631,7 @@ fn gi_claim_miss(index:u32) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         if gi_evictable(slot) {
             atomicStore(&gi_work[base+5u],slot);
-            atomicMax(&gi_work[GI_W_CLAIMS+slot],gi_miss_priority(base));
+            atomicMax(&gi_work[GI_W_CLAIMS+slot],gi_miss_claim(base));
             return;
         }
     }
@@ -593,16 +650,17 @@ fn gi_claim_miss(index:u32) {
     let count=gi_miss_count();
     for(var i=id.x;i<count;i+=groups.x*64u) {
         gi_resolve_miss(i);
-        let entry=gi_frame.requests.x+atomicLoad(&gi_work[gi_frame.offsets.y+i*GI_MISS_WORDS+4u])*2u;
+        let entry=gi_frame.requests.x+atomicLoad(&gi_work[gi_frame.offsets.y+i*GI_MISS_WORDS+4u])*GI_REQUEST_WORDS;
         atomicStore(&gi_work[entry],0u);
         atomicStore(&gi_work[entry+1u],0u);
+        atomicStore(&gi_work[entry+2u],0u);
     }
 }
 fn gi_resolve_miss(index:u32) {
     let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     let slot=atomicLoad(&gi_work[base+5u]);
     if slot>=GI_CREATED { return; }
-    if atomicLoad(&gi_work[GI_W_CLAIMS+slot])!=gi_miss_priority(base) {
+    if atomicLoad(&gi_work[GI_W_CLAIMS+slot])!=gi_miss_claim(base) {
         atomicAdd(&gi_work[GI_W_LOST],1u);
         return;
     }
@@ -617,10 +675,10 @@ fn gi_resolve_miss(index:u32) {
     gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
     gi_outgoing[slot]=vec4<f32>(0.0);
     gi_table[cold+GI_C_KEY_B]=key.y;
-    // Cells only gathers requested (G2: priorities below every pixel's) are secondary, or
-    // tertiary when a secondary cell's gather requested them (gi_gather).
-    let priority=gi_miss_priority(base);
-    let generation=select(select(0u,GI_SECONDARY,priority<0x80000000u),GI_SECONDARY|GI_TERTIARY,priority<0x40000000u);
+    // Cells only gathers requested (bands below the pixels') are secondary, or tertiary
+    // when a secondary cell's gather requested them (gi_gather).
+    let band=gi_miss_band(base);
+    let generation=select(select(0u,GI_SECONDARY,band<GI_BAND_PIXEL),GI_SECONDARY|GI_TERTIARY,band<GI_BAND_SECONDARY);
     gi_table[cold+GI_C_STATE]=GI_QUEUED|generation;
     gi_table[cold+GI_C_SEEN]=gi_word(GI_H_FRAME);
     gi_table[cold+GI_C_DEF]=atomicLoad(&gi_work[base]);
@@ -1342,7 +1400,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
     // overflow, entries nobody listed remain, so the whole request table is cleared (no
     // later pass reads it this frame).
     if atomicLoad(&gi_work[GI_W_MISS_OVERFLOW])!=0u {
-        let words=(gi_frame.requests.y+1u)*2u;
+        let words=(gi_frame.requests.y+1u)*GI_REQUEST_WORDS;
         for(var i=group.x*64u+index;i<words;i+=groups.x*64u) { atomicStore(&gi_work[gi_frame.requests.x+i],0u); }
     }
 }
@@ -1529,13 +1587,13 @@ fn gi_light_reached(slot:u32) -> bool {
     }
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
-// miss, at a priority below every pixel's (resolve marks it secondary).
-fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
+// miss, in a generation band below the pixels' (resolve marks it secondary or tertiary).
+fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
     let key=gi_key(level,bin,cell);
     let entry=gi_request_entry(key.x);
     if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); return; }
-    atomicMax(&gi_work[gi_frame.requests.x+entry.x*2u+1u],priority);
-    if entry.y==0u { return; }
+    atomicMax(&gi_work[gi_frame.requests.x+entry.x*GI_REQUEST_WORDS+1u],band);
+    if !gi_request_list(entry.x,key.y) { return; }
     let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
     if at>=gi_frame.counts.w { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); return; }
     let base=gi_frame.offsets.y+at*GI_MISS_WORDS;
@@ -1553,9 +1611,9 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, priority:u32) {
 // next coarser levels' containing cells with a value (a deterministic coarser fallback, as
 // the lookup's, W3). w is 1 for the hit level's own value, 0.5 for a coarser level's (the
 // gather is then repeated once the hit level's cell has one), 0 for none (the ray adds
-// nothing). A hit level without a cell is requested when `priority` is nonzero, for the
-// claim rounds that follow this pass.
-fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, priority:u32) -> vec4<f32> {
+// nothing). A hit level without a cell is requested in generation band `band` when that is
+// nonzero, for the claim rounds that follow this pass.
+fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
@@ -1566,7 +1624,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, priority:u32) -> vec4
         let cell=vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)));
         let slot=gi_find(gi_key(l,bin,cell));
         if slot==0xffffffffu {
-            if l==base && priority!=0u { gi_request_one(l,bin,cell,priority); }
+            if l==base && band!=0u { gi_request_one(l,bin,cell,band); }
             if l==base { cause=GI_W_GATHER_ABSENT; }
             continue;
         }
@@ -1579,109 +1637,122 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, priority:u32) -> vec4
     atomicAdd(&gi_work[select(GI_W_GATHER_ORPHANS,cause,cause!=0u)],1u);
     return vec4<f32>(0.0);
 }
-// Eight lanes per queued cell, eight cells per workgroup (as setup): lane j traces the
-// cell's blocked directions k = j, j+8, ... with closest-hit rays, each adding its hit's
-// outgoing radiance times the fixed weight 2 pi / K to the L1 SH; a fixed tree sums the
-// lanes, and the sum replaces the cell's bounce value (W1). Cells read their own and other
-// cells' last outgoing radiance, which cell shading rewrites only after this pass, so the
-// result does not depend on thread order.
-const GI_GATHER_LANES:u32=8u;
-const GI_GATHER_CELLS:u32=8u;
-var<workgroup> gi_wg_bounce:array<f32,GI_GATHER_CELLS*12u*GI_GATHER_LANES>;
-var<workgroup> gi_wg_missing:array<atomic<u32>,GI_GATHER_CELLS>;
+// One workgroup per queued cell and one lane per fixed direction (k = lane, and lane + 64 with
+// 128 directions): each lane traces its direction when it is blocked, with a closest-hit ray,
+// and adds its hit's outgoing radiance times the fixed weight 2 pi / K to the L1 SH; a fixed
+// tree sums the lanes, and the sum replaces the cell's bounce value (W1). (G2 ran eight lanes a
+// cell, each tracing about six rays one after another; the pass waited on those chains, most
+// of all on software rays: docs/m7-g2b.md.) Cells read their own and other cells' last
+// outgoing radiance, which cell shading rewrites only after this pass, so the result does not
+// depend on thread order.
+// A frame gathers at most GI_H_GATHER_CELLS cells (0: every queued cell). When more are queued,
+// it gathers those with slot % P == frame % P, for the smallest power of two P (up to
+// GI_GATHER_PERIOD_MAX) that brings the queue under that count on average, and the rest wait
+// in next frame's queue with their schedule unchanged. A fixed rotation by slot (W2), never a
+// ranking: it bounds a cut's gather rays per frame in time rather than in frames.
+const GI_GATHER_LANES:u32=64u;
+const GI_GATHER_PERIOD_MAX:u32=64u;
+var<workgroup> gi_wg_bounce:array<f32,12u*GI_GATHER_LANES>;
+var<workgroup> gi_wg_missing:atomic<u32>;
+var<workgroup> gi_wg_rays:atomic<u32>;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
-@compute @workgroup_size(64) fn gi_gather(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) index:u32) {
-    let cell=index/GI_GATHER_LANES;
-    let lane=index%GI_GATHER_LANES;
-    if index==0u { gi_wg_count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x); }
+// The gather period P for `count` queued cells (1 without a cap).
+fn gi_gather_period(count:u32) -> u32 {
+    let cap=gi_word(GI_H_GATHER_CELLS);
+    var p=1u;
+    if cap==0u { return p; }
+    while p<GI_GATHER_PERIOD_MAX && count>cap*p { p*=2u; }
+    return p;
+}
+@compute @workgroup_size(64) fn gi_gather(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    if lane==0u { gi_wg_count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x); }
     let count=workgroupUniformLoad(&gi_wg_count);
     let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;
-    for(var first=group.x*GI_GATHER_CELLS;first<count;first+=groups.x*GI_GATHER_CELLS) {
-        if lane==0u { atomicStore(&gi_wg_missing[cell],0u); }
-        var slot=0u;
-        var live=first+cell<count;
-        if live {
-            slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+first+cell]);
-            let state=gi_table[gi_cold(slot)+GI_C_STATE];
-            live=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
-                && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+    let period=gi_gather_period(count);
+    let phase=gi_word(GI_H_FRAME)%period;
+    for(var at=group.x;at<count;at+=groups.x) {
+        if lane==0u {
+            atomicStore(&gi_wg_missing,0u);
+            atomicStore(&gi_wg_rays,0u);
         }
+        let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
+        let cold=gi_cold(slot);
+        let state=gi_table[cold+GI_C_STATE];
+        let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
+            && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+        let live=queued && slot%period==phase;
         workgroupBarrier();
         for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
-        let cold=gi_cold(slot);
         if live {
             let c=gi_cell(slot);
             let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
             let q=gi_point(cold);
             let frame=gi_basis(n);
             let origin=q+n*gi_origin_offset(q,c.edge);
-            // Cells pixels made request at priorities in [2^30, 2^31), cells their gathers made
-            // in [1, 2^30) (resolve marks what they make tertiary), tertiary cells request none:
-            // two generations of hit cells beyond what pixels see. All below every pixel's.
-            let state=gi_table[cold+GI_C_STATE];
+            // Cells pixels made request in the secondary band, cells their gathers made in the
+            // tertiary band, and tertiary cells request none: two generations of hit cells
+            // beyond what pixels see, all below the pixels' band (gi_miss_claim).
             let secondary=(state&GI_SECONDARY)!=0u;
             let tertiary=(state&GI_TERTIARY)!=0u;
-            let rank=min(slot,0x3ffffffeu);
-            let priority=select(select(0x7fffffffu-rank,0x3fffffffu-rank,secondary),0u,!requests || tertiary);
+            let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             var missing=0u;
             var rays=0u;
+            let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
-                if (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
+                if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
                 rays+=1u;
                 if !h.hit { continue; }
-                let o=gi_hit_radiance(origin,d,h,priority);
+                let o=gi_hit_radiance(origin,d,h,band);
                 if o.w<1.0 { missing+=1u; }
                 if o.w==0.0 { continue; }
                 gi_sh_basis(d);
-                let radiance=o.rgb*(6.283185307179586/f32(GI_DIRECTIONS));
+                let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
-            if missing!=0u {
-                atomicAdd(&gi_wg_missing[cell],1u);
-                atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing);
-            }
-            atomicAdd(&gi_work[GI_W_GATHER_RAYS],rays);
+            if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
+            if rays!=0u { atomicAdd(&gi_wg_rays,rays); }
         }
         // The lanes' sums into lane 0 in a fixed tree order (no atomics on values).
-        let at=cell*12u*GI_GATHER_LANES+lane;
         for(var i=0u;i<4u;i+=1u) {
-            gi_wg_bounce[at+(i*3u)*GI_GATHER_LANES]=gi_gather_sh[i].x;
-            gi_wg_bounce[at+(i*3u+1u)*GI_GATHER_LANES]=gi_gather_sh[i].y;
-            gi_wg_bounce[at+(i*3u+2u)*GI_GATHER_LANES]=gi_gather_sh[i].z;
+            gi_wg_bounce[(i*3u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].x;
+            gi_wg_bounce[(i*3u+1u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].y;
+            gi_wg_bounce[(i*3u+2u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].z;
         }
         workgroupBarrier();
         for(var stride=GI_GATHER_LANES/2u;stride>0u;stride/=2u) {
             if lane<stride {
                 for(var j=0u;j<12u;j+=1u) {
-                    gi_wg_bounce[at+j*GI_GATHER_LANES]+=gi_wg_bounce[at+j*GI_GATHER_LANES+stride];
+                    gi_wg_bounce[j*GI_GATHER_LANES+lane]+=gi_wg_bounce[j*GI_GATHER_LANES+lane+stride];
                 }
             }
             workgroupBarrier();
         }
         if live && lane==0u {
             atomicAdd(&gi_work[GI_W_GATHERS],1u);
+            atomicAdd(&gi_work[GI_W_GATHER_RAYS],atomicLoad(&gi_wg_rays));
+            let missing=atomicLoad(&gi_wg_missing);
+            if missing!=0u { atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing); }
             var m=0.0;
-            for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[at+j*GI_GATHER_LANES])); }
+            for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
             if m<=0.0 {
                 gi_table[hot+GI_HOT_BOUNCE]=0u;
             } else {
                 for(var w=0u;w<6u;w+=1u) {
-                    let a=gi_wg_bounce[at+(2u*w)*GI_GATHER_LANES];
-                    let b=gi_wg_bounce[at+(2u*w+1u)*GI_GATHER_LANES];
+                    let a=gi_wg_bounce[(2u*w)*GI_GATHER_LANES];
+                    let b=gi_wg_bounce[(2u*w+1u)*GI_GATHER_LANES];
                     gi_table[hot+GI_HOT_BOUNCE+1u+w]=pack2x16float(vec2<f32>(a,b)/m);
                 }
                 gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(m);
             }
             // The schedule: one gather done. A gather that met hit cells without a value yet
             // (new this frame, or requested now) is repeated once more.
-            let state=gi_table[cold+GI_C_STATE];
             var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
             left=select(0u,left-1u,left>0u);
             var retry=state&GI_RETRY;
-            if atomicLoad(&gi_wg_missing[cell])!=0u {
+            if missing!=0u {
                 if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
             } else {
                 retry=0u;
@@ -1689,6 +1760,12 @@ var<private> gi_gather_sh:array<vec3<f32>,4>;
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
             gi_schedule(slot,left);
+        }
+        // Outside this frame's slot group: next frame's queue, the schedule unchanged.
+        if queued && !live && lane==0u {
+            atomicAdd(&gi_work[GI_W_GATHER_DEFERRED],1u);
+            gi_table[cold+GI_C_STATE]=state&~GI_BQUEUED;
+            gi_schedule(slot,max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,1u));
         }
         workgroupBarrier();
     }

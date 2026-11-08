@@ -179,7 +179,13 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     rl_indirect_prepare(surface_input);
     let lit=rl_finite(shade(surface_output,surface_input));
     let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));
-    return vec4<f32>(rl_finite(TP_COMPOSITE),1.0);
+    // AT1 fog and aerial perspective over the surface's own light, and the share of the
+    // path's in-scattering that the light behind (already fogged up to the eye) carries:
+    // atmosphere_surface(c, p) = c t + s, so fully clear glass leaves `behind` unchanged.
+    let coverage=transparent_coverage(material,material.base_color.a*sampled_alpha*input.color.a);
+    let fog=atmosphere_surface(vec3<f32>(0.0),input.world);
+    let passed=TP_TRANSMIT;
+    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(TP_SURFACE),input.world)+passed*max(behind-fog,vec3<f32>(0.0))),1.0);
 }
 // ---- end TP_GLASS ----
 
@@ -319,6 +325,7 @@ struct TpBillboard {
     @location(2) @interpolate(flat) radiance:vec3<f32>,
     @location(3) depth:f32,
     @location(4) @interpolate(flat) emission:vec3<f32>,
+    @location(5) world:vec3<f32>,
 };
 @vertex fn tp_particle_vs(@builtin(vertex_index) vertex:u32, @builtin(instance_index) rank:u32) -> TpBillboard {
     var out:TpBillboard;
@@ -347,6 +354,7 @@ struct TpBillboard {
     out.radiance=p.light.rgb*(color.rgb/PI);
     out.emission=emission;
     out.depth=dot(world-tp.eye.xyz,tp.forward.xyz);
+    out.world=world;
     return out;
 }
 @fragment fn tp_particle_fs(input:TpBillboard) -> @location(0) vec4<f32> {
@@ -367,6 +375,10 @@ struct TpBillboard {
     let alpha=clamp(input.color.a*shape*soft,0.0,1.0);
     // Premultiplied: scattering covers `alpha`; emission adds over the particle's shape.
     let rgb=exposed_product(input.radiance,tint*alpha)+exposed_product(input.emission,tint*(shape*soft));
-    return vec4<f32>(min(rgb,vec3<f32>(65504.0)),alpha);
+    // AT1 fog over premultiplied light: rgb t + alpha s, as atmosphere_surface(rgb) less the
+    // in-scattering the uncovered share leaves to what is behind.
+    let fog=atmosphere_surface(vec3<f32>(0.0),input.world);
+    let fogged=atmosphere_surface(min(rgb,vec3<f32>(65504.0)),input.world)-(1.0-alpha)*fog;
+    return vec4<f32>(clamp(fogged,vec3<f32>(0.0),vec3<f32>(65504.0)),alpha);
 }
 // ---- end TP_PARTICLES_DRAW ----

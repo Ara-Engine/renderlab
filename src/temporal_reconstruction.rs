@@ -563,7 +563,9 @@ impl Renderer {
                     .concat(),
             )
             .chain_update(self.environment.uniform())
-            .chain_update([u8::from(self.environment.visible)]);
+            .chain_update([u8::from(self.environment.visible)])
+            // AT1: the atmosphere sky on misses (atmosphere_gpu.rs).
+            .chain_update([u8::from(self.atmosphere_sky_visible())]);
         for v in [
             u.environment,
             u.geometry,
@@ -659,7 +661,9 @@ impl Renderer {
             })
             .collect();
         let background = self.lit_clear().map(|v| v as f32);
-        let visible_sky = self.environment.visible && self.environment.selected.is_some();
+        // AT1: misses also vary per pixel while the atmosphere's sky is on.
+        let visible_sky = (self.environment.visible && self.environment.selected.is_some())
+            || self.atmosphere_sky_visible();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
         let state = self.reconstruction_state.as_mut().unwrap();
         let continued = state

@@ -115,7 +115,7 @@ fn pre_tp1_standard_is_exact() {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(pre_tp1_standard().as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    // shaders/programs/standard.wgsl at main ffdaee9 (DC1, R1; before TP1).
+    // shaders/programs/standard.wgsl at main f159fcd (DC1, R1, G2b, AT1; before TP1).
     assert_eq!(hex, "c30842af78c4fa216e494182e63673f4aedf083c00ce2405c552f0836c5f43c7");
 }
 
@@ -491,6 +491,7 @@ fn gpu_tp1_scene() {
         view_formats: &[],
     });
     let mut log = serde_json::json!({"path": path, "primary": format!("{:?}", r.primary_mode),
+        "indirect": r.indirect().enabled,
         "soft": format!("{:?}", r.soft_mode), "exposure_stops": exposure, "size": [width, height],
         "tr1": r.reconstruction.enabled});
 
@@ -672,9 +673,12 @@ fn gpu_tp1_scene() {
         }
         save(&mut r, "opaque");
         // The opaque image with the pre-TP1 standard program: TP1 leaves it unchanged.
-        // TR1 off for this pair, so both images are single frames of the same shading.
+        // TR1 and the radiance cache off for this pair, so both images are single frames of
+        // the same shading (a program reload relights the cache over several frames).
         let reconstruction = r.reconstruction;
+        let indirect = r.indirect();
         r.set_reconstruction(Reconstruction::off()).unwrap();
+        r.set_indirect(IndirectSettings::off()).unwrap();
         for _ in 0..3 {
             render(&mut r, &camera, &mut asset, None, None);
         }
@@ -689,6 +693,7 @@ fn gpu_tp1_scene() {
         let before = read_texture(&r, &target, 4);
         r.reload_program(&standard, crate::STANDARD_PROGRAM).unwrap();
         r.set_reconstruction(reconstruction).unwrap();
+        r.set_indirect(indirect).unwrap();
         let differing = current.chunks_exact(4).zip(before.chunks_exact(4)).filter(|(a, b)| a != b).count();
         log["identity"] = serde_json::json!({"differing_pixels": differing,
             "note": "opaque quarry, TP1 standard program vs the pre-TP1 one, presented RGBA8"});

@@ -415,6 +415,13 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
+    // AT1: camera-pixel entries apply the sky and fog (shaders/atmosphere_api.wgsl); cell
+    // shading's bounce light carries none.
+    let atmosphere = if stage == Stage::Cell {
+        String::new()
+    } else {
+        crate::atmosphere::api_source()
+    };
     let (mut reflection, traces) = reflection_api(head, program, stage);
     if traces {
         // M7-R1: the indirect inputs' cache-off state, which reads the open environment.
@@ -427,7 +434,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         });
     }
     let mut source = format!(
-        "{head}\n{COMMON_API}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{binding}// ---- program ----\n"
+        "{head}\n{COMMON_API}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}// ---- program ----\n"
     );
     if traces {
         // M7-R1: hits trace their own light visibility.
