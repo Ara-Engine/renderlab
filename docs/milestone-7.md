@@ -129,3 +129,5 @@ Unreal packages, update of 2026-11-08 (from M7-U0b). Never mix packages within o
 `m7-u0/ue-project/Saved/StagedBuilds` was a byte-identical copy of ue-svsky-package (proof: `m7-u0b/package-retention-proof.json`) and is deleted, freeing 1.42 GB.
 
 Retention correction (root, 2026-11-08): path-traced reference archives, plus the Unreal native captures that later units score against, are not "raw dumps". Keep them until integrated M7 acceptance. That covers the S2G, Q-disocclusion, Q-sun and U1b specular references, and TSR's Q-disocclusion capture. The 5 MB delete rule applies to intermediate buffers, rejected attempts and duplicates. TR1 found that deleted S2G, Q-disocclusion and U1b references blocked its remaining gates. Regenerate those once, compactly (half-precision where the scorer allows), into `E:/renderlab-work/m7-refs/`, and keep them there.
+
+Package update (2026-11-08): R0a's reflection fixtures RF1-RF10 use `E:/renderlab-work/m7-r0a/ue-package-c` (package C). Keep package C and the source `ue-project/Content`. R0a needed no further recooks, so the Unreal project's DerivedDataCache and Saved/Cooked are deleted, freeing 2.88 GB.
