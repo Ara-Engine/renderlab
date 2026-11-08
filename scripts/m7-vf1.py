@@ -6,6 +6,7 @@ All targets, staged binaries and evidence belong to D:/Coding/renderlab-work/m7-
 """
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -18,6 +19,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 OUT = Path('D:/Coding/renderlab-work/m7-vf1')
 OWNER = 'm7-vf1'
+BIN = OUT / 'bin' / os.environ.get('VF1_BIN_TAG', '')
 
 
 def load(name):
@@ -50,14 +52,25 @@ def build():
             raise SystemExit(code)
         rows = [json.loads(l) for l in (OUT / ('build-' + label + '.out')).read_text().splitlines() if l.startswith('{')]
         executable = next(r['executable'] for r in reversed(rows) if r.get('executable'))
-        (OUT / 'bin').mkdir(exist_ok=True)
-        shutil.copy2(executable, OUT / 'bin' / (label + '.exe'))
-    print('staged', OUT / 'bin', flush=True)
+        BIN.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(executable, BIN / (label + '.exe'))
+    print('staged', BIN, flush=True)
 
 
 def batch(label):
-    tests = str(OUT / 'bin/lib.exe')
-    example = str(OUT / 'bin/example.exe')
+    # A queued batch may pin a completed staged build before taking the lease;
+    # existing executables stay immutable. Verify the pins before any test runs.
+    pins = OUT / (label + '-binaries.json')
+    directory = BIN
+    if pins.exists():
+        plan = json.loads(pins.read_text())
+        directory = Path(plan['directory'])
+        for name in ['lib', 'example']:
+            actual = hashlib.sha256((directory / (name + '.exe')).read_bytes()).hexdigest()
+            assert actual == plan[name + '_sha256'], name + ' executable pin changed'
+        print('VF1 pinned binaries', directory, flush=True)
+    tests = str(directory / 'lib.exe')
+    example = str(directory / 'example.exe')
     root = OUT / 'images' / label
     root.mkdir(parents=True, exist_ok=True)
     manifest = 'E:/renderlab-work/m7-g1c/quarry/manifest.json'

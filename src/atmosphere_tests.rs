@@ -599,6 +599,27 @@ fn gpu_at1_quarry() {
         log["configs"][name] = serde_json::json!({"mean_exposed_rgb": mean,
             "sun_travel": travel.to_array(), "lux": lux, "captured_sky": captured, "frames": frames});
     }
+    // A near-horizontal view toward the low sun makes the shafts behind the
+    // rocks visible in the surrounding medium, rather than against surfaces only.
+    let mut shaft_pose = frame.clone();
+    shaft_pose.eye[1] = 1.1;
+    shaft_pose.target[1] = 1.1;
+    let shaft_camera = shaft_pose.camera().unwrap();
+    for (name, atmosphere) in [
+        ("off", legacy),
+        ("default", Atmosphere::default()),
+        ("dense", volumetric),
+    ] {
+        apply(&mut r, atmosphere, false, low, space);
+        for _ in 0..24 {
+            render(&mut r, &mut asset, &shaft_camera);
+        }
+        png(
+            &out.join(format!("{path}-shaft-view-{name}.png")),
+            size,
+            &capture(&mut r),
+        );
+    }
     // VF1: a short camera-only move followed by a hold, so world reprojection is
     // exercised without caster uploads resetting fog history every frame.
     apply(&mut r, volumetric, false, low, space);

@@ -28,6 +28,9 @@ sheet('quarry-sheet.png', [[(p + ': ' + mode, ROOT / p / (p + '-' + config + '.p
 sheet('quarry-default-sheet.png', [[(p + ': ' + mode, ROOT / p / (p + '-' + config + '.png'))
     for mode, config in [('AT1 default', 'legacy'), ('VF1 default', 'default')]] for p in paths])
 sheet('motion-sheet.png', [[(p + ': frame ' + str(k), ROOT / p / f'{p}-motion-{k:02}.png') for k in [0,7,15,23]] for p in paths], 480)
+if (ROOT / 'nonrt/nonrt-shaft-view-dense.png').exists():
+    sheet('shafts-sheet.png', [[(p + ': ' + mode, ROOT / p / f'{p}-shaft-view-{mode}.png')
+        for mode in ['off','default','dense']] for p in paths])
 game_rows = []
 for p in ['nonrt', 'rt']:
     game_rows.append([(p + ': ' + mode, sorted((ROOT / ('game-' + p + '-' + mode)).glob('*.png'))[-1])
@@ -35,6 +38,7 @@ for p in ['nonrt', 'rt']:
 sheet('game-sheet.png', game_rows, 640)
 
 summary = {'quarry': {}, 'game': {}}
+previous = json.loads((ROOT / 'summary.json').read_text()) if (ROOT / 'summary.json').exists() else {}
 for p in paths:
     data = json.loads((ROOT / p / (p + '-at1.json')).read_text())
     summary['quarry'][p] = data
@@ -46,6 +50,9 @@ for p in paths:
     # Preserve useful full-HDR comparisons before deleting bulk raw dumps.
     comparisons = {}
     for a,b in [('legacy','default'),('low','low-default'),('low','low-volumetric')]:
+        if not (ROOT / p / f'{p}-{a}.f32').exists():
+            comparisons[a+'-to-'+b] = previous['quarry'][p]['hdr_comparisons'][a+'-to-'+b]
+            continue
         old = np.fromfile(ROOT / p / f'{p}-{a}.f32', dtype='<f4').reshape(-1,3)
         new = np.fromfile(ROOT / p / f'{p}-{b}.f32', dtype='<f4').reshape(-1,3)
         d = new-old
@@ -63,3 +70,27 @@ for p in ['nonrt','rt']:
             cpu_render_ms_p50=float(np.median([f['cpu_render_ms'] for f in data['frames'][8:]])))
 print(json.dumps(summary['game'], indent=2))
 (ROOT / 'summary.json').write_text(json.dumps(summary, indent=2))
+
+chart = Image.new('RGB', (1800, 430), '#17191b')
+draw = ImageDraw.Draw(chart)
+draw.text((24, 14), 'Quarry low sun: shared-host wall throughput (ms/frame); dots are the two rounds, not an overhead bound', font=font, fill='white')
+settings = [('analytic only', 'procedural-low', '#87939b'), ('default fog', 'default-fog', '#6db59b'), ('dense fog', 'volumetric', '#d6b27c')]
+ceiling = max(v['timing'][f'{key}-r{k}']['wall_ms_per_frame'] for v in summary['quarry'].values() for _,key,_ in settings for k in [0,1]) * 1.1
+for i,p in enumerate(paths):
+    x = i*600 + 24
+    draw.text((x,55),p,font=font,fill='white')
+    for row,(label,key,color) in enumerate(settings):
+        y = 98 + row*85
+        values = [summary['quarry'][p]['timing'][f'{key}-r{k}']['wall_ms_per_frame'] for k in [0,1]]
+        draw.text((x,y),f'{label}: {values[0]:.3f} / {values[1]:.3f}',font=font,fill='white')
+        length = sum(values)/2/ceiling*530
+        draw.rectangle((x,y+29,x+length,y+46),fill=color)
+        for value in values:
+            px=x+value/ceiling*530
+            draw.ellipse((px-3,y+34,px+3,y+40),fill='white')
+    draw.line((x,375,x+530,375),fill='#777777')
+    for tick in range(0,int(ceiling)+1,5):
+        px=x+tick/ceiling*530
+        draw.line((px,370,px,380),fill='#aaaaaa')
+        draw.text((px,387),str(tick),font=font,fill='white')
+chart.save(ROOT/'timing-chart.png')

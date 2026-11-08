@@ -339,6 +339,9 @@ impl Renderer {
         atmosphere.validate()?;
         if self.atmosphere.settings != atmosphere {
             self.atmosphere.previous = None;
+            // TR1 otherwise keeps pixels integrated under the old fog density or
+            // medium even after the froxels have restarted.
+            self.cut_reconstruction();
         }
         self.atmosphere.settings = atmosphere;
         Ok(())
