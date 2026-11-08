@@ -531,6 +531,38 @@ fn write_frame(path: &Path, values: &[f32]) {
     .unwrap();
 }
 
+/// The no-RT device with visibility-buffer primaries (temporal reconstruction does not
+/// reconstruct raster primaries): the suite's no-RT renderer plus the visibility features.
+fn visibility_renderer() -> Renderer {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::debugging().with_env(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: crate::RECEIVER_FEATURES
+            | crate::VISIBILITY_FEATURES
+            | crate::VISIBILITY_RASTER_FEATURES
+            | crate::VIRTUAL_FEATURES
+            | wgpu::Features::TIMESTAMP_QUERY,
+        required_limits: crate::visibility_limits(wgpu::Limits::default()),
+        ..Default::default()
+    }))
+    .unwrap();
+    let r = Renderer::new_with_options(
+        device,
+        queue,
+        FORMAT,
+        Limits::default(),
+        RendererOptions::default(),
+        SOURCE,
+    )
+    .unwrap();
+    assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
+    r
+}
+
 #[test]
 #[ignore = "U1 offscreen GPU lease, fixture.rla and 4/2 GiB live guard required"]
 fn gpu_specular_aa_motion_screen() {
@@ -540,9 +572,16 @@ fn gpu_specular_aa_motion_screen() {
     let reference = mode.starts_with("reference");
     let native = std::env::var_os("RENDERLAB_U1_NATIVE").is_some();
     let size = if native { [1920, 1080] } else { [320, 180] };
-    let (device, queue) = device(true);
-    let features = format!("{:?}", device.features());
-    let mut r = suite_renderer(device, queue, FORMAT, RendererOptions::default(), SOURCE).unwrap();
+    // TR1b's hand-off mode (docs/m7-tr1b.md): the unfiltered "before" program reconstructed
+    // on traced (RT suite) or visibility-buffer (no-RT) primaries.
+    let reconstructed = mode.ends_with("-tr1");
+    let mut r = if reconstructed && !traced_suite() {
+        visibility_renderer()
+    } else {
+        let (device, queue) = device(true);
+        suite_renderer(device, queue, FORMAT, RendererOptions::default(), SOURCE).unwrap()
+    };
+    let features = format!("{:?}", r.device.features());
     if !traced_suite() {
         assert!(
             !r.device
@@ -554,6 +593,40 @@ fn gpu_specular_aa_motion_screen() {
     let mut scene = scene(&mut r, &root);
     let out = root.join(&mode);
     fs::create_dir_all(&out).unwrap();
+    if reconstructed {
+        // Each track from cold: `warm` frames of its first index, then its indices
+        // consecutively, each frame's reconstructed HDR written as variant 1.
+        let warm = 256;
+        let settings = crate::Reconstruction {
+            enabled: true,
+            ..Default::default()
+        };
+        for track in ["static", "camera", "light"] {
+            r.set_reconstruction(crate::Reconstruction::default())
+                .unwrap();
+            r.set_reconstruction(settings).unwrap();
+            for _ in 0..warm {
+                let c = configure(&mut r, track, 0, size[0]);
+                frame(&mut r, &t, &c, &mut scene, 0);
+            }
+            for index in 0..if track == "static" { 1 } else { 12 } {
+                let c = configure(&mut r, track, index, size[0]);
+                frame(&mut r, &t, &c, &mut scene, 0);
+                let image = hdr(&mut r);
+                write_frame(&out.join(format!("{track}-{index}-1.f32")), &image);
+            }
+        }
+        fs::write(
+            out.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({"size":size,"mode":mode,
+            "features":features,"primary":format!("{:?}",r.primary_mode),"warm_frames":warm,
+            "reconstruction":format!("{settings:?}"),"variants":["before","tr1"]}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(r.fault.get().is_none());
+        return;
+    }
     let average = reference.then(|| Average::new(&r, size));
     let mut timings = vec![];
     let mut uncertainty = vec![];
