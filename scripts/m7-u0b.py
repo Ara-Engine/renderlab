@@ -359,6 +359,10 @@ def reference(args):
         if not args.benches:raise ValueError("S2G regression requires --benches")
         test="reference::tests::gpu_reference_s2g_replay_regression"
     if args.manifest:
+        env["RENDERLAB_M7_QUARRY_REPLAY_POLICY"]=getattr(args,"replay_policy","strict")
+        if getattr(args,"canonical",False):
+            for key in ("RENDERLAB_M7_QUARRY_REPLAY_MODE","RENDERLAB_M7_QUARRY_REPLAY_COUNT","RENDERLAB_M7_SHADER_OVERRIDE"):
+                env.pop(key,None)
         env["RENDERLAB_M7_QUARRY_MANIFEST"]=str(args.manifest)
         env["RENDERLAB_M7_REFERENCE_BATCH"]=str(min(args.batch_frames,3) if game_state()=="relaxed" else args.batch_frames)
         if all("alias_of" not in f for f in json.loads(args.manifest.read_text())["frames"]):
@@ -628,7 +632,8 @@ def sequence(args):
         before={name for name in names if (root/(name+".npz")).exists()}
         if len(before)==len(names):break
         reference(argparse.Namespace(label=args.label,manifest=args.manifest,batch_frames=1,
-            minutes=11,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None))
+            minutes=11,benches=None,geometry=False,replay_loaded=False,seed=None,dispatch_samples=None,depth=None,
+            replay_policy="bounded-as-v1",canonical=True))
         for name in names:
             if name in before or not (root/(name+".json")).exists():continue
             if not (root/(name+".npz")).exists():
@@ -639,8 +644,8 @@ def sequence(args):
         if after==before:raise RuntimeError("reference batch made no progress")
         for name in after-before:
             meta=json.loads((root/(name+".json")).read_text())
-            if meta.get("accepted_for_scoring") is not True or not meta.get("strict_replay",{}).get("bit_identical"):
-                raise RuntimeError("new quarry reference did not pass strict replay: "+name)
+            if not load("m7-u0b-score").qualified_replay(meta):
+                raise RuntimeError("new quarry reference did not pass its replay policy: "+name)
         print(f"sequence references {len(after)}/{len(names)}",flush=True)
         time.sleep(3)
 
@@ -817,6 +822,7 @@ def main():
     q.add_argument("--depth",type=int)
     q.add_argument("--benches",nargs="+");q.add_argument("--manifest",type=Path)
     q.add_argument("--batch-frames",type=int,default=16)
+    q.add_argument("--replay-policy",choices=("strict","bounded-as-v1"),default="strict")
     q.add_argument("--geometry",action="store_true");q.add_argument("--replay-loaded",action="store_true")
     q.add_argument("--s2g-regression",action="store_true")
     q=sub.add_parser("study");q.add_argument("label");q.add_argument("--minutes",type=int,default=30)

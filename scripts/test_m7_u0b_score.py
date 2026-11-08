@@ -14,6 +14,33 @@ score=importlib.util.module_from_spec(spec);spec.loader.exec_module(score)
 
 
 class PhysicalFloorTests(unittest.TestCase):
+    def test_bounded_as_certificate_preserves_raw_reports_and_rejects_every_failed_gate(self):
+        invariant=dict(geometry_captured=True,all_geometry_bytes_identical=True,centre_geometry_identical=True,
+            accepted_counts_identical=True,visibility_sums_identical=True,invalid_pixels=[0,0])
+        report=dict(invariant,bit_identical=False,**{k:dict(max_ulp=4,rms_relative=1e-7,rms_absolute=1e-6)
+            for k in ("mean","half0","half1")})
+        meta=dict(accepted_for_scoring=True,replay_reports=[report],strict_replay=report,
+            fixed_resource_replay=dict(invariant,bit_identical=True),replay_qualification=dict(
+                policy="bounded-as-v1",label="bounded-as",accepted=True,same_resource_bit_identical=True,half_noise_rms=1.))
+        before=json.dumps(meta,sort_keys=True)
+        self.assertTrue(score.qualified_replay(meta));self.assertEqual(json.dumps(meta,sort_keys=True),before)
+        for part in ("mean","half0","half1"):
+            for field,value in (("max_ulp",5),("rms_relative",1.01e-5),("rms_absolute",1.01e-3)):
+                bad=json.loads(before);bad["replay_reports"][0][part][field]=value
+                self.assertFalse(score.qualified_replay(bad),(part,field))
+        for field in ("all_geometry_bytes_identical","centre_geometry_identical","accepted_counts_identical","visibility_sums_identical"):
+            bad=json.loads(before);bad["replay_reports"][0][field]=False
+            self.assertFalse(score.qualified_replay(bad),field)
+        bad=json.loads(before);bad["fixed_resource_replay"]["bit_identical"]=False
+        self.assertFalse(score.qualified_replay(bad))
+        bad=json.loads(before);bad["replay_qualification"]["half_noise_rms"]=0
+        self.assertFalse(score.qualified_replay(bad))
+        bad=json.loads(before);bad["replay_reports"][0]["invalid_pixels"]=[0,1]
+        self.assertFalse(score.qualified_replay(bad))
+        strict=dict(accepted_for_scoring=True,strict_replay=dict(invariant,bit_identical=True),
+            replay_qualification=dict(label="strict"))
+        self.assertTrue(score.qualified_replay(strict))
+
     def test_strict_raw_data_can_defer_archival_until_lease_release(self):
         scratch=Path("E:/renderlab-work/m7-u0b/cpu-tests");scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as temporary:
@@ -33,7 +60,13 @@ class PhysicalFloorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"metadata changed"):
                 score.compact(args)
             score.save(path,meta)
-            score.compact(args)
+            original_save=score.save
+            def publish_metadata(path,value):
+                if "archive_sha256" in value:
+                    self.assertFalse((root/(name+".npz")).exists())
+                    self.assertTrue((root/(name+".npz.pending")).exists())
+                original_save(path,value)
+            with patch.object(score,"save",side_effect=publish_metadata):score.compact(args)
             self.assertFalse(pending.exists())
             with np.load(root/(name+".npz")) as arrays:
                 np.testing.assert_array_equal(arrays["L0"],np.full((2,2,3),11,"f4"))

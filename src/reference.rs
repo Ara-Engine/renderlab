@@ -655,10 +655,17 @@ fn render_repeats(
             },
         ],
     });
+    #[cfg(test)]
+    let diagnostic_shader = std::env::var("RENDERLAB_M7_SHADER_OVERRIDE")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).expect("diagnostic shader override"));
+    let shader = SHADER;
+    #[cfg(test)]
+    let shader = diagnostic_shader.as_deref().unwrap_or(shader);
     let make_pipeline = || {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("reference path tracer"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
         });
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("reference path tracer"),

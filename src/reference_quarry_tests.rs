@@ -109,22 +109,112 @@ fn gpu_reference_quarry() {
         if frame["sky_only"].as_bool() == Some(true) {
             scene.sun = None;
         }
+        let mode = std::env::var("RENDERLAB_M7_QUARRY_REPLAY_MODE")
+            .unwrap_or_else(|_| "independent".into());
+        let repeats = std::env::var("RENDERLAB_M7_QUARRY_REPLAY_COUNT")
+            .map_or(2, |v| v.parse::<usize>().unwrap());
+        assert!((2..=8).contains(&repeats));
         let start = std::time::Instant::now();
-        let image = render(&device, &queue, &scene, &view, &settings).unwrap();
-        let render_seconds = start.elapsed().as_secs_f64();
-        let replay = render(&device, &queue, &scene, &view, &settings).unwrap();
-        let replay_report = super::tests::replay_report(&image, &replay);
-        let identical = replay_report["bit_identical"] == true;
+        let images = match mode.as_str() {
+            "independent" => (0..repeats)
+                .map(|_| render(&device, &queue, &scene, &view, &settings).unwrap())
+                .collect::<Vec<_>>(),
+            "fixed" | "rebuild-pipeline" => render_repeats(
+                &device,
+                &queue,
+                &scene,
+                &view,
+                &settings,
+                repeats,
+                mode == "rebuild-pipeline",
+            )
+            .unwrap(),
+            _ => panic!("unknown replay diagnostic mode"),
+        };
+        let image = &images[0];
+        let render_seconds = start.elapsed().as_secs_f64() / repeats as f64;
+        let mut replay_reports = images[1..]
+            .iter()
+            .map(|replay| super::tests::replay_report(image, replay))
+            .collect::<Vec<_>>();
+        let identical = replay_reports.iter().all(|r| r["bit_identical"] == true);
+        let policy =
+            std::env::var("RENDERLAB_M7_QUARRY_REPLAY_POLICY").unwrap_or_else(|_| "strict".into());
+        assert!(matches!(policy.as_str(), "strict" | "bounded-as-v1"));
+        assert!(
+            mode == "independent" || policy == "strict",
+            "diagnostic modes keep the strict gate"
+        );
+        let noise_rms = (image
+            .standard_error
+            .iter()
+            .flatten()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            / (3 * image.mean.len()) as f64)
+            .sqrt();
+        let mut fixed_report = None;
+        if policy == "bounded-as-v1"
+            && !identical
+            && replay_reports
+                .iter()
+                .all(|r| super::tests::qualify_as_replay(r, noise_rms, true))
+        {
+            let control =
+                render_repeats(&device, &queue, &scene, &view, &settings, 2, false).unwrap();
+            fixed_report = Some(super::tests::replay_report(&control[0], &control[1]));
+            replay_reports.push(super::tests::replay_report(image, &control[0]));
+        }
+        let fixed_exact = fixed_report
+            .as_ref()
+            .is_some_and(|r| r["bit_identical"] == true);
+        let accepted = if policy == "strict" {
+            identical
+        } else {
+            replay_reports
+                .iter()
+                .all(|r| super::tests::qualify_as_replay(r, noise_rms, fixed_exact))
+        };
+        let representative = replay_reports
+            .iter()
+            .max_by_key(|r| {
+                (
+                    r["bit_identical"] != true,
+                    ["mean", "half0", "half1"]
+                        .iter()
+                        .map(|k| r[*k]["changed_pixels"].as_u64().unwrap())
+                        .sum::<u64>(),
+                )
+            })
+            .unwrap();
+        let maximum = |field: &str| {
+            replay_reports
+                .iter()
+                .flat_map(|r| {
+                    ["mean", "half0", "half1"].map(move |k| r[k][field].as_f64().unwrap())
+                })
+                .fold(0.0f64, f64::max)
+        };
+        let qualification = serde_json::json!({"policy":policy,"accepted":accepted,
+            "label":if identical {"strict"} else if accepted {"bounded-as"} else {"rejected"},
+            "same_resource_bit_identical":fixed_exact,"half_noise_rms":noise_rms,
+            "max_ulp":maximum("max_ulp") as u64,"max_changed_pixels":maximum("changed_pixels") as u64,
+            "max_rms_relative":maximum("rms_relative"),"max_rms_absolute":maximum("rms_absolute"),
+            "limits":{"max_ulp":4,"rms_relative":1e-5,"fraction_of_half_noise":1e-3},
+            "statistics_scope":"maxima across every comparison and RGB image/half; raw reports retained"});
         rendered += 1;
         super::tests::save(
             &dir,
             name,
-            &image,
+            image,
             serde_json::json!({"frame":frame,"content":info,"seconds":render_seconds,"qualification_seconds":start.elapsed().as_secs_f64(),"seed":settings.seed,"max_depth":settings.max_depth,"visibility_samples_per_primary":settings.visibility_samples,"camera_background":scene.camera_background,
-                "accepted_for_scoring":identical,"strict_replay":replay_report,
-                "replay_scope":"same seed and dispatch layout, independent AS and pipeline rebuild; every HDR-half and geometry byte"}),
+                "accepted_for_scoring":accepted,"strict_replay":representative,"replay_reports":replay_reports,
+                "fixed_resource_replay":fixed_report,"replay_qualification":qualification,
+                "replay_mode":mode,"replay_count":repeats,
+                "seconds_scope":"mean base-render wall time; fixed resource setup amortized; not GPU time",
+                "replay_scope":"same seed and dispatch layout; mode records independent AS/pipeline, fixed resources, or fixed AS with rebuilt pipelines; every HDR-half and geometry byte"}),
         );
-        assert!(identical, "{name}: strict quarry replay differs");
+        assert!(accepted, "{name}: quarry replay policy {policy} rejected");
         let status = std::process::Command::new("py")
             .args([
                 "-3",

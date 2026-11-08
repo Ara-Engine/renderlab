@@ -39,7 +39,7 @@ private scan payloads and captures stay out of Git.
 
 ## Validation retained so far
 
-- Library tests: **125 passed, 120 ignored**, exit 0. The new CPU checks cover cube-CDF support
+- Library tests: **126 passed, 120 ignored**, exit 0. The new CPU checks cover cube-CDF support
   and RGB-correlated uncertainty; Naga validates the complete measurement shader.
 - GPU analytic run `reference/analytic-final`: all pass, zero invalid pixels. Delta-sun and
   constant-sky Lambert floors are 1.000000. The prepared-cube floor is
@@ -89,9 +89,10 @@ atomic acquisition retries without repeating an acquired job's body.
 
 New quarry states run **one state per lease**, with a **600-second functional guard inside an
 11-minute reservation**, releasing between states to alternate with TR0. Each state requires
-an independent acceleration-structure/pipeline rebuild replay: all mean/half float bits,
-all 80-byte geometric records, D/V sums and zero-invalid status must match before compaction
-and publication. A failed replay keeps its data unaccepted; no tolerance is substituted.
+an independent acceleration-structure/pipeline rebuild replay. All 80-byte geometric records,
+D/V sums, counts and invalid flags remain exact. HDR is qualified by the uniform
+`bounded-as-v1` policy below; strict pairs retain their strict label. Failed qualifications
+stay unaccepted.
 
 G1b-q2 released at **21:31:17.941996Z**. The coordinated CPU gap has anchored START/END lines
 at **21:31:18.432756Z / 21:38:34.717228Z**. The warm-target build took **435.5 seconds wall**
@@ -118,8 +119,62 @@ half preservation across this boundary. Integrated examples release at **22:05:3
 22:06:26.237Z**, then publish archive metadata at **22:05:34.442Z / 22:06:28.164Z**. Both
 processes exit 0 with no monitor failures, exact replay and minima **9.670 / 10.059 GiB**.
 This matches TR0's release-before-CPU-archival flow; samples, scene inputs and renderer code
-are unchanged. The focused Python suite passes **12 tests** after the telemetry-routing and
+are unchanged. The focused Python suite passes **13 tests** after the telemetry-routing and
 bounded static-matrix handoff checks.
+
+## Independent-AS replay policy
+
+Root approved **`bounded-as-v1`** after the time-boxed `q-disocclusion-001` diagnosis.
+The original strict pair differed in 514 mean pixels by at most two ULPs, with identical
+geometry, D/V and counts and zero invalid pixels. An unchanged one-frame repeat passed;
+its first image also matched the original first image byte for byte. The original failed
+process and raw report remain separate and unaccepted.
+
+Controls on the unchanged D8 shader, at the exact 1,024-spp registered pose:
+
+| Control | Result |
+|---|---|
+| Fixed AS and pipeline, eight renders | **8/8 bit-identical** |
+| Fixed AS, rebuilt pipelines, eight renders | **8/8 bit-identical** |
+| Independent AS/resources, eight renders | **6/7 comparisons against the first differ** |
+
+The independent-build differences reach three ULPs, with at most 810 changed mean pixels,
+781 half-0 pixels and 776 half-1 pixels. Geometry, centre identity, accepted counts, direct
+light and visibility remain byte-identical. The worst RGB RMS difference is **2.74e-6 cd/m²**,
+against **9.9329 cd/m²** RGB split-half noise, below 2.8e-7 of that noise. Rebuilding scene/AS
+resources isolates the variation; pipeline rebuilding alone does not reproduce it. The
+equal/near-equal-t secondary-hit mechanism is **inferred**. A changed-shader signature probe
+did not directly capture a changed hit, so no particular triangle tie is claimed proven.
+
+Every new canonical state uses the same policy:
+
+- Keep every raw comparison report. Geometry, centre, counts, all D/V bytes and zero-invalid
+  flags stay exact.
+- Mean RGB and **both** actual halves must each stay within **4 ULP per channel**, RGB RMS
+  relative to that image's signal RMS **≤1e-5**, and error **≤1e-3** of the first image's RGB
+  split-half noise RMS. Zero-noise data permits no nonzero error.
+- Any accepted nonzero cross-AS difference also requires a **bit-exact fixed-AS/pipeline
+  repeat**. Its independent comparison to the retained image must meet the same bounds.
+- Exact pairs keep the **strict** label. Bounded states record their maximum ULP, maximum
+  changed-pixel count, relative/absolute RMS, noise, fixed-resource report and policy version.
+
+The first image is retained; qualification replays do **not** increase its stated spp or
+reduce its noise estimate. This bounds a reference-instrument rounding difference, with
+no change to the shader, scene, sampling or image-quality gates. The earlier S2G colour bug
+failed a fixed-resource repeat and therefore would not qualify under this policy.
+
+Rust and Python boundary checks reject five ULPs, excessive relative/noise error, changed
+geometry/count/visibility/invalid flags and failed fixed repeats. The policy harness build
+passes **126 library tests, 120 ignored**; its SHA256 is
+`997151eba494045297288b3fcfb445efc1fdd0291963d83def23b4e0fb426306`.
+The default shader remains D8 (`eac6a57e…c086`), so the retained independent controls apply.
+The final CPU gap ends **00:37:29.992Z** with no Cargo left running.
+
+`q-disocclusion-001` requalifies in a clean process with eight exact cross-AS renders, so
+its published label remains **strict**, not bounded. Its archive SHA256 is
+`de9b3da68249fb77ef4489a2f3605f6de0a77db4edd3d012ddbf48bca704351f`.
+Diagnostics and the original rejected reports are retained under
+`reference/replay-diagnostics/q-disocc001`; they are not substituted for canonical data.
 
 ## Retained quarry references
 

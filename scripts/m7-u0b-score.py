@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -43,15 +44,42 @@ def archive(path,arrays):
     temporary.replace(path)
 
 
+def qualified_replay(meta):
+    """Uniform strict/bounded-AS-v1 certificate check; never relax geometry or a fixed repeat."""
+    if meta.get("accepted_for_scoring") is not True:return False
+    reports=meta.get("replay_reports") or [meta.get("strict_replay",{})]
+    invariant=("all_geometry_bytes_identical","centre_geometry_identical","accepted_counts_identical","visibility_sums_identical")
+    if all(r.get("bit_identical") is True and all(r.get(k,True) is True for k in invariant)
+           and r.get("invalid_pixels",[0,0])==[0,0] for r in reports):
+        return meta.get("replay_qualification",{}).get("label","strict")=="strict"
+    q=meta.get("replay_qualification",{});fixed=meta.get("fixed_resource_replay") or {}
+    if (q.get("policy")!="bounded-as-v1" or q.get("label")!="bounded-as" or q.get("accepted") is not True
+            or q.get("same_resource_bit_identical") is not True or fixed.get("bit_identical") is not True
+            or fixed.get("geometry_captured") is not True
+            or not all(fixed.get(k) is True for k in invariant) or fixed.get("invalid_pixels")!=[0,0]):return False
+    def number(v):return type(v) in (int,float) and math.isfinite(v) and v>=0
+    noise=q.get("half_noise_rms")
+    if not number(noise):return False
+    for r in reports:
+        if not (r.get("geometry_captured") is True and all(r.get(k) is True for k in invariant)
+                and r.get("invalid_pixels")==[0,0]):return False
+        for part in ("mean","half0","half1"):
+            v=r.get(part,{})
+            if not (number(v.get("max_ulp")) and v["max_ulp"]<=4
+                    and number(v.get("rms_relative")) and v["rms_relative"]<=1e-5
+                    and number(v.get("rms_absolute")) and v["rms_absolute"]<=1e-3*noise):return False
+    return True
+
+
 def compact(args):
     root,name=args.root,args.name
     meta=json.loads((root/(name+".json")).read_text());h,w=meta["height"],meta["width"];n=meta["samples"]
     pending=root/(name+".compact-pending.json")
     if os.environ.get("RENDERLAB_M7_DEFER_REFERENCE_COMPACT")=="1":
-        if meta.get("accepted_for_scoring") is not True or not meta.get("strict_replay",{}).get("bit_identical"):
-            raise ValueError("only a strict-replay-qualified quarry state can defer archival")
+        if not qualified_replay(meta):
+            raise ValueError("only a replay-qualified quarry state can defer archival")
         save(pending,dict(metadata_sha256=sha(root/(name+".json")),
-            status="strict GPU data complete; archive/noise/population compaction awaits GPU lease release"))
+            status="qualified GPU data complete; archive/noise/population compaction awaits GPU lease release"))
         print(json.dumps(dict(reference=name,compaction="deferred until GPU lease release")),flush=True)
         return
     if pending.exists() and sha(root/(name+".json"))!=json.loads(pending.read_text())["metadata_sha256"]:
@@ -87,7 +115,7 @@ def compact(args):
             arrays[f"D{k}"]=a[f"direct{k}"][...,:3]/((n+1-k)//2)
             arrays[f"V{k}"]=np.divide(a[f"direct{k}"][...,3],counts[k],out=np.zeros((h,w),"f4"),where=counts[k]>0)
     arrays|={"pop_"+k:v for k,v in pops.items()}
-    target=root/(name+".npz");archive(target,arrays)
+    target=root/(name+".npz");staged=target.with_suffix(".npz.pending");archive(staged,arrays)
     stops=-14 if "frame" in meta else -9
     if "bench" in meta:
         source=Path("E:/renderlab-work/m7-u0/scenes")/meta["bench"]/"scene.json"
@@ -98,12 +126,14 @@ def compact(args):
     noise=np.abs((se*np.array([.2126,.7152,.0722])).sum(-1))
     lit=lum>max(float(lum.max())*1e-4,1e-8)
     relative=np.divide(noise,np.maximum(lum,1e-20))[lit]
-    meta|=dict(archive_sha256=sha(target),radiance_units="unexposed cd/m^2",noise_relative_quantiles=np.quantile(relative,[.5,.95,.99]).tolist() if relative.size else [],
+    meta|=dict(archive_sha256=sha(staged),radiance_units="unexposed cd/m^2",noise_relative_quantiles=np.quantile(relative,[.5,.95,.99]).tolist() if relative.size else [],
                noise_luminance_rms=float(np.sqrt((noise**2).mean())),populations={k:int(v.sum()) for k,v in pops.items()},
                deleted_raw={p.name:dict(sha256=sha(p),bytes=p.stat().st_size) for p in raw if p.exists()},
                direct_definition="physical sun-only direct radiance; includes disk integration (not the old delta-BRDF T1b estimand)",
                visibility_definition="disk visibility conditioned on centre placement and 2% forward-depth band; single-surface mask has every sample accepted")
     save(root/(name+".json"),meta)
+    # The public archive is the readiness marker: its metadata/noise/hash must exist first.
+    staged.replace(target)
     if pending.exists():pending.unlink()
     for p in raw:
         if p.exists():p.unlink()
@@ -281,7 +311,7 @@ def floor(args):
                     residuals.append(dict(frames=[index-1,index],offset=offset,phase=pose.get("phase"),
                         static_camera=key(pose)==key(recipe["frames"][index-1]),
                         measures=measures(residual,noise,mask)))
-                if offset==0 and index in (0,48,64,120,128,160):
+                if offset==0 and index in (0,1,48,64,120,128,160):
                     pixels=np.concatenate([ref,estimate,8*np.abs(estimate-ref)],axis=1)
                     Image.fromarray(np.rint(np.clip(pixels,0,255)).astype("u1")).save(directory/f"physical-{index:03}.png")
             previous=dict(frame=index,covered=populations["all-covered"],hit=hit,

@@ -833,6 +833,13 @@ pub(super) fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
     assert_eq!((a.width, a.height), (b.width, b.height));
     let width = a.width;
     let rgb = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+        let reference_rms = (a
+            .iter()
+            .flatten()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            / (3 * a.len()) as f64)
+            .sqrt();
         let mut changed_pixels = 0;
         let mut changed_channels = 0;
         let mut sum_squared = 0.0f64;
@@ -854,8 +861,16 @@ pub(super) fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
                 examples.push(serde_json::json!({"pixel":[pixel as u32 % width,pixel as u32 / width],"first":x,"replay":y}));
             }
         }
+        let rms = (sum_squared / (3 * a.len()) as f64).sqrt();
+        let relative = if reference_rms > 0.0 {
+            rms / reference_rms
+        } else if rms == 0.0 {
+            0.0
+        } else {
+            f64::MAX
+        };
         serde_json::json!({"changed_pixels":changed_pixels,"changed_channels":changed_channels,
-            "rms_absolute":(sum_squared/(3*a.len()) as f64).sqrt(),"max_absolute":max_abs,
+            "rms_absolute":rms,"rms_relative":relative,"reference_rms":reference_rms,"max_absolute":max_abs,
             "max_ulp":max_ulp,"first_changed_examples":examples})
     };
     let mut centre = true;
@@ -880,6 +895,77 @@ pub(super) fn replay_report(a: &Image, b: &Image) -> serde_json::Value {
         "accepted_counts_identical":counts,"visibility_sums_identical":visibility,
         "all_geometry_bytes_identical":a.geometry==b.geometry,
         "invalid_pixels":[a.invalid_pixels,b.invalid_pixels]})
+}
+
+/// Only the independent-AS HDR comparison is bounded. Fixed resources, geometry,
+/// direct/visibility sums and invalid flags retain the exact gate.
+pub(super) fn qualify_as_replay(
+    report: &serde_json::Value,
+    noise_rms: f64,
+    fixed_exact: bool,
+) -> bool {
+    let invariants = report["geometry_captured"] == true
+        && report["all_geometry_bytes_identical"] == true
+        && report["centre_geometry_identical"] == true
+        && report["accepted_counts_identical"] == true
+        && report["visibility_sums_identical"] == true
+        && report["invalid_pixels"] == serde_json::json!([0, 0]);
+    if !invariants || !noise_rms.is_finite() || noise_rms < 0.0 {
+        return false;
+    }
+    if report["bit_identical"] == true {
+        return true;
+    }
+    fixed_exact
+        && ["mean", "half0", "half1"].iter().all(|key| {
+            let value = &report[*key];
+            value["max_ulp"].as_u64().is_some_and(|v| v <= 4)
+                && value["rms_relative"]
+                    .as_f64()
+                    .is_some_and(|v| v.is_finite() && v >= 0.0 && v <= 1e-5)
+                && value["rms_absolute"]
+                    .as_f64()
+                    .is_some_and(|v| v.is_finite() && v >= 0.0 && v <= 1e-3 * noise_rms)
+        })
+}
+
+#[test]
+fn bounded_as_replay_keeps_strict_invariants_and_hard_numeric_limits() {
+    let image = || Image {
+        width: 1,
+        height: 1,
+        samples: 2,
+        mean: vec![[1.0; 3]],
+        halves: [vec![[1.1; 3]], vec![[0.9; 3]]],
+        standard_error: vec![[0.1; 3]],
+        geometry: vec![0; 80],
+        invalid_pixels: 0,
+    };
+    let a = image();
+    let mut b = image();
+    let exact = replay_report(&a, &b);
+    assert!(qualify_as_replay(&exact, 0.0, false));
+    b.mean[0][0] = f32::from_bits(1.0f32.to_bits() + 4);
+    let bounded = replay_report(&a, &b);
+    assert!(qualify_as_replay(&bounded, 0.1, true));
+    assert!(!qualify_as_replay(&bounded, 0.1, false));
+    assert!(!qualify_as_replay(&bounded, 0.0, true));
+    for key in ["mean", "half0", "half1"] {
+        for (field, value) in [
+            ("max_ulp", serde_json::json!(5)),
+            ("rms_relative", serde_json::json!(1.01e-5)),
+            ("rms_absolute", serde_json::json!(1.01e-4)),
+        ] {
+            let mut bad = bounded.clone();
+            bad[key][field] = value;
+            assert!(!qualify_as_replay(&bad, 0.1, true), "{key}/{field}");
+        }
+    }
+    b.geometry[0] = 1;
+    assert!(!qualify_as_replay(&replay_report(&a, &b), 0.1, true));
+    b = image();
+    b.invalid_pixels = 1;
+    assert!(!qualify_as_replay(&replay_report(&a, &b), 0.1, true));
 }
 
 /// The ordinary bench suite replays only its first pose. Keep the S2G camera-0.25px

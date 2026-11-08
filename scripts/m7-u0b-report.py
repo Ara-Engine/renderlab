@@ -250,7 +250,7 @@ def references(args):
             if not path.exists():missing.append(name);continue
             if source not in verified:
                 meta=json.loads(path.with_suffix(".json").read_text())
-                if meta.get("camera_background")!=[0,0,0] or sha(path)!=meta["archive_sha256"]:
+                if meta.get("accepted_for_scoring") is False or meta.get("camera_background")!=[0,0,0] or sha(path)!=meta["archive_sha256"]:
                     raise ValueError("reference hash/background mismatch")
                 verified[source]=meta
             meta=verified[source]
@@ -259,13 +259,17 @@ def references(args):
             if meta["samples"]!=frame["samples"]:raise ValueError("reference sample budget mismatch")
             rows.append(dict(frame=name,canonical=source,samples=meta["samples"],
                 archive_sha256=meta["archive_sha256"],relative_noise_quantiles=meta["noise_relative_quantiles"],
-                luminance_noise_rms=meta["noise_luminance_rms"]))
+                luminance_noise_rms=meta["noise_luminance_rms"],
+                replay_label=meta.get("replay_qualification",{}).get("label",
+                    "strict" if meta.get("strict_replay",{}).get("bit_identical") else "earlier validation"),
+                replay_qualification=meta.get("replay_qualification")))
         ranges={}
         for samples in sorted({r["samples"] for r in rows}):
             noise=np.array([r["relative_noise_quantiles"] for r in rows if r["samples"]==samples])
             ranges[str(samples)]=dict(per_frame_median_p95_p99_relative_SE_range=[noise.min(0).tolist(),noise.max(0).tolist()])
         groups[group]=dict(expected=len(manifest["frames"]),ready=len(rows),missing=missing,
-            canonical_ready=len({r["canonical"] for r in rows}),noise_ranges_by_spp=ranges,frames=rows)
+            canonical_ready=len({r["canonical"] for r in rows}),noise_ranges_by_spp=ranges,frames=rows,
+            replay_labels={label:sum(r["replay_label"]==label for r in rows) for label in sorted({r["replay_label"] for r in rows})})
     save(OUT/"reference-coverage.json",dict(primary_background=[0,0,0],groups=groups,
         noise_definition="absolute split-half luminance difference / 2 divided by mean luminance; quantiles where mean exceeds 1e-4 of image peak; not a confidence interval"))
     print(json.dumps({k:{f:v[f] for f in ("expected","ready","canonical_ready","missing")} for k,v in groups.items()}))
