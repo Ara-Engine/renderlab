@@ -1,7 +1,7 @@
 # M7 SK1: animated meshes
 
 Implementation branch: `t3/m7-sk1`, based on `984a18b`, updated with main's
-`35d27e6`. This is the 2026-11-08 overnight base, with the remaining limits listed
+`ae95d3a` (TR1b and DC1). This is the 2026-11-08 overnight base, with the remaining limits listed
 below. It makes no Unreal quality or performance claim.
 
 ## Asset and cache contract
@@ -79,14 +79,22 @@ Busy/rejected frame admission does not advance pose history.
   A padding vec4 in a previous-pose stream identifies skinned geometry by buffer
   length without stealing placement or material bits. Only pixels touching skinned
   geometry use the moving-surface history rule; the static quarry keeps its still
-  accumulation. An anchor bit rejects mixed character history on revealed pixels.
+  accumulation. Moving-character neighbourhoods bypass the still-silhouette cache;
+  TR1b's two history slots retain their individual surface identities.
+  Static receivers reject lighting history inside a swept caster shadow volume.
+  With dynamic GI enabled this rejection is conservatively scene-wide; refining
+  that region and retaining more stable shadow samples remain performance/quality work.
 - **Non-RT visibility:** full-detail original clusters retain their topology and
   primitive IDs. A second compute dispatch updates their duplicated positions.
   Conservative mesh bounds cover every skinned cluster; LOD attachment is rejected.
   This uses terminal clusters rather than a separate plain-draw implementation.
+  Only the skinned draw's bounds records are republished in the shared table;
+  existing visibility/shadow consumers keep their buffers and pipelines.
 - **Shadows:** raster shadow passes read the same deformed stream. Virtual shadow
   pages/receiver regions are invalidated for deforming casters even if their model
   matrix and aggregate box stay unchanged; horizon records include pose revision.
+  Pose changes refresh only the animated draw's horizon and walk records; the
+  static quarry's records remain resident.
 - **RT:** animated BLASes disable compaction, request ALLOW_UPDATE/PreferUpdate and
   fast-build behavior. Skinning precedes the BLAS update and TLAS build. Pose scratch
   is admitted/accounted and retained through its flight. `blas_updates` counts it.
@@ -138,6 +146,9 @@ to 64. The retained image/timing run is recorded below once completed.
   current rebuild implementation.
 - Non-RT dynamic GI rebuilds the software BVH on the CPU for every changed pose.
   Cluster bounds use the mesh-wide box, and shadow invalidation is conservative.
+- Dynamic-GI receiver-history rejection is scene-wide, and independent skins
+  currently own their compute pipelines. Crowds and dynamic-GI temporal stability
+  need further work; this is a correctness base rather than a crowd renderer.
 - No skinned cluster simplification/LOD, blend shapes, dual-quaternion skinning,
   clip blending, animation events or automatic root-motion extraction.
 - Matrix nodes and additional influence sets are rejected, rather than silently

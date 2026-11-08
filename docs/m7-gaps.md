@@ -15,6 +15,9 @@ One section per feature. Each lists the measured or inspected gaps that remain a
   outside the overnight base.
 - Existing TR1 model-transform edits still reset history. SK1 supplies previous
   deformed vertex positions; its walk example puts translation in the palette.
+- Moving-caster shadow regions reject old receiver lighting history to avoid
+  trailing shadows. With dynamic GI enabled the region is conservatively
+  scene-wide; finer rejection and stable shadow sampling remain open.
 - Hardware shadows retain the existing opaque, double-sided caster contract. The
   example enables double-sided materials explicitly.
 - No new Unreal or path-traced comparison was run for this overnight unit. Its
