@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate self as renderlab;
 mod environment;
+mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
 mod instances;
@@ -45,6 +46,7 @@ pub use receiver_adjacency::MeshUpload;
 pub use renderer::{Capture, CaptureInfo};
 pub use renderer::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
+    ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
 pub use renderer::{Reconstruction, Renderer};

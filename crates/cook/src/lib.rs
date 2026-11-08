@@ -9,6 +9,7 @@ pub mod environment_hdr;
 pub mod fixtures;
 mod import;
 mod mip;
+pub mod near_field;
 pub mod normal_fixture;
 pub mod normal_map;
 pub mod normal_moments;

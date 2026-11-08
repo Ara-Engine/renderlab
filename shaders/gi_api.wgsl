@@ -56,23 +56,47 @@ fn gi_hot_eval(h:GiHot, w:f32) -> vec4<f32> {
     return vec4<f32>(w*bitcast<f32>(h.r0.y)*e,w);
 }
 
+// Whether the last gi_sample read a split cell with weight (G1c): its pixels then read
+// the next finer level, where the slab and the floor beneath it are separate cells.
+var<private> gi_sampled_split:bool;
+fn gi_note_split(h:GiHot, w:f32) {
+    gi_sampled_split=gi_sampled_split || (w>0.0 && (h.r3.w&GI_SPLIT_HOT)!=0u);
+}
 // The cells around `world` at `level` for `bin`, each evaluated against gi_y (the
 // band-weighted basis of the shading normal): rgb is the weighted irradiance sum, w the
 // weight sum. Bilinear over four cells in the bin's tangent plane, or the containing
 // cell. Cells without a current value or query point get no weight; the caller
 // renormalizes. No sub-cell jitter (W3). Each record loads whole in one round trip.
 fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> vec4<f32> {
+    gi_sampled_split=false;
     let u=gi_lattice(world,gi_edge(level),bin);
     if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u {
-        return gi_hot_eval(gi_hot_find(gi_key(level,bin,vec3<i32>(floor(u)))),1.0);
+        let h=gi_hot_find(gi_key(level,bin,vec3<i32>(floor(u))));
+        gi_note_split(h,1.0);
+        return gi_hot_eval(h,1.0);
     }
     let corners=gi_corners(u,bin);
     var out=vec4<f32>(0.0);
     for(var c=0u;c<4u;c+=1u) {
         let h=gi_hot_find(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)));
-        out+=gi_hot_eval(h,gi_corner_weight(corners.f,bin,c));
+        let w=gi_corner_weight(corners.f,bin,c);
+        gi_note_split(h,w);
+        out+=gi_hot_eval(h,w);
     }
     return out;
+}
+// gi_sample, read at finer levels while it meets split cells (up to GI_REFINE), keeping
+// the finest level with a value: the same walk gi_probe requests.
+fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> vec4<f32> {
+    var s=gi_sample(world,level,bin);
+    var l=level;
+    for(var r=0u;r<GI_REFINE && gi_sampled_split && l>0u;r+=1u) {
+        let f=gi_sample(world,l-1u,bin);
+        if f.w<=1e-6 { break; }
+        s=f;
+        l-=1u;
+    }
+    return s;
 }
 
 // Unoccluded environment irradiance in lux around n, as `ambient` computes it.
@@ -112,7 +136,7 @@ fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     for(var j=0u;j<2u;j+=1u) {
         let w=select(1.0-pick.t,pick.t,j==1u);
         if w<=0.0 || (j==1u && pick.hi==pick.lo) { continue; }
-        let s=gi_sample(world,select(pick.lo,pick.hi,j==1u),bin);
+        let s=gi_sample_refined(world,select(pick.lo,pick.hi,j==1u),bin);
         if s.w<=1e-6 { continue; }
         e+=w*s.rgb/s.w;
         total+=w;

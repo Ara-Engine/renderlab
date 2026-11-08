@@ -116,6 +116,9 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let surface_input=SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
         primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel));
+    // Engine inputs computed once per receiver (src/program.rs), before the program's
+    // values are live.
+    rl_indirect_prepare(surface_input);
     let surface_output=surface(surface_input);
     // Unreachable: traced frames cull the source-back faces of single-sided draws.
     if material.double_sided==0u && !lit_front {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}

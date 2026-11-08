@@ -625,3 +625,5 @@ py -3 -B scripts/m7-g1b-run.py plan <label> plan.json --minutes 10 [--quiet] [--
 ```
 
 Plan steps take `sections`, `configs`, `visits`, `gate`, `shaders` (a variant directory), `env`, `lib`, `test`, `test_name` and `command`. Quarry steps run `gpu_gi_quarry` with `RENDERLAB_M7_G1_{QUARRY,QUARRY_EXACT,QUARRY_VARIANTS,QUARRY_SKY,QUARRY_SETTINGS,QUARRY_FRAMES,PATHS,SPP,REFS}`. The harness reads `RENDERLAB_M7_G1_{TIMING,TIMING_PROGRAM,PROFILING,PROFILE_FRAMES,PROFILE_MODE}`.
+
+AA state (IQ1, 2026-11-08; [iq1-quarry-image.md](iq1-quarry-image.md)): this unit's gates rendered 1x with TR1 off and anisotropy 1, the shipping default, so every population, edges included, is an un-anti-aliased image scored against pixel-integrated references.

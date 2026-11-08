@@ -16,5 +16,6 @@
         raster_receiver(input.world,triangle,pixel,material.thin!=0u));
     let surface_output=surface(surface_input);
     if material.double_sided==0u && !source_front { discard; }
+    rl_indirect_prepare(surface_input);
     return vec4<f32>(rl_finite(shade(surface_output,surface_input)),1.0);
 }

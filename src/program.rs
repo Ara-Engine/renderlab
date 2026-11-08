@@ -25,14 +25,31 @@ const RASTER_PARAMETERS: &str = "@group(2) @binding(7) var<uniform> params:Param
 /// Traced shading reads each draw's block from a binding array and copies the hit's.
 const TRACED_PARAMETERS: &str = "struct RlParameters { value:Parameters };\n@group(2) @binding(17) var<storage,read> rl_parameters:binding_array<RlParameters,PRIMARY_BATCHES>;\nvar<private> params:Parameters;\nfn rl_load_parameters(slot:u32) { params=rl_parameters[slot].value; }\n";
 const TRACED_NO_PARAMETERS: &str = "fn rl_load_parameters(slot:u32) {}\n";
-/// M7 indirect-light inputs (world radiance cache): composed only for programs that
-/// call them, so every other program's modules are unchanged (shaders/gi_api.wgsl).
-const INDIRECT_API: [&str; 2] = [
+/// M7 indirect-light inputs (world radiance cache, then the occluded environment specular
+/// of M7-ES1): composed only for programs that call them, so every other program's modules
+/// are unchanged (shaders/gi_api.wgsl, shaders/environment_lobes.wgsl).
+const INDIRECT_API: [&str; 3] = [
     include_str!("../shaders/gi_cells.wgsl"),
     include_str!("../shaders/gi_api.wgsl"),
+    include_str!("../shaders/environment_lobes.wgsl"),
+];
+/// The M7-ES1 inputs that read the receiver's sky visibility for specular. The generated
+/// entry prepares it once before `shade`, for programs that call one of them
+/// (`rl_indirect_prepare`): a lookup at each call site cost 0.4 ms of shading on the quarry.
+const SPECULAR_INPUTS: [&str; 4] = [
+    "indirect_radiance",
+    "environment_lobe_count",
+    "environment_lobe",
+    "environment_lobe_reflection",
 ];
 /// The engine inputs `INDIRECT_API` defines.
-const INDIRECT_INPUTS: [&str; 1] = ["indirect_irradiance"];
+const INDIRECT_INPUTS: [&str; 5] = [
+    "indirect_irradiance",
+    "indirect_radiance",
+    "environment_lobe_count",
+    "environment_lobe",
+    "environment_lobe_reflection",
+];
 
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
@@ -50,6 +67,7 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
     source.push_str(&gi_shader("gi_api.wgsl", INDIRECT_API[1]));
+    source.push_str(&gi_shader("environment_lobes.wgsl", INDIRECT_API[2]));
     source
 }
 
@@ -314,11 +332,20 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             TRACED_ENTRY,
         ),
     };
-    let indirect = if uses_indirect(program) {
+    let mut indirect = if uses_indirect(program) {
         indirect_api()
     } else {
         String::new()
     };
+    // Each entry calls this once per receiver before `shade`; it is empty unless the
+    // program reads the specular inputs.
+    indirect.push_str(
+        if tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t)) {
+            "fn rl_indirect_prepare(input:SurfaceInput) { es_prepare(input); }\n"
+        } else {
+            "fn rl_indirect_prepare(input:SurfaceInput) {}\n"
+        },
+    );
     let mut source =
         format!("{head}\n{COMMON_API}{SPECULAR_API}{api}{indirect}{binding}// ---- program ----\n");
     let start = source.len();

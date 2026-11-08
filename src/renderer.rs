@@ -39,6 +39,7 @@ pub use texture_residency::{ResidencyStats, TextureResidency};
 mod gi_cache;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
+    ProbeCounters,
 };
 pub(crate) struct PreparedDraw<'a> {
     pub mesh: &'a crate::Mesh,
@@ -3567,3 +3568,7 @@ mod fresh_shadow_tests;
 #[cfg(test)]
 #[path = "specular_aa_tests.rs"]
 mod specular_aa_tests;
+
+#[cfg(test)]
+#[path = "iq1_tests.rs"]
+mod iq1_tests;

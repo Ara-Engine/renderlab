@@ -15,7 +15,7 @@
 // Header words, then every hot record, then every cold record.
 const GI_HEADER:u32=64u;
 const GI_HOT_WORDS:u32=16u;
-const GI_COLD_WORDS:u32=24u;
+const GI_COLD_WORDS:u32=28u;
 // Slots searched per key, from an offset the key picks.
 const GI_BUCKET:u32=8u;
 // Fixed directions per cell: a uniform Fibonacci hemisphere about the query normal.
@@ -48,6 +48,16 @@ const GI_H_ITEMS:u32=13u;
 // group of directions k % S == g that is still untraced, one group a frame, so a cut's
 // rays spread over S frames (src/gi_cache.rs IndirectSettings::cut_phases).
 const GI_H_SPREAD:u32=14u;
+// Software rays with cooked near-field masks (M7 G1c): their octahedral bins per side (0:
+// none).
+const GI_H_NEAR_BINS:u32=16u;
+// Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
+// a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
+// last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly
+// all of three levels' quality on the quarry (map sky 30.85% against 30.76%) at a third of
+// the probe's walk cost (about 0.9 against 3 ms a frame; docs/m7-g1c.md).
+const GI_REFINE:u32=1u;
+const GI_SPLIT_HOT:u32=0x10000u;
 // The levels a point reads and the weight of the second: one level away from a switch
 // (or with the blend off), two around it. `margin` widens the band for the kernels,
 // which must also cover a shading module's rounding at the switch itself.
@@ -70,6 +80,8 @@ const GI_F_TRILINEAR:u32=1u;
 const GI_F_FIELD:u32=2u;
 // Rotate each cell's directions about its normal by an angle its key fixes.
 const GI_F_ROTATE:u32=4u;
+// Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
+const GI_F_STATS:u32=8u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and
@@ -94,13 +106,19 @@ const GI_C_BITS:u32=12u;
 const GI_C_KNOWN:u32=16u;
 // Directions with ray items this frame, between setup and finish (GI_MAX_WORDS words).
 const GI_C_PENDING:u32=20u;
+// Directions the cooked near-field masks block at the query point (GI_MAX_WORDS words; zero
+// without masks): never traced, always blocked, whatever moves.
+const GI_C_NEAR:u32=24u;
 // State bits: the value is current; the cell has no canonical query point; some
 // directions are still untraced (counted as open sky until they are); queued for
-// tracing this frame.
+// tracing this frame; the cell is split (read at finer levels), a property of its probe
+// that keeps across re-traces until the next probe.
 const GI_TRACED:u32=1u;
 const GI_ORPHAN:u32=2u;
 const GI_PARTIAL:u32=4u;
 const GI_QUEUED:u32=8u;
+const GI_SPLIT:u32=32u;
+const GI_KEEP:u32=GI_SPLIT;
 
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
 // shading a vec4 array (gi_api.wgsl) so records load whole.

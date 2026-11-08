@@ -17,9 +17,10 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
-/// Key, hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
-const SLOT_WORDS: u64 = 16 + 24;
-const COUNTER_WORDS: u64 = 16;
+/// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
+const SLOT_WORDS: u64 = 16 + 28;
+/// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
+const COUNTER_WORDS: u64 = 32;
 const MISS_WORDS: u64 = 6;
 /// WGSL GiFrame: region, counts, offsets, requests, then 64 vec4 box corners.
 const FRAME_BYTES: usize = 64 + 64 * 16;
@@ -32,7 +33,19 @@ const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate.
 const PROFILE_STAMPS: u32 = 2 * (6 + 2 * CLAIM_ROUNDS);
 /// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
-const PROBE_TILE: u32 = 16;
+const PROBE_TILE: u32 = 8;
+/// The probe tile side; test builds that screen shader variants (RENDERLAB_GI_SHADERS) may
+/// override it with RENDERLAB_GI_PROBE_TILE to match a variant's workgroup.
+fn probe_tile() -> u32 {
+    #[cfg(test)]
+    if let Some(tile) = std::env::var("RENDERLAB_GI_PROBE_TILE")
+        .ok()
+        .and_then(|t| t.parse().ok())
+    {
+        return tile;
+    }
+    PROBE_TILE
+}
 /// Fixed grids, in 64-thread workgroups, of the passes whose counts only the GPU knows:
 /// each kernel reads its count and loops over it. Direct dispatches need no argument
 /// passes, and skip the per-dispatch validation pass wgpu adds to indirect dispatches
@@ -48,9 +61,17 @@ const CELL_GROUPS: u32 = 2048;
 const PROFILE_RING: u64 = 64;
 const PROFILE_STRIDE: u64 = 256;
 /// Consecutive identical frames after which a frame runs no cache pass: the orphan-parent
-/// chain completes on the third frame (gi_probe's rounds), and claims lost on it retry
-/// on the next two.
-const IDLE_AFTER: u32 = 5;
+/// chain completes on the third frame (gi_probe's rounds), a split cell's finer levels
+/// appear one a frame after it (up to GI_REFINE), and claims lost on the last retry on
+/// the next two.
+const IDLE_AFTER: u32 = 8;
+/// Slot groups a changing environment map spreads its re-integration over: on frames where
+/// the map changed again (a rotating sky), each frame re-integrates the slots with
+/// (slot + phase) % ENVIRONMENT_PERIOD == 0, a fixed rotation (W2), and it keeps going for
+/// ENVIRONMENT_PERIOD frames after the last change, so every cell is exact again within the
+/// 8-frame settle limit. A single change after a still frame re-integrates every cell at
+/// once (the next frame equals a fresh cache).
+const ENVIRONMENT_PERIOD: u32 = 8;
 /// Entries of the frame's request table: twice the miss capacity (a power of two).
 fn requests(misses: u32) -> u32 {
     misses * 2
@@ -168,8 +189,12 @@ impl IndirectSettings {
 pub struct IndirectStats {
     pub table_bytes: u64,
     pub work_bytes: u64,
-    /// Software-ray geometry (non-RT path).
+    /// Software-ray geometry (non-RT path), near-field masks included.
     pub geometry_bytes: u64,
+    /// Of which cooked near-field masks.
+    pub near_bytes: u64,
+    /// Instances whose transform matched a cooked near field in the last software frame.
+    pub near_instances: u32,
     /// Frames that ran the cache passes.
     pub frames: u64,
     /// The last such frame traced software rays.
@@ -223,6 +248,33 @@ pub struct IndirectCounters {
     /// qualifying candidate lay inside a solid.
     pub orphans_no_surface: u32,
     pub orphans_inside: u32,
+    /// Cells probed this frame whose fixed probe lines each met two surface layers
+    /// (shaders/gi_cache.wgsl gi_probe_line); their pixels read finer levels.
+    pub splits: u32,
+    /// The probe's work, counted on profiled frames only (zero otherwise).
+    pub probe: ProbeCounters,
+}
+
+/// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
+/// covered pixel, covered pixels, tile-table insert calls and their probe steps, unique cells
+/// from pixels, added for orphans' parents and by refinement, table finds and how many found
+/// a cell, refinement walks (pixel, bin and level), tiles that refined, the most unique cells
+/// in one tile, and tiles by unique cells (< 32, < 64, < 256, full).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProbeCounters {
+    pub tiles: u32,
+    pub pixels: u32,
+    pub inserts: u32,
+    pub steps: u32,
+    pub cells: u32,
+    pub parents: u32,
+    pub refined: u32,
+    pub finds: u32,
+    pub found: u32,
+    pub walks: u32,
+    pub refine_tiles: u32,
+    pub max_cells: u32,
+    pub tiles_by_cells: [u32; 4],
 }
 
 struct Resources {
@@ -263,15 +315,112 @@ struct Arrays {
     instances: Vec<u8>,
     bind: Owned<wgpu::BindGroup>,
 }
-/// Software-ray geometry: every draw's mesh records and the flat instance list.
+/// Software-ray geometry: every draw's mesh records and near masks, and the flat instance
+/// list. With a merged world (`World`), the world BVH is the last packed mesh and the draws
+/// whose instances it covers pack nothing.
 struct Packed {
     meshes: Vec<wgpu::Buffer>,
     instances: usize,
+    /// Per (draw, instance) in draw order, whether the world BVH covers it (empty: no world).
+    covered: Vec<bool>,
+    /// Per draw, its mesh's index among the packed meshes (None: every instance is covered).
+    entry: Vec<Option<usize>>,
     offsets: Vec<[u32; 4]>,
+    /// Per draw, the base word of each of its mesh's cooked near placements' masks.
+    near: Vec<Vec<u32>>,
+    near_bytes: u64,
     head: Vec<u32>,
     buffer: Owned<wgpu::Buffer>,
     bytes: u64,
     _allocation: Allocation,
+}
+/// A cooked near field's placements merged into one world-space BVH (non-RT, G1d), built at
+/// `set_indirect_near_field` from fields without masks: every placement's far-field cut in
+/// world space. While each placement is drawn with its exact cooked transform (and nothing
+/// else draws a field mesh), software rays trace it as one identity instance in place of the
+/// placements' own BVHs: the quarry's twelve scans overlap, so a ray otherwise descends each
+/// scan's BVH in turn. Any other instance set falls back to per-placement BVHs.
+struct World {
+    blas: Arc<Blas>,
+    source: [u8; 32],
+    /// Each placement's field mesh and transform bits.
+    placements: Vec<(u32, [u32; 16])>,
+    /// Per field mesh, the renderer mesh (vertex buffer) registered for it.
+    meshes: Vec<Option<wgpu::Buffer>>,
+}
+impl World {
+    fn new(field: &crate::asset::near_field::NearField) -> Result<Self, Error> {
+        let mut positions = vec![];
+        let mut indices = vec![];
+        for p in &field.placements {
+            let model = Mat4::from_cols_array_2d(&p.transform);
+            let mesh = field
+                .meshes
+                .get(p.mesh as usize)
+                .ok_or(Error::InvalidInput("near-field placement mesh"))?;
+            let base = positions.len() as u32;
+            positions.extend(mesh.positions.iter().map(|q| {
+                model
+                    .transform_point3(glam::Vec3::new(q[0], q[1], q[2]))
+                    .to_array()
+            }));
+            // A mirroring transform reverses the winding the source-side tests read.
+            let flip = model.determinant() < 0.0;
+            for t in mesh.indices.chunks_exact(3) {
+                let (b, c) = if flip { (t[2], t[1]) } else { (t[1], t[2]) };
+                indices.extend_from_slice(&[base + t[0], base + b, base + c]);
+            }
+        }
+        Ok(Self {
+            blas: Arc::new(Blas::new(gi_bvh::build(&positions, &indices)?, 0)?),
+            source: field.source,
+            placements: field
+                .placements
+                .iter()
+                .map(|p| (p.mesh, transform_bits(&p.transform)))
+                .collect(),
+            meshes: vec![None; field.meshes.len()],
+        })
+    }
+    /// Per (draw, instance) of `draws`, whether the world covers it, when its placements
+    /// are exactly the drawn instances of the field's meshes; None otherwise.
+    fn covers(&self, draws: &[PreparedDraw<'_>]) -> Option<Vec<bool>> {
+        let mut wanted: Vec<Option<(&wgpu::Buffer, [u32; 16])>> = self
+            .placements
+            .iter()
+            .map(|(m, bits)| Some((self.meshes.get(*m as usize)?.as_ref()?, *bits)))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut covered = vec![];
+        for d in draws {
+            let key: &wgpu::Buffer = &d.mesh.vertex;
+            let field_mesh = self.meshes.iter().any(|m| m.as_ref() == Some(key));
+            for model in &d.instances.state.models {
+                let bits = model.to_cols_array().map(f32::to_bits);
+                let hit = wanted
+                    .iter_mut()
+                    .find(|w| w.is_some_and(|(k, b)| k == key && b == bits));
+                match hit {
+                    Some(w) => {
+                        *w = None;
+                        covered.push(true);
+                    }
+                    // A field mesh drawn elsewhere: its BVH would double the world's.
+                    None if field_mesh => return None,
+                    None => covered.push(false),
+                }
+            }
+        }
+        wanted.iter().all(Option::is_none).then_some(covered)
+    }
+}
+/// A placement transform's exact bits, column-major (as `Mat4::to_cols_array`).
+fn transform_bits(t: &[[f32; 4]; 4]) -> [u32; 16] {
+    Mat4::from_cols_array_2d(t)
+        .to_cols_array()
+        .map(f32::to_bits)
 }
 struct Groups {
     key: (wgpu::Texture, wgpu::Texture, u64, bool),
@@ -290,10 +439,15 @@ struct Profile {
 /// What `prepare_gi` decided for this frame.
 struct Plan {
     groups: [u32; 2],
+    /// Scan workgroups: every slot, or one environment slot group.
+    scan_groups: u32,
     scan: bool,
     /// The environment changed: cells re-integrate their stored bits.
     integrate: bool,
     clear: bool,
+    /// Only the environment changed, with the view and scene otherwise idle: only the scan
+    /// and integrate passes run.
+    environment_only: bool,
 }
 enum Retired {
     Resources(#[allow(dead_code)] Resources),
@@ -315,6 +469,10 @@ pub(super) struct GiState {
     pipelines: Option<Pipelines>,
     arrays: Option<Arrays>,
     meshes: Vec<(wgpu::Buffer, Arc<Blas>)>,
+    /// The octahedral bins per side every cooked mesh's near-field masks share (0: none).
+    near_bins: u32,
+    /// A mask-free cooked near field merged into one world BVH (`World`).
+    world: Option<World>,
     packed: Option<Packed>,
     /// Last frame's world bounds per placement, for moved-caster boxes.
     bounds: Vec<[f32; 6]>,
@@ -327,6 +485,14 @@ pub(super) struct GiState {
     /// frames in a row they have been unchanged; idle frames run no cache pass.
     idle_key: Option<[u8; 32]>,
     idle_frames: u32,
+    /// The idle key without the environment, and its count of identical frames.
+    view_key: Option<[u8; 32]>,
+    view_frames: u32,
+    /// The environment changed on the last cache frame; spread re-integrations left after
+    /// the last change; and the slot group the next spread frame re-integrates.
+    environment_streak: bool,
+    environment_catchup: u32,
+    environment_phase: u32,
     plan: Option<Plan>,
     profile: Option<Profile>,
     groups: Option<Groups>,
@@ -355,6 +521,8 @@ impl GiState {
             pipelines: None,
             arrays: None,
             meshes: vec![],
+            near_bins: 0,
+            world: None,
             packed: None,
             bounds: vec![],
             environment: None,
@@ -363,6 +531,11 @@ impl GiState {
             since_clear: u32::MAX,
             idle_key: None,
             idle_frames: 0,
+            view_key: None,
+            view_frames: 0,
+            environment_streak: false,
+            environment_catchup: 0,
+            environment_phase: 0,
             plan: None,
             profile: None,
             groups: None,
@@ -583,6 +756,7 @@ impl Renderer {
     pub fn indirect_stats(&self) -> IndirectStats {
         let mut stats = self.gi.stats;
         stats.geometry_bytes = self.gi.packed.as_ref().map_or(0, |p| p.bytes);
+        stats.near_bytes = self.gi.packed.as_ref().map_or(0, |p| p.near_bytes);
         stats
     }
     /// Empties the cache on the next frame: a camera cut or scene replacement that
@@ -612,13 +786,80 @@ impl Renderer {
         bvh: crate::asset::cluster_bvh::Bvh,
         level: usize,
     ) -> Result<(), Error> {
+        self.set_indirect_blas(mesh, Blas::new(bvh, level)?)
+    }
+    /// Software-ray geometry for `mesh` from mesh `index` of a cooked near field
+    /// (renderlab_asset::near_field, docs/m7-g1c.md): its far-field cut, traced at runtime in
+    /// place of full detail. When the field has masks, each instance whose transform has the
+    /// exact bits of one of the field's placements of this mesh reads that placement's masks:
+    /// a cell on it also blocks the directions all three vertex masks block. Every cooked mesh
+    /// with masks must share the field's `bins`.
+    pub fn set_indirect_near_field(
+        &mut self,
+        mesh: &Mesh,
+        field: &crate::asset::near_field::NearField,
+        index: usize,
+    ) -> Result<(), Error> {
+        let bins = field.settings.bins;
+        if bins != 0 && self.gi.near_bins != 0 && self.gi.near_bins != bins {
+            return Err(Error::InvalidInput(
+                "near-field masks must share their bins",
+            ));
+        }
+        let bvh = field
+            .meshes
+            .get(index)
+            .ok_or(Error::InvalidInput("near-field mesh index"))?;
+        let mut blas = Blas::new(bvh.clone(), 0)?;
+        blas.near = field
+            .placements
+            .iter()
+            .filter(|p| p.mesh as usize == index && !p.masks.is_empty())
+            .map(|p| gi_bvh::NearMasks {
+                model: Mat4::from_cols_array_2d(&p.transform),
+                masks: p.masks.clone(),
+            })
+            .collect();
+        if bins != 0 {
+            self.gi.near_bins = bins;
+        }
+        // Mask-free fields also trace as one merged world BVH where their placements allow.
+        let reuse = self.gi.world.as_ref().is_some_and(|w| {
+            w.source == field.source
+                && w.placements.len() == field.placements.len()
+                && w.placements
+                    .iter()
+                    .zip(&field.placements)
+                    .all(|((m, bits), p)| *m == p.mesh && *bits == transform_bits(&p.transform))
+        });
+        if bins != 0 {
+            self.gi.world = None;
+        } else if !reuse {
+            self.gi.world = Some(World::new(field)?);
+        }
+        let key: wgpu::Buffer = (**mesh.vertex).clone();
+        self.set_indirect_blas(mesh, blas)?;
+        if let Some(slot) = self.gi.world.as_mut().and_then(|w| w.meshes.get_mut(index)) {
+            *slot = Some(key);
+        }
+        Ok(())
+    }
+    fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
         if !Arc::ptr_eq(&self.identity, &mesh.renderer) {
             return Err(Error::InvalidInput("mesh belongs to another renderer"));
         }
-        let blas = Arc::new(Blas::new(bvh, level)?);
         let key: wgpu::Buffer = (**mesh.vertex).clone();
         self.gi.meshes.retain(|(k, _)| *k != key);
-        self.gi.meshes.push((key, blas));
+        // Whatever this mesh traced before, it no longer stands for a field mesh.
+        for m in self.gi.world.iter_mut().flat_map(|w| &mut w.meshes) {
+            if m.as_ref() == Some(&key) {
+                *m = None;
+            }
+        }
+        self.gi.meshes.push((key, Arc::new(blas)));
+        if self.gi.meshes.iter().all(|(_, b)| b.near.is_empty()) {
+            self.gi.near_bins = 0;
+        }
         if let Some(old) = self.gi.packed.take() {
             self.gi
                 .retired
@@ -765,6 +1006,22 @@ impl Renderer {
             ray_items: w[12],
             orphans_no_surface: w[13],
             orphans_inside: w[14],
+            splits: w[15],
+            probe: ProbeCounters {
+                tiles: w[16],
+                pixels: w[17],
+                inserts: w[18],
+                steps: w[19],
+                cells: w[20],
+                parents: w[21],
+                refined: w[22],
+                finds: w[23],
+                found: w[24],
+                walks: w[25],
+                refine_tiles: w[26],
+                max_cells: w[27],
+                tiles_by_cells: [w[28], w[29], w[30], w[31]],
+            },
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
@@ -1088,17 +1345,48 @@ impl Renderer {
             blases.push(blas.clone());
         }
         let meshes: Vec<wgpu::Buffer> = draws.iter().map(|d| (**d.mesh.vertex).clone()).collect();
-        let instances: usize = draws.iter().map(|d| d.instances.len()).sum();
+        let covered = self
+            .gi
+            .world
+            .as_ref()
+            .filter(|_| self.gi.near_bins == 0)
+            .and_then(|w| w.covers(draws))
+            .unwrap_or_default();
+        // The world BVH is one identity instance in place of the instances it covers.
+        let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
+            - covered.iter().filter(|&&c| c).count()
+            + usize::from(!covered.is_empty());
         if self
             .gi
             .packed
             .as_ref()
-            .is_none_or(|p| p.meshes != meshes || p.instances != instances)
+            .is_none_or(|p| p.meshes != meshes || p.instances != instances || p.covered != covered)
         {
-            let refs: Vec<&Blas> = blases.iter().map(|b| &**b).collect();
-            let (offsets, total) = gi_bvh::layout(&refs, instances);
-            let words = gi_bvh::mesh_words(&refs, &offsets, total);
+            // Pack each draw's mesh unless the world covers all its instances, then the world.
+            let mut entry = vec![];
+            let mut refs: Vec<&Blas> = vec![];
+            let mut at = 0;
+            for (d, blas) in draws.iter().zip(&blases) {
+                let n = d.instances.len();
+                let open = covered.is_empty() || covered[at..at + n].iter().any(|&c| !c);
+                at += n;
+                entry.push(open.then(|| {
+                    refs.push(&**blas);
+                    refs.len() - 1
+                }));
+            }
+            let world = self.gi.world.as_ref().filter(|_| !covered.is_empty());
+            if let Some(w) = world {
+                refs.push(&w.blas);
+            }
+            let (offsets, near, total) = gi_bvh::layout(&refs, instances);
+            let words = gi_bvh::mesh_words(&refs, &offsets, &near, total);
             let bytes = (words.len() * 4) as u64;
+            let near_bytes = refs
+                .iter()
+                .flat_map(|b| &b.near)
+                .map(|n| n.masks.len() as u64 * 4)
+                .sum();
             let buffer = self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("indirect cache software geometry"),
@@ -1113,7 +1401,11 @@ impl Renderer {
             let packed = Packed {
                 meshes,
                 instances,
+                covered,
+                entry,
                 offsets,
+                near,
+                near_bytes,
                 head: vec![],
                 buffer,
                 bytes,
@@ -1132,11 +1424,28 @@ impl Renderer {
         }
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
-        for ((d, blas), offsets) in draws.iter().zip(&blases).zip(&p.offsets) {
+        if !p.covered.is_empty() {
+            let w = &self.gi.world.as_ref().unwrap().blas;
+            records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
+        }
+        let mut at = 0;
+        for ((d, blas), entry) in draws.iter().zip(&blases).zip(&p.entry) {
             for model in &d.instances.state.models {
-                records.push((*model, &**blas, *offsets));
+                let covered = p.covered.get(at).copied().unwrap_or(false);
+                at += 1;
+                if covered {
+                    continue;
+                }
+                let e = entry.unwrap();
+                records.push((
+                    *model,
+                    &**blas,
+                    p.offsets[e],
+                    blas.near_base(model, &p.near[e]),
+                ));
             }
         }
+        self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
         let head = gi_bvh::instance_words(&records)?;
         if p.head != head {
             let raw: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -1172,9 +1481,11 @@ impl Renderer {
         header[0] = u32::from(run);
         header[1] = r.slots - 1;
         let field = self.environment.selected.is_some();
+        // Probe statistics (GI_F_STATS) on profiled frames only.
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
-            | (u32::from(s.rotate_directions) << 2);
+            | (u32::from(s.rotate_directions) << 2)
+            | (u32::from(self.gi.profile.is_some()) << 3);
         header[3] = self.gi.frame;
         let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32 * s.cell_pixels;
         header[4] = footprint.to_bits();
@@ -1200,6 +1511,10 @@ impl Renderer {
         };
         let spread = cut_phases > 1 && since_clear < cut_phases;
         header[14] = if spread { cut_phases } else { 0 };
+        // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
+        if software {
+            header[16] = self.gi.near_bins;
+        }
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -1279,7 +1594,27 @@ impl Renderer {
         if s.rotation_period != 0 {
             flags |= 2;
         }
-        if environment_changed {
+        // A step after a still frame re-integrates every cell; a map changing on
+        // consecutive frames, and the ENVIRONMENT_PERIOD frames after it last changed,
+        // re-integrate one fixed slot group a frame (ENVIRONMENT_PERIOD).
+        let integrate_all = environment_changed && !self.gi.environment_streak;
+        let spread = !integrate_all && (environment_changed || self.gi.environment_catchup > 0);
+        self.gi.environment_catchup = if integrate_all {
+            0
+        } else if environment_changed {
+            ENVIRONMENT_PERIOD
+        } else {
+            self.gi.environment_catchup.saturating_sub(1)
+        };
+        self.gi.environment_streak = environment_changed;
+        let integrate = integrate_all || spread;
+        let environment_group = if spread {
+            self.gi.environment_phase = (self.gi.environment_phase + 1) % ENVIRONMENT_PERIOD;
+            ENVIRONMENT_PERIOD | (self.gi.environment_phase << 8)
+        } else {
+            0
+        };
+        if integrate {
             flags |= 4;
         }
         let region = self.primary.as_ref().unwrap().scene;
@@ -1304,6 +1639,9 @@ impl Renderer {
         put(12, items + RAY_ITEMS + RAY_ITEMS / 32);
         put(13, requests(r.misses) - 1);
         put(14, items);
+        // The environment's slot group: period (0: every slot) and phase; bit 31 is set
+        // below on environment-only frames, whose scan visits only that group.
+        put(15, environment_group);
         for (i, b) in boxes.iter().enumerate() {
             for k in 0..3 {
                 put(16 + i * 8 + k, b[k].to_bits());
@@ -1312,8 +1650,8 @@ impl Renderer {
         }
         self.queue.write_buffer(&r.frame, 0, &frame);
         let groups = [
-            (region[2] - region[0]).div_ceil(PROBE_TILE),
-            (region[3] - region[1]).div_ceil(PROBE_TILE),
+            (region[2] - region[0]).div_ceil(probe_tile()),
+            (region[3] - region[1]).div_ceil(probe_tile()),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
         // A view whose every input is unchanged has nothing to trace once its cells
@@ -1334,21 +1672,50 @@ impl Renderer {
             self.gi.idle_frames = 0;
         }
         self.gi.idle_key = Some(idle_key);
+        // The same view and scene with only the environment changing (a rotating sky over a
+        // still camera): once that view is idle, no cell is new, so only the scan and the
+        // integrate passes run. Such frames do not advance the cache frame, so seen stamps
+        // do not age toward eviction while nothing is probed.
+        let view_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(&self.gi.arrays.as_ref().unwrap().instances);
+            h.update(format!("{s:?}").as_bytes());
+            h.update(region.map(u32::to_le_bytes).concat());
+            h.finalize().into()
+        };
+        if self.gi.view_key == Some(view_key) && !clear {
+            self.gi.view_frames = self.gi.view_frames.saturating_add(1);
+        } else {
+            self.gi.view_frames = 0;
+        }
+        self.gi.view_key = Some(view_key);
         if self.gi.idle_frames >= IDLE_AFTER && flags == 0 {
             self.gi.stats.idle_frames += 1;
             return Ok(());
         }
+        let environment_only = self.gi.view_frames >= IDLE_AFTER && flags == 4;
+        let mut scan_groups = r.slots.div_ceil(64);
+        if environment_only && spread {
+            let word = (environment_group | (1 << 31)).to_le_bytes();
+            self.queue.write_buffer(&r.frame, 60, &word);
+            scan_groups = (r.slots / ENVIRONMENT_PERIOD).div_ceil(64);
+        }
         self.gi.plan = Some(Plan {
             groups,
+            scan_groups,
             scan: flags != 0,
-            integrate: environment_changed,
+            integrate,
             clear,
+            environment_only,
         });
         self.prepare_gi_groups(software, scene_generation)?;
-        self.gi.since_clear = since_clear.saturating_add(1);
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
-        self.gi.frame = self.gi.frame.wrapping_add(1);
+        if !environment_only {
+            self.gi.since_clear = since_clear.saturating_add(1);
+            self.gi.frame = self.gi.frame.wrapping_add(1);
+        }
         Ok(())
     }
 
@@ -1482,31 +1849,39 @@ impl GiState {
         // with no work this frame (scan and integrate without an event) are not encoded;
         // when profiling they are empty passes, so every stamp is written.
         let profiling = queries.is_some();
-        main_pass(
-            encoder,
-            "indirect cache probe",
-            &p.probe,
-            0,
-            Some(plan.groups),
-        );
-        for k in 0..CLAIM_ROUNDS {
-            let grid = Some([CLAIM_GROUPS, 1]);
-            main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
-            let last = k + 1 == CLAIM_ROUNDS;
-            let resolve = if last { &p.resolve_last } else { &p.resolve };
-            main_pass(encoder, "indirect cache resolve", resolve, 2 + 2 * k, grid);
+        // Environment-only frames run only scan and integrate; when profiling, the other
+        // passes are empty, so every stamp is written.
+        let traced = !plan.environment_only;
+        if traced || profiling {
+            main_pass(
+                encoder,
+                "indirect cache probe",
+                &p.probe,
+                0,
+                traced.then_some(plan.groups),
+            );
+            for k in 0..CLAIM_ROUNDS {
+                let grid = traced.then_some([CLAIM_GROUPS, 1]);
+                main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
+                let last = k + 1 == CLAIM_ROUNDS;
+                let resolve = if last { &p.resolve_last } else { &p.resolve };
+                main_pass(encoder, "indirect cache resolve", resolve, 2 + 2 * k, grid);
+            }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
         if plan.scan || profiling {
-            let groups = plan.scan.then(|| [r.slots.div_ceil(64), 1]);
+            let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
         }
-        let setup = Some([SETUP_GROUPS, 1]);
-        main_pass(encoder, "indirect cache setup", &p.setup, s + 1, setup);
-        let rays = Some([RAY_GROUPS, 1]);
-        main_pass(encoder, "indirect cache rays", &p.rays, s + 2, rays);
         let cells = Some([CELL_GROUPS, 1]);
-        main_pass(encoder, "indirect cache finish", &p.finish, s + 3, cells);
+        if traced || profiling {
+            let setup = traced.then_some([SETUP_GROUPS, 1]);
+            main_pass(encoder, "indirect cache setup", &p.setup, s + 1, setup);
+            let rays = traced.then_some([RAY_GROUPS, 1]);
+            main_pass(encoder, "indirect cache rays", &p.rays, s + 2, rays);
+            let finish = cells.filter(|_| traced);
+            main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
+        }
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
             main_pass(
@@ -1688,6 +2063,51 @@ mod tests {
         // L2 truncation alone under 0.01 (docs/m7-g1.md).
         eprintln!("G1 representation: worst relative error beside a wall {worst:.4}");
         assert!(worst < 0.07, "wall representation error {worst}");
+    }
+
+    /// The merged world (G1d) holds every placement's cut in world space, and a mirroring
+    /// placement keeps its triangles' source-winding normals pointing as the instance path's
+    /// inverse-transpose normals do, so inside tests read the same faces.
+    #[test]
+    fn world_merges_placements_and_keeps_winding() {
+        use crate::asset::near_field::{NearField, NearPlacement, Settings, build_bvh};
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        // Source winding normal: (b - a) x (c - a) = +x cross +z = -y.
+        let mesh = build_bvh(&positions, &[0, 1, 2]).unwrap();
+        let shift = Mat4::from_translation(glam::Vec3::new(5.0, 0.0, 0.0));
+        let mirror = Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0));
+        let field = NearField {
+            settings: Settings {
+                lod_error: 0.01,
+                reach: 0.0,
+                skip: 0.0,
+                bins: 0,
+            },
+            source: [7; 32],
+            meshes: vec![mesh],
+            placements: [shift, mirror]
+                .map(|m| NearPlacement {
+                    mesh: 0,
+                    transform: m.to_cols_array_2d(),
+                    masks: vec![],
+                })
+                .to_vec(),
+        };
+        let world = World::new(&field).unwrap();
+        let bvh = &world.blas.bvh;
+        assert_eq!(bvh.positions.len(), 6);
+        assert_eq!(bvh.indices.len(), 6);
+        assert_eq!(world.placements.len(), 2);
+        assert!(world.meshes.len() == 1 && world.meshes[0].is_none());
+        for t in bvh.indices.chunks_exact(3) {
+            let p = |i: u32| glam::Vec4::from(bvh.positions[i as usize]).truncate();
+            let n = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+            // Both placements keep the object's -y normal: the shift trivially, the mirror
+            // because its winding is reversed (its inverse transpose keeps -y too).
+            assert!(n.y < 0.0 && n.x.abs() < 1e-6, "world normal {n}");
+            let shifted = p(t[0]).x >= 4.0;
+            assert_eq!(shifted, (0..3).all(|k| p(t[k]).x >= 4.0));
+        }
     }
 }
 

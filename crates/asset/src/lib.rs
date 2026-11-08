@@ -2,6 +2,7 @@
 mod binary;
 pub mod cluster_bvh;
 pub mod environment;
+pub mod near_field;
 pub mod virtual_mesh;
 
 pub use binary::{

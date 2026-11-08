@@ -12,6 +12,9 @@
 //! visits (order reversed on odd visits) record per-frame GPU spans for the paired cost.
 //! `replay` renders the first variant again and compares every frame hash (F8).
 //!
+//! AA state (docs/iq1-quarry-image.md): 1x with TR1 per variant, anisotropy 16 (the test
+//! renderers' clamp; the shipping default is 1).
+//!
 //! A sequence frame's `to_light` (Q-sun, S2G) sets the sun direction before that frame.
 //! `scene` replaces the quarry with a U0b bench scene.json (S2G): its meshes, materials,
 //! sun and constant sky, black primary misses, identity instances.
