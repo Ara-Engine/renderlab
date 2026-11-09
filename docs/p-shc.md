@@ -155,6 +155,11 @@ separate endpoint, not inferred from these samples.
   0/47) match completely in both RGBA8 and HDR, with the ordinary GI/TR1, reflection,
   transparency, atmosphere, particle and post settings. This covers the game fixture,
   not every scene or arbitrary custom shader.
+- **Post-reload recovery oracle:** the original-runtime and final `restored.png`
+  files are also byte-identical on both paths after the edit/rejection/restore
+  sequence, covering reuse of the glass targets. Inspected both final default
+  frame-47 PNGs and the RT probe baseline: geometry, silhouettes, shadows, glass,
+  mirror/gold reflections, foliage, particles and the toon hero remain present.
 - **ARA1 devloop:** the existing tool completed startup to a fresh GPU-readback marker
   on the matched game scene: 28,905.7 ms RT / 27,988.9 ms non-RT. It is a two-frame
   startup replay, not a new Rust-edit measurement or a controlled cold-cache claim.
