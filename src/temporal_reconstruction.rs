@@ -69,6 +69,17 @@ pub struct Reconstruction {
     /// surface-identity history does not trail them. Zero turns the cap off. Programs that
     /// declare nothing are unaffected.
     pub view_budget: f32,
+    /// P-FLAT (docs/p-flat-tr1.md): on frames where local lights' intensity or colour changed,
+    /// a pixel within such a light's range caps its window at `1 + light_budget / (change *
+    /// falloff)`. `change` is the light's largest relative channel change; `falloff` is its
+    /// range-windowed inverse square relative to 1 m, the shading's attenuation shape. Where
+    /// the cap falls below 2 the pixel restarts, as every pixel did before P-FLAT. Only engine
+    /// data and the receiver's position size the cap, never the pixel's colour. History
+    /// continues under MQ1's 3x3 box. Zero, the default, restarts every pixel on any such
+    /// change, as before P-FLAT. A positive budget trades a measured flicker lag near the light
+    /// for history elsewhere (docs/p-flat-tr1.md). More than four changed lights in one frame
+    /// also restart.
+    pub light_budget: f32,
     /// TR2 (docs/m7-tr2.md): upscaled frames weight every internal sample of the pixel's
     /// surface by a tent whose radius shrinks from the internal sample spacing (young history
     /// interpolates the internal grid instead of repeating its nearest sample, which stepped
@@ -119,6 +130,7 @@ impl Default for Reconstruction {
             rotate_directions: true,
             motion_box: true,
             view_budget: 0.25,
+            light_budget: LIGHT_BUDGET,
             upscale_interpolation: true,
             scale: RenderScale::Native,
         }
@@ -163,6 +175,7 @@ impl Reconstruction {
             && (0.0..=f32::MAX).contains(&self.blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
             && (0.0..=f32::MAX).contains(&self.view_budget)
+            && (0.0..=f32::MAX).contains(&self.light_budget)
             && (0.0..=2.0).contains(&self.start_radius);
         if valid {
             Ok(())
@@ -175,11 +188,68 @@ impl Reconstruction {
 }
 
 /// WGSL Tr1Frame.
-const FRAME_BYTES: usize = 336;
+const FRAME_BYTES: usize = 448;
+/// Changed local lights one frame can cap (`Reconstruction::light_budget`); more restart.
+const RELIT_SLOTS: usize = 4;
+/// `Reconstruction::light_budget`'s default: zero, so a local light's intensity change
+/// restarts every pixel. Every positive budget P-FLAT measured kept flicker lag on the surfaces
+/// the light dominates (docs/p-flat-tr1.md, section 3).
+const LIGHT_BUDGET: f32 = 0.0;
 // Test-only tail permits the immutable MQ1 static-control shader's runtime-array
 // minimum binding span. Production has only fixed words; transform history lives
 // exclusively in the shared placement buffer.
 const FRAME_BUFFER_BYTES: usize = FRAME_BYTES + if cfg!(test) { 64 } else { 0 };
+/// `light` with its candela zeroed: a local light's identity for `reconstruction_key`.
+fn without_candela(mut light: Light) -> Light {
+    if let Light::Point { candela, .. } | Light::Spot { candela, .. } = &mut light {
+        *candela = [0.; 3];
+    }
+    light
+}
+/// Local lights whose candela changed from `previous` (bits, in order): position, range
+/// (f32::MAX when unlimited) and largest relative channel change. The key equals the previous
+/// frame's, so the local lights are the same lights in the same order.
+fn relit_lights(previous: &[[u32; 3]], lights: &[Light]) -> Vec<(Vec3, f32, f32)> {
+    lights
+        .iter()
+        .filter_map(|l| match *l {
+            Light::Point {
+                position,
+                candela,
+                range,
+                ..
+            }
+            | Light::Spot {
+                position,
+                candela,
+                range,
+                ..
+            } => Some((position, range.unwrap_or(f32::MAX), candela)),
+            Light::Directional { .. } => None,
+        })
+        .zip(previous)
+        .filter_map(|((position, range, candela), old)| {
+            let change = candela
+                .iter()
+                .zip(old.map(f32::from_bits))
+                .map(|(&new, old)| (new - old).abs() / new.max(old).max(f32::MIN_POSITIVE))
+                .fold(0.0, f32::max);
+            (change > 0.0).then_some((position, range, change))
+        })
+        .collect()
+}
+/// Local lights' candela bits in order: what `reconstruction_key` leaves out of a light.
+fn local_intensities(lights: &[Light]) -> Vec<[u32; 3]> {
+    lights
+        .iter()
+        .filter_map(|l| match l {
+            Light::Point { candela, .. } | Light::Spot { candela, .. } => {
+                Some(candela.map(f32::to_bits))
+            }
+            Light::Directional { .. } => None,
+        })
+        .collect()
+}
 /// The rank-1 lattice generator of the sample sequence (film_accumulation.wgsl's).
 const GENERATOR: u32 = 71;
 /// The lattice's shifts in 1/256 px: x as T1's; y chosen so the 256 points are
@@ -456,6 +526,8 @@ struct Previous {
     /// Directional lights' travel directions.
     suns: Vec<Vec3>,
     key: [u8; 32],
+    /// Local lights' candela bits (P-FLAT): a change continues history under MQ1's box.
+    intensities: Vec<[u32; 3]>,
     skin_bounds: Option<crate::shadow_plan::Bounds>,
     skin_revisions: Vec<u64>,
 }
@@ -683,12 +755,14 @@ impl Renderer {
     }
 
     /// Identity of every input a reconstructed frame depends on besides the camera, the
-    /// eye, exposure, directional-light directions, skinned poses (SK1) and placement
-    /// transforms (MQ1), which TR1 follows: a change restarts every pixel. Programs, prelude,
-    /// geometry, bindings, materials, textures, new placements, light colours and kinds, the
-    /// environment and every shadow and visibility setting. Before MQ1 transform edits of
-    /// existing placements restarted every pixel, so a scene with any animated rigid object
-    /// never accumulated; they now reproject through their previous transforms.
+    /// eye, exposure, directional-light directions, local-light intensities (P-FLAT), skinned
+    /// poses (SK1) and placement transforms (MQ1), which TR1 follows: a change restarts every
+    /// pixel. Programs, prelude, geometry, bindings, materials, textures, new placements, the
+    /// sun's colour, light kinds and local lights' position, direction, range, cone and source
+    /// radius, the environment and every shadow and visibility setting. Before MQ1 transform
+    /// edits of existing placements restarted every pixel, so a scene with any animated rigid
+    /// object never accumulated; they now reproject through their previous transforms. Before
+    /// P-FLAT a flickering local light restarted every pixel every frame in the same way.
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
@@ -696,9 +770,10 @@ impl Renderer {
             .lighting
             .source_lights
             .iter()
-            .map(|light| match light {
+            .map(|light| match *light {
                 crate::Light::Directional { lux, .. } => format!("directional {lux:?}"),
-                other => format!("{other:?}"),
+                // Candela (intensity and colour) is in `local_intensities`, not the key.
+                local => format!("{:?}", without_candela(local)),
             })
             .collect();
         let mut hash = Sha256::new()
@@ -848,6 +923,7 @@ impl Renderer {
             self.reconstruction_state = Some(next);
         }
         let key = self.reconstruction_key();
+        let intensities = local_intensities(&self.lighting.source_lights);
         let settings = self.reconstruction;
         let matrix = camera.unjittered().matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
@@ -903,6 +979,9 @@ impl Renderer {
             }
         }
         let mut shadow_bounds = None;
+        // The shadowed sun's direction toward it and disk half-angle, when `shadow_bounds` is
+        // tested as its swept shadow rather than as a box (P-FLAT).
+        let mut caster_light: Option<(Vec3, f32)> = None;
         // MQ2: some skinned pose changed since the previous frame.
         let mut posed = false;
         if let (Some(current), Some(previous)) = (
@@ -918,25 +997,37 @@ impl Renderer {
             let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
                 (b.max - b.min).length().max(1.)
             }) * 2.;
-            for (light, request) in self
+            let requested: Vec<&Light> = self
                 .lighting
                 .source_lights
                 .iter()
                 .zip(&self.shadows.settings.requests)
-            {
-                if matches!(request, ShadowRequest::None) {
-                    continue;
-                }
-                if let Light::Directional { travel, .. } = light {
-                    affected = union(
-                        Some(affected),
-                        crate::shadow_plan::Bounds {
-                            min: swept.min + travel.normalize() * distance,
-                            max: swept.max + travel.normalize() * distance,
-                        },
-                    );
-                } else if let Some(scene) = scene_bounds {
-                    affected = union(Some(affected), scene);
+                .filter(|(_, r)| !matches!(r, ShadowRequest::None))
+                .map(|(l, _)| l)
+                .collect();
+            // P-FLAT: with one shadowed sun and no other shadow request, receivers are tested
+            // against the swept bounds' own shadow (`tr1_caster_shadow`): inside the bounds, or
+            // a ray toward the sun within its disk meets them. The box below stretches the
+            // bounds twice the scene's size along the sun; under a low sun it held most of the
+            // scene's static receivers to one frame of history while a character walked.
+            if let [Light::Directional { travel, .. }] = requested[..] {
+                caster_light = Some((
+                    -travel.normalize(),
+                    self.shadows.settings.directional_disk_angle,
+                ));
+            } else {
+                for light in requested {
+                    if let Light::Directional { travel, .. } = light {
+                        affected = union(
+                            Some(affected),
+                            crate::shadow_plan::Bounds {
+                                min: swept.min + travel.normalize() * distance,
+                                max: swept.max + travel.normalize() * distance,
+                            },
+                        );
+                    } else if let Some(scene) = scene_bounds {
+                        affected = union(Some(affected), scene);
+                    }
                 }
             }
             // Sky occlusion and bounce the character changes outside its direct shadow are
@@ -975,11 +1066,24 @@ impl Renderer {
         } else {
             settings.window
         };
-        state.reset = continued.is_none() || state.cut || event_window < 1.0;
+        // P-FLAT: local lights whose intensity or colour changed. History continues, held to
+        // this frame's 3x3 box as for moving placements and capped near those lights
+        // (`light_budget`), so a flicker is followed without restarting every pixel on every
+        // frame. A zero budget, or more changed lights than the frame can carry, restarts.
+        let changed = match (continued, state.previous.as_ref()) {
+            (Some(_), Some(p)) if p.intensities != intensities => {
+                relit_lights(&p.intensities, &self.lighting.source_lights)
+            }
+            _ => vec![],
+        };
+        let light_restart =
+            !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
+        state.reset = continued.is_none() || state.cut || event_window < 1.0 || light_restart;
         state.cut = false;
         // MQ1's clamp event comes from the same submitted transforms that feed
         // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
         let moved = !state.reset && rigid_motion;
+        let relit = !state.reset && !changed.is_empty();
         let jitter = camera.jitter();
         let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
             Some((m, e, x, _, j)) if !state.reset => (m, e, exposure / x, j),
@@ -989,8 +1093,9 @@ impl Renderer {
         // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3
-            | u32::from(settings.upscale_interpolation) << 4;
+            | u32::from((moved || relit || (posed && !state.reset)) && settings.motion_box) << 3
+            | u32::from(settings.upscale_interpolation) << 4
+            | u32::from(relit) << 5;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -1038,9 +1143,12 @@ impl Renderer {
         } else {
             0
         };
+        // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
+        // pixels near a relit light) take the restart budget, as frames that restart every
+        // pixel do: the restarted pixels keep main's per-pixel ray count.
         state.shadow_rays = self.reconstruction_shadow_budget.rays(
             cold,
-            state.reset,
+            state.reset || shadow_bounds.is_some() || relit,
             sampling_still,
             state.held_frames,
         );
@@ -1066,9 +1174,49 @@ impl Renderer {
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
-        for value in shadow_bounds.map_or([0.; 8], |b| {
-            [b.min.x, b.min.y, b.min.z, 1., b.max.x, b.max.y, b.max.z, 0.]
+        // shadow_lo.w enables rejection; shadow_hi.w selects the swept-shadow test, whose
+        // shadow_light is the unit direction toward the sun (no zero component, so the slab
+        // test's reciprocals stay finite) and the tangent of its disk half-angle, widened.
+        let toward = caster_light.map_or(Vec3::ZERO, |(l, _)| {
+            l.map(|c| {
+                if c.abs() < 1e-6 {
+                    1e-6f32.copysign(c)
+                } else {
+                    c
+                }
+            })
+        });
+        let spread = caster_light.map_or(0., |(_, angle)| angle.tan() * 1.01 + 1e-4);
+        for value in shadow_bounds.map_or([0.; 12], |b| {
+            [
+                b.min.x,
+                b.min.y,
+                b.min.z,
+                1.,
+                b.max.x,
+                b.max.y,
+                b.max.z,
+                if caster_light.is_some() { 1. } else { 0. },
+                toward.x,
+                toward.y,
+                toward.z,
+                spread,
+            ]
         }) {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        // relit[4]: position and range of each changed light (zero rows unused), then each one's
+        // relative change, then the budget.
+        let mut relit_words = [0f32; 24];
+        if relit {
+            for (k, (position, range, change)) in changed.iter().enumerate() {
+                relit_words[k * 4..k * 4 + 4]
+                    .copy_from_slice(&[position.x, position.y, position.z, *range]);
+                relit_words[16 + k] = *change;
+            }
+            relit_words[20] = settings.light_budget;
+        }
+        for value in relit_words {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
@@ -1083,6 +1231,7 @@ impl Renderer {
             exposure,
             suns,
             key,
+            intensities,
             skin_bounds,
             skin_revisions,
         });
@@ -1174,6 +1323,45 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P-FLAT: a flicker (candela only) keeps a local light's history identity and is the
+    /// event `local_intensities` reports; moving or reshaping the light changes the identity.
+    #[test]
+    fn local_light_identity_ignores_only_candela() {
+        let spot =
+            |y: f32, candela: [f32; 3], range: f32, outer: f32, source_radius: f32| Light::Spot {
+                position: Vec3::new(3.0, y, 3.0),
+                travel: Vec3::NEG_Y,
+                candela,
+                range: Some(range),
+                inner: 0.3,
+                outer,
+                source_radius,
+            };
+        let bright = [26_000.0, 25_000.0, 23_000.0];
+        let lamp = spot(3.0, bright, 12.0, 0.6, 0.1);
+        let dimmer = spot(3.0, [13_000.0, 9_000.0, 4_000.0], 12.0, 0.6, 0.1);
+        let sun = Light::Directional {
+            travel: Vec3::NEG_Y,
+            lux: [1.0; 3],
+        };
+        let identity = |l: Light| format!("{:?}", without_candela(l));
+        assert_eq!(identity(lamp), identity(dimmer));
+        assert_ne!(
+            local_intensities(&[sun, lamp]),
+            local_intensities(&[sun, dimmer])
+        );
+        assert_eq!(local_intensities(&[sun, lamp]).len(), 1);
+        for moved in [
+            spot(2.9, bright, 12.0, 0.6, 0.1),
+            spot(3.0, bright, 11.0, 0.6, 0.1),
+            spot(3.0, bright, 12.0, 0.5, 0.1),
+            spot(3.0, bright, 12.0, 0.6, 0.0),
+        ] {
+            assert_ne!(identity(lamp), identity(moved), "{moved:?}");
+        }
+        assert_eq!(identity(sun), format!("{sun:?}"));
+    }
 
     #[test]
     fn samples_are_balanced_lattice_pairs() {
@@ -1304,6 +1492,10 @@ mod tests {
             },
             Reconstruction {
                 view_budget: f32::INFINITY,
+                ..Default::default()
+            },
+            Reconstruction {
+                light_budget: f32::NAN,
                 ..Default::default()
             },
         ] {
