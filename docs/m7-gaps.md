@@ -101,6 +101,9 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes". P-FLAT ([p-flat.md](p-flat.md)) found three causes.
 
+- **Current status (P-FLAT2's fresh measure on main ee361f5, real fire and Fox, frames 8-47).** Crate-top speckle is 0.079 on RT and 0.075 on non-RT. The path-traced reference's own grain is 0.080-0.096, so both paths are at or below it. Main started at 0.759 (RT) and 0.278 (non-RT); P-FLAT's lamp fix and P-NSQ's non-RT shadow fix brought them down. Crate sides are 0.044 on RT and 0.024 on non-RT.
+- **OPEN, improvement beyond the reference grain:** P-FLAT2's exact light-range history ([p-flat2.md](p-flat2.md), branch `t3/p-flat2` 68a902b, NOT merged) cuts crate tops to 0.057 on RT and 0.054 on non-RT, with flicker slopes within noise of main's. Its final silhouette build was never compiled, and none of its acceptance tests ran (RF, Q-walk, SK1, MQ1, MV1, object motion, lib), because outside builds blocked the host. `light_budget` stays 0. The plan is in D:/Coding/renderlab-work/p-flat2/plans/w2.json.
+
 - **Fixed (P-FLAT): the courtyard's spot lamp sat inside its own iron post.** 74-82 % of its source disk was blocked for every receiver, so every spot-lit pixel was a permanent penumbra that LC2's four rays sampled as grain. The arch light also clipped its bulb. Both lamps now clear their fixtures (`examples/game_scene.rs`; `--diag lamp=post` restores the old placement).
   - RT crate tops in flight: speckle 0.759 → 0.079, sides 0.270 → 0.044, arch 0.059 → 0.015.
   - The crates get the spot's light: both paths agree within 1.6 codes, where they differed by 6.8.
