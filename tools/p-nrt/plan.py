@@ -7,7 +7,7 @@ one still runs:
   {"kind": "trace", "binary": EXE, "scene": JSON, "out": DIR, "submits": 1200, "shader_profiler": true}
       Nsight GPU Trace (N8f/N8g recipe: Nsight-only implicit-layer dir, no --platform,
       200 ms / 4 submits), then the target is killed (it keeps running after ngfx).
-  {"kind": "capture", "binary": EXE, "scene": JSON, "out": DIR, "mode": "nonrt"}
+  {"kind": "capture", "binary": EXE, "scene": JSON, "out": DIR, "mode": "nonrt", "env": {...}}
       ARA1 capture adapter without validation layers: engine.json timing and PNGs.
   {"kind": "build", "tree": DIR, "target": DIR, "out": LOG}
       Release ara1_capture build; only inside our own lease (build scripts trip guards).
@@ -55,7 +55,8 @@ def trace(step):
     capture = out / "capture"
     args = f'"{step["scene"]}" {step.get("mode", "nonrt")} "{capture}"'
     command = [NGFX, "--activity", "GPU Trace Profiler", "--output-dir", str(out), "--exe", str(binary), "--dir", str(REPO),
-               "--args", args, "--env", f"WGPU_DEBUG=1; RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK;",
+               "--args", args, "--env", f"WGPU_DEBUG=1; RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK;"
+               + "".join(f" {k}={v};" for k, v in step.get("env", {}).items() if k != "RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK"),
                "--start-after-submits", str(step.get("submits", 1200)), "--limit-to-submits", str(step.get("limit", 4)),
                "--max-duration-ms", "200", "--set-gpu-clocks", "unaltered", "--collect-screenshot", "0",
                "--architecture", "Ada", "--metric-set-name", "Top-Level Triage"]
@@ -75,7 +76,9 @@ def capture(step):
     out.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
     with (out.parent / f"{out.name}.log").open("w", encoding="utf-8") as log:
-        result = subprocess.run([step["binary"], step["scene"], step.get("mode", "nonrt"), str(out)], cwd=REPO, env=release_env(),
+        # P-NRT3: optional per-step `env` (screening switches, the RT acknowledgement).
+        result = subprocess.run([step["binary"], step["scene"], step.get("mode", "nonrt"), str(out)], cwd=REPO,
+                                env=release_env() | step.get("env", {}),
                                 stdout=log, stderr=subprocess.STDOUT, creationflags=FLAGS, timeout=step.get("timeout", 300))
     images = {f.name: digest(f) for f in sorted(out.glob("frame-*.png"))} if out.exists() else {}
     return dict(exit_code=result.returncode, seconds=time.monotonic() - start, images=images)

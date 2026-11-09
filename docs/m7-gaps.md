@@ -133,7 +133,7 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
 
 ## Non-RT frame cost (M8, P-NRT)
 
-- **OPEN: P-NRT3's two-submit split and batched GI drain (branch `t3/p-nrt3` 9e4d474) are NOT merged. The candidate doesn't render.** P-VERIFY's admitted l2 run found that `final.exe` fails `Device::create_shader_module` for "indirect cache kernels" with a WGSL redefinition of `gi_wg_base`. The original is an `array<u32,GI_SETUP_CELLS>` (composed line 1992); the batched gather adds a scalar `u32` of the same name (line 2684). Game-base and ara-pbr candidate runs both exit 1 with no image. Fix: rename the new scalar, rebuild, then rerun l2 (identity) and q1 (quiet timing). The two-submit split itself is untested.
+- **OPEN: P-NRT3b identity passes, DON'T MERGE: RT early-still median service is not cleared.** [P-NRT3b](p-nrt3b.md) merged current-main runtime and repaired the WGSL blocker, then dropped batched gather: non-RT gather windows improve (5.085/0.433 to 4.657/0.414 ms), but measured RT windows do not (0.0379/0.0361 to 0.0395/0.0380 ms). Split-only passes every registered identity comparison (426 outputs/hashes/buffers) and 200 lib tests. Moving game service improves 11.46 to 11.27 ms non-RT and 5.13 to 4.90 ms RT; isolated gaps improve 1.852 to 1.253 ms and 0.868 to 0.447 ms. Eight additional quiet RT quarry early-still pairs yield median 7.377 to 7.423 ms, 4/8 paired median wins; mean improves 7.828 to 7.526 ms. Preserve that distribution/median miss rather than declaring a universal win. Source retains the split as an experimental candidate; no promotion. All 1,061 resource samples were compiler-free; target deleted.
 - **OPEN, performance: non-RT is still 3-5x Ara raster's service time on the matched scenes.**
   P-NRT's byte-identical changes (docs/p-nrt.md §2) cut ARA1 service by 13-18% on game-base
   (still 11.30 → 9.79 ms) and 17-21% on ara-pbr (still 9.43 → 7.79 ms). The quarry stays within
@@ -185,6 +185,15 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
     - The GI light key Debug-formats every light each frame (`prepare_gi`). That is small, and
       matters only in many-light scenes; a memo must keep its exact equality semantics
       (`-0.0`, NaN).
+
+- **P-NRT3 original is historical; P-NRT3b completed verification and recommends DON'T MERGE**
+  ([p-nrt3b.md](p-nrt3b.md)). The original scalar collision was repaired and all composed
+  modules CPU-validated. Batched gather was dropped for lack of an RT win. The split-only
+  candidate is byte-identical on both paths and improves moving service/idle gaps, but its
+  RT early-still median gate remains open after eight paired repeats. Offscreen service
+  is not measured scanout latency; extra submit/internal-gap costs remain disclosed.
+  Evidence and rebuilt binaries: `D:/Coding/renderlab-work/p-nrt3b/`; the old
+  `D:/Coding/renderlab-work/p-nrt3/` binaries are historical, not the current baseline.
 
 ## RT shadows
 

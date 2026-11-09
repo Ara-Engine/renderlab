@@ -2865,6 +2865,41 @@ impl Renderer {
             },
         }
     }
+    /// The GI cache's and post's frame preparation, each in its own error scopes.
+    fn prepare_cache_and_post(
+        &mut self,
+        draws: &[PreparedDraw<'_>],
+        camera: &Camera,
+        color: &wgpu::Texture,
+        eligible: bool,
+        hardware_build: bool,
+        traced: bool,
+    ) -> Result<(), Error> {
+        // Traced and visibility-buffer frames feed the cache; every other lit frame
+        // publishes it as off, so its programs read the unoccluded environment.
+        let scopes = OperationScopes::new(&self.device);
+        let scene_generation = self
+            .hardware_shadows
+            .as_ref()
+            .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
+        let result = self.prepare_gi(
+            draws,
+            camera,
+            [color.width(), color.height()],
+            eligible,
+            scene_generation,
+        );
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        result?;
+        let scopes = OperationScopes::new(&self.device);
+        self.prepare_post(camera, traced)?;
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        Ok(())
+    }
     // Persistent data is prepared once, then borrowed for the shared render pass.
     // `traced` frames replace both raster geometry passes with camera rays and
     // deferred compute shading; the TLAS for this draw sequence is current.
@@ -3107,32 +3142,23 @@ impl Renderer {
                 }
             }
         }
-        if lit {
-            // Traced and visibility-buffer frames feed the cache; every other lit frame
-            // publishes it as off, so its programs read the unoccluded environment.
-            let scopes = OperationScopes::new(&self.device);
-            let scene_generation = self
-                .hardware_shadows
-                .as_ref()
-                .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
-            let result = self.prepare_gi(
+        // P-NRT3: lit traced frames submit their first half (skinning, clusters, shadows,
+        // atmosphere, visibility and sun visibility) before the GI cache and post are prepared
+        // and the second half is encoded, so the GPU starts while the CPU still works. Every
+        // queue write of the late preparation and encoding lands before the second submit and
+        // touches only buffers the first half does not read (GI cache, post, transparency), and
+        // both halves run in the same queue order, so the frame's results are unchanged.
+        let split = lit && traced && !temporal;
+        let mut early_submit = std::time::Duration::ZERO;
+        if lit && !split {
+            self.prepare_cache_and_post(
                 draws,
                 camera,
-                [color.width(), color.height()],
+                color,
                 traced && !temporal,
-                scene_generation,
-            );
-            if let Some(error) = scopes.finish() {
-                return Err(self.fail(error.to_string()));
-            }
-            result?;
-        }
-        if lit {
-            let scopes = OperationScopes::new(&self.device);
-            self.prepare_post(camera, traced)?;
-            if let Some(error) = scopes.finish() {
-                return Err(self.fail(error.to_string()));
-            }
+                hardware_build,
+                traced,
+            )?;
         }
         self.check_fault()?;
         let view = self
@@ -3229,6 +3255,18 @@ impl Renderer {
                     if soft {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
+                }
+                if split {
+                    let late_encoder =
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("mesh frame, late"),
+                            });
+                    let early = std::mem::replace(&mut encoder, late_encoder).finish();
+                    let submitted_at = Instant::now();
+                    self.queue.submit([early]);
+                    early_submit = submitted_at.elapsed();
+                    self.prepare_cache_and_post(draws, camera, color, true, hardware_build, true)?;
                 }
                 let shading = if soft {
                     primary_ray_gpu::Shading::Soft
@@ -3478,10 +3516,10 @@ impl Renderer {
         });
         let commands = encoder.finish();
         self.check_fault()?;
-        let encode = encode_start.elapsed() - cpu.shadow_encode;
+        let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
         let submitted_at = Instant::now();
         let index = self.queue.submit([commands]);
-        let submit = submitted_at.elapsed();
+        let submit = submitted_at.elapsed() + early_submit;
         self.submissions += 1;
         if lit {
             self.atmosphere_submitted(camera, [color.width(), color.height()]);
