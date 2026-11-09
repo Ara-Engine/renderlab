@@ -283,6 +283,15 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 ## Reflections
 
+- **M8 P-R2 (2026-11-10): workgroup ray compaction rejected before implementation.**
+  The 1080p 8x4 ray-loop count replay gives max/mean 1.0797 on game-base (both
+  paths) and 1.1433 on ara-pbr (both paths), below the required 1.4 gate.
+  No renderer change or speed/identity claim; the traversal-cost gap remains.
+  WGSL's 16-byte vec3 array stride also makes 512 radiance results 8 KiB before
+  queue/ray state, above the design's 6 KiB result estimate. Details and fixture
+  counts: [P-R2](p-r2.md). Prefer per-ray traversal work over count compaction on
+  these measured still workloads; variable traversal/hit cost remains unmeasured.
+
 - **Closed (RD1, [m7-rd1.md](m7-rd1.md)): non-RT courtyard reflection blotches.** LC3's inspected sheet came from a binary built on main `622db4d`, before R1n merged, so its non-RT spheres showed the untraced estimate. On main `ff56b79` (LC3 and VF2 merged), the courtyard's non-RT chrome and gold match RT, still and moving with `--fox`, from frame 000 (`D:/Coding/renderlab-work/rd1/rd1-final-spheres.png`).
 
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
