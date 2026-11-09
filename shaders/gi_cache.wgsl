@@ -1719,8 +1719,12 @@ var<workgroup> gi_wg_bounce:array<f32,12u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
 var<workgroup> gi_wg_rays:atomic<u32>;
-// Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
-var<workgroup> gi_wg_live:u32;
+// P-NRT3: this step's live cells, the deferred cells' appends, and their broadcasts.
+var<workgroup> gi_wg_list:array<u32,GI_GATHER_LANES>;
+var<workgroup> gi_wg_listed:atomic<u32>;
+var<workgroup> gi_wg_appends:atomic<u32>;
+var<workgroup> gi_wg_n:u32;
+var<workgroup> gi_wg_base:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
 fn gi_gather_period(count:u32) -> u32 {
@@ -1736,26 +1740,72 @@ fn gi_gather_period(count:u32) -> u32 {
     let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;
     let period=gi_gather_period(count);
     let phase=gi_word(GI_H_FRAME)%period;
-    for(var at=group.x;at<count;at+=groups.x) {
+    // P-NRT3: `width` lanes screen that many consecutive queue entries at once, one each, so a
+    // capped drain's deferred cells cost one parallel step instead of one workgroup iteration
+    // each. A workgroup still covers about count / groups entries, as one entry a step did.
+    // The live cells it finds are then gathered one after another by all lanes, as before;
+    // each cell's rays, sums and writes are unchanged, and queue order carries no meaning.
+    let width=clamp(count/groups.x,1u,GI_GATHER_LANES);
+    for(var head=group.x*width;head<count;head+=groups.x*width) {
+        if lane==0u {
+            atomicStore(&gi_wg_listed,0u);
+            atomicStore(&gi_wg_appends,0u);
+        }
+        workgroupBarrier();
+        let at=head+lane;
+        var slot=0u;
+        var deferred=false;
+        var mine=0u;
+        if lane<width && at<count {
+            slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
+            let cold=gi_cold(slot);
+            let state=gi_table[cold+GI_C_STATE];
+            let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
+                && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+            if queued && slot%period==phase {
+                // This frame's slot group: gathered below by the whole workgroup.
+                gi_wg_list[atomicAdd(&gi_wg_listed,1u)]=slot;
+            } else if queued {
+                // Outside this frame's slot group: next frame's queue, the schedule unchanged.
+                // As clearing GI_BQUEUED and then gi_schedule(slot, max(left, 1)), with the
+                // workgroup's appends to the next queue (and their counters) added once.
+                let cleared=state&~GI_BQUEUED;
+                let gathers=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,1u);
+                let left=max((cleared&GI_GATHER_MASK)>>GI_GATHER_SHIFT,min(gathers,7u));
+                gi_table[cold+GI_C_STATE]=(cleared&~GI_GATHER_MASK)|(left<<GI_GATHER_SHIFT)|GI_BQUEUED;
+                deferred=true;
+                mine=atomicAdd(&gi_wg_appends,1u);
+            }
+        }
+        workgroupBarrier();
+        if lane==0u {
+            let appends=atomicLoad(&gi_wg_appends);
+            var base=0u;
+            if appends!=0u {
+                atomicAdd(&gi_work[GI_W_GATHER_DEFERRED],appends);
+                base=atomicAdd(&gi_work[gi_frame.bounce.y],appends);
+                atomicAdd(&gi_work[GI_W_BQUEUE],appends);
+            }
+            gi_wg_base=base;
+            gi_wg_n=atomicLoad(&gi_wg_listed);
+        }
+        let listed=workgroupUniformLoad(&gi_wg_n);
+        if deferred {
+            let a=gi_wg_base+mine;
+            if a<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.y+1u+a],slot); }
+        }
+        for(var j=0u;j<listed;j+=1u) {
+        let slot=gi_wg_list[j];
+        let cold=gi_cold(slot);
+        let state=gi_table[cold+GI_C_STATE];
         if lane==0u {
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
             atomicStore(&gi_wg_rays,0u);
         }
-        let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
-        let cold=gi_cold(slot);
-        let state=gi_table[cold+GI_C_STATE];
-        let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
-            && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
-        let live=queued && slot%period==phase;
-        // Every lane reads the same slot, so `live` is the workgroup's: broadcast as a uniform
-        // value (the load carries the barrier that ordered lane 0's resets), so a cell outside
-        // this frame's slot group, or not queued, skips the sums and their reduction, which
-        // gathered zeros for it (P-GI: a capped cut defers 140-200k cells a frame).
-        if lane==0u { gi_wg_live=select(0u,1u,live); }
-        if workgroupUniformLoad(&gi_wg_live)!=0u {
+        workgroupBarrier();
         for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
-        if live {
+        {
             let c=gi_cell(slot);
             let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
             let q=gi_point(cold);
@@ -1804,7 +1854,7 @@ fn gi_gather_period(count:u32) -> u32 {
             }
             workgroupBarrier();
         }
-        if live && lane==0u {
+        if lane==0u {
             atomicAdd(&gi_work[GI_W_GATHERS],1u);
             atomicAdd(&gi_work[GI_W_GATHER_RAYS],atomicLoad(&gi_wg_rays));
             let missing=atomicLoad(&gi_wg_missing);
@@ -1847,14 +1897,8 @@ fn gi_gather_period(count:u32) -> u32 {
             gi_queue_shade(slot);
             gi_schedule(slot,left);
         }
-        }
-        // Outside this frame's slot group: next frame's queue, the schedule unchanged.
-        if queued && !live && lane==0u {
-            atomicAdd(&gi_work[GI_W_GATHER_DEFERRED],1u);
-            gi_table[cold+GI_C_STATE]=state&~GI_BQUEUED;
-            gi_schedule(slot,max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,1u));
-        }
         workgroupBarrier();
+        }
     }
 }
 
