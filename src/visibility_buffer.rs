@@ -266,7 +266,8 @@ pub(super) fn repair_source() -> String {
 /// ascending, a superset of what the scan accepts. Otherwise x..y are primitives: y past the
 /// mesh for a whole-mesh scan (meshes without lists, LOD triangles), or x == y for none.
 /// Visiting only listed candidates leaves the repair unchanged.
-const REPAIR_POLICY: &str = "@group(0) @binding(30) var<storage,read> primary_repair_scan:array<u32>;
+const REPAIR_POLICY: &str =
+    "@group(0) @binding(30) var<storage,read> primary_repair_scan:array<u32>;
 fn primary_repair_range(batch:u32,primitive:u32,edge:u32)->vec3<u32> {
     let s=primary_repair_scan[batch];
     if s==0u {return vec3<u32>(0u);}
@@ -742,8 +743,14 @@ impl VisibilityBuffer {
                 },
             };
         }
-        let repair_scan = Buffer::new(r, "N1c ambiguous-edge fallback policy", policy.len() as u64 * 4, storage);
-        r.queue.write_buffer(&repair_scan.value, 0, &words(policy.iter().copied()));
+        let repair_scan = Buffer::new(
+            r,
+            "N1c ambiguous-edge fallback policy",
+            policy.len() as u64 * 4,
+            storage,
+        );
+        r.queue
+            .write_buffer(&repair_scan.value, 0, &words(policy.iter().copied()));
         let image_size = Buffer::new(r, "N1c image size", 16, wgpu::BufferUsages::UNIFORM);
         r.queue.write_buffer(
             &image_size.value,

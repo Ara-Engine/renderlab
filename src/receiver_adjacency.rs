@@ -137,9 +137,15 @@ pub(crate) fn repair_candidates(data: &MeshData<'_>, adjacency: &Adjacency) -> V
         let (t, e) = (h / 3, h % 3);
         let (a, b) = (corner(3 * t + (e + 1) % 3), corner(3 * t + (e + 2) % 3));
         let start = list.len();
-        for &other in around[a as usize].iter().chain(if a == b { &[][..] } else { &around[b as usize][..] }) {
+        for &other in around[a as usize].iter().chain(if a == b {
+            &[][..]
+        } else {
+            &around[b as usize][..]
+        }) {
             let o = other as usize;
-            let shared = (0..3).filter(|&k| [a, b].contains(&corner(3 * o + k))).count();
+            let shared = (0..3)
+                .filter(|&k| [a, b].contains(&corner(3 * o + k)))
+                .count();
             if o != t && shared == 2 {
                 list.push(other);
             }
@@ -338,7 +344,13 @@ mod tests {
             let (t, e) = (h / 3, h % 3);
             let (e0, e1) = (at(3 * t + (e + 1) % 3), at(3 * t + (e + 2) % 3));
             (0..indices.len() / 3)
-                .filter(|&o| o != t && (0..3).filter(|&k| at(3 * o + k) == e0 || at(3 * o + k) == e1).count() == 2)
+                .filter(|&o| {
+                    o != t
+                        && (0..3)
+                            .filter(|&k| at(3 * o + k) == e0 || at(3 * o + k) == e1)
+                            .count()
+                            == 2
+                })
                 .map(|o| o as u32)
                 .collect()
         };
