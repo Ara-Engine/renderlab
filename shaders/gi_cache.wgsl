@@ -1996,7 +1996,12 @@ fn gi_filter_cell(slot:u32) {
     }
 }
 // Nine items per queued cell: the cell itself and its eight neighbours (gi_filter_neighbour),
-// each rewritten from its own neighbourhood, since their filtered values read the cell.
+// each rewritten from its own neighbourhood, since their filtered values read the cell. A
+// neighbour is left alone when it is queued itself (GI_SHADE, set by gi_queue_shade until
+// gi_light: its own item writes the same words) or waits for a gather (GI_BQUEUED: that gather
+// queues it, and its item then reads this cell's source as it is then). Once every schedule
+// has ended the values are the same; during a camera cut, which queues nearly every cell,
+// rewriting each up to nine times made cut frames 3-10 ms slower (docs/m7-g3.md).
 @compute @workgroup_size(64) fn gi_filter(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
     for(var i=id.x;i<count*9u;i+=groups.x*64u) {
@@ -2008,7 +2013,7 @@ fn gi_filter_cell(slot:u32) {
             let cold=gi_cold(c);
             let def=gi_table[cold+GI_C_DEF];
             slot=gi_filter_neighbour(def&0xffu,def>>8u,gi_point(cold),gi_unpack_normal(gi_table[cold+GI_C_NORMAL]),i32(j%3u)-1,i32(j/3u)-1);
-            if slot==0xffffffffu { continue; }
+            if slot==0xffffffffu || (gi_table[gi_cold(slot)+GI_C_STATE]&(GI_SHADE|GI_BQUEUED))!=0u { continue; }
         }
         gi_filter_cell(slot);
     }
