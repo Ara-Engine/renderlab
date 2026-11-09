@@ -51,14 +51,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             experimental_ray_query: ack,
             settings: Settings {
-                global_illumination: !spec.startup_minimal,
+                global_illumination: !spec.startup_minimal && spec.effects.gi,
+                local_shadows: renderlab::LocalShadows {
+                    count: if spec.effects.local_shadows { 128 } else { 0 },
+                    ..Default::default()
+                },
+                reflections: renderlab::ReflectionSettings {
+                    enabled: spec.effects.reflections,
+                    ..Default::default()
+                },
                 exposure: Exposure::Manual {
                     stops: spec.exposure_stops,
                 },
                 // The neutral matched subset has no participating medium in either engine.
-                aerial_perspective: false,
-                height_fog: None,
-                volumetric_fog: None,
+                aerial_perspective: spec.effects.atmosphere,
+                height_fog: spec.effects.fog.then_some(renderlab::HeightFog {
+                    density: 0.01,
+                    falloff: 1.0 / 90.0,
+                    base_height: 0.0,
+                    start_distance: 0.0,
+                    albedo: [0.9; 3],
+                    anisotropy: 0.3,
+                }),
+                volumetric_fog: spec.effects.fog.then_some(renderlab::VolumetricFog {
+                    extra_density: 0.0,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             texture_anisotropy: 16,
@@ -76,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .renderer_mut()
         .set_post_settings(renderlab::PostSettings {
             tonemapper: renderlab::Tonemapper::Filmic,
-            bloom: 0.0,
+            bloom: if spec.effects.post { 0.035 } else { 0.0 },
             motion_blur: false,
             vignette: 0.0,
             ..Default::default()
@@ -85,7 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = asset::decode(&encoded, asset::Limits::unlimited())?;
     drop(encoded);
     engine.add_asset(prepared)?;
-    engine.set_sky(Sky::Uniform(spec.environment))?;
+    engine.set_sky(if spec.effects.atmosphere {
+        Sky::default()
+    } else {
+        Sky::Uniform(spec.environment)
+    })?;
     engine.set_sun(Some(Sun {
         travel: -Vec3::from_array(spec.to_light),
         illuminance: spec.sun_lux,
@@ -119,6 +141,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Vec<_>>();
     engine.set_lights(&lights)?;
+    if spec.effects.alpha_panel {
+        let vertices: Vec<_> = scene::PANEL_POSITIONS
+            .iter()
+            .enumerate()
+            .map(|(i, &position)| Vertex {
+                position,
+                normal: [0.0, 0.0, 1.0],
+                uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]][i],
+                color: [1.0; 4],
+            })
+            .collect();
+        let mesh = engine.create_mesh(&MeshData {
+            vertices: &vertices,
+            indices: &[0, 1, 2, 0, 2, 3],
+        })?;
+        let program = engine.create_program("ARA1 coverage", include_str!("game_scene.wgsl"))?;
+        let material = engine.create_material(&MaterialDesc {
+            base_color: scene::PANEL_COLOR,
+            metallic: 0.0,
+            roughness: 0.18,
+            transparency: Some(renderlab::Transparency {
+                opacity: 1.0,
+                ior: 1.5,
+                thickness: 0.0,
+            }),
+            program: Some(program),
+            ..Default::default()
+        })?;
+        engine.spawn(mesh, material, Mat4::IDENTITY)?;
+    }
     if spec.startup_minimal {
         // Avoid ever allocating the normal 2^19-slot table during the startup smoke.
         engine
@@ -152,6 +204,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let report = engine.render(&camera)?;
         let cpu_ms = start.elapsed().as_secs_f64() * 1e3;
+        if spec.synchronous {
+            engine.device().poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            })?;
+        }
+        let service_ms = start.elapsed().as_secs_f64() * 1e3;
         if frame.capture || index == 0 {
             let image = engine.capture()?;
             if first_image_ms.is_none() {
@@ -166,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         rows.push(json!({"index":index,"phase":frame.phase,"cut":frame.cut,
-            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"triangles":report.scene.triangles}));
+            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,"triangles":report.scene.triangles}));
         for sample in engine.poll()?.gpu {
             gpu.push(gpu_row(sample));
         }
@@ -174,6 +233,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.capture()?;
     for sample in engine.poll()?.gpu {
         gpu.push(gpu_row(sample));
+    }
+    let mut reload = None;
+    if env::var_os("ARA1_SHADER_RELOAD").is_some() {
+        let frame = spec.frames.last().ok_or("missing camera")?;
+        let camera = Camera::look_at(
+            Vec3::from_array(frame.eye),
+            Vec3::from_array(frame.target),
+            Vec3::Y,
+            frame.fov_y,
+            0.1,
+            10_000.0,
+        )?;
+        let before = engine.capture()?;
+        let source = include_str!("../shaders/programs/standard.wgsl");
+        let edit = source.replace(
+            "return exposed;",
+            "return exposed * vec3<f32>(0.83, 1.0, 1.0);",
+        );
+        if source == edit {
+            return Err("shader edit did not match".into());
+        }
+        let start = Instant::now();
+        let report = engine.reload_program(engine.standard_program(), &edit)?;
+        let compile_ms = start.elapsed().as_secs_f64() * 1e3;
+        engine.render(&camera)?;
+        let edited = engine.capture()?;
+        let image_ms = start.elapsed().as_secs_f64() * 1e3;
+        write_png(&out.join("shader-edited.png"), &edited)?;
+        reload = Some(
+            json!({"kind":"live standard material WGSL edit", "visible_change":before.rgba8 != edited.rgba8,
+            "compile_ms":compile_ms,"edit_to_readback_ms":image_ms,"report":format!("{report:?}")}),
+        );
     }
     fs::write(
         out.join("engine.json"),
@@ -183,7 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "scene_ready_ms":ready_ms,"startup_to_readback_ms":first_image_ms,
             "settings":format!("{:?}",engine.settings()),"frames":rows,"gpu":gpu,
             "startup_minimal":spec.startup_minimal,"effective_indirect":format!("{:?}",engine.renderer().indirect()),
-            "timing_scope":"CPU submission excludes image readback/encoding; GPU span excludes uploads and readbacks",
+            "shader_reload":reload,"synchronous":spec.synchronous,
+            "timing_scope":"CPU submit is render() only; CPU service includes explicit GPU drain, excluding image readback/encoding; GPU span excludes uploads and readbacks",
             "excluded_effects":spec.notes,
         }))?,
     )?;

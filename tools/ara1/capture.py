@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import threading
 import time
@@ -65,7 +66,11 @@ def ara_process_check():
 
 def identity(source):
     def git(*args):return subprocess.check_output(["git","-C",str(source),*args],text=True).strip()
-    return dict(source=str(source),sha=git("rev-parse","HEAD"),tracked_status=git("status","--porcelain","--untracked-files=no"))
+    # A live edit to this measurement harness cannot alter a frozen child binary.
+    # Ara is stricter: every tracked path in its checkout remains read-only.
+    paths=['--','src','shaders','crates','Cargo.toml','Cargo.lock','rust-toolchain.toml'] if source.resolve()==REPO.resolve() else []
+    return dict(source=str(source),sha=git("rev-parse","HEAD"),tracked_status=git("status","--porcelain","--untracked-files=no",*paths),
+                mutation_scope='renderer/build inputs; harness sources separately hashed' if paths else 'entire Ara tracked checkout')
 
 
 def require_lease():
@@ -101,13 +106,20 @@ def main(engine):
     p.add_argument("--mode",required=True)
     p.add_argument("--out",type=Path,required=True)
     p.add_argument("--bake-cache",type=Path)
+    p.add_argument("--cache-from",type=Path,help="Ara only: seed the new GPU cache with a completed prior run; record exact payload identity")
     p.add_argument("--profile",choices=["dev","release"],required=True)
+    p.add_argument("--validate",action="store_true",help="retain inherited Vulkan validation for diagnostic runs; release measurements normally remove it")
     p.add_argument("--contention",required=True,help="explicit context, e.g. shared-GPU functional dry-run")
     a=p.parse_args()
     expected,owner=require_lease()
     if engine=="ara":ara_process_check()
     if a.out.exists():raise RuntimeError("refusing to overwrite a capture directory")
     a.out.mkdir(parents=True)
+    cache_payload=None
+    if a.cache_from:
+        if engine!='ara':raise ValueError('--cache-from applies only to Ara GPU caches')
+        cache_payload={str(f.relative_to(a.cache_from)):dict(bytes=f.stat().st_size,sha256=digest(f)) for f in a.cache_from.rglob('*') if f.is_file()}
+        shutil.copytree(a.cache_from,a.out/'gpu-cache')
     scene=json.loads(a.scene.read_text());asset=Path(scene["asset"])
     if not asset.is_absolute():asset=a.scene.parent/asset
     source=identity(a.source)
@@ -118,6 +130,7 @@ def main(engine):
                 cpu=platform.processor(),lease=owner,root_order=check_order(expected)["line"],
                 hardware=command_output(["nvidia-smi","--query-gpu=name,uuid,driver_version,memory.total,power.limit","--format=csv,noheader,nounits"]),
                 memory_scope="GPU board memory is separate from the per-process WDDM Dedicated Usage counter; unavailable counters stay unavailable")
+    record['seeded_gpu_cache']=dict(source=str(a.cache_from),payload=cache_payload) if a.cache_from else None
     command=[str(a.binary),str(a.scene),a.mode,str(a.out)]
     if engine=="ara":
         if a.bake_cache is None:p.error("Ara needs --bake-cache (raster/hybrid require an acquired cache)")
@@ -126,6 +139,14 @@ def main(engine):
     samples=[dict(monotonic_start=time.monotonic(),unix_seconds=time.time(),gpu=command_output(["nvidia-smi","--query-gpu=memory.used,utilization.gpu","--format=csv,noheader,nounits"]))]
     stop=threading.Event()
     environment=os.environ|{"ARA_CONFIG_DIR":str(a.out/"profile"),"ARA_CRASH_DIR":str(a.out/"crashes")}
+    removed={}
+    if a.profile=='release' and not a.validate:
+        for key in ('VK_INSTANCE_LAYERS','VK_LAYER_ENABLES'):
+            if key in environment:removed[key]=environment.pop(key)
+    record['gpu_environment']=dict(release_validation_requested=a.validate,removed_inherited=removed,
+        effective={k:v for k,v in environment.items() if k.startswith(('VK_','WGPU_')) or k in (
+            'ARA_CONFIG_DIR','ARA_CRASH_DIR','ARA_UPSCALER','ARA_REFLECTION_CAPTURES',
+            'RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK','RENDERLAB_M7_SHADER_OVERRIDE')})
     start=time.perf_counter();ready=None
     with (a.out/"process.log").open("w",encoding="utf-8") as log:
         child=subprocess.Popen(command,cwd=REPO,env=environment,stdout=log,stderr=subprocess.STDOUT,creationflags=FLAGS)
@@ -173,6 +194,9 @@ def main(engine):
     record["images"]={f.name:digest(f) for f in a.out.glob("frame-*.png")}
     if not record["exit_code"] and a.mode!="bake":
         expected={f"frame-{i:04}.png" for i,f in enumerate(scene["frames"]) if f["capture"]}
+        if a.mode=="reference" and os.environ.get("ARA1_REFERENCE_INDICES"):
+            selected={int(i) for i in os.environ["ARA1_REFERENCE_INDICES"].split(',')}
+            expected={f"frame-{i:04}.png" for i in selected if scene["frames"][i]["capture"]}
         if set(record["images"])!=expected or not (a.out/"engine.json").exists():
             raise RuntimeError("successful process did not produce the registered frames and timing record")
     (a.out/"process.json").write_text(json.dumps(record,indent=2)+"\n")

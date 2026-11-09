@@ -54,14 +54,18 @@ def main():
     p.add_argument("--minutes",type=float,default=5)
     p.add_argument("--handoff-seconds",type=float,default=0,help="bounded in-process 50 ms polling; never starts another agent")
     p.add_argument("--low-memory-dry",action="store_true",help="root-authorized low-resolution fallback: 2 GiB preflight/runtime guard")
+    p.add_argument("--held-startup",action="store_true",help="held window: require >=8 GiB at admission, retain 2 GiB runtime guard")
     p.add_argument("command",nargs=argparse.REMAINDER)
     a=p.parse_args()
-    if not 0<a.minutes<=15:p.error("ARA1 leases must be <=15 minutes")
+    if not 0<a.minutes<=10:p.error("ARA1 phase-2 leases must be <=10 minutes")
     directive=check_order(a.expected_order,() if a.handoff_seconds else a.after)
     spec=importlib.util.spec_from_file_location("ara1_n8",REPO/"scripts/n8-run.py")
     n8=importlib.util.module_from_spec(spec)
     os.environ.update(N8_OWNER="m7-ara1",N8_OUT=str(a.root/"lease"),ARA1_EXPECTED_ORDER=a.expected_order)
     spec.loader.exec_module(n8)
+    if a.held_startup:
+        n8.s1.runner.PREFLIGHT_MEMORY_MBYTES=8192
+        n8.s1.runner.RUNTIME_MEMORY_MBYTES=2048
     if a.handoff_seconds:
         deadline=time.monotonic()+a.handoff_seconds
         print("waiting in-process for release/lock handoff",flush=True)
@@ -106,7 +110,7 @@ def main():
     command=a.command[1:] if a.command[:1]==["--"] else a.command
     if not command:p.error("command required")
     sys.argv=[str(REPO/"scripts/n8-run.py"),"--label",a.label,"--minutes",str(a.minutes),
-              "--record-resources" if a.low_memory_dry else "--fast-check","--",*command]
+              "--record-resources" if a.low_memory_dry or a.held_startup else "--fast-check","--",*command]
     try:return n8.s1.runner.main()
     finally:
         if n8.s1.claimed:

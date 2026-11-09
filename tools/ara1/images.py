@@ -91,17 +91,27 @@ def score(manifest,out):
         regions={"whole_image":np.ones(ref.shape[:2],bool)}
         for name,rect in value.get("crops",{}).items():
             x0,y0,x1,y1=crop_box(rect,spec["size"]);mask=np.zeros(ref.shape[:2],bool);mask[y0:y1,x0:x1]=True;regions[name]=mask
+        reference_noise=None
+        half0=frame['reference'].parent/'reference-halves'/f'frame-{i:04}-0.png'
+        half1=frame['reference'].parent/'reference-halves'/f'frame-{i:04}-1.png'
+        if half0.exists() and half1.exists():
+            reference_noise=(scan.linear(scan.load(half0))-scan.linear(scan.load(half1)))/2
         for key,_ in PANELS[:3]:
             if not frame.get(key):continue
             cand=scan.linear(scan.load(frame[key]));error=cand-ref
             stats={name:metrics.summary(error[mask].reshape(-1)) for name,mask in regions.items()}
             record=dict(index=i,engine=key,phase=pose["phase"],reference_sha256=digest(frame["reference"]),candidate_sha256=digest(frame[key]),
                         linear_display_rgb=stats,display_mae=scan.statistics(error,regions))
+            if reference_noise is not None:
+                record['reference_noise_linear_rgb']={name:metrics.summary(reference_noise[mask].reshape(-1)) for name,mask in regions.items()}
             if key in previous and previous[key][0]+1==i:
                 # A screen-coordinate residual-change diagnostic; not a motion-warped
                 # estimator, and never compared across a cut or a missing frame.
                 record["screen_residual_change"]=metrics.summary((error-previous[key][1]).reshape(-1))
-            previous[key]=(i,error);rows.append(record)
+                record['screen_residual_change_by_region']={name:metrics.summary((error-previous[key][1])[mask].reshape(-1)) for name,mask in regions.items()}
+                if reference_noise is not None and previous[key][2] is not None:
+                    record['screen_residual_noise_by_region']={name:metrics.summary((reference_noise-previous[key][2])[mask].reshape(-1)) for name,mask in regions.items()}
+            previous[key]=(i,error,reference_noise);rows.append(record)
     out.parent.mkdir(parents=True,exist_ok=True)
     out.write_text(json.dumps(dict(scope="final displayed-image error; includes shading and display differences; no HDR/visibility inference",
         manifest_sha256=digest(manifest),metric_sources=["scripts/scan-quality-compare.py","support/fresh_level_b_metrics.py"],rows=rows),indent=2,allow_nan=False)+"\n")

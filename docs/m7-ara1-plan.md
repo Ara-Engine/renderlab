@@ -1,5 +1,9 @@
 # ARA1 preparation: Ara versus Renderlab
 
+> Phase 2 executed on the final `ae857501ab4792d1889e11111064c3957cc8af44` renderer base (comparison merge `6d2d895`). See [m7-ara1-report.md](m7-ara1-report.md) for results, source identities, corrected scene admission and gaps. The preparation record below remains historical. Active ARA1 leases are now capped at **10 minutes**; the held window finished and its exact release line was written.
+
+Phase-2 closure: 39.07 minutes of owned slot wall time across 23 leases, including preflight, startup/compiler work and repaired/rejected attempts; this is not GPU execution time. The final aggregate contains 106 primary/named-variant/warm observations plus 25 superseded captures, and seven separately marked resource-only tails close short-process WDDM sampling gaps. The report embeds 48 still/motion/cut comparison sheets and crops. Particles, animated characters, calibrated effect references and genuine Ara/core edit loops remain explicitly unmeasured. All owned jobs are released. No disposable capture dump above 5 MiB was found. Automatic approval review blocked target cleanup with “blocked by policy”; the three owned targets remain at 4.42 GiB, recorded in `D:/Coding/renderlab-work/ara1/target-sizes-phase2.json`.
+
 Phase 1 only, 2026-11-09. Phase 2 begins **only when root declares the overnight base complete**. No renderer implementation is changed. This branch prepares measurement adapters; it does not integrate Ara into Renderlab or establish a quality/performance winner. Root's final steer authorizes pushing this preparation checkpoint; the visual comparison report is not published.
 
 ## Identities and evidence

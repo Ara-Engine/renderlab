@@ -55,7 +55,49 @@ pub struct Scene {
     /// Tiny, explicitly unqualified startup smoke profile; never a quality/performance row.
     #[serde(default)]
     pub startup_minimal: bool,
+    #[serde(default)]
+    pub effects: Effects,
+    #[serde(default = "enabled")]
+    pub synchronous: bool,
 }
+
+fn enabled() -> bool {
+    true
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Effects {
+    pub gi: bool,
+    pub reflections: bool,
+    pub local_shadows: bool,
+    pub atmosphere: bool,
+    pub fog: bool,
+    pub post: bool,
+    pub alpha_panel: bool,
+}
+impl Default for Effects {
+    fn default() -> Self {
+        Self {
+            gi: true,
+            reflections: true,
+            local_shadows: true,
+            atmosphere: false,
+            fog: false,
+            post: false,
+            alpha_panel: false,
+        }
+    }
+}
+
+/// Shared alpha coverage, explicitly not refractive glass.
+pub const PANEL_POSITIONS: [[f32; 3]; 4] = [
+    [0.55, 0.05, 4.3],
+    [3.05, 0.05, 4.3],
+    [3.05, 2.55, 4.3],
+    [0.55, 2.55, 4.3],
+];
+pub const PANEL_COLOR: [f32; 4] = [0.1, 0.6, 0.8, 0.32];
 
 pub fn load(path: &Path) -> Result<Scene, Box<dyn Error>> {
     let mut scene: Scene = serde_json::from_slice(&fs::read(path)?)?;

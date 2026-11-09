@@ -11,10 +11,17 @@ from PIL import Image
 import images
 import lease
 import prepare
+from reference_alias import physical_inputs
 from capture import WorkingSet
 
 
 class Contracts(unittest.TestCase):
+    def test_reference_reuse_excludes_only_algorithm_switches(self):
+        source=dict(name='base',notes=[],size=[8,8],frames=[dict(eye=[1,2,3])],sun_lux=[1000]*3,effects={})
+        candidate=source|dict(name='gi off',effects=dict(gi=False,reflections=False))
+        self.assertEqual(physical_inputs(source),physical_inputs(candidate))
+        for changed in (dict(size=[4,4]),dict(sun_lux=[10]*3),dict(frames=[dict(eye=[2,2,3])]),dict(effects=dict(fog=True))):
+            self.assertNotEqual(physical_inputs(source),physical_inputs(candidate|changed))
     def test_replay_has_unblended_cut_and_contiguous_motion(self):
         frames=prepare.frames([2,2,5],[0,1,0],.85,False)
         cuts=[i for i,f in enumerate(frames) if f["cut"]]
