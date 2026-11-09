@@ -113,6 +113,10 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
 - **Reference:** the matched courtyard (dusk sun, uniform sky, no local lights or character) against a 16,384-spp path trace. RT crate tops sit at or below the reference's own grain (0.021-0.045 against 0.080-0.096, RMS 1.3 codes). Non-RT is clean in flight but 0.509 on a still camera (RMS 4.5 codes). The path tracer has no point or spot lights, so local-light quality has no path-traced reference yet.
 - The ground, arch and wall stay at 0.006-0.06 on RT.
 
+## Post / HDR invariance
+
+- **OPEN: PP1 GPU post sweep fails on untouched main.** `gpu_post_sweep` (`src/post_tests.rs:220`, an ignored GPU test) asserts that the `neutral` post variant leaves the HDR capture byte-identical to `off` ("post must not feed back into HDR/TR1"). P-MEM found it failing on its frozen baseline (2026-11-09). Either a post setting leaks into the HDR or TR1 history (a quality bug), or the test's invariant is stale after later merges (TR1/MQ1/MV1 history, motion vectors). It needs a bisect and an owner. The lib gate doesn't run ignored GPU tests, which is why no merge caught it.
+
 ## Non-RT sun shadows
 
 - **OPEN, quality shortfall: grainy, harder penumbrae on non-RT.** The v0.1.0 clean-clone `game_scene` run shows grainy sun-shadow edges on non-RT at frame 16 (`D:/Coding/renderlab-work/v010-check/out-nonrt/frame-016.png`). RT's same frame (`out-rt/frame-016.png`) is clean.
