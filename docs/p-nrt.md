@@ -176,12 +176,89 @@ All pure optimisations: the same values reach every output.
 
 ## 3. Quality proof
 
-(in progress)
+Every change is a pure optimisation, so the bar is byte identity. The final candidate
+(**cand4**: all five changes) against the v0.1.0 baseline, each in its own process, from
+separate per-tree targets:
+
+| Check | Result |
+|---|---|
+| ARA1 quality witnesses, non-RT, 960x540 (game-base, ara-pbr, quarry; 19 frames each: still, moving, the cut and its recovery) | 57/57 PNGs byte-identical |
+| ARA1 game-atmosphere quality witnesses (physical sky; the environment fast paths) | 19/19 byte-identical |
+| ARA1 1080p timing captures (frames 39, 71, 87, every scene and repetition) | 21/21 byte-identical (97/97 frames in total) |
+| Q-walk (quarry walk, 93 frames, TR1 on), non-RT and RT | 93/93 and 93/93 frame hashes identical |
+| RF1-RF10 after 32 TR1 frames per pose (`gpu_r0a_current`), non-RT and RT | 13/13 and 13/13 poses byte-identical |
+| Lib suite, release test binary of cand4 | 198 passed, 0 failed, 163 ignored. Includes `repair_candidates_equal_the_shaders_whole_mesh_scan`, which checks the lists against a brute-force float-equality scan with nonmanifold, duplicate, collapsed-corner and signed-zero cases. |
+
+Screens on the way:
+- cand1 (exposure fast path plus a boundary-only scan skip) was 75/75 ARA1 frames identical.
+- cand2 (adding R1n vec4 and the TR1 memo) failed non-RT pipeline creation: the binding-36
+  layout still declared a 4-byte minimum. Its RT Q-walk and RF were identical, and the
+  layout was fixed in cand3.
+- cand3 (adding the environment fast paths) was 57/57 identical.
+
+No quality setting changed: ray counts, directions, walk caps, cache sizes and the 16-ray
+glossy budget are untouched.
 
 ## 4. Timings
 
-(in progress)
+ARA1 timing scenes, 1920x1080, synchronous service (`render()` plus GPU drain, ARA1's
+definition). Medians pooled over repetitions; the n column is frame samples, base / cand4.
+The first cut is ARA1's frame 72 (one sample per run). GPU passes are ARA1's timestamps:
+VB = `primary_ms`, shading = `shading_ms`, TR1 = `reconstruction_ms`.
+
+| Scene | Phase | Base ms | cand4 ms | Change | GPU span | VB | Shading | TR1 | n |
+|---|---|---|---|---|---|---|---|---|---|
+| game-base | still | 11.30 | 9.79 | -13% | 10.33 → 8.78 | 1.19 → 0.40 | 3.36 → 2.93 | 0.51 → 0.44 | 117 / 78 |
+| game-base | moving | 11.68 | 10.10 | -14% | 10.59 → 9.04 | 1.56 → 0.40 | 2.89 → 2.46 | 0.81 → 0.72 | 96 / 64 |
+| game-base | cut | 13.14 | 11.07 | -16% | 11.51 → 9.84 | 1.56 → 0.38 | 3.04 → 2.68 | 0.43 → 0.36 | 3 / 2 |
+| game-base | recovered | 9.58 | 7.85 | -18% | 8.50 → 6.84 | 1.56 → 0.41 | 2.99 → 2.55 | 0.51 → 0.44 | 45 / 30 |
+| ara-pbr-oriented | still | 9.43 | 7.79 | -17% | 8.31 → 6.82 | 1.47 → 0.30 | 2.83 → 2.32 | 0.39 → 0.35 | 117 / 78 |
+| ara-pbr-oriented | moving | 7.82 | 6.15 | -21% | 6.83 → 5.16 | 1.47 → 0.31 | 2.75 → 2.26 | 0.54 → 0.50 | 96 / 64 |
+| ara-pbr-oriented | cut | 8.72 | 7.08 | -19% | 7.10 → 5.33 | 1.48 → 0.30 | 2.84 → 2.33 | 0.33 → 0.29 | 3 / 2 |
+| ara-pbr-oriented | recovered | 7.74 | 6.08 | -21% | 6.73 → 5.14 | 1.48 → 0.31 | 2.80 → 2.34 | 0.39 → 0.35 | 45 / 30 |
+| quarry-daylight | still | 12.80 | 12.49 | -2% | 11.44 → 11.33 | 0.71 → 0.71 | 0.70 → 0.67 | 0.51 → 0.51 | 117 / 78 |
+| quarry-daylight | moving | 12.62 | 12.47 | -1% | 11.31 → 11.27 | 0.71 → 0.73 | 0.66 → 0.63 | 0.50 → 0.49 | 96 / 64 |
+| quarry-daylight | cut | 18.62 | 19.03 | +2% | 16.87 → 17.05 | 0.74 → 0.77 | 0.78 → 0.75 | 0.49 → 0.49 | 3 / 2 |
+| quarry-daylight | recovered | 13.93 | 13.92 | -0% | 12.73 → 12.75 | 0.74 → 0.78 | 0.79 → 0.75 | 0.54 → 0.54 | 45 / 30 |
+| game-atmosphere | still | 15.25 | 13.16 | -14% | 14.09 → 12.10 | 1.19 → 0.40 | 6.76 → 5.87 | 0.55 → 0.48 | 39 / 39 |
+| game-atmosphere | moving | 16.01 | 13.99 | -13% | 14.95 → 12.77 | 1.56 → 0.41 | 6.28 → 5.23 | 0.85 → 0.77 | 32 / 32 |
+| game-atmosphere | cut | 17.44 | 15.17 | -13% | 16.10 → 13.62 | 1.53 → 0.38 | 6.89 → 5.67 | 0.47 → 0.40 | 1 / 1 |
+| game-atmosphere | recovered | 15.51 | 13.73 | -11% | 14.47 → 12.15 | 1.56 → 0.41 | 6.76 → 5.64 | 0.55 → 0.48 | 15 / 15 |
+
+- **Hardware:** RTX 4070 SUPER (12,282 MiB), NVIDIA 617.14, Ryzen 7 7800X3D, Windows 11
+  10.0.26300.
+- **Build:** release profile, rustc 1.96.0, `examples/ara1_capture.rs` with the CPU-parts
+  rows.
+  - Base: v0.1.0 (3a71de0) in `tree-base`/`target-base`, `bin/base.exe` sha256 2e66d4f8...
+  - cand4: `tree-cand4` in `D:/Coding/pnrt-target-cand`, `bin/cand4v.exe` bf55da0d...
+  - Lib-test binaries: base-lib 7762be11..., cand4-lib 9340d310...
+- **Contention:** each repetition ran inside a P-NRT GPU lease, the only GPU job. Leases
+  lease-4b (base repetition 0) and lease-6 (base repetitions 1 and 2, cand4 repetitions 1
+  and 2) ran at 08:43 and 10:07 UTC, interleaved per case. No P-NRT build overlapped a
+  timing run. Other units' CPU-only builds and ordinary desktop activity (the wallpaper GPU
+  client) may have.
+- **Quarry:** within noise. Its ARA1 frames are dominated by GI settling (§1), which P-GI
+  owns. ARA1's single first-cut sample swings by several ms.
+
+**Against Ara raster** (ARA1: game 1.86/1.96/1.84, PBR 1.70/1.71/1.71, quarry 5.60/8.71/8.84 ms):
+non-RT remains 5.3x (game still), 4.6x (PBR still; 3.6x moving) and 2.2x (quarry still) slower after these changes.
+The target is not met; §5 ranks what remains.
 
 ## 5. Gaps
 
-(in progress)
+Recorded in docs/m7-gaps.md, "Non-RT frame cost". In order of measured size:
+1. **GI settling** in ARA1's early frames (P-GI): about 9 ms per frame on the quarry, up to
+   2.9 ms on game-base.
+2. **Surface-cache sun visibility** (P-NSQ): 1.2-3.4 ms. P-NSQ's penumbra fix may add cost.
+3. **CPU per synchronous frame:** `render()` costs 0.7-1.3 ms, encode dominating, plus about
+   0.6 ms of completion and submit latency. Next step: a CPU sampling profile of
+   `submit_frame`; no profiler was available.
+4. **Deferred shading:** 2.3-2.9 ms on the small scenes (5.2-5.9 ms with a physical sky).
+   - R1n traversal is still the largest part. Next: a short register stack, and a two-level
+     instance tree with an index-ordered tie rule (identical closest hits).
+   - Environment lookups dominate under a physical sky.
+   - P-GI found the shading pass runs 16-pixel workgroups (half a warp). Retiling the
+     shading dispatch is the next screen; its workgroup-shared state must stay
+     byte-identical.
+5. **TR1:** 0.3-0.8 ms. The memo saved about 0.07 ms; the history fetch's local arrays are
+   next.

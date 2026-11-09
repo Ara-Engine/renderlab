@@ -113,8 +113,10 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 ## Non-RT frame cost (M8, P-NRT)
 
 - **OPEN, performance: non-RT is still 3-5x Ara raster's service time on the matched scenes.**
-  P-NRT's byte-identical changes (docs/p-nrt.md §2) take RESULT_PLACEHOLDER. The remaining
-  cost, ranked by measured size (docs/p-nrt.md §1, 1080p, RTX 4070 SUPER):
+  P-NRT's byte-identical changes (docs/p-nrt.md §2) cut ARA1 service by 13-18% on game-base
+  (still 11.30 → 9.79 ms) and 17-21% on ara-pbr (still 9.43 → 7.79 ms). The quarry stays within
+  noise. Non-RT remains 5.3x (game), 4.6x (PBR) and 2.2x (quarry) Ara raster's still service.
+  The remaining cost, ranked by measured size (docs/p-nrt.md §1, 1080p, RTX 4070 SUPER):
   - **GI settling in ARA1's first ~90 frames (P-GI).** On the quarry, about 9 ms per frame of
     the 11-13 ms span is GI fill while a view is first seen; the steady state is 0.5-0.9 ms.
     ARA1's 88-frame windows measure the settling, not the steady state.
@@ -123,7 +125,8 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
     global-memory latency, and TR1's jitter makes still frames walk like moving ones.
     P-NSQ's penumbra fix may add cost.
   - **Deferred shading's software reflections (R1n).** The BVH traversal was about 1.6 ms of
-    game-base's 3.0 ms shading before the vec4 loads. The 16-ray glossy budget stays. Next
+    game-base's 3.0 ms shading before the vec4 loads (shading is 2.3-2.9 ms after P-NRT). The
+    16-ray glossy budget stays. Next
     candidates: a short register stack, and a two-level instance tree with an
     index-ordered tie rule (identical closest hits).
   - **Environment lookups with a physical sky.** The atmosphere variant adds 3.4 ms of
