@@ -192,7 +192,7 @@ them, including transitions. RT does not allocate that mapped-shadow pool.
    padding are omitted from the GPU upload. Child order, triangle order, local
    indices, near-field masks and traversal arithmetic remain identical. Cooked
    assets and the general cluster-BVH representation do not change. The quarry's
-   uploaded software-GI geometry falls from about 407.074 to 311.934 MiB.
+   uploaded software-GI geometry falls from about 407.074 to 311.933 MiB.
 
 4. **Unreachable spot cube faces: 320 MiB in the all-spot witness.**
    The atlas uses one D2Array layer when no selected slot needs a cube; any point
@@ -285,8 +285,13 @@ Raw RF and Q-walk dumps above 5 MB were summarized and removed. Sixty-six
 representative PNGs were inspected, individually and in three contact sheets;
 their retained-image manifest is under the local evidence's `report/` directory.
 Automatic approval review blocked the subsequent deletion of unretained PNGs
-with "blocked by policy", so those additional PNGs remain. Target cleanup is
-recorded in the final handoff after the last build.
+with "blocked by policy", so those additional PNGs remain. The Cargo target's
+resolved path was verified as exactly `D:/Coding/renderlab-work/p-mem/target`
+(ordinary directory, 1353 files, 816564472 bytes). The requested literal-path
+recursive deletion was also rejected by automatic approval review with
+"blocked by policy"; a subsequent existence check confirmed it remains. No
+alternate deletion mechanism was attempted. Frozen proof binaries remain in
+the separate `bin/` directory.
 
 Public replay helpers:
 
@@ -310,6 +315,14 @@ Schedule readers stream line by line so the growing shared history is never
 copied wholesale. The final retime's first preflight (13:06 UTC) deferred at
 6935 MiB with foreign compilers active, before any GPU execution. Its rejected
 preflight is retained separately; it contributes no timing result.
+
+The second attempt admitted at 13:41:04 UTC (12672 MiB, no compiler). At
+13:41:22 the runtime sample detected new foreign `cargo.exe`/`rustc.exe`
+processes, with 10647 MiB still available, and the strict no-build guard aborted
+the job. It released at 13:41:23. Only the first baseline game process completed;
+there is **no complete A/B pair or quiet quarry retime**, and no no-regression
+clearance. [p-mem-retime.json](p-mem-retime.json) records the rejected and aborted
+attempts. No preflight/runtime guard was reduced, and no foreign job was stopped.
 
 ## Timing screen and limits
 
@@ -338,11 +351,15 @@ seconds includes its recorded PP1 assertion failure. Build, queue, coding and
 verification overlap; wall time is not attributed entirely to either algorithm
 implementation or GPU verification.
 
+The unit closes within its three-hour box with the timing effect still open.
+Resolve the non-RT deltas with the frozen ABBA replay in a genuinely quiet window
+before treating these storage cuts as cleared for frame-time regression.
+
 ## Gaps and next exact candidates
 
 The remaining non-RT quarry live allocation is about 3699.730 MiB. Its largest
 resources are immutable material mips (1024.022), walk records (447.518),
-software-GI geometry (about 311.934), mesh vertices (303.673), mesh indices
+software-GI geometry (about 311.933), mesh vertices (303.673), mesh indices
 (298.345), raster cluster geometry (226.911), GI table (192), sun clipmap layers
 (192), GI filter sources (88), TR1 histories (168.750), and GI work (56.250).
 They carry quality or serve distinct consumers; deleting them is not justified.

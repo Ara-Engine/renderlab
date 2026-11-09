@@ -471,8 +471,12 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   GI allocation cannot simply be deferred: lighting upload precedes GI prepare
   and would change the first frame's binding. Existing BLAS compaction and
   upload retirement already operate and are not new P-MEM savings.
-- Non-RT timing deltas in the contended identity runs are unresolved; a short
-  paired quiet retime is requested. No frame-time regression clearance or
-  performance superiority follows from the memory/hash proof. Ordinary PP1's
+- Non-RT timing deltas in the contended identity runs remain unresolved. The
+  13:06 retime deferred before GPU work (6935 MiB and active compilers); the
+  13:41 retime passed 8 GiB/no-build preflight but the runtime guard caught new
+  foreign cargo/rustc processes and aborted before any complete A/B pair. No
+  frame-time regression clearance or performance superiority follows from the
+  memory/hash proof. A future quiet frozen-binary ABBA replay is still required.
+  Ordinary PP1's
   baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
   record-only sweep proves cross-build identity while leaving that gate strict.

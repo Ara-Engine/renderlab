@@ -1,0 +1,78 @@
+{
+  "status": "incomplete_unverified",
+  "complete_ab_pairs": 0,
+  "first_attempt": {
+    "utc": "2026-11-09T13:06:31.568759+00:00",
+    "available_mbytes": 6935,
+    "builds": [
+      {
+        "Name": "cargo.exe",
+        "ProcessId": 28388,
+        "ExecutablePath": "C:\\Users\\snowy\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\cargo.exe"
+      },
+      {
+        "Name": "cargo.exe",
+        "ProcessId": 38344,
+        "ExecutablePath": "C:\\Users\\snowy\\.rustup\\toolchains\\nightly-x86_64-pc-windows-msvc\\bin\\cargo.exe"
+      },
+      {
+        "Name": "rustc.exe",
+        "ProcessId": 50892,
+        "ExecutablePath": "C:\\Users\\snowy\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rustc.exe"
+      }
+    ]
+  },
+  "second_attempt": {
+    "start": "2026-11-09T13:41:04.586630+00:00",
+    "end": "2026-11-09T13:41:23.467406+00:00",
+    "seconds": 15.879489299986744,
+    "exit": 1,
+    "failures": [
+      "contention or available memory below 2048 MiB"
+    ],
+    "runtime_memory_floor_mbytes": 2048,
+    "preflight_memory_floor_mbytes": 8192,
+    "reject_build_contention": true,
+    "samples": [
+      {
+        "utc": "2026-11-09T13:41:13.881220+00:00",
+        "available_mbytes": 12522,
+        "games": [],
+        "gpu_processes": [],
+        "builds": [],
+        "gpu": "NVIDIA GeForce RTX 4070 SUPER, 617.14, 83, 3561, 50",
+        "engine_helpers": []
+      },
+      {
+        "utc": "2026-11-09T13:41:18.339317+00:00",
+        "available_mbytes": 12586,
+        "games": [],
+        "gpu_processes": [],
+        "builds": [],
+        "gpu": "NVIDIA GeForce RTX 4070 SUPER, 617.14, 4, 2143, 43",
+        "engine_helpers": []
+      },
+      {
+        "utc": "2026-11-09T13:41:22.845048+00:00",
+        "available_mbytes": 10647,
+        "games": [],
+        "gpu_processes": [],
+        "builds": [
+          {
+            "Name": "cargo.exe",
+            "ProcessId": 52712,
+            "ExecutablePath": "C:\\Users\\snowy\\.rustup\\toolchains\\nightly-x86_64-pc-windows-msvc\\bin\\cargo.exe"
+          },
+          {
+            "Name": "rustc.exe",
+            "ProcessId": 2828,
+            "ExecutablePath": "C:\\Users\\snowy\\.rustup\\toolchains\\nightly-x86_64-pc-windows-msvc\\bin\\rustc.exe"
+          }
+        ],
+        "gpu": "NVIDIA GeForce RTX 4070 SUPER, 617.14, 10, 2525, 41",
+        "engine_helpers": []
+      }
+    ]
+  },
+  "note": "The no-build guard caught new foreign cargo/rustc processes; only the first baseline game process completed. No timing regression clearance."
+}
