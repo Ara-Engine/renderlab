@@ -469,7 +469,11 @@ startup is 30.12/30.31 s, populated replay 1.16/0.89 s, with complete RGBA8/HDR
 identity at matched frames 0/1. All six ARA1 game/PBR/quarry baseline replays
 complete; no split frame-time A/B exists. Lib: 199 passed. Main runtime and
 default shaders are unchanged; this unit verifies the existing fallback and
-leaves the optimization open.
+leaves the optimization open. **OPEN: frame hitches during background compile.**
+While the new pipeline compiles in the background, old-revision frames still
+stall: the worst gap between old-revision frames is 432 ms, and the worst
+readback 97 ms (P-SHC2, contended). That is visible in a running game, so the
+fallback isn't hitch-free yet.
 
 P-SHC ([p-shc.md](p-shc.md)) fixes a mixed-program reload transaction gap: active
 MP1 list pipelines and dependent glass hit shading now compile before publication,
