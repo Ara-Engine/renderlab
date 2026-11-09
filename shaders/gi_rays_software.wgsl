@@ -84,12 +84,23 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
             if (child&GI_BVH_LEAF)!=0u {
                 let l=leaves+(child&~GI_BVH_LEAF)*8u;
                 let first=gi_geometry[l+4u];let count=gi_geometry[l+5u];
-                for(var k=0u;k<count;k+=3u) {
+                // Two triangles a step: both triangles' indices, then both triangles'
+                // positions, load before either is tested, so a leaf costs half the dependent
+                // round trips. They are tested in leaf order, the second against the first's
+                // best.t: the same hits as one at a time. A lone last triangle loads itself
+                // twice and tests once.
+                for(var k=0u;k<count;k+=6u) {
                     let x=indices+first+k;
+                    let two=k+3u<count;
+                    let y=select(x,x+3u,two);
                     let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
+                    let ja=gi_geometry[y];let jb=gi_geometry[y+1u];let jc=gi_geometry[y+2u];
                     let a=gi_gv(positions+ia*4u);
                     let b=gi_gv(positions+ib*4u);
                     let c=gi_gv(positions+ic*4u);
+                    let a2=gi_gv(positions+ja*4u);
+                    let b2=gi_gv(positions+jb*4u);
+                    let c2=gi_gv(positions+jc*4u);
                     let h=gi_triangle(o,d,a,b,c,tmin,best.t);
                     if h.x>=0.0 {
                         // The source-winding normal through the inverse transpose. r0-r2 are
@@ -97,6 +108,14 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                         let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
                         best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
                         if any_hit { return best; }
+                    }
+                    if two {
+                        let h2=gi_triangle(o,d,a2,b2,c2,tmin,best.t);
+                        if h2.x>=0.0 {
+                            let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b2-a2,c2-a2);
+                            best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
+                            if any_hit { return best; }
+                        }
                     }
                 }
                 continue;

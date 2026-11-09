@@ -319,6 +319,29 @@ fn gi_find(key:vec2<u32>) -> u32 {
     }
     return 0xffffffffu;
 }
+// gi_find with the start slot's and the next slot's key words loaded together: a key whose
+// start slot was taken usually sits one slot on. The same slot. For gather hits and the filter's
+// neighbours, which meet more displaced keys than pixels do; in the probe the extra load cost
+// about 10-15 us a frame (P-GI, docs/p-gi.md).
+fn gi_find_pair(key:vec2<u32>) -> u32 {
+    let mask=gi_word(GI_H_MASK);
+    let bucket=(key.x&mask)&~(GI_BUCKET-1u);
+    let s0=bucket+(gi_start(key)&(GI_BUCKET-1u));
+    let s1=bucket+((gi_start(key)+1u)&(GI_BUCKET-1u));
+    let w0=gi_word(gi_hot(s0));
+    let w1=gi_word(gi_hot(s1));
+    if (w0&GI_KEY_BITS)==key.x { return s0; }
+    if w0==0u { return 0xffffffffu; }
+    if (w1&GI_KEY_BITS)==key.x { return s1; }
+    if w1==0u { return 0xffffffffu; }
+    for(var i=2u;i<GI_BUCKET;i+=1u) {
+        let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
+        let word=gi_word(gi_hot(slot));
+        if (word&GI_KEY_BITS)==key.x { return slot; }
+        if word==0u { break; }
+    }
+    return 0xffffffffu;
+}
 // SH coefficient j (band j / 3, channel j % 3) of a hot record, before its scale.
 fn gi_half(hot:u32, j:u32) -> f32 {
     let pair=unpack2x16float(gi_word(hot+2u+(j>>1u)));
