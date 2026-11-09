@@ -296,6 +296,15 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 ## Reflections
 
+- **M8 P-R2 (2026-11-10): workgroup ray compaction rejected before implementation.**
+  The 1080p 8x4 ray-loop count replay gives max/mean 1.0797 on game-base (both
+  paths) and 1.1433 on ara-pbr (both paths), below the required 1.4 gate.
+  No renderer change or speed/identity claim; the traversal-cost gap remains.
+  WGSL's 16-byte vec3 array stride also makes 512 radiance results 8 KiB before
+  queue/ray state, above the design's 6 KiB result estimate. Details and fixture
+  counts: [P-R2](p-r2.md). Prefer per-ray traversal work over count compaction on
+  these measured still workloads; variable traversal/hit cost remains unmeasured.
+
 - **Closed (RD1, [m7-rd1.md](m7-rd1.md)): non-RT courtyard reflection blotches.** LC3's inspected sheet came from a binary built on main `622db4d`, before R1n merged, so its non-RT spheres showed the untraced estimate. On main `ff56b79` (LC3 and VF2 merged), the courtyard's non-RT chrome and gold match RT, still and moving with `--fox`, from frame 000 (`D:/Coding/renderlab-work/rd1/rd1-final-spheres.png`).
 
 From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14 stops (8-bit F0 codes) against R0a's references, static, 1x, GI cache off; Unreal floors are R0a's.
@@ -415,6 +424,16 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
 
 ## GI
+
+- **P-GIE / design G-E rejected at its cheap gate** ([p-gie.md](p-gie.md), 2026-11-09).
+  Existing probe statistics at the actual 8x4 shading dimensions exceed the allowed
+  40 unique keys per tile: game maxima RT 58 / non-RT 83; quarry 143 on both paths.
+  These are conservative probe request unions, not exact shading-only sets. Averages
+  (~11.3 game / ~25 quarry per 32 covered pixels) pass but do not satisfy the maximum
+  rule. No production lookup change ships; the ~0.8 ms lookup gap remains. A future
+  bounded cooperative cache needs an exact overflow path and a revised gate; the
+  16 KiB device budget must also accommodate R2/R3. No identity or quiet speedup is
+  claimed for this dropped design.
 
 G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
 
