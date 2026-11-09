@@ -628,14 +628,17 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   GI allocation cannot simply be deferred: lighting upload precedes GI prepare
   and would change the first frame's binding. Existing BLAS compaction and
   upload retirement already operate and are not new P-MEM savings.
-- Non-RT timing deltas in the contended identity runs are unresolved.
-  [P-RETIME](p-retime.md) built a clean packed-BVH-only pair on `dc0d4ea`, with
-  only the runtime BVH Rust/WGSL files from `241b87b`, but game/quarry non-RT
-  timings never admitted before its three-hour wait limit. The packed-BVH
-  regression verdict remains open. No frame-time regression clearance or
-  performance superiority follows from the memory/hash proof. Ordinary PP1's
-  baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
-  record-only sweep proves cross-build identity while leaving that gate strict.
+- **CLOSED at the reported magnitude: packed-BVH quarry regression** ([P-BVHT](p-bvht.md)).
+  A compiler-free, prebuilt packed-only pair on `dc0d4ea`, two ABBA blocks and
+  16 tracks per binary gives service medians moving 8.7766 ? 8.8154 ms (+0.44%),
+  cut 38.8012 ? 38.4471 ms (?0.91%), recovered 9.8808 ? 9.7777 ms (?1.04%).
+  All three service means and GPU-span medians improve; 532/532 HDR and
+  532/532 PNG cross-process witness comparisons match. P-VERIFY's +5.5%/+6.1%
+  means do not reproduce; broad tails affect both binaries. Keep the ~95.140 MiB
+  software-GI geometry saving. Small sub-percent costs and tail causality remain
+  unproven; this is frozen-pair clearance, not a current-main speed claim.
+  Ordinary PP1's baseline neutral-HDR assertion remains a separate P-POST gap;
+  P-MEM's record-only sweep leaves that gate strict.
 
 
 ## M8 local lights follow-up (P-LTS3, 2026-11-09)
