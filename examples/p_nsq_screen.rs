@@ -3,7 +3,8 @@
 //!
 //! `p_nsq_screen SCENE.json OUT VARIANT...`, each VARIANT `name:key=value,...` with keys
 //! `path` (nonrt|rt), `rot` (0|1: TR1's per-frame direction rotation), `budget`
-//! (cold/reset/active/held rays), `cap` (walk cap), `lookup` (surface|exact) and `tr1` (0|1).
+//! (cold/reset/active/held rays), `cap` (walk cap), `trunc` (0|1), `steps` (walk steps), `march`
+//! (march samples), `fb` (first-step block mode), `lookup` (surface|exact) and `tr1` (0|1).
 //! `P_NSQ_FRAMES` lists the frames to capture (default: the scene's capture flags).
 #[allow(dead_code)]
 #[path = "../tools/ara1/scene.rs"]
@@ -31,8 +32,10 @@ struct Variant {
     rotate: bool,
     budget: Option<renderlab::ReconstructionShadowBudget>,
     cap: Option<u32>,
-    trunc: bool,
+    trunc: Option<bool>,
     steps: Option<u32>,
+    march: Option<u32>,
+    first_block: Option<u32>,
     lookup: Option<renderlab::VirtualLookup>,
     tr1: bool,
 }
@@ -45,8 +48,10 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
         rotate: true,
         budget: None,
         cap: None,
-        trunc: false,
+        trunc: None,
         steps: None,
+        march: None,
+        first_block: None,
         lookup: None,
         tr1: true,
     };
@@ -63,8 +68,10 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
             "rot" => v.rotate = value == "1",
             "tr1" => v.tr1 = value == "1",
             "cap" => v.cap = Some(value.parse()?),
-            "trunc" => v.trunc = value == "1",
+            "trunc" => v.trunc = Some(value == "1"),
             "steps" => v.steps = Some(value.parse()?),
+            "march" => v.march = Some(value.parse()?),
+            "fb" => v.first_block = Some(value.parse()?),
             "lookup" => {
                 v.lookup = Some(match value {
                     "surface" => renderlab::VirtualLookup::Surface,
@@ -189,9 +196,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(lookup) = v.lookup {
                 s.lookup = lookup;
             }
-            s.truncated_walks_block = v.trunc;
+            if let Some(trunc) = v.trunc {
+                s.truncated_walks_block = trunc;
+            }
             if let Some(steps) = v.steps {
                 s.walk_steps = steps;
+            }
+            if let Some(march) = v.march {
+                s.march_samples = march;
+            }
+            if let Some(first_block) = v.first_block {
+                s.first_block = first_block;
             }
             r.set_virtual_shadow_settings(s)?;
         }

@@ -129,10 +129,11 @@ pub struct VirtualShadowSettings {
     /// as RT does, so TR1's history integrates the disk (docs/p-nsq.md).
     pub directions: u32,
     /// N8e walk cap: once a receiver's exact walks have visited this many triangles and one
-    /// of its directions is proven blocked, its undecided directions are taken as blocked
-    /// (0: no cap). Proven blocks only, so a fully lit receiver is never darkened by it; it
-    /// spends partial-shadow accuracy (quarry partial RMS .326 -> .353) to cut leaks by
-    /// two thirds and the cost by a sixth (docs/non-rt-n8e.md).
+    /// of its directions is proven blocked, every direction still open is taken as blocked
+    /// (0: no cap, the default since P-NSQ). It cut leaks and a sixth of the cost
+    /// (docs/non-rt-n8e.md), but a penumbra receiver of a distant caster always reaches it,
+    /// so it turned wide penumbrae into umbra (docs/p-nsq.md). `truncated_walks_block` now
+    /// decides the undecided directions one by one.
     pub walk_cap: u32,
     /// N8e rolling refresh: on a frame with the last frame's camera, casters, settings and
     /// map, one trace tile in every `refresh` (1, 2, 4, 8 or 16) is looked up again and the
@@ -159,7 +160,7 @@ pub struct VirtualShadowSettings {
     /// Every other direction keeps its exact verdict.
     pub truncated_walks_block: bool,
     /// Triangles one candidate walk may cross at the receiver's level before it is
-    /// undecided (N8b's 8); each coarser level doubles it, up to four times. Walks that
+    /// undecided (32; N8b used 8); each coarser level doubles it, up to four times. Walks that
     /// locate their triangle sooner stop sooner, so a larger budget costs only long walks.
     pub walk_steps: u32,
 }
@@ -211,13 +212,13 @@ impl Default for VirtualShadowSettings {
             caster_error_texels: -1.0,
             first_block: 2,
             directions: 8,
-            walk_cap: 16,
+            walk_cap: 0,
             refresh: 16,
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
             lookup: VirtualLookup::Surface,
-            truncated_walks_block: false,
-            walk_steps: 8,
+            truncated_walks_block: true,
+            walk_steps: 32,
         }
     }
 }
