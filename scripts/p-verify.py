@@ -69,7 +69,8 @@ def lease(label, command):
             post(f'p-verify {label} admitted {runner.utc()}')
         original_save(path, value)
     runner.save = save
-    sys.argv = ['n8-run.py', '--label', label, '--minutes', '15', '--no-build-contention', '--record-resources', '--', *command]
+    quiet = ['--no-build-contention'] if os.environ.get('PVERIFY_QUIET') == '1' else []
+    sys.argv = ['n8-run.py', '--label', label, '--minutes', '14', *quiet, '--record-resources', '--', *command]
     try:
         return runner.main()
     finally:
@@ -133,8 +134,13 @@ def build(unit):
         if sample['compilers'] or sample['available_mbytes'] < 8192:
             return 3
         with (OUT / f'{unit}-build.log').open('w') as log:
-            result = sp.run(command, cwd=tree, env=os.environ | dict(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS='2'), stdout=log, stderr=sp.STDOUT, creationflags=sp.CREATE_NO_WINDOW)
-        return result.returncode
+            child = sp.Popen(command, cwd=tree, env=os.environ | dict(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS='2'), stdout=log, stderr=sp.STDOUT, creationflags=sp.CREATE_NO_WINDOW)
+            try:
+                return child.wait(timeout=810)
+            except sp.TimeoutExpired:
+                sp.run(['taskkill', '/PID', str(child.pid), '/T', '/F'], creationflags=sp.CREATE_NO_WINDOW)
+                child.wait()
+                return 1
     finally:
         (OUT / f'{unit}-build-audit.json').write_text(json.dumps(dict(command=command, seconds=time.monotonic()-start, admission=sample), indent=2))
         if json.loads((slot / 'owner.json').read_text())['token'] == token:
@@ -172,8 +178,13 @@ if __name__ == '__main__':
                 if not sample['compilers'] and sample['available_mbytes'] >= 8192:
                     print('ADMISSIBLE', flush=True)
                     if len(sys.argv) > 3:
-                        raise SystemExit(sp.call(sys.argv[3:], env=os.environ | {'ARA1_HDR_HASH': '1'}))
+                        code = sp.call(sys.argv[3:], env=os.environ | {'ARA1_HDR_HASH': '1'})
+                        if code == 3:
+                            time.sleep(1)
+                            continue
+                        raise SystemExit(code)
                     break
                 if time.monotonic() >= end:
-                    print('WAIT EXPIRED', sample, flush=True); break
+                    print('WAIT EXPIRED', sample, flush=True)
+                    raise SystemExit(3)
                 time.sleep(1)

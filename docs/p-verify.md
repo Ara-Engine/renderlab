@@ -26,11 +26,36 @@ or test process was started. RAM was 13223/13287 MiB; foreign Cargo PIDs 57888
 present, with zero rustc. `queue.jsonl` records subsequent one-second samples.
 No frame-time claim can be made from these admission failures.
 
+First admission was at 18:22:05 UTC with 13946 MiB available, no observed
+compilers and no foreign renderer. The 28.62-second attempt was stopped when
+foreign Cargo PID 28932 appeared. Last sampled RAM was 10625 MiB, so this was
+compiler contention rather than a memory-floor failure. No capture completed;
+the attempt is unscored. The PID-owned process tree was stopped and the lease
+released at 18:22:31 UTC. Audit: `lease/runs/nrt3-q1-ready2.json`.
+
+Two further attempts at 18:23:45 and 18:24:28 UTC stopped after 20.15 and
+11.06 seconds on foreign compiler starts, also before a capture completed.
+The runtime compiler-abort was subsequently made optional: compiler-free
+admission remains mandatory, but correctness captures may finish if another
+project starts afterward. Such timing/trace intervals are diagnostic only.
+The 2 GiB runtime memory guard remains mandatory.
+
+The coordinator approved joining stillkit's existing named mutex queue,
+`Global\stillkit-cargo-one-at-a-time`, for one build or GPU lease at a time.
+`scripts/p-verify-queue.ps1` waits for its current owner normally; it never
+stops that owner or changes stillkit's scripts. It releases immediately after
+the command. Admission waits at most 30 seconds once acquired, and our GPU
+lease is shortened to 14 minutes (build timeout 810 seconds), keeping the
+whole mutex hold below 15 minutes. The process owns the native mutex handle,
+so process exit cannot leave a persistent lock file. Every acquire/release
+is recorded in local `mutex.jsonl`; exact completed intervals will be listed
+here. Builds also retain Renderlab's atomic build-slot lock and two-job limit.
+
 ## P-NRT3 — pending
 
 | Gate | Result | Numbers |
 |---|---|---|
-| l1 quiet timings and drain/idle traces | Awaiting admission | No new measurements |
+| l1 quiet timings and drain/idle traces | First admitted attempt interrupted; retry queued | No completed capture |
 | l2 ARA1 both paths, Q-walk, RF1–RF10, MP1, lib | Awaiting admission | No tests run |
 | Merge recommendation | DON'T MERGE pending evidence | Byte identity and benefit unproved |
 
