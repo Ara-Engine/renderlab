@@ -16,9 +16,10 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = Path("D:/Coding/renderlab-work/p-flat")
+# Follow-up units (P-FLAT2) reuse the runner under their own owner name and evidence folder.
+OWNER = os.environ.get("RENDERLAB_PFLAT_OWNER", "p-flat")
+OUT = Path(os.environ.get("RENDERLAB_PFLAT_OUT", f"D:/Coding/renderlab-work/{OWNER}"))
 SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
-OWNER = "p-flat"
 # Root's 11:00:47 order: 7 GiB for short non-quarry leases (full-quarry runs keep 8 GiB).
 ADMISSION_GIB = float(os.environ.get("RENDERLAB_PFLAT_ADMISSION_GIB", "8"))
 
@@ -79,6 +80,14 @@ def available_gib():
     return status.available / 2**30
 
 
+def compilers_running():
+    """Any cargo/rustc on the machine. Root's 2026-11-09 build rule (Islam): no GPU lease while
+    another project's compiler runs; this unit runs none of its own during its leases."""
+    import subprocess
+    out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout.lower()
+    return any(f'"{n}"' in out for n in ("cargo.exe", "rustc.exe", "cargo-clippy.exe", "clippy-driver.exe"))
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(name.replace("-", "_"), REPO / "scripts" / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -114,6 +123,7 @@ def main():
     deadline = time.time() + wait * 60
     while time.time() < deadline:
         if root_hold(read_schedule()) is None and available_gib() >= ADMISSION_GIB and not r1.LOCK.exists() \
+                and not compilers_running() \
                 and not r1.schedule_read_retry(runner.quiet_active, g, any_lease=True) \
                 and r1.schedule_read_retry(runner.hold_state, g) != "hold":
             try:

@@ -55,9 +55,9 @@ struct Tr1Frame {
     shadow_hi:vec4<f32>,
     // xyz: unit direction toward the sun, no zero component; w: tangent of its disk half-angle.
     shadow_light:vec4<f32>,
-    // P-FLAT, TR1_RELIT frames: up to four local lights whose intensity or colour changed:
-    // position and range (xyz, w; zero rows unused), each one's largest relative channel change,
-    // and x: Reconstruction::light_budget.
+    // P-FLAT2, TR1_RELIT frames: up to four local lights whose intensity or colour changed:
+    // position and range (xyz, w; zero rows unused), each one's relative swing since every pixel
+    // last restarted, and x: Reconstruction::light_budget.
     relit:array<vec4<f32>,4>,
     relit_change:vec4<f32>,
     relit_params:vec4<f32>,
@@ -71,7 +71,7 @@ const TR1_BOX:u32=8u;
 // TR2 (docs/m7-tr2.md): upscaled young history interpolates the internal grid
 // (Reconstruction::upscale_interpolation).
 const TR1_UPSCALE_INTERPOLATION:u32=16u;
-// P-FLAT (docs/p-flat-tr1.md): local lights' intensity changed; windows near them are capped.
+// P-FLAT2 (docs/p-flat2.md): local lights' intensity changed; pixels near them restart.
 const TR1_RELIT:u32=32u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
@@ -354,37 +354,36 @@ fn tr1_caster_shadow(x:vec3<f32>)->bool {
     return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
 }
 
-// P-FLAT: the window cap near local lights whose intensity or colour changed this frame
-// (TR1_RELIT): 1 + budget / (change * falloff) for each such light whose range holds point x,
-// falloff being the light's range-windowed inverse square relative to 1 m (the shading's
-// attenuation shape). The light's position, range and change and the receiver's position size
-// it: no pixel colour or lighting difference (patent notes above). No cap: 3.4e38.
-fn tr1_relit_cap(x:vec3<f32>)->f32 {
-    var cap=3.4e38;
-    if (tr1.flags.y&TR1_RELIT)==0u {return cap;}
+// P-FLAT2: whether point x restarts near local lights whose intensity or colour changed this
+// frame (TR1_RELIT): some such light's range holds x and its swing times falloff reaches the
+// budget, falloff being the light's range-windowed inverse square relative to 1 m (the
+// shading's attenuation shape). Every intensity a history holds lies within the swing, so a
+// continued history's error from the light stays below the budget; where it could reach it,
+// the pixel follows the light exactly. Only the light's position, range and swing and the
+// receiver's position decide it: no pixel colour or lighting difference (patent notes above).
+fn tr1_relit(x:vec3<f32>)->bool {
+    if (tr1.flags.y&TR1_RELIT)==0u {return false;}
     for(var k=0u;k<4u;k+=1u) {
-        let dc=tr1.relit_change[k];
-        if !(dc>0.0) {continue;}
+        let swing=tr1.relit_change[k];
+        if !(swing>0.0) {continue;}
         let rl=tr1.relit[k];
         let rd=distance(x,rl.xyz);
         if rd>=rl.w {continue;}
         let q=rd/rl.w;
         let fade=max(1.0-q*q*q*q,0.0);
         let falloff=fade*fade/max(rd*rd,1.0);
-        cap=min(cap,1.0+tr1.relit_params.x/max(dc*falloff,1e-30));
+        if swing*falloff>=tr1.relit_params.x {return true;}
     }
-    return cap;
+    return false;
 }
 
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     if s.id!=0u && tr1.shadow_lo.w!=0.0 && !tr1_moving(s.id-1u) && tr1_caster_shadow(s.point.xyz) {
         var rejected:Tr1History;return rejected;
     }
-    // Below a window of 2 the capped history would add less than one earlier sample while
-    // carrying the light's old intensity: the pixel restarts as an unrelit restart would, from
-    // this frame's spatial start.
-    let relit_cap=tr1_relit_cap(s.point.xyz);
-    if relit_cap<2.0 {
+    // Near a relit light the pixel restarts as an unrelit restart would, from this frame's
+    // spatial start (tr1_relit).
+    if tr1_relit(s.point.xyz) {
         var rejected:Tr1History;return rejected;
     }
     let q=tr1_fetch_position(p,s,vec2<f32>(size));
@@ -459,8 +458,6 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             h.window=min(h.window,cap);
         }
     }
-    // P-FLAT: near a relit light (tr1_relit_cap).
-    h.window=min(h.window,relit_cap);
     // MQ1: while placements move, light they change on other surfaces (moving shadows,
     // reflections of moving objects) is held to this frame's 3x3 range.
     if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
@@ -688,7 +685,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if first!=0u && first!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
         if second!=0u && second!=TR1_NONE && second!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
-    if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin && !s.moved {
+    // P-FLAT2: near a relit light the pixel restarts (tr1_relit), silhouettes included: the
+    // kept branch below would carry both stored colours at the light's old intensity.
+    if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin && !s.moved && !tr1_relit(s.point.xyz) {
         // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether
         // the jittered 3x3 shows the other one depends on the jitter, not on the footprint,
         // and at a corner of three surfaces the jitter alternates which other one it shows;
@@ -766,7 +765,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // as the new observation (1 when it shows the occluder); a new silhouette starts from the
     // tent-weighted share of this frame's 3x3 samples.
     var c=vec3<f32>(0.0);
-    if tr1.flags.x==0u {c=tr1_coverage(p,o,select(s.id,u.id,occluder_is_s),size);}
+    // P-FLAT2: a relit pixel restarts exactly as a full restart does, its coverage included.
+    if tr1.flags.x==0u && !tr1_relit(s.point.xyz) {c=tr1_coverage(p,o,select(s.id,u.id,occluder_is_s),size);}
     var coverage=tr1_share(o.id);
     var coverage_weight=1.0;
     if c.y>0.0 {

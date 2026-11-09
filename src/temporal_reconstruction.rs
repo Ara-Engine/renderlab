@@ -69,16 +69,17 @@ pub struct Reconstruction {
     /// surface-identity history does not trail them. Zero turns the cap off. Programs that
     /// declare nothing are unaffected.
     pub view_budget: f32,
-    /// P-FLAT (docs/p-flat-tr1.md): on frames where local lights' intensity or colour changed,
-    /// a pixel within such a light's range caps its window at `1 + light_budget / (change *
-    /// falloff)`. `change` is the light's largest relative channel change; `falloff` is its
-    /// range-windowed inverse square relative to 1 m, the shading's attenuation shape. Where
-    /// the cap falls below 2 the pixel restarts, as every pixel did before P-FLAT. Only engine
-    /// data and the receiver's position size the cap, never the pixel's colour. History
-    /// continues under MQ1's 3x3 box. Zero, the default, restarts every pixel on any such
-    /// change, as before P-FLAT. A positive budget trades a measured flicker lag near the light
-    /// for history elsewhere (docs/p-flat-tr1.md). More than four changed lights in one frame
-    /// also restart.
+    /// P-FLAT2 (docs/p-flat2.md): on frames where local lights' intensity or colour changed,
+    /// a pixel within such a light's range restarts where `swing * falloff >= light_budget`,
+    /// and elsewhere continues under MQ1's 3x3 box. `swing` is the light's largest channel
+    /// distance from its current candela to any candela it had since every pixel last
+    /// restarted (so to any intensity a history can hold), relative to that channel's peak;
+    /// `falloff` is its range-windowed inverse square relative to 1 m, the shading's
+    /// attenuation shape. A continued history's error from the light's old intensities is
+    /// therefore below `light_budget` (in units of the light's peak at 1 m), and every pixel
+    /// where it could reach it follows the light exactly, as a restart does. Only engine light
+    /// data and the receiver's position decide it, never the pixel's colour. Zero restarts
+    /// every pixel on any such change. More than four changed lights in one frame also restart.
     pub light_budget: f32,
     /// TR2 (docs/m7-tr2.md): upscaled frames weight every internal sample of the pixel's
     /// surface by a tent whose radius shrinks from the internal sample spacing (young history
@@ -189,11 +190,12 @@ impl Reconstruction {
 
 /// WGSL Tr1Frame.
 const FRAME_BYTES: usize = 448;
-/// Changed local lights one frame can cap (`Reconstruction::light_budget`); more restart.
+/// Changed local lights one frame can carry (`Reconstruction::light_budget`); more restart.
 const RELIT_SLOTS: usize = 4;
 /// `Reconstruction::light_budget`'s default: zero, so a local light's intensity change
-/// restarts every pixel. Every positive budget P-FLAT measured kept flicker lag on the surfaces
-/// the light dominates (docs/p-flat-tr1.md, section 3).
+/// restarts every pixel. P-FLAT2's swing restart at 0.004 improves every crate crop on both
+/// paths with wall and ground slopes within noise of main's, but its acceptance runs (static
+/// identity, motion tests, lib suite) are still owed (docs/p-flat2.md).
 const LIGHT_BUDGET: f32 = 0.0;
 // Test-only tail permits the immutable MQ1 static-control shader's runtime-array
 // minimum binding span. Production has only fixed words; transform history lives
@@ -206,10 +208,37 @@ fn without_candela(mut light: Light) -> Light {
     }
     light
 }
+/// Each local light's candela range per channel, `[lo, hi]`, since every pixel last
+/// restarted: every intensity a history can hold (P-FLAT2).
+type Swing = [[f32; 3]; 2];
+/// `swings` (one per local light, in order) widened by this frame's candela; a fresh range
+/// for each light when `swings` is `None`.
+fn widen_swings(swings: Option<&[Swing]>, intensities: &[[u32; 3]]) -> Vec<Swing> {
+    intensities
+        .iter()
+        .enumerate()
+        .map(|(i, bits)| {
+            let now = bits.map(f32::from_bits);
+            swings
+                .and_then(|s| s.get(i))
+                .map_or([now, now], |[lo, hi]| {
+                    [
+                        std::array::from_fn(|c| lo[c].min(now[c])),
+                        std::array::from_fn(|c| hi[c].max(now[c])),
+                    ]
+                })
+        })
+        .collect()
+}
 /// Local lights whose candela changed from `previous` (bits, in order): position, range
-/// (f32::MAX when unlimited) and largest relative channel change. The key equals the previous
-/// frame's, so the local lights are the same lights in the same order.
-fn relit_lights(previous: &[[u32; 3]], lights: &[Light]) -> Vec<(Vec3, f32, f32)> {
+/// (f32::MAX when unlimited) and swing, the largest channel distance from the current candela
+/// to either end of its `swings` range, relative to that channel's peak. The key equals the
+/// previous frame's, so the local lights are the same lights in the same order.
+fn relit_lights(
+    previous: &[[u32; 3]],
+    swings: &[Swing],
+    lights: &[Light],
+) -> Vec<(Vec3, f32, f32)> {
     lights
         .iter()
         .filter_map(|l| match *l {
@@ -227,14 +256,15 @@ fn relit_lights(previous: &[[u32; 3]], lights: &[Light]) -> Vec<(Vec3, f32, f32)
             } => Some((position, range.unwrap_or(f32::MAX), candela)),
             Light::Directional { .. } => None,
         })
-        .zip(previous)
-        .filter_map(|((position, range, candela), old)| {
-            let change = candela
-                .iter()
-                .zip(old.map(f32::from_bits))
-                .map(|(&new, old)| (new - old).abs() / new.max(old).max(f32::MIN_POSITIVE))
+        .zip(previous.iter().zip(swings))
+        .filter(|((_, _, candela), (old, _))| candela.map(f32::to_bits) != **old)
+        .map(|((position, range, candela), (_, [lo, hi]))| {
+            let swing = (0..3)
+                .map(|c| {
+                    (candela[c] - lo[c]).max(hi[c] - candela[c]) / hi[c].max(f32::MIN_POSITIVE)
+                })
                 .fold(0.0, f32::max);
-            (change > 0.0).then_some((position, range, change))
+            (position, range, swing)
         })
         .collect()
 }
@@ -592,6 +622,8 @@ struct Previous {
     key: [u8; 32],
     /// Local lights' candela bits (P-FLAT): a change continues history under MQ1's box.
     intensities: Vec<[u32; 3]>,
+    /// Local lights' candela ranges since the last full restart (P-FLAT2).
+    swings: Vec<Swing>,
     skin_bounds: Option<crate::shadow_plan::Bounds>,
     skin_revisions: Vec<u64>,
 }
@@ -1135,13 +1167,16 @@ impl Renderer {
         } else {
             settings.window
         };
-        // P-FLAT: local lights whose intensity or colour changed. History continues, held to
-        // this frame's 3x3 box as for moving placements and capped near those lights
-        // (`light_budget`), so a flicker is followed without restarting every pixel on every
-        // frame. A zero budget, or more changed lights than the frame can carry, restarts.
-        let changed = match (continued, state.previous.as_ref()) {
-            (Some(_), Some(p)) if p.intensities != intensities => {
-                relit_lights(&p.intensities, &self.lighting.source_lights)
+        // P-FLAT2: local lights whose intensity or colour changed. History continues, held to
+        // this frame's 3x3 box as for moving placements, except where the light's swing since
+        // the histories began could leave `light_budget` of error: those pixels restart. A
+        // flicker is then followed exactly without restarting every pixel on every frame. A
+        // zero budget, or more changed lights than the frame can carry, restarts every pixel.
+        let previous = continued.and(state.previous.as_ref());
+        let swings = widen_swings(previous.map(|p| p.swings.as_slice()), &intensities);
+        let changed = match previous {
+            Some(p) if p.intensities != intensities => {
+                relit_lights(&p.intensities, &swings, &self.lighting.source_lights)
             }
             _ => vec![],
         };
@@ -1149,6 +1184,12 @@ impl Renderer {
             !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
         state.reset = continued.is_none() || state.cut || event_window < 1.0 || light_restart;
         state.cut = false;
+        // Every history begins at a full restart: the swing starts again from this frame.
+        let swings = if state.reset {
+            widen_swings(None, &intensities)
+        } else {
+            swings
+        };
         // MQ1's clamp event comes from the same submitted transforms that feed
         // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
         let moved = !state.reset && rigid_motion;
@@ -1293,7 +1334,7 @@ impl Renderer {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         // relit[4]: position and range of each changed light (zero rows unused), then each one's
-        // relative change, then the budget.
+        // relative swing, then the budget.
         let mut relit_words = [0f32; 24];
         if relit {
             for (k, (position, range, change)) in changed.iter().enumerate() {
@@ -1319,6 +1360,7 @@ impl Renderer {
             suns,
             key,
             intensities,
+            swings,
             skin_bounds,
             skin_revisions,
         });
@@ -1448,6 +1490,36 @@ mod tests {
             assert_ne!(identity(lamp), identity(moved), "{moved:?}");
         }
         assert_eq!(identity(sun), format!("{sun:?}"));
+    }
+
+    /// P-FLAT2: a changed light reports its distance to the farthest candela since the swing
+    /// began, not its change since the last frame; unchanged lights are not reported.
+    #[test]
+    fn relit_swing_spans_every_intensity_since_restart() {
+        let fire = |scale: f32| Light::Point {
+            position: Vec3::new(-3.8, 0.95, 2.0),
+            candela: [24_000.0 * scale, 12_000.0 * scale, 4_000.0 * scale],
+            range: Some(10.0),
+            source_radius: 0.25,
+        };
+        let lamp = fire(1.0);
+        let mut swings = widen_swings(None, &local_intensities(&[fire(1.0), lamp]));
+        for scale in [0.7, 0.9] {
+            swings = widen_swings(Some(&swings), &local_intensities(&[fire(scale), lamp]));
+        }
+        // The fire moves 0.9 -> 0.91: one percent since the last frame, but 0.3 of its 1.0 peak
+        // from the 0.7 the oldest history may still hold.
+        let previous = local_intensities(&[fire(0.9), lamp]);
+        let now = [fire(0.91), lamp];
+        swings = widen_swings(Some(&swings), &local_intensities(&now));
+        let changed = relit_lights(&previous, &swings, &now);
+        assert_eq!(changed.len(), 1);
+        let (position, range, swing) = changed[0];
+        assert_eq!((position, range), (Vec3::new(-3.8, 0.95, 2.0), 10.0));
+        assert!((swing - 0.21).abs() < 1e-5, "{swing}");
+        // A fresh swing (after a full restart) holds only this frame.
+        let [lo, hi] = widen_swings(None, &local_intensities(&now))[0];
+        assert_eq!(lo, hi);
     }
 
     #[test]
