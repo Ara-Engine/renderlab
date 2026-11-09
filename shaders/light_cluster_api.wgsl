@@ -132,6 +132,33 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     let f=t-floor(t);
     let near=rl_light_frame.far.y;
     let far=max(select(1000.0,light.position_range.w,light.position_range.w>0.0),2.0*near);
+    // Four gathers read the same 4x4 hard-PCF texels. Compare each against its own
+    // receiver-plane depth and keep the original row-major accumulation order.
+    // Face/tile edges retain the original reprojecting path below.
+    let first=origin-vec2<i32>(1);
+    if all(first>=vec2<i32>(0)) && all(first+vec2<i32>(3)<vec2<i32>(extent)) {
+        let atlas=vec2<f32>(textureDimensions(rl_local_depth));
+        let tile=rl_light_frame.tiles[slot];
+        var left=vec4<f32>(0.0);
+        var right=vec4<f32>(0.0);
+        var gathered=0.0;
+        for(var j=0;j<4;j+=1) {
+            if (j&1)==0 {
+                let centre=(vec2<f32>(first+vec2<i32>(0,j))+tile.xy+vec2<f32>(1.0))/atlas;
+                left=textureGather(rl_local_depth,dfg_sampler,centre,i32(layer%6u));
+                right=textureGather(rl_local_depth,dfg_sampler,centre+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
+            }
+            let row=select(vec4<f32>(left.w,left.z,right.w,right.z),vec4<f32>(left.x,left.y,right.x,right.y),(j&1)!=0);
+            for(var i=0;i<4;i+=1) {
+                let coordinate=origin+vec2<i32>(i-1,j-1);
+                let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+                let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+                let visibility=select(0.0,1.0,reference>=row[i]);
+                gathered+=visibility*rl_pcf_weight(i,f.x)*rl_pcf_weight(j,f.y);
+            }
+        }
+        return gathered/9.0;
+    }
     var lit=0.0;
     for(var j=0;j<4;j+=1) {
         for(var i=0;i<4;i+=1) {

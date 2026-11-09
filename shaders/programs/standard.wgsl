@@ -134,6 +134,10 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);
+        // Conservative clusters include zero-incidence candidates. The unfiltered
+        // BRDF also returns exact zero below its shading hemisphere. Keep that
+        // material-specific decision here, leaving user programs unrestricted.
+        if light.attenuation==0.0 || (!SPECULAR_AA && dot(n,light.direction)<=0.0) { continue; }
         let attenuation=light.attenuation*light_visibility(input,light);
         var response=brdf(n,v,light.direction,base,metal,rough);
         if SPECULAR_AA {response=specular_brdf(input,light.direction,base,metal,rough);}

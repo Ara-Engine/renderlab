@@ -122,6 +122,16 @@ fn shadow_fit_maps_receivers_into_the_map() {
 /// The standard program as it was before TP1's marked edits, rebuilt from the current one.
 fn pre_tp1_standard() -> String {
     let mut s = crate::STANDARD_PROGRAM.to_owned();
+    // Undo P-LTS's later exact-zero work rejection as well: this oracle must keep
+    // testing the frozen pre-TP1 program, rather than changing its expected digest.
+    let start = s
+        .find("        // Conservative clusters include zero-incidence candidates.")
+        .unwrap();
+    let end = start
+        + s[start..]
+            .find("        let attenuation=light.attenuation*light_visibility(input,light);")
+            .unwrap();
+    s.replace_range(start..end, "");
     for (from, to) in [
         ("// alpha: TP1 coverage of transparent materials (docs/m7-tp1.md), exactly 1 for opaque ones.
 struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };",

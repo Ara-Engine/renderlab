@@ -3,6 +3,7 @@
 mod scene;
 use renderlab::{asset, engine::*};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -183,6 +184,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             })?;
     }
+    // Measurement-only A/B: the same binary and asset can use the frozen standard
+    // program. This never changes settings or other shading stages.
+    if let Some(path) = env::var_os("ARA1_STANDARD_PROGRAM") {
+        engine.reload_program(engine.standard_program(), &fs::read_to_string(path)?)?;
+    }
+    let hash_hdr = env::var_os("ARA1_HDR_HASH").is_some();
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut first_image_ms = None;
     let mut rows = Vec::new();
@@ -211,6 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
         }
         let service_ms = start.elapsed().as_secs_f64() * 1e3;
+        let mut hdr_sha256 = None;
         if frame.capture || index == 0 {
             let image = engine.capture()?;
             if first_image_ms.is_none() {
@@ -223,9 +231,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if frame.capture {
                 write_png(&out.join(format!("frame-{index:04}.png")), &image)?;
             }
+            if hash_hdr {
+                let mut hdr = engine
+                    .renderer_mut()
+                    .try_capture_hdr()?
+                    .ok_or("HDR capture admission")?;
+                let deadline = Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
+                    if let Some(bytes) = hdr.try_read()? {
+                        hdr_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("HDR capture readback timeout".into());
+                    }
+                    std::thread::yield_now();
+                }
+            }
         }
         rows.push(json!({"index":index,"phase":frame.phase,"cut":frame.cut,
-            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,"triangles":report.scene.triangles}));
+            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,"triangles":report.scene.triangles,
+            "hdr_sha256":hdr_sha256}));
         for sample in engine.poll()?.gpu {
             gpu.push(gpu_row(sample));
         }
