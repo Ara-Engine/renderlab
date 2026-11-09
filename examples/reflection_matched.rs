@@ -15,12 +15,18 @@
 //! writes exactly those frames, and `--no-post` presents without post processing. The other
 //! options are the game example's at that revision: `--sky uniform`, `--no-volumetric-fog`,
 //! `--no-gi`, `--no-temporal`, `--render-scale`, `--exposure`, `--sun-speed`, `--sun-after`,
-//! `--still`, `--timing-frames N` and `--quarry MANIFEST`.
+//! `--still`, `--timing-frames N` and `--quarry MANIFEST`. `--hour H` replaces the fixed sun
+//! with the game example's sun at that time of day (`Sun::at_hour`, latitude 0.7), and
+//! `--diag KEY=VALUE` sets the game example's estimator bisect switches (P-FLAT,
+//! docs/p-flat.md).
 //!
 //! ```text
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK //!     cargo run --example reflection_matched -- --path nonrt --reference 16384 --write-frames 47 --out REF
 //! cargo run --example reflection_matched -- --path rt --matched --write-frames 16,32,47 --out RUN
 //! ```
+#[path = "../support/estimator_diag.rs"]
+#[allow(dead_code)]
+mod diag;
 #[path = "../support/environment_controls.rs"]
 #[allow(dead_code)]
 mod environment_controls;
@@ -63,6 +69,8 @@ struct Args {
     reference: Option<u32>,
     freeze: Option<u32>,
     write_frames: Option<Vec<u32>>,
+    hour: Option<f32>,
+    diag: Vec<(String, String)>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -94,6 +102,8 @@ impl Args {
             reference: None,
             freeze: None,
             write_frames: None,
+            hour: None,
+            diag: Vec::new(),
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -141,6 +151,12 @@ impl Args {
                 "--no-post" => a.post = false,
                 "--reference" => a.reference = Some(value()?.parse::<u32>()?.max(2)),
                 "--freeze" => a.freeze = Some(value()?.parse()?),
+                "--hour" => a.hour = Some(value()?.parse()?),
+                "--diag" => {
+                    let v = value()?;
+                    let (key, setting) = v.split_once('=').ok_or("--diag KEY=VALUE")?;
+                    a.diag.push((key.into(), setting.into()));
+                }
                 "--write-frames" => {
                     a.write_frames = Some(
                         value()?
@@ -170,6 +186,9 @@ impl Args {
         }
         if !a.sun_speed.is_finite() {
             return Err("--sun-speed must be finite".into());
+        }
+        if a.hour.is_some() && a.sun_speed != 0.0 {
+            return Err("--hour sets a fixed sun; --sun-speed turns the default sun only".into());
         }
         if a.reference.is_some() && (a.quarry.is_some() || a.sun_speed != 0.0) {
             return Err("--reference traces the procedural scene under a fixed sun only".into());
@@ -222,6 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_or(-14.5, |s| s as f32)
     });
     let mut preparation = Vec::new();
+    let diag = diag::Diag::parse(&args.diag)?;
 
     let mut engine = Engine::new(
         &adapter,
@@ -229,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             experimental_ray_query,
             pipeline_cache: args.pipeline_cache.clone(),
-            settings: Settings {
+            settings: diag.settings(Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
                 render_scale: args.scale,
@@ -247,10 +267,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 height_fog: Settings::default().height_fog.filter(|_| !args.matched),
                 exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
-            },
+            }),
             ..Default::default()
         },
     )?;
+    diag.apply(&mut engine, path, args.scale)?;
     let engine_seconds = start.elapsed().as_secs_f64();
     engine.resize(args.size[0], args.size[1])?;
     if args.matched || !args.post {
@@ -444,11 +465,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hero_body = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
     let hero_head = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
 
-    let sun = Sun {
-        travel: Vec3::new(-0.45, -0.75, -0.5),
-        // Under the atmosphere this is the sun outside it (`Sun::default()`, 120 klux), which
-        // its transmittance dims and warms; under `--sky uniform` it arrives as given.
-        ..Default::default()
+    let sun = match args.hour {
+        Some(hour) => Sun::at_hour(hour, 0.7).ok_or("--hour puts the sun below the horizon")?,
+        None => Sun {
+            travel: Vec3::new(-0.45, -0.75, -0.5),
+            // Under the atmosphere this is the sun outside it (`Sun::default()`, 120 klux), which
+            // its transmittance dims and warms; under `--sky uniform` it arrives as given.
+            ..Default::default()
+        },
     };
     engine.set_sun(Some(sun))?;
     // A warm lantern under the arch arrives with many-light shading (LC1): at this
@@ -580,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             frames.push(serde_json::json!({
                 "frame": frame, "trace_seconds": begin.elapsed().as_secs_f64(), "samples": traced.samples,
+                "eye": eye.to_array(), "target": target.to_array(),
                 "split_half_noise_codes_rms": noise, "invalid_pixels": invalid,
             }));
             continue;
@@ -603,7 +628,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sun_angle_degrees": sun_angle.to_degrees(), "cpu_sun_update_ms": sun_update_ms,
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
-            "rgba8_sha256": image_hash,
+            "rgba8_sha256": image_hash, "eye": eye.to_array(), "target": target.to_array(),
         }));
         last_camera = Some(camera);
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
@@ -680,6 +705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
+        "hour": args.hour, "diag": args.diag,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
