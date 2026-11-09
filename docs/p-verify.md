@@ -51,18 +51,32 @@ so process exit cannot leave a persistent lock file. Every acquire/release
 is recorded in local `mutex.jsonl`; exact completed intervals will be listed
 here. Builds also retain Renderlab's atomic build-slot lock and two-job limit.
 
-## P-NRT3 — pending
+## P-NRT3 — DON'T MERGE
 
 | Gate | Result | Numbers |
 |---|---|---|
-| l1 quiet timings and drain/idle traces | First admitted attempt interrupted; retry queued | No completed capture |
-| l2 ARA1 both paths, Q-walk, RF1–RF10, MP1, lib | Awaiting admission | No tests run |
-| Merge recommendation | DON'T MERGE pending evidence | Byte identity and benefit unproved |
+| l1 quiet timings and drain/idle traces | Not scored; superseded by a correctness failure | Three short interrupted starts |
+| l2 ARA1 | **FAIL: final binary cannot create its GI shader** | Baseline RT game-base: 88 frames, 19 HDR witnesses; candidate exit 1, zero images |
+| Q-walk, RF1–RF10, MP1, lib | Remaining plan stopped after decisive shader failure | Not certified |
+| Merge recommendation | **DON'T MERGE** | WGSL duplicate `gi_wg_base` declaration |
 
 Frozen branch `9e4d474`; baseline `0979ffe`. Plan copies preserve the staged
 binary paths and redirect output into this unit's evidence root. The wrapper
 preserves per-step environment switches and replaces trace image-name killing
 with exact executable-path/PID tree termination.
+
+Final binary SHA-256
+`3f48e24f303bef51fc8b32ed02985e7b55e5a69fc6b079347ffbb961d011c98c`
+fails `Device::create_shader_module`, label `indirect cache kernels`:
+`gi_wg_base` is first declared as `array<u32,GI_SETUP_CELLS>` at composed WGSL
+line 1992 and redeclared as scalar `u32` at line 2684. Both game-base and
+ara-pbr candidate captures exited 1. This is a renderer shader failure, not a
+timing or memory failure. The remaining owned plan process tree was stopped;
+the lease released at 18:53:32 UTC. No renderer fix was made by this unit.
+
+Shared mutex acquired 18:50:55.159 UTC; the exact release is in `mutex.jsonl`.
+Lease elapsed 156.75 seconds; resource audit is
+`lease/runs/nrt3-l2-mutex1.json`. No speed comparison is certified.
 
 ## P-RETIME open checks — pending
 

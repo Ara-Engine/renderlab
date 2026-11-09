@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess as sp
 import sys
+import threading
 import time
 
 REPO = Path(__file__).resolve().parents[1]
@@ -135,12 +136,26 @@ def build(unit):
             return 3
         with (OUT / f'{unit}-build.log').open('w') as log:
             child = sp.Popen(command, cwd=tree, env=os.environ | dict(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS='2'), stdout=log, stderr=sp.STDOUT, creationflags=sp.CREATE_NO_WINDOW)
+            stopped = threading.Event()
+            resources = []
+            def monitor_memory():
+                while not stopped.wait(1):
+                    value = runner.resource_sample()
+                    resources.append(value)
+                    if value['available_mbytes'] < 2048 and child.poll() is None:
+                        sp.run(['taskkill', '/PID', str(child.pid), '/T', '/F'], creationflags=sp.CREATE_NO_WINDOW)
+                        return
+            monitor = threading.Thread(target=monitor_memory)
+            monitor.start()
             try:
                 return child.wait(timeout=810)
             except sp.TimeoutExpired:
                 sp.run(['taskkill', '/PID', str(child.pid), '/T', '/F'], creationflags=sp.CREATE_NO_WINDOW)
                 child.wait()
                 return 1
+            finally:
+                stopped.set(); monitor.join()
+                (OUT / f'{unit}-build-resources.json').write_text(json.dumps(resources))
     finally:
         (OUT / f'{unit}-build-audit.json').write_text(json.dumps(dict(command=command, seconds=time.monotonic()-start, admission=sample), indent=2))
         if json.loads((slot / 'owner.json').read_text())['token'] == token:

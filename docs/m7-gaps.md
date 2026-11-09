@@ -640,3 +640,9 @@ admission was deferred by foreign Cargo builds despite more than 8 GiB free.
 No gate is closed and no new performance or quality claim follows from a
 queued run. Frozen-binary identities and the resource audit are under
 `D:/Coding/renderlab-work/p-verify`.
+
+P-NRT3 is now a measured **DON'T MERGE**: its staged final binary fails GI
+shader creation because composed WGSL declares `gi_wg_base` twice (array at
+line 1992, scalar at 2684). Baseline RT game-base completed 88 frames; the
+candidate produced no image. Scheduling/drain speed remains unproved until
+the owning implementation unit fixes this and the complete gates pass.
