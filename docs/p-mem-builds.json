@@ -1,0 +1,31 @@
+{
+  "source_base": "7f4f75d5999c58fd90541900a935bcd88d5ef470",
+  "measurement_checkpoint": "fbf2cbf19e5da5e019c6040f83da0620d439aae1",
+  "binaries": {
+    "baseline-tests.exe": "de7f4554991b13c4ea24419c1d2dbb5890b6fa441e3ee51085d486618c8e1e90",
+    "baseline.exe": "e6d62bdffe4c3cc0ca7b7347a5dc8b95671bec72c9096b82328c6b821a09218e",
+    "baseline1080-tests.exe": "251e5ff8e393341e846ec7096c8ffa383312fcf2af9d1df29e87446c40985f09",
+    "baseline1080.exe": "e6d62bdffe4c3cc0ca7b7347a5dc8b95671bec72c9096b82328c6b821a09218e",
+    "candidate-tests.exe": "996aed8b670c7d96b57938bad28bab14de63ddd55f0bb2c47a78ec0696be9b0e",
+    "candidate.exe": "833d92bd3ae5da91855a22c912fa3d547f0dacf92fe51cbeaedaa39d8977b8fc"
+  },
+  "lib_candidate": {
+    "passed": 199,
+    "failed": 0,
+    "ignored": 163,
+    "seconds": 3.1
+  },
+  "final_source_sha256": {
+    "src/gi_cache.rs": "9ecff31a5dc052513836c9324f0a9684961441798536557084b6a100940e90a4",
+    "src/gi_bvh.rs": "da75a4e833ea0e750fad2464b3af98f479cae423e793106704e38ce934546827",
+    "src/post_gpu.rs": "29c69631c83d1ccb4f0351da60e4e052dbcf8c1fadb3b1c0f26b5a4dbb3b74b7",
+    "src/light_cluster_gpu.rs": "eb205cf6604c093181bb77b3641352f70dc5417e03f05b18bdd40b3367eea825",
+    "src/light_cluster_tests.rs": "13d35aaf373b43ff5c6cb5714bf1c5cf6bc4a0bb3cdd5351a64966bc638491ab",
+    "src/post_tests.rs": "caec416de05a70710c8343ad5f39c6cc47ce86e81f9a5965a07c440209a2da8e",
+    "shaders/gi_cells.wgsl": "010818324cb2e344077f166c8c90461c34e258ed6e93f20dc0df3c99b830538c",
+    "shaders/gi_cache.wgsl": "5f9abe43b59692c857156bddafa924f1645b0da91f69d6df3758f6d4d5b8dcc5",
+    "shaders/gi_rays_software.wgsl": "66d2ba522e781c6d6baa722cc9ac22777c60969cf900965b4cf389fe665de5d0",
+    "examples/ara1_capture.rs": "295f01a964f4c3c2409467f186a0f48f0ad78f8129bd2119c31394ebe1e5a274",
+    "tools/ara1/allocation.rs": "84f74c5ba0e25f6714b0e9312a5f8e0c29a83eeb6e5edf36c81a61df8e061387"
+  }
+}

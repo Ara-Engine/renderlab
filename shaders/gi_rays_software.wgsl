@@ -1,7 +1,8 @@
 // ---- world radiance cache ray source: software rays (non-RT path) ----
-// Per-placement object-space BVH4s in the R0c cluster-BVH layout (docs/m7-r0c.md):
-// 20-word nodes (origin, step, four tagged children, axis-major byte planes, errors),
-// 8-word leaves, vec4 positions and leaf-local indices, packed by src/gi_bvh.rs into
+// Per-placement object-space BVH4s built in the R0c format (docs/m7-r0c.md).
+// P-MEM's runtime upload keeps 16-word nodes (origin, step, four tagged children,
+// axis-major byte planes), 2-word leaves (index offset/count), three-word positions
+// and unchanged leaf-local indices, packed by src/gi_bvh.rs into
 // one buffer behind a flat instance list (a top level rebuilt on the CPU when
 // transforms change; a cooked near field's placements may instead be one merged world BVH,
 // an identity instance, src/gi_cache.rs World). Each ray is its own work item, traversed
@@ -82,8 +83,9 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
             sp-=1u;
             let child=stack[sp];
             if (child&GI_BVH_LEAF)!=0u {
-                let l=leaves+(child&~GI_BVH_LEAF)*8u;
-                let first=gi_geometry[l+4u];let count=gi_geometry[l+5u];
+                // P-MEM runtime layout: only leaf index offset/count are uploaded.
+                let l=leaves+(child&~GI_BVH_LEAF)*2u;
+                let first=gi_geometry[l];let count=gi_geometry[l+1u];
                 // Two triangles a step: both triangles' indices, then both triangles'
                 // positions, load before either is tested, so a leaf costs half the dependent
                 // round trips. They are tested in leaf order, the second against the first's
@@ -95,12 +97,12 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                     let y=select(x,x+3u,two);
                     let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
                     let ja=gi_geometry[y];let jb=gi_geometry[y+1u];let jc=gi_geometry[y+2u];
-                    let a=gi_gv(positions+ia*4u);
-                    let b=gi_gv(positions+ib*4u);
-                    let c=gi_gv(positions+ic*4u);
-                    let a2=gi_gv(positions+ja*4u);
-                    let b2=gi_gv(positions+jb*4u);
-                    let c2=gi_gv(positions+jc*4u);
+                    let a=gi_gv(positions+ia*3u);
+                    let b=gi_gv(positions+ib*3u);
+                    let c=gi_gv(positions+ic*3u);
+                    let a2=gi_gv(positions+ja*3u);
+                    let b2=gi_gv(positions+jb*3u);
+                    let c2=gi_gv(positions+jc*3u);
                     let h=gi_triangle(o,d,a,b,c,tmin,best.t);
                     if h.x>=0.0 {
                         // The source-winding normal through the inverse transpose. r0-r2 are
@@ -120,7 +122,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                 }
                 continue;
             }
-            let n=nodes+child*20u;
+            let n=nodes+child*16u;
             let origin_q=gi_gv(n);let step=gi_gv(n+3u);
             // The four children's entry distances (misses above best.t), then pushed far to
             // near so the nearest is visited first: closest-hit rays shrink best.t early and

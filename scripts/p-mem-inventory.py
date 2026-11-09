@@ -80,14 +80,22 @@ def main():
         for side, root in [("before", before), ("after", after)]:
             upload = read(root, case, "memory-upload.json")
             summary[case][side + "_upload"] = totals(upload) if upload else None
-        labels = [{r["name"]: r for r in report["by_label"]} if report else {} for report in [a, b]]
-        for name in sorted(labels[0].keys() | labels[1].keys()):
-            values = [label.get(name, {"bytes": 0, "count": 0}) for label in labels]
-            rows.append(dict(case=case, name=name,
-                kind="acceleration structure" if name.startswith("renderlab hardware") else "texture" if name in TEXTURES else "buffer",
-                category=category(name), before_bytes=values[0]["bytes"], after_bytes=values[1]["bytes"] if b else "",
-                saved_bytes=values[0]["bytes"]-values[1]["bytes"] if b else "",
-                before_count=values[0]["count"], after_count=values[1]["count"] if b else ""))
+            engine = read(root, case, "engine.json")
+            if summary[case][side] and engine:
+                snapshots = [frame["dxgi"] for frame in engine["frames"] if frame.get("dxgi")]
+                snapshots += [r["dxgi"] for r in [upload, a if side == "before" else b] if r]
+                summary[case][side]["dxgi_captured_peak_bytes"] = max(
+                    adapter["local_used_bytes"] for snapshot in snapshots for adapter in snapshot)
+        for phase, reports in [("warm", [a, b]), ("upload", [read(root, case, "memory-upload.json")
+                                                          for root in [before, after]])]:
+            labels = [{r["name"]: r for r in report["by_label"]} if report else {} for report in reports]
+            for name in sorted(labels[0].keys() | labels[1].keys()):
+                values = [label.get(name, {"bytes": 0, "count": 0}) for label in labels]
+                rows.append(dict(case=case, phase=phase, name=name,
+                    kind="acceleration structure" if name.startswith("renderlab hardware") else "texture" if name in TEXTURES else "buffer",
+                    category=category(name), before_bytes=values[0]["bytes"], after_bytes=values[1]["bytes"] if reports[1] else "",
+                    saved_bytes=values[0]["bytes"]-values[1]["bytes"] if reports[1] else "",
+                    before_count=values[0]["count"], after_count=values[1]["count"] if reports[1] else ""))
     with (out / "resources.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
     (out / "memory-summary.json").write_text(json.dumps(summary, indent=2))

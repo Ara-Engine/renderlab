@@ -1,11 +1,13 @@
 //! Object-space software-ray geometry for the world radiance cache on the non-RT path
-//! (M7 G1, G1c). Meshes trace a BVH4 in R0c's cluster-BVH record layout
+//! (M7 G1, G1c). Meshes trace a BVH4 built with R0c's cluster-BVH format
 //! (`renderlab_asset::cluster_bvh`, docs/m7-r0c.md): a full-detail build made at load
 //! (`build`), or a cooked near field's far-field cut (`renderlab_asset::near_field`,
 //! docs/m7-g1c.md), whose placements also carry per-vertex near-field masks. `layout` and
 //! `mesh_words` pack the meshes' records and those masks into one storage buffer behind a
 //! flat instance list (a top level rebuilt on the CPU when transforms change,
 //! `instance_words`), which shaders/gi_rays_software.wgsl traverses.
+//! P-MEM: the runtime upload omits fields that traversal never reads. Cooked BVHs,
+//! child/triangle order, position bits and near-field mask indices stay unchanged.
 use crate::asset::cluster_bvh::Bvh;
 use crate::{Error, Mat4};
 
@@ -15,6 +17,9 @@ pub(crate) const HEADER_WORDS: usize = 16;
 /// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
 /// instance's near-field mask base (0: none, the instance is traced over whole rays).
 pub(crate) const INSTANCE_WORDS: usize = 32;
+const NODE_WORDS: usize = 16;
+const LEAF_WORDS: usize = 2;
+const POSITION_WORDS: usize = 3;
 
 /// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf), by binned
 /// SAH splits (GC1: software rays visit fewer nodes and triangles than over median splits; the
@@ -58,9 +63,9 @@ impl Blas {
         })
     }
     fn words(&self) -> usize {
-        self.bvh.nodes.len() * 20
-            + self.bvh.leaves.len() * 8
-            + self.bvh.positions.len() * 4
+        self.bvh.nodes.len() * NODE_WORDS
+            + self.bvh.leaves.len() * LEAF_WORDS
+            + self.bvh.positions.len() * POSITION_WORDS
             + self.bvh.indices.len()
     }
     /// The base word of the near-field masks cooked under exactly `model`, given this
@@ -94,9 +99,9 @@ pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, Vec<
         .iter()
         .map(|b| {
             let nodes = at;
-            let leaves = nodes + b.bvh.nodes.len() * 20;
-            let positions = leaves + b.bvh.leaves.len() * 8;
-            let indices = positions + b.bvh.positions.len() * 4;
+            let leaves = nodes + b.bvh.nodes.len() * NODE_WORDS;
+            let positions = leaves + b.bvh.leaves.len() * LEAF_WORDS;
+            let indices = positions + b.bvh.positions.len() * POSITION_WORDS;
             at += b.words();
             [nodes, leaves, positions, indices].map(|v| v as u32)
         })
@@ -134,30 +139,23 @@ pub(crate) fn mesh_words(
                 .into_iter()
                 .chain(n.children)
                 .chain(n.lower.map(lane))
-                .chain(n.upper.map(lane))
-                .chain(n.errors.map(f32::to_bits));
+                .chain(n.upper.map(lane));
             for w in record {
                 words[at] = w;
                 at += 1;
             }
         }
         for l in &b.bvh.leaves {
-            let record = [
-                l.mesh,
-                l.cluster,
-                l.page,
-                l.source_index_offset,
-                l.indices.offset,
-                l.indices.count,
-                l.error.to_bits(),
-                l.material,
-            ];
-            words[at..at + 8].copy_from_slice(&record);
-            at += 8;
+            words[at..at + LEAF_WORDS].copy_from_slice(&[l.indices.offset, l.indices.count]);
+            at += LEAF_WORDS;
         }
         for p in &b.bvh.positions {
-            words[at..at + 4].copy_from_slice(&p.map(f32::to_bits));
-            at += 4;
+            words[at..at + POSITION_WORDS].copy_from_slice(&[
+                p[0].to_bits(),
+                p[1].to_bits(),
+                p[2].to_bits(),
+            ]);
+            at += POSITION_WORDS;
         }
         words[at..at + b.bvh.indices.len()].copy_from_slice(&b.bvh.indices);
         for (n, &base) in b.near.iter().zip(bases) {
@@ -296,6 +294,40 @@ mod tests {
         let words = mesh_words(&[&blas], &offsets, &near, total);
         assert_eq!(words.len(), total);
         assert_eq!(offsets[0][0] as usize, HEADER_WORDS + 2 * INSTANCE_WORDS);
+        // Every field consumed by software traversal survives bit for bit; removed
+        // node errors, leaf metadata and position.w are absent from the runtime ABI.
+        let [nodes, leaves, positions, indices] = offsets[0].map(|v| v as usize);
+        for (i, node) in blas.bvh.nodes.iter().enumerate() {
+            let expected: Vec<_> = node
+                .origin
+                .map(f32::to_bits)
+                .into_iter()
+                .chain(node.step.map(f32::to_bits))
+                .chain(node.children)
+                .chain(node.lower.map(u32::from_le_bytes))
+                .chain(node.upper.map(u32::from_le_bytes))
+                .collect();
+            assert_eq!(
+                &words[nodes + i * NODE_WORDS..nodes + (i + 1) * NODE_WORDS],
+                expected
+            );
+        }
+        for (i, leaf) in blas.bvh.leaves.iter().enumerate() {
+            assert_eq!(
+                &words[leaves + i * LEAF_WORDS..leaves + (i + 1) * LEAF_WORDS],
+                [leaf.indices.offset, leaf.indices.count]
+            );
+        }
+        for (i, p) in blas.bvh.positions.iter().enumerate() {
+            assert_eq!(
+                &words[positions + i * POSITION_WORDS..positions + (i + 1) * POSITION_WORDS],
+                p[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            &words[indices..indices + blas.bvh.indices.len()],
+            &blas.bvh.indices
+        );
         let base = near[0][0] as usize;
         assert_eq!(&words[base..base + masks.len()], &masks[..]);
         assert_eq!(base + masks.len(), total);

@@ -1,0 +1,926 @@
+{
+  "ara-pbr-oriented-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 21818832,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 186675904,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 1784832,
+        "Sun-shadow buffers": 303346128,
+        "Sun-shadow textures": 17235968,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Software GI geometry buffer": 776784,
+        "Post textures": 84993536,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 1264260784,
+      "reserved_bytes": 1396965824,
+      "slack_bytes": 132705040,
+      "dxgi_local_bytes": 1442627584,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 1442627584
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 21818832,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 186675904,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 1784832,
+        "Sun-shadow buffers": 303346128,
+        "Sun-shadow textures": 17235968,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Software GI geometry buffer": 599600,
+        "Post textures": 18016,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 1145554160,
+      "reserved_bytes": 1296302528,
+      "slack_bytes": 150748368,
+      "dxgi_local_bytes": 1341964288,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 1341964288
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 92592,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 1770752,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 485739040,
+      "reserved_bytes": 524550592,
+      "slack_bytes": 38811552,
+      "dxgi_local_bytes": 525975552,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 92592,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 1770752,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 452184608,
+      "reserved_bytes": 490996160,
+      "slack_bytes": 38811552,
+      "dxgi_local_bytes": 492421120,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "ara-pbr-oriented-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83532544,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 172232544,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Geometry buffers": 1385760,
+        "Post textures": 84993104,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 718352
+      },
+      "allocated_bytes": 990491104,
+      "reserved_bytes": 1136071120,
+      "slack_bytes": 145580016,
+      "dxgi_local_bytes": 1257291776,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1257291776
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83532544,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 172232544,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Geometry buffers": 1385760,
+        "Post textures": 17552,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 718352
+      },
+      "allocated_bytes": 871961632,
+      "reserved_bytes": 1035407824,
+      "slack_bytes": 163446192,
+      "dxgi_local_bytes": 1156628480,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1156628480
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584944,
+        "Upload/build staging": 52064,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 1384032,
+        "BLAS/TLAS": 906784
+      },
+      "allocated_bytes": 486218608,
+      "reserved_bytes": 524550592,
+      "slack_bytes": 38331984,
+      "dxgi_local_bytes": 593281024,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584944,
+        "Upload/build staging": 52064,
+        "Material/environment/LUT textures": 67760576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 1384032,
+        "BLAS/TLAS": 906784
+      },
+      "allocated_bytes": 452664176,
+      "reserved_bytes": 490996160,
+      "slack_bytes": 38331984,
+      "dxgi_local_bytes": 559726592,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  },
+  "game-base-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 20227616,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920336,
+        "Software GI geometry buffer": 312608,
+        "Post textures": 84993568,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 1338723392,
+      "reserved_bytes": 1459880384,
+      "slack_bytes": 121156992,
+      "dxgi_local_bytes": 1505542144,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 1505542144
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 20227616,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365904,
+        "Software GI geometry buffer": 241488,
+        "Post textures": 18480,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 1220123264,
+      "reserved_bytes": 1359217088,
+      "slack_bytes": 139093824,
+      "dxgi_local_bytes": 1404878848,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 1404878848
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 417527280,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 454672384,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 383972848,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 421117952,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "game-base-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83531824,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172231936,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920336,
+        "Geometry buffers": 483296,
+        "Post textures": 84993856,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 922016096,
+      "reserved_bytes": 1064767952,
+      "slack_bytes": 142751856,
+      "dxgi_local_bytes": 1185988608,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1185988608
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83532336,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172231936,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365904,
+        "Geometry buffers": 483296,
+        "Post textures": 18304,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 803487136,
+      "reserved_bytes": 964104656,
+      "slack_bytes": 160617520,
+      "dxgi_local_bytes": 1085325312,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1085325312
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 481280,
+        "BLAS/TLAS": 571392
+      },
+      "allocated_bytes": 417922272,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35325152,
+      "dxgi_local_bytes": 521977856,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 481280,
+        "BLAS/TLAS": 571392
+      },
+      "allocated_bytes": 384367840,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35325152,
+      "dxgi_local_bytes": 488423424,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  },
+  "game-lights-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 20232736,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 402849792,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 419697552,
+        "Software GI geometry buffer": 312608,
+        "Post textures": 84995040,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 1758356480,
+      "reserved_bytes": 1870659840,
+      "slack_bytes": 112303360,
+      "dxgi_local_bytes": 1916256256,
+      "dxgi_nonlocal_bytes": 29249536,
+      "dxgi_captured_peak_bytes": 2151202816
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 20232736,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 402849792,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 386143120,
+        "Software GI geometry buffer": 241488,
+        "Post textures": 17472,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 1639753872,
+      "reserved_bytes": 1769996544,
+      "slack_bytes": 130242672,
+      "dxgi_local_bytes": 1815592960,
+      "dxgi_nonlocal_bytes": 29249536,
+      "dxgi_captured_peak_bytes": 2016985088
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 417527280,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 454672384,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 383972848,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 421117952,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "game-lights-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83536944,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172231936,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 419697552,
+        "Geometry buffers": 483296,
+        "Post textures": 84994560,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 938799136,
+      "reserved_bytes": 1072894224,
+      "slack_bytes": 134095088,
+      "dxgi_local_bytes": 1194049536,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1428996096
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83537456,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172232192,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 386143120,
+        "Geometry buffers": 483424,
+        "Post textures": 18320,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 820269872,
+      "reserved_bytes": 972230928,
+      "slack_bytes": 151961056,
+      "dxgi_local_bytes": 1093386240,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1294778368
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 481280,
+        "BLAS/TLAS": 571392
+      },
+      "allocated_bytes": 417922272,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35325152,
+      "dxgi_local_bytes": 521977856,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 481408,
+        "BLAS/TLAS": 497664
+      },
+      "allocated_bytes": 384294240,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35398752,
+      "dxgi_local_bytes": 488423424,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  },
+  "game-spots-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 20232736,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 402849792,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 419697552,
+        "Software GI geometry buffer": 312608,
+        "Post textures": 84995040,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 1758356480,
+      "reserved_bytes": 1870659840,
+      "slack_bytes": 112303360,
+      "dxgi_local_bytes": 1916256256,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 2151202816
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 20232736,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 186675696,
+        "Local shadow atlas": 67305472,
+        "Geometry buffers": 641152,
+        "Sun-shadow buffers": 448177232,
+        "Sun-shadow textures": 17236752,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 386143120,
+        "Software GI geometry buffer": 241488,
+        "Post textures": 17472,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 1304209552,
+      "reserved_bytes": 1434452224,
+      "slack_bytes": 130242672,
+      "dxgi_local_bytes": 1480048640,
+      "dxgi_nonlocal_bytes": 25055232,
+      "dxgi_captured_peak_bytes": 1681440768
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 417527280,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 454672384,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583632,
+        "Upload/build staging": 189728,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 633440,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 383972848,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35720144,
+      "dxgi_local_bytes": 421117952,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "game-spots-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83536944,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172232192,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 419697552,
+        "Geometry buffers": 483296,
+        "Post textures": 84994560,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 938799392,
+      "reserved_bytes": 1072894224,
+      "slack_bytes": 134094832,
+      "dxgi_local_bytes": 1194049536,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1428996096
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83536944,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 172231936,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 386143120,
+        "Geometry buffers": 483296,
+        "Post textures": 18320,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 316416
+      },
+      "allocated_bytes": 820268976,
+      "reserved_bytes": 972230928,
+      "slack_bytes": 151961952,
+      "dxgi_local_bytes": 1093386240,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 1294778368
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 481280,
+        "BLAS/TLAS": 571392
+      },
+      "allocated_bytes": 417922272,
+      "reserved_bytes": 453247424,
+      "slack_bytes": 35325152,
+      "dxgi_local_bytes": 521977856,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 583680,
+        "Upload/build staging": 165440,
+        "Material/environment/LUT textures": 590272,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 481280,
+        "BLAS/TLAS": 571392
+      },
+      "allocated_bytes": 384367840,
+      "reserved_bytes": 419692992,
+      "slack_bytes": 35325152,
+      "dxgi_local_bytes": 488423424,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  },
+  "quarry-base-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 21371984,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 186675296,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 875904656,
+        "Sun-shadow buffers": 830488304,
+        "Sun-shadow textures": 17237312,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Software GI geometry buffer": 426847968,
+        "Post textures": 84993104,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 4097739424,
+      "reserved_bytes": 4290085024,
+      "slack_bytes": 192345600,
+      "dxgi_local_bytes": 4336304128,
+      "dxgi_nonlocal_bytes": 29249536,
+      "dxgi_captured_peak_bytes": 4336304128
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 21371984,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 186675296,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 875904656,
+        "Sun-shadow buffers": 830488304,
+        "Sun-shadow textures": 17237312,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Software GI geometry buffer": 327085936,
+        "Post textures": 17552,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 3879447920,
+      "reserved_bytes": 4089659696,
+      "slack_bytes": 210211776,
+      "dxgi_local_bytes": 4135829504,
+      "dxgi_nonlocal_bytes": 27152384,
+      "dxgi_captured_peak_bytes": 4135829504
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 83020304,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 869195600,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 2442683600,
+      "reserved_bytes": 2620857296,
+      "slack_bytes": 178173696,
+      "dxgi_local_bytes": 2622996480,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 83020304,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 869195600,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 2409129168,
+      "reserved_bytes": 2587302864,
+      "slack_bytes": 178173696,
+      "dxgi_local_bytes": 2589442048,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "quarry-base-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83532928,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 172233344,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Geometry buffers": 631267008,
+        "Post textures": 84993104,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 351910720
+      },
+      "allocated_bytes": 2978157904,
+      "reserved_bytes": 3484901840,
+      "slack_bytes": 506743936,
+      "dxgi_local_bytes": 3606626304,
+      "dxgi_nonlocal_bytes": 35540992,
+      "dxgi_captured_peak_bytes": 3606626304
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83532928,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 172233264,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Geometry buffers": 631267136,
+        "Post textures": 17552,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 351910720
+      },
+      "allocated_bytes": 2859628480,
+      "reserved_bytes": 3317129680,
+      "slack_bytes": 457501200,
+      "dxgi_local_bytes": 3438854144,
+      "dxgi_nonlocal_bytes": 33443840,
+      "dxgi_captured_peak_bytes": 3438854144
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584960,
+        "Upload/build staging": 69515056,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 631265280,
+        "BLAS/TLAS": 575527680
+      },
+      "allocated_bytes": 2766775760,
+      "reserved_bytes": 3201862128,
+      "slack_bytes": 435086368,
+      "dxgi_local_bytes": 3271278592,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584976,
+        "Upload/build staging": 139263504,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 631265408,
+        "BLAS/TLAS": 648758016
+      },
+      "allocated_bytes": 2876200256,
+      "reserved_bytes": 3223039568,
+      "slack_bytes": 346839312,
+      "dxgi_local_bytes": 3292512256,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  },
+  "quarry-daylight-nonrt": {
+    "before": {
+      "groups": {
+        "Other buffers": 21371984,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 186675296,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 875904656,
+        "Sun-shadow buffers": 830488304,
+        "Sun-shadow textures": 17237312,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Software GI geometry buffer": 426847968,
+        "Post textures": 84993104,
+        "Post uniforms": 448
+      },
+      "allocated_bytes": 4097739424,
+      "reserved_bytes": 4290085024,
+      "slack_bytes": 192345600,
+      "dxgi_local_bytes": 4380344320,
+      "dxgi_nonlocal_bytes": 29249536,
+      "dxgi_captured_peak_bytes": 4380344320
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 21371984,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 186675296,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 875904656,
+        "Sun-shadow buffers": 830488304,
+        "Sun-shadow textures": 17237312,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Software GI geometry buffer": 327085936,
+        "Post textures": 17552,
+        "Post uniforms": 960
+      },
+      "allocated_bytes": 3879447920,
+      "reserved_bytes": 4089659696,
+      "slack_bytes": 210211776,
+      "dxgi_local_bytes": 4135829504,
+      "dxgi_nonlocal_bytes": 29249536,
+      "dxgi_captured_peak_bytes": 4135829504
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 83020304,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 869195600,
+        "GI cache buffers": 402918432
+      },
+      "allocated_bytes": 2442683600,
+      "reserved_bytes": 2620857296,
+      "slack_bytes": 178173696,
+      "dxgi_local_bytes": 2622996480,
+      "dxgi_nonlocal_bytes": 17715200
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584912,
+        "Upload/build staging": 83020304,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "Geometry buffers": 869195600,
+        "GI cache buffers": 369364000
+      },
+      "allocated_bytes": 2409129168,
+      "reserved_bytes": 2587302864,
+      "slack_bytes": 178173696,
+      "dxgi_local_bytes": 2589442048,
+      "dxgi_nonlocal_bytes": 17715200
+    }
+  },
+  "quarry-daylight-rt": {
+    "before": {
+      "groups": {
+        "Other buffers": 83532928,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 172232832,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 402920064,
+        "Geometry buffers": 631267136,
+        "Post textures": 84993104,
+        "Post uniforms": 448,
+        "BLAS/TLAS": 351910720
+      },
+      "allocated_bytes": 2978157520,
+      "reserved_bytes": 3417792976,
+      "slack_bytes": 439635456,
+      "dxgi_local_bytes": 3539517440,
+      "dxgi_nonlocal_bytes": 35540992,
+      "dxgi_captured_peak_bytes": 3539517440
+    },
+    "after": {
+      "groups": {
+        "Other buffers": 83532928,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 172232368,
+        "Local shadow atlas": 512,
+        "TR1 history textures": 176947200,
+        "GI cache buffers": 369365632,
+        "Geometry buffers": 631267136,
+        "Post textures": 17552,
+        "Post uniforms": 960,
+        "BLAS/TLAS": 351910864
+      },
+      "allocated_bytes": 2859627728,
+      "reserved_bytes": 3384238544,
+      "slack_bytes": 524610816,
+      "dxgi_local_bytes": 3505963008,
+      "dxgi_nonlocal_bytes": 35540992,
+      "dxgi_captured_peak_bytes": 3505963008
+    },
+    "before_upload": {
+      "groups": {
+        "Other buffers": 584944,
+        "Upload/build staging": 69515056,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 402918432,
+        "Geometry buffers": 631265408,
+        "BLAS/TLAS": 435418368
+      },
+      "allocated_bytes": 2626666560,
+      "reserved_bytes": 2994643952,
+      "slack_bytes": 367977392,
+      "dxgi_local_bytes": 3064053760,
+      "dxgi_nonlocal_bytes": 31346688
+    },
+    "after_upload": {
+      "groups": {
+        "Other buffers": 584960,
+        "Upload/build staging": 69515056,
+        "Material/environment/LUT textures": 1074352576,
+        "Other frame targets/textures": 12611264,
+        "Local shadow atlas": 512,
+        "GI cache buffers": 369364000,
+        "Geometry buffers": 631265408,
+        "BLAS/TLAS": 603542016
+      },
+      "allocated_bytes": 2761235792,
+      "reserved_bytes": 3101198832,
+      "slack_bytes": 339963040,
+      "dxgi_local_bytes": 3170615296,
+      "dxgi_nonlocal_bytes": 31346688
+    }
+  }
+}

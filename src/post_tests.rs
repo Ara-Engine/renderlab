@@ -216,7 +216,9 @@ fn sweep(
         if name == "off" {
             off = Some(hdr.clone());
         }
-        if name == "neutral" {
+        // P-MEM records the complete cross-build sweep even if this existing gate
+        // fails on the untouched baseline. Ordinary invocations remain strict.
+        if name == "neutral" && std::env::var_os("P_MEM_POST_RECORD").is_none() {
             assert!(
                 off.as_ref().unwrap() == &hdr,
                 "post must not feed back into HDR/TR1"
@@ -232,7 +234,11 @@ fn sweep(
         }
         let moving = read_texture(r, &colour);
         png(&out.join(format!("{name}-moving.png")), size, &moving);
-        rows.insert(name.into(),serde_json::json!({"frames":costs,"hdr_sha256":hex(&hdr),"display_sha256":hex(&moving)}));
+        rows.insert(
+            name.into(),
+            serde_json::json!({"frames":costs,"hdr_sha256":hex(&hdr),"display_sha256":hex(&moving),
+            "hdr_matches_disabled":off.as_ref().is_some_and(|bytes| *bytes == hdr)}),
+        );
     }
     fs::write(
         out.join("timing.json"),

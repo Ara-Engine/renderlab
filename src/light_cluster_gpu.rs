@@ -6,7 +6,8 @@ use crate::light_cluster::{self as lc, LightClusterStats, LocalShadows};
 use crate::pipeline_compilation::PipelineDevice;
 use sha2::{Digest, Sha256};
 
-/// Six Depth32Float atlas layers, with the same tile rectangle on each cube face.
+/// Depth32Float atlas layers, with the same tile rectangle on each cube face.
+/// P-MEM: all-spot frames need only face 0; point-light slots restore all six.
 pub(super) struct Atlas {
     _texture: Owned<wgpu::Texture>,
     pub view: Owned<wgpu::TextureView>,
@@ -17,6 +18,7 @@ pub(super) struct Atlas {
     stride: u64,
     resolution: u32,
     slots: u32,
+    cube_layers: bool,
     clear: Option<Owned<wgpu::RenderPipeline>>,
     _allocation: Allocation,
 }
@@ -28,11 +30,15 @@ impl Atlas {
         bindings: Option<&wgpu::BindGroupLayout>,
         resolution: u32,
         slots: u32,
+        cube_layers: bool,
     ) -> Self {
         let (size, layers) = if slots == 0 {
             (1, 1)
         } else {
-            (lc::atlas_extent(resolution), 6)
+            (
+                lc::atlas_extent(resolution),
+                if cube_layers { 6 } else { 1 },
+            )
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
@@ -151,6 +157,7 @@ impl Atlas {
             stride,
             resolution,
             slots,
+            cube_layers,
             clear,
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
         }
@@ -299,7 +306,7 @@ impl LightClusters {
             layout,
             pipeline,
             bind: None,
-            atlas: Atlas::new(device, ledger, None, 1, 0),
+            atlas: Atlas::new(device, ledger, None, 1, 0, false),
             retired: vec![],
             generation: 0,
             keys: vec![],
@@ -490,13 +497,23 @@ impl Renderer {
         let mut redraw = vec![];
         let maps = maps && slots.iter().any(Option::is_some);
         if maps {
-            if state.atlas.slots != count || state.atlas.resolution != state.settings.resolution {
+            // P-MEM allocation seam only: keep slots, tile coordinates, resolutions,
+            // matrices and cache keys. A transitioning point slot still needs its cube.
+            let cube_layers = slots
+                .iter()
+                .flatten()
+                .any(|&i| lc::cube(&lights[i as usize]));
+            if state.atlas.slots != count
+                || state.atlas.resolution != state.settings.resolution
+                || state.atlas.cube_layers != cube_layers
+            {
                 let next = Atlas::new(
                     &self.device,
                     &self.ledger,
                     Some(&self.shadows.bindings),
                     state.settings.resolution,
                     count,
+                    cube_layers,
                 );
                 let old = std::mem::replace(&mut state.atlas, next);
                 state.retired.push((self.submissions, old));

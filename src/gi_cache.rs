@@ -17,12 +17,17 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
 const HEADER_WORDS: u64 = 64;
-/// Hot (shading) and cold (kernel) words per slot; shaders/gi_cells.wgsl.
+/// Keep the original admission policy: packing storage must not change the chosen
+/// slot count on devices with smaller binding limits. The cold stride is sized below.
 const SLOT_WORDS: u64 = 24 + 32;
+// P-MEM: the four direction bitsets contain exactly the selected direction count.
+pub(super) fn light_cold_offset(directions: u32) -> u32 {
+    12 + 4 * (directions / 32) + 3
+}
 // LC2 light-list plumbing only: cold records end with a visibility bit per light. Keep
 // vec4 alignment for the shading view; grow on demand, without a light-count cutoff.
-fn light_cold_words(lights: u32) -> u32 {
-    (31 + lights.div_ceil(32).max(1)).next_multiple_of(4)
+fn light_cold_words(lights: u32, directions: u32) -> u32 {
+    (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
 const COUNTER_WORDS: u64 = 44;
@@ -477,6 +482,7 @@ struct Resources {
     raw: Owned<wgpu::Buffer>,
     slots: u32,
     cold_words: u32, // LC2: dynamic per-cell light bitset stride.
+    directions: u32,
     misses: u32,
     /// Slots the filter sources hold (1 without a filter).
     raw_slots: u32,
@@ -969,15 +975,13 @@ impl Renderer {
         // The filter's sources are sized by the setting (G3).
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let reallocate = settings.enabled
-            && self
-                .gi
-                .resources
-                .as_ref()
-                .is_none_or(|r| r.slots != slots || r.raw_slots != raw_slots);
+            && self.gi.resources.as_ref().is_none_or(|r| {
+                r.slots != slots || r.raw_slots != raw_slots || r.directions != settings.directions
+            });
         if reallocate {
-            let filter = std::mem::replace(&mut self.gi.settings.filter, settings.filter);
+            let previous = std::mem::replace(&mut self.gi.settings, settings);
             let allocated = self.allocate_gi(slots);
-            self.gi.settings.filter = filter;
+            self.gi.settings = previous;
             allocated?;
         } else if self.gi.settings.lookup != settings.lookup
             || self.gi.settings.cell_pixels != settings.cell_pixels
@@ -1025,7 +1029,8 @@ impl Renderer {
             // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
             // the miss list and request table stay at G2's size with the larger tables.
             let misses = slots.min(1 << 19);
-            let cold_words = light_cold_words(self.lighting.pending.count);
+            let directions = self.gi.settings.directions;
+            let cold_words = light_cold_words(self.lighting.pending.count, directions);
             let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
             let limits = self.device.limits();
             if table_bytes
@@ -1094,6 +1099,7 @@ impl Renderer {
                 raw: buffer("indirect cache filter sources", raw_bytes, storage),
                 slots,
                 cold_words,
+                directions,
                 misses,
                 raw_slots,
                 _allocations: [
@@ -1573,6 +1579,7 @@ impl Renderer {
         let hash: [u8; 32] = Sha256::new()
             .chain_update(self.program_slot(id).source.as_bytes())
             .chain_update(self.source.as_bytes())
+            .chain_update(self.gi.settings.directions.to_le_bytes())
             .finalize()
             .into();
         (id, hash, software, streamed)
@@ -1596,6 +1603,14 @@ impl Renderer {
         let parameters = crate::program::declares_parameters(&source);
         let mut composed =
             crate::program::compose(&heads[1], &source, crate::program::Stage::Cell, parameters);
+        // P-MEM: cell shading reads cold material/light records too. Its cached pipeline
+        // must use the same packed layout as this direction count's tracing kernels.
+        let line = "const GI_DIRECTIONS:u32=64u;";
+        assert_eq!(composed.source.matches(line).count(), 1);
+        composed.source = composed.source.replace(
+            line,
+            &format!("const GI_DIRECTIONS:u32={}u;", self.gi.settings.directions),
+        );
         if mixed {
             composed.source = mixed_cell_entry(&composed.source, id);
         }
@@ -2094,11 +2109,10 @@ impl Renderer {
         // LC2: changing light count may outgrow the bitset. Existing in-flight tables
         // retire normally; scheduling and cache lookup are otherwise unchanged.
         if self.gi.settings.enabled
-            && self
-                .gi
-                .resources
-                .as_ref()
-                .is_some_and(|r| r.cold_words < light_cold_words(self.lighting.pending.count))
+            && self.gi.resources.as_ref().is_some_and(|r| {
+                r.cold_words
+                    < light_cold_words(self.lighting.pending.count, self.gi.settings.directions)
+            })
         {
             self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
         }
@@ -2848,6 +2862,31 @@ mod tests {
         for directions in [64, 128] {
             validate("hardware kernels", &kernel_source(false, directions));
             validate("software kernels", &kernel_source(true, directions));
+        }
+    }
+
+    #[test]
+    fn cold_layout_keeps_every_direction_and_light() {
+        for directions in [64, 128] {
+            let words = directions / 32;
+            let lights_at = light_cold_offset(directions);
+            assert_eq!(lights_at, if directions == 64 { 23 } else { 31 });
+            for lights in [0u32, 1, 32, 64, 128, 300, 65_535] {
+                let stride = light_cold_words(lights, directions);
+                assert_eq!(stride % 4, 0);
+                let mut used = vec![false; stride as usize];
+                let mut occupy = |range: std::ops::Range<u32>| {
+                    for i in range {
+                        assert!(!std::mem::replace(&mut used[i as usize], true));
+                    }
+                };
+                occupy(0..12); // definition, point and state
+                for bitset in 0..4 {
+                    occupy(12 + bitset * words..12 + (bitset + 1) * words);
+                }
+                occupy(lights_at - 3..lights_at); // material, primitive, barycentrics
+                occupy(lights_at..lights_at + lights.div_ceil(32).max(1));
+            }
         }
     }
 

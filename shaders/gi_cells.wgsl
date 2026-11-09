@@ -33,9 +33,10 @@ const GI_BUCKET:u32=8u;
 // Fixed directions per cell: a uniform Fibonacci hemisphere about the query normal.
 // 64 or 128; src/gi_cache.rs substitutes the setting into this line.
 const GI_DIRECTIONS:u32=64u;
-// Visibility words per cell, and the most any setting uses.
+// P-MEM: reserve only the words this direction count reads. The CPU and cell-shading
+// pipeline use the same direction-specific cold layout (src/gi_cache.rs).
 const GI_WORDS:u32=GI_DIRECTIONS/32u;
-const GI_MAX_WORDS:u32=4u;
+const GI_MAX_WORDS:u32=GI_WORDS;
 
 // Header layout (written by the CPU each frame; src/gi_cache.rs prepare_gi).
 const GI_H_ENABLED:u32=0u;
@@ -145,20 +146,20 @@ const GI_C_POINT:u32=8u;
 const GI_C_BASE:u32=11u;
 const GI_C_BITS:u32=12u;
 // Directions traced since the cell's last invalidation (GI_MAX_WORDS words).
-const GI_C_KNOWN:u32=16u;
+const GI_C_KNOWN:u32=GI_C_BITS+GI_MAX_WORDS;
 // Directions with ray items this frame, between setup and finish (GI_MAX_WORDS words).
-const GI_C_PENDING:u32=20u;
+const GI_C_PENDING:u32=GI_C_KNOWN+GI_MAX_WORDS;
 // Directions the cooked near-field masks block at the query point (GI_MAX_WORDS words; zero
 // without masks): never traced, always blocked, whatever moves.
-const GI_C_NEAR:u32=24u;
+const GI_C_NEAR:u32=GI_C_PENDING+GI_MAX_WORDS;
 // The query point's material (G2), fixed with the point: its placement's identity + 1 (0:
 // none; a draw's stable id << 16 | instance, src/gi_cache.rs `draw_ids`), the hit triangle's
 // primitive (0xffffffff when the ray source cannot name it: software rays against a cooked
 // cut), its barycentrics (pack2x16unorm), then one visibility bit per light at the point.
-const GI_C_MATERIAL:u32=28u;
-const GI_C_PRIMITIVE:u32=29u;
-const GI_C_BARY:u32=30u;
-const GI_C_LIGHTS:u32=31u;
+const GI_C_MATERIAL:u32=GI_C_NEAR+GI_MAX_WORDS;
+const GI_C_PRIMITIVE:u32=GI_C_MATERIAL+1u;
+const GI_C_BARY:u32=GI_C_MATERIAL+2u;
+const GI_C_LIGHTS:u32=GI_C_MATERIAL+3u;
 const GI_NO_PRIMITIVE:u32=0xffffffffu;
 // State bits: the value is current; the cell has no canonical query point; some
 // directions are still untraced (counted as open sky until they are); queued for
@@ -187,7 +188,7 @@ const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY
 // shading a vec4 array (gi_api.wgsl) so records load whole.
 fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_word(i)); }
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
-fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*max(32u,gi_word(GI_H_COLD_WORDS)); }
+fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*max(24u,gi_word(GI_H_COLD_WORDS)); }
 
 // Level whose edge is the smallest power-of-two multiple of the minimum edge at least
 // `footprint` times the eye distance. The kernels request both levels near a boundary,
