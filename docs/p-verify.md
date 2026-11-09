@@ -74,8 +74,9 @@ ara-pbr candidate captures exited 1. This is a renderer shader failure, not a
 timing or memory failure. The remaining owned plan process tree was stopped;
 the lease released at 18:53:32 UTC. No renderer fix was made by this unit.
 
-Shared mutex acquired 18:50:55.159 UTC; the exact release is in `mutex.jsonl`.
-Lease elapsed 156.75 seconds; resource audit is
+Shared mutex acquired 18:50:55.159 UTC, released 18:53:32.533 UTC (157.374 s).
+Lease elapsed 156.75 seconds; 1265 resource samples show zero compiler overlap
+and minimum 10295 MiB available. Resource audit is
 `lease/runs/nrt3-l2-mutex1.json`. No speed comparison is certified.
 
 ## P-RETIME open checks — pending
@@ -98,13 +99,48 @@ these open checks. No regression yes/no is inferred from missing measurements.
 | q1 byte identity and lower cut time | Not run | No lane count retained |
 | Merge recommendation | DON'T MERGE pending evidence | No measured cut benefit |
 
-## P-FLAT2 — pending
+## P-FLAT2 — DON'T MERGE
 
 | Gate | Result | Numbers |
 |---|---|---|
-| Build `68a902b` silhouette correction | Awaiting compiler gate | Source archive prepared |
-| w2 flicker/crop and complete acceptance matrix | Not run | Earlier pre-correction evidence is not this build |
-| Merge recommendation | DON'T MERGE pending evidence | Corrected build unverified |
+| Build `68a902b` silhouette correction | PASS | Release, -j 2, 243.74 s; minimum sampled RAM 13167 MiB |
+| Six courtyard flights | Completed | 0.004, 0.002 and 0.001 on RT/non-RT, 48 frames each |
+| Wall flicker floor | **Not met on either path, every budget** | Full precision below |
+| Fox fixture | PASS, baseline and candidate | 117.5 / 67.0 s process wall, not frame performance |
+| RF1–RF10 | Baseline RT passed; candidate interrupted | Remaining configurations not certified |
+| Q-walk, MQ1, MV1, SK1, object motion, lib | Plan stopped after floor miss | Not certified; MV1 manifest was set |
+| Merge recommendation | **DON'T MERGE** | Strict flicker floor unmet; complete matrix unproved |
+
+Flicker slopes against the saved no-history control, frames 8–47. Baseline and
+control witnesses are reused from P-FLAT2 w1 (`ee361f5`), as its plan specifies.
+Candidate rows are the freshly built silhouette correction. No tolerance was
+substituted for the requested "at or above main" floor.
+
+| Budget | RT wall | RT ground | Non-RT wall | Non-RT ground |
+|---|---:|---:|---:|---:|
+| Main | 0.984687 | 0.995773 | 0.982017 | 0.994508 |
+| 0.004 | 0.984580 | 0.995887 | 0.981980 | 0.994614 |
+| 0.002 | 0.984647 | 0.995771 | 0.981950 | 0.994515 |
+| 0.001 | 0.984621 | 0.995775 | 0.981982 | 0.994513 |
+
+These differences are tiny; this does not establish a perceptible regression.
+It also does not establish the strict floor. At 0.004, mean crate-top speckle
+improves 0.079→0.057 RT and 0.075→0.054 non-RT; ground 0.012→0.008 /
+0.016→0.012; arch 0.015→0.012 / 0.016→0.014. These are six-frame crop means,
+not a claim that every frame/population passes. At 0.001 non-RT arch reads
+0.017 versus main 0.016, another unclosed crop gate.
+
+Verified visually: `flat2/inspection.png`, baseline/candidate frame 24 on both
+paths, including complete silhouettes, foliage, reflections, transparency and
+shadow edges. Smoother crates do not waive motion acceptance. Vulkan validation
+was enabled. The owned GPU tree was stopped after the floor miss. 25 raw dumps
+(622080000 bytes) were hashed and removed, retaining JSON/logs and inspected PNGs.
+
+Build mutex: 18:54:31.361–18:58:35.467 UTC, 244.106 s. GPU mutex:
+19:04:38.724–19:12:32.196 UTC, 473.473 s. GPU audit: 3949 resource samples,
+zero compiler overlap, minimum 9307 MiB available. No performance comparison
+is made from these correctness runs. Binary identities: `bin/flat2/build.json`;
+scores and slopes: `flat2/analysis/`.
 
 ## P-LTS3 C — pending
 

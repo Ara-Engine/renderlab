@@ -183,6 +183,16 @@ if __name__ == '__main__':
         case, mode, prefix = sys.argv[2:]
         for index, side in enumerate(['before', 'after', 'after', 'before']):
             retime.capture(case, mode, index, prefix + '-' + side)
+    if sys.argv[1] == 'retime-all':
+        for case, mode, prefix in [('lights', 'rt', 'a'), ('lights', 'nonrt', 'a'), ('game', 'nonrt', 'mem'), ('quarry', 'nonrt', 'mem')]:
+            folder = OUT / 'retime/runs' / case / mode
+            if all((folder / f'{i}-{prefix}-{side}/result.json').exists() for i, side in enumerate(['before', 'after', 'after', 'before'])):
+                continue
+            if folder.exists():
+                rejected = OUT / 'retime/rejected' / f'{case}-{mode}-{time.time_ns()}'
+                rejected.parent.mkdir(parents=True, exist_ok=True)
+                folder.rename(rejected)
+            sp.run([sys.executable, '-B', __file__, 'retime', case, mode, prefix], check=True)
     if sys.argv[1] == 'wait':
         _, runner = load('retime', REPO / 'scripts/p-retime.py').load_runner()
         end = time.monotonic() + float(sys.argv[2])

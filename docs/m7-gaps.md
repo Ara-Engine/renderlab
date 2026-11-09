@@ -646,3 +646,12 @@ shader creation because composed WGSL declares `gi_wg_base` twice (array at
 line 1992, scalar at 2684). Baseline RT game-base completed 88 frames; the
 candidate produced no image. Scheduling/drain speed remains unproved until
 the owning implementation unit fixes this and the complete gates pass.
+
+P-FLAT2's final silhouette build was now tested by P-VERIFY. At budget 0.004,
+crate-top speckle improves 0.079→0.057 RT and 0.075→0.054 non-RT, but wall
+flicker slope is 0.984580 versus main 0.984687 RT and 0.981980 versus
+0.982017 non-RT. All three budgets miss the strict wall floor; 0.001 also
+reads higher non-RT arch speckle (0.017 versus 0.016). No perceptible regression
+is established by these tiny slope differences, but the requested acceptance
+floor remains unproved. **DON'T MERGE**; remaining matrix stopped after the
+floor miss. Default `light_budget` remains 0.
