@@ -218,6 +218,8 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
 /// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
 /// Materials still receive the same visibility value and shading inputs.
+/// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
+/// the budget only near shadow edges; with it off every receiver traces the budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconstructionShadowBudget {
     pub cold_rays: u32,
@@ -295,6 +297,8 @@ pub(in crate::renderer) struct TraceKernels {
     pub repair: Option<Owned<wgpu::ComputePipeline>>,
     pub retry: Option<Owned<wgpu::ComputePipeline>>,
     pub full: Option<Owned<wgpu::ComputePipeline>>,
+    /// P-RTS: the penumbra list and its full-budget trace, after the deferred repair.
+    pub penumbra: Option<[Owned<wgpu::ComputePipeline>; 2]>,
 }
 /// Pipelines of the reconstruction, compiled by its first frame after each prelude.
 pub(in crate::renderer) struct Pipelines {
@@ -303,6 +307,11 @@ pub(in crate::renderer) struct Pipelines {
 }
 
 pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
+    trace_source_with(soft_kernels, PENUMBRA_LISTING)
+}
+/// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
+/// otherwise the module is main's (every receiver traces the budget).
+fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error> {
     let (find, replace) = ROTATION_SEAM;
     if soft_kernels.matches(find).count() != 1 {
         return Err(Error::InvalidInput(
@@ -317,15 +326,67 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
             "reconstruction shadow budget requires the fresh ray loop",
         ));
     }
+    if !listing {
+        // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
+        // Exact pipelines keep their override, direction sequence and normalization.
+        return Ok(source
+            .replace(
+                loop_seam,
+                "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
+            )
+            .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"));
+    }
+    // P-RTS: the full-budget estimator for listed penumbra pixels is this module's own
+    // fresh_estimate text, renamed, with lanes striding the frame's budget.
+    let begin = source.find("fn fresh_estimate(").unwrap();
+    let end = begin + source[begin..].find("\n}\n").unwrap() + 3;
+    let budget = source[begin..end]
+        .replacen("fn fresh_estimate(", "fn fresh_estimate_budget(", 1)
+        .replacen(
+            loop_seam,
+            "for(var j=lane;j<primary_frame.sampling.x;j+=PENUMBRA_LANES)",
+            1,
+        );
+    // Probe directions: on listing frames (sampling.z = PROBE_DISK, else 0) the first
+    // sampling.z are the budget's own, then the same sequence over a cone sampling.w
+    // times the sun's. Other frames keep j and an exact x 1.0 slope.
+    let source = source.replacen(
+        ROTATION_SEAM.1,
+        "let wide=primary_frame.sampling.z!=0u && j>=primary_frame.sampling.z;
+        let direction=fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y,shift,l,u,v,view.texel.z*select(1.0,bitcast<f32>(primary_frame.sampling.w),wide));",
+        1,
+    );
     // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
     // Exact pipelines keep their override, direction sequence and normalization.
-    Ok(source
-        .replace(
-            loop_seam,
-            "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
-        )
-        .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"))
+    // The probe kernels trace sampling.y (= the budget unless P-RTS lists penumbrae).
+    Ok(format!(
+        "{}\n{budget}\n{PENUMBRA_TRACE}",
+        source
+            .replace(
+                loop_seam,
+                "for(var j=lane;j<primary_frame.sampling.y;j+=1u)",
+            )
+            .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.y")
+    ))
 }
+const PENUMBRA_TRACE: &str = include_str!("../shaders/primary_penumbra.wgsl");
+/// P-RTS (docs/p-rts.md). Listing frames probe PROBE_DISK of the budget's own directions
+/// and PROBE_DISK more over a cone PROBE_CONE times the sun's. The wide probes find thin
+/// slivers at a small sun's rim (an occluder clipping the disk also covers a large cap of
+/// the wider disk); the disk probes keep full density when the light is large and a
+/// blocker's shadow is no wider than the probe cone. Probes only decide which pixels trace
+/// the budget; a non-listed pixel takes its window's unanimous 0 or 256.
+const PROBE_DISK: u32 = 8;
+const PROBE_CONE: f32 = 2.0;
+/// P-RTS listing. Off by default: on RTDEF2's S2 fixture (0.04 rad light) the listed
+/// frames still left near-unanimous fringe pixels unlisted (up to 0.125 visibility on
+/// moving frames), which fails the zero-loss bar. Off, the trace module, pipelines and
+/// targets are main's exactly. On, ARA1's eight non-quarry scenes are byte-identical and
+/// the cut costs 1.1-1.7 ms instead of 9.7-17.5 ms (docs/p-rts.md).
+pub(super) const PENUMBRA_LISTING: bool = false;
+/// P-RTS's standalone penumbra list pass (docs/p-rts.md).
+pub(in crate::renderer) const PENUMBRA_LIST: &str =
+    include_str!("../shaders/primary_penumbra_list.wgsl");
 pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
@@ -439,6 +500,9 @@ impl PrimaryState {
                     )
                 }),
                 full: deferred.then(|| self.interactive_pipeline(device, ledger, &soft, &eight)),
+                // The penumbra pass follows the retained two-pass repair only.
+                penumbra: (deferred && !modern && PENUMBRA_LISTING)
+                    .then(|| self.penumbra_pipelines(device, ledger, &soft)),
             }
         });
         Pipelines { trace, resolve }
@@ -481,6 +545,9 @@ pub(in crate::renderer) struct ReconstructionState {
     pub reset: bool,
     held_frames: u32,
     pub shadow_rays: u32,
+    /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
+    /// penumbra pixels trace the full budget (docs/p-rts.md).
+    pub probe_rays: u32,
 }
 type GroupKey = (
     wgpu::Texture,
@@ -574,6 +641,7 @@ impl ReconstructionState {
             reset: true,
             held_frames: 0,
             shadow_rays: 8,
+            probe_rays: 8,
         }
     }
     fn size(&self) -> wgpu::Extent3d {
@@ -791,6 +859,7 @@ impl Renderer {
             1 + u64::from(t.repair.is_some())
                 + u64::from(t.retry.is_some())
                 + u64::from(t.full.is_some())
+                + 2 * u64::from(t.penumbra.is_some())
         });
         self.pipeline.primary.as_mut().unwrap().reconstruction = Some(pipelines);
         Ok(())
@@ -1044,19 +1113,37 @@ impl Renderer {
             sampling_still,
             state.held_frames,
         );
+        // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
+        // traces the held count; only listed pixels trace the rest of the budget.
+        let primary = self.primary.as_ref().unwrap();
+        let listing = primary.targets.as_ref().is_some_and(|t| t.defer_edges)
+            && self.pipeline.primary.as_ref().is_some_and(|p| {
+                p.reconstruction
+                    .as_ref()
+                    .and_then(|r| r.trace.as_ref())
+                    .is_some_and(|t| t.penumbra.is_some())
+            });
+        // Listing pays only where the budget exceeds both probe sets.
+        state.probe_rays = if listing && PENUMBRA_LISTING && state.shadow_rays > 2 * PROBE_DISK {
+            2 * PROBE_DISK
+        } else {
+            state.shadow_rays
+        };
+        // Listing frames probe a cone PROBE_CONE times the sun's; frames without listing
+        // keep the exact budget directions (x 1.0 is exact).
+        let (disk, widen) = if state.probe_rays < state.shadow_rays {
+            (PROBE_DISK, PROBE_CONE)
+        } else {
+            (0, 1.0)
+        };
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
-        let primary_frame = &self
-            .primary
-            .as_ref()
-            .unwrap()
-            .frame
-            .as_ref()
-            .unwrap()
-            .0
-            .value;
-        self.queue
-            .write_buffer(primary_frame, 112, &state.shadow_rays.to_ne_bytes());
-        self.uploads.view_settings += 4;
+        let primary_frame = &primary.frame.as_ref().unwrap().0.value;
+        let mut words = state.shadow_rays.to_ne_bytes().to_vec();
+        words.extend_from_slice(&state.probe_rays.to_ne_bytes());
+        words.extend_from_slice(&disk.to_ne_bytes());
+        words.extend_from_slice(&widen.to_bits().to_ne_bytes());
+        self.queue.write_buffer(primary_frame, 112, &words);
+        self.uploads.view_settings += 16;
         self.uploads.write_calls += 1;
         for w in [
             u32::from(state.reset),
@@ -1254,9 +1341,22 @@ mod tests {
         let resolve = resolve_source(prelude).unwrap();
         assert!(!resolve.contains("ray_query") && !resolve.contains("rayQuery"));
         let kernels = shader_sources(prelude).unwrap();
-        let trace = trace_source(&kernels[1]).unwrap();
-        assert!(trace.contains("fresh_direction(j+primary_frame.sided.y"));
-        for source in [resolve, trace] {
+        // Main's module when listing is off; P-RTS's seams when it is on.
+        let off = trace_source_with(&kernels[1], false).unwrap();
+        assert!(off.contains("for(var j=lane;j<primary_frame.sampling.x;j+=1u)"));
+        assert!(!off.contains("primary_penumbra_trace"));
+        let trace = trace_source_with(&kernels[1], true).unwrap();
+        assert!(trace.contains("fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y"));
+        // P-RTS: probes trace sampling.y; listed pixels stride the whole budget.
+        assert_eq!(trace.matches("j<primary_frame.sampling.y;j+=1u").count(), 1);
+        assert_eq!(trace.matches("bitcast<f32>(primary_frame.sampling.w),wide)").count(), 1);
+        assert_eq!(
+            trace
+                .matches("j<primary_frame.sampling.x;j+=PENUMBRA_LANES")
+                .count(),
+            1
+        );
+        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()] {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

@@ -651,6 +651,8 @@ pub(super) struct Targets {
     pub repairs: Buffer,
     pub repair_args: Buffer,
     pub retries: Buffer,
+    /// P-RTS: pixels listed for the full shadow budget (header, then pixel indices).
+    pub penumbra: Buffer,
     defer_edges: bool,
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
@@ -671,6 +673,8 @@ struct Bindings {
     interactive: Option<Owned<wgpu::BindGroup>>,
     repair: Option<Owned<wgpu::BindGroup>>,
     check: Option<Owned<wgpu::BindGroup>>,
+    /// P-RTS: penumbra list and trace.
+    penumbra: Option<[Owned<wgpu::BindGroup>; 2]>,
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
     /// MP1: `shade` plus the program list bindings, while list buffers exist.
     list: [Option<Owned<wgpu::BindGroup>>; 2],
@@ -720,6 +724,8 @@ pub(super) struct InteractiveKernels<'a> {
     repair: Option<&'a wgpu::ComputePipeline>,
     retry: Option<&'a wgpu::ComputePipeline>,
     full: Option<&'a wgpu::ComputePipeline>,
+    /// P-RTS: list and trace, on frames whose budget exceeds their probe count.
+    penumbra: Option<[&'a wgpu::ComputePipeline; 2]>,
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -749,6 +755,11 @@ pub(super) struct PrimaryState {
     repair_layout: Owned<wgpu::PipelineLayout>,
     check_bindings: Owned<wgpu::BindGroupLayout>,
     check_layout: Owned<wgpu::PipelineLayout>,
+    /// P-RTS: the penumbra list (probe counts, hits, tiles, queue) and its trace.
+    penumbra_list_bindings: Owned<wgpu::BindGroupLayout>,
+    penumbra_list_layout: Owned<wgpu::PipelineLayout>,
+    penumbra_trace_bindings: Owned<wgpu::BindGroupLayout>,
+    penumbra_trace_layout: Owned<wgpu::PipelineLayout>,
     array_bindings: Owned<wgpu::BindGroupLayout>,
     material_bindings: Owned<wgpu::BindGroupLayout>,
     /// `material_bindings` plus the texture residency bindings 18 and 19.
@@ -943,6 +954,25 @@ impl PrimaryState {
             ],
         );
         let uint = wgpu::TextureSampleType::Uint;
+        let penumbra_list_bindings = group(
+            "P-RTS penumbra list",
+            &[
+                texture(6, uint),
+                texture(7, uint),
+                texture(21, uint),
+                buffer(29, wgpu::BufferBindingType::Storage { read_only: false }, 20),
+            ],
+        );
+        let penumbra_trace_bindings = group(
+            "P-RTS penumbra trace",
+            &[
+                scene(TRACE_SCENE),
+                scene(2),
+                frame,
+                image(5, F::R32Uint),
+                read(29, 20),
+            ],
+        );
         let check_bindings = group(
             "primary arithmetic edge checks",
             &[
@@ -1143,6 +1173,18 @@ impl PrimaryState {
                 &[Some(&check_bindings), Some(&array_bindings)],
             ),
             check_bindings,
+            penumbra_list_layout: layout("P-RTS penumbra list ABI", &[Some(&penumbra_list_bindings)]),
+            penumbra_list_bindings,
+            penumbra_trace_layout: layout(
+                "P-RTS penumbra trace ABI",
+                &[
+                    Some(&penumbra_trace_bindings),
+                    Some(&array_bindings),
+                    None,
+                    Some(lighting),
+                ],
+            ),
+            penumbra_trace_bindings,
             interactive_bindings,
             fresh_bindings,
             trace_bindings: trace,
@@ -1409,6 +1451,37 @@ impl PrimaryState {
         )
     }
 
+    /// P-RTS: the standalone penumbra list and `primary_penumbra_trace` of TR1's soft
+    /// module `module` (docs/p-rts.md).
+    pub(super) fn penumbra_pipelines(
+        &self,
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+    ) -> [Owned<wgpu::ComputePipeline>; 2] {
+        let list = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("P-RTS penumbra list"),
+            source: wgpu::ShaderSource::Wgsl(temporal_reconstruction::PENUMBRA_LIST.into()),
+        });
+        let pipeline = |layout, module, entry| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        [
+            pipeline(&*self.penumbra_list_layout, &list, "primary_penumbra_list"),
+            pipeline(&*self.penumbra_trace_layout, module, "primary_penumbra_trace"),
+        ]
+    }
+
     /// `primary_trace_interactive` of a soft primary module on its fused ABI. Tests seed
     /// the estimator through `constants`.
     pub fn interactive_pipeline(
@@ -1564,7 +1637,12 @@ impl Renderer {
             uploads.write_calls += 1;
         }
         let mut bytes = [0; FRAME_BYTES];
+        // sampling.x: TR1's shadow budget; y: its probe directions; z: the probes inside the
+        // sun's disk before wide ones (0: no split); w: the wide probes' cone scale as f32
+        // bits (P-RTS; 0 and 1.0 here and on every frame that lists no penumbrae).
         bytes[112..116].copy_from_slice(&8u32.to_ne_bytes());
+        bytes[116..120].copy_from_slice(&8u32.to_ne_bytes());
+        bytes[124..128].copy_from_slice(&1f32.to_bits().to_ne_bytes());
         bytes[..64].copy_from_slice(&matrix_bytes(inverse));
         for (dst, value) in bytes[64..80]
             .chunks_exact_mut(4)
@@ -1859,10 +1937,21 @@ impl Renderer {
                     | wgpu::BufferUsages::INDIRECT
                     | wgpu::BufferUsages::COPY_SRC,
             );
+            let penumbra = Buffer::new(
+                self,
+                "P-RTS penumbra list",
+                if defer_edges && temporal_reconstruction::PENUMBRA_LISTING {
+                    retry_bytes
+                } else {
+                    20
+                },
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            );
             let next = Targets {
                 repairs,
                 repair_args,
                 retries,
+                penumbra,
                 defer_edges,
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
@@ -2059,6 +2148,29 @@ impl Renderer {
                         ],
                     )
                 }),
+                penumbra: fresh.filter(|_| hardware.is_some()).map(|f| {
+                    [
+                        group(
+                            &state.penumbra_list_bindings,
+                            &[
+                                (6, R::TextureView(&f.visibility.view)),
+                                (7, hit.clone()),
+                                (21, tiles.clone()),
+                                (29, t.penumbra.value.as_entire_binding()),
+                            ],
+                        ),
+                        group(
+                            &state.penumbra_trace_bindings,
+                            &[
+                                trace_scene.clone(),
+                                scene.clone(),
+                                uniform.clone(),
+                                (5, R::TextureView(&f.visibility.view)),
+                                (29, t.penumbra.value.as_entire_binding()),
+                            ],
+                        ),
+                    ]
+                }),
                 shade,
                 list,
                 key,
@@ -2152,6 +2264,7 @@ impl Renderer {
             repair: p.interactive_repair.as_deref(),
             retry: p.interactive_retry.as_deref(),
             full: p.interactive_full.as_deref(),
+            penumbra: None,
         };
         self.encode_interactive_kernels(encoder, pipeline, kernels, tile, timestamp_writes);
     }
@@ -2164,11 +2277,22 @@ impl Renderer {
     ) {
         let p = self.pipeline.primary.as_ref().unwrap();
         let t = p.reconstruction.as_ref().unwrap().trace.as_ref().unwrap();
+        // P-RTS: the probe kernels traced fewer directions than the budget only when the
+        // frame words say so (ReconstructionState::probe_rays).
+        let listed = self
+            .reconstruction_state
+            .as_ref()
+            .is_some_and(|s| s.probe_rays < s.shadow_rays);
         let kernels = InteractiveKernels {
             check: p.interactive_repair.as_deref(),
             repair: t.repair.as_deref(),
             retry: t.retry.as_deref(),
             full: t.full.as_deref(),
+            penumbra: t
+                .penumbra
+                .as_ref()
+                .filter(|_| listed)
+                .map(|[list, trace]| [&**list, &**trace]),
         };
         self.encode_interactive_kernels(encoder, &t.trace, kernels, TRACE_TILE, timestamp_writes);
     }
@@ -2203,6 +2327,12 @@ impl Renderer {
             encoder.clear_buffer(&targets.repair_args.value, 0, Some(16));
             encoder.clear_buffer(&targets.retries.value, 0, Some(16));
         }
+        let penumbra = kernels
+            .penumbra
+            .filter(|_| deferred && kernels.retry.is_none());
+        if penumbra.is_some() {
+            encoder.clear_buffer(&targets.penumbra.value, 0, Some(16));
+        }
         let begin = timestamp_writes
             .as_ref()
             .map(|t| wgpu::ComputePassTimestampWrites {
@@ -2229,17 +2359,25 @@ impl Renderer {
         );
         drop(pass);
         if deferred && kernels.retry.is_none() {
-            let stamps = timestamp_writes.map(|t| wgpu::ComputePassTimestampWrites {
-                query_set: t.query_set,
-                beginning_of_pass_write_index: if split_timestamps {
-                    t.beginning_of_pass_write_index.map(|i| i + 2)
-                } else {
-                    None
-                },
-                end_of_pass_write_index: t
-                    .end_of_pass_write_index
-                    .map(|i| i + if split_timestamps { 2 } else { 0 }),
-            });
+            // The frame's span ends on its last pass: the repair, or P-RTS's trace.
+            let end = |t: &wgpu::ComputePassTimestampWrites<'_>| {
+                t.end_of_pass_write_index
+                    .map(|i| i + if split_timestamps { 2 } else { 0 })
+            };
+            let stamps = timestamp_writes
+                .as_ref()
+                .map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set,
+                    beginning_of_pass_write_index: if split_timestamps {
+                        t.beginning_of_pass_write_index.map(|i| i + 2)
+                    } else {
+                        None
+                    },
+                    end_of_pass_write_index: if penumbra.is_some() { None } else { end(t) },
+                })
+                .filter(|s| {
+                    s.beginning_of_pass_write_index.is_some() || s.end_of_pass_write_index.is_some()
+                });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("retained two-pass receiver correction"),
                 timestamp_writes: stamps,
@@ -2249,6 +2387,38 @@ impl Renderer {
             pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             pass.dispatch_workgroups_indirect(&targets.repairs.value, 0);
+            drop(pass);
+            if let Some([list, trace]) = penumbra {
+                let [list_group, trace_group] = bindings.penumbra.as_ref().unwrap();
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("P-RTS penumbra list"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(list);
+                pass.set_bind_group(0, &**list_group, &[]);
+                pass.dispatch_workgroups(
+                    size.width.div_ceil(TRACE_TILE[0]),
+                    size.height.div_ceil(TRACE_TILE[1]),
+                    1,
+                );
+                drop(pass);
+                let stamps = timestamp_writes.as_ref().and_then(|t| {
+                    end(t).map(|i| wgpu::ComputePassTimestampWrites {
+                        query_set: t.query_set,
+                        beginning_of_pass_write_index: None,
+                        end_of_pass_write_index: Some(i),
+                    })
+                });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("P-RTS full-budget penumbra visibility"),
+                    timestamp_writes: stamps,
+                });
+                pass.set_pipeline(trace);
+                pass.set_bind_group(0, &**trace_group, &[]);
+                pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                pass.dispatch_workgroups_indirect(&targets.penumbra.value, 0);
+            }
             return;
         }
 
