@@ -77,7 +77,7 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     if clip.w<=0.0 { return 1.0; }
     let ndc=clip.xyz/clip.w;
     if any(abs(ndc.xy)>vec2<f32>(1.0)) || ndc.z<0.0 || ndc.z>1.0 { return 1.0; }
-    let extent=vec2<f32>(textureDimensions(rl_local_depth));
+    let extent=vec2<f32>(rl_light_frame.tiles[slot].z);
     let geometric=receiver.geometric;
     let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(geometric.x)>0.9);
     let tangent=unit_normal(cross(geometric,axis));
@@ -130,15 +130,14 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     }
     let origin=vec2<i32>(floor(t));
     let f=t-floor(t);
-    let size=vec2<i32>(extent);
+    let near=rl_light_frame.far.y;
+    let far=max(select(1000.0,light.position_range.w,light.position_range.w>0.0),2.0*near);
     var lit=0.0;
     for(var j=0;j<4;j+=1) {
         for(var i=0;i<4;i+=1) {
-            let p=clamp(origin+vec2<i32>(i-1,j-1),vec2<i32>(0),size-vec2<i32>(1));
-            let centre=((vec2<f32>(p)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,centre-ndc.xy)+bias;
-            let stored=textureLoad(rl_local_depth,p,i32(layer),0);
-            lit+=select(0.0,rl_pcf_weight(i,f.x)*rl_pcf_weight(j,f.y),reference>=stored);
+            let tap=vec2<f32>(origin+vec2<i32>(i-1,j-1));
+            let visibility=rl_local_tap(light,receiver,biased,layer,ndc,slope,bias,tap,near,far).x;
+            lit+=visibility*rl_pcf_weight(i,f.x)*rl_pcf_weight(j,f.y);
         }
     }
     return lit/9.0;
@@ -154,7 +153,8 @@ fn rl_pcf_weight(i:i32, f:f32) -> f32 {
 // Cube taps crossing a face edge reproject into their neighbour, rather than clamp and
 // smear the face edge. The comparison stays on the same world receiver plane.
 fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec3<f32>,slope:vec2<f32>,bias:f32,tap:vec2<f32>,near:f32,far:f32) -> vec2<f32> {
-    let extent=vec2<f32>(textureDimensions(rl_local_depth));
+    let tile=rl_light_frame.tiles[layer/6u];
+    let extent=vec2<f32>(tile.z);
     let size=vec2<i32>(extent);
     let m=rl_local_matrix(layer);
     // Compare on the texel actually loaded, including fractional blocker-search taps.
@@ -195,7 +195,7 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
         depth_scale=dot(forward,ray)/dot(other_forward,ray);
     }
     coordinate=clamp(coordinate,vec2<i32>(0),size-vec2<i32>(1));
-    let stored=textureLoad(rl_local_depth,coordinate,i32(use_layer),0);
+    let stored=textureLoad(rl_local_depth,coordinate+vec2<i32>(tile.xy),i32(use_layer%6u),0);
     let depth=near*far/max(near+stored*(far-near),1e-10);
     return vec2<f32>(select(0.0,1.0,reference>=stored),depth*depth_scale);
 }

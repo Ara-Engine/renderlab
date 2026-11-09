@@ -90,8 +90,11 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
 // World-space visibility of the sampled light from this receiver, 1 when unshadowed:
 // ray-traced on hardware renderers, light-space maps otherwise, never screen-space. The
 // engine computes it at its own receiver, so it is identical for every program. Shadowed
-// point and spot lights (the frame's most important, LC1) use one ray or pooled PCF maps.
+// LC3 local lights use source-sampled rays or cached atlas maps. A conservative cluster
+// may contain receivers outside a light's exact range/cone; those samples have no
+// incidence and need no visibility work. This assumes no BRDF or receiver hemisphere.
 fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
+    if s.attenuation==0.0 { return 1.0; }
     if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }

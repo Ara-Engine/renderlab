@@ -176,9 +176,11 @@ pub struct Settings {
     /// On by default with a subtle 0.001/m haze. Sun visibility uses hardware rays or
     /// the non-RT path's cached shadow depth; None disables it.
     pub volumetric_fog: Option<VolumetricFog>,
-    /// Shadows for the most important point and spot lights, chosen every frame (LC1):
-    /// traced rays on `HardwareRt`, pooled maps on `NonRt`. Default: 4 lights; `count: 0`
-    /// turns local shadows off. Lights beyond the count still light the scene.
+    /// Local visibility (LC3): every contributing clustered light on `HardwareRt`, or
+    /// up to `count` cached atlas lights on `NonRt` (default/max 128). `resolution` is
+    /// the maximum map-face size. Zero count disables automatic local shadows on both
+    /// paths; any positive count enables all-light RT. Unselected map lights still light
+    /// the scene. Each light's source radius controls its soft penumbra.
     pub local_shadows: LocalShadows,
     /// Presentation after reconstruction (PP1): bloom, motion blur, optional depth of field,
     /// the tone mapper, white balance, contrast, saturation, vignette, grain and the colour
@@ -245,7 +247,7 @@ pub(crate) fn lighting(
             ));
         }
         // The soft sun is light 0 and the only shadow request; local lights follow it
-        // unrequested and LC1 shadows the most important of them (docs/m7-lc1.md).
+        // unrequested and LC3 supplies ray or cached-atlas visibility (docs/m7-lc3.md).
         all.push(Light::Directional {
             travel: sun.travel,
             lux: sun.illuminance,
@@ -339,6 +341,31 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_shadow_facade_follows_renderer_defaults_and_accepts_the_larger_budget() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.local_shadows, LocalShadows::default());
+        assert_eq!(defaults.local_shadows.count, 128);
+        for count in [0, 4, 16, 128] {
+            let settings = Settings {
+                local_shadows: LocalShadows {
+                    count,
+                    ..defaults.local_shadows
+                },
+                ..defaults
+            };
+            assert!(settings.local_shadows.validate(4096).is_ok());
+        }
+        assert!(
+            LocalShadows {
+                count: 129,
+                ..defaults.local_shadows
+            }
+            .validate(4096)
+            .is_err()
+        );
+    }
 
     #[test]
     fn sun_angles_and_hours_follow_the_documented_axes() {

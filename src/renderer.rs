@@ -774,6 +774,8 @@ impl Renderer {
             // TP2 adds one sampled map to the complete lighting/material ABI (15).
             || device_limits.max_sampled_textures_per_shader_stage < 15
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
+            // LC3 keeps atlas transforms in a uniform, without another storage binding.
+            || device_limits.max_uniform_buffer_binding_size < crate::light_cluster::FRAME_BYTES as u64
         {
             return Err(Error::InvalidInput(
                 "device does not support the lighting/shadow binding ABI",

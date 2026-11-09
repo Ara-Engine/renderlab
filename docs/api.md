@@ -173,7 +173,7 @@ let leaves = engine.create_material(&MaterialDesc { thin: true, ..leaf_material 
 
 - **Time of day (AT2).** `Sun::at(elevation, azimuth)` places a default sun by angles (radians; azimuth clockwise from north, with +Y up, -Z north and +X east). `Sun::at_hour(hour, latitude) -> Option<Sun>` follows an equinox sun path: it rises in the east at 6, peaks toward the equator at 12, sets in the west at 18, and is None below the horizon. Calling `set_sun` every frame is cheap. AT2 updates the procedural sky in place, and GI relights progressively without a flush, so a day cycle is just `engine.set_sun(Sun::at_hour(hour, latitude))` per frame.
 - `set_sun(Option<Sun>)`. The sun is the scene's one shadowed directional light. `Sun::travel` is the direction its light travels. `illuminance` is lux per channel: under `Sky::Atmosphere` it is the sun outside the atmosphere (default 120,000), which the atmosphere dims and warms; under the other skies it arrives as given (clear midday is about 100,000). `angular_radius` (radians, 0-0.1) sets penumbra width. Its default, 0.04, is the measured shipping configuration on both paths; 0 gives hard shadows. The visible sun disk keeps the real sun's size (the medium's `sun_radius`), independent of the penumbra.
-- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster, and the most important ones are shadowed each frame (LC1, [m7-lc1.md](m7-lc1.md); `Settings::local_shadows`, 4 by default); the rest are unshadowed. Every light also reaches GI (LC2). They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
+- `set_lights(&[Light])`: local point and spot lights, in candela with an optional range. They are culled per camera cluster. LC3 ([m7-lc3.md](m7-lc3.md)) traces shadows for every contributing clustered local light on RT heads; map heads shadow up to 128 lights from a cached atlas, ranked by projected influence and energy, with fading slot changes. `Settings::local_shadows` controls the map budget (128 by default, maximum 128), maximum map-face resolution and near plane; count zero disables automatic local shadows on both paths. Any positive count enables all-light RT visibility. Every light also reaches GI (LC2). They combine with a soft sun. `Light::Point` and `Light::Spot` take `source_radius` in metres (LC2, [m7-lc2.md](m7-lc2.md)): zero keeps hard shadows, positive values give soft local shadows on both paths. Existing Rust light literals need `source_radius: 0.0`; JSON lighting files default it to zero. Directional lights go in the sun.
 - `Settings::exposure`: `Exposure::Manual { stops }` scales scene luminance by 2^stops before tone mapping. With sunlight in lux, -14 to -16 is typical.
 
 ## Sky, atmosphere and fog
@@ -208,7 +208,7 @@ pub struct Settings {
     pub aerial_perspective: bool,         // see Sky, atmosphere and fog
     pub height_fog: Option<HeightFog>,
     pub volumetric_fog: Option<VolumetricFog>,
-    pub local_shadows: LocalShadows,      // shadowed local lights per frame (count, map size, near)
+    pub local_shadows: LocalShadows,      // cached map budget, maximum face size, near; positive enables all-light RT
     pub post: PostSettings,               // bloom, motion blur, DOF, tone mapper, grading
     pub reflections: ReflectionSettings,  // traced reflections: enabled, max_roughness
 }
@@ -217,7 +217,7 @@ pub struct Settings {
 - `Quality::Realtime` is each path's measured real-time configuration (the table above).
 - `Quality::Reference` integrates sun visibility exactly: all 256 disk directions per pixel on RT, and the exact triangle-tested map lookup without RT. It is for stills, captures and A/B checks, not real-time play.
 - `render_scale` is TR1b's upscaling preset: with temporal reconstruction on, every pass renders at the scale's internal size and TR1 reconstructs the target. It needs `temporal_reconstruction`; a scale below `Native` without it is rejected.
-- `local_shadows` (LC1, LC2): `LocalShadows { count, resolution, near }`, default 4 lights at 1024² map faces. `count: 0` turns local shadows off. Penumbrae come from each light's `source_radius`.
+- `local_shadows` (LC3): `LocalShadows { count, resolution, near }`, default 128 cached atlas lights with a 1024-square maximum face and 0.02 m near plane. Counts 0-128 are accepted; zero turns automatic local shadows off, and any positive value enables every contributing RT local. Map tiles can be smaller than the maximum (down to 128-square at the default), retain their placement/resolution while selected, and redraw when the light or intersecting casters move. Selection changes fade out/in over eight frames each. Penumbrae come from each light's `source_radius`. The default six-layer depth atlas uses 384 MiB; maximum face size must not exceed one quarter of the device's 2D texture limit.
 - `post` (PP1): `PostSettings` with `enabled`, `bloom`, `motion_blur`, `shutter_angle_degrees`, `depth_of_field: Option<DepthOfField>`, `tonemapper: Tonemapper`, white balance, `contrast`, `saturation`, `vignette`, `grain`, chromatic aberration and `lut_strength`. It is on by default; `enabled: false` presents the plain tone-mapped image. `Engine::set_colour_lut(Option<ColourLut>)` sets the grading LUT.
 - `reflections` (R1n): `ReflectionSettings { enabled, max_roughness }`; `ReflectionSettings::off()` leaves every program its untraced estimate.
 - `set_settings` applies a change only when something changed, and validates before touching the renderer. It overwrites any overlapping tuning made through `renderer_mut()`.
@@ -228,7 +228,7 @@ Defaults follow each feature unit's default ruling, not the facade's opinion. Wi
 - Temporal reconstruction is **on** at native scale (TR1b; its remaining losses to no-AA and TSR are in [m7-gaps.md](m7-gaps.md)).
 - The physical atmosphere sky, aerial perspective, height fog and a light volumetric haze are **on** (AT1, VF1).
 - Traced reflections are on wherever a program asks for them, on both paths (R1, R1n; see [Reflections](#reflections)).
-- Post (bloom, motion blur, grading, vignette) is **on**; depth of field is opt-in (PP1). Four local lights are shadowed (LC1).
+- Post (bloom, motion blur, grading, vignette) is **on**; depth of field is opt-in (PP1). Automatic local shadows are **on**: every contributing RT local, or up to 128 cached map lights (LC3).
 
 Gaps against Unreal and the reference for each are in [m7-gaps.md](m7-gaps.md).
 
@@ -300,7 +300,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 - At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
 - At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
 - Materials must be double-sided while the sun casts shadows.
-- Only the most important local lights cast shadows (`Settings::local_shadows`, 4 by default, at most 16); the rest are unshadowed. See the Lights section of [m7-gaps.md](m7-gaps.md#lights).
+- Map heads shadow at most 128 local lights (`Settings::local_shadows`); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Coarse tail tiles, changed-light full-detail map redraws and reflection-hit visibility remain limitations. Budget reductions and removal/reindexing of the light vector do not guarantee a smooth fade. See [Lights gaps](m7-gaps.md#lights).
 - Glass casts coloured sun shadows only (no local-light shadows) and is invisible to GI rays; particles cast no shadows (TP1, TP2).
 - Small, very bright emitters (a lamp bulb's `emission`) turn into GI fireflies, because each cache cell traces a few fixed directions. Light such sources with a point light and keep their glow out of `emission`, as the example's bulbs do.
 - On `NonRt`, removing a mesh does not yet release its GI ray geometry, which the renderer keeps until it drops. Avoid heavy mesh churn on that path.
@@ -338,7 +338,7 @@ Each overnight unit landed in a named slot; every row is now wired.
 | TP1, TP2 | glass, foliage, particles | **Wired**: `MaterialDesc::{transparency, thin}`; `cutout`/`AlphaMask` for foliage; `create_emitter`/`update_emitter`/`remove_emitter`/`set_particle_step` with `EmitterId`. TP2's coloured glass shadows, RT glass reflections and coverage AA need no API. |
 | AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
 | SK1 | skinned meshes | **Wired**: `create_skinned_mesh`, `add_skinned_asset -> SkinnedHandles`, `set_joint_palette(MeshId, &[Mat4])`; `ClipPlayer` and `AnimationPose` re-exported. The example's hero is the walking Fox. |
-| LC1, LC2 | many lights, soft local shadows | **Wired**: `set_lights` unchanged; `Settings::local_shadows: LocalShadows`; `Light::{Point, Spot}::source_radius` (LC2). The example has three soft-shadowed lanterns. |
+| LC1, LC2, LC3 | many lights, soft local shadows, cached atlas | **Wired**: `set_lights` unchanged; `Settings::local_shadows: LocalShadows` defaults to 128 cached map lights, or all contributing RT locals; `Light::{Point, Spot}::source_radius` (LC2). The courtyard has three authored sources and adds 24 in night-lantern mode. |
 | AT2 | time of day | **Wired**: `Sun::at(elevation, azimuth)`, `Sun::at_hour(hour, latitude)`; per-frame `set_sun` is cheap. |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
 | PP1 | post-processing | **Wired**: `Settings::post: PostSettings`, `Engine::set_colour_lut`; `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported. No auto exposure yet (`Exposure` may grow an `Auto` variant). |
@@ -347,7 +347,7 @@ Each overnight unit landed in a named slot; every row is now wired.
 | MP1 | per-program dispatch | **Wired**, no API change: materials of different programs share a frame (see [Shading programs](#shading-programs)). The example's hero has its own toon program, examples/game_toon.wgsl. |
 | G2c | GI speckles and streaks | **Wired**, no API change |
 
-Units still arriving (MV1 per-object motion vectors, LC3, RQ1, TP3) are internal: their planned changes need no new engine API. Anything they do need is an addition under the rules below.
+MV1, MQ2 and RQ1 are wired without new engine calls. Other internal feature units (including TP3) need no new engine API as planned; anything they do need is an addition under the rules below.
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.
 
@@ -380,6 +380,7 @@ New handles follow the `Id<T>` pattern, new settings are new fields with default
 | `Settings::default()`: GI and TR1 on, aerial perspective, height fog and volumetric fog on | G2b, TR1b, AT1, VF1 | set the fields off explicitly to reproduce older frames |
 | `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
 | Soft sun plus local lights renders (was rejected) | LC1 | none |
+| `Settings::local_shadows` follows LC3: default/max count 128; `resolution` is the maximum atlas face size; positive count enables all contributing RT locals | LC3 | names/signatures unchanged; set `count: 4` for the old map budget, `count: 0` to disable |
 | `Light::Point`/`Spot` gained `source_radius` | LC2 | add `source_radius: 0.0` to light literals for hard shadows |
 | `MaterialDesc` gained `thin` and `transparency` | TP1 | none for `..Default::default()` constructions |
 | `Settings` gained `local_shadows`, `post`, `reflections`; post and volumetric fog are on by default | LC1, PP1, R1n, VF1 | `post: PostSettings { enabled: false, .. }` and `volumetric_fog: None` reproduce older frames |
@@ -401,6 +402,7 @@ The scene is a dusk courtyard with every feature on by default:
 
 Options:
 - `--path rt|nonrt|auto`; `--frames N` (48); `--every K` (8: a PNG every K-th frame and the last); `--size WxH` (1280x720).
+- `--night-lanterns` dims the sky/moon and courtyard emitters and adds 24 warm point lights (27 locals total); `--local-shadow-count N` selects a 0-128 map budget, with any positive value enabling all-light RT.
 - `--hour H` (17.5) or `--time dusk|noon`; `--sun-speed DEG_PER_S` with `--sun-after FRAME`; `--still`; `--timing-frames N`.
 - `--exposure STOPS`; `--no-gi`, `--no-temporal`, `--no-post`, `--no-glass`, `--no-particles`, `--no-volumetric-fog`; `--render-scale native|quality|performance`; `--sky atmosphere|uniform`.
 - `--quarry MANIFEST` loads the registered quarry scans and RLE2 sky in place of the procedural ground, shown as a visible sky. `run.json` beside the frames records the path, settings, per-frame CPU time and GPU render spans. These are development-build timings on a shared GPU, not performance claims.
