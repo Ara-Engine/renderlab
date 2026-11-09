@@ -1412,15 +1412,18 @@ fn vsm_directions(b:u32) {
 }
 // Directions a pixel evaluates this frame: n8e.x per batch, nsq.x batches.
 fn vsm_total()->u32 {return vsm.n8e.x*vsm.nsq.x;}
-// P-NSQ: the prepared pixel's visible directions over every batch of the frame. Each batch is
-// N8e's lookup of eight directions (its walk cap counts that batch's visits); vsm_batch_work is the
-// pixel's ring tests and walk visits over all batches (the walk orders' estimate).
+// P-NSQ: the prepared pixel's visible directions over the frame's batches `first`, `first` +
+// `stride`, ... (P-NSQ3: the Surface walk splits a pixel's batches over several lanes; every
+// other caller takes them all, 0 and 1). Each batch is N8e's lookup of eight directions (its walk
+// cap counts that batch's visits) and depends on nothing another batch computed, so any split
+// gives each batch the same result. vsm_batch_work is the pixel's ring tests and walk visits over
+// these batches (the walk orders' estimate).
 var<private> vsm_batch_work:u32;
-fn vsm_walk_batches(px:VsmPixel)->u32 {
+fn vsm_walk_batches(px:VsmPixel,first:u32,stride:u32)->u32 {
     let r=px.r;
     var visible=0u;
     vsm_batch_work=0u;
-    for(var b=0u;b<vsm.nsq.x;b+=1u) {
+    for(var b=first;b<vsm.nsq.x;b+=stride) {
         if b>0u {vsm_directions(b);}
         vsm_visits=0u;
         let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
@@ -1489,7 +1492,7 @@ fn vsm_lookup_tile(group:vec2<u32>,local:vec2<u32>) {
     if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
     let r=px.r;
     if VSM_SKIP==2u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(u32(dot(vsm_shear_at(r.primitive&7u),vsm_own[0])>1e30)+256u));return;}
-    vsm_visible(id,vsm_walk_batches(px));
+    vsm_visible(id,vsm_walk_batches(px,0u,1u));
     // The tile's work for the next frame's order: its heaviest lane's, where it is not light.
     let work=vsm_batch_work;
     if VSM_PERSIST!=0u && VSM_ORDER && !casters && work>=VSM_HEAVY {
