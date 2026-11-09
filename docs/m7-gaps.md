@@ -451,6 +451,26 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 
 ## Startup
 
+P-SHC2 ([p-shc2.md](p-shc2.md)) has **no production structural split** and
+does not meet the 1–2 s first-new-shader target. Its compile-only buffered-input
+screen leaves 11.04 s RT / 16.93 s non-RT of native compilation after removing GI
+preparation, reflection preparation and light visibility (single contended
+samples, no producer passes, never rendered). Removing GI alone leaves
+25.43 / 31.36 s. Other helper work and user shading remain; a broader split is
+unproven. A staged, shading-model-independent user/engine request protocol still
+needs implementation, complete-image identity and ARA1 frame-cost evidence.
+The existing background fallback keeps the previous revision while compiling;
+this is responsiveness, not a reduction in new-shader driver codegen.
+Its extended watcher fixture passes exact old/updated-versus-sync/restored HDR
+checks on both paths (286/313 old frames), but edit-to-readback remains
+40.70/32.31 s in that contended fixture. The corrected game API probe is
+26.18/24.08 s; these are distinct endpoints. Fresh-initial-program empty-cache
+startup is 30.12/30.31 s, populated replay 1.16/0.89 s, with complete RGBA8/HDR
+identity at matched frames 0/1. All six ARA1 game/PBR/quarry baseline replays
+complete; no split frame-time A/B exists. Lib: 199 passed. Main runtime and
+default shaders are unchanged; this unit verifies the existing fallback and
+leaves the optimization open.
+
 P-SHC ([p-shc.md](p-shc.md)) fixes a mixed-program reload transaction gap: active
 MP1 list pipelines and dependent glass hit shading now compile before publication,
 and unused list variants stay lazy. The corrected game probe requires a real source

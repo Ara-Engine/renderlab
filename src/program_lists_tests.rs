@@ -135,6 +135,34 @@ fn gpu_cc1_codegen() {
                 source.replace(from, "vec3<f32>(0.0)")
             }
             "no-gi" => body(&source, "gi_prepare", "gi_rx_valid=false;"),
+            // P-SHC2 compile-only boundary screen. Reuse an existing read binding
+            // to model full precision deferred inputs; these pipelines never render.
+            "buffered-gi" | "buffered-engine" => {
+                let gi = body(
+                    &source,
+                    "gi_prepare",
+                    r#"
+                    let at=(input.pixel.y*textureDimensions(primary_hdr).x+input.pixel.x)*14u;
+                    gi_rx_valid=gi_table[at].x!=0u;
+                    for(var i=0u;i<9u;i+=1u) {gi_rx_sky[i]=bitcast<vec4<f32>>(gi_table[at+1u+i]).xyz;}
+                    for(var i=0u;i<4u;i+=1u) {gi_rx_bounce[i]=bitcast<vec4<f32>>(gi_table[at+10u+i]).xyz;}
+                "#,
+                );
+                if variant == "buffered-gi" {
+                    gi
+                } else {
+                    let reflection = body(
+                        &gi,
+                        "rl_reflection_prepare",
+                        "rl_specular=bitcast<vec4<f32>>(gi_table[(pixel.y*size.x+pixel.x)*14u]);",
+                    );
+                    body(
+                        &reflection,
+                        "light_visibility",
+                        "return bitcast<f32>(gi_table[input.pixel.y*textureDimensions(primary_hdr).x+input.pixel.x][s.index&3u]);",
+                    )
+                }
+            }
             "no-lights" => body(&source, "light_count", "return 0u;"),
             "no-decals" => body(&source, "decal_inputs", "return decal_none();"),
             "no-software" => body(&source, "rs_trace", "return RsHit(tmax,vec4<u32>(0u));"),
@@ -147,10 +175,14 @@ fn gpu_cc1_codegen() {
             )
             .unwrap(),
         };
+        // P-SHC2: the game return gained emission; never time a no-op tint again.
+        let seam =
+            "return min(exposed+expose(max(params.glow,vec3<f32>(0.0))),vec3<f32>(65504.0));";
+        assert_eq!(edited.matches(seam).count(), 1, "fresh edit seam moved");
         edited = edited.replace(
-            "return exposed;",
+            seam,
             &format!(
-                "return exposed*vec3<f32>({},1.0,1.0);",
+                "return min(exposed+expose(max(params.glow,vec3<f32>(0.0))),vec3<f32>(65504.0))*vec3<f32>({},1.0,1.0);",
                 0.8 + f64::from(salt % 100000 + index as u32) / 1e6
             ),
         );
@@ -555,17 +587,73 @@ fn gpu_shc_mixed_reload() {
             0.6 + f64::from(salt) / 1e10
         ),
     );
-    let background = r.start_program_reload(&standard, &source).unwrap();
+    let out = std::env::var_os("RENDERLAB_SHC2_OUT").map(PathBuf::from);
+    // P-SHC2: measure the actual file-watch publication endpoint, rather than
+    // discarding the expensive result after eight old-image frames.
+    let file = out
+        .as_ref()
+        .map(|p| p.join("watched.wgsl"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("renderlab-shc2-{}.wgsl", std::process::id()))
+        });
+    if let Some(out) = &out {
+        std::fs::create_dir_all(out).unwrap();
+    }
+    std::fs::write(&file, crate::STANDARD_PROGRAM).unwrap();
+    let mut watch = crate::program_watch::ShaderWatch::programs_only();
+    watch.watch_program(&standard, &file, crate::STANDARD_PROGRAM);
+    let edit_start = std::time::Instant::now();
+    std::fs::write(&file, &source).unwrap();
+    assert!(watch.poll_async(&mut r).is_empty());
     let mut max_frame_ms = 0.0f64;
     let mut active_frames = 0;
-    for _ in 0..8 {
-        active_frames += usize::from(!background.is_finished());
+    let published_seconds = loop {
+        let events = watch.poll_async(&mut r);
+        if !events.is_empty() {
+            assert_eq!(events.len(), 1);
+            assert!(events[0].result.is_ok());
+            break edit_start.elapsed().as_secs_f64();
+        }
+        assert!(
+            edit_start.elapsed().as_secs() < 150,
+            "reload did not publish"
+        );
+        active_frames += 1;
         let start = std::time::Instant::now();
         assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
         max_frame_ms = max_frame_ms.max(start.elapsed().as_secs_f64() * 1e3);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let created = r.pipelines.created;
+    let updated = render(&mut r, &mut scene, &refs, false, 1).0;
+    let image_seconds = edit_start.elapsed().as_secs_f64();
+    assert_ne!(updated, before);
+    assert_eq!(
+        r.pipelines.created, created,
+        "publication left first-frame compile work"
+    );
+    r.reload_program(&standard, &source).unwrap();
+    assert_eq!(
+        render(&mut r, &mut scene, &refs, false, 1).0,
+        updated,
+        "background output differs from synchronous output"
+    );
+    r.reload_program(&standard, crate::STANDARD_PROGRAM)
+        .unwrap();
+    assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
+    std::fs::remove_file(&file).unwrap();
+    let row = serde_json::json!({"path":if nonrt(){"nonrt"}else{"rt"},
+        "publish_seconds":published_seconds,"edit_to_readback_seconds":image_seconds,
+        "old_frames":active_frames,"max_old_frame_readback_ms":max_frame_ms,
+        "background_equals_sync_hdr":true,"restore_equals_baseline_hdr":true});
+    if let Some(out) = out {
+        std::fs::write(
+            out.join("background.json"),
+            serde_json::to_vec_pretty(&row).unwrap(),
+        )
+        .unwrap();
     }
-    background.discard();
-    eprintln!("SHC background active_frames={active_frames} max_frame_ms={max_frame_ms:.3}");
+    eprintln!("SHC2 {row}");
     assert!(
         max_frame_ms < 2000.0,
         "background compilation blocked the render thread"
