@@ -282,3 +282,68 @@ retry, with the reason "blocked by policy". The target and staged executables
 remain; no alternate deletion mechanism was used. JSON/log identities and
 inspected PNGs remain too. `verification-summary.json` collects final results.
 No raw HDR dump larger than 5 MB was generated or retained.
+
+
+## Integration with current main
+
+The coordinator requested a follow-up merge after the original push. Main through
+`8e3c06f` (including RQ1 and MV1) is merged at `537511a`. The resolution keeps
+`atmosphere_volume_groups(injection, scene)` and API1b's generation key
+(`tlas_builds + hardware_build`), rather than the in-place TLAS object's address.
+Shadow-resource selection remains below the scatter check. VF2's raw/temporal
+visibility volumes, current-view phase, finer froxels and integration bindings
+are retained. Post and primary match main exactly, sharing
+`primary_ray_gpu::FRAME_BYTES` (now 144 bytes with object motion).
+
+Small additional edit outside atmosphere: the engine's headless adapter honors
+`InstanceFlags::from_env_or_default()`. Previously a release example ignored
+`WGPU_VALIDATION=1`; the follow-up fox run explicitly enables that flag. No
+validation cost is used for a performance comparison.
+
+The integration runner can stage the example with `example`, and `VF2_FOX`
+adds a 48-frame RT flight with explicit volumetric fog to the same guarded batch.
+Final integrated test/example rebuild and staging took 115.79/30.70 seconds,
+respectively, using two jobs and this unit's target on D:.
+
+
+Integration lease `integrated-a-1` ran **2026-11-09 00:00:16.821 to
+00:02:37.068 UTC**, **140.25 seconds**, exit 0, no guard failures. The runner
+reread and acknowledged the latest root order giving RD1 priority, waited for
+`m7-rd1 rd1-a window released`, then acquired its single <=15-minute lease.
+No game, foreign GPU process or compiler was sampled; available RAM was
+7,682-10,616 MiB. Hardware remains the RTX 4070 SUPER / Ryzen 7800X3D above.
+
+- **194 lib tests passed**, 0 failed, 162 ignored (3.23 s test time).
+- WGSL ground-distance regression passed.
+- Both actual device paths passed the window scene's stills, 0.9 m camera
+  move/hold and moving-sun sequences. The native dense images and
+  `windows-{fixture,motion,sun,angle-sun}-sheet.png` under
+  `D:/Coding/renderlab-work/vf2/images/integrated-a/` were inspected.
+  Beams remain distinct, with dark intervening air. Soft edges, startup
+  speckling and transient non-RT moving-sun light leakage remain recorded gaps.
+- **RT example with `--fox --volumetric-fog`, 48 frames at 960x540 passed**
+  with `WGPU_VALIDATION=1`. `fox-rt/run.json` confirms HardwareRt/Traced,
+  animation, fog g=0.8, post/motion blur, GI and native TR1. All seven saved
+  frames were inspected in `fox-rt-sheet.png`, and `fox-rt/frame-047.png`
+  at native size. The fox changes pose while the camera moves; shadows and
+  surrounding objects remain coherent. No BLAS/TLAS validation fault or any
+  new validation-error type appears.
+- The two window processes and fox each log **ten existing
+  `VUID-StandaloneSpirv-None-10684` diagnostics**; lib and isolated ground
+  regression log zero. This is a successful TLAS regression check, not a
+  clean-Vulkan-validation claim.
+
+Final test binary SHA-256:
+`553e1af0a6d71c3294fede794bb9c3d6a15c825ad1482220140f28bacc7125b6`.
+Final example SHA-256:
+`f9b66554c540fb4d7e93cc3aeaed4aa91a9f38126d9fa0d908e693fb67c17f83`.
+Source hashes match the verified merged checkout. `integration-summary.json`,
+`images/integrated-a/{build-identity,example-identity,steps}.json` and
+`runs/integrated-a-1.json` retain identities, exact settings and resources.
+Rustfmt (edition 2024), runner syntax and diff checks pass. No additional
+Unreal, reference or quarry campaign was run for this integration request.
+
+The coordinator deleted the old target before this follow-up. Automatic
+approval review again rejected deletion of the newly rebuilt
+`D:/Coding/renderlab-work/vf2/target` with "blocked by policy"; the target
+remains for coordinator cleanup. No new raw HDR dump over 5 MB was generated.
