@@ -581,3 +581,18 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   Ordinary PP1's
   baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
   record-only sweep proves cross-build identity while leaving that gate strict.
+
+
+## M8 local lights follow-up (P-LTS3, 2026-11-09)
+
+[P-LTS3](p-lts3.md) promotes no renderer change. Current-main profiling still
+selects light_sample (22.9% sampled states), unit_normal (10.5%) and light-index
+reads (7.5%); achieved occupancy is unavailable. BRDF hoisting, exact scaled-normal
+reuse and tangent memoization showed no established benefit under contention.
+A conservative froxel-plane culling prototype is archived, with 199 lib tests,
+24 LC PNGs, 960p and odd-edge pairs passing identity; its remaining 1080p pair,
+128/129 boundary, MP1, courtyard, full quarry and quiet timing are unresolved.
+The 3.5 ms target on both paths remains open. No quiet before/after numbers or
+complete quality promotion are claimed. Preserve the 128-shadow budget, every
+contributing RT light and LC2 softness in the follow-up. Raw summaries and staged
+baseline/C binaries live under D:/Coding/renderlab-work/p-lts3.
