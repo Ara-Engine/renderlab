@@ -6,15 +6,18 @@
 //! an emblem decal and a wet puddle decal, and the skinned Fox walking with a toon program
 //! (`--fox Fox.glb`, fetched by `scripts/m7-sk1-asset.py`; without it the hero is two toon
 //! spheres). A low sun through the physical atmosphere, volumetric and height fog, GI,
-//! traced reflections (RT), temporal reconstruction and post (bloom, motion blur, grading)
-//! render it from a camera fly path. Every `--every`-th frame is written as PNG.
+//! traced reflections (hardware rays on RT, software rays on non-RT), temporal
+//! reconstruction and post (bloom, motion blur, grading) render it from a camera fly path.
+//! Every `--every`-th frame is written as PNG.
 //!
 //! Options: `--hour H` (sun time of day at 40 degrees latitude; default 17.5, dusk) or
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
-//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky uniform`, `--no-volumetric-fog`, `--no-gi`,
-//! `--no-temporal`, `--no-post`, `--render-scale`, `--exposure`, and `--quarry MANIFEST`,
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
+//! uniform`, `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
+//! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
+//! `--exposure`, and `--quarry MANIFEST`,
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
 //! keys `asset`, `limits`, `environment`, `exposure_stops`).
 //!
@@ -56,6 +59,7 @@ struct Args {
     glass: bool,
     particles: bool,
     local_shadows: bool,
+    reflections: bool,
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
@@ -86,6 +90,7 @@ impl Args {
             glass: true,
             particles: true,
             local_shadows: true,
+            reflections: true,
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
@@ -143,6 +148,7 @@ impl Args {
                 "--no-glass" => a.glass = false,
                 "--no-particles" => a.particles = false,
                 "--no-local-shadows" => a.local_shadows = false,
+                "--no-reflections" => a.reflections = false,
                 "--fox" => a.fox = Some(value()?.into()),
                 "--hour" => a.hour = value()?.parse()?,
                 "--time" => {
@@ -263,6 +269,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 exposure: Exposure::Manual { stops: exposure },
+                reflections: if args.reflections {
+                    ReflectionSettings::default()
+                } else {
+                    ReflectionSettings::off()
+                },
                 ..Default::default()
             },
             ..Default::default()
