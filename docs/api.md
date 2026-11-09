@@ -338,7 +338,7 @@ Each overnight unit landed in a named slot; every row is now wired.
 | TP1, TP2 | glass, foliage, particles | **Wired**: `MaterialDesc::{transparency, thin}`; `cutout`/`AlphaMask` for foliage; `create_emitter`/`update_emitter`/`remove_emitter`/`set_particle_step` with `EmitterId`. TP2's coloured glass shadows, RT glass reflections and coverage AA need no API. |
 | AT1 | atmosphere, fog | **Wired**: `Sky::Atmosphere(AtmosphereMedium)` (the default sky); `Settings::{aerial_perspective, height_fog, volumetric_fog}`. See [Sky, atmosphere and fog](#sky-atmosphere-and-fog). |
 | SK1 | skinned meshes | **Wired**: `create_skinned_mesh`, `add_skinned_asset -> SkinnedHandles`, `set_joint_palette(MeshId, &[Mat4])`; `ClipPlayer` and `AnimationPose` re-exported. The example's hero is the walking Fox. |
-| LC1, LC2 | many lights, soft local shadows | **Wired**: `set_lights` unchanged; `Settings::local_shadows: LocalShadows`; `Light::{Point, Spot}::source_radius` (LC2). The example has three soft-shadowed lanterns. |
+| LC1, LC2, LC3 | many lights, soft local shadows, cached atlas | **Wired**: `set_lights` unchanged; `Settings::local_shadows: LocalShadows` defaults to 128 cached map lights, or all contributing RT locals; `Light::{Point, Spot}::source_radius` (LC2). The courtyard has three authored sources and adds 24 in night-lantern mode. |
 | AT2 | time of day | **Wired**: `Sun::at(elevation, azimuth)`, `Sun::at_hour(hour, latitude)`; per-frame `set_sun` is cheap. |
 | DC1 | decals | **Wired** (phase 2): `set_decals(&[Decal])`, with `Decal`, `DecalBlend`, `DecalTextures`, `DecalTexture` and `DecalTextureKind` re-exported. See [Decals](#decals). |
 | PP1 | post-processing | **Wired**: `Settings::post: PostSettings`, `Engine::set_colour_lut`; `PostSettings`, `Tonemapper`, `DepthOfField` and `ColourLut` re-exported. No auto exposure yet (`Exposure` may grow an `Auto` variant). |
@@ -347,7 +347,7 @@ Each overnight unit landed in a named slot; every row is now wired.
 | MP1 | per-program dispatch | **Wired**, no API change: materials of different programs share a frame (see [Shading programs](#shading-programs)). The example's hero has its own toon program, examples/game_toon.wgsl. |
 | G2c | GI speckles and streaks | **Wired**, no API change |
 
-Units still arriving (RQ1, TP3) are internal: their planned changes need no new engine API. Anything they do need is an addition under the rules below.
+MV1, MQ2 and RQ1 are wired without new engine calls. Other internal feature units (including TP3) need no new engine API as planned; anything they do need is an addition under the rules below.
 
 New handles follow the `Id<T>` pattern, new settings are new fields with defaults, and new sky and exposure kinds are new enum variants. None of these change an existing call.
 

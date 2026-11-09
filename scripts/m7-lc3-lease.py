@@ -45,12 +45,13 @@ def main():
             continue
         # Optional dependencies from the reviewed directive, e.g. an owner's two
         # requested dry runs. Count only releases after that exact directive.
-        owner = os.environ.get("LC3_WAIT_RELEASE_OWNER")
-        if owner:
+        owners = os.environ.get("LC3_WAIT_RELEASE_OWNER", "").split(",")
+        if any(owners):
             lines = SCHEDULE.read_text(encoding="utf-8").splitlines()
             later = lines[lines.index(reviewed) + 1:]
-            count = sum(line.startswith(owner + " ") and "window released" in line for line in later)
-            if count < int(os.environ.get("LC3_WAIT_RELEASE_COUNT", "1")):
+            required = int(os.environ.get("LC3_WAIT_RELEASE_COUNT", "1"))
+            if any(sum(line.startswith(owner + " ") and "window released" in line for line in later) < required
+                   for owner in owners if owner):
                 time.sleep(1)
                 continue
         floor = float(os.environ.get("LC3_PREFLIGHT_MB", "4096"))
