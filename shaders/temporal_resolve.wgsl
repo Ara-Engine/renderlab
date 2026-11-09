@@ -59,10 +59,9 @@ const TR1_SPATIAL_START:u32=2u;
 // continued histories are clamped to the plain min/max box of this frame's 3x3 samples (all
 // nine samples, no mean or variance: P0's box, docs/m7-p0-claims.md).
 const TR1_BOX:u32=8u;
-// TR2 (docs/m7-tr2.md): Catmull-Rom next to edges (Reconstruction::edge_catmull_rom) and
-// interpolating upscaled young history (Reconstruction::upscale_interpolation).
-const TR1_EDGE_CATMULL_ROM:u32=16u;
-const TR1_UPSCALE_INTERPOLATION:u32=32u;
+// TR2 (docs/m7-tr2.md): upscaled young history interpolates the internal grid
+// (Reconstruction::upscale_interpolation).
+const TR1_UPSCALE_INTERPOLATION:u32=16u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -374,9 +373,6 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     if blur>0.0 {h.window=min(h.window,1.0+tr1.windows.w/blur);}
     if shown==4u && (tr1.flags.y&TR1_CATMULL_ROM)!=0u && blur>0.0 {
         let wx=tr1_catmull_rom(f.x);let wy=tr1_catmull_rom(f.y);
-        // TR2: next to an edge (or the image border) a rejected outer tap takes its nearest
-        // inner tap's value, clamp-to-edge style, instead of falling back to bilinear.
-        let edges=(tr1.flags.y&TR1_EDGE_CATMULL_ROM)!=0u;
         var sharp=vec3<f32>(0.0);
         var outer=true;
         for(var i=0;i<16 && outer;i+=1) {
@@ -386,14 +382,8 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
                 c=inner[o.y*2+o.x];
             } else {
                 let x=tr1_tap(base+o,s,expected,size);
-                if x.w>0.0 {
-                    c=x.xyz*scale;
-                } else if edges {
-                    let n=clamp(o,vec2<i32>(0),vec2<i32>(1));
-                    c=inner[n.y*2+n.x];
-                } else {
-                    outer=false;
-                }
+                outer=x.w>0.0;
+                c=x.xyz*scale;
             }
             sharp=fma(c,vec3<f32>(wx[i&3]*wy[i>>2u]),sharp);
         }
