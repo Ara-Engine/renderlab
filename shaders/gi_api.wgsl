@@ -133,11 +133,20 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> f32 {
 // finer level when it has a value: the same walk gi_probe requests. The level sums hold the
 // level whose weight it returns.
 fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> f32 {
-    let s=gi_sample(world,level,bin);
-    if GI_REFINE==0u || !gi_sampled_split || level==0u { return s; }
-    let f=gi_sample(world,level-1u,bin);
-    if f>1e-6 { return f; }
-    return gi_sample(world,level,bin);
+    // CC1: one sampler call site, preserving the original level/finer/restore walk.
+    // Repeating its body here multiplies the driver's inlined lookup graph.
+    var sample_level=level;
+    for(var step=0u;step<3u;step+=1u) {
+        let s=gi_sample(world,sample_level,bin);
+        if step==0u {
+            if GI_REFINE==0u || !gi_sampled_split || level==0u {return s;}
+            sample_level=level-1u;
+        } else if step==1u {
+            if s>1e-6 {return s;}
+            sample_level=level;
+        } else {return s;}
+    }
+    return 0.0;
 }
 
 // Unoccluded environment irradiance in lux around n, as `ambient` computes it.

@@ -1,6 +1,6 @@
 """CC1 compile screens and PC1 startup matrix. Own targets/evidence on D:.
 
-build dev|release; gpu LABEL screen|game-gate|quarry-check|all|dev|release|edit-dev|edit-release|lib
+build dev|release; gpu LABEL screen|game-gate|after-game|quarry-check|all|dev|release|edit-dev|edit-release|lib
 All waits are in this process; each acquired n8 lease is <=15 minutes.
 """
 import datetime
@@ -59,6 +59,29 @@ def batch(label, profile):
             result = batch(f"{label}-{item}", f"game-{item}")
             if result: return result
         return 0
+    if profile == "after-game":
+        # Reject runtime regressions before spending the rest of a lease on assets.
+        for build in ("dev", "release"):
+            for path in ("rt", "nonrt"):
+                groups = []
+                for name in ("base-final", label):
+                    groups.append([json.loads((OUT / "runs" / f"{name}-{build}" /
+                        f"game-{path}-{mode}" / "run.json").read_text())
+                        for mode in ("off", "cold", "warm")])
+                hashes = [[f["rgba8_sha256"] for f in run["frames"] if f["written"]]
+                    for group in groups for run in group]
+                if any(h != hashes[0] for h in hashes):
+                    raise RuntimeError(f"game identity failed: {build}/{path}")
+                means = [sum(run["timing"]["wall_ms_per_frame"] for run in group)/len(group)
+                    for group in groups]
+                print(json.dumps(dict(build=build, path=path, before_ms=means[0], after_ms=means[1])), flush=True)
+                if means[1] > means[0]*1.01:
+                    print("CC1 rejects candidate: more than 1% slower in the game screen", flush=True)
+                    return 76
+        result = batch(label, "quarry-check")
+        if result: return result
+        result = batch(label, "all")
+        return result or batch("base-final", "all")
     if profile == "quarry-check":
         for item in ("dev", "release"):
             for name in ("base-final", label):
@@ -112,6 +135,11 @@ def batch(label, profile):
 
 
 def memory_ready(scene, path, mode):
+    deadline = OUT / "unit-deadline.json"
+    if deadline.exists() and time.time() >= datetime.datetime.fromisoformat(
+            json.loads(deadline.read_text())["latest_process_start"]).timestamp():
+        print(f"CC1 time-box: no new {scene}/{path}/{mode} process", flush=True)
+        return False
     if scene != "quarry": return True
     available = load("m6-film-run").resource_sample()["available_mbytes"]
     if available >= 7168: return True
