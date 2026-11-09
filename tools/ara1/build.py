@@ -86,7 +86,7 @@ def main():
     a = p.parse_args()
     a.root.mkdir(parents=True, exist_ok=True)
     if a.engine == "renderlab":
-        command = ["cargo", "check" if a.check else "build", "--example", "ara1_capture", "--example", "ara1_prepare", "-j", str(a.jobs)]
+        command = ["cargo", "check" if a.check else "build", "--example", "ara1_capture", "--example", "ara1_prepare", "--example", "ara1_reference", "--example", "game_scene", "-j", str(a.jobs)]
         if a.release:command.append("--release")
         return run_build(command, os.environ | {"CARGO_TARGET_DIR": str(a.root / "target-renderlab"), "CARGO_BUILD_JOBS": str(a.jobs)}, REPO, a.root, "renderlab")
     source = a.ara_source or (a.root / "ara-main" if a.engine == "ara-main" else Path("C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92"))

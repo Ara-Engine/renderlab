@@ -143,6 +143,7 @@ fn native_scene(a: &asset::Asset, s: &scene::Scene) -> Result<native::Scene> {
         );
     }
     let mut geometry = Vec::new();
+    let mut geometry_keys = std::collections::HashMap::new();
     let mut map = Vec::new();
     for mesh in &a.meshes {
         let mut primitives = Vec::new();
@@ -182,9 +183,15 @@ fn native_scene(a: &asset::Asset, s: &scene::Scene) -> Result<native::Scene> {
             let mut hash = Sha256::new();
             hash.update(bytemuck::cast_slice(&vertices));
             hash.update(bytemuck::cast_slice(&p.indices));
+            let key: [u8; 32] = hash.finalize().into();
+            if let Some(&index) = geometry_keys.get(&key) {
+                primitives.push((index, p.material as usize));
+                continue;
+            }
+            geometry_keys.insert(key, geometry.len());
             primitives.push((geometry.len(), p.material as usize));
             geometry.push(native::Geometry {
-                key: hash.finalize().into(),
+                key,
                 vertices,
                 lods: vec![native::Lod {
                     indices: p.indices.clone(),
@@ -219,10 +226,64 @@ fn native_scene(a: &asset::Asset, s: &scene::Scene) -> Result<native::Scene> {
             });
         }
     }
+    let mut materials: Vec<_> = a.materials.iter().map(material).collect();
+    if s.effects.alpha_panel {
+        let vertices: Vec<_> = scene::PANEL_POSITIONS
+            .iter()
+            .enumerate()
+            .map(|(i, &position)| native::Vertex {
+                position,
+                normal: [0.0, 0.0, 1.0],
+                uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]][i],
+                uv1: [0.0; 2],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+                terrain_weights: 0,
+                #[cfg(not(ara1_v3))]
+                reserved: 0,
+                #[cfg(ara1_v3)]
+                color: u32::MAX,
+            })
+            .collect();
+        let mut m = native::Material::default();
+        m.pbr.base_color = scene::PANEL_COLOR;
+        m.pbr.emissive_roughness[3] = 0.18;
+        m.pbr.flags[0] = 2;
+        m.pbr.flags[1] |= ara::DOUBLE_SIDED;
+        let material = materials.len();
+        materials.push(m);
+        let index = geometry.len();
+        geometry.push(native::Geometry {
+            key: Sha256::digest(bytemuck::cast_slice(&vertices)).into(),
+            vertices,
+            lods: vec![native::Lod {
+                indices: vec![0, 1, 2, 0, 2, 3],
+                error: 0.0,
+            }],
+            bounds: [Vec3::new(0.55, 0.05, 4.3), Vec3::new(3.05, 2.55, 4.3)],
+            deforming: false,
+            revision: 0,
+            #[cfg(ara1_v3)]
+            vertex_colors: false,
+        });
+        instances.push(native::Instance {
+            entity: instances.len() as u64 + 1,
+            name: "ARA1 coverage panel".into(),
+            geometry: index,
+            material,
+            world: Mat4::IDENTITY,
+            previous_world: Mat4::IDENTITY,
+            #[cfg(ara1_v3)]
+            casts_shadows: true,
+            #[cfg(ara1_v3)]
+            paint: None,
+            #[cfg(ara1_v3)]
+            receives_decals: true,
+        });
+    }
     Ok(native::Scene {
         geometry,
         instances,
-        materials: a.materials.iter().map(material).collect(),
+        materials,
         textures: a.textures.len() as u32,
         #[cfg(ara1_v3)]
         decals: Vec::new(),
@@ -666,8 +727,19 @@ fn main() -> Result<()> {
         } else {
             let empty = ara::Scene {
                 meshes: vec![],
-                materials: vec![],
-                textures: vec![],
+                materials: vec![ara::Material::default()],
+                textures: vec![
+                    ara::Texture {
+                        size: [1, 1],
+                        rgba: vec![255; 4],
+                        srgb: false,
+                    },
+                    ara::Texture {
+                        size: [1, 1],
+                        rgba: vec![128, 128, 255, 255],
+                        srgb: false,
+                    },
+                ],
                 lights: vec![],
                 sun_direction: source.sun_direction,
                 sun_lux: source.sun_lux,
@@ -686,8 +758,35 @@ fn main() -> Result<()> {
         if args[1] == "raster" {
             quality.ray_queries = None;
         }
+        if !spec.effects.reflections {
+            quality.ray_queries = None;
+            quality.reflections = None;
+            quality.reflection_captures = None;
+        }
+        if !spec.effects.local_shadows {
+            quality.local_shadows = None;
+        }
         renderer.set_quality(quality)?;
-        renderer.set_probe_surfaces(Some(&load_bake(&cache, &spec)?))?;
+        renderer.set_look(ara_render::look::Look {
+            sky: spec
+                .effects
+                .atmosphere
+                .then_some(ara_render::look::Sky::default()),
+            fog: spec.effects.fog.then_some(ara_render::look::Fog {
+                extinction: 0.01,
+                height: 90.0,
+                base: 0.0,
+                tint: [1.0; 3],
+                albedo: 0.9,
+                anisotropy: 0.3,
+            }),
+            bloom: if spec.effects.post { 0.035 } else { 0.0 },
+            ..Default::default()
+        })?;
+        if spec.effects.gi {
+            renderer.set_probe_surfaces(Some(&load_bake(&cache, &spec)?))?;
+        }
+        let mut readiness_frames = 0;
         for (i, f) in spec.frames.iter().enumerate() {
             if f.cut {
                 renderer.reset_temporal_history();
@@ -695,6 +794,17 @@ fn main() -> Result<()> {
             let c = camera(f);
             let start = Instant::now();
             renderer.render(&c, 2.0_f32.powf(spec.exposure_stops))?;
+            if i == 0 && args[1] == "hybrid" {
+                let deadline = Instant::now();
+                while renderer.ray_pipelines_pending() {
+                    ensure!(
+                        deadline.elapsed().as_secs() < 120,
+                        "hybrid ray pipelines did not become ready"
+                    );
+                    renderer.render(&c, 2.0_f32.powf(spec.exposure_stops))?;
+                    readiness_frames += 1;
+                }
+            }
             let cpu = start.elapsed().as_secs_f64() * 1e3;
             let passes: Vec<_> = renderer
                 .timings()
@@ -723,7 +833,8 @@ fn main() -> Result<()> {
                 }
             }
             rows.push(
-                json!({"index":i,"phase":f.phase,"cut":f.cut,"cpu_service_ms":cpu,"passes":passes}),
+                json!({"index":i,"phase":f.phase,"cut":f.cut,"cpu_service_ms":cpu,"passes":passes,
+                    "probe_gi_ready":renderer.probe_gi_ready(),"probe_gi_needs_frame":renderer.probe_gi_needs_frame()}),
             );
         }
         fs::write(
@@ -731,7 +842,7 @@ fn main() -> Result<()> {
             serde_json::to_vec_pretty(
                 &json!({"engine":"ara","path":args[1],"adapter":renderer.gpu().info(),"size":spec.size,
             "startup_to_readback_ms":first,"settings":format!("{quality:?}"),"geometry":"native instanced, shared uncompressed RLA mips","frames":rows,
-            "notes":spec.notes,"startup_minimal":spec.startup_minimal,"timing_scope":"synchronous render service; pass sums are not an end-to-end GPU span","probe_acquisition":"prebaked on RT; separately charged"}),
+            "notes":spec.notes,"startup_minimal":spec.startup_minimal,"readiness_frames":readiness_frames,"timing_scope":"synchronous render service; pass sums are not an end-to-end GPU span","probe_acquisition":"prebaked on RT; separately charged"}),
             )?,
         )?;
         renderer.gpu().assert_clean()?;

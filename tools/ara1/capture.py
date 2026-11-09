@@ -173,6 +173,9 @@ def main(engine):
     record["images"]={f.name:digest(f) for f in a.out.glob("frame-*.png")}
     if not record["exit_code"] and a.mode!="bake":
         expected={f"frame-{i:04}.png" for i,f in enumerate(scene["frames"]) if f["capture"]}
+        if a.mode=="reference" and os.environ.get("ARA1_REFERENCE_INDICES"):
+            selected={int(i) for i in os.environ["ARA1_REFERENCE_INDICES"].split(',')}
+            expected={f"frame-{i:04}.png" for i in selected if scene["frames"][i]["capture"]}
         if set(record["images"])!=expected or not (a.out/"engine.json").exists():
             raise RuntimeError("successful process did not produce the registered frames and timing record")
     (a.out/"process.json").write_text(json.dumps(record,indent=2)+"\n")

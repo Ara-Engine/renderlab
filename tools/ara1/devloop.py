@@ -6,6 +6,7 @@ An adapter edit is an adapter-edit proxy, not a renderer incremental-build resul
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -32,14 +33,21 @@ def main():
     result=dict(recipe=recipe,recipe_sha256=digest(a.recipe),source=source,steps=[],measurement="process start / staged edit to a fresh GPU readback marker; excludes PNG encoding and scanout")
     start=time.perf_counter()
     try:
-        if edit:edit.write_bytes(original+b"\n// ARA1 development-loop measurement edit\n")
+        if edit:
+            if recipe.get('edit_find'):
+                find=recipe['edit_find'].encode();replacement=recipe['edit_replace'].encode()
+                if find not in original:raise ValueError('staged edit did not match')
+                edit.write_bytes(original.replace(find,replacement))
+            else:edit.write_bytes(original+b"\n// ARA1 development-loop measurement edit\n")
+            result['staged_before_sha256']=__import__('hashlib').sha256(original).hexdigest()
+            result['staged_edited_sha256']=digest(edit)
         for index,command in enumerate(recipe["commands"]):
             check_order(order)
             if recipe["engine"]=="ara":ara_process_check()
             if not isinstance(command,list) or not command or not all(isinstance(v,str) for v in command):raise ValueError("command must be a nonempty string array")
             began=time.perf_counter()
             with (out/f"step-{index}.log").open("w") as log:
-                child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+                child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=os.environ|recipe.get('environment',{}),creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
                 observed=None
                 while child.poll() is None:
                     if observed is None and ready.exists():observed=(time.perf_counter()-start)*1000
