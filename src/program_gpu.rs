@@ -419,9 +419,12 @@ pub(super) fn compile_program(
     label: &str,
     source: &str,
 ) -> Result<Compiled, Error> {
+    let started = Instant::now();
     let parameters = program::declares_parameters(source);
     let raster = program::compose(preludes.raster, source, Stage::Raster, parameters);
+    let compose_raster = started.elapsed();
     let layout = program::analyse(label, source, &raster)?.parameters;
+    let analysis = started.elapsed() - compose_raster;
     if layout.is_some() != parameters {
         return Err(Error::Shader(format!(
             "program `{label}`: struct Parameters must be declared at module scope"
@@ -440,6 +443,8 @@ pub(super) fn compile_program(
             &head, source, parameters,
         ));
     }
+    let compose = started.elapsed() - analysis;
+    let modules_started = Instant::now();
     let scopes = OperationScopes::new(abi.device);
     let raster_variant = |head: &str| {
         module(
@@ -480,6 +485,20 @@ pub(super) fn compile_program(
             .chain(modules.temporal.iter()),
     ) {
         abi.modules.insert(&composed.source, module.clone());
+    }
+    if std::env::var_os("RENDERLAB_STARTUP_PROFILE").is_some() {
+        eprintln!(
+            "program_compile label={label:?} compose_ms={:.3} analyse_ms={:.3} modules_and_cache_ms={:.3} total_ms={:.3} raster_bytes={} traced_bytes={:?}",
+            compose.as_secs_f64() * 1e3,
+            analysis.as_secs_f64() * 1e3,
+            modules_started.elapsed().as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3,
+            raster.source.len(),
+            traced_sources
+                .iter()
+                .map(|c| c.source.len())
+                .collect::<Vec<_>>()
+        );
     }
     Ok(Compiled { modules, layout })
 }
@@ -674,44 +693,12 @@ impl Renderer {
         p: &crate::Program,
         source: &str,
     ) -> Result<ReloadReport, ReloadError> {
-        if let Some(fault) = self.fault.get() {
-            return Err(ReloadError::Fault(fault.clone()));
-        }
-        let start = Instant::now();
-        let rejected = |error: Error| ReloadError::Rejected {
-            diagnostic: error.to_string(),
-            compile: start.elapsed(),
-        };
-        if !Arc::ptr_eq(&p.0.renderer, &self.identity) {
-            return Err(rejected(Error::InvalidInput(
-                "program belongs to another renderer",
-            )));
-        }
-        self.pipelines.attempts += 1;
-        self.program_cache.refresh(&self.device);
-        let abi = self.program_abi();
-        let built = compile_program(&abi, &self.preludes(), &p.0.label, source).and_then(|c| {
-            let sets: Vec<_> = self
-                .hot_sets(p.id(), &c.modules)
-                .map(|v| (&c.modules, p.0.label.as_str(), v))
-                .collect();
-            let built = create_sets(&abi, &sets)?;
-            let variants: Vec<_> = sets.iter().map(|s| s.2).collect();
-            Ok((c, variants, built))
-        });
-        let (compiled, variants, built) = match built {
-            Ok(built) => built,
-            Err(Error::Fault(Fault(message))) => {
-                let _ = self.fault.set(Fault(message));
-                return Err(ReloadError::Fault(self.fault.get().unwrap().clone()));
-            }
-            Err(error) => return Err(rejected(error)),
-        };
-        let compile = start.elapsed();
-        if let Some(fault) = self.fault.get() {
-            return Err(ReloadError::Fault(fault.clone()));
-        }
-        Ok(self.install_program(p, source, compiled, variants, built, compile))
+        let reload = self.start_program_reload_with_policy(
+            p,
+            source,
+            crate::shader_compiler::CompilePolicy::WarmLibraries,
+        )?;
+        self.finish_program_reload(reload)
     }
 
     fn install_program(
@@ -842,6 +829,7 @@ impl Renderer {
             self.check_fault()?;
         }
         self.hot = sets;
+        self.hot_lists.clear();
         Ok(())
     }
 
@@ -850,6 +838,7 @@ impl Renderer {
     #[cfg(test)]
     pub(super) fn ensure_standard_pipelines(&mut self) {
         let hot = std::mem::take(&mut self.hot);
+        let hot_lists = std::mem::take(&mut self.hot_lists);
         let sets = [
             Variant::Lit,
             Variant::Hardware,
@@ -862,6 +851,7 @@ impl Renderer {
         .collect();
         self.ensure_pipelines(sets).unwrap();
         self.hot = hot;
+        self.hot_lists = hot_lists;
     }
 
     /// Sets named `Parameters` values of `m`, keeping its others: a buffer write, no
@@ -1009,6 +999,9 @@ impl Renderer {
             })
             .collect();
         if missing.is_empty() {
+            self.hot_lists.clear();
+            self.hot_lists
+                .extend(ids.iter().map(|&id| (id, streamed, shading)));
             return Ok(());
         }
         let stage = if streamed {
@@ -1069,6 +1062,9 @@ impl Renderer {
             let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
             slot.pipelines.list[usize::from(streamed)][shading] = Some(pipeline);
         }
+        self.hot_lists.clear();
+        self.hot_lists
+            .extend(ids.iter().map(|&id| (id, streamed, shading)));
         Ok(())
     }
 

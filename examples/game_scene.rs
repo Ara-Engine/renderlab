@@ -38,6 +38,25 @@ use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
 
 const GAME_PROGRAM: &str = include_str!("game_scene.wgsl");
 const TOON_PROGRAM: &str = include_str!("game_toon.wgsl");
+// PC1/P-SHC: include the current programmable emission term in a real visible edit.
+const GAME_RETURN: &str =
+    "return min(exposed+expose(max(params.glow,vec3<f32>(0.0))),vec3<f32>(65504.0));";
+fn tinted_program(tint: f32) -> String {
+    assert_eq!(
+        GAME_PROGRAM.matches(GAME_RETURN).count(),
+        1,
+        "reload probe return seam moved"
+    );
+    let expression = GAME_RETURN
+        .strip_prefix("return ")
+        .unwrap()
+        .strip_suffix(';')
+        .unwrap();
+    GAME_PROGRAM.replace(
+        GAME_RETURN,
+        &format!("return ({expression})*vec3<f32>({tint},1.0,1.0);"),
+    )
+}
 const FPS: f32 = 30.0;
 /// The scene's latitude for `Sun::at_hour`, radians.
 const LATITUDE: f32 = 0.7;
@@ -292,7 +311,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Two programs in one frame: photoreal props and the toon hero (MP1).
-    let program = engine.create_program("game", GAME_PROGRAM)?;
+    // P-SHC diagnostic: a live, previously unseen initial shader, not a cache flush.
+    let game_program = std::env::var("RENDERLAB_SHC_PROGRAM_TINT")
+        .ok()
+        .map(|tint| {
+            let tint: f32 = tint.parse().expect("P-SHC tint must be f32");
+            assert!((0.5..=1.0).contains(&tint));
+            tinted_program(tint)
+        });
+    let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
+    let program = engine.create_program("game", game_program)?;
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -718,10 +746,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
         let written = frame % args.every == 0 || frame + 1 == args.frames;
         let mut image_hash = None;
+        let mut hdr_hash = None;
         if written {
             let image = engine.capture()?;
             first_image_seconds.get_or_insert_with(|| start.elapsed().as_secs_f64());
             image_hash = Some(format!("{:x}", Sha256::digest(&image.rgba8)));
+            if std::env::var_os("RENDERLAB_SHC_HDR_HASHES").is_some() {
+                let mut capture = engine
+                    .renderer_mut()
+                    .try_capture_hdr()?
+                    .ok_or("HDR capture busy")?;
+                engine.device().poll(wgpu::PollType::wait_indefinitely())?;
+                let bytes = capture.try_read()?.ok_or("HDR readback pending")?;
+                hdr_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+            }
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
         }
         frames.push(serde_json::json!({
@@ -730,6 +768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash,
+            "hdr_sha256": hdr_hash,
         }));
         last_camera = Some(camera);
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
@@ -742,10 +781,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|s| s.parse::<f32>().ok())
                 .filter(|t| (0.5..1.0).contains(t))
                 .unwrap_or(0.83);
-            let edit = GAME_PROGRAM.replace(
-                "return exposed;",
-                &format!("return exposed*vec3<f32>({tint},1.0,1.0);"),
-            );
+            let edit = tinted_program(tint);
+            assert_ne!(edit, game_program, "probe must change the shader");
             let edited = Instant::now();
             engine.reload_program(program, &edit)?;
             let compiled_seconds = edited.elapsed().as_secs_f64();
@@ -762,12 +799,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.render(&camera)?;
             let retained = engine.capture()?;
             write_png(&args.out.join("rejected-retained.png"), &retained)?;
-            engine.reload_program(program, GAME_PROGRAM)?;
+            engine.reload_program(program, game_program)?;
             engine.render(&camera)?;
             let restored = engine.capture()?;
             write_png(&args.out.join("restored.png"), &restored)?;
+            let repeated = Instant::now();
+            engine.reload_program(program, &edit)?;
+            engine.render(&camera)?;
+            engine.capture()?;
+            let repeat_seconds = repeated.elapsed().as_secs_f64();
+            engine.reload_program(program, game_program)?;
+            engine.render(&camera)?;
+            engine.capture()?;
             reload = Some(serde_json::json!({"compile_seconds": compiled_seconds,
-                "edit_to_readback_seconds": image_seconds, "invalid_edit_rejected": rejected}));
+                "edit_to_readback_seconds": image_seconds, "repeat_to_readback_seconds": repeat_seconds,
+                "tint":tint,"source_changed":edit != game_program,
+                "edited_rgba8_sha256":format!("{:x}",Sha256::digest(&image.rgba8)),
+                "invalid_edit_rejected": rejected}));
         }
     }
     let compilation: Vec<_> = engine.take_compilation_timings().into_iter().map(|t|
