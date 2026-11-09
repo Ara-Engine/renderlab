@@ -104,8 +104,8 @@ build time are separate from frame-service timing. No final performance claim.
 Own target was `D:/Coding/plts3-target` (-j 2), outside renderlab-work. Automatic
 approval review rejected the combined stop/archive/native target-removal command
 as **blocked by policy**; nothing in it executed. Stop/archive succeeded separately.
-Deletion was not retried by another method; the retained target is handed to root
-for cleanup. Evidence, staged binaries, inspected PNGs and source patches are
+Deletion was not retried by another method; cleanup was handed to root. A final
+read-only check confirms that the target no longer exists. Evidence, staged binaries, inspected PNGs and source patches are
 separate from that disposable target. Production sources were restored exactly.
 
 Follow-up: on an admitted quiet host, run `scripts/p-lts3-final.py LABEL` through
