@@ -1,4 +1,6 @@
 //! Offscreen, scene-matched measurement adapter. Renderer implementation stays untouched.
+#[path = "../tools/ara1/allocation.rs"]
+mod allocation;
 #[path = "../tools/ara1/scene.rs"]
 mod scene;
 use renderlab::{asset, engine::*};
@@ -190,6 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine.reload_program(engine.standard_program(), &fs::read_to_string(path)?)?;
     }
     let hash_hdr = env::var_os("ARA1_HDR_HASH").is_some();
+    let memory = env::var_os("ARA1_MEMORY").is_some();
+    if memory {
+        allocation::write(&engine, &out.join("memory-upload.json"))?;
+    }
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut first_image_ms = None;
     let mut rows = Vec::new();
@@ -258,7 +264,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "cpu_parts_ms":{"preparation":ms(c.preparation),"shadow_preparation":ms(c.shadow_preparation),
                 "shadow_upload":ms(c.shadow_upload),"shadow_encode":ms(c.shadow_encode),"visibility":ms(c.visibility),
                 "packing":ms(c.packing),"upload":ms(c.upload),"encode":ms(c.encode),"submit":ms(c.submit),"poll":ms(c.poll)},
-            "hdr_sha256":hdr_sha256}));
+            "hdr_sha256":hdr_sha256,
+            "dxgi":(memory && (frame.capture || index == 0)).then(allocation::usage)}));
         for sample in engine.poll()?.gpu {
             gpu.push(gpu_row(sample));
         }
@@ -266,6 +273,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.capture()?;
     for sample in engine.poll()?.gpu {
         gpu.push(gpu_row(sample));
+    }
+    if memory {
+        allocation::write(&engine, &out.join("memory.json"))?;
     }
     let mut reload = None;
     if env::var_os("ARA1_SHADER_RELOAD").is_some() {

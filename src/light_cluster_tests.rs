@@ -901,6 +901,8 @@ fn gi_light_counts(r: &mut Renderer, count: u32) -> Vec<u32> {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    // P-MEM: use the production cold layout rather than hard-coding 128-direction padding.
+    let lights_offset = crate::renderer::gi_cache::light_cold_offset(r.indirect().directions);
     let source = format!(
         "@group(0) @binding(0) var<storage,read> table:array<u32>;
 @group(0) @binding(1) var<storage,read_write> counts:array<atomic<u32>>;
@@ -910,7 +912,7 @@ fn gi_light_counts(r: &mut Renderer, count: u32) -> Vec<u32> {
  let cold=64u+slots*24u+slot*table[23];
  if (table[cold]&2u)!=0u {{ return; }}
  for(var i=0u;i<{count}u;i+=1u) {{
-  if (table[cold+31u+(i>>5u)]&(1u<<(i&31u)))!=0u {{ atomicAdd(&counts[i],1u); }}
+  if (table[cold+{lights_offset}u+(i>>5u)]&(1u<<(i&31u)))!=0u {{ atomicAdd(&counts[i],1u); }}
  }}
 }}"
     );

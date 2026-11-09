@@ -515,3 +515,35 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   reload timing remain unmeasured. Corrupt-file/key tests pass on CPU; GPU replay after
   corruption or an actual driver update remains untested. Cache files are bounded to
   64 MiB and concurrent writers retain the last complete snapshot.
+
+## M8 GPU memory (P-MEM, 2026-11-09)
+
+- [P-MEM](p-mem.md) retains exact cold-record/software-BVH packing, inactive post
+  target allocation and unreachable spot cube-face removal. Complete HDR/PNG,
+  RF, Q-walk and local-light transition hashes match. Logical GI capacity,
+  directions, texture detail, 128-light capacity and shadow resolution stay fixed.
+- **Ara's per-scene memory target remains open.** Warm process-local DXGI MiB:
+  game RT 1131.047 -> 1035.047, non-RT 1435.797 -> 1339.797; PBR RT
+  1199.047 -> 1103.047, non-RT 1375.797 -> 1279.797; 64 point lights RT
+  1138.734 -> 1042.734, non-RT 1827.484 -> 1731.484; quarry daylight RT
+  3375.547 -> 3343.547, non-RT 4177.422 -> 3944.234. Only quarry RT falls
+  below the historical Ara comparator. Live allocation savings are different
+  from reservation/local savings; 64 MiB block packing varies between replays.
+- Remaining non-RT quarry live memory is 3699.730 MiB. Largest allocations are
+  material mips (1024.022), walk records (447.518), packed software-GI geometry
+  (about 311.934), source vertices/indices (303.673/298.345), raster cluster
+  geometry (226.911), GI table (192), sun clipmap layers (192), GI sources (88)
+  and TR1 histories (168.750). Their active consumers prevent simply deleting
+  copies or reducing capacities.
+- Next exact candidates: address-compatible geometry sharing/encoding; sparse
+  physical GI backing with unchanged logical capacity; reuse of ancillary GI
+  buffers across light-bitset growth; proven non-overlapping target aliasing;
+  mixed point/spot physical atlas layout with cache and fade identity. Initial
+  GI allocation cannot simply be deferred: lighting upload precedes GI prepare
+  and would change the first frame's binding. Existing BLAS compaction and
+  upload retirement already operate and are not new P-MEM savings.
+- Non-RT timing deltas in the contended identity runs are unresolved; a short
+  paired quiet retime is requested. No frame-time regression clearance or
+  performance superiority follows from the memory/hash proof. Ordinary PP1's
+  baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
+  record-only sweep proves cross-build identity while leaving that gate strict.

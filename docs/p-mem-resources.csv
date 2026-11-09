@@ -1,0 +1,1848 @@
+case,phase,name,kind,category,before_bytes,after_bytes,saved_bytes,before_count,after_count
+ara-pbr-oriented-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+ara-pbr-oriented-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+ara-pbr-oriented-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+ara-pbr-oriented-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+ara-pbr-oriented-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+ara-pbr-oriented-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+ara-pbr-oriented-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+ara-pbr-oriented-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+ara-pbr-oriented-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+ara-pbr-oriented-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+ara-pbr-oriented-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+ara-pbr-oriented-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+ara-pbr-oriented-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+ara-pbr-oriented-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,384,384,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,892160,892160,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,11968,11968,0,1,1
+ara-pbr-oriented-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,390560,390560,0,12,12
+ara-pbr-oriented-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594112,5594112,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8848144,8848144,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c image size,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+ara-pbr-oriented-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,1152,1152,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,3008,3008,0,2,2
+ara-pbr-oriented-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,1472,1472,0,1,1
+ara-pbr-oriented-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+ara-pbr-oriented-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1744,1744,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,3072,3072,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,3072,3072,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8847360,8847360,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16400,16400,0,1,1
+ara-pbr-oriented-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,94896,94896,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,16777216,16777216,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8388608,8388608,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,12224,12224,0,1,1
+ara-pbr-oriented-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,3072,3072,0,1,1
+ara-pbr-oriented-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+ara-pbr-oriented-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+ara-pbr-oriented-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,854064,854064,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+ara-pbr-oriented-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+ara-pbr-oriented-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+ara-pbr-oriented-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+ara-pbr-oriented-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+ara-pbr-oriented-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+ara-pbr-oriented-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+ara-pbr-oriented-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+ara-pbr-oriented-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+ara-pbr-oriented-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+ara-pbr-oriented-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+ara-pbr-oriented-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+ara-pbr-oriented-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+ara-pbr-oriented-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+ara-pbr-oriented-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+ara-pbr-oriented-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+ara-pbr-oriented-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+ara-pbr-oriented-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+ara-pbr-oriented-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+ara-pbr-oriented-nonrt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+ara-pbr-oriented-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,67173120,67173120,0,39,39
+ara-pbr-oriented-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,776784,599600,177184,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+ara-pbr-oriented-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+ara-pbr-oriented-nonrt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+ara-pbr-oriented-nonrt,warm,light records,buffer,Other buffers,80,80,0,1,1
+ara-pbr-oriented-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-nonrt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+ara-pbr-oriented-nonrt,warm,mesh indices,buffer,Geometry buffers,569568,569568,0,12,12
+ara-pbr-oriented-nonrt,warm,mesh tangents,buffer,Geometry buffers,202752,202752,0,12,12
+ara-pbr-oriented-nonrt,warm,mesh vertices,buffer,Geometry buffers,607872,607872,0,12,12
+ara-pbr-oriented-nonrt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+ara-pbr-oriented-nonrt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+ara-pbr-oriented-nonrt,warm,post bloom down,texture,Post textures,7045632,6176,7039456,6,6
+ara-pbr-oriented-nonrt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+ara-pbr-oriented-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+ara-pbr-oriented-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+ara-pbr-oriented-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+ara-pbr-oriented-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+ara-pbr-oriented-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+ara-pbr-oriented-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+ara-pbr-oriented-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+ara-pbr-oriented-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+ara-pbr-oriented-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+ara-pbr-oriented-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-nonrt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+ara-pbr-oriented-nonrt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-nonrt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+ara-pbr-oriented-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+ara-pbr-oriented-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+ara-pbr-oriented-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+ara-pbr-oriented-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,832,832,0,1,1
+ara-pbr-oriented-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+ara-pbr-oriented-nonrt,warm,software reflection geometry,buffer,Other buffers,1647136,1647136,0,1,1
+ara-pbr-oriented-nonrt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+ara-pbr-oriented-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+ara-pbr-oriented-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,92592,92592,0,6,6
+ara-pbr-oriented-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+ara-pbr-oriented-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+ara-pbr-oriented-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+ara-pbr-oriented-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+ara-pbr-oriented-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+ara-pbr-oriented-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+ara-pbr-oriented-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+ara-pbr-oriented-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+ara-pbr-oriented-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+ara-pbr-oriented-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+ara-pbr-oriented-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+ara-pbr-oriented-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,390560,390560,0,12,12
+ara-pbr-oriented-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+ara-pbr-oriented-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+ara-pbr-oriented-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+ara-pbr-oriented-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+ara-pbr-oriented-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+ara-pbr-oriented-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+ara-pbr-oriented-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+ara-pbr-oriented-nonrt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+ara-pbr-oriented-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,67173120,67173120,0,39,39
+ara-pbr-oriented-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+ara-pbr-oriented-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+ara-pbr-oriented-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-nonrt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+ara-pbr-oriented-nonrt,upload,mesh indices,buffer,Geometry buffers,569568,569568,0,12,12
+ara-pbr-oriented-nonrt,upload,mesh tangents,buffer,Geometry buffers,202752,202752,0,12,12
+ara-pbr-oriented-nonrt,upload,mesh vertices,buffer,Geometry buffers,607872,607872,0,12,12
+ara-pbr-oriented-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+ara-pbr-oriented-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+ara-pbr-oriented-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+ara-pbr-oriented-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+ara-pbr-oriented-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+ara-pbr-oriented-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+ara-pbr-oriented-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,944,944,0,1,1
+ara-pbr-oriented-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+ara-pbr-oriented-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+ara-pbr-oriented-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+ara-pbr-oriented-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+ara-pbr-oriented-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+ara-pbr-oriented-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+ara-pbr-oriented-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+ara-pbr-oriented-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+ara-pbr-oriented-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+ara-pbr-oriented-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+ara-pbr-oriented-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+ara-pbr-oriented-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+ara-pbr-oriented-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+ara-pbr-oriented-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+ara-pbr-oriented-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+ara-pbr-oriented-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+ara-pbr-oriented-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+ara-pbr-oriented-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,128,128,0,1,1
+ara-pbr-oriented-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+ara-pbr-oriented-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17695072,17695072,0,1,1
+ara-pbr-oriented-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+ara-pbr-oriented-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+ara-pbr-oriented-rt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+ara-pbr-oriented-rt,warm,immutable material texture,texture,Material/environment/LUT textures,67173120,67173120,0,39,39
+ara-pbr-oriented-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+ara-pbr-oriented-rt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+ara-pbr-oriented-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+ara-pbr-oriented-rt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+ara-pbr-oriented-rt,warm,light records,buffer,Other buffers,80,80,0,1,1
+ara-pbr-oriented-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-rt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+ara-pbr-oriented-rt,warm,mesh indices,buffer,Geometry buffers,572256,572256,0,12,12
+ara-pbr-oriented-rt,warm,mesh tangents,buffer,Geometry buffers,202752,202752,0,12,12
+ara-pbr-oriented-rt,warm,mesh vertices,buffer,Geometry buffers,609024,609024,0,12,12
+ara-pbr-oriented-rt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+ara-pbr-oriented-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+ara-pbr-oriented-rt,warm,post bloom down,texture,Post textures,7045200,5712,7039488,6,6
+ara-pbr-oriented-rt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+ara-pbr-oriented-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+ara-pbr-oriented-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+ara-pbr-oriented-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+ara-pbr-oriented-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+ara-pbr-oriented-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+ara-pbr-oriented-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+ara-pbr-oriented-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+ara-pbr-oriented-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+ara-pbr-oriented-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+ara-pbr-oriented-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+ara-pbr-oriented-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+ara-pbr-oriented-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+ara-pbr-oriented-rt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+ara-pbr-oriented-rt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-rt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+ara-pbr-oriented-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+ara-pbr-oriented-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+ara-pbr-oriented-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+ara-pbr-oriented-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1280,1280,0,1,1
+ara-pbr-oriented-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,67840,67840,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,67072,67072,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,19968,19968,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,69376,69376,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,70400,70400,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,72800,72800,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,70144,70144,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,69120,69120,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,66656,66656,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,68096,68096,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,70144,70144,0,1,1
+ara-pbr-oriented-rt,warm,renderlab hardware 1 TLAS 13,acceleration structure,BLAS/TLAS,5456,5456,0,1,1
+ara-pbr-oriented-rt,warm,shadow sampling records,buffer,Other buffers,336,336,0,1,1
+ara-pbr-oriented-rt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+ara-pbr-oriented-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+ara-pbr-oriented-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,42368,42368,0,4,4
+ara-pbr-oriented-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,32,32,0,2,2
+ara-pbr-oriented-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+ara-pbr-oriented-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+ara-pbr-oriented-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,9696,9696,0,1,1
+ara-pbr-oriented-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+ara-pbr-oriented-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+ara-pbr-oriented-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+ara-pbr-oriented-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+ara-pbr-oriented-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+ara-pbr-oriented-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+ara-pbr-oriented-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+ara-pbr-oriented-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+ara-pbr-oriented-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+ara-pbr-oriented-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+ara-pbr-oriented-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+ara-pbr-oriented-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+ara-pbr-oriented-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+ara-pbr-oriented-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+ara-pbr-oriented-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+ara-pbr-oriented-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+ara-pbr-oriented-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+ara-pbr-oriented-rt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+ara-pbr-oriented-rt,upload,immutable material texture,texture,Material/environment/LUT textures,67173120,67173120,0,39,39
+ara-pbr-oriented-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+ara-pbr-oriented-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+ara-pbr-oriented-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+ara-pbr-oriented-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+ara-pbr-oriented-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+ara-pbr-oriented-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+ara-pbr-oriented-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+ara-pbr-oriented-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+ara-pbr-oriented-rt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+ara-pbr-oriented-rt,upload,mesh indices,buffer,Geometry buffers,572256,572256,0,12,12
+ara-pbr-oriented-rt,upload,mesh tangents,buffer,Geometry buffers,202752,202752,0,12,12
+ara-pbr-oriented-rt,upload,mesh vertices,buffer,Geometry buffers,609024,609024,0,12,12
+ara-pbr-oriented-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+ara-pbr-oriented-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+ara-pbr-oriented-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,67840,67840,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 11,acceleration structure,BLAS/TLAS,165472,165472,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,67072,67072,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,48384,48384,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,69376,69376,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,70400,70400,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,72800,72800,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,70144,70144,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,69120,69120,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,66656,66656,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,68096,68096,0,1,1
+ara-pbr-oriented-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,70144,70144,0,1,1
+ara-pbr-oriented-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-base-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-base-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-base-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-base-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-base-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-base-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-base-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-base-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-base-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-base-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-base-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-base-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-base-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-base-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-base-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+game-base-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,448,448,0,1,1
+game-base-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+game-base-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,295920,295920,0,1,1
+game-base-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,5248,5248,0,1,1
+game-base-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-base-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594880,5594880,0,1,1
+game-base-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8847488,8847488,0,1,1
+game-base-nonrt,warm,N1c image size,buffer,Other buffers,80,80,0,1,1
+game-base-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+game-base-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,736,736,0,1,1
+game-base-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,1312,1312,0,2,2
+game-base-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,512,512,0,1,1
+game-base-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+game-base-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+game-base-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1760,1760,0,1,1
+game-base-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+game-base-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-base-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-base-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8847360,8847360,0,1,1
+game-base-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16400,16400,0,1,1
+game-base-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,37808,37808,0,1,1
+game-base-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,27962032,27962032,0,1,1
+game-base-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-base-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-base-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8389392,8389392,0,1,1
+game-base-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,5504,5504,0,1,1
+game-base-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-base-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+game-base-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+game-base-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,340272,340272,0,1,1
+game-base-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+game-base-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-base-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+game-base-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+game-base-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+game-base-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+game-base-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-base-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-base-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-base-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-base-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-base-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-base-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-base-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-base-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-base-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-base-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-base-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-base-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-base-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+game-base-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-base-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-base-nonrt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-base-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-base-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-base-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-base-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-base-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-base-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-base-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-base-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-base-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-base-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-base-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,312608,241488,71120,1,1
+game-base-nonrt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-base-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-base-nonrt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-base-nonrt,warm,light records,buffer,Other buffers,80,80,0,1,1
+game-base-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-base-nonrt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-base-nonrt,warm,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-base-nonrt,warm,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-base-nonrt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-base-nonrt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+game-base-nonrt,warm,post bloom down,texture,Post textures,7045664,6640,7039024,6,6
+game-base-nonrt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+game-base-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-base-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-base-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-base-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-base-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-base-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-base-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-base-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-base-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-base-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-base-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+game-base-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-nonrt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-base-nonrt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-base-nonrt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-base-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-base-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+game-base-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-base-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-base-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+game-base-nonrt,warm,software reflection geometry,buffer,Other buffers,655136,655136,0,1,1
+game-base-nonrt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-base-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-base-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,189728,189728,0,5,5
+game-base-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-base-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-base-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-base-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-base-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-base-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-base-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-base-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-base-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-base-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-base-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-base-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-base-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-base-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-base-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-base-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-base-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-base-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-base-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-base-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-base-nonrt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-base-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-base-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-base-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-base-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-base-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-base-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-base-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-base-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-base-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-base-nonrt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-base-nonrt,upload,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-base-nonrt,upload,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-base-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-base-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-base-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-base-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-base-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-base-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-base-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,1056,1056,0,1,1
+game-base-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-base-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-base-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-base-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-base-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-base-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-base-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-base-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-base-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-base-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-base-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-base-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-base-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-base-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-base-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-base-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-base-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-base-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-base-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-base-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-base-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17695232,17695232,0,1,1
+game-base-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-base-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-base-rt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-base-rt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-base-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-base-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-base-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-base-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-base-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-base-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-base-rt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-base-rt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-base-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-base-rt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-base-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-base-rt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-base-rt,warm,light records,buffer,Other buffers,80,80,0,1,1
+game-base-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-base-rt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-base-rt,warm,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-base-rt,warm,mesh vertices,buffer,Geometry buffers,251136,251136,0,14,14
+game-base-rt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-base-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+game-base-rt,warm,post bloom down,texture,Post textures,7045952,6464,7039488,6,6
+game-base-rt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+game-base-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-base-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-base-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-base-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-base-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-base-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-base-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-base-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-base-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-base-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-base-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+game-base-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-base-rt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-base-rt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-base-rt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-base-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-base-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+game-base-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-base-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,512,512,0,1,1
+game-base-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 14 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,warm,renderlab hardware 1 TLAS 15,acceleration structure,BLAS/TLAS,5888,5888,0,1,1
+game-base-rt,warm,shadow sampling records,buffer,Other buffers,336,848,-512,1,1
+game-base-rt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-base-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-base-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,114112,114112,0,3,3
+game-base-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,48,48,0,3,3
+game-base-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-base-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-base-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,51328,51328,0,1,1
+game-base-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-base-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-base-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-base-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-base-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-base-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-base-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-base-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-base-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-base-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-base-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-base-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-base-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-base-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-base-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-base-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-base-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-base-rt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-base-rt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-base-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-base-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-base-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-base-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-base-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-base-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-base-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-base-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-base-rt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-base-rt,upload,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-base-rt,upload,mesh vertices,buffer,Geometry buffers,251136,251136,0,14,14
+game-base-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-base-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-base-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,3840,3840,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 13,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 14,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-base-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-lights-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-lights-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-lights-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-lights-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-lights-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-lights-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-lights-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-lights-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-lights-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-lights-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-lights-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-lights-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-lights-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-lights-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,402653184,402653184,0,1,1
+game-lights-nonrt,warm,LC1 local shadow view matrices,buffer,Local shadow atlas,196608,196608,0,1,1
+game-lights-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+game-lights-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,448,448,0,1,1
+game-lights-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+game-lights-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,295920,295920,0,1,1
+game-lights-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,5248,5248,0,1,1
+game-lights-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-lights-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594880,5594880,0,1,1
+game-lights-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8847488,8847488,0,1,1
+game-lights-nonrt,warm,N1c image size,buffer,Other buffers,80,80,0,1,1
+game-lights-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+game-lights-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,736,736,0,1,1
+game-lights-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,1312,1312,0,2,2
+game-lights-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,512,512,0,1,1
+game-lights-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+game-lights-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+game-lights-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1760,1760,0,1,1
+game-lights-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+game-lights-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-lights-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-lights-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8847360,8847360,0,1,1
+game-lights-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16400,16400,0,1,1
+game-lights-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,37808,37808,0,1,1
+game-lights-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,27962032,27962032,0,1,1
+game-lights-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-lights-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-lights-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8389392,8389392,0,1,1
+game-lights-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,5504,5504,0,1,1
+game-lights-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-lights-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+game-lights-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+game-lights-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,340272,340272,0,1,1
+game-lights-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+game-lights-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-lights-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+game-lights-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+game-lights-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+game-lights-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+game-lights-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-lights-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-lights-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-lights-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-lights-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-lights-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-lights-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-lights-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-lights-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-lights-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-lights-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-lights-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-lights-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-lights-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+game-lights-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-lights-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-lights-nonrt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-lights-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-lights-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-lights-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-lights-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-lights-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-lights-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-lights-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-lights-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-lights-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-lights-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-lights-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,312608,241488,71120,1,1
+game-lights-nonrt,warm,indirect cache table,buffer,GI cache buffers,251658496,218104064,33554432,1,1
+game-lights-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-lights-nonrt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-lights-nonrt,warm,light records,buffer,Other buffers,5200,5200,0,1,1
+game-lights-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-lights-nonrt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-lights-nonrt,warm,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-lights-nonrt,warm,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-lights-nonrt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-lights-nonrt,warm,post DOF,texture,Post textures,17695488,1024,17694464,1,1
+game-lights-nonrt,warm,post bloom down,texture,Post textures,7045680,5632,7040048,6,6
+game-lights-nonrt,warm,post bloom up,texture,Post textures,7045808,6144,7039664,6,6
+game-lights-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-lights-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-lights-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-lights-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-lights-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-lights-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-lights-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-lights-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-lights-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-lights-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-lights-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+game-lights-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-nonrt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-lights-nonrt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-lights-nonrt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-lights-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-lights-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+game-lights-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-lights-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-lights-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+game-lights-nonrt,warm,software reflection geometry,buffer,Other buffers,655136,655136,0,1,1
+game-lights-nonrt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-lights-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-lights-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,189728,189728,0,5,5
+game-lights-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-lights-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-lights-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-lights-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-lights-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-lights-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-lights-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-lights-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-lights-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-lights-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-lights-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-lights-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-lights-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-lights-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-lights-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-lights-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-lights-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-lights-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-lights-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-lights-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-lights-nonrt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-lights-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-lights-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-lights-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-lights-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-lights-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-lights-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-lights-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-lights-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-lights-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-lights-nonrt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-lights-nonrt,upload,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-lights-nonrt,upload,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-lights-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-lights-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-lights-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-lights-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-lights-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-lights-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-lights-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,1056,1056,0,1,1
+game-lights-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-lights-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-lights-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-lights-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-lights-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-lights-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-lights-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-lights-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-lights-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-lights-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-lights-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-lights-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-lights-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-lights-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-lights-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-lights-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-lights-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-lights-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-lights-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-lights-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-lights-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17695232,17695488,-256,1,1
+game-lights-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-lights-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-lights-rt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-lights-rt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-lights-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-lights-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-lights-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-lights-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-lights-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-lights-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-lights-rt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-lights-rt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-lights-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-lights-rt,warm,indirect cache table,buffer,GI cache buffers,251658496,218104064,33554432,1,1
+game-lights-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-lights-rt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-lights-rt,warm,light records,buffer,Other buffers,5200,5200,0,1,1
+game-lights-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-lights-rt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-lights-rt,warm,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-lights-rt,warm,mesh vertices,buffer,Geometry buffers,251136,251264,-128,14,14
+game-lights-rt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-lights-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+game-lights-rt,warm,post bloom down,texture,Post textures,7045968,6480,7039488,6,6
+game-lights-rt,warm,post bloom up,texture,Post textures,7045808,6144,7039664,6,6
+game-lights-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-lights-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-lights-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-lights-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-lights-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-lights-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-lights-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-lights-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-lights-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-lights-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-lights-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+game-lights-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-lights-rt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-lights-rt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-lights-rt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-lights-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-lights-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+game-lights-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-lights-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,512,512,0,1,1
+game-lights-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 14 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,warm,renderlab hardware 1 TLAS 15,acceleration structure,BLAS/TLAS,5888,5888,0,1,1
+game-lights-rt,warm,shadow sampling records,buffer,Other buffers,336,848,-512,1,1
+game-lights-rt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-lights-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-lights-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,114112,114112,0,3,3
+game-lights-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,48,48,0,3,3
+game-lights-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-lights-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-lights-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,51328,51328,0,1,1
+game-lights-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-lights-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-lights-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-lights-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-lights-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-lights-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-lights-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-lights-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-lights-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-lights-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-lights-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-lights-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-lights-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-lights-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-lights-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-lights-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-lights-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-lights-rt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-lights-rt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-lights-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-lights-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-lights-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-lights-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-lights-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-lights-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-lights-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-lights-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-lights-rt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-lights-rt,upload,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-lights-rt,upload,mesh vertices,buffer,Geometry buffers,251136,251264,-128,14,14
+game-lights-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-lights-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-lights-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,3840,3840,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 13,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,0,73728,1,0
+game-lights-rt,upload,renderlab hardware 1 BLAS 14,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-lights-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-spots-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-spots-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-spots-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+game-spots-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-spots-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-spots-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-spots-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-spots-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-spots-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-spots-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-spots-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-spots-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-spots-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-spots-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,402653184,67108864,335544320,1,1
+game-spots-nonrt,warm,LC1 local shadow view matrices,buffer,Local shadow atlas,196608,196608,0,1,1
+game-spots-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+game-spots-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,448,448,0,1,1
+game-spots-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+game-spots-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,295920,295920,0,1,1
+game-spots-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,5248,5248,0,1,1
+game-spots-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-spots-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594880,5594880,0,1,1
+game-spots-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8847488,8847488,0,1,1
+game-spots-nonrt,warm,N1c image size,buffer,Other buffers,80,80,0,1,1
+game-spots-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+game-spots-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,736,736,0,1,1
+game-spots-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,1312,1312,0,2,2
+game-spots-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,512,512,0,1,1
+game-spots-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+game-spots-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+game-spots-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1760,1760,0,1,1
+game-spots-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+game-spots-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-spots-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-spots-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8847360,8847360,0,1,1
+game-spots-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16400,16400,0,1,1
+game-spots-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,37808,37808,0,1,1
+game-spots-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,27962032,27962032,0,1,1
+game-spots-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-spots-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,167772160,167772160,0,1,1
+game-spots-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8389392,8389392,0,1,1
+game-spots-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,5504,5504,0,1,1
+game-spots-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,5120,5120,0,1,1
+game-spots-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+game-spots-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+game-spots-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,340272,340272,0,1,1
+game-spots-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+game-spots-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+game-spots-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+game-spots-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+game-spots-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+game-spots-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+game-spots-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-spots-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+game-spots-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-spots-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-spots-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-spots-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-spots-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-spots-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-spots-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-spots-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-spots-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-spots-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-spots-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-spots-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+game-spots-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-spots-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-spots-nonrt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-spots-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-spots-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-spots-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-spots-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-spots-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-spots-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-spots-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-spots-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-spots-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-spots-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-spots-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,312608,241488,71120,1,1
+game-spots-nonrt,warm,indirect cache table,buffer,GI cache buffers,251658496,218104064,33554432,1,1
+game-spots-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-spots-nonrt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-spots-nonrt,warm,light records,buffer,Other buffers,5200,5200,0,1,1
+game-spots-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-spots-nonrt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-spots-nonrt,warm,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-spots-nonrt,warm,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-spots-nonrt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-spots-nonrt,warm,post DOF,texture,Post textures,17695488,1024,17694464,1,1
+game-spots-nonrt,warm,post bloom down,texture,Post textures,7045680,5632,7040048,6,6
+game-spots-nonrt,warm,post bloom up,texture,Post textures,7045808,6144,7039664,6,6
+game-spots-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-spots-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-spots-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-spots-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-spots-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-spots-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-spots-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-spots-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-spots-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-spots-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-spots-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+game-spots-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-nonrt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-spots-nonrt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-spots-nonrt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-spots-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-spots-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+game-spots-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-spots-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-spots-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+game-spots-nonrt,warm,software reflection geometry,buffer,Other buffers,655136,655136,0,1,1
+game-spots-nonrt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-spots-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-spots-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,189728,189728,0,5,5
+game-spots-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-spots-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-spots-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-spots-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-spots-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-spots-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-spots-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-spots-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-spots-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-spots-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-spots-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-spots-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,156688,156688,0,14,14
+game-spots-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-spots-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-spots-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-spots-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-spots-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-spots-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-spots-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-spots-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-spots-nonrt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-spots-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-spots-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-spots-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-spots-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-spots-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-spots-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-spots-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-spots-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-spots-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-spots-nonrt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-spots-nonrt,upload,mesh indices,buffer,Geometry buffers,227072,227072,0,14,14
+game-spots-nonrt,upload,mesh vertices,buffer,Geometry buffers,249680,249680,0,14,14
+game-spots-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-spots-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-spots-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+game-spots-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-spots-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-spots-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-spots-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,1056,1056,0,1,1
+game-spots-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-spots-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-spots-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-spots-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-spots-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-spots-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-spots-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-spots-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-spots-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-spots-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-spots-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-spots-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+game-spots-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+game-spots-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+game-spots-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+game-spots-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+game-spots-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-spots-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+game-spots-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+game-spots-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-spots-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17695232,17695232,0,1,1
+game-spots-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-spots-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-spots-rt,warm,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-spots-rt,warm,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-spots-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+game-spots-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-spots-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-spots-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-spots-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-spots-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-spots-rt,warm,indirect cache placement draws,buffer,GI cache buffers,64,64,0,1,1
+game-spots-rt,warm,indirect cache placement normals,buffer,GI cache buffers,896,896,0,1,1
+game-spots-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,896,896,0,1,1
+game-spots-rt,warm,indirect cache table,buffer,GI cache buffers,251658496,218104064,33554432,1,1
+game-spots-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-spots-rt,warm,instance transforms,buffer,Geometry buffers,896,896,0,14,14
+game-spots-rt,warm,light records,buffer,Other buffers,5200,5200,0,1,1
+game-spots-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-spots-rt,warm,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-spots-rt,warm,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-spots-rt,warm,mesh vertices,buffer,Geometry buffers,251136,251136,0,14,14
+game-spots-rt,warm,normal transforms,buffer,Geometry buffers,896,896,0,14,14
+game-spots-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+game-spots-rt,warm,post bloom down,texture,Post textures,7045968,6480,7039488,6,6
+game-spots-rt,warm,post bloom up,texture,Post textures,7045808,6144,7039664,6,6
+game-spots-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+game-spots-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+game-spots-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+game-spots-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+game-spots-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+game-spots-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+game-spots-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-spots-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+game-spots-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+game-spots-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+game-spots-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+game-spots-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+game-spots-rt,warm,primary placement draws,buffer,Other buffers,64,64,0,1,1
+game-spots-rt,warm,primary placement normals,buffer,Other buffers,896,896,0,1,1
+game-spots-rt,warm,primary placement transforms,buffer,Other buffers,1792,1792,0,1,1
+game-spots-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+game-spots-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+game-spots-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+game-spots-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,768,512,256,1,1
+game-spots-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 14 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,warm,renderlab hardware 1 TLAS 15,acceleration structure,BLAS/TLAS,5888,5888,0,1,1
+game-spots-rt,warm,shadow sampling records,buffer,Other buffers,336,336,0,1,1
+game-spots-rt,warm,visible instance IDs,buffer,Geometry buffers,224,224,0,14,14
+game-spots-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+game-spots-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,114112,114112,0,3,3
+game-spots-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,48,48,0,3,3
+game-spots-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+game-spots-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+game-spots-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,51328,51328,0,1,1
+game-spots-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+game-spots-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+game-spots-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+game-spots-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+game-spots-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+game-spots-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+game-spots-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+game-spots-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+game-spots-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+game-spots-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+game-spots-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+game-spots-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+game-spots-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+game-spots-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+game-spots-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+game-spots-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+game-spots-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+game-spots-rt,upload,immutable material factors,buffer,Other buffers,1088,1088,0,9,9
+game-spots-rt,upload,immutable material texture,texture,Material/environment/LUT textures,2816,2816,0,3,3
+game-spots-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+game-spots-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+game-spots-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+game-spots-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+game-spots-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+game-spots-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+game-spots-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+game-spots-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+game-spots-rt,upload,material program parameters,buffer,Other buffers,2304,2304,0,9,9
+game-spots-rt,upload,mesh indices,buffer,Geometry buffers,230144,230144,0,14,14
+game-spots-rt,upload,mesh vertices,buffer,Geometry buffers,251136,251136,0,14,14
+game-spots-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+game-spots-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+game-spots-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,3968,3968,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,3840,3840,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 13,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 13 (compacted),acceleration structure,BLAS/TLAS,73728,73728,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 14,acceleration structure,BLAS/TLAS,165376,165376,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,1408,1408,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,1280,1280,0,1,1
+game-spots-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+quarry-base-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-base-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+quarry-base-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+quarry-base-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-base-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-base-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-base-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-base-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-base-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-base-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-base-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-base-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-base-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-base-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-base-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+quarry-base-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,384,384,0,1,1
+quarry-base-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+quarry-base-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,256,256,0,1,1
+quarry-base-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,6706944,6706944,0,1,1
+quarry-base-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,237933632,237933632,0,12,12
+quarry-base-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594384,5594384,0,1,1
+quarry-base-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8848128,8848128,0,1,1
+quarry-base-nonrt,warm,N1c image size,buffer,Other buffers,64,64,0,1,1
+quarry-base-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+quarry-base-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,419584,419584,0,1,1
+quarry-base-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,1676736,1676736,0,2,2
+quarry-base-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,512,512,0,1,1
+quarry-base-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+quarry-base-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+quarry-base-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1760,1760,0,1,1
+quarry-base-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+quarry-base-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-base-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-base-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8848368,8848368,0,1,1
+quarry-base-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16416,16416,0,1,1
+quarry-base-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,52139616,52139616,0,1,1
+quarry-base-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,16777216,16777216,0,1,1
+quarry-base-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+quarry-base-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+quarry-base-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8388944,8388944,0,1,1
+quarry-base-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,6707200,6707200,0,1,1
+quarry-base-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-base-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+quarry-base-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+quarry-base-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,469256512,469256512,0,7,7
+quarry-base-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+quarry-base-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-base-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+quarry-base-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+quarry-base-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+quarry-base-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+quarry-base-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+quarry-base-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+quarry-base-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-base-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-base-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+quarry-base-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+quarry-base-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+quarry-base-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-base-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-base-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-base-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+quarry-base-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+quarry-base-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-base-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+quarry-base-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-base-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-base-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-base-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-base-nonrt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-base-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-base-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+quarry-base-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-base-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-base-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-base-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-base-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-base-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+quarry-base-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+quarry-base-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+quarry-base-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,426847968,327085936,99762032,1,1
+quarry-base-nonrt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-base-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-base-nonrt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-base-nonrt,warm,light records,buffer,Other buffers,80,80,0,1,1
+quarry-base-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-base-nonrt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-base-nonrt,warm,mesh indices,buffer,Geometry buffers,312837840,312837840,0,12,12
+quarry-base-nonrt,warm,mesh vertices,buffer,Geometry buffers,318424128,318424128,0,12,12
+quarry-base-nonrt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-base-nonrt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+quarry-base-nonrt,warm,post bloom down,texture,Post textures,7045200,5712,7039488,6,6
+quarry-base-nonrt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+quarry-base-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+quarry-base-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+quarry-base-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+quarry-base-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+quarry-base-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+quarry-base-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+quarry-base-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-base-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+quarry-base-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+quarry-base-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+quarry-base-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+quarry-base-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-base-nonrt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+quarry-base-nonrt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+quarry-base-nonrt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+quarry-base-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+quarry-base-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+quarry-base-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+quarry-base-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,928,928,0,1,1
+quarry-base-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+quarry-base-nonrt,warm,software reflection geometry,buffer,Other buffers,32,32,0,1,1
+quarry-base-nonrt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+quarry-base-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-base-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,83020304,83020304,0,5,5
+quarry-base-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-base-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-base-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-base-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-base-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-base-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-base-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-base-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-base-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-base-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-base-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-base-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,237933632,237933632,0,12,12
+quarry-base-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-base-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-base-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-base-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+quarry-base-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+quarry-base-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-base-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-base-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-base-nonrt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-base-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-base-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-base-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-base-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-base-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-base-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-base-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-base-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-base-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-base-nonrt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-base-nonrt,upload,mesh indices,buffer,Geometry buffers,312837840,312837840,0,12,12
+quarry-base-nonrt,upload,mesh vertices,buffer,Geometry buffers,318424128,318424128,0,12,12
+quarry-base-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-base-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+quarry-base-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+quarry-base-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-base-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-base-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-base-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,768,768,0,1,1
+quarry-base-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-base-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-base-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-base-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-base-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-base-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-base-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-base-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-base-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-base-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-base-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-base-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+quarry-base-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+quarry-base-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+quarry-base-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-base-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-base-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-base-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+quarry-base-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+quarry-base-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-base-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17695488,17695152,336,1,1
+quarry-base-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-base-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389952,-512,1,1
+quarry-base-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-base-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-base-rt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-base-rt,warm,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-base-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+quarry-base-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-base-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-base-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-base-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-base-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-base-rt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+quarry-base-rt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+quarry-base-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+quarry-base-rt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-base-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-base-rt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-base-rt,warm,light records,buffer,Other buffers,80,80,0,1,1
+quarry-base-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-base-rt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-base-rt,warm,mesh indices,buffer,Geometry buffers,312839680,312839680,0,12,12
+quarry-base-rt,warm,mesh vertices,buffer,Geometry buffers,318425600,318425728,-128,12,12
+quarry-base-rt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-base-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+quarry-base-rt,warm,post bloom down,texture,Post textures,7045200,5712,7039488,6,6
+quarry-base-rt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+quarry-base-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+quarry-base-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+quarry-base-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+quarry-base-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+quarry-base-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+quarry-base-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+quarry-base-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-base-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+quarry-base-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+quarry-base-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+quarry-base-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+quarry-base-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847744,8847744,0,1,1
+quarry-base-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-base-rt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+quarry-base-rt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+quarry-base-rt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+quarry-base-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+quarry-base-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+quarry-base-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+quarry-base-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1280,1024,256,1,1
+quarry-base-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,28782080,28782080,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,50614016,50614016,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,28014336,28014336,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,28478208,28478208,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,26515968,26515968,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,27514112,27514112,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,26898432,26898432,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,26884608,26884608,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,27416576,27416576,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,26442240,26442240,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,26807296,26807296,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,27537408,27537408,0,1,1
+quarry-base-rt,warm,renderlab hardware 1 TLAS 13,acceleration structure,BLAS/TLAS,5440,5440,0,1,1
+quarry-base-rt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+quarry-base-rt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+quarry-base-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-base-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,48365872,96976272,-48610400,3,6
+quarry-base-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,48,64,-16,3,4
+quarry-base-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-base-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-base-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,21149184,42287232,-21138048,1,2
+quarry-base-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-base-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-base-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-base-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-base-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-base-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-base-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-base-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-base-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-base-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-base-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-base-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-base-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+quarry-base-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+quarry-base-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-base-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-base-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-base-rt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-base-rt,upload,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-base-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-base-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-base-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-base-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-base-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-base-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-base-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-base-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-base-rt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-base-rt,upload,mesh indices,buffer,Geometry buffers,312839680,312839680,0,12,12
+quarry-base-rt,upload,mesh vertices,buffer,Geometry buffers,318425600,318425728,-128,12,12
+quarry-base-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-base-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+quarry-base-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,28782080,28782080,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 10,acceleration structure,BLAS/TLAS,140109312,140109312,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,50614016,50614016,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 11,acceleration structure,BLAS/TLAS,69984768,69984768,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,70020864,70020864,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,26515968,26515968,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,27514112,27514112,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,26898432,26898432,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,26884608,26884608,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,27416576,27416576,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,26442240,26442240,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,26807296,26807296,0,1,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 9,acceleration structure,BLAS/TLAS,0,73230336,-73230336,0,1
+quarry-base-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,27537408,27537408,0,1,1
+quarry-base-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+quarry-daylight-nonrt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-nonrt,warm,(wgpu internal) Indirect draw validation destination buffer,buffer,Other buffers,1048560,1048560,0,1,1
+quarry-daylight-nonrt,warm,(wgpu internal) Indirect draw validation metadata buffer,buffer,Other buffers,1048560,1048560,0,1,1
+quarry-daylight-nonrt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-daylight-nonrt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-daylight-nonrt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-daylight-nonrt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-daylight-nonrt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-daylight-nonrt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-daylight-nonrt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-daylight-nonrt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-daylight-nonrt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-daylight-nonrt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-daylight-nonrt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-daylight-nonrt,warm,N1c 64-bit depth and cluster IDs,buffer,Other buffers,16588800,16588800,0,1,1
+quarry-daylight-nonrt,warm,N1c LOD groups,buffer,Geometry buffers,384,384,0,1,1
+quarry-daylight-nonrt,warm,N1c absent cluster data,buffer,Other buffers,528,528,0,1,1
+quarry-daylight-nonrt,warm,N1c ambiguous-edge fallback policy,buffer,Other buffers,256,256,0,1,1
+quarry-daylight-nonrt,warm,N1c cluster instances,buffer,Geometry buffers,6706944,6706944,0,1,1
+quarry-daylight-nonrt,warm,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,237933632,237933632,0,12,12
+quarry-daylight-nonrt,warm,N1c conservative min depth,texture,Other frame targets/textures,5594384,5594384,0,1,1
+quarry-daylight-nonrt,warm,N1c hardware-cluster depth,texture,Other frame targets/textures,8848128,8848128,0,1,1
+quarry-daylight-nonrt,warm,N1c image size,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-nonrt,warm,"N1c indirect software dispatch, hardware draw and counts",buffer,Other buffers,256,256,0,2,2
+quarry-daylight-nonrt,warm,N1c pass-1 HZB rejects and pyramid dispatches,buffer,Other buffers,419584,419584,0,1,1
+quarry-daylight-nonrt,warm,N1c software then hardware clusters,buffer,Other buffers,1676736,1676736,0,2,2
+quarry-daylight-nonrt,warm,N1c unused HZB base input,texture,Other frame targets/textures,512,512,0,1,1
+quarry-daylight-nonrt,warm,N1c view and pass,buffer,Other buffers,384,384,0,2,2
+quarry-daylight-nonrt,warm,N8 decision trace,buffer,Sun-shadow buffers,518560,518560,0,1,1
+quarry-daylight-nonrt,warm,N8 frame,buffer,Sun-shadow buffers,1760,1760,0,1,1
+quarry-daylight-nonrt,warm,N8 level and mip uniforms,buffer,Sun-shadow buffers,4144,4144,0,1,1
+quarry-daylight-nonrt,warm,N8 page epochs,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-daylight-nonrt,warm,N8 page requests,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-daylight-nonrt,warm,N8 receiver levels,texture,Sun-shadow textures,8848368,8848368,0,1,1
+quarry-daylight-nonrt,warm,N8 ring horizon passes,buffer,Sun-shadow buffers,16416,16416,0,1,1
+quarry-daylight-nonrt,warm,N8 ring horizons,buffer,Sun-shadow buffers,52139616,52139616,0,1,1
+quarry-daylight-nonrt,warm,N8c absent cluster data,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8c clipmap max-mips,buffer,Sun-shadow buffers,16777216,16777216,0,1,1
+quarry-daylight-nonrt,warm,N8c clipmap peel layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+quarry-daylight-nonrt,warm,N8c clipmap top layer,buffer,Sun-shadow buffers,100663296,100663296,0,1,1
+quarry-daylight-nonrt,warm,N8c hardware raster area,texture,Sun-shadow textures,8388944,8388944,0,1,1
+quarry-daylight-nonrt,warm,N8c page raster arguments and cluster lists,buffer,Sun-shadow buffers,6707200,6707200,0,1,1
+quarry-daylight-nonrt,warm,N8c pages rasterized this frame,buffer,Sun-shadow buffers,3072,3072,0,1,1
+quarry-daylight-nonrt,warm,N8f caster cull dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8g absent walk records,buffer,Sun-shadow buffers,48,48,0,1,1
+quarry-daylight-nonrt,warm,N8g walk record passes,buffer,Sun-shadow buffers,32768,32768,0,1,1
+quarry-daylight-nonrt,warm,N8g walk records,buffer,Sun-shadow buffers,469256512,469256512,0,7,7
+quarry-daylight-nonrt,warm,N8k clipmap min-mips,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8k clipmap planarity errors,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8k clipmap texel planes,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8k hybrid queue,buffer,Sun-shadow buffers,16588944,16588944,0,1,1
+quarry-daylight-nonrt,warm,N8k hybrid queue dispatch,buffer,Sun-shadow buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,N8k mip dispatch arguments,buffer,Sun-shadow buffers,192,192,0,1,1
+quarry-daylight-nonrt,warm,N8n surface cache counters,buffer,Sun-shadow buffers,32,32,0,1,1
+quarry-daylight-nonrt,warm,N8n surface cache dispatch,buffer,Sun-shadow buffers,32,32,0,1,1
+quarry-daylight-nonrt,warm,N8n surface cache frame,buffer,Sun-shadow buffers,96,96,0,1,1
+quarry-daylight-nonrt,warm,N8n surface cells,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+quarry-daylight-nonrt,warm,N8o surface cell claims,buffer,Sun-shadow buffers,33554432,33554432,0,1,1
+quarry-daylight-nonrt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-daylight-nonrt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-daylight-nonrt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+quarry-daylight-nonrt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+quarry-daylight-nonrt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+quarry-daylight-nonrt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-daylight-nonrt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-daylight-nonrt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-nonrt,warm,camera,buffer,Other buffers,160,160,0,1,1
+quarry-daylight-nonrt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+quarry-daylight-nonrt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-daylight-nonrt,warm,exposed linear HDR,texture,Other frame targets/textures,17695152,17695152,0,1,1
+quarry-daylight-nonrt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-daylight-nonrt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-daylight-nonrt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-daylight-nonrt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-nonrt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-daylight-nonrt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-daylight-nonrt,warm,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-daylight-nonrt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+quarry-daylight-nonrt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-daylight-nonrt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-daylight-nonrt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-daylight-nonrt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-daylight-nonrt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-daylight-nonrt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+quarry-daylight-nonrt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+quarry-daylight-nonrt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+quarry-daylight-nonrt,warm,indirect cache software geometry,buffer,Software GI geometry buffer,426847968,327085936,99762032,1,1
+quarry-daylight-nonrt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-daylight-nonrt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-daylight-nonrt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-daylight-nonrt,warm,light records,buffer,Other buffers,80,80,0,1,1
+quarry-daylight-nonrt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-nonrt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-daylight-nonrt,warm,mesh indices,buffer,Geometry buffers,312837840,312837840,0,12,12
+quarry-daylight-nonrt,warm,mesh vertices,buffer,Geometry buffers,318424128,318424128,0,12,12
+quarry-daylight-nonrt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-daylight-nonrt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+quarry-daylight-nonrt,warm,post bloom down,texture,Post textures,7045200,5712,7039488,6,6
+quarry-daylight-nonrt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+quarry-daylight-nonrt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+quarry-daylight-nonrt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+quarry-daylight-nonrt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+quarry-daylight-nonrt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+quarry-daylight-nonrt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+quarry-daylight-nonrt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+quarry-daylight-nonrt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-daylight-nonrt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+quarry-daylight-nonrt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+quarry-daylight-nonrt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,primary edge worklist,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-nonrt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-nonrt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-daylight-nonrt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+quarry-daylight-nonrt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-nonrt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+quarry-daylight-nonrt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+quarry-daylight-nonrt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-nonrt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+quarry-daylight-nonrt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,928,928,0,1,1
+quarry-daylight-nonrt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-nonrt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+quarry-daylight-nonrt,warm,software reflection geometry,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-nonrt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+quarry-daylight-nonrt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-nonrt,upload,(wgpu internal) Staging,buffer,Upload/build staging,83020304,83020304,0,5,5
+quarry-daylight-nonrt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-daylight-nonrt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-daylight-nonrt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-daylight-nonrt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-daylight-nonrt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-daylight-nonrt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-daylight-nonrt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-daylight-nonrt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-daylight-nonrt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-daylight-nonrt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-daylight-nonrt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-daylight-nonrt,upload,"N1c cluster vertices, triangles and primitive tables",buffer,Geometry buffers,237933632,237933632,0,12,12
+quarry-daylight-nonrt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-daylight-nonrt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-daylight-nonrt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-nonrt,upload,camera,buffer,Other buffers,160,160,0,1,1
+quarry-daylight-nonrt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+quarry-daylight-nonrt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-daylight-nonrt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-daylight-nonrt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-daylight-nonrt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-daylight-nonrt,upload,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-daylight-nonrt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-daylight-nonrt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-daylight-nonrt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-daylight-nonrt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-daylight-nonrt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-daylight-nonrt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-daylight-nonrt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-daylight-nonrt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-nonrt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-daylight-nonrt,upload,mesh indices,buffer,Geometry buffers,312837840,312837840,0,12,12
+quarry-daylight-nonrt,upload,mesh vertices,buffer,Geometry buffers,318424128,318424128,0,12,12
+quarry-daylight-nonrt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-daylight-nonrt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+quarry-daylight-nonrt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-nonrt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1
+quarry-daylight-rt,warm,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-rt,warm,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-daylight-rt,warm,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-daylight-rt,warm,(wgpu-core) instances_buffer,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-rt,warm,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-daylight-rt,warm,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-daylight-rt,warm,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-daylight-rt,warm,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-daylight-rt,warm,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-daylight-rt,warm,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-daylight-rt,warm,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-daylight-rt,warm,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-daylight-rt,warm,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-daylight-rt,warm,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-daylight-rt,warm,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-daylight-rt,warm,TR1 frame samples,texture,Other frame targets/textures,17694720,17694720,0,1,1
+quarry-daylight-rt,warm,TR1 frame state,buffer,Other buffers,336,336,0,1,1
+quarry-daylight-rt,warm,TR1 history anchors,texture,TR1 history textures,35389440,35389440,0,2,2
+quarry-daylight-rt,warm,TR1 history colour,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-daylight-rt,warm,TR1 silhouette slots,texture,TR1 history textures,70778880,70778880,0,2,2
+quarry-daylight-rt,warm,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-rt,warm,camera,buffer,Other buffers,160,160,0,1,1
+quarry-daylight-rt,warm,disjoint shadow raster matrices,buffer,Other buffers,176,176,0,1,1
+quarry-daylight-rt,warm,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-daylight-rt,warm,exposed linear HDR,texture,Other frame targets/textures,17694720,17695152,-432,1,1
+quarry-daylight-rt,warm,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-daylight-rt,warm,fresh exact world position and depth,texture,Other frame targets/textures,35389696,35389440,256,1,1
+quarry-daylight-rt,warm,fresh geometric normal and coverage,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-daylight-rt,warm,fresh visible ray counts,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-rt,warm,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-daylight-rt,warm,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-daylight-rt,warm,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-daylight-rt,warm,indirect cache absent storage,buffer,GI cache buffers,48,48,0,1,1
+quarry-daylight-rt,warm,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-daylight-rt,warm,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-daylight-rt,warm,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-daylight-rt,warm,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-daylight-rt,warm,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-daylight-rt,warm,indirect cache placement draws,buffer,GI cache buffers,48,48,0,1,1
+quarry-daylight-rt,warm,indirect cache placement normals,buffer,GI cache buffers,768,768,0,1,1
+quarry-daylight-rt,warm,indirect cache placement transforms,buffer,GI cache buffers,768,768,0,1,1
+quarry-daylight-rt,warm,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-daylight-rt,warm,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-daylight-rt,warm,instance transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-daylight-rt,warm,light records,buffer,Other buffers,80,80,0,1,1
+quarry-daylight-rt,warm,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-rt,warm,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-daylight-rt,warm,mesh indices,buffer,Geometry buffers,312839680,312839680,0,12,12
+quarry-daylight-rt,warm,mesh vertices,buffer,Geometry buffers,318425728,318425728,0,12,12
+quarry-daylight-rt,warm,normal transforms,buffer,Geometry buffers,768,768,0,12,12
+quarry-daylight-rt,warm,post DOF,texture,Post textures,17694720,1024,17693696,1,1
+quarry-daylight-rt,warm,post bloom down,texture,Post textures,7045200,5712,7039488,6,6
+quarry-daylight-rt,warm,post bloom up,texture,Post textures,7045120,6144,7038976,6,6
+quarry-daylight-rt,warm,post camera,buffer,Post uniforms,320,320,0,1,1
+quarry-daylight-rt,warm,post depth velocity,texture,Post textures,35389440,1088,35388352,1,1
+quarry-daylight-rt,warm,post identity LUT,texture,Post textures,1024,1536,-512,1,1
+quarry-daylight-rt,warm,post motion,texture,Post textures,17694720,1024,17693696,1,1
+quarry-daylight-rt,warm,post settings,buffer,Post uniforms,128,640,-512,1,1
+quarry-daylight-rt,warm,post velocity max,texture,Post textures,122880,1024,121856,1,1
+quarry-daylight-rt,warm,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-daylight-rt,warm,primary absent storage,buffer,Other buffers,48,48,0,1,1
+quarry-daylight-rt,warm,"primary camera inverse, clear and culling",buffer,Other buffers,240,240,0,1,1
+quarry-daylight-rt,warm,primary edge dispatch arguments,buffer,Other buffers,16,16,0,1,1
+quarry-daylight-rt,warm,primary edge worklist,buffer,Other buffers,74649616,74649616,0,1,1
+quarry-daylight-rt,warm,primary hard receiver epsilon,texture,Other frame targets/textures,8847744,8847360,384,1,1
+quarry-daylight-rt,warm,primary hit records,texture,Other frame targets/textures,35389440,35389440,0,1,1
+quarry-daylight-rt,warm,primary placement draws,buffer,Other buffers,48,48,0,1,1
+quarry-daylight-rt,warm,primary placement normals,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-rt,warm,primary placement transforms,buffer,Other buffers,1536,1536,0,1,1
+quarry-daylight-rt,warm,primary shading region,buffer,Other buffers,16,16,0,1,1
+quarry-daylight-rt,warm,primary sparse fallback and changed receivers,buffer,Other buffers,8294416,8294416,0,1,1
+quarry-daylight-rt,warm,primary tile coverage,texture,Other frame targets/textures,368640,368640,0,1,1
+quarry-daylight-rt,warm,redrawn hard shadow depth array,texture,Other frame targets/textures,1280,1024,256,1,1
+quarry-daylight-rt,warm,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,28782080,28782080,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,50614016,50614016,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,28014336,28014336,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 12 (compacted),acceleration structure,BLAS/TLAS,28478208,28478208,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,26515968,26515968,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,27514112,27514112,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,26898432,26898432,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,26884608,26884608,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,27416576,27416576,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,26442240,26442240,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,26807296,26807296,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,27537408,27537408,0,1,1
+quarry-daylight-rt,warm,renderlab hardware 1 TLAS 13,acceleration structure,BLAS/TLAS,5440,5584,-144,1,1
+quarry-daylight-rt,warm,shadow sampling records,buffer,Other buffers,848,848,0,1,1
+quarry-daylight-rt,warm,visible instance IDs,buffer,Geometry buffers,192,192,0,12,12
+quarry-daylight-rt,upload,(wgpu internal) Indirect dispatch validation destination buffer,buffer,Other buffers,32,32,0,1,1
+quarry-daylight-rt,upload,(wgpu internal) Staging,buffer,Upload/build staging,48365872,48365872,0,3,3
+quarry-daylight-rt,upload,(wgpu internal) compaction read-back buffer,buffer,Other buffers,32,48,-16,2,3
+quarry-daylight-rt,upload,(wgpu internal) default external texture params buffer,buffer,Other buffers,256,256,0,1,1
+quarry-daylight-rt,upload,(wgpu internal) zero init buffer,buffer,Other buffers,524288,524288,0,1,1
+quarry-daylight-rt,upload,(wgpu) scratch buffer,buffer,Upload/build staging,21149184,21149184,0,1,1
+quarry-daylight-rt,upload,AT1 atmosphere uniform,buffer,Other buffers,480,480,0,1,1
+quarry-daylight-rt,upload,AT1 camera volume,texture,Material/environment/LUT textures,49152,49152,0,1,1
+quarry-daylight-rt,upload,AT1 multiple-scattering LUT,texture,Material/environment/LUT textures,8192,8192,0,1,1
+quarry-daylight-rt,upload,AT1 sky-view LUT,texture,Material/environment/LUT textures,196608,196608,0,1,1
+quarry-daylight-rt,upload,AT1 transmittance LUT (+ fog ambient row),texture,Material/environment/LUT textures,262848,262848,0,1,1
+quarry-daylight-rt,upload,"DC1 decal grid, records and linear mip texels",buffer,Other buffers,576,576,0,1,1
+quarry-daylight-rt,upload,LC1 cluster frame,buffer,Other buffers,51840,51840,0,1,1
+quarry-daylight-rt,upload,LC1 light cluster lists,texture,Other frame targets/textures,3761024,3761024,0,1,1
+quarry-daylight-rt,upload,LC1 local shadow maps,texture,Local shadow atlas,512,512,0,1,1
+quarry-daylight-rt,upload,TP2 coloured transmission,texture,Other frame targets/textures,1408,1408,0,1,1
+quarry-daylight-rt,upload,TP2 transmission,buffer,Other buffers,640,640,0,1,1
+quarry-daylight-rt,upload,aligned timestamp resolve,buffer,Other buffers,768,768,0,1,1
+quarry-daylight-rt,upload,camera,buffer,Other buffers,160,160,0,1,1
+quarry-daylight-rt,upload,disjoint shadow raster matrices,buffer,Other buffers,272,272,0,1,1
+quarry-daylight-rt,upload,environment lobe table,texture,Material/environment/LUT textures,1536,1536,0,1,1
+quarry-daylight-rt,upload,flight timestamps,buffer,Other buffers,240,240,0,3,3
+quarry-daylight-rt,upload,immutable environment cube,texture,Material/environment/LUT textures,3072,3072,0,1,1
+quarry-daylight-rt,upload,immutable material factors,buffer,Other buffers,1344,1344,0,13,13
+quarry-daylight-rt,upload,immutable material texture,texture,Material/environment/LUT textures,1073765120,1073765120,0,15,15
+quarry-daylight-rt,upload,indirect cache draw table,buffer,GI cache buffers,1024,1024,0,1,1
+quarry-daylight-rt,upload,indirect cache filter sources,buffer,GI cache buffers,92274688,92274688,0,1,1
+quarry-daylight-rt,upload,indirect cache frame,buffer,GI cache buffers,1152,1152,0,1,1
+quarry-daylight-rt,upload,indirect cache header (off),buffer,GI cache buffers,480,480,0,1,1
+quarry-daylight-rt,upload,indirect cache outgoing radiance,buffer,GI cache buffers,16777216,16777216,0,1,1
+quarry-daylight-rt,upload,indirect cache table,buffer,GI cache buffers,234881280,201326848,33554432,1,1
+quarry-daylight-rt,upload,indirect cache work,buffer,GI cache buffers,58982592,58982592,0,1,1
+quarry-daylight-rt,upload,lighting eye/count/environment/exposure,buffer,Other buffers,64,64,0,1,1
+quarry-daylight-rt,upload,material program parameters,buffer,Other buffers,3328,3328,0,13,13
+quarry-daylight-rt,upload,mesh indices,buffer,Geometry buffers,312839680,312839680,0,12,12
+quarry-daylight-rt,upload,mesh vertices,buffer,Geometry buffers,318425728,318425728,0,12,12
+quarry-daylight-rt,upload,prepared DFG RG16F,texture,Material/environment/LUT textures,66048,66048,0,1,1
+quarry-daylight-rt,upload,redrawn hard shadow depth array,texture,Other frame targets/textures,1472,1472,0,1,1
+quarry-daylight-rt,upload,renderlab engine output,texture,Other frame targets/textures,8847360,8847360,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 1 (compacted),acceleration structure,BLAS/TLAS,28782080,28782080,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 10,acceleration structure,BLAS/TLAS,0,140109312,-140109312,0,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 10 (compacted),acceleration structure,BLAS/TLAS,50614016,50614016,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 11,acceleration structure,BLAS/TLAS,69984768,69984768,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 11 (compacted),acceleration structure,BLAS/TLAS,0,28014336,-28014336,0,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 12,acceleration structure,BLAS/TLAS,70020864,70020864,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 2 (compacted),acceleration structure,BLAS/TLAS,26515968,26515968,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 3 (compacted),acceleration structure,BLAS/TLAS,27514112,27514112,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 4 (compacted),acceleration structure,BLAS/TLAS,26898432,26898432,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 5 (compacted),acceleration structure,BLAS/TLAS,26884608,26884608,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 6 (compacted),acceleration structure,BLAS/TLAS,27416576,27416576,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 7 (compacted),acceleration structure,BLAS/TLAS,26442240,26442240,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 8 (compacted),acceleration structure,BLAS/TLAS,26807296,26807296,0,1,1
+quarry-daylight-rt,upload,renderlab hardware 1 BLAS 9 (compacted),acceleration structure,BLAS/TLAS,27537408,27537408,0,1,1
+quarry-daylight-rt,upload,shadow sampling records,buffer,Other buffers,624,624,0,1,1

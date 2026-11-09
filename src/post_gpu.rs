@@ -23,6 +23,8 @@ pub(super) struct PostGpu {
     sampler: Owned<wgpu::Sampler>,
     lut: Depth,
     retired_luts: Vec<(u64, Depth)>,
+    // P-MEM: targets replaced by an effect toggle stay alive through their last frame.
+    retired_targets: Vec<(u64, Depth)>,
     lut_custom: bool,
     previous: Option<(u64, Mat4)>,
     serial: u32,
@@ -342,14 +344,24 @@ impl PostGpu {
         );
         let image =
             |label, size| texture(r, label, size, F::Rgba16Float, wgpu::TextureDimension::D2);
+        let settings = r.post_settings;
+        let tiny = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let needed = |enabled, size| if enabled { size } else { tiny };
         let mut level = size;
         let mut down = vec![];
         let mut up = vec![];
         for _ in 0..6 {
             level.width = level.width.div_ceil(2);
             level.height = level.height.div_ceil(2);
-            down.push(image("post bloom down", level));
-            up.push(image("post bloom up", level));
+            down.push(image(
+                "post bloom down",
+                needed(settings.bloom > 0.0, level),
+            ));
+            up.push(image("post bloom up", needed(settings.bloom > 0.0, level)));
             if level.width == 1 && level.height == 1 {
                 break;
             }
@@ -361,19 +373,28 @@ impl PostGpu {
             aux: texture(
                 r,
                 "post depth velocity",
-                size,
+                needed(
+                    settings.motion_blur || settings.depth_of_field.is_some(),
+                    size,
+                ),
                 F::Rgba32Float,
                 wgpu::TextureDimension::D2,
             ),
             tile: image(
                 "post velocity max",
-                wgpu::Extent3d {
-                    width: size.width.div_ceil(16),
-                    height: size.height.div_ceil(16),
-                    ..size
-                },
+                needed(
+                    settings.motion_blur,
+                    wgpu::Extent3d {
+                        width: size.width.div_ceil(16),
+                        height: size.height.div_ceil(16),
+                        ..size
+                    },
+                ),
             ),
-            ping: [image("post motion", size), image("post DOF", size)],
+            ping: [
+                image("post motion", needed(settings.motion_blur, size)),
+                image("post DOF", needed(settings.depth_of_field.is_some(), size)),
+            ],
             down,
             up,
             compute_layout,
@@ -398,6 +419,7 @@ impl PostGpu {
             ),
             lut_custom: false,
             retired_luts: vec![],
+            retired_targets: vec![],
             previous: None,
             serial: 0,
             groups: None,
@@ -446,7 +468,10 @@ impl PostGpu {
     fn prepare(&mut self, r: &Renderer, camera: &Camera, primary: bool) {
         self.retired_luts
             .retain(|(last, _)| *last > r.completed_submission);
+        self.retired_targets
+            .retain(|(last, _)| *last > r.completed_submission);
         let s = r.post_settings;
+        self.prepare_targets(r);
         let internal = r.lighting.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
         // MV1: camera and object history must describe the same rendered frame.
@@ -645,6 +670,68 @@ impl PostGpu {
             up,
             tone,
         });
+    }
+    /// P-MEM: unused passes need only valid bindings. Enabling a pass restores its
+    /// full target before encoding, preserving camera history and the post frame index.
+    fn prepare_targets(&mut self, r: &Renderer) {
+        use wgpu::TextureFormat as F;
+        let s = r.post_settings;
+        let tiny = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let needed = |enabled, size| if enabled { size } else { tiny };
+        let mut retired = vec![];
+        let mut resize = |target: &mut Depth, name, size, format| {
+            if target.texture.size() != size {
+                let next = texture(r, name, size, format, wgpu::TextureDimension::D2);
+                retired.push((r.submissions, std::mem::replace(target, next)));
+            }
+        };
+        resize(
+            &mut self.aux,
+            "post depth velocity",
+            needed(s.motion_blur || s.depth_of_field.is_some(), self.size),
+            F::Rgba32Float,
+        );
+        resize(
+            &mut self.tile,
+            "post velocity max",
+            needed(
+                s.motion_blur,
+                wgpu::Extent3d {
+                    width: self.size.width.div_ceil(16),
+                    height: self.size.height.div_ceil(16),
+                    ..self.size
+                },
+            ),
+            F::Rgba16Float,
+        );
+        resize(
+            &mut self.ping[0],
+            "post motion",
+            needed(s.motion_blur, self.size),
+            F::Rgba16Float,
+        );
+        resize(
+            &mut self.ping[1],
+            "post DOF",
+            needed(s.depth_of_field.is_some(), self.size),
+            F::Rgba16Float,
+        );
+        let mut level = self.size;
+        for (down, up) in self.down.iter_mut().zip(&mut self.up) {
+            level.width = level.width.div_ceil(2);
+            level.height = level.height.div_ceil(2);
+            let size = needed(s.bloom > 0.0, level);
+            resize(down, "post bloom down", size, F::Rgba16Float);
+            resize(up, "post bloom up", size, F::Rgba16Float);
+        }
+        if !retired.is_empty() {
+            self.groups = None;
+            self.retired_targets.extend(retired);
+        }
     }
     pub(super) fn encode(&self, r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
         let g = self.groups.as_ref().unwrap();

@@ -1382,7 +1382,10 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             let k2=select(0u,gi_table[cold+GI_C_KNOWN+2u]|gi_table[cold+GI_C_PENDING+2u],GI_WORDS>2u);
             let k3=select(0u,gi_table[cold+GI_C_KNOWN+3u]|gi_table[cold+GI_C_PENDING+3u],GI_WORDS>3u);
             let b0=atomicLoad(&gi_wg_bits[at]);let b1=atomicLoad(&gi_wg_bits[at+1u]);
-            let b2=atomicLoad(&gi_wg_bits[at+2u]);let b3=atomicLoad(&gi_wg_bits[at+3u]);
+            // P-MEM: the packed 64-direction workgroup has only two words per cell.
+            var b2=0u;var b3=0u;
+            if GI_WORDS>2u { b2=atomicLoad(&gi_wg_bits[at+2u]); }
+            if GI_WORDS>3u { b3=atomicLoad(&gi_wg_bits[at+3u]); }
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_SH_LANES) {
                 gi_lane_add(c,frame,k,gi_open(k,k0,k1,k2,k3,b0,b1,b2,b3));
             }
