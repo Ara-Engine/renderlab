@@ -403,6 +403,16 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 ## GI
 
+- **P-GIE / design G-E rejected at its cheap gate** ([p-gie.md](p-gie.md), 2026-11-09).
+  Existing probe statistics at the actual 8x4 shading dimensions exceed the allowed
+  40 unique keys per tile: game maxima RT 58 / non-RT 83; quarry 143 on both paths.
+  These are conservative probe request unions, not exact shading-only sets. Averages
+  (~11.3 game / ~25 quarry per 32 covered pixels) pass but do not satisfy the maximum
+  rule. No production lookup change ships; the ~0.8 ms lookup gap remains. A future
+  bounded cooperative cache needs an exact overflow path and a revised gate; the
+  16 KiB device budget must also accommodate R2/R3. No identity or quiet speedup is
+  claimed for this dropped design.
+
 G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
 
 G3 ([m7-g3.md](m7-g3.md)) added a fixed-weight cell-space filter of the sky and bounce values, contrast refine (2 px cells only at visibility edges such as crevice mouths) and bounce fill, on by default (`filter` 15). Every quarry population is better than G2b-GC1's default on both paths. TR1x64 pinholes are at the cache-off level (RT 142 to 65, non-RT 122 to 68, against 74). The cave's mottle is mostly gone, and G3 now beats Lumen HW on edge, isolated and faint.
