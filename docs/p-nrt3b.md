@@ -75,7 +75,7 @@ Quiet q1 leases: `q1-nonrt-1`, `q1-next-1`, `q1-rest-1`: 176/120/96 runtime samp
 
 ## Reproduction, time and housekeeping
 
-Evidence/plans/tools/new binaries: `D:/Coding/renderlab-work/p-nrt3b/`. `trace-summary.json` and each trace's `attribution.json` retain the inspected pass timings; summarized raw GPU traces over 5 MB are deleted. Non-RT initial q1 uses inherited `runs/l1`; RT uses `runs/q1-rt`. Retained service uses `runs/kept-timing`. No private assets/images are committed.
+Evidence/plans/tools/new binaries: `D:/Coding/renderlab-work/p-nrt3b/`. `trace-summary.json` and each trace's `attribution.json` retain the inspected pass timings; summarized raw GPU traces and RF float dumps over 5 MB are deleted. `raw-hashes.json` preserves the individual SHA256s of all 78 RF buffers (about 1.94 GB removed) after both candidate comparisons completed. Non-RT initial q1 uses inherited `runs/l1`; RT uses `runs/q1-rt`. Retained service uses `runs/kept-timing`. No private assets/images are committed.
 
 One target `D:/Coding/pnrt3b-target`, serial release builds at `-j 2`. Builds hold atomic `build-slot.lock` with owner JSON and the normal stillkit mutex acquire. Each build/lease mutex is released immediately afterward by its owning process. Admission requires no cargo/rustc, >=8 GiB available and >=5 GB D free. Every GPU/test-binary execution uses `scripts/n8-run.py` through the P-NRT wrapper, <=15 minutes, 2 GiB runtime floor. Latest root orders are reread; alternating gates match anchored owner releases. Schedule reading is streamed. PID-tree cleanup replaces the inherited trace runner's image-name kill in the local evidence runner.
 
