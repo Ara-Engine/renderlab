@@ -1,4 +1,4 @@
-# P-NRT3: overlapped frame submission and a cheaper GI drain (zero quality loss)
+# P-NRT3 (NOT VERIFIED): overlapped frame submission and a cheaper GI drain
 
 Unit P-NRT3, 2026-11-09, branch `t3/p-nrt3` from main `0979ffe` (after P-NRT2).
 Islam's bar: "without compromising even a bit in quality". Both changes here are pure
@@ -10,9 +10,25 @@ uploads, submits) and the GI cache (`src/gi_cache*`, GI shaders). Others own sun
 
 Labels: **M** measured here, **A** author-reported elsewhere, **I** inference.
 
-## 1. Status
+## 1. Status: NOT VERIFIED
 
-RESULTS-PLACEHOLDER
+**Both changes are built but NOT VERIFIED.** No image, timing or test of this branch has run on
+the GPU. Every argument below for byte identity is from reading the code (**I**), not
+measurement. Root will not merge until leases q1 and l2 (section 4) have both passed.
+
+- **Why.** Eight GPU leases between 15:37 and 16:50 UTC died before their first capture
+  finished (section 4).
+  - The host was saturated by about 32-45 cargo/rustc processes, most from other projects
+    (glaze, stillkit and others), with 2.7-7 GiB of 32 GiB available.
+  - Each binary's first ARA1 capture compiles its pipelines. That compile did not finish in
+    40-170 s before the lease guard stopped the run.
+  - The CPU gap, the first target, cannot be timed on a saturated CPU in any case.
+- **Measured here:** nothing.
+  - Before figures are P-NRT2's (**A**): 1.8-2.1 ms synchronous CPU gap, `render()` about
+    0.85 ms, and GI fill 1.7-7 ms of span over ARA1's first 87 frames.
+  - After figures, the GPU idle gap and the cut-fill cost are all unmeasured.
+- **Quality settings:** none changed: the gather budget, the number of fill frames, the
+  16-ray glossy budget and the 128-light shadow budget are all unchanged.
 
 ## 2. Changes
 
@@ -73,7 +89,7 @@ everything after the first submit overlaps GPU work.
   time.
 - In a pipelined game loop (frames in flight), a GPU-bound game sees its frame finish earlier
   after its CPU submit. A CPU-bound game pays the extra submit call.
-- Input-to-photon latency is unchanged or lower (section 4 measures it).
+- Input-to-photon latency should be unchanged or lower (**I**, not measured).
 
 ### 2.2 GI gather: one parallel screening step for many queue entries (`shaders/gi_cache.wgsl`, `gi_gather`)
 
@@ -86,7 +102,9 @@ step. For every deferred entry, all 64 lanes read the same slot, broadcast wheth
 (a workgroup barrier), and lane 0 rewrote its state. Lane 0 then appended it to the next
 queue (three same-address atomics) and the workgroup synchronised again. With 100-200k
 queued cells, that is about 25-50 serial steps per workgroup before and between the few
-live cells.
+live cells (**I**). The planned drain trace (q1) would show how much of a drain frame's
+gather this overhead is, against the live cells' rays. If the rays dominate, the change
+saves little.
 
 Now `width = clamp(count / groups, 1, 64)` lanes each screen one consecutive entry at once:
 
@@ -127,3 +145,86 @@ same gather budget and number of fill frames.
   buffer written by `prepare_gi`, `prepare_post` or `encode_transparency`. A pass that does
   belongs after the split.
 - `shaders/gi_cache.wgsl` `gi_gather` (mine).
+
+## 3. Expected quality
+
+Both changes are meant as pure optimisations, so the expected result is byte identity on
+every frame, both paths (**I**). Section 2 gives the reasons per change:
+- **The split:** the queue writes between the two submits touch only buffers that no
+  first-half pass reads, and both halves keep the same queue order.
+- **The gather:** each cell's work is unchanged; only the order of queue entries moves,
+  and nothing reads that order.
+
+Section 4's l2 lease is the check.
+
+## 4. Verification pending (staged for a quiet host)
+
+### Staged binaries
+
+All in `D:/Coding/renderlab-work/p-nrt3/bin/`, release builds; sha256 prefixes:
+
+| Binary | Source | sha256 |
+|---|---|---|
+| `base.exe` | `ara1_capture`, main `0979ffe` (`D:/Coding/pnrt3-base-tree`) | `12f16b41e5cbb0b7` |
+| `cand1.exe` | `ara1_capture`, the screening build | `0a282532a67ab154` |
+| `final.exe` | `ara1_capture`, this branch (`0149582`'s code) | `3f48e24f303bef51` |
+| `base-lib.exe` | lib test binary, main `0979ffe` | `29633c0343d825da` |
+| `final-lib.exe` | lib test binary, this branch | `6601f9a49e9931ec` |
+
+`cand1.exe` takes two screening switches:
+- `RENDERLAB_PNRT3_SPLIT`: 0 is one submit, 1 splits the encode only, and 2 also moves GI and
+  post preparation after the first submit, which is the shipped form;
+- `RENDERLAB_PNRT3_CPU=1` prints per-stage CPU timestamps from `submit_frame`.
+
+Its GI gather is the shipped one. The switches are not in the branch.
+
+### Plans
+
+In `D:/Coding/renderlab-work/p-nrt3/plans/`, run through `tools/p-nrt/lease.py` with
+`PNRT_OWNER=p-nrt3`, `PNRT_ROOT=D:/Coding/renderlab-work/p-nrt3`.
+`tools/lease-retry.sh PREFIX PLAN` retries and resumes: `tools/todo.py` skips finished captures
+and tests.
+
+- **q1** (`l1.json`, about 12 min, needs COMPILER-QUIET):
+  - ARA1 non-RT quality witnesses: `base` against `cand1` split 2, on game-base, ara-pbr,
+    game-atmosphere and quarry;
+  - 1080p timing, two interleaved repetitions, on game-base and quarry for `base` and
+    `cand1` splits 0, 1 and 2, plus split 2 with the CPU probe;
+  - Nsight traces (P-NRT's recipe):
+    - base quarry still at submits 110 and 150, the drain frames;
+    - base and split 2 game-base still at 1200, giving the GPU idle gap before and after.
+  - Read with `tools/p-nrt/summarize.py runs/l1` and `tools/p-nrt/attribute.py`.
+- **l2** (`l2.json`, about 14 min; identity only, a quiet host is not required):
+  - ARA1 quality and timing frames on RT and non-RT, `base` against `final`;
+  - the Q-walk (`gpu_tr1_sequence`) and RF1-RF10 (`gpu_r0a_current`), both paths;
+  - MP1 mixed-program frames (`gpu_mp1_mixed_programs`), both paths;
+  - the lib suite of `final-lib.exe`.
+- **Afterwards:** quiet-certified final service timings on both paths need one more
+  compiler-quiet lease from root.
+
+### Failed attempts, 2026-11-09
+
+All admitted with at least 8 GiB available, except where noted. No capture finished.
+
+| Label | Ran | Cause |
+|---|---|---|
+| l1 | 42 s | runtime RAM floor (2 GiB) |
+| l1b | 39 s | the guard's process query (`Get-CimInstance`) timed out at 25 s |
+| l1c | 0 s | deferred at preflight: 7.2 GiB available, about 45 compiler processes |
+| l1r-1 | 112 s | runtime RAM floor |
+| l1r-2 | 167 s | the guard's `nvidia-smi` query timed out at 10 s |
+| l2-1 | 0 s | deferred: GPU lock held by another unit for the whole 600 s wait |
+| l2-2 | 74 s | runtime RAM floor; process query and `taskkill` timed out |
+| l2-3 | 70 s | runtime RAM floor ("contention or available memory below 2048 MiB") |
+
+Root could not open a quiet window: 32 of 36 compiler processes belonged to other projects.
+
+## 5. Housekeeping
+
+- **Evidence and binaries:** `D:/Coding/renderlab-work/p-nrt3/` (`bin/`, `plans/`, `tools/`,
+  `lease/`), kept for the verification run.
+- **Cargo targets:** `D:/Coding/pnrt3-target` and `D:/Coding/pnrt3-target-base` are deleted.
+  The base worktree `D:/Coding/pnrt3-base-tree` (main `0979ffe`) is kept for rebuilding base.
+- **Incident.** At 15:09 I ran `taskkill /IM cargo.exe` to stop my own build for a compiler
+  hold. It killed every cargo.exe on the machine, including p-flat2's cand-lib build, which
+  then logged exit 1. I reported it on the schedule, and p-flat2 rebuilt at 15:43.

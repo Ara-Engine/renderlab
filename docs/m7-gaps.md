@@ -179,6 +179,19 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
       matters only in many-light scenes; a memo must keep its exact equality semantics
       (`-0.0`, NaN).
 
+- **P-NRT3 two-submit split and batched GI drain: built, unverified, pending a quiet host**
+  ([p-nrt3.md](p-nrt3.md); branch `t3/p-nrt3`, not merged).
+  - Lit traced frames submit their first half (through visibility and sun visibility) before
+    GI and post are prepared and the rest is encoded. This targets the 1.8-2.1 ms
+    synchronous CPU gap.
+  - The capped GI gather screens up to 64 drain-queue entries per step. This targets the
+    1.7-7 ms fill over ARA1's first 87 frames.
+  - Both should be byte-identical (**I**). Neither has run on the GPU: eight leases died before
+    their first capture on a host saturated by other projects' builds.
+  - Merge waits for leases q1 (quiet timing and drain traces) and l2 (identity on both paths,
+    the Q-walk, RF, MP1 and lib). Binaries and plans are staged in
+    `D:/Coding/renderlab-work/p-nrt3/`.
+
 ## RT shadows
 
 [RTDEF2](rtdef2.md) selects traced primaries, Interactive and TR1 for capable
