@@ -1,5 +1,6 @@
 """P-VERIFY: compiler-free, bounded leases for prebuilt verification plans."""
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -96,6 +97,16 @@ def plan(path):
         for pid in pids:
             sp.run(['taskkill', '/PID', pid, '/T', '/F'], creationflags=sp.CREATE_NO_WINDOW)
     module.kill = kill
+    trace = module.trace
+    def safe_trace(step):
+        previous = os.environ.copy()
+        os.environ.update(step.get('env', {}))
+        try:
+            return trace(step)
+        finally:
+            kill(Path(step['binary']).name)
+            os.environ.clear(); os.environ.update(previous)
+    module.trace = safe_trace
     sys.argv = ['plan.py', path]
     return module.main()
 
@@ -137,6 +148,20 @@ if __name__ == '__main__':
         raise SystemExit(plan(sys.argv[2]))
     if sys.argv[1] == 'build':
         raise SystemExit(build(sys.argv[2]))
+    if sys.argv[1] == 'retime':
+        retime = load('retime', REPO / 'scripts/p-retime.py')
+        retime.OUT = OUT / 'retime'
+        for directory in ['bin', 'scenes']:
+            destination = retime.OUT / directory
+            destination.mkdir(parents=True, exist_ok=True)
+            for source in Path('D:/Coding/renderlab-work/p-retime', directory).iterdir():
+                if source.is_file() and not (destination / source.name).exists():
+                    os.link(source, destination / source.name)
+        source = inspect.getsource(retime.capture).replace("== 'p-retime'", "== 'p-verify'")
+        exec(source, retime.__dict__)
+        case, mode, prefix = sys.argv[2:]
+        for index, side in enumerate(['before', 'after', 'after', 'before']):
+            retime.capture(case, mode, index, prefix + '-' + side)
     if sys.argv[1] == 'wait':
         _, runner = load('retime', REPO / 'scripts/p-retime.py').load_runner()
         end = time.monotonic() + float(sys.argv[2])
@@ -145,7 +170,10 @@ if __name__ == '__main__':
                 sample = runner.resource_sample()
                 audit.write(json.dumps(sample) + '\n'); audit.flush()
                 if not sample['compilers'] and sample['available_mbytes'] >= 8192:
-                    print('ADMISSIBLE', flush=True); break
+                    print('ADMISSIBLE', flush=True)
+                    if len(sys.argv) > 3:
+                        raise SystemExit(sp.call(sys.argv[3:], env=os.environ | {'ARA1_HDR_HASH': '1'}))
+                    break
                 if time.monotonic() >= end:
                     print('WAIT EXPIRED', sample, flush=True); break
                 time.sleep(1)
