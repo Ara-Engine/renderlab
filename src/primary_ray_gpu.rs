@@ -604,6 +604,7 @@ impl Buffer {
 #[derive(PartialEq)]
 struct DrawKey {
     vertex: wgpu::Buffer,
+    placements: wgpu::Buffer,
     // SK1: static draws alias the current stream; deforming draws retain last frame.
     previous: wgpu::Buffer,
     index: wgpu::Buffer,
@@ -618,7 +619,7 @@ struct Geometry {
     _placements: Buffer,
     models: Buffer,
     normals: Buffer,
-    /// Published model then normal-transform bytes, in placement order.
+    /// Published current/previous models, then normals, in placement order.
     instances: Vec<u8>,
     arrays: Owned<wgpu::BindGroup>,
     /// Group 2, rebuilt alone when a streamed texture's resident range changes, so a
@@ -1638,6 +1639,7 @@ impl Renderer {
             .iter()
             .map(|d| DrawKey {
                 vertex: (**d.mesh.vertex).clone(),
+                placements: (*d.instances.transforms).clone(),
                 previous: d
                     .mesh
                     .skin
@@ -1653,10 +1655,16 @@ impl Renderer {
         if state.geometry.as_ref().is_none_or(|g| g.keys != keys) {
             let storage = wgpu::BufferUsages::STORAGE;
             let instance_bytes = (placements.len().max(1) * 64) as u64;
+            if instance_bytes * 2 > u64::from(self.device.limits().max_storage_buffer_binding_size)
+            {
+                return Err(Error::InvalidInput(
+                    "current/previous placement transforms exceed storage binding limit",
+                ));
+            }
             let models = Buffer::new(
                 self,
                 "primary placement transforms",
-                instance_bytes,
+                instance_bytes * 2,
                 storage,
             );
             let normals = Buffer::new(self, "primary placement normals", instance_bytes, storage);
@@ -1741,9 +1749,14 @@ impl Renderer {
             }
         }
         // Instance edits keep the tables; only their transforms are republished.
-        let mut instances = Vec::with_capacity(placements.len() * 128);
+        let mut instances = Vec::with_capacity(placements.len() * 192);
         for d in draws {
             for model in &d.instances.state.models {
+                instances.extend_from_slice(&matrix_bytes(*model));
+            }
+        }
+        for d in draws {
+            for model in d.instances.state.previous_models(self.frames) {
                 instances.extend_from_slice(&matrix_bytes(*model));
             }
         }
@@ -1754,7 +1767,7 @@ impl Renderer {
         }
         let g = self.primary.as_mut().unwrap().geometry.as_mut().unwrap();
         if g.instances != instances {
-            let (models, normals) = instances.split_at(instances.len() / 2);
+            let (models, normals) = instances.split_at(instances.len() / 3 * 2);
             if !models.is_empty() {
                 self.queue.write_buffer(&g.models.value, 0, models);
                 self.queue.write_buffer(&g.normals.value, 0, normals);
@@ -2596,7 +2609,10 @@ impl Renderer {
             if words != r.records {
                 let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
                 self.queue.write_buffer(&r.buffer.value, 0, &bytes);
-                uploads.geometry += (words.len() * 4) as u64;
+                // MQ2: same meshes and slots, so only placement transforms changed. Count
+                // them as transform edits, which TR1 reprojects (MQ1); `geometry` is in
+                // TR1's restart key and restarted every non-RT pixel on every animated frame.
+                uploads.models += (words.len() * 4) as u64;
                 uploads.write_calls += 1;
                 self.primary
                     .as_mut()

@@ -774,6 +774,8 @@ impl Renderer {
             // TP2 adds one sampled map to the complete lighting/material ABI (15).
             || device_limits.max_sampled_textures_per_shader_stage < 15
             || device_limits.max_uniform_buffer_binding_size < crate::shadows::VIEW_BYTES
+            // LC3 keeps atlas transforms in a uniform, without another storage binding.
+            || device_limits.max_uniform_buffer_binding_size < crate::light_cluster::FRAME_BYTES as u64
         {
             return Err(Error::InvalidInput(
                 "device does not support the lighting/shadow binding ABI",
@@ -2704,7 +2706,7 @@ impl Renderer {
         if shadow_frame.is_some() {
             shadow_preparation += shadow_start.elapsed();
         }
-        self.submit_frame(
+        let result = self.submit_frame(
             color,
             camera_bytes,
             camera,
@@ -2727,7 +2729,13 @@ impl Renderer {
                 poll,
                 ..CpuFrame::default()
             },
-        )
+        );
+        if matches!(&result, Ok(Some(_))) {
+            for draw in draws {
+                draw.instances.state.motion_submitted(self.frames);
+            }
+        }
+        result
     }
 
     fn upload_instance_edits(

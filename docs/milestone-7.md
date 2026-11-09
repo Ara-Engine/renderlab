@@ -188,3 +188,35 @@ Target by about 05:00 local: every feature built and on by default, on both path
 | Engine-facing API freeze and example scene | API1 |
 
 The default rule, time-box and verification for this push are in AGENTS.md. They supersede the stricter default gates above for this push. Every gap to Unreal and to the reference is recorded in `docs/m7-gaps.md`.
+
+### Base complete (2026-11-09, main ff56b79 plus RD1)
+
+Every feature above is on main and on by default on both paths. Each merge has a row in `docs/milestones-5-6-decisions.tsv`. The table lists the base units and the follow-ups that landed with them:
+
+| Feature | Units on main |
+|---|---|
+| TR1 and upscaling, AA in motion | TR1b, MQ1, MQ2, MV1 |
+| GI | G2b, G2c, GC1 |
+| Reflections, RT and non-RT | R1, R1n, RQ1 |
+| Glass, foliage, particles | TP1, TP2 |
+| Atmosphere, fog, light shafts, time of day | AT1, VF1, VF2, AT2 |
+| Skinned meshes | SK1 (and API1b's fog TLAS key fix) |
+| Many lights, soft local shadows | LC1, LC2, LC3 |
+| Decals | DC1 |
+| Post-processing | PP1 |
+| Per-object shading programs | MP1 |
+| Startup | PC1 |
+| Engine API freeze and the dusk courtyard example | API1, API1b |
+
+RD1 checked the reported non-RT courtyard reflection blotches against the merged base. It found the binary that showed them predated R1n. The base renders clean on both paths.
+
+### Phase order after the base (Islam, 2026-11-08)
+
+1. **Ara comparison report.** "Once the base is done compare it to the rendering in the Ara engine, and measure quality and performance on many aspects. I need that report before starting the next level," with side-by-side pictures. The harness and plan are in `docs/m7-ara1-plan.md`. The comparison is measurement only; Ara stays read-only.
+2. **Islam reviews the report.**
+3. **Next-level phase.** "The best visual fidelity to performance possible, the original goal basically." Every unit targets the original bar again:
+   - **Floor:** Unreal fidelity on every measure, static and in motion, on both paths, at least 2x Unreal's speed on matched workloads.
+   - **Ambition:** film quality against path-traced references.
+   - **Backlog:** the gap list, ranked by visible impact.
+   - **Comparisons:** Unreal and reference comparisons are back on where they decide a gap.
+   - **Unchanged:** the overnight speed rules (time-boxed units, light checks, free slots filled at once).

@@ -53,6 +53,10 @@ pub(crate) struct VisibilityUpdate {
 
 pub(crate) struct InstanceState {
     pub models: Vec<Mat4>,
+    /// Last successfully submitted placement, independent of pending/coalesced edits.
+    previous: Vec<Mat4>,
+    submitted_frame: Option<u64>,
+    motion_dirty: bool,
     pub normals: Vec<crate::normal::NormalTransform>,
     pub invalid_normals: usize,
     dirty: Vec<u64>,
@@ -83,6 +87,9 @@ impl InstanceState {
         let invalid_normals = normals.iter().filter(|n| !n.valid()).count();
         Self {
             models: models.to_vec(),
+            previous: models.to_vec(),
+            submitted_frame: None,
+            motion_dirty: false,
             normals,
             invalid_normals,
             dirty: vec![0; models.len().div_ceil(64)],
@@ -109,12 +116,28 @@ impl InstanceState {
         self.invalid_normals += usize::from(!normal.valid());
         self.normals[slot] = normal;
         self.models[slot] = model;
+        self.motion_dirty = true;
         let bit = 1 << (slot % 64);
         if self.dirty[slot / 64] & bit == 0 {
             self.dirty[slot / 64] |= bit;
             self.dirty_count += 1;
         }
         Ok(())
+    }
+    pub fn previous_models(&self, previous_frame: u64) -> &[Mat4] {
+        if self.submitted_frame == Some(previous_frame) {
+            &self.previous
+        } else {
+            &self.models
+        }
+    }
+    /// Called only after a successful render submission; backpressure keeps history.
+    pub fn motion_submitted(&mut self, frame: u64) {
+        if self.motion_dirty || self.submitted_frame.is_none() {
+            self.previous.clone_from(&self.models);
+            self.motion_dirty = false;
+        }
+        self.submitted_frame = Some(frame);
     }
     pub fn dirty_runs(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         let mut slots = self
@@ -256,6 +279,27 @@ mod tests {
         min: [-0.1; 3],
         max: [0.1; 3],
     };
+    #[test]
+    fn motion_history_tracks_submissions_and_initializes_the_first_pose() {
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        let a = Mat4::from_translation(Vec3::X);
+        let b = Mat4::from_rotation_y(0.7);
+        // An edit before the first render has no invented initial velocity.
+        s.set(0, a).unwrap();
+        assert_eq!(s.previous_models(0), s.models);
+        s.motion_submitted(1);
+        s.set(0, b).unwrap();
+        s.clear_dirty(); // upload is not submission
+        assert_eq!(s.previous_models(1), [a, Mat4::IDENTITY]);
+        s.set(0, Mat4::IDENTITY).unwrap();
+        assert_eq!(s.previous_models(1), [a, Mat4::IDENTITY]);
+        // An omitted draw has no surface in the immediately previous frame.
+        assert_eq!(s.previous_models(2), s.models);
+        s.motion_submitted(3);
+        assert_eq!(s.previous_models(3), [Mat4::IDENTITY; 2]);
+        s.motion_submitted(4);
+        assert_eq!(s.previous_models(4), [Mat4::IDENTITY; 2]);
+    }
     #[test]
     fn edits_validate_before_mutation_and_coalesce_across_words() {
         assert!(InstanceState::validate(&[], 128).is_err());

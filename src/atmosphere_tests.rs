@@ -505,7 +505,7 @@ fn gpu_at1_quarry() {
         r.collect().unwrap();
     }
     r.test_drain("AT1 upload");
-    if env("AT2").is_some() && path == "nonrt" {
+    if (env("AT2").is_some() || env("VF2").is_some()) && path == "nonrt" {
         let bvh = crate::asset::cluster_bvh::decode(
             &std::fs::read(path_of("cluster_bvh")).unwrap(),
             crate::asset::cluster_bvh::Limits::default(),
@@ -549,6 +549,20 @@ fn gpu_at1_quarry() {
             r.test_drain("AT1 admission");
         }
     };
+    if env("VF2").is_some() {
+        vf2::quarry(
+            &mut r,
+            &mut asset,
+            &camera,
+            size,
+            &out,
+            &path,
+            quarry_travel,
+            set_sun,
+            render,
+        );
+        return;
+    }
     if env("AT2").is_some() {
         at2::quarry(
             &mut r,
@@ -740,3 +754,6 @@ fn gpu_at1_quarry() {
 
 #[path = "atmosphere_at2_tests.rs"]
 mod at2;
+
+#[path = "atmosphere_vf2_tests.rs"]
+mod vf2;

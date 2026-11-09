@@ -217,30 +217,60 @@ var<workgroup> at_ambient_sum:array<vec3<f32>,64>;
     }
 }
 
-// R2 sequence offset for frame k, in [0, 1)^3.
+// Low-discrepancy offset for frame k, in [0, 1)^3.
 fn at_jitter(k:u32) -> vec3<f32> {
     let g=1.22074408460575947536;
     let a=vec3<f32>(1.0/g,1.0/(g*g),1.0/(g*g*g));
     return fract(vec3<f32>(0.5)+a*f32(k%4096u));
 }
 
-// Volumetric fog injection: each froxel's in-scattered radiance per unit sun illuminance
-// and extinction (/m) at a jittered point, the sun shadowed by `at_sun_visible` (composed
-// per path by src/atmosphere.rs), blended with its reprojected history.
+// Raw fog cells: r is density-weighted sun visibility, gb unused, a is mean
+// extinction (/m). Keep view-dependent phase and radiance out of world reprojection.
+// The current camera lights the resolved visibility during integration below.
 @compute @workgroup_size(4,4,4) fn at_fog_inject(@builtin(global_invocation_id) id:vec3<u32>) {
     let grid=vec3<u32>(atmosphere.grid.xy,AT_FROXEL_SLICES);
     if any(id>=grid) { return; }
-    let j=at_jitter(atmosphere.grid.z);
-    let uv=(vec2<f32>(id.xy)+j.xy)/vec2<f32>(grid.xy);
-    let d=at_view_direction(at_uv_ndc(uv));
-    let distance=at_froxel_distance((f32(id.z)+j.z)/f32(grid.z));
-    let world=atmosphere.eye.xyz+d*distance;
-    let extinction=select(0.0,at_fog_density(world.y)+atmosphere.volume.y,distance>=atmosphere.fog.w);
-    let sun=at_sun_transmittance()*at_hg(atmosphere.fog_albedo.w,dot(d,atmosphere.sun.xyz));
-    let ambient=at_ambient();
-    let scattering=atmosphere.fog_albedo.rgb*extinction;
-    var value=vec4<f32>(scattering*(sun*at_sun_visible(world)+ambient),extinction);
+    // A decorrelated pair in opposite half cells covers narrow gaps without a
+    // coherent slice/column pattern. These are volume samples, not sun-disk rays.
+    let seed=id.x*73856093u^id.y*19349663u^id.z*83492791u;
+    let shift=vec3<f32>(f32(seed&1023u),f32((seed>>10u)&1023u),f32((seed>>20u)&1023u))/1024.0;
+    let j=fract(at_jitter(atmosphere.grid.z)+shift);
+    var lit_density=0.0;var total_density=0.0;
+    let base_samples=u32(atmosphere.volume.w);
+    // A reset (including a moving sun) cannot reuse history: spend on fresh samples.
+    let samples=select(base_samples,2u*base_samples,atmosphere.previous_eye.w==0.0);
+    for(var sample=0u;sample<samples;sample+=1u) {
+        let offset=fract(j+vec3<f32>(f32(sample)/f32(samples)));
+        let uv=(vec2<f32>(id.xy)+offset.xy)/vec2<f32>(grid.xy);
+        let d=at_view_direction(at_uv_ndc(uv));
+        let near=at_froxel_distance(f32(id.z)/f32(grid.z));
+        let far=at_froxel_distance(f32(id.z+1u)/f32(grid.z));
+        let distance=mix(near,far,offset.z);
+        let world=atmosphere.eye.xyz+d*distance;
+        let extinction=select(0.0,at_fog_density(world.y)+atmosphere.volume.y,distance>=atmosphere.fog.w);
+        lit_density+=extinction*at_sun_visible(world);
+        total_density+=extinction;
+    }
+    textureStore(at_scatter_out,vec3<i32>(id),vec4<f32>(lit_density/max(total_density,1e-20),0.0,0.0,total_density/f32(samples)));
+}
+
+// A plain min/max envelope of the raw cell and its six face neighbors retains
+// accumulation at sampled shaft edges. No moments, variance or spatial averaging.
+@compute @workgroup_size(4,4,4) fn at_fog_temporal(@builtin(global_invocation_id) id:vec3<u32>) {
+    let grid=vec3<u32>(atmosphere.grid.xy,AT_FROXEL_SLICES);
+    if any(id>=grid) { return; }
+    var value=textureLoad(at_scatter,vec3<i32>(id),0);
+    let extinction=value.a;
     if atmosphere.previous_eye.w>0.0 {
+        var lo=value.r;var hi=value.r;
+        for(var axis=0u;axis<3u;axis+=1u) {
+            for(var side=0u;side<2u;side+=1u) {
+                var offset=vec3<i32>(0);offset[axis]=select(-1,1,side==1u);
+                let cell=clamp(vec3<i32>(id)+offset,vec3<i32>(0),vec3<i32>(grid)-vec3<i32>(1));
+                let sample=textureLoad(at_scatter,cell,0).r;
+                lo=min(lo,sample);hi=max(hi,sample);
+            }
+        }
         // Reproject the cell centre, not this frame's jittered integration sample.
         // Otherwise even a stationary camera repeatedly blurs history across cells.
         let centre_uv=(vec2<f32>(id.xy)+vec2<f32>(0.5))/vec2<f32>(grid.xy);
@@ -252,15 +282,14 @@ fn at_jitter(k:u32) -> vec3<f32> {
             let border=vec3<f32>(0.5)/vec3<f32>(grid);
             if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {
                 let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);
-                // Reject density discontinuities; limit old lighting to this cell's
-                // physical lit/shadowed range. Rapid visibility changes get less lag.
+                // Reject density discontinuities before bounding old visibility by
+                // this frame's raw neighborhood.
                 let density_error=abs(history.a-extinction)/max(extinction,1e-6);
-                let lo=scattering*ambient;let hi=scattering*(ambient+sun);
-                let old=clamp(history.rgb,lo,hi);
-                let delta=abs(old-value.rgb)/max(hi-lo,vec3<f32>(1e-6));
-                let change=max(delta.x,max(delta.y,delta.z));
-                let weight=atmosphere.volume.z*(1.0-smoothstep(0.1,0.5,density_error))*mix(1.0,0.3,smoothstep(0.25,0.75,change));
-                value=vec4<f32>(mix(value.rgb,old,weight),extinction);
+                // A fully shadowed neighborhood has no direct-light support.
+                // Clamp stale sunlight away while retaining edge accumulation.
+                let old=clamp(history.r,lo,hi);
+                let weight=atmosphere.volume.z*(1.0-smoothstep(0.1,0.5,density_error));
+                value=vec4<f32>(mix(value.r,old,weight),0.0,0.0,extinction);
             }
         }
     }
@@ -272,6 +301,10 @@ fn at_jitter(k:u32) -> vec3<f32> {
 @compute @workgroup_size(8,8) fn at_fog_integrate(@builtin(global_invocation_id) id:vec3<u32>) {
     let grid=atmosphere.grid.xy;
     if any(id.xy>=grid) { return; }
+    let uv=(vec2<f32>(id.xy)+vec2<f32>(0.5))/vec2<f32>(grid);
+    let d=at_view_direction(at_uv_ndc(uv));
+    let sun=at_sun_transmittance()*at_hg(atmosphere.fog_albedo.w,dot(d,atmosphere.sun.xyz));
+    let ambient=at_ambient();
     var luminance=vec3<f32>(0.0);var transmittance=1.0;
     var near=0.0;
     for(var k=0u;k<AT_FROXEL_SLICES;k+=1u) {
@@ -279,7 +312,9 @@ fn at_jitter(k:u32) -> vec3<f32> {
         let s=textureLoad(at_scatter,vec3<i32>(vec2<i32>(id.xy),i32(k)),0);
         let thickness=far-near;
         let segment=exp(-s.w*thickness);
-        luminance+=transmittance*s.rgb*(1.0-segment)/max(s.w,1e-7);
+        // Visibility is view independent; phase follows this frame's camera exactly.
+        let source=atmosphere.fog_albedo.rgb*(sun*s.x+ambient);
+        luminance+=transmittance*source*(1.0-segment);
         transmittance*=segment;
         near=far;
         textureStore(at_volume_out,vec3<i32>(vec2<i32>(id.xy),i32(k)),vec4<f32>(luminance,transmittance));

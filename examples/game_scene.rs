@@ -6,14 +6,18 @@
 //! an emblem decal and a wet puddle decal, and the skinned Fox walking with a toon program
 //! (`--fox Fox.glb`, fetched by `scripts/m7-sk1-asset.py`; without it the hero is two toon
 //! spheres). A low sun through the physical atmosphere, volumetric and height fog, GI,
-//! traced reflections (RT), temporal reconstruction and post (bloom, motion blur, grading)
-//! render it from a camera fly path. Every `--every`-th frame is written as PNG.
+//! traced reflections (hardware rays on RT, software rays on non-RT), temporal
+//! reconstruction and post (bloom, motion blur, grading) render it from a camera fly path.
+//! Every `--every`-th frame is written as PNG.
 //!
 //! Options: `--hour H` (sun time of day at 40 degrees latitude; default 17.5, dusk) or
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
-//! N` (a drained timing segment), `--sky uniform`, `--no-volumetric-fog`, `--no-gi`,
-//! `--no-temporal`, `--no-post`, `--render-scale`, `--exposure`, and `--quarry MANIFEST`,
+//! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
+//! uniform`, `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
+//! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
+//! `--exposure`, and `--quarry MANIFEST`,
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
 //! keys `asset`, `limits`, `environment`, `exposure_stops`).
 //!
@@ -55,6 +59,7 @@ struct Args {
     glass: bool,
     particles: bool,
     local_shadows: bool,
+    reflections: bool,
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
@@ -63,6 +68,8 @@ struct Args {
     timing_frames: u32,
     pipeline_cache: Option<PathBuf>,
     reload_probe: bool,
+    night_lanterns: bool,
+    local_shadow_count: Option<u32>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -83,6 +90,7 @@ impl Args {
             glass: true,
             particles: true,
             local_shadows: true,
+            reflections: true,
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
@@ -95,6 +103,8 @@ impl Args {
                     .unwrap_or_else(|| "measurements/pipeline-cache".into()),
             ),
             reload_probe: false,
+            night_lanterns: false,
+            local_shadow_count: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -138,6 +148,7 @@ impl Args {
                 "--no-glass" => a.glass = false,
                 "--no-particles" => a.particles = false,
                 "--no-local-shadows" => a.local_shadows = false,
+                "--no-reflections" => a.reflections = false,
                 "--fox" => a.fox = Some(value()?.into()),
                 "--hour" => a.hour = value()?.parse()?,
                 "--time" => {
@@ -150,6 +161,8 @@ impl Args {
                 "--sun-speed" => a.sun_speed = value()?.parse()?,
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
+                "--night-lanterns" => a.night_lanterns = true,
+                "--local-shadow-count" => a.local_shadow_count = Some(value()?.parse()?),
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
@@ -213,6 +226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or(format!("quarry manifest needs `{key}`"))
     };
     let exposure = args.exposure.unwrap_or_else(|| {
+        if args.night_lanterns {
+            return -1.0;
+        }
         quarry
             .as_ref()
             .and_then(|m| m["exposure_stops"].as_f64())
@@ -239,7 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                 },
                 local_shadows: LocalShadows {
-                    count: if args.local_shadows { 4 } else { 0 },
+                    count: if args.local_shadows {
+                        args.local_shadow_count
+                            .unwrap_or(LocalShadows::default().count)
+                    } else {
+                        0
+                    },
                     ..Default::default()
                 },
                 post: PostSettings {
@@ -248,6 +269,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 exposure: Exposure::Manual { stops: exposure },
+                reflections: if args.reflections {
+                    ReflectionSettings::default()
+                } else {
+                    ReflectionSettings::off()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -310,10 +336,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     })?;
     let iron = material(&mut engine, [0.08, 0.08, 0.09], 0.9, 0.45)?;
+    // Night diagnostics keep the courtyard sources at lantern-scale exposure.
+    let lamp_scale = if args.night_lanterns { 0.001 } else { 1.0 };
     let bulb = engine.create_material(&MaterialDesc {
         base_color: [1.0, 0.9, 0.7, 1.0],
         program: Some(program),
-        parameters: &[("glow", Value::Vec3([60_000.0, 40_000.0, 18_000.0]))],
+        parameters: &[(
+            "glow",
+            Value::Vec3([
+                60_000.0 * lamp_scale,
+                40_000.0 * lamp_scale,
+                18_000.0 * lamp_scale,
+            ]),
+        )],
         ..Default::default()
     })?;
 
@@ -478,7 +513,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sun_hour = |frame: u32| {
         args.hour + frame.saturating_sub(args.sun_after) as f32 / FPS * args.sun_speed / 15.0
     };
-    engine.set_sun(Sun::at_hour(sun_hour(0), LATITUDE))?;
+    let scene_sun = |hour| {
+        Sun::at_hour(hour, LATITUDE).map(|sun| Sun {
+            illuminance: if args.night_lanterns {
+                [0.03, 0.04, 0.08]
+            } else {
+                sun.illuminance
+            },
+            ..sun
+        })
+    };
+    engine.set_sun(scene_sun(sun_hour(0)))?;
+    if args.night_lanterns {
+        engine.set_sky(Sky::Uniform([0.001, 0.002, 0.005]))?;
+    }
     // Fire and smoke over the brazier (TP1 GPU particles), simulated at the frame rate.
     engine.set_particle_step(1.0 / FPS)?;
     let flame = brazier + Vec3::new(0.0, 0.65, 0.0);
@@ -495,7 +543,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 drag: 0.6,
                 size: [0.32, 0.08],
                 color: [[1.0, 0.55, 0.15, 0.85], [0.4, 0.1, 0.02, 0.0]],
-                emission: [[9000.0, 3800.0, 900.0], [1200.0, 250.0, 40.0]],
+                emission: [
+                    [9000.0 * lamp_scale, 3800.0 * lamp_scale, 900.0 * lamp_scale],
+                    [1200.0 * lamp_scale, 250.0 * lamp_scale, 40.0 * lamp_scale],
+                ],
                 fade: [0.1, 0.4],
                 soft_distance: 0.15,
                 capacity: 128,
@@ -525,22 +576,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         )?;
     }
-    // Lanterns (LC1, LC2): a warm bulb under the arch, a cool spot over the crates and the
-    // fire's flickering light, all shadowed (`Settings::local_shadows`, 4 by default) with
-    // soft penumbrae from their source radii.
+    // Keep the courtyard's point/spot/fire sources; night mode adds 24 LC3 lanterns.
+    // The facade shadows every contributing RT local, or up to 128 cached map lights.
+    // Source radii retain soft penumbrae on both paths.
     let lanterns = |t: f32| {
         let flicker = 0.85 + 0.1 * (23.0 * t).sin() + 0.05 * (37.0 * t + 1.0).sin();
-        [
+        let mut lights = vec![
             Light::Point {
                 position: arch_lamp - Vec3::new(0.0, 0.2, 0.0),
-                candela: [30_000.0, 21_000.0, 11_000.0],
+                candela: [
+                    30_000.0 * lamp_scale,
+                    21_000.0 * lamp_scale,
+                    11_000.0 * lamp_scale,
+                ],
                 range: Some(14.0),
                 source_radius: 0.12,
             },
             Light::Spot {
                 position: post_lamp - Vec3::new(0.0, 0.15, 0.0),
                 travel: (at(4.6, 0.0, 1.5) - post_lamp).normalize(),
-                candela: [26_000.0, 25_000.0, 23_000.0],
+                candela: [
+                    26_000.0 * lamp_scale,
+                    25_000.0 * lamp_scale,
+                    23_000.0 * lamp_scale,
+                ],
                 range: Some(12.0),
                 inner: 0.3,
                 outer: 0.6,
@@ -548,11 +607,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             Light::Point {
                 position: flame + Vec3::new(0.0, 0.3, 0.0),
-                candela: [24_000.0 * flicker, 12_000.0 * flicker, 4_000.0 * flicker],
+                candela: [
+                    24_000.0 * flicker * lamp_scale,
+                    12_000.0 * flicker * lamp_scale,
+                    4_000.0 * flicker * lamp_scale,
+                ],
                 range: Some(10.0),
                 source_radius: 0.25,
             },
-        ]
+        ];
+        if args.night_lanterns {
+            lights.extend((0..24).map(|i| Light::Point {
+                position: at((i % 6) as f32 * 1.8 - 4.5, 1.8, (i / 6) as f32 * 2.0 - 1.5),
+                candela: [22.0, 12.0, 4.0],
+                range: Some(4.0),
+                source_radius: 0.06,
+            }));
+        }
+        lights
     };
 
     // Decals on the ground: an emblem in front of the arch, and a wet puddle that darkens
@@ -609,7 +681,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
         if args.sun_speed != 0.0 && frame >= args.sun_after {
-            engine.set_sun(Sun::at_hour(hour, LATITUDE))?;
+            engine.set_sun(scene_sun(hour))?;
         }
         let sun_update_ms = sun_update.elapsed().as_secs_f64() * 1e3;
         // The hero walks a circle through the arch.
@@ -663,8 +735,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
         // and restoration. These captures are separate from the ordinary frame hashes.
         if args.reload_probe && frame + 1 == args.frames {
-            let edit =
-                GAME_PROGRAM.replace("return exposed;", "return exposed*vec3<f32>(0.83,1.0,1.0);");
+            // CC1: a fresh live constant excludes a previously compiled edit from
+            // the NVIDIA private cache; ordinary PC1 probes retain their tint.
+            let tint = std::env::var("RENDERLAB_RELOAD_PROBE_TINT")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|t| (0.5..1.0).contains(t))
+                .unwrap_or(0.83);
+            let edit = GAME_PROGRAM.replace(
+                "return exposed;",
+                &format!("return exposed*vec3<f32>({tint},1.0,1.0);"),
+            );
             let edited = Instant::now();
             engine.reload_program(program, &edit)?;
             let compiled_seconds = edited.elapsed().as_secs_f64();
@@ -710,7 +791,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for step in 0..args.timing_frames {
             let submit = Instant::now();
             if args.sun_speed != 0.0 {
-                engine.set_sun(Sun::at_hour(sun_hour(args.frames + step), LATITUDE))?;
+                engine.set_sun(scene_sun(sun_hour(args.frames + step)))?;
             }
             engine.render(camera)?;
             cpu.push(submit.elapsed().as_secs_f64() * 1e3);
@@ -728,6 +809,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
+        "night_lanterns": args.night_lanterns, "local_lights": lanterns(0.0).len(),
+        "local_shadow_count":engine.settings().local_shadows.count,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
