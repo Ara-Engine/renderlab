@@ -2001,8 +2001,6 @@ impl Renderer {
                     words.extend([*base, draw_identity(ids, d, i)]);
                 }
             }
-            // Whole 16-byte words: the shader binds the buffer as array<vec4<u32>> (P-NRT2).
-            words.resize(words.len().next_multiple_of(4), 0);
             let bytes = (words.len() * 4) as u64;
             let near_bytes = refs
                 .iter()
