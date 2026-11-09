@@ -1939,7 +1939,11 @@ impl Renderer {
             let penumbra = Buffer::new(
                 self,
                 "P-RTS penumbra list",
-                if defer_edges { retry_bytes } else { 20 },
+                if defer_edges && temporal_reconstruction::PENUMBRA_LISTING {
+                    retry_bytes
+                } else {
+                    20
+                },
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             );
             let next = Targets {

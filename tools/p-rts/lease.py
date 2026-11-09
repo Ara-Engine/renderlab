@@ -21,10 +21,23 @@ sys.path.insert(0, str(REPO / "tools/ara1"))
 from lease import SCHEDULE, check_order, order_state, released_after  # noqa: E402
 
 
-def released(after):
-    """True once, after the latest root order, a release line *starts with* one of the
-    owners in `after` (OWNER LABEL window released ...). Quoted text never matches."""
-    return not after or any(released_after(order_state(), owner) for owner in after)
+def released(after, anchor=None):
+    """True once a release line *starts with* one of the owners in `after` (OWNER LABEL
+    window released ...) after the latest root order, or after `anchor` (the first order
+    this waiter accepted) when it follows the queue. Quoted text never matches."""
+    state = order_state()
+    if anchor is not None:
+        lines = SCHEDULE.read_text(encoding="utf-8").splitlines()
+        state = dict(state, following=lines[lines.index(anchor) + 1:])
+    return not after or any(released_after(state, owner) for owner in after)
+
+
+def follow(expected, keep):
+    """The current order hash: `expected`, or a newer order that still contains `keep`."""
+    state = order_state()
+    if state["sha256"] == expected or (keep and keep in state["line"]):
+        return state["sha256"]
+    check_order(expected)
 
 
 def main():
@@ -37,6 +50,7 @@ def main():
     p.add_argument("--label", required=True)
     p.add_argument("--minutes", type=float, default=14)
     p.add_argument("--wait-minutes", type=float, default=0)
+    p.add_argument("--follow-queue", help="accept a newer root order that still contains this literal text")
     p.add_argument("--admission-mbytes", type=float, default=8192, help="root's floor: 7 GiB short, 8 GiB full quarry")
     p.add_argument("--after-owner", action="append", default=[],
                    help="hold until this owner's own release line follows the order (any of several spellings)")
@@ -45,6 +59,7 @@ def main():
     if not 0 < a.minutes <= 15:
         p.error("P-RTS leases are at most 15 minutes")
     check_order(a.expected_order)
+    anchor = order_state()["line"] if a.follow_queue else None
     os.environ.update(N8_OWNER="p-rts", N8_OUT=str(ROOT / "lease"), P_RTS_EXPECTED_ORDER=a.expected_order)
     spec = importlib.util.spec_from_file_location("p_rts_n8", REPO / "scripts/n8-run.py")
     n8 = importlib.util.module_from_spec(spec)
@@ -52,8 +67,11 @@ def main():
     n8.s1.runner.PREFLIGHT_MEMORY_MBYTES = a.admission_mbytes
     n8.s1.runner.RUNTIME_MEMORY_MBYTES = 2048
     deadline = time.monotonic() + a.wait_minutes * 60
-    while n8.s1.runner.LOCK.exists() or not released(a.after_owner):
-        check_order(a.expected_order)
+    # Wait for the lock, the gate and the RAM floor, so admission never burns the slot.
+    while (n8.s1.runner.LOCK.exists() or not released(a.after_owner, anchor)
+           or n8.s1.runner.resource_sample()["available_mbytes"] < a.admission_mbytes + 256):
+        a.expected_order = follow(a.expected_order, a.follow_queue)
+        os.environ["P_RTS_EXPECTED_ORDER"] = a.expected_order
         if time.monotonic() >= deadline:
             print("DEFERRED: GPU lock occupied", flush=True)
             return 3
@@ -63,8 +81,9 @@ def main():
     def save(path, value):
         if path == n8.s1.runner.LOCK / "owner.json":
             try:
-                check_order(a.expected_order)
-                if not released(a.after_owner):
+                a.expected_order = follow(a.expected_order, a.follow_queue)
+                os.environ["P_RTS_EXPECTED_ORDER"] = a.expected_order
+                if not released(a.after_owner, anchor):
                     raise RuntimeError("hold owner has not released after the latest root order")
             except RuntimeError:
                 n8.s1.runner.LOCK.rmdir()

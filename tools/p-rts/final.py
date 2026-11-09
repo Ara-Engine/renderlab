@@ -17,10 +17,21 @@ FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 sys.path.insert(0, str(REPO / "tools/ara1"))
 from lease import check_order  # noqa: E402
 
+def check_running(expected):
+    """A running P-RTS lease continues under a newer order that says it does not stop
+    running leases; any other change stops it (tools/ara1/lease.py's check)."""
+    from lease import order_state
+    state = order_state()
+    if state["sha256"] != expected and "Running leases are not stopped" in state["line"]:
+        os.environ["P_RTS_EXPECTED_ORDER"] = state["sha256"]
+        return state
+    return check_order(expected)
+
+
 
 def step(name, command, log, env=None):
     # Every step re-reads the latest root order; a changed order ends the lease here.
-    check_order(os.environ["P_RTS_EXPECTED_ORDER"])
+    check_running(os.environ["P_RTS_EXPECTED_ORDER"])
     begin = time.perf_counter()
     with log.open("w", encoding="utf-8") as out:
         code = subprocess.run(command, cwd=REPO, env=env or os.environ, stdout=out, stderr=subprocess.STDOUT,

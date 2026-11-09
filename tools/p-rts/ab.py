@@ -21,6 +21,17 @@ SCENES = Path("D:/Coding/renderlab-work/ara1/phase2-scenes")
 sys.path.insert(0, str(REPO / "tools/ara1"))
 from lease import check_order  # noqa: E402
 
+def check_running(expected):
+    """A running P-RTS lease continues under a newer order that says it does not stop
+    running leases; any other change stops it (tools/ara1/lease.py's check)."""
+    from lease import order_state
+    state = order_state()
+    if state["sha256"] != expected and "Running leases are not stopped" in state["line"]:
+        os.environ["P_RTS_EXPECTED_ORDER"] = state["sha256"]
+        return state
+    return check_order(expected)
+
+
 
 def digest(path):
     with open(path, "rb") as f:
@@ -85,7 +96,7 @@ def main():
                       for label in (list(binaries) if r % 2 == 0 else list(binaries)[::-1])]
     failures = 0
     for scene, label, rep in steps:
-        check_order(expected)
+        expected = check_running(expected)["sha256"]
         # A name is a frozen ARA1 scene; a .json path is a P-RTS supplemental scene.
         path = Path(scene) if scene.endswith(".json") else SCENES / f"{scene}.json"
         # The adapter keeps its pipeline cache beside OUT: one per binary, across scenes.

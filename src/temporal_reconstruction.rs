@@ -309,6 +309,11 @@ pub(in crate::renderer) struct Pipelines {
 }
 
 pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
+    trace_source_with(soft_kernels, PENUMBRA_LISTING)
+}
+/// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
+/// otherwise the module is main's (every receiver traces the budget).
+fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error> {
     let (find, replace) = ROTATION_SEAM;
     if soft_kernels.matches(find).count() != 1 {
         return Err(Error::InvalidInput(
@@ -322,6 +327,16 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
         return Err(Error::InvalidInput(
             "reconstruction shadow budget requires the fresh ray loop",
         ));
+    }
+    if !listing {
+        // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
+        // Exact pipelines keep their override, direction sequence and normalization.
+        return Ok(source
+            .replace(
+                loop_seam,
+                "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
+            )
+            .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"));
     }
     // P-RTS: the full-budget estimator for listed penumbra pixels is this module's own
     // fresh_estimate text, renamed, with lanes striding the frame's budget.
@@ -365,8 +380,12 @@ const PENUMBRA_TRACE: &str = include_str!("../shaders/primary_penumbra.wgsl");
 /// the budget; a non-listed pixel takes its window's unanimous 0 or 256.
 const PROBE_DISK: u32 = 8;
 const PROBE_CONE: f32 = 2.0;
-/// P-RTS listing on (measured default) or off (every receiver traces the full budget).
-const PENUMBRA_LISTING: bool = true;
+/// P-RTS listing. Off by default: on RTDEF2's S2 fixture (0.04 rad light) the listed
+/// frames still left near-unanimous fringe pixels unlisted (up to 0.125 visibility on
+/// moving frames), which fails the zero-loss bar. Off, the trace module, pipelines and
+/// targets are main's exactly. On, ARA1's eight non-quarry scenes are byte-identical and
+/// the cut costs 1.1-1.7 ms instead of 9.7-17.5 ms (docs/p-rts.md).
+pub(super) const PENUMBRA_LISTING: bool = false;
 /// P-RTS's standalone penumbra list pass (docs/p-rts.md).
 pub(in crate::renderer) const PENUMBRA_LIST: &str =
     include_str!("../shaders/primary_penumbra_list.wgsl");
@@ -484,7 +503,8 @@ impl PrimaryState {
                 }),
                 full: deferred.then(|| self.interactive_pipeline(device, ledger, &soft, &eight)),
                 // The penumbra pass follows the retained two-pass repair only.
-                penumbra: (deferred && !modern).then(|| self.penumbra_pipelines(device, ledger, &soft)),
+                penumbra: (deferred && !modern && PENUMBRA_LISTING)
+                    .then(|| self.penumbra_pipelines(device, ledger, &soft)),
             }
         });
         Pipelines { trace, resolve }
@@ -1323,8 +1343,12 @@ mod tests {
         let resolve = resolve_source(prelude).unwrap();
         assert!(!resolve.contains("ray_query") && !resolve.contains("rayQuery"));
         let kernels = shader_sources(prelude).unwrap();
-        let trace = trace_source(&kernels[1]).unwrap();
-        assert!(trace.contains("fresh_direction(j+primary_frame.sided.y"));
+        // Main's module when listing is off; P-RTS's seams when it is on.
+        let off = trace_source_with(&kernels[1], false).unwrap();
+        assert!(off.contains("for(var j=lane;j<primary_frame.sampling.x;j+=1u)"));
+        assert!(!off.contains("primary_penumbra_trace"));
+        let trace = trace_source_with(&kernels[1], true).unwrap();
+        assert!(trace.contains("fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y"));
         // P-RTS: probes trace sampling.y; listed pixels stride the whole budget.
         assert_eq!(trace.matches("j<primary_frame.sampling.y;j+=1u").count(), 1);
         assert_eq!(trace.matches("bitcast<f32>(primary_frame.sampling.w),wide)").count(), 1);
@@ -1334,7 +1358,7 @@ mod tests {
                 .count(),
             1
         );
-        for source in [resolve, trace, PENUMBRA_LIST.to_owned()] {
+        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()] {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

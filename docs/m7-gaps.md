@@ -147,20 +147,23 @@ settings and the old recorded gates remain available.
 - Historical eight-ray, TR1-off speed/memory rows are retained as historical
   evidence, not prices for the new GI/AT1/TR1 default. Unreal/film parity and
   a combined 2x advantage are not certified by this unit.
-- **P-RTS (M8, [p-rts.md](p-rts.md)).** Cut, reset and moving TR1 frames now trace
-  the budget only at listed penumbra pixels, after 16 probes (eight in-disk, eight
-  over a 2x cone) per receiver. Remaining gaps:
-  - Listing is a sampled decision, not a certificate. A sliver of the sun that no probe
+- **P-RTS (M8, [p-rts.md](p-rts.md)): RT first-cut and moving shadow cost is still open.**
+  Penumbra listing (16 probes per receiver, then the budget only at listed edge pixels)
+  cuts the game first cut from 21.6 to 5.6 ms. It keeps ARA1's eight non-quarry scenes
+  byte-identical, and the quarry has one pixel off by one code that scores better. But it
+  loses fringe shadowing on RTDEF2's S2 0.04 rad light (up to 0.125 on moving frames), so
+  `PENUMBRA_LISTING` is false and the default is main's. Remaining gaps:
+  - Listing is a sampled decision, not a certificate. A sliver of the light that no probe
     in a pixel's 3x3 window sees ("hidden fringe") keeps the unanimous 0 or 256 where
-    production would give a near-unanimous count. The measured residue is in p-rts.md §4.
-    Exact certification would need a cone query that hardware ray queries lack.
+    production would give a near-unanimous count. Exact certification needs a conservative
+    cone/occluder bound; hardware ray queries offer no cone query.
   - Held frames still trace eight rays for every receiver. The small-scene still-frame
     gap to Ara hybrid is mostly shading, GI and TR1 resolve, outside this unit; the
     sun-ray share of a held small-scene frame is about 0.4 ms.
-  - Quarry cut frames remain about 5–6 ms CPU service, above Ara's 2–4 ms. After this
-    unit the shadow share is about 2.5 ms; the rest is GI's cut path and the resolve.
+  - With listing on, quarry cut frames are 5.8–7.5 ms CPU service (shadow share
+    about 2.8–3.4 ms); the rest is GI's cut path and the resolve.
   - The non-deferred fallback (edge repair buffer over the device limit, e.g. some 4K
-    targets) keeps the full budget for every receiver, so it keeps the old cut cost.
+    targets) would keep the full budget for every receiver even with listing on.
   - No Nsight trace was taken (saturated GPU queue). The cost model is ARA1's per-pass
     timestamps across budgets, which are linear in the ray count.
 
