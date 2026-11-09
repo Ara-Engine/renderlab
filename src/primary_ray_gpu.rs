@@ -1636,8 +1636,9 @@ impl Renderer {
             uploads.write_calls += 1;
         }
         let mut bytes = [0; FRAME_BYTES];
-        // sampling.x: TR1's shadow budget; y: its probe directions; w: the probe cone
-        // scale as f32 bits (P-RTS; 1.0 here and on every frame that lists no penumbrae).
+        // sampling.x: TR1's shadow budget; y: its probe directions; z: the probes inside the
+        // sun's disk before wide ones (0: no split); w: the wide probes' cone scale as f32
+        // bits (P-RTS; 0 and 1.0 here and on every frame that lists no penumbrae).
         bytes[112..116].copy_from_slice(&8u32.to_ne_bytes());
         bytes[116..120].copy_from_slice(&8u32.to_ne_bytes());
         bytes[124..128].copy_from_slice(&1f32.to_bits().to_ne_bytes());

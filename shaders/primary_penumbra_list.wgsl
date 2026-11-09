@@ -1,7 +1,7 @@
 // P-RTS penumbra list (docs/p-rts.md). Standalone module, run after TR1's probe trace
 // and its edge repair when the frame's shadow budget exceeds its probe count.
-// The probe pass wrote each receiver's sampling.y probe rays (a cone sampling.w times the
-// sun's) as 0..256. A pixel is listed for the full budget when its own receiver exists and
+// The probe pass wrote each receiver's sampling.y probe rays (sampling.z of the budget's
+// directions, the rest over a cone sampling.w times the sun's) as 0..256. A pixel is listed for the full budget when its own receiver exists and
 // its 3x3 window holds both a blocked and a visible probe ray: a mixed pixel, or unanimous
 // 0 and 256 pixels side by side. Listed pixels get exactly production's budget count.
 @group(0) @binding(6) var probe_visibility:texture_2d<u32>;

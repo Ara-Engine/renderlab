@@ -147,6 +147,22 @@ settings and the old recorded gates remain available.
 - Historical eight-ray, TR1-off speed/memory rows are retained as historical
   evidence, not prices for the new GI/AT1/TR1 default. Unreal/film parity and
   a combined 2x advantage are not certified by this unit.
+- **P-RTS (M8, [p-rts.md](p-rts.md)).** Cut, reset and moving TR1 frames now trace
+  the budget only at listed penumbra pixels, after 16 probes (eight in-disk, eight
+  over a 2x cone) per receiver. Remaining gaps:
+  - Listing is a sampled decision, not a certificate. A sliver of the sun that no probe
+    in a pixel's 3x3 window sees ("hidden fringe") keeps the unanimous 0 or 256 where
+    production would give a near-unanimous count. The measured residue is in p-rts.md §4.
+    Exact certification would need a cone query that hardware ray queries lack.
+  - Held frames still trace eight rays for every receiver. The small-scene still-frame
+    gap to Ara hybrid is mostly shading, GI and TR1 resolve, outside this unit; the
+    sun-ray share of a held small-scene frame is about 0.4 ms.
+  - Quarry cut frames remain about 5–6 ms CPU service, above Ara's 2–4 ms. After this
+    unit the shadow share is about 2.5 ms; the rest is GI's cut path and the resolve.
+  - The non-deferred fallback (edge repair buffer over the device limit, e.g. some 4K
+    targets) keeps the full budget for every receiver, so it keeps the old cut cost.
+  - No Nsight trace was taken (saturated GPU queue). The cost model is ARA1's per-pass
+    timestamps across budgets, which are linear in the ray count.
 
 ## Atmosphere
 

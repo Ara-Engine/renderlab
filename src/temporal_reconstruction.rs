@@ -218,9 +218,9 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
 /// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
 /// Materials still receive the same visibility value and shading inputs.
-/// P-RTS (docs/p-rts.md): when a frame's budget exceeds `held_rays`, every receiver first
-/// traces `held_rays` probe directions over a cone twice the sun's; only pixels whose 3x3
-/// window holds both a blocked and a visible probe trace the budget, exactly as before.
+/// P-RTS (docs/p-rts.md): when a frame's budget exceeds 16, every receiver first traces
+/// eight of the budget's directions and eight over a cone twice the sun's; only pixels whose
+/// 3x3 window holds both a blocked and a visible probe trace the budget, exactly as before.
 /// Receivers whose whole window agrees take the unanimous 0 or 256.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconstructionShadowBudget {
@@ -334,10 +334,13 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
             "for(var j=lane;j<primary_frame.sampling.x;j+=PENUMBRA_LANES)",
             1,
         );
-    // The probes' cone scale (sampling.w, 1.0 unless the frame lists penumbrae).
+    // Probe directions: on listing frames (sampling.z = PROBE_DISK, else 0) the first
+    // sampling.z are the budget's own, then the same sequence over a cone sampling.w
+    // times the sun's. Other frames keep j and an exact x 1.0 slope.
     let source = source.replacen(
         ROTATION_SEAM.1,
-        "let direction=fresh_direction(j+primary_frame.sided.y,shift,l,u,v,view.texel.z*bitcast<f32>(primary_frame.sampling.w));",
+        "let wide=primary_frame.sampling.z!=0u && j>=primary_frame.sampling.z;
+        let direction=fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y,shift,l,u,v,view.texel.z*select(1.0,bitcast<f32>(primary_frame.sampling.w),wide));",
         1,
     );
     // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
@@ -354,12 +357,16 @@ pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
     ))
 }
 const PENUMBRA_TRACE: &str = include_str!("../shaders/primary_penumbra.wgsl");
-/// P-RTS probe cone scale on listing frames. An occluder that clips the sun's disk crosses
-/// its rim, so it also covers a large cap of a twice-wider probe disk: the probes find
-/// slivers that the disk's own eight directions miss. Probes only decide which pixels trace
-/// the budget; no probe ray is counted in any pixel's visibility except a unanimous one.
-/// Screened 1.0/1.5/2.0 with 3x3/5x5/7x7 windows on the ARA1 scenes (docs/p-rts.md).
+/// P-RTS (docs/p-rts.md). Listing frames probe PROBE_DISK of the budget's own directions
+/// and PROBE_DISK more over a cone PROBE_CONE times the sun's. The wide probes find thin
+/// slivers at a small sun's rim (an occluder clipping the disk also covers a large cap of
+/// the wider disk); the disk probes keep full density when the light is large and a
+/// blocker's shadow is no wider than the probe cone. Probes only decide which pixels trace
+/// the budget; a non-listed pixel takes its window's unanimous 0 or 256.
+const PROBE_DISK: u32 = 8;
 const PROBE_CONE: f32 = 2.0;
+/// P-RTS listing on (measured default) or off (every receiver traces the full budget).
+const PENUMBRA_LISTING: bool = true;
 /// P-RTS's standalone penumbra list pass (docs/p-rts.md).
 pub(in crate::renderer) const PENUMBRA_LIST: &str =
     include_str!("../shaders/primary_penumbra_list.wgsl");
@@ -1098,25 +1105,24 @@ impl Renderer {
                     .and_then(|r| r.trace.as_ref())
                     .is_some_and(|t| t.penumbra.is_some())
             });
-        state.probe_rays = if listing {
-            self.reconstruction_shadow_budget
-                .held_rays
-                .min(state.shadow_rays)
+        // Listing pays only where the budget exceeds both probe sets.
+        state.probe_rays = if listing && PENUMBRA_LISTING && state.shadow_rays > 2 * PROBE_DISK {
+            2 * PROBE_DISK
         } else {
             state.shadow_rays
         };
         // Listing frames probe a cone PROBE_CONE times the sun's; frames without listing
         // keep the exact budget directions (x 1.0 is exact).
-        let widen: f32 = if state.probe_rays < state.shadow_rays {
-            PROBE_CONE
+        let (disk, widen) = if state.probe_rays < state.shadow_rays {
+            (PROBE_DISK, PROBE_CONE)
         } else {
-            1.0
+            (0, 1.0)
         };
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
         let mut words = state.shadow_rays.to_ne_bytes().to_vec();
         words.extend_from_slice(&state.probe_rays.to_ne_bytes());
-        words.extend_from_slice(&0u32.to_ne_bytes());
+        words.extend_from_slice(&disk.to_ne_bytes());
         words.extend_from_slice(&widen.to_bits().to_ne_bytes());
         self.queue.write_buffer(primary_frame, 112, &words);
         self.uploads.view_settings += 16;
@@ -1321,7 +1327,7 @@ mod tests {
         assert!(trace.contains("fresh_direction(j+primary_frame.sided.y"));
         // P-RTS: probes trace sampling.y; listed pixels stride the whole budget.
         assert_eq!(trace.matches("j<primary_frame.sampling.y;j+=1u").count(), 1);
-        assert_eq!(trace.matches("view.texel.z*bitcast<f32>(primary_frame.sampling.w)").count(), 1);
+        assert_eq!(trace.matches("bitcast<f32>(primary_frame.sampling.w),wide)").count(), 1);
         assert_eq!(
             trace
                 .matches("j<primary_frame.sampling.x;j+=PENUMBRA_LANES")

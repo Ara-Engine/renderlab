@@ -37,6 +37,7 @@ def main():
     p.add_argument("--label", required=True)
     p.add_argument("--minutes", type=float, default=14)
     p.add_argument("--wait-minutes", type=float, default=0)
+    p.add_argument("--admission-mbytes", type=float, default=8192, help="root's floor: 7 GiB short, 8 GiB full quarry")
     p.add_argument("--after-owner", action="append", default=[],
                    help="hold until this owner's own release line follows the order (any of several spellings)")
     p.add_argument("command", nargs=argparse.REMAINDER)
@@ -48,7 +49,7 @@ def main():
     spec = importlib.util.spec_from_file_location("p_rts_n8", REPO / "scripts/n8-run.py")
     n8 = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(n8)
-    n8.s1.runner.PREFLIGHT_MEMORY_MBYTES = 6144
+    n8.s1.runner.PREFLIGHT_MEMORY_MBYTES = a.admission_mbytes
     n8.s1.runner.RUNTIME_MEMORY_MBYTES = 2048
     deadline = time.monotonic() + a.wait_minutes * 60
     while n8.s1.runner.LOCK.exists() or not released(a.after_owner):
