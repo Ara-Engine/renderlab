@@ -478,8 +478,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
         // and restoration. These captures are separate from the ordinary frame hashes.
         if args.reload_probe && frame + 1 == args.frames {
-            let edit =
-                GAME_PROGRAM.replace("return exposed;", "return exposed*vec3<f32>(0.83,1.0,1.0);");
+            // CC1: a fresh live constant excludes a previously compiled edit from
+            // the NVIDIA private cache; ordinary PC1 probes retain their tint.
+            let tint = std::env::var("RENDERLAB_RELOAD_PROBE_TINT")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|t| (0.5..1.0).contains(t))
+                .unwrap_or(0.83);
+            let edit = GAME_PROGRAM.replace(
+                "return exposed;",
+                &format!("return exposed*vec3<f32>({tint},1.0,1.0);"),
+            );
             let edited = Instant::now();
             engine.reload_program(program, &edit)?;
             let compiled_seconds = edited.elapsed().as_secs_f64();
