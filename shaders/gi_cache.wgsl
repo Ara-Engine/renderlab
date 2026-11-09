@@ -159,6 +159,13 @@ fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 // Per draw (batch) of this frame: its stable id (0: none), first placement and instance
 // count, so a cell's material names its placement whatever the draw order (src/gi_cache.rs).
 @group(0) @binding(36) var<storage,read> gi_draws:array<vec4<u32>>;
+// The cell-space filter's sources (G3, gi_filter): per slot, its own unfiltered hot words 1-22
+// (sky scale and halves, bounce scale and halves), written beside the hot record by gi_store_sh
+// and gi_gather while a filter bit is set. One record when the filter is off.
+@group(0) @binding(37) var<storage,read_write> gi_raw:array<u32>;
+const GI_RAW_WORDS:u32=22u;
+fn gi_raw_at(slot:u32, word:u32) -> u32 { return slot*GI_RAW_WORDS+word-1u; }
+fn gi_filter_on(term:u32) -> bool { return (gi_word(GI_H_FILTER)&term)!=0u; }
 struct GiVec4s { data:array<vec4<f32>> };
 struct GiU32s { data:array<u32> };
 @group(1) @binding(2) var<storage,read> gi_vertices:binding_array<GiVec4s,PRIMARY_BATCHES>;
@@ -673,6 +680,8 @@ fn gi_resolve_miss(index:u32) {
     // No split flag, bounce value or outgoing radiance from the slot's last occupant.
     gi_table[gi_hot(slot)+15u]=0u;
     gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
+    // The filter's bounce source says "gathered" (G3).
+    if gi_filter_on(GI_FILTER_BOUNCE) { gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]=0u; }
     gi_outgoing[slot]=vec4<f32>(0.0);
     gi_table[cold+GI_C_KEY_B]=key.y;
     // Cells only gathers requested (bands below the pixels') are secondary, or tertiary
@@ -819,6 +828,11 @@ fn gi_store_sh(slot:u32) {
     gi_table[hot+1u]=bitcast<u32>(scale);
     // The query normal beside the value, for shading's agreement weight (G2).
     gi_table[hot+GI_HOT_NORMAL]=gi_table[gi_cold(slot)+GI_C_NORMAL];
+    // The unfiltered value, the filter's source (G3); gi_filter replaces the hot words later
+    // this frame.
+    if gi_filter_on(GI_FILTER_SKY) {
+        for(var w=1u;w<16u;w+=1u) { gi_raw[gi_raw_at(slot,w)]=gi_table[hot+w]; }
+    }
 }
 fn gi_sh_component(j:u32) -> f32 {
     let v=gi_cell_sh[j/3u];
@@ -1081,6 +1095,7 @@ const GI_SETUP_CHOSEN:u32=7u;
                     gi_table[gi_hot(slot)]=c.key.x;
                     gi_table[gi_hot(slot)+15u]=select(0u,GI_SPLIT_HOT,split);
                     gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
+                    if gi_filter_on(GI_FILTER_BOUNCE) { gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]=0u; }
                     gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN|select(0u,GI_SPLIT,split)
                         |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
                     atomicAdd(&gi_work[GI_W_ORPHANS],1u);
@@ -1432,7 +1447,12 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             }
         }
         gi_lane_reduce(cell,lane);
-        if live && lane==0u { gi_store_sh(slot); }
+        if live && lane==0u {
+            gi_store_sh(slot);
+            // A filtered value is rewritten from the new source this frame (G3): the filter
+            // reads the cell shading queue.
+            if gi_bounce_on() && gi_filter_on(GI_FILTER_SKY) { gi_queue_shade(slot); }
+        }
         workgroupBarrier();
     }
 }
@@ -1792,6 +1812,10 @@ fn gi_gather_period(count:u32) -> u32 {
                 }
                 gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(m);
             }
+            // The unfiltered value, the filter's source (G3).
+            if gi_filter_on(GI_FILTER_BOUNCE) {
+                for(var w=GI_HOT_BOUNCE;w<GI_HOT_BOUNCE+7u;w+=1u) { gi_raw[gi_raw_at(slot,w)]=gi_table[hot+w]; }
+            }
             // The schedule: one gather done. A gather that met hit cells without a value yet
             // (new this frame, or requested now) is repeated once more.
             var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
@@ -1820,5 +1844,172 @@ fn gi_gather_period(count:u32) -> u32 {
             gi_schedule(slot,max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,1u));
         }
         workgroupBarrier();
+    }
+}
+
+// ---- cell-space filter (G3, docs/m7-g3.md) ----
+// One fixed-weight pass over the neighbourhood of every cell whose value changed this frame.
+// A cell's filtered value is the weighted mean of the unfiltered values (gi_raw) of itself and
+// the eight cells around it in its bin's tangent plane at its level. The weights are a fixed
+// tent (1 at the centre, e on the edges, e^2 at the corners) times two geometric factors: the
+// agreement of the neighbour's query normal with the cell's, and the distance of the
+// neighbour's query point from the cell's query plane, so cells across a crease, a step or
+// another layer take none. No jitter, no sample counts, no variance, one non-separable pass
+// (docs/m7-g3.md claim notes). The result replaces the hot words that shading, ES1's specular
+// and cell shading read; the unfiltered values stay the source, so a value is never filtered
+// twice and never blends with an earlier one (W1).
+// Per-cell fixed-direction quadrature error differs from cell to cell (each cell's directions
+// are rotated by its key); where light enters through a narrow opening (the quarry's cave and
+// hollow) a few directions carry most of it, and that error showed as a coarse cell-sized
+// mottle the reference does not have (docs/m7-g2b.md).
+var<private> gi_f_sky:array<f32,27>;
+var<private> gi_f_bounce:array<f32,12>;
+// The cell beside (level, bin, query point q, query normal n) at tangent offset (du, dv): the
+// cell containing q moved one edge along the tangents, then along the bin's axis onto the
+// query plane, so a sloping surface's neighbours in the next layer up or down are found.
+fn gi_filter_neighbour(level:u32, bin:u32, q:vec3<f32>, n:vec3<f32>, du:i32, dv:i32) -> u32 {
+    let edge=gi_edge(level);
+    let axis=gi_axis_mask(bin);
+    var p=q+(f32(du)*vec3<f32>(gi_corner_offset(bin,1u))+f32(dv)*vec3<f32>(gi_corner_offset(bin,2u)))*edge;
+    let na=dot(n,axis);
+    if abs(na)>0.3 { p-=axis*clamp(dot(p-q,n)/na,-1.5*edge,1.5*edge); }
+    return gi_find(gi_key(level,bin,vec3<i32>(floor(gi_lattice(p,edge,bin)))));
+}
+// The share of the open sky's irradiance about the gi_y direction (gi_sh_basis) that slot m's
+// unfiltered sky value holds, channel mean; `open` is the unoccluded value there.
+fn gi_raw_openness(m:u32, open:f32) -> f32 {
+    var e=0.0;
+    for(var j=0u;j<27u;j+=1u) {
+        let pair=unpack2x16float(gi_raw[gi_raw_at(m,2u+j/2u)]);
+        let i=j/3u;
+        e+=gi_band_weight(i)*gi_y[i]*select(pair.x,pair.y,(j&1u)!=0u);
+    }
+    return e*bitcast<f32>(gi_raw[gi_raw_at(m,1u)])/(3.0*max(open,1e-30));
+}
+// Rewrites one valid cell's hot sky and/or bounce words with its filtered value. Every thread
+// that rewrites a cell in a frame computes the same words from the same sources: the pass
+// writes no source (gi_raw, the cold records, the hot valid bits), so the result does not
+// depend on thread order.
+fn gi_filter_cell(slot:u32) {
+    let hot=gi_hot(slot);
+    if (gi_table[hot]&GI_VALID)==0u { return; }
+    let sky=gi_filter_on(GI_FILTER_SKY);
+    // Whether a cell has been gathered is its bounce source's word (zeroed when the slot is
+    // claimed): hot word 0 is "not gathered yet" to the lookup (G2c). Without GI_FILTER_FILL a
+    // cell not gathered yet keeps that 0; with it, it takes its gathered neighbours' filtered
+    // bounce instead of the coarser level's, which the lookup would read for it (non-RT's gather
+    // cap leaves cells waiting for many frames after a cut: G2b's draining speckle).
+    let gathered=gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]!=0u;
+    let bounce=gi_filter_on(GI_FILTER_BOUNCE) && (gathered || gi_filter_on(GI_FILTER_FILL));
+    if !sky && !bounce { return; }
+    let cold=gi_cold(slot);
+    let def=gi_table[cold+GI_C_DEF];
+    let level=def&0xffu;
+    let bin=def>>8u;
+    let edge=gi_edge(level);
+    let q=gi_point(cold);
+    let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+    let e=gi_header_f32(GI_H_FILTER_EDGE);
+    // Contrast refine (GI_FILTER_CONTRAST): a cell whose sky is much darker than an agreeing
+    // neighbour's sits on a visibility edge narrower than a cell (a crevice mouth), where its
+    // dark query point stood for pixels that are open (docs/m7-g2.md section 4). It is marked
+    // split, so its pixels read the next finer level there (GI_REFINE), as G1c's two-layer
+    // cells are. A fixed per-cell rule on visibility; no cell is ranked against another.
+    let contrast_on=sky && gi_filter_on(GI_FILTER_CONTRAST);
+    var contrast=false;
+    var open=0.0;
+    var open_c=0.0;
+    if contrast_on {
+        gi_sh_basis(n);
+        open=PI;
+        if lighting.map.w!=0.0 {
+            open=dot(environment_bilinear(environment_diffuse,environment_direction(n),0,0),vec3<f32>(1.0/3.0));
+        }
+        open_c=gi_raw_openness(slot,open);
+    }
+    for(var c=0u;c<27u;c+=1u) { gi_f_sky[c]=0.0; }
+    for(var c=0u;c<12u;c+=1u) { gi_f_bounce[c]=0.0; }
+    var ws=0.0;
+    var wb=0.0;
+    for(var j=0u;j<9u;j+=1u) {
+        let du=i32(j%3u)-1;
+        let dv=i32(j/3u)-1;
+        var m=slot;
+        var w=1.0;
+        if j!=4u {
+            m=gi_filter_neighbour(level,bin,q,n,du,dv);
+            if m==0xffffffffu || (gi_table[gi_hot(m)]&GI_VALID)==0u { continue; }
+            let mcold=gi_cold(m);
+            let tent=select(e,e*e,du!=0 && dv!=0);
+            let agree=smoothstep(0.5,0.9,dot(gi_unpack_normal(gi_table[mcold+GI_C_NORMAL]),n));
+            let plane=clamp(1.5-3.0*abs(dot(gi_point(mcold)-q,n))/edge,0.0,1.0);
+            w=tent*agree*plane;
+            if w<=0.0 { continue; }
+            if contrast_on && agree*plane>=0.5 {
+                let o=gi_raw_openness(m,open);
+                contrast=contrast || (o>0.25 && open_c<0.25*o);
+            }
+        }
+        if sky {
+            let s=w*bitcast<f32>(gi_raw[gi_raw_at(m,1u)]);
+            for(var k=0u;k<14u;k+=1u) {
+                let pair=unpack2x16float(gi_raw[gi_raw_at(m,2u+k)]);
+                gi_f_sky[2u*k]+=s*pair.x;
+                // The last word's other half is the split flag, not a coefficient.
+                if k<13u { gi_f_sky[2u*k+1u]+=s*pair.y; }
+            }
+            ws+=w;
+        }
+        if bounce && gi_raw[gi_raw_at(m,GI_HOT_BOUNCE)]!=0u {
+            // GI_BOUNCE_NONE (-0.0): gathered, no light; it weighs in as zero.
+            let b=w*max(bitcast<f32>(gi_raw[gi_raw_at(m,GI_HOT_BOUNCE)]),0.0);
+            for(var k=0u;k<6u;k+=1u) {
+                let pair=unpack2x16float(gi_raw[gi_raw_at(m,GI_HOT_BOUNCE+1u+k)]);
+                gi_f_bounce[2u*k]+=b*pair.x;
+                gi_f_bounce[2u*k+1u]+=b*pair.y;
+            }
+            wb+=w;
+        }
+    }
+    if sky && ws>0.0 {
+        var mx=0.0;
+        for(var c=0u;c<27u;c+=1u) { gi_f_sky[c]/=ws; mx=max(mx,abs(gi_f_sky[c])); }
+        let scale=max(mx,1e-30);
+        for(var k=0u;k<13u;k+=1u) {
+            gi_table[hot+2u+k]=pack2x16float(vec2<f32>(gi_f_sky[2u*k],gi_f_sky[2u*k+1u])/scale);
+        }
+        let split=(gi_raw[gi_raw_at(slot,15u)]&0xffff0000u)|select(0u,GI_SPLIT_HOT,contrast);
+        gi_table[hot+15u]=(pack2x16float(vec2<f32>(gi_f_sky[26]/scale,0.0))&0xffffu)|split;
+        gi_table[hot+1u]=bitcast<u32>(scale);
+    }
+    if bounce && wb>0.0 {
+        var mx=0.0;
+        for(var c=0u;c<12u;c+=1u) { gi_f_bounce[c]/=wb; mx=max(mx,abs(gi_f_bounce[c])); }
+        if mx<=0.0 {
+            gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
+        } else {
+            for(var k=0u;k<6u;k+=1u) {
+                gi_table[hot+GI_HOT_BOUNCE+1u+k]=pack2x16float(vec2<f32>(gi_f_bounce[2u*k],gi_f_bounce[2u*k+1u])/mx);
+            }
+            gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(mx);
+        }
+    }
+}
+// Nine items per queued cell: the cell itself and its eight neighbours (gi_filter_neighbour),
+// each rewritten from its own neighbourhood, since their filtered values read the cell.
+@compute @workgroup_size(64) fn gi_filter(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
+    for(var i=id.x;i<count*9u;i+=groups.x*64u) {
+        let c=atomicLoad(&gi_work[gi_frame.bounce.w+i/9u]);
+        let j=i%9u;
+        if (gi_table[gi_hot(c)]&GI_VALID)==0u { continue; }
+        var slot=c;
+        if j!=4u {
+            let cold=gi_cold(c);
+            let def=gi_table[cold+GI_C_DEF];
+            slot=gi_filter_neighbour(def&0xffu,def>>8u,gi_point(cold),gi_unpack_normal(gi_table[cold+GI_C_NORMAL]),i32(j%3u)-1,i32(j/3u)-1);
+            if slot==0xffffffffu { continue; }
+        }
+        gi_filter_cell(slot);
     }
 }
