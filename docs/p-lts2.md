@@ -4,7 +4,8 @@
 Checkpoint A changes single-program deferred shading from 4x4 to 8x4 invocations.
 **The 3.5 ms target remains unmet.** All retained A image gates, including full
 quarry, pass byte identity. Unshadowed performance needs a clean follow-up after
-foreign compiler contention; D remains an unretained prototype.
+foreign compiler contention; D is unretained. The unit closed within its three-hour
+box with no owned GPU/build job or waiter remaining.
 
 ## Retained implementation
 
@@ -96,6 +97,20 @@ counts rise to 1–2 on RT and sixteen on non-RT. The non-RT baseline's eight sa
 range from 10.68 to 56.42 ms. Their images still match. Only those unresolved timing
 pairs need repeating; the completed quality gates do not.
 
+The most recent unshadowed measurements (`runs/d-screen-1-a-unshadowed`) are:
+
+| Steady frame service, ms | Baseline | A | Status |
+|---|---:|---:|---|
+| RT unshadowed | 8.841 | 4.652 | Diagnostic only |
+| Non-RT unshadowed | 10.018 | 8.955 | Diagnostic only |
+
+Their per-process resource samples show zero rustc and over 10.5 GiB available,
+but P-NRT2 reported an overlapping build interval. They are **not** quiet timing
+certification. A subsequent compiler-free retime was queued with 8 GiB admission
+for its quarry component; foreign Glaze/other builds prevented admission. Its final
+bounded handoff expired at 13:40 UTC before any GPU work. The owner release was
+recorded and the quiet unshadowed/quarry repeat remains an explicit follow-up.
+
 Quarry timings are also contended and do **not** establish a quarry speedup. Its
 soft-default probes are 13.858 to 14.272 ms RT and 19.869 to 20.943 ms non-RT;
 hard controls are 13.284 to 11.555 and 15.813 to 14.353 ms. These fixture probes
@@ -163,7 +178,17 @@ indices 127 and 128 contribute to the image. Evidence: `runs/d-screen-1-d` and
 `runs/d-screen-1-boundary`.
 
 The first D screen has no measured gain over A, but a P-NRT2 build overlapped the
-intended quiet prefix; those timings are excluded pending a clean repeat. The warm
+intended quiet prefix; those timings are excluded from quiet performance claims:
+
+| Steady frame service, ms | A | D |
+|---|---:|---:|
+| RT shadowed | 6.530 | 6.711 |
+| Non-RT shadowed | 13.433 | 13.642 |
+| RT unshadowed | 4.594 | 4.883 |
+| Non-RT unshadowed | 8.568 | 8.724 |
+
+No benefit was demonstrated, and a clean repeat could not admit within the time box.
+D was left out of the branch; it has no full-fixture promotion claim. The warm
 D non-RT trace reports primary shading at **3.512 ms**, with `rl_light_record` at
 **13.2%** and `rl_light_index` at **5.4%** of sampled states. This trace also includes
 A's group-size change, so comparison with the original 4x4 baseline does not isolate
@@ -182,6 +207,12 @@ actual owner-prefixed release lines. Compiler-quiet holds are honored.
 Root explicitly amended admission to **7 GiB for short non-quarry leases**;
 full-quarry runs retain **8 GiB**. The standard **2 GiB runtime guard** is unchanged.
 The fixture driver rejects a full-quarry run under a smaller admission lease.
+Quiet admission waits for Cargo, rustc and linker processes and records no admitted
+line when build preflight fails. The schedule reader streams lines to avoid a full
+file copy under memory pressure; owner gates remain anchored and scoped after the
+latest root order. The retime's optional fixture flag skips additional legacy/walk
+controls, preserving the exact soft default, eight timing repeats, all 261 lights,
+software GI geometry and the 128-map budget. It was prepared but never run.
 
 The first quiet screen was stopped by foreign compiler contention after its warm
 profile, before any scored A/B pair. Remaining diagnostic screens allow compiler
@@ -199,8 +230,9 @@ with **"blocked by policy"**. The original two are now absent; the D trace's
 52,307,348-byte cleanup was handed to root. `summarized-traces.json` records paths,
 sizes and SHA-256 hashes. The same review rejected deletion of the unused own target
 `D:/Coding/renderlab-work/p-lts2/target` (716,575,607 bytes); `target-cleanup.json`
-records that handoff. No alternate deletion method was used. Inspected PNGs,
-JSON/CSV and logs remain separately.
+records that handoff. A subsequent read-only check confirms that the target and
+all three raw traces are now absent. No alternate deletion method was used by this
+unit. Inspected PNGs, JSON/CSV and logs remain separately.
 
 Development and verification time are separate from frame measurements: A's warm
 example build took **52.08 s**, and its retained lib-test build took **1m57s**.
