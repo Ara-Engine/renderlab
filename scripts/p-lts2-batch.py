@@ -71,8 +71,11 @@ def main():
                 raise ValueError("paths must be rt and/or nonrt")
             paired = []
             for variant in ("base", "candidate"):
-                if order() != directive:
-                    raise RuntimeError("root order changed between steps")
+                latest = order()
+                if latest != directive:
+                    if "Running leases are not stopped by this order." not in latest:
+                        raise RuntimeError("root order changed between steps")
+                    directive = latest
                 folder = out / f"{case}-{mode}-{variant}"
                 folder.mkdir()
                 binary = a.baseline_binary if variant == "base" and a.baseline_binary else a.binary

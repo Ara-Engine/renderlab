@@ -2,8 +2,10 @@
 
 2026-11-09, `t3/p-lts2`, baseline `7f4f75d5999c58fd90541900a935bcd88d5ef470`.
 Checkpoint A changes single-program deferred shading from 4x4 to 8x4 invocations.
-**The 3.5 ms target remains unmet.** Final quarry verification is pending in the
-coordinator's GPU queue; the completed checks below do not certify that missing gate.
+**The 3.5 ms target remains unmet.** All retained A image gates, including full
+quarry, pass byte identity. Unshadowed performance needs a clean follow-up after
+foreign compiler contention; D is unretained. The unit closed within its three-hour
+box with no owned GPU/build job or waiter remaining.
 
 ## Retained implementation
 
@@ -81,6 +83,40 @@ All four pairs' original still/motion/cut witnesses and final tail are HDR-byte 
 PNG-byte identical. These paired baselines replace neither P-LTS's older measured
 baseline nor Ara's measured values. All four remain above 3.5 ms.
 
+The final `a-final-1` lease supplies two uncontended pairs. Per-process intervals
+in `a-final-timing-context.json` contain zero observed rustc processes and at least
+10.2 GiB available throughout these four runs:
+
+| Steady frame service, ms | Baseline | A |
+|---|---:|---:|
+| RT shadowed | 10.098 | 6.632 |
+| Non-RT shadowed | 15.864 | 13.685 |
+
+Both final unshadowed pairs are excluded from performance claims: foreign compiler
+counts rise to 1–2 on RT and sixteen on non-RT. The non-RT baseline's eight samples
+range from 10.68 to 56.42 ms. Their images still match. Only those unresolved timing
+pairs need repeating; the completed quality gates do not.
+
+The most recent unshadowed measurements (`runs/d-screen-1-a-unshadowed`) are:
+
+| Steady frame service, ms | Baseline | A | Status |
+|---|---:|---:|---|
+| RT unshadowed | 8.841 | 4.652 | Diagnostic only |
+| Non-RT unshadowed | 10.018 | 8.955 | Diagnostic only |
+
+Their per-process resource samples show zero rustc and over 10.5 GiB available,
+but P-NRT2 reported an overlapping build interval. They are **not** quiet timing
+certification. A subsequent compiler-free retime was queued with 8 GiB admission
+for its quarry component; foreign Glaze/other builds prevented admission. Its final
+bounded handoff expired at 13:40 UTC before any GPU work. The owner release was
+recorded and the quiet unshadowed/quarry repeat remains an explicit follow-up.
+
+Quarry timings are also contended and do **not** establish a quarry speedup. Its
+soft-default probes are 13.858 to 14.272 ms RT and 19.869 to 20.943 ms non-RT;
+hard controls are 13.284 to 11.555 and 15.813 to 14.353 ms. These fixture probes
+include readback and differ from ARA1 service. Whether the soft result reflects
+group-size cost or contention remains unresolved; do not hide that possible regression.
+
 ## Quality ledger
 
 - **198 lib tests passed**, zero failed, including all shading compositions and
@@ -97,17 +133,25 @@ baseline nor Ara's measured values. All four remain above 3.5 ms.
   candidate PNGs** match across both paths.
 - Night courtyard with the Fox, default effects and unchanged lights, sixteen
   still and thirty-two moving frames per path: all **sixteen candidate PNGs** match.
-- Full registered quarry: pending its separate 8 GiB admission lease.
+- Full registered quarry, 13,034,903 source triangles and 261 lights: **28 float-HDR
+  and 56 candidate PNG witnesses** match across both paths. This includes the
+  sixteen-frame camera walk, moving lights, hard/soft and legacy controls, GI on/off,
+  day and dusk. Cluster mean 3.7766, longest 99, zero CPU mismatches/overflow and
+  zero unclustered differing channels are unchanged; visible-light GI populations
+  also match exactly. Evidence: `runs/a-final-1-quarry/summary.json`.
 
 All completed short image pairs share lease `a-checkpoint-1`. Its completed image
 prefix has no failed assertion or mismatch. The runner stopped at its bounded
 command deadline (512.36 s) just as the separate final timing step began; that
 incomplete timing attempt supplies no performance evidence.
 
-Inspected contact sheets: `inspection/a-game-lights.png` (sixteen 1080p witnesses)
-and `inspection/a-lc.png` (all twenty-four controls). Silhouettes, shadows, highlights
-and soft penumbrae retain the baseline image. Byte identity preserves the registered
-reference-error populations; this does not establish a new Unreal or film-quality claim.
+Inspected contact sheets: `inspection/a-game-lights.png`, `a-lc.png`, `a-mixed.png`,
+`a-night.png`, and both `a-quarry-*.png` sheets, plus full frame 031 courtyard images
+on both paths, RT quarry night and non-RT final walk presentation. Silhouettes,
+shadows, highlights, soft penumbrae and transparency retain the baseline image.
+Existing grain and the courtyard glass rectangle remain baseline defects. Byte
+identity preserves reference-error populations; this establishes no new Unreal or
+film-quality claim.
 
 ## Other trials
 
@@ -125,9 +169,32 @@ reference-error populations; this does not establish a new Unreal or film-qualit
   but its timing baseline was contended and the run stopped on a new root order.
   It is unretained; the current profile attributes only 3% to `brdf`.
 
-The fixed combined D prototype is saved in the ignored evidence directory. The
-checkpoint production diff contains only A. Any later promotion requires its own
-image gates and the 128/129-light uniform/storage boundary checks.
+The fixed combined D prototype is saved as `d-ready.patch` in the ignored evidence
+directory; the production diff contains only A. Its manual reference-probe composition
+needs a storage-backed `rl_light_record` stub. The fixed prototype passes **199 lib
+tests**, zero failed. The first screen's four ARA1 pairs and four 128/129-light
+uniform/storage boundary pairs all match HDR/PNG bytes. Boundary lights at global
+indices 127 and 128 contribute to the image. Evidence: `runs/d-screen-1-d` and
+`runs/d-screen-1-boundary`.
+
+The first D screen has no measured gain over A, but a P-NRT2 build overlapped the
+intended quiet prefix; those timings are excluded from quiet performance claims:
+
+| Steady frame service, ms | A | D |
+|---|---:|---:|
+| RT shadowed | 6.530 | 6.711 |
+| Non-RT shadowed | 13.433 | 13.642 |
+| RT unshadowed | 4.594 | 4.883 |
+| Non-RT unshadowed | 8.568 | 8.724 |
+
+No benefit was demonstrated, and a clean repeat could not admit within the time box.
+D was left out of the branch; it has no full-fixture promotion claim. The warm
+D non-RT trace reports primary shading at **3.512 ms**, with `rl_light_record` at
+**13.2%** and `rl_light_index` at **5.4%** of sampled states. This trace also includes
+A's group-size change, so comparison with the original 4x4 baseline does not isolate
+D. Shader samples describe attribution, not an achieved speedup. The trace's
+catalog, source, hotspots, function shares and pipeline times are summarized under
+`profile-d-screen-1-nonrt`.
 
 ## Reproduction and resource policy
 
@@ -140,16 +207,32 @@ actual owner-prefixed release lines. Compiler-quiet holds are honored.
 Root explicitly amended admission to **7 GiB for short non-quarry leases**;
 full-quarry runs retain **8 GiB**. The standard **2 GiB runtime guard** is unchanged.
 The fixture driver rejects a full-quarry run under a smaller admission lease.
+Quiet admission waits for Cargo, rustc and linker processes and records no admitted
+line when build preflight fails. The schedule reader streams lines to avoid a full
+file copy under memory pressure; owner gates remain anchored and scoped after the
+latest root order. The retime's optional fixture flag skips additional legacy/walk
+controls, preserving the exact soft default, eight timing repeats, all 261 lights,
+software GI geometry and the 128-map budget. It was prepared but never run.
 
 The first quiet screen was stopped by foreign compiler contention after its warm
 profile, before any scored A/B pair. Remaining diagnostic screens allow compiler
 contention and record it. A root-order parser mismatch in P-FLAT's queue gate was
 identified with a CPU-only reproducer; the corrected order unblocked the queue.
+`a-final-1` completes in **272.48 s**, with 8 GiB admission and minimum available
+memory **2447.6 MiB**, above the unchanged 2 GiB runtime guard. Foreign compiler
+count reaches nineteen later in that lease; only the clean shadowed timing prefix
+is retained as uncontended evidence. Root's hold starts at the runner's actual
+owner-prefixed admitted line. Commands honor later orders explicitly allowing
+running leases to continue.
 
-Automatic approval review rejected deletion of the two summarized raw GPU traces
-with **"blocked by policy"**; nothing was deleted. `summarized-traces.json` records
-their exact paths, sizes and SHA-256 hashes for root cleanup. Target cleanup is pending
-completion of the unit. Inspected PNGs, JSON/CSV and logs are retained separately.
+Automatic approval review rejected native deletion of the summarized raw traces
+with **"blocked by policy"**. The original two are now absent; the D trace's
+52,307,348-byte cleanup was handed to root. `summarized-traces.json` records paths,
+sizes and SHA-256 hashes. The same review rejected deletion of the unused own target
+`D:/Coding/renderlab-work/p-lts2/target` (716,575,607 bytes); `target-cleanup.json`
+records that handoff. A subsequent read-only check confirms that the target and
+all three raw traces are now absent. No alternate deletion method was used by this
+unit. Inspected PNGs, JSON/CSV and logs remain separately.
 
 Development and verification time are separate from frame measurements: A's warm
 example build took **52.08 s**, and its retained lib-test build took **1m57s**.

@@ -57,7 +57,8 @@ def main():
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 creationflags=subprocess.CREATE_NO_WINDOW)
     # Only this uniquely labelled profiler target may be stopped after collection.
-    script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'rl-capture.exe' "
+    exe_name = a.binary.name.replace("'", "''")
+    script = (f"Get-CimInstance Win32_Process | Where-Object {{ $_.Name -eq '{exe_name}' "
               f"-and $_.CommandLine -like '*{folder.name}/capture*' "
               "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
     subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True,
@@ -67,4 +68,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -24,6 +24,8 @@ def main():
     p.add_argument("--game", type=Path)
     p.add_argument("--steps", default="lib,fixture,mixed,quarry,game-still,game-move")
     p.add_argument("--paths", nargs="+", choices=["traced", "nonrt"], default=["traced", "nonrt"])
+    p.add_argument("--skip-quarry-controls", action="store_true",
+                   help="skip LC3 legacy/walk controls; keep identical soft quarry defaults")
     a = p.parse_args()
     spec = importlib.util.spec_from_file_location("p_lts_guard", REPO / "scripts/p-lts2-run.py")
     guard = importlib.util.module_from_spec(spec)
@@ -40,8 +42,11 @@ def main():
     for step in a.steps.split(","):
         for variant in (["candidate"] if step == "lib" else ["base", "candidate"]):
             for mode in ([None] if step == "lib" else a.paths):
-                if guard.order() != directive:
-                    raise RuntimeError("root order changed between fixture steps")
+                latest = guard.order()
+                if latest != directive:
+                    if "Running leases are not stopped by this order." not in latest:
+                        raise RuntimeError("root order changed between fixture steps")
+                    directive = latest
                 folder = out / f"{step}-{mode}-{variant}"
                 folder.mkdir()
                 binary = ROOT / "bin/base-tests.exe" if variant == "base" else a.candidate
@@ -50,6 +55,8 @@ def main():
                     LC2_NEAR="E:/renderlab-work/m7-g1c/near-cache/near-field-v1/rla1-rvg1/packages/743a2fce42fdf444407e23c2b00c0586ff0438806eeb023bfc19d91979c502f3",
                     VK_LOADER_LAYERS_DISABLE="VK_LAYER_KHRONOS_validation")
                 env.pop("VK_INSTANCE_LAYERS", None)
+                if step == "quarry" and a.skip_quarry_controls:
+                    env["LC3"] = "0"
                 if step.startswith("game"):
                     binary = ROOT / "bin/base-game.exe" if variant == "base" else a.game
                     command = [str(binary), "--path", "rt" if mode == "traced" else "nonrt", "--out", str(folder),
@@ -72,9 +79,11 @@ def main():
                                ("gpu_lc2_penumbra" if step == "fixture" else "gpu_lc1_quarry_night"),
                                "--ignored", "--exact", "--nocapture", "--test-threads=1"]
                 start = time.monotonic()
+                start_unix = time.time()
                 with (folder / "process.log").open("w") as log:
                     result = subprocess.run(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
                                             creationflags=subprocess.CREATE_NO_WINDOW, timeout=180)
+                end_unix = time.time()
                 hashes = {str(f.relative_to(folder)): hashlib.sha256(f.read_bytes()).hexdigest()
                           for f in sorted(folder.rglob("*")) if f.suffix in (".f32", ".png")}
                 if step != "lib" and result.returncode == 0 and not hashes:
@@ -84,7 +93,9 @@ def main():
                         f.unlink()
                 row = dict(step=step, variant=variant, mode=mode, binary=str(binary),
                     binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), seconds=time.monotonic()-start,
-                    exit=result.returncode, hashes=hashes)
+                    exit=result.returncode, hashes=hashes,
+                    start_unix=start_unix, end_unix=end_unix,
+                    skip_quarry_controls=a.skip_quarry_controls)
                 rows.append(row)
                 different = []
                 if variant == "candidate" and step != "lib":

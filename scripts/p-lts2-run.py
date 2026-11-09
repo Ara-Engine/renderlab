@@ -19,8 +19,14 @@ SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 
 
 def order():
-    return [line for line in SCHEDULE.read_text(encoding="utf-8").splitlines()
-            if line.startswith("[root order]")][-1]
+    latest = None
+    with SCHEDULE.open(encoding="utf-8") as schedule:
+        for line in schedule:
+            if line.startswith("[root order]"):
+                latest = line.rstrip("\r\n")
+    if latest is None:
+        raise RuntimeError("no root order in the schedule")
+    return latest
 
 
 def main():
@@ -66,18 +72,37 @@ def main():
             if a.quiet:
                 with SCHEDULE.open("a", encoding="utf-8") as f:
                     f.write(f"\n[p-lts2 QUIET active] owner=p-lts2 label={a.label} QUIET active; no foreign builds until owner release.\n")
+        if (path.name.endswith("-preflight.json") and not value["games"]
+                and not value["gpu_processes"] and value["available_mbytes"] >= a.admission_mib
+                and not (a.quiet and value["builds"])):
+            with SCHEDULE.open("a", encoding="utf-8") as f:
+                f.write(f"\np-lts2 {a.label} admitted {runner.utc()} ({a.admission_mib} MiB admission passed).\n")
         original_save(path, value)
 
     runner.save = save
     deadline = time.monotonic() + a.handoff_seconds
     def released():
-        following = SCHEDULE.read_text(encoding="utf-8").split(directive, 1)[1].splitlines()
-        return not a.after_owner or any(
-            re.match(rf"^{re.escape(a.after_owner)}(?: [A-Za-z0-9_-]+)? window released(?: |$)", line)
-            for line in following
-        )
+        if not a.after_owner:
+            return True
+        following = False
+        with SCHEDULE.open(encoding="utf-8") as schedule:
+            for line in schedule:
+                if line.rstrip("\r\n") == directive:
+                    following = True
+                elif following and re.match(
+                    rf"^{re.escape(a.after_owner)}(?: [A-Za-z0-9_-]+)? window released(?: |$)", line
+                ):
+                    return True
+        return False
 
-    while runner.LOCK.exists() or not released() or (a.quiet and runner.resource_sample()["rustc_count"]) or runner.resource_sample()["available_mbytes"] < a.admission_mib:
+    def builds_running():
+        return bool(runner.ps("ConvertTo-Json -InputObject @(Get-Process | Where-Object "
+                              "{ $_.ProcessName -in @('cargo','rustc','clippy-driver','link','unrealbuildtool') } "
+                              "| Select-Object Id) -Compress"))
+
+    while (runner.LOCK.exists() or not released()
+           or runner.resource_sample()["available_mbytes"] < a.admission_mib
+           or (a.quiet and builds_running())):
         if order() != directive:
             raise RuntimeError("root order changed during handoff")
         if time.monotonic() >= deadline:
