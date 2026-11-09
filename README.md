@@ -2,7 +2,25 @@
 
 Provisional name for an independent Rust renderer. Public repository: [Ara-Engine/renderlab](https://github.com/Ara-Engine/renderlab). The license remains undecided.
 
-## Run
+Current version: **0.1.0**, the first complete base. See [the release notes](docs/release-0.1.0.md).
+
+## Use it as an engine renderer
+
+`renderlab::engine` is the frozen engine-facing API; [docs/api.md](docs/api.md) describes it. It renders with or without hardware ray tracing (`--path rt` or `--path nonrt`), and both paths run the same features by default:
+- GI;
+- reflections;
+- temporal reconstruction with upscaling presets;
+- glass, foliage cutouts and GPU particles;
+- sky, fog and light shafts;
+- skinned meshes;
+- many shadowed local lights;
+- decals;
+- post-processing;
+- per-object shading programs.
+
+`cargo run --example game_scene -- --path rt` renders a dusk courtyard with every feature on and writes frames to `measurements/game-scene`. `--path nonrt` renders it without ray tracing. The walking Fox is optional: fetch it with `py -3 scripts/m7-sk1-asset.py` (it carries its own credit, in `third-party/Fox.md`) and pass `--fox <Fox.glb>`. Nothing in the example needs private assets. Known gaps to Unreal and to path-traced references are listed in [docs/m7-gaps.md](docs/m7-gaps.md).
+
+## Viewer and scan tooling
 
 On the scan-development host, `powershell -File scripts/quarry-demo.ps1` opens the private twelve-scan quarry with the existing optimized viewer, full geometry, 4K textures, 4x MSAA, 16x anisotropic filtering and interactive camera controls. [Real-scan results](docs/scan-results.md) compare this path with bounded streaming. It does not build or import. See [the demo settings and measured tradeoffs](docs/scan-tuning.md). The source scans and cooked cache are not distributed with this repository.
 
@@ -20,7 +38,7 @@ On the scan-development host, `powershell -File scripts/quarry-demo.ps1` opens t
 
 The fixture contains two indexed cubes and a triangle with perspective projection and depth testing. Mesh buffers persist across frames; camera and model updates upload only changed matrices. The library owns its depth attachment and accepts a caller-owned color texture, independently of winit. Uploads and rendering share a bounded, nonblocking submission gate; callers retry when it returns `None`.
 
-Milestones 0-4 are complete on the recorded Windows/Vulkan host. [Milestone 3](docs/milestone-3.md) records prepared assets, owned textures/materials, diagnostic views and basic MSAA. [Milestone 4](docs/milestone-4.md) adds clustered pages, bounded streaming, prepared first views and [configurable limits](docs/limits.md), with [independent acceptance and recorded limitations](docs/m4-final-verification.md). [M5-A](docs/milestone-5a.md) adds verified direct lighting and HDR as partial M5. Shadows, normal maps, spatial environment maps, transparency lighting, temporal reconstruction and GI remain unfinished. No Unreal or Nanite superiority is demonstrated. Thin features and texture detail can still alias, including with MSAA.
+Milestones 0-4 are complete on the recorded Windows/Vulkan host. [Milestone 3](docs/milestone-3.md) records prepared assets, owned textures/materials, diagnostic views and basic MSAA. [Milestone 4](docs/milestone-4.md) adds clustered pages, bounded streaming, prepared first views and [configurable limits](docs/limits.md), with [independent acceptance and recorded limitations](docs/m4-final-verification.md). [M5-A](docs/milestone-5a.md) adds verified direct lighting and HDR. Milestones 5-7 add shadows, temporal reconstruction, GI, reflections and the rest of the 0.1.0 feature set ([milestone-7.md](docs/milestone-7.md) records them). No overall Unreal or Nanite superiority is claimed; measured gaps are in [docs/m7-gaps.md](docs/m7-gaps.md).
 
 ## Prepare an asset
 
