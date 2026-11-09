@@ -54,6 +54,16 @@ The main-vs-s2 gap figures are 1.895 to 1.253 ms non-RT and 0.860 to 0.447 ms RT
 
 ## Rejected gather
 
+Gather-only service and idle-gap screen (two interleaved runs, ms):
+
+| Measure | Non-RT main | Non-RT gather | RT main | RT gather |
+|---|---:|---:|---:|---:|
+| Game moving service | 11.40 | 11.18 | 5.14 | 5.12 |
+| Quarry moving service | 11.85 | 11.34 | 3.89 | 3.97 |
+| Game inter-frame gap | 1.895 | 1.852 | 0.860 | 0.868 |
+
+The gather has no established RT service/idle win in this cohort; small deltas are not a broad regression certificate.
+
 Matched quarry windows after 110/150 submissions, one-submit baseline and gather-only s0, seven complete intervals per trace. No split confound.
 
 | Gather kernel, ms | Main | Batched | Result |
