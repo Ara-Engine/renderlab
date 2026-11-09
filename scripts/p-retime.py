@@ -8,6 +8,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 import statistics as st
 import subprocess as sp
@@ -49,6 +50,47 @@ def order():
     if latest is None:
         raise RuntimeError('no root order')
     return latest
+
+
+def owner_gate(owner):
+    """Match owner release lines after the latest root order, never quoted phrases."""
+    released = False
+    with SCHEDULE.open(encoding='utf-8',errors='replace') as lines:
+        for line in lines:
+            if line.startswith('[root order]'): released = False
+            elif release_line(owner,line): released = True
+    return released
+
+
+def release_line(owner,line):
+    return re.match(rf'^{re.escape(owner)}(?: [A-Za-z0-9_-]+)? window released(?: |$)',line) is not None
+
+
+def next_owner(directive):
+    """A running X followed by Y is NEXT gates on Y, not on X's release."""
+    explicit = re.search(r"p-retime must not take another lease until a line starting '([^']+)'",directive)
+    following = re.search(r'\bthen ([a-z0-9_-]+)\b[^.]*?\bis NEXT\b',directive)
+    match = explicit or following
+    return match.group(1) if match and match.group(1)!='p-retime' else None
+
+
+def wait_owner(owner, after):
+    """CPU-only handoff waiter: never start measure before the required owner release."""
+    deadline = float(os.environ.get('P_RETIME_DEADLINE_UNIX',time.time()+10800))
+    print('WAIT OWNER',owner,'after root order',after,flush=True)
+    while time.time()<deadline:
+        started = released = False
+        with SCHEDULE.open(encoding='utf-8',errors='replace') as lines:
+            for line in lines:
+                if line.startswith('[root order] ') and line.split()[2]>=after:
+                    started = True
+                elif started and release_line(owner,line):
+                    released = True
+        if released:
+            print('OWNER RELEASE OBSERVED',owner,flush=True)
+            return sp.run([sys.executable,'-B',str(Path(__file__).resolve()),'measure'],creationflags=FLAGS).returncode
+        time.sleep(1)
+    raise RuntimeError('three-hour handoff deadline expired')
 
 
 def load_runner():
@@ -264,6 +306,14 @@ def lease(case,mode,prefix,deadline):
             sample = runner.resource_sample()
             checked = time.monotonic()
         if not runner.LOCK.exists() and sample['available_mbytes']>=8192 and not sample['compilers']:
+            required = next_owner(order())
+            if required and not owner_gate(required):
+                time.sleep(.05)
+                continue
+            if os.environ.get('P_RETIME_AFTER_OWNER') and not owner_gate(os.environ['P_RETIME_AFTER_OWNER']):
+                time.sleep(.05)
+                continue
+            os.environ.pop('P_RETIME_AFTER_OWNER',None)
             directive = order()
             sample = runner.resource_sample()
             if sample['available_mbytes']<8192 or sample['compilers']:
@@ -277,6 +327,9 @@ def lease(case,mode,prefix,deadline):
         if path == runner.LOCK / 'owner.json':
             if order()!=directive:
                 runner.LOCK.rmdir(); raise RuntimeError('root order changed before claim')
+            required = next_owner(directive)
+            if required and not owner_gate(required):
+                runner.LOCK.rmdir(); raise RuntimeError('next owner has not released')
             value['root_order'] = directive
         if path.name.endswith('-preflight.json') and not value['games'] and not value['gpu_processes'] and not value['builds'] and value['available_mbytes']>=8192:
             post('p-retime retime admitted')
@@ -294,6 +347,15 @@ def lease(case,mode,prefix,deadline):
 if __name__=='__main__':
     if sys.argv[1]=='build': build()
     elif sys.argv[1]=='build-bvh': build_bvh()
+    elif sys.argv[1]=='wait-owner': raise SystemExit(wait_owner(*sys.argv[2:]))
+    elif sys.argv[1]=='check-gate':
+        assert next_owner('Queue: p-retime a-quarry-rt (running), then p-lts3 a-quiet (6 min) is NEXT.')=='p-lts3'
+        assert next_owner("p-retime must not take another lease until a line starting 'p-lts3' that says released appears.")=='p-lts3'
+        assert next_owner('Queue: root, then units; p-retime takes the first genuinely quiet window.') is None
+        assert release_line('p-lts3','p-lts3 a-quiet window released now')
+        assert not release_line('p-lts3',"p-lts3 note: waiting for a line saying 'released'")
+        assert not release_line('p-lts3','root note: p-lts3 a-quiet window released now')
+        print('owner gate cases passed')
     elif sys.argv[1]=='measure': measure()
     elif sys.argv[1]=='abba':
         case,mode,prefix=sys.argv[2:]
