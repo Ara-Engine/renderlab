@@ -54,8 +54,8 @@ pub struct Reconstruction {
     /// Revealed pixels start from this frame's 3x3 samples of their surface; otherwise
     /// from their own sample.
     pub spatial_start: bool,
-    /// Rotate Interactive's eight disk directions through the pixel's 256-direction
-    /// sequence, 8 per frame (RT renderers).
+    /// Rotate the sun-disk directions through the pixel's 256-direction sequence, 8 per
+    /// frame: RT Interactive's, and non-RT Virtual's Exact and Surface lookups (P-NSQ).
     pub rotate_directions: bool,
     /// MQ1 (docs/m7-mq1.md): on frames where a placement's transform changed, clamp every
     /// continued history to the plain min/max box of this frame's 3x3 samples (all nine, no

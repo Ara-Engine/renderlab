@@ -62,8 +62,8 @@ loop {
 
 | Path | Needs | Primary visibility | Sun visibility | GI rays |
 |---|---|---|---|---|
-| `HardwareRt` | ray queries with hit-vertex return, descriptor indexing (`TRACED_FEATURES`, `traced_limits`) | one traced ray per pixel | traced: 8 disk directions per pixel (`Quality::Realtime`) | hardware |
-| `NonRt` | 64-bit storage atomics, descriptor indexing (`VISIBILITY_*`, `VIRTUAL_FEATURES`, `visibility_limits`) | visibility buffer (software and hardware raster of cluster cuts) | cached sun clipmap with exact triangle confirmation (`SoftShadows::Virtual`) | software BVH |
+| `HardwareRt` | ray queries with hit-vertex return, descriptor indexing (`TRACED_FEATURES`, `traced_limits`) | one traced ray per pixel | traced disk directions per pixel (`Quality::Realtime`): with TR1, `ReconstructionShadowBudget`'s 256 on a cut, 32 in motion and 8 when held, rotated every frame | hardware |
+| `NonRt` | 64-bit storage atomics, descriptor indexing (`VISIBILITY_*`, `VIRTUAL_FEATURES`, `visibility_limits`) | visibility buffer (software and hardware raster of cluster cuts) | cached sun clipmap with exact triangle confirmation (`SoftShadows::Virtual`); with TR1, the same directions and budget as RT ([p-nsq.md](p-nsq.md)) | software BVH |
 
 `Capabilities::preferred()` picks hardware RT where available. `Engine::new(&adapter, descriptor)` creates the device itself, with exactly the path's features and limits, the adapter's buffer-size limits (large scans need one big buffer) and, where available, timestamp queries and the pipeline cache. So the game never negotiates Renderlab's feature list.
 
