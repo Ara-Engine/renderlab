@@ -57,7 +57,7 @@ def main():
     p.add_argument("--held-startup",action="store_true",help="held window: require >=8 GiB at admission, retain 2 GiB runtime guard")
     p.add_argument("command",nargs=argparse.REMAINDER)
     a=p.parse_args()
-    if not 0<a.minutes<=15:p.error("ARA1 leases must be <=15 minutes")
+    if not 0<a.minutes<=10:p.error("ARA1 phase-2 leases must be <=10 minutes")
     directive=check_order(a.expected_order,() if a.handoff_seconds else a.after)
     spec=importlib.util.spec_from_file_location("ara1_n8",REPO/"scripts/n8-run.py")
     n8=importlib.util.module_from_spec(spec)

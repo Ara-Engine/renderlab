@@ -787,6 +787,7 @@ fn main() -> Result<()> {
             renderer.set_probe_surfaces(Some(&load_bake(&cache, &spec)?))?;
         }
         let mut readiness_frames = 0;
+        let mut configured_image_ms = None;
         for (i, f) in spec.frames.iter().enumerate() {
             if f.cut {
                 renderer.reset_temporal_history();
@@ -794,12 +795,31 @@ fn main() -> Result<()> {
             let c = camera(f);
             let start = Instant::now();
             renderer.render(&c, 2.0_f32.powf(spec.exposure_stops))?;
-            if i == 0 && args[1] == "hybrid" {
+            if i == 0 {
+                let loading = renderer.capture_completed(&CaptureRequest {
+                    camera: c.clone(),
+                    size: spec.size,
+                    mode: ViewMode::Lit,
+                    deterministic: false,
+                    exposure: 2.0_f32.powf(spec.exposure_stops),
+                    settle_frames: 0,
+                    tick: 0,
+                    seed: 7,
+                    marks: None,
+                })?;
+                first = Some(begin.elapsed().as_secs_f64() * 1e3);
+                loading.image.save(out.join("loading-first.png"))?;
+                fs::write(
+                    out.join("first-image.ready"),
+                    b"first live loading-frame readback",
+                )?;
                 let deadline = Instant::now();
-                while renderer.ray_pipelines_pending() {
+                while renderer.ray_pipelines_pending()
+                    || (spec.effects.gi && renderer.probe_gi_needs_frame())
+                {
                     ensure!(
                         deadline.elapsed().as_secs() < 120,
-                        "hybrid ray pipelines did not become ready"
+                        "ray pipelines / GI volume did not become ready"
                     );
                     renderer.render(&c, 2.0_f32.powf(spec.exposure_stops))?;
                     readiness_frames += 1;
@@ -824,6 +844,9 @@ fn main() -> Result<()> {
                     seed: 7,
                     marks: None,
                 })?;
+                if configured_image_ms.is_none() {
+                    configured_image_ms = Some(begin.elapsed().as_secs_f64() * 1e3);
+                }
                 if first.is_none() {
                     first = Some(begin.elapsed().as_secs_f64() * 1e3);
                     fs::write(out.join("first-image.ready"), b"readback ready")?;
@@ -842,7 +865,8 @@ fn main() -> Result<()> {
             serde_json::to_vec_pretty(
                 &json!({"engine":"ara","path":args[1],"adapter":renderer.gpu().info(),"size":spec.size,
             "startup_to_readback_ms":first,"settings":format!("{quality:?}"),"geometry":"native instanced, shared uncompressed RLA mips","frames":rows,
-            "notes":spec.notes,"startup_minimal":spec.startup_minimal,"readiness_frames":readiness_frames,"timing_scope":"synchronous render service; pass sums are not an end-to-end GPU span","probe_acquisition":"prebaked on RT; separately charged"}),
+            "notes":spec.notes,"startup_minimal":spec.startup_minimal,"readiness_frames":readiness_frames,
+            "configured_image_ms":configured_image_ms,"timing_scope":"synchronous render service; pass sums are not an end-to-end GPU span; first image is a loading frame, configured image waits GI/RT readiness","probe_acquisition":"prebaked on RT; separately charged"}),
             )?,
         )?;
         renderer.gpu().assert_clean()?;

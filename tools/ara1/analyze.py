@@ -15,6 +15,15 @@ SEGMENTS={'still':range(32,40),'move':range(64,72),'cut_first':[72],
           'cut_recovery':range(73,80),'cut_settled':range(80,88)}
 
 
+def mark_roles(captures):
+    latest={}
+    for capture in captures:
+        if Path(capture['folder']).name!=capture['mode']:continue
+        key=(capture['scene_sha256'],capture['mode'])
+        if key in latest:latest[key]['campaign_role']='superseded later capture of the same frozen case'
+        latest[key]=capture
+
+
 def stats(values):
     values=[float(v) for v in values if v is not None]
     return dict(n=len(values),median=float(np.median(values)),p90=float(np.percentile(values,90)),
@@ -25,15 +34,17 @@ def summarize(folder):
     p=json.loads((folder/'process.json').read_text())
     e=json.loads((folder/'engine.json').read_text())
     result={k:p.get(k) for k in ('engine','mode','resolution','profile','binary_sha256','source',
-        'scene_sha256','asset_sha256','contention','hardware','cpu','lease','root_order','process_seconds','launch_to_ready_file_ms')}
+        'scene_sha256','asset_sha256','contention','hardware','cpu','lease','root_order','process_seconds','launch_to_ready_file_ms','gpu_environment','seeded_gpu_cache')}
     result['startup_memory']=p.get('startup_memory')
     result['peak_sampled_process_dedicated_bytes']=p.get('peak_process_dedicated_bytes') or None
     result['startup_to_readback_ms']=e.get('startup_to_readback_ms')
     result['settings']=e.get('settings')
     result['readiness_frames']=e.get('readiness_frames')
+    result['configured_image_ms']=e.get('configured_image_ms')
     result['shader_reload']=e.get('shader_reload')
     result['timing_scope']=e.get('timing_scope')
     result['folder']=str(folder)
+    result['campaign_role']='superseded orientation/exposure case' if folder.parent.name.startswith(('ara-pbr-base-','quarry-base-')) else 'primary / named variant'
     gpu={r['frame_id']:r for r in e.get('gpu',[])}
     result['segments']={}
     for name,indices in SEGMENTS.items():
@@ -62,18 +73,28 @@ def main():
         for file in sorted((ROOT/'phase2-runs'/tag).glob('*/*/engine.json')):
             folder=file.parent
             record=json.loads((folder/'process.json').read_text())
-            if record.get('exit_code')==0:
+            if record.get('exit_code')==0 and record.get('source_status_unchanged'):
                 captures.append(summarize(folder))
+    mark_roles(captures)
     save(out/'performance.json',dict(scope='single frame in flight; service excludes capture/PNG; shared CPU contention is retained with every row',runs=captures))
     regions=json.loads((ROOT/'phase2-scenes/regions.json').read_text())
     quality={}
     for capture in captures:
         if capture['resolution']!=[960,540] or capture['mode']=='reference': continue
+        if Path(capture['folder']).name!=capture['mode']: continue
+        if capture['campaign_role'].startswith('superseded'):continue
         key=Path(capture['folder']).parent.name
+        if capture['scene_sha256']!=digest(ROOT/'phase2-scenes'/f'{key}.json'):
+            raise ValueError('candidate capture was made with a different scene identity')
         quality.setdefault(key,{})[capture['mode']]=Path(capture['folder'])
     # References may be acquired in separate short leases/tags.
     references={}
     for file in sorted((ROOT/'phase2-runs').glob('*/*/reference/frame-*.png')):
+        sidecar=json.loads(file.with_suffix('.png.json').read_text())
+        process_path=Path(sidecar.get('reference_source_process',str(file.parent/'process.json')))
+        if not process_path.exists():continue
+        process=json.loads(process_path.read_text())
+        if process.get('exit_code')!=0 or not process.get('source_status_unchanged'):continue
         references.setdefault(file.parents[1].name,{})[int(file.stem.split('-')[-1])]=str(file)
     comparisons=[]
     for case,modes in quality.items():
@@ -94,7 +115,7 @@ def main():
             manifest=out/f'{case}-{ara}.json';save(manifest,value)
             score(manifest,out/f'{case}-{ara}-scores.json')
             # Keep key witnesses and consecutive motion/cut crops; do not create hundreds of sheets.
-            selected=[r for r in rows if r['index'] in (39,40,41,72,73,87)]
+            selected=[r for r in rows if r['index'] in (39,40,41,71,72,73,87)]
             small=out/f'{case}-{ara}-sheets.json';save(small,value|dict(frames=selected))
             compose(small,out/'sheets'/f'{case}-{ara}')
             comparisons.append(str(manifest))

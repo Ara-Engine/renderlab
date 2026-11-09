@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 
 from capture import REPO, digest
 from prepare import ROOT, frames, save
@@ -18,8 +19,27 @@ import numpy as np
 
 ARA = ROOT / 'ara-main'
 V3 = Path('C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92')
-CONTENTION = 'shared machine; one owned headless renderer; lease resource log records foreign CPU builds, available RAM and GPU utilization; no quiet-window performance certification'
+CONTENTION = 'root assigned ARA1 the sole GPU; one headless renderer; no parallel ARA1 build during final captures; lease resource log retains available RAM, foreign processes and utilization; ordinary OS activity remains'
 WITNESSES = {0, 31, 38, 39, 40, 41, 42, 43, 47, 63, 70, 71, 72, 73, 74, 75, 76, 80, 87}
+
+
+def freeze():
+    out=ROOT/'bin/final';out.mkdir(parents=True,exist_ok=True)
+    files={'rl-capture.exe':ROOT/'target-renderlab/release/examples/ara1_capture.exe',
+           'rl-reference.exe':ROOT/'target-renderlab/release/examples/ara1_reference.exe',
+           'game-scene.exe':ROOT/'target-renderlab/release/examples/game_scene.exe',
+           'ara.exe':ROOT/'target-ara-main/release/ara1-ara.exe'}
+    for name,source in files.items():
+        dest=out/name
+        if dest.exists() and digest(dest)!=digest(source):
+            raise RuntimeError('frozen binary differs; use a new campaign, never replace measured binaries')
+        if not dest.exists():shutil.copy2(source,dest)
+    save(out/'identities.json',{name:digest(out/name) for name in files})
+    save(out/'sources.json',dict(renderlab_base='ae857501ab4792d1889e11111064c3957cc8af44',
+        renderlab_harness_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip(),
+        ara_commit=subprocess.check_output(['git','-C',str(ARA),'rev-parse','HEAD'],text=True).strip(),
+        renderer_diff_from_base=subprocess.check_output(['git','diff','ae857501ab4792d1889e11111064c3957cc8af44','--','src','shaders','crates','viewer'],cwd=REPO,text=True)))
+    print(out)
 
 
 def projected_box(spec, center, radius):
@@ -44,6 +64,8 @@ def prepare():
         spec['frames'] = frames(f['eye'], f['target'], f['fov_y'], False)
         spec['synchronous'] = True
         variants = {'base': {}}
+        if name=='quarry':variants['daylight']={}
+        if name=='ara-pbr':variants['oriented']={}
         if name == 'game':
             variants |= {'no-gi': {'gi': False}, 'no-reflections': {'reflections': False},
                          'alpha': {'alpha_panel': True}, 'atmosphere': {'atmosphere': True},
@@ -53,6 +75,12 @@ def prepare():
             case = copy.deepcopy(spec)
             case['effects'] = effects
             case['name'] += '-'+variant
+            if variant=='daylight':
+                case['exposure_stops']=-8.5
+                case['notes'].append('Shared display exposure raised to -8.5 stops after the inherited HDR-sky exposure made the neutral replacement nearly black; no per-engine fitting')
+            if variant=='oriented':
+                case['asset']=str(ROOT/'scenes-dry/ara-pbr-oriented.rla')
+                case['notes'].append('Canonical winding aligned to authored normals on both engines; the original procedural sample has inward winding, unlike its Avocado glTF. See orientation.json; no vertex/material/texture changes.')
             if variant.startswith('lights'):
                 case['sun_lux'] = [1000]*3
                 case['environment'] = [30,35,45]
@@ -90,6 +118,7 @@ def run(a):
     spec = json.loads(scene.read_text())
     asset_name = a.case.split('-base')[0] if '-base' in a.case else 'game'
     if a.case.startswith('ara-pbr'): asset_name = 'ara-pbr'
+    if a.case.startswith('ara-pbr-oriented'): asset_name='ara-pbr-oriented'
     if a.case.startswith('quarry'): asset_name = 'quarry'
     cache = ROOT/'bakes'/f'p2-{asset_name}{"-alpha" if spec.get("effects",{}).get("alpha_panel") else ""}-normal'
     group = ROOT/'phase2-runs'/a.tag/f'{a.case}-{a.resolution}'
@@ -102,7 +131,7 @@ def run(a):
                 continue
             raise RuntimeError(f'incomplete output needs a new tag: {out}')
         engine = 'renderlab' if mode in ('rt','nonrt','reference') else 'ara'
-        binary = ROOT/'bin/a2c92b1'/('rl-reference.exe' if mode=='reference' else 'rl-capture.exe' if engine=='renderlab' else 'ara.exe')
+        binary = ROOT/'bin/final'/('rl-reference.exe' if mode=='reference' else 'rl-capture.exe' if engine=='renderlab' else 'ara.exe')
         commands = []
         if engine=='ara' and not (cache/'bake.json').exists():
             commands.append(('bake',group/'bake'))
@@ -122,9 +151,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('prepare')
+    sub.add_parser('freeze')
     r=sub.add_parser('run')
     r.add_argument('--case',required=True)
-    r.add_argument('--resolution',choices=['quality','timing'],default='quality')
+    r.add_argument('--resolution',choices=['quality','timing','quality,timing'],default='quality')
     r.add_argument('--engines',default='nonrt,rt,raster,hybrid')
     r.add_argument('--tag',required=True)
     r.add_argument('--samples',type=int,default=1024)
@@ -132,6 +162,8 @@ def main():
     a=p.parse_args()
     if a.command=='prepare':
         prepare()
+    elif a.command=='freeze':
+        freeze()
     else:
         for case in a.case.split(','):
             for resolution in a.resolution.split(','):
