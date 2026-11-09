@@ -40,8 +40,7 @@ const PAGE: u32 = 128;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the 64 per-batch horizon offsets and (first record, recorded) pairs,
 /// N8e's uvec4 and P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`).
-const FRAME_BYTES: usize =
-    6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 768 + 16 + 16;
+const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 768 + 16 + 16;
 /// `VsmFrame::nsq`: direction batches and the frame's sequence rotation (docs/p-nsq.md).
 const SAMPLING_OFFSET: u64 = (FRAME_BYTES - 16) as u64;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
@@ -2819,7 +2818,13 @@ mod tests {
         let source = shader_source();
         let n8e = source.find("    n8e:vec4<u32>,").unwrap();
         let nsq = source.find("    nsq:vec4<u32>,").unwrap();
-        assert!(n8e < nsq && source[nsq..].trim_start_matches("    nsq:vec4<u32>,").trim_start().starts_with("};"));
+        assert!(
+            n8e < nsq
+                && source[nsq..]
+                    .trim_start_matches("    nsq:vec4<u32>,")
+                    .trim_start()
+                    .starts_with("};")
+        );
         // The encoder reads the lookup schedule's defaults from the shader.
         assert_eq!(schedule_defaults(&shader_source()), (4096, true));
         assert_eq!(

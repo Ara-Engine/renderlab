@@ -80,10 +80,7 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
                 })
             }
             "budget" => {
-                let n: Vec<u32> = value
-                    .split('/')
-                    .map(str::parse)
-                    .collect::<Result<_, _>>()?;
+                let n: Vec<u32> = value.split('/').map(str::parse).collect::<Result<_, _>>()?;
                 let [cold_rays, reset_rays, active_rays, held_rays] = n[..] else {
                     return Err("budget c/r/a/h".into());
                 };
@@ -109,10 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = scene::load(Path::new(&args[0]))?;
     let out = PathBuf::from(&args[1]);
     let frames: BTreeSet<usize> = match env::var("P_NSQ_FRAMES") {
-        Ok(list) => list
-            .split(',')
-            .map(str::parse)
-            .collect::<Result<_, _>>()?,
+        Ok(list) => list.split(',').map(str::parse).collect::<Result<_, _>>()?,
         Err(_) => (0..spec.frames.len())
             .filter(|&i| spec.frames[i].capture)
             .collect(),
@@ -235,8 +229,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &engine.capture()?,
                 )?;
             }
-            rows.push(json!({"index":index,"phase":frame.phase,"frame_id":report.frame.0,
-                "shadow_rays":engine.renderer().reconstruction_shadow_rays()}));
+            rows.push(
+                json!({"index":index,"phase":frame.phase,"frame_id":report.frame.0,
+                "shadow_rays":engine.renderer().reconstruction_shadow_rays()}),
+            );
             for g in engine.poll()?.gpu {
                 gpu.push(json!({"frame_id":g.frame.0,
                     "span_ms":g.render_span.as_secs_f64()*1e3,

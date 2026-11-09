@@ -105,10 +105,10 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 ## Non-RT sun shadows
 
-- **OPEN, quality shortfall: grainy, harder penumbrae on non-RT.** The v0.1.0 clean-clone `game_scene` run shows grainy sun-shadow edges on non-RT at frame 16 (`D:/Coding/renderlab-work/v010-check/out-nonrt/frame-016.png`). RT's same frame (`out-rt/frame-016.png`) is clean.
-  - **Likely cause (P-NRT's profile):** Virtual sun shadows evaluate N8e's 8 directions per receiver per frame, which is the setting's maximum. The 16-triangle walk cap counts undecided directions as blocked. N8e recorded both as cost-driven partial-shadow trades.
-  - **Rule:** under the no-quality-reduction rule these are not accepted trades. The penumbra must match the path-traced reference, soft and noise-free in motion, without capping directions or walks to buy time.
-  - **Owner:** unit P-NSQ.
+- **FIXED (P-NSQ, [p-nsq.md](p-nsq.md)): grainy, harder penumbrae on non-RT.** Two causes. The walk cap turned wide penumbrae into umbra, and each pixel's 8 directions were the same every frame, so TR1 could not integrate them. Virtual now takes RT's sampling under TR1: directions rotated every frame, 256/64/32/8 a frame by `ReconstructionShadowBudget`. It also drops the full-march walk cap (a truncated walk blocks only its own direction). Wide-sun game crop .02669 -> .02398 against the path-traced reference (RT .02374). The courtyard penumbrae now match RT's width, still and in flight. S2 held-frame penumbra grain 13.4-14.5 -> 1.4-2.3 (RT 1.3-1.7). RT is byte-identical.
+  - **OPEN: quarry near-field speckle.** The quarry contact crop is .01505 against main's .01496 (RT .01485): about 100 single-pixel speckles a frame in gravel and along rock contacts, which the old cap hid. Occluders right at the receiver are not presented by the exact march. A near-field-only cap fixes the quarry (.01491) but costs the wide-sun crop 0.4%, so it was not taken. The next attempt should find those occluders exactly near the origin.
+  - **OPEN: cost.** Moving frames +2.6-3.3 ms (32 directions), cut frames +28-30 ms (256 directions, RT's cold budget), quarry held frames +0.7 ms, at 1080p. Paid back by P-NRT/P-RTS work, not by lowering the budget.
+  - **Residual:** on S2's camera tracks, held-frame penumbra grain stays 0.4-0.6 codes above RT's.
 
 ## RT shadows
 

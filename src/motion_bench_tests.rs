@@ -866,16 +866,8 @@ fn gpu_motion_bench_batch() {
                         .unwrap_or(8),
                 };
                 r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
-                    cold_rays: if auto {
-                        256
-                    } else {
-                        active_rays
-                    },
-                    reset_rays: if auto {
-                        64
-                    } else {
-                        active_rays
-                    },
+                    cold_rays: if auto { 256 } else { active_rays },
+                    reset_rays: if auto { 64 } else { active_rays },
                     active_rays,
                     held_rays: 8,
                     settle_frames: 16,
