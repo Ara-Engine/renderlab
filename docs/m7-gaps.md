@@ -115,7 +115,8 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
 
 ## Post / HDR invariance
 
-- **OPEN: PP1 GPU post sweep fails on untouched main.** `gpu_post_sweep` (`src/post_tests.rs:220`, an ignored GPU test) asserts that the `neutral` post variant leaves the HDR capture byte-identical to `off` ("post must not feed back into HDR/TR1"). P-MEM found it failing on its frozen baseline (2026-11-09). Either a post setting leaks into the HDR or TR1 history (a quality bug), or the test's invariant is stale after later merges (TR1/MQ1/MV1 history, motion vectors). It needs a bisect and an owner. The lib gate doesn't run ignored GPU tests, which is why no merge caught it.
+- **RESOLVED: PP1's neutral HDR assertion had stale replay setup** ([P-POST](p-post.md)). The first bad merge is VF1 `b388368`: it enabled temporal volumetric fog, while the sweep restarted GI/TR1 but retained fog history and its sample index. Even identical disabled-post variants failed on main. The sweep now calls public `Renderer::reset_atmosphere_history()` and completes each refill frame. All 13 variants match scene HDR, reconstructed output and TR1 colour history, still/moving, on RT/non-RT at native/Quality/Performance; 198 lib tests pass. The invariant is exact; no rendering quality setting was reduced.
+- **OPEN: non-RT in-flight replay changes HDR under post workload.** With fog reset but unfenced static refill frames, motion/DOF variants can differ in scene HDR and TR1 history; the failing variant moved between runs. All 13 disabled-post controls pass, and completing each refill frame passes the full sweep. The responsible resource and whether this is a production cross-frame race remain unisolated. P-POST fixes comparison setup, not renderer synchronization; evidence and limits are in [p-post.md](p-post.md).
 
 ## Non-RT sun shadows
 
@@ -212,6 +213,8 @@ settings and the old recorded gates remain available.
     timestamps across budgets, which are linear in the ray count.
 
 ## Atmosphere
+
+- **OPEN: fog history survives camera cuts; possible ghosting after cuts.** `cut_reconstruction()` only marks TR1 (`src/primary_ray_gpu.rs:404`); `Engine::cut()` calls it plus texture-residency `mark_camera_cut()` (`src/engine/mod.rs:1015`, `src/texture_residency.rs:326`). Atmosphere has no camera-cut/teleport invalidator (`src/atmosphere_gpu.rs:55`, `:568`, `:1098`), so it can reuse fog from before a cut. `Renderer::reset_atmosphere_history()` is now available explicitly; automatic engine-cut integration and visual ghosting verification remain open. See [P-POST's audit](p-post.md#camera-cuts-code-audit).
 
 AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md), [AT2](m7-at2.md) and [VF2](m7-vf2.md). The sky, aerial perspective, height fog, sun transmittance, procedural environment and shadowed volumetric fog are on by default on both paths.
 

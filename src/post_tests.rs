@@ -165,6 +165,38 @@ fn timings(r: &mut Renderer) -> Vec<serde_json::Value> {
         })
         .collect()
 }
+#[derive(Clone, PartialEq, Eq)]
+struct HdrState {
+    scene: Vec<u8>,
+    reconstructed: String,
+    history: Option<String>,
+}
+fn hdr_state(r: &mut Renderer) -> HdrState {
+    let scene = capture(r);
+    // Upscaling resolves to a separate output; try_capture_hdr returns the internal image.
+    let reconstructed = r
+        .upscale
+        .as_ref()
+        .map_or_else(|| hex(&scene), |u| hex(&read_texture(r, &u.hdr.texture)));
+    let history = r
+        .reconstruction_state
+        .as_ref()
+        .map(|state| hex(&read_texture(r, state.test_history())));
+    HdrState {
+        scene,
+        reconstructed,
+        history,
+    }
+}
+fn assert_hdr_matches_off(off: &HdrState, hdr: &HdrState, name: &str, phase: &str) {
+    assert!(
+        off == hdr,
+        "post must not feed back into HDR/TR1 ({name}, {phase}): scene={}, reconstructed={}, history={}",
+        off.scene == hdr.scene,
+        off.reconstructed == hdr.reconstructed,
+        off.history == hdr.history,
+    );
+}
 fn sweep(
     r: &mut Renderer,
     out: &std::path::Path,
@@ -176,6 +208,7 @@ fn sweep(
     let colour = target(r, size[0], size[1]);
     let mut rows = serde_json::Map::new();
     let mut off = None;
+    let mut off_moving = None;
     for (name, settings) in variants() {
         r.test_drain("PP1 setting boundary");
         r.set_post_settings(settings).unwrap();
@@ -204,24 +237,22 @@ fn sweep(
         r.reset_virtual_shadow_cache();
         // Replay the same bounded GI refill for every post variant.
         r.reset_indirect();
+        // VF1/VF2 fog owns history and a sample index independent of GI and TR1.
+        r.reset_atmosphere_history();
         r.cut_post_motion();
         r.cut_reconstruction();
         for _ in 0..8 {
             draw(r, &colour, &cameras[0]);
+            r.test_drain("PP1 refill step");
         }
         r.test_drain("PP1 static");
         let static_image = read_texture(r, &colour);
         png(&out.join(format!("{name}-still.png")), size, &static_image);
-        let hdr = capture(r);
+        let hdr = hdr_state(r);
         if name == "off" {
             off = Some(hdr.clone());
         }
-        if name == "neutral" {
-            assert!(
-                off.as_ref().unwrap() == &hdr,
-                "post must not feed back into HDR/TR1"
-            );
-        }
+        assert_hdr_matches_off(off.as_ref().unwrap(), &hdr, name, "still");
         let _ = timings(r);
         // Eight moving frames: one loaded scene, no full-buffer readback for timings.
         let mut costs = vec![];
@@ -231,8 +262,25 @@ fn sweep(
             costs.extend(timings(r));
         }
         let moving = read_texture(r, &colour);
+        let moving_hdr = hdr_state(r);
+        if name == "off" {
+            off_moving = Some(moving_hdr.clone());
+        }
+        assert_hdr_matches_off(off_moving.as_ref().unwrap(), &moving_hdr, name, "moving");
         png(&out.join(format!("{name}-moving.png")), size, &moving);
-        rows.insert(name.into(),serde_json::json!({"frames":costs,"hdr_sha256":hex(&hdr),"display_sha256":hex(&moving)}));
+        rows.insert(
+            name.into(),
+            serde_json::json!({
+                "frames": costs,
+                "hdr_sha256": hex(&hdr.scene),
+                "reconstructed_hdr_sha256": hdr.reconstructed,
+                "tr1_history_sha256": hdr.history,
+                "moving_hdr_sha256": hex(&moving_hdr.scene),
+                "moving_reconstructed_hdr_sha256": moving_hdr.reconstructed,
+                "moving_tr1_history_sha256": moving_hdr.history,
+                "display_sha256": hex(&moving),
+            }),
+        );
     }
     fs::write(
         out.join("timing.json"),
