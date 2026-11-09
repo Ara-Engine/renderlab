@@ -401,6 +401,13 @@ G2c ([m7-g2c.md](m7-g2c.md)) fixed API1's game-scene ground speckles (glossy and
 
 ## Lights
 
+P-LTS2's A checkpoint ([p-lts2.md](p-lts2.md)) uses 32-invocation single-program
+shading groups and preserves mixed-program 4x4 lists. The initial contended 1080p
+screen is faster but still misses 3.5 ms on all four shadowed/unshadowed RT/non-RT
+cases. Lib tests, ARA1 HDR/PNG, LC1-LC3, mixed-program and courtyard image gates
+pass byte identity. Full-quarry and final uncontended timing gates remain pending;
+this checkpoint does not certify them. All light/shadow quality budgets remain intact.
+
 LC1 ([m7-lc1.md](m7-lc1.md)), LC2 ([m7-lc2.md](m7-lc2.md)) and LC3 ([m7-lc3.md](m7-lc3.md)): clustered point/spot lights with soft local shadows. LC3 removes the selected-light limit on RT heads and raises the cached map pool from 4 to 128 lights by default. The soft sun renders with further lights. LC3 evidence is recorded in its unit note; no new Unreal or path-traced comparison was run tonight.
 
 - **P-LTS performance target remains open** ([p-lts.md](p-lts.md)). Exact-zero rejection in the standard material and four depth gathers for interior hard PCF retain the 128-map budget, every contributing RT light and LC2 softness. In a paired, compiler-quiet 1080p ARA1 steady replay (RTX 4070 SUPER), shadowed RT improves 12.13 to 11.08 ms and non-RT 25.52 to 18.00 ms; unshadowed RT improves 10.16 to 9.25 ms and non-RT 13.14 to 11.98 ms. All four remain above the approximately 3.5 ms frame target. These are drained CPU+GPU service medians, not isolated light-pass costs. Clustering is about 0.010 ms; map sampling and shading dominate. Image identity and fixture evidence are in the unit note. Moving-map redraw, soft filtering and dense contributing-light work remain gaps; no quality budget was reduced.

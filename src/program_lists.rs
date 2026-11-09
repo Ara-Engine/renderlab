@@ -11,6 +11,8 @@ use crate::pipeline_compilation::PipelineDevice;
 
 /// Programs one frame can shade: the binning mask is one u32 per tile.
 pub(crate) const MAX_FRAME_PROGRAMS: usize = 32;
+/// Mixed-program binning and list entries retain their own 4x4 shading tiles.
+const LIST_TILE: [u32; 2] = [4, 4];
 /// WGSL `RlList`: slot, list base, capacity, flags, then the slot of each of the
 /// `TRACED_DRAWS` batches.
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
@@ -160,8 +162,8 @@ pub(crate) fn frame_slots(programs: impl IntoIterator<Item = u64>) -> (Vec<u64>,
 /// Words of one slot list for a `width` x `height` image: its length, then room for
 /// every 4x4 shading tile of the trace-tile-widened region and every 16x16 clear block.
 fn capacity([width, height]: [u32; 2]) -> u32 {
-    1 + (width + TRACE_TILE[0]).div_ceil(SHADE_TILE[0])
-        * (height + TRACE_TILE[1]).div_ceil(SHADE_TILE[1])
+    1 + (width + TRACE_TILE[0]).div_ceil(LIST_TILE[0])
+        * (height + TRACE_TILE[1]).div_ceil(LIST_TILE[1])
         + width.div_ceil(CLEAR_TILE[0]) * height.div_ceil(CLEAR_TILE[1])
 }
 
@@ -390,7 +392,7 @@ impl Renderer {
         });
         pass.set_pipeline(state.bins.as_ref().unwrap());
         pass.set_bind_group(0, &*lists.bins.as_ref().unwrap().0, &[]);
-        let [x, y] = state.region_groups(SHADE_TILE);
+        let [x, y] = state.region_groups(LIST_TILE);
         let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
         pass.dispatch_workgroups(x.max(bx), y + by, 1);
         pass.set_bind_group(1, &*g.arrays, &[]);
@@ -427,7 +429,7 @@ mod tests {
         for size in [[1920u32, 1080], [1, 1], [961, 641], [3840, 2160]] {
             // The widest region: the image widened to whole trace tiles.
             let region = [0, 1].map(|i| size[i].div_ceil(TRACE_TILE[i]) * TRACE_TILE[i]);
-            let tiles = region[0] / SHADE_TILE[0] * (region[1] / SHADE_TILE[1]);
+            let tiles = region[0] / LIST_TILE[0] * (region[1] / LIST_TILE[1]);
             let blocks = size[0].div_ceil(CLEAR_TILE[0]) * size[1].div_ceil(CLEAR_TILE[1]);
             assert!(capacity(size) > tiles + blocks, "{size:?}");
         }
