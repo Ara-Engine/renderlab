@@ -351,16 +351,35 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   37.497 s with persistence off. A real unseen program edit still took 31.335 s to
   readback; 95.7 ms of module work was followed by a 31.081 s first-use mixed-program
   list pipeline compile. Background/prewarmed creation of unseen variants remains open.
+- CC1's [native stage screen](m7-cc1.md) attributes substantial driver work to GI
+  lookup, reflection hit shading and non-RT traversal. Removing any one is not a
+  shipping fix. Sharing the user surface/shade call sites lowered the paired native
+  compile from 36.854/34.182 s to 23.582/15.883 s (RT/non-RT), with identical game
+  pixels, but raised release frame time by 84%/16%; it was rejected and reverted.
+  Splitting trace/hit shading into smaller independently compiled programmable
+  stages and a correct background fallback remain open. Large cold-compile gains
+  on both paths without a steady-state cost have not been established.
+- CC1 retains a single-call-site GI refinement loop with unchanged sampling order.
+  Completed game comparisons (both builds/paths, all cache modes) and quarry
+  comparisons (dev both paths, release RT) are bit-identical, with no observed
+  frame-time regression. Release game disabled-cache startup is 30.760 -> 21.356 s
+  RT and 36.540 -> 22.370 s non-RT; populated-cache samples are 0.833 -> 0.630 s
+  and 0.603 -> 0.571 s. The smaller pipeline was privately warm afterward, so the
+  entire startup reduction cannot be credited to CC1. Cold compilation still
+  takes tens of seconds. Release non-RT quarry, quarry empty/populated-cache runs
+  and the complete new-edit matrix remain unverified after yielding to ARA1's
+  held window; those gaps are not replaced with inferred numbers.
 - A driver-private-cache hit can already make startup fast. The dev matrix shows no
   consistent extra benefit from persistence, and one non-RT warm sample is slower.
-- Warm quarry preparation remains 9.479/27.306 s in dev and 4.415/15.236 s in release
+- PC1 measured warm quarry preparation at 9.479/27.306 s in dev and 4.415/15.236 s in release
   (RT/non-RT); resource/geometry/ray preparation and upload dominate non-RT. This unit
   changes no GI, acceleration-structure or asset-cooking algorithms.
 - The timed quarry is the engine example with the complete registered scan asset and
   game props, using its game camera. Startup of the low-level viewer/quarry walk was
   not measured; its legacy program-only cache setter does not persist all startup kernels.
-- The program edit check uses the API, without GI/TR1, on RT. File-watch debounce,
-  physical scanout, a separate non-RT reload timing and native-only driver/SPIR-V
-  attribution were not measured. Corrupt-file/key tests pass on CPU; GPU replay after
+- PC1's program edit check uses the API, without GI/TR1, on RT. CC1 adds native
+  driver/SPIR-V stage attribution on both paths; its fresh API edit/readback matrix
+  was not completed. File-watch debounce, physical scanout and a separate non-RT
+  reload timing remain unmeasured. Corrupt-file/key tests pass on CPU; GPU replay after
   corruption or an actual driver update remains untested. Cache files are bounded to
   64 MiB and concurrent writers retain the last complete snapshot.
