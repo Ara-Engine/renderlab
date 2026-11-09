@@ -39,8 +39,8 @@ const CLAIM_ROUNDS: u32 = 3;
 /// traced in parallel. A frame wanting more traces the rest in setup, eight lanes a cell.
 const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate, then
-/// bounce's gather, light and cell shading (G2).
-const PROFILE_STAMPS: u32 = 2 * (9 + 2 * CLAIM_ROUNDS);
+/// bounce's gather, light and cell shading (G2), then the cell-space filter (G3).
+const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
 const GATHER_GROUPS: u32 = 4096;
@@ -60,6 +60,11 @@ const CLAIM_CELLS_SOFTWARE: u32 = 20480;
 /// to them until they exist (G2b).
 const COARSE_CUT_FRAMES: u32 = 4;
 const LIGHT_GROUPS: u32 = 1024;
+/// The cell-space filter's fixed grid (G3): nine items (a changed cell and its eight
+/// neighbours) per cell shading queue entry.
+const FILTER_GROUPS: u32 = 1024;
+/// Unfiltered hot words 1-22 per slot, the filter's sources (shaders/gi_cache.wgsl gi_raw).
+const RAW_WORDS: u64 = 22;
 /// Slot groups a lighting, environment or caster change spreads relighting over while it
 /// keeps changing (and for as many frames after), as ENVIRONMENT_PERIOD does for the sky.
 const RELIGHT_PERIOD: u32 = 8;
@@ -231,6 +236,18 @@ pub struct IndirectSettings {
     /// on the SV test scene the coarse-to-fine handover settled more slowly than it saved
     /// (docs/m7-g2b.md).
     pub claim_cells: u32,
+    /// Cell-space filter (G3, docs/m7-g3.md), with bounce on: bit 0 filters each cell's sky
+    /// value, bit 1 its bounce value, over itself and its eight neighbours in its bin's tangent
+    /// plane at its level, with fixed weights (`filter_edge`) times geometric ones (query-normal
+    /// agreement, distance from the query plane). One pass, no jitter or sample counts. The
+    /// unfiltered values (88 bytes a slot) stay the filter's sources. 0 is off. Bit 2 (with bit 0)
+    /// marks a cell much darker than an agreeing neighbour split, so its pixels read the next
+    /// finer level (contrast refine, for crevice mouths). Bit 3 (with bit 1) gives cells not
+    /// gathered yet their gathered neighbours' filtered bounce.
+    pub filter: u32,
+    /// The filter's tent: weight 1 at the centre, this on the four edge neighbours and its
+    /// square on the four corners (0-1).
+    pub filter_edge: f32,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -244,6 +261,10 @@ impl Default for IndirectSettings {
     /// the larger table cut the quarry's moving GI cost by 0.3-0.5 ms (RT) at the same image. A
     /// device whose storage-binding limit is wgpu's default 128 MiB gets 2^19 (`gi_slots`;
     /// docs/m7-gc1.md).
+    /// The cell-space filter with contrast refine and bounce fill since G3 (`filter` 15, 88 more
+    /// bytes a slot): quarry TR1x64 pinholes RT 142 -> 65 and non-RT 122 -> 68 (cache-off 74),
+    /// every quarry population better on both paths, the cave's mottle and the hollow's streaks
+    /// mostly gone (docs/m7-g3.md).
     fn default() -> Self {
         Self {
             enabled: true,
@@ -270,6 +291,9 @@ impl Default for IndirectSettings {
             gather_cells: 0,
             gather_stride: 1,
             claim_cells: u32::MAX,
+            // G3 (docs/m7-g3.md): sky and bounce filtered, contrast refine and bounce fill.
+            filter: 15,
+            filter_edge: 0.5,
         }
     }
 }
@@ -294,7 +318,9 @@ impl IndirectSettings {
             && (0.0..=0.5).contains(&self.level_blend)
             && self.cut_phases <= 8
             && (1..=7).contains(&self.gathers)
-            && [1, 2, 4].contains(&self.gather_stride);
+            && [1, 2, 4].contains(&self.gather_stride)
+            && self.filter <= 15
+            && (0.0..=1.0).contains(&self.filter_edge);
         if valid {
             Ok(())
         } else {
@@ -325,6 +351,8 @@ pub struct IndirectStats {
     /// The outgoing-radiance, draw-table and queue buffers bounce adds (in `work_bytes`
     /// for the queues), in bytes.
     pub bounce_bytes: u64,
+    /// The cell-space filter's unfiltered sources (G3), in bytes.
+    pub filter_bytes: u64,
 }
 
 /// GPU microseconds per cache pass of the last profiled frame.
@@ -343,6 +371,8 @@ pub struct IndirectProfile {
     pub gather: f64,
     pub light: f64,
     pub shade: f64,
+    /// The cell-space filter (G3).
+    pub filter: f64,
 }
 impl IndirectProfile {
     pub fn trace(&self) -> f64 {
@@ -359,6 +389,7 @@ impl IndirectProfile {
             + self.trace()
             + self.integrate
             + self.bounce()
+            + self.filter
     }
 }
 
@@ -441,10 +472,15 @@ struct Resources {
     /// stable id, first placement and instance count (shaders/gi_cache.wgsl gi_draws).
     outgoing: Owned<wgpu::Buffer>,
     draws: Owned<wgpu::Buffer>,
+    /// The cell-space filter's sources (G3): RAW_WORDS per slot while a filter is set, else
+    /// one slot's.
+    raw: Owned<wgpu::Buffer>,
     slots: u32,
     cold_words: u32, // LC2: dynamic per-cell light bitset stride.
     misses: u32,
-    _allocations: [Allocation; 4],
+    /// Slots the filter sources hold (1 without a filter).
+    raw_slots: u32,
+    _allocations: [Allocation; 5],
 }
 struct Layouts {
     /// Hardware (TLAS at 34) and software (geometry at 35).
@@ -469,6 +505,7 @@ struct Pipelines {
     integrate: Owned<wgpu::ComputePipeline>,
     gather: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
+    filter: Owned<wgpu::ComputePipeline>,
 }
 /// One program's cell shading pipeline (G2), keyed by everything its module and layout
 /// depend on: the program and its source, the prelude, the ray path and the material
@@ -652,6 +689,8 @@ struct Plan {
     /// offset (in bytes) of next frame's gather queue count, cleared before the passes.
     bounce: bool,
     next_queue_at: u64,
+    /// The cell-space filter (G3) runs this frame (bounce on, a filter bit set).
+    filter: bool,
 }
 enum Retired {
     Resources(#[allow(dead_code)] Resources),
@@ -927,10 +966,19 @@ impl Renderer {
         self.check_fault()?;
         settings.validate()?;
         let slots = self.gi_slots(settings.slots_log2);
-        let reallocate =
-            settings.enabled && self.gi.resources.as_ref().is_none_or(|r| r.slots != slots);
+        // The filter's sources are sized by the setting (G3).
+        let raw_slots = if settings.filter != 0 { slots } else { 1 };
+        let reallocate = settings.enabled
+            && self
+                .gi
+                .resources
+                .as_ref()
+                .is_none_or(|r| r.slots != slots || r.raw_slots != raw_slots);
         if reallocate {
-            self.allocate_gi(slots)?;
+            let filter = std::mem::replace(&mut self.gi.settings.filter, settings.filter);
+            let allocated = self.allocate_gi(slots);
+            self.gi.settings.filter = filter;
+            allocated?;
         } else if self.gi.settings.lookup != settings.lookup
             || self.gi.settings.cell_pixels != settings.cell_pixels
             || self.gi.settings.min_edge != settings.min_edge
@@ -940,6 +988,8 @@ impl Renderer {
             || self.gi.settings.rotate_directions != settings.rotate_directions
             // Bounce values left by an earlier setting would still be read.
             || self.gi.settings.bounce != settings.bounce
+            // Values filtered, or sources written, under another filter setting (G3).
+            || self.gi.settings.filter != settings.filter
         {
             // Keys change meaning: start from an empty table.
             self.gi.pending_clear = true;
@@ -1001,6 +1051,12 @@ impl Renderer {
                 * 4;
             let outgoing_bytes = u64::from(slots) * 16;
             let draws_bytes = u64::from(TRACED_DRAWS) * 16;
+            let raw_slots = if self.gi.settings.filter != 0 {
+                slots
+            } else {
+                1
+            };
+            let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
             let buffer = |label, size, usage| {
                 self.ledger.own(
                     self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1035,20 +1091,24 @@ impl Renderer {
                     storage | wgpu::BufferUsages::COPY_SRC,
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
+                raw: buffer("indirect cache filter sources", raw_bytes, storage),
                 slots,
                 cold_words,
                 misses,
+                raw_slots,
                 _allocations: [
                     self.ledger.allocate(AllocationKind::Light, table_bytes),
                     self.ledger.allocate(AllocationKind::Light, work_bytes),
                     self.ledger.allocate(AllocationKind::Light, outgoing_bytes),
                     self.ledger.allocate(AllocationKind::Light, draws_bytes),
+                    self.ledger.allocate(AllocationKind::Light, raw_bytes),
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
             self.gi.stats.work_bytes = work_bytes;
             self.gi.stats.bounce_bytes =
                 outgoing_bytes + draws_bytes + (2 * (1 + u64::from(slots)) + u64::from(slots)) * 4;
+            self.gi.stats.filter_bytes = raw_bytes;
             self.gi.draw_table.clear();
             if let Some(old) = self.gi.resources.replace(resources) {
                 self.gi
@@ -1294,6 +1354,7 @@ impl Renderer {
                     gather: pass(6 + 2 * rounds),
                     light: pass(7 + 2 * rounds),
                     shade: pass(8 + 2 * rounds),
+                    filter: pass(9 + 2 * rounds),
                 }
             })
             .collect())
@@ -1609,6 +1670,7 @@ impl Renderer {
             ),
             storage(33, false),
             storage(36, true),
+            storage(37, false),
         ];
         let tlas = entry(
             34,
@@ -1730,6 +1792,7 @@ impl Renderer {
             integrate: compute("gi_integrate", main),
             gather: compute("gi_gather", main),
             light: compute("gi_light", main),
+            filter: compute("gi_filter", main),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
@@ -2117,6 +2180,15 @@ impl Renderer {
             u32::MAX => 0,
             cells => cells,
         };
+        // The cell-space filter (G3) runs over cell shading's queue, so only with bounce, and
+        // only once its sources are allocated.
+        let filter = if bounce && r.raw_slots == r.slots {
+            s.filter
+        } else {
+            0
+        };
+        header[24] = filter;
+        header[25] = s.filter_edge.to_bits();
         let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -2426,6 +2498,7 @@ impl Renderer {
             environment_only,
             bounce,
             next_queue_at: u64::from(next) * 4,
+            filter: bounce && filter != 0,
         });
         if bounce {
             self.gi.parity = !self.gi.parity;
@@ -2490,6 +2563,10 @@ impl Renderer {
             wgpu::BindGroupEntry {
                 binding: 36,
                 resource: r.draws.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 37,
+                resource: r.raw.as_entire_binding(),
             },
         ];
         if software {
@@ -2695,6 +2772,18 @@ impl GiState {
                 &p.integrate,
                 s + 4,
                 groups,
+            );
+        }
+        // The cell-space filter (G3), once every value of the frame is written and before cell
+        // shading reads them.
+        if plan.filter || profiling {
+            let grid = plan.filter.then_some([FILTER_GROUPS, 1]);
+            main_pass(
+                encoder,
+                "indirect cache filter",
+                &p.filter,
+                9 + 2 * CLAIM_ROUNDS,
+                grid,
             );
         }
         // Light visibility at the cells to shade, then the program's cell shading (G2).

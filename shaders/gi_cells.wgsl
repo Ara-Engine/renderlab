@@ -82,6 +82,17 @@ const GI_H_GATHER_STRIDE:u32=21u;
 // gi_cache.rs COARSE_CUT_FRAMES) and are listed again next frame. A fixed rotation by key, never
 // a ranking (W2).
 const GI_H_CLAIM_CELLS:u32=22u;
+// Cell-space filter (G3, gi_filter): bit 0 filters the sky SH, bit 1 the bounce SH (only while
+// bounce runs: its shading queue lists the cells whose values changed); word 25 is the fixed
+// tent's edge weight (f32; corners take its square).
+const GI_H_FILTER:u32=24u;
+const GI_H_FILTER_EDGE:u32=25u;
+const GI_FILTER_SKY:u32=1u;
+const GI_FILTER_BOUNCE:u32=2u;
+// Bit 2: contrast refine (gi_filter_cell), with the sky filter.
+const GI_FILTER_CONTRAST:u32=4u;
+// Bit 3: cells not gathered yet take their gathered neighbours' filtered bounce (gi_filter_cell).
+const GI_FILTER_FILL:u32=8u;
 // Split cells (M7 G1c): a cell whose fixed probe lines meet two surface layers (a slab over
 // a floor) is read at finer levels, up to GI_REFINE below the pixel's own; its hot record's
 // last word carries GI_SPLIT_HOT in the half no SH coefficient uses. One level keeps nearly
