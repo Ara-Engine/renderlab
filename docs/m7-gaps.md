@@ -630,3 +630,13 @@ The 3.5 ms target on both paths remains open. No quiet before/after numbers or
 complete quality promotion are claimed. Preserve the 128-shadow budget, every
 contributing RT light and LC2 softness in the follow-up. Raw summaries and staged
 baseline/C binaries live under D:/Coding/renderlab-work/p-lts3.
+
+
+## M8 verification queue (P-VERIFY, 2026-11-09)
+
+[P-VERIFY](p-verify.md) tracks the outstanding P-NRT3, P-RETIME, P-NSQ3,
+P-FLAT2 and P-LTS3 C acceptance work in that priority order. Initial GPU
+admission was deferred by foreign Cargo builds despite more than 8 GiB free.
+No gate is closed and no new performance or quality claim follows from a
+queued run. Frozen-binary identities and the resource audit are under
+`D:/Coding/renderlab-work/p-verify`.
