@@ -1,5 +1,6 @@
 """Summarize retained quiet P-RETIME ABBA runs; reject missing or unequal witnesses."""
 import json
+import hashlib
 from pathlib import Path
 import statistics as st
 import sys
@@ -43,5 +44,11 @@ if '--export' in sys.argv:
             fixture_timings={k:v for k,v in row.get('report',{}).items() if k.startswith('time_')}))
     public = dict(complete=len(result)==8,builds=json.loads((ROOT / 'builds.json').read_text()),
         results=result,processes=processes)
+    public['frozen_binaries'] = {}
+    for binary in sorted((ROOT/'bin').glob('*.exe')):
+        with binary.open('rb') as f:
+            public['frozen_binaries'][binary.name] = hashlib.file_digest(f,'sha256').hexdigest()
+    if (ROOT/'pnrt/summary-index.json').exists():
+        public['canonical_pnrt'] = json.loads((ROOT/'pnrt/summary-index.json').read_text())
     destination = Path(__file__).resolve().parents[1] / 'docs/p-retime-results.json'
     destination.write_text(json.dumps(public,indent=2)+'\n')

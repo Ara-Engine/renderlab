@@ -1,6 +1,6 @@
 """Frozen P-RETIME builds and compiler-audited, bounded ABBA GPU leases.
 
-Run `py -3 -B scripts/p-retime.py build`, then `... measure`.
+Run `py -3 -B scripts/p-retime.py build`, then `... build-bvh`, then `... measure`.
 Evidence is local/ignored; no production source in this checkout is modified.
 """
 import hashlib
@@ -16,6 +16,8 @@ import sys
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
+import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = Path('D:/Coding/renderlab-work/p-retime')
@@ -23,6 +25,7 @@ TARGET = Path('D:/Coding/pretime-target')
 SCHEDULE = Path('E:/renderlab-work/gpu-schedule.md')
 SCENES = Path('D:/Coding/renderlab-work/ara1/phase2-scenes')
 FLAGS = sp.CREATE_NO_WINDOW
+BUILD_SLOT = Path('D:/Coding/renderlab-work/build-slot.lock')
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -116,6 +119,44 @@ def load_runner():
     return n8, runner
 
 
+@contextmanager
+def build_slot(command):
+    """Serialize Cargo commands and let existing foreign compilers/GPU leases finish."""
+    _, runner = load_runner()
+    token = uuid.uuid4().hex
+
+    def release():
+        assert BUILD_SLOT.resolve()==Path('D:/Coding/renderlab-work/build-slot.lock').resolve()
+        owner = BUILD_SLOT/'owner.json'
+        if json.loads(owner.read_text())['token']!=token:
+            raise RuntimeError('build slot ownership changed')
+        owner.unlink()
+        BUILD_SLOT.rmdir()
+
+    while True:
+        required = next_owner(order())
+        if (runner.LOCK.exists() or runner.resource_sample()['compilers']
+                or (required and not owner_gate(required))):
+            time.sleep(1)
+            continue
+        try:
+            BUILD_SLOT.mkdir()
+        except FileExistsError:
+            time.sleep(.1)
+            continue
+        save(BUILD_SLOT/'owner.json',dict(owner='p-retime',pid=os.getpid(),token=token,
+            utc=runner.utc(),command=command))
+        if runner.LOCK.exists() or runner.resource_sample()['compilers']:
+            release()
+            time.sleep(1)
+            continue
+        break
+    try:
+        yield
+    finally:
+        release()
+
+
 def build():
     tree = OUT / 'source'
     tree.mkdir(exist_ok=True)
@@ -126,14 +167,6 @@ def build():
     for name, commit in [('a-before','71f7228'),('a-after','6112205'),
                          ('mem-before','dc0d4ea'),('mem-after','241b87b')]:
         directive = order()
-        # Compiler holds use owner lines only; a quoted phrase in a root order is not a hold.
-        active = False
-        with SCHEDULE.open(encoding='utf-8', errors='replace') as lines:
-            for line in lines:
-                if line.startswith('p-retime retime admitted'): active = True
-                elif line.startswith('p-retime ') and 'window released' in line: active = False
-        if active:
-            raise RuntimeError('compiler hold active')
         archive = OUT / 'source.zip'
         sp.run(['git','archive','--format=zip','-o',str(archive),commit], cwd=REPO, check=True)
         with zipfile.ZipFile(archive) as z:
@@ -149,7 +182,7 @@ def build():
         for k, command in enumerate(commands):
             log = OUT / f'build-{name}-{k}.log'
             print('BUILD',name,command,flush=True)
-            with log.open('w') as f:
+            with build_slot(command), log.open('w') as f:
                 sp.run(command,cwd=tree,env=env,stdout=f,stderr=sp.STDOUT,check=True,creationflags=FLAGS)
             if k == 0:
                 import shutil
@@ -177,8 +210,9 @@ def build_bvh():
     for path in tree.rglob('*'):
         if path.is_file(): os.utime(path,None)
     start = time.monotonic()
-    with (OUT / 'build-mem-packed-only.log').open('w') as log:
-        sp.run(['cargo','build','--release','-j','2','--locked','--example','ara1_capture'],cwd=tree,
+    command = ['cargo','build','--release','-j','2','--locked','--example','ara1_capture']
+    with build_slot(command), (OUT / 'build-mem-packed-only.log').open('w') as log:
+        sp.run(command,cwd=tree,
             env=os.environ | {'CARGO_TARGET_DIR':str(TARGET),'CARGO_BUILD_JOBS':'2'},stdout=log,stderr=sp.STDOUT,
             creationflags=FLAGS,check=True)
     shutil.copy2(OUT / 'bin/mem-after.exe',OUT / 'bin/mem-merged.exe')
@@ -306,7 +340,8 @@ def lease(case,mode,prefix,deadline):
             directive = order()
             sample = runner.resource_sample()
             checked = time.monotonic()
-        if not runner.LOCK.exists() and sample['available_mbytes']>=8192 and not sample['compilers']:
+        if (not runner.LOCK.exists() and not BUILD_SLOT.exists()
+                and sample['available_mbytes']>=8192 and not sample['compilers']):
             required = next_owner(order())
             if required and not owner_gate(required):
                 time.sleep(.05)
@@ -328,6 +363,8 @@ def lease(case,mode,prefix,deadline):
         if path == runner.LOCK / 'owner.json':
             if order()!=directive:
                 runner.LOCK.rmdir(); raise RuntimeError('root order changed before claim')
+            if BUILD_SLOT.exists():
+                runner.LOCK.rmdir(); raise RuntimeError('build slot occupied before claim')
             required = next_owner(directive)
             if required and not owner_gate(required):
                 runner.LOCK.rmdir(); raise RuntimeError('next owner has not released')

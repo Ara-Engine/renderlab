@@ -1907,5 +1907,1046 @@
         }
       }
     }
-  ]
+  ],
+  "frozen_binaries": {
+    "a-after-tests.exe": "bdc0cc3c6895c46404c2e552a2e5d3dfe1be12d5ee9ce4fc5465d46ce0a5b100",
+    "a-after.exe": "9b01e55c06810cb661ae7ed2b697b87f57e34054814c33eb31cb166a858c8c81",
+    "a-before-tests.exe": "1ba6e6aee3b704bfa49eeeead40915510f9bed9636238c7541e4e37729de0367",
+    "a-before.exe": "401ced894d4d92262d3458479072e5acce20b2ede8e889936cc205f392015c00",
+    "mem-after.exe": "fc8e651ea9993cf26657d26e9ac8dd90e0db6e07b98f4b752ac7fa551a723b05",
+    "mem-before.exe": "6766d9e58aea4d30a63558ceca7beda6f231f01a475f81a7bbdc13166d3663de",
+    "mem-merged.exe": "840216f56cc4e33ee9cb0b7d1418288ce53ee79aedfd820a81569a018e5c72b8"
+  },
+  "canonical_pnrt": {
+    "a-quarry-rt": {
+      "identity": {
+        "candidate": {
+          "compared": 152,
+          "identical": 152,
+          "differing": []
+        }
+      },
+      "timing": {
+        "quarry-daylight": {
+          "base": {
+            "still": {
+              "service_ms": {
+                "median": 5.0840499999999995,
+                "n": 312,
+                "min": 3.1342000000000003,
+                "max": 29.7345
+              },
+              "submit_ms": {
+                "median": 0.65665,
+                "n": 312,
+                "min": 0.4642,
+                "max": 2.7575
+              },
+              "cpu.encode": {
+                "median": 0.50145,
+                "n": 312,
+                "min": 0.3523,
+                "max": 2.3428
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 312,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00034999999999999994,
+                "n": 312,
+                "min": 0.00019999999999999998,
+                "max": 0.0045000000000000005
+              },
+              "cpu.preparation": {
+                "median": 0.0013,
+                "n": 312,
+                "min": 0.001,
+                "max": 0.0168
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 312,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.011399999999999999,
+                "n": 312,
+                "min": 0.0081,
+                "max": 0.0478
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0023,
+                "n": 312,
+                "min": 0.0015999999999999999,
+                "max": 0.0237
+              },
+              "cpu.submit": {
+                "median": 0.0808,
+                "n": 312,
+                "min": 0.0606,
+                "max": 0.36900000000000005
+              },
+              "cpu.upload": {
+                "median": 0.044199999999999996,
+                "n": 312,
+                "min": 0.0331,
+                "max": 0.16620000000000001
+              },
+              "cpu.visibility": {
+                "median": 0.002,
+                "n": 312,
+                "min": 0.0014,
+                "max": 0.0123
+              },
+              "span_ms": {
+                "median": 4.155904,
+                "n": 312,
+                "min": 2.4637439999999997,
+                "max": 28.577792000000002
+              },
+              "shading_ms": {
+                "median": 0.888352,
+                "n": 312,
+                "min": 0.629728,
+                "max": 2.4438400000000002
+              },
+              "primary_ms": {
+                "median": 1.02144,
+                "n": 312,
+                "min": 0.485376,
+                "max": 6.091776
+              },
+              "reconstruction_ms": {
+                "median": 0.651248,
+                "n": 312,
+                "min": 0.500288,
+                "max": 1.559616
+              },
+              "post_ms": {
+                "median": 0.047616,
+                "n": 312,
+                "min": 0.028672,
+                "max": 0.344064
+              }
+            },
+            "moving": {
+              "service_ms": {
+                "median": 5.2669,
+                "n": 256,
+                "min": 3.5625,
+                "max": 7.3331
+              },
+              "submit_ms": {
+                "median": 0.712,
+                "n": 256,
+                "min": 0.4633,
+                "max": 1.23
+              },
+              "cpu.encode": {
+                "median": 0.55585,
+                "n": 256,
+                "min": 0.3484,
+                "max": 0.9840000000000001
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 256,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00039999999999999996,
+                "n": 256,
+                "min": 0.00019999999999999998,
+                "max": 0.0031
+              },
+              "cpu.preparation": {
+                "median": 0.0014,
+                "n": 256,
+                "min": 0.0009,
+                "max": 0.007
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 256,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.0115,
+                "n": 256,
+                "min": 0.008199999999999999,
+                "max": 0.044199999999999996
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0025,
+                "n": 256,
+                "min": 0.0015999999999999999,
+                "max": 0.0051
+              },
+              "cpu.submit": {
+                "median": 0.0839,
+                "n": 256,
+                "min": 0.061,
+                "max": 0.3657
+              },
+              "cpu.upload": {
+                "median": 0.047299999999999995,
+                "n": 256,
+                "min": 0.0342,
+                "max": 0.1702
+              },
+              "cpu.visibility": {
+                "median": 0.002,
+                "n": 256,
+                "min": 0.0014,
+                "max": 0.012799999999999999
+              },
+              "span_ms": {
+                "median": 4.407808,
+                "n": 256,
+                "min": 2.4944640000000002,
+                "max": 6.2197759999999995
+              },
+              "shading_ms": {
+                "median": 0.843648,
+                "n": 256,
+                "min": 0.584256,
+                "max": 1.58128
+              },
+              "primary_ms": {
+                "median": 1.98144,
+                "n": 256,
+                "min": 0.49561600000000006,
+                "max": 3.228672
+              },
+              "reconstruction_ms": {
+                "median": 0.62832,
+                "n": 256,
+                "min": 0.470304,
+                "max": 1.1048959999999999
+              },
+              "post_ms": {
+                "median": 0.045056,
+                "n": 256,
+                "min": 0.027648,
+                "max": 0.531456
+              }
+            },
+            "cut": {
+              "service_ms": {
+                "median": 22.481499999999997,
+                "n": 8,
+                "min": 16.889000000000003,
+                "max": 27.4043
+              },
+              "submit_ms": {
+                "median": 0.9212499999999999,
+                "n": 8,
+                "min": 0.7489,
+                "max": 1.5230000000000001
+              },
+              "cpu.encode": {
+                "median": 0.7015,
+                "n": 8,
+                "min": 0.5729,
+                "max": 1.1833
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 8,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00045,
+                "n": 8,
+                "min": 0.0003,
+                "max": 0.0014
+              },
+              "cpu.preparation": {
+                "median": 0.004999999999999999,
+                "n": 8,
+                "min": 0.0029000000000000002,
+                "max": 0.0079
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 8,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.03175,
+                "n": 8,
+                "min": 0.0222,
+                "max": 0.061099999999999995
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0034,
+                "n": 8,
+                "min": 0.0024,
+                "max": 0.0056
+              },
+              "cpu.submit": {
+                "median": 0.10245000000000001,
+                "n": 8,
+                "min": 0.0814,
+                "max": 0.2614
+              },
+              "cpu.upload": {
+                "median": 0.0721,
+                "n": 8,
+                "min": 0.0543,
+                "max": 0.1147
+              },
+              "cpu.visibility": {
+                "median": 0.005849999999999999,
+                "n": 8,
+                "min": 0.0029000000000000002,
+                "max": 0.007700000000000001
+              },
+              "span_ms": {
+                "median": 20.877312,
+                "n": 8,
+                "min": 15.553536,
+                "max": 26.189824
+              },
+              "shading_ms": {
+                "median": 1.006016,
+                "n": 8,
+                "min": 0.73712,
+                "max": 1.22528
+              },
+              "primary_ms": {
+                "median": 18.176512000000002,
+                "n": 8,
+                "min": 12.769279999999998,
+                "max": 23.218176
+              },
+              "reconstruction_ms": {
+                "median": 0.59832,
+                "n": 8,
+                "min": 0.489088,
+                "max": 0.837472
+              },
+              "post_ms": {
+                "median": 0.045056,
+                "n": 8,
+                "min": 0.029696,
+                "max": 0.070656
+              }
+            },
+            "recovered": {
+              "service_ms": {
+                "median": 7.2199,
+                "n": 120,
+                "min": 4.9235,
+                "max": 12.4261
+              },
+              "submit_ms": {
+                "median": 0.75765,
+                "n": 120,
+                "min": 0.4754,
+                "max": 1.3809
+              },
+              "cpu.encode": {
+                "median": 0.579,
+                "n": 120,
+                "min": 0.3631,
+                "max": 1.1331
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 120,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00039999999999999996,
+                "n": 120,
+                "min": 0.00019999999999999998,
+                "max": 0.0012
+              },
+              "cpu.preparation": {
+                "median": 0.0017000000000000001,
+                "n": 120,
+                "min": 0.001,
+                "max": 0.0076
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 120,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.0142,
+                "n": 120,
+                "min": 0.0081,
+                "max": 0.0441
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0028,
+                "n": 120,
+                "min": 0.0015999999999999999,
+                "max": 0.0155
+              },
+              "cpu.submit": {
+                "median": 0.09095,
+                "n": 120,
+                "min": 0.061,
+                "max": 0.1999
+              },
+              "cpu.upload": {
+                "median": 0.0503,
+                "n": 120,
+                "min": 0.027399999999999997,
+                "max": 0.1671
+              },
+              "cpu.visibility": {
+                "median": 0.0029500000000000004,
+                "n": 120,
+                "min": 0.0005,
+                "max": 0.0083
+              },
+              "span_ms": {
+                "median": 6.129664,
+                "n": 120,
+                "min": 4.122624,
+                "max": 10.904575999999999
+              },
+              "shading_ms": {
+                "median": 1.048432,
+                "n": 120,
+                "min": 0.7372799999999999,
+                "max": 2.345504
+              },
+              "primary_ms": {
+                "median": 2.7909119999999996,
+                "n": 120,
+                "min": 1.6179199999999998,
+                "max": 4.717568
+              },
+              "reconstruction_ms": {
+                "median": 0.715328,
+                "n": 120,
+                "min": 0.537472,
+                "max": 1.729856
+              },
+              "post_ms": {
+                "median": 0.054272,
+                "n": 120,
+                "min": 0.030719999999999997,
+                "max": 0.079872
+              }
+            }
+          },
+          "candidate": {
+            "still": {
+              "service_ms": {
+                "median": 4.45795,
+                "n": 312,
+                "min": 3.0252999999999997,
+                "max": 25.0202
+              },
+              "submit_ms": {
+                "median": 0.5980000000000001,
+                "n": 312,
+                "min": 0.40700000000000003,
+                "max": 2.3946
+              },
+              "cpu.encode": {
+                "median": 0.44784999999999997,
+                "n": 312,
+                "min": 0.2938,
+                "max": 1.3803999999999998
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 312,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.0003,
+                "n": 312,
+                "min": 0.00019999999999999998,
+                "max": 0.0012
+              },
+              "cpu.preparation": {
+                "median": 0.0013,
+                "n": 312,
+                "min": 0.001,
+                "max": 0.0074
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 312,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.010499999999999999,
+                "n": 312,
+                "min": 0.0081,
+                "max": 0.08009999999999999
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0021,
+                "n": 312,
+                "min": 0.0015999999999999999,
+                "max": 0.0059
+              },
+              "cpu.submit": {
+                "median": 0.07925000000000001,
+                "n": 312,
+                "min": 0.0593,
+                "max": 1.4466999999999999
+              },
+              "cpu.upload": {
+                "median": 0.041699999999999994,
+                "n": 312,
+                "min": 0.0318,
+                "max": 0.21939999999999998
+              },
+              "cpu.visibility": {
+                "median": 0.0019,
+                "n": 312,
+                "min": 0.0014,
+                "max": 0.019
+              },
+              "span_ms": {
+                "median": 3.572224,
+                "n": 312,
+                "min": 2.33984,
+                "max": 23.844864
+              },
+              "shading_ms": {
+                "median": 0.733344,
+                "n": 312,
+                "min": 0.5192960000000001,
+                "max": 1.608
+              },
+              "primary_ms": {
+                "median": 0.8652799999999999,
+                "n": 312,
+                "min": 0.485376,
+                "max": 5.134335999999999
+              },
+              "reconstruction_ms": {
+                "median": 0.660416,
+                "n": 312,
+                "min": 0.4912,
+                "max": 1.8024639999999998
+              },
+              "post_ms": {
+                "median": 0.068608,
+                "n": 312,
+                "min": 0.033791999999999996,
+                "max": 0.525312
+              }
+            },
+            "moving": {
+              "service_ms": {
+                "median": 4.5478000000000005,
+                "n": 256,
+                "min": 3.4994,
+                "max": 7.9338
+              },
+              "submit_ms": {
+                "median": 0.68925,
+                "n": 256,
+                "min": 0.4708,
+                "max": 2.184
+              },
+              "cpu.encode": {
+                "median": 0.52825,
+                "n": 256,
+                "min": 0.3552,
+                "max": 1.4038
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 256,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.0003,
+                "n": 256,
+                "min": 0.00019999999999999998,
+                "max": 0.003
+              },
+              "cpu.preparation": {
+                "median": 0.0014,
+                "n": 256,
+                "min": 0.001,
+                "max": 0.0098
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 256,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.01175,
+                "n": 256,
+                "min": 0.008199999999999999,
+                "max": 0.0496
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0024,
+                "n": 256,
+                "min": 0.0015999999999999999,
+                "max": 0.015000000000000001
+              },
+              "cpu.submit": {
+                "median": 0.08615,
+                "n": 256,
+                "min": 0.061900000000000004,
+                "max": 0.281
+              },
+              "cpu.upload": {
+                "median": 0.0481,
+                "n": 256,
+                "min": 0.0349,
+                "max": 0.5103
+              },
+              "cpu.visibility": {
+                "median": 0.002,
+                "n": 256,
+                "min": 0.0014,
+                "max": 0.0072
+              },
+              "span_ms": {
+                "median": 3.569152,
+                "n": 256,
+                "min": 2.4145920000000003,
+                "max": 6.053888000000001
+              },
+              "shading_ms": {
+                "median": 0.546144,
+                "n": 256,
+                "min": 0.49561600000000006,
+                "max": 1.17504
+              },
+              "primary_ms": {
+                "median": 1.49248,
+                "n": 256,
+                "min": 0.49561600000000006,
+                "max": 3.1723519999999996
+              },
+              "reconstruction_ms": {
+                "median": 0.515088,
+                "n": 256,
+                "min": 0.479872,
+                "max": 1.2001279999999999
+              },
+              "post_ms": {
+                "median": 0.039936,
+                "n": 256,
+                "min": 0.034816,
+                "max": 0.319488
+              }
+            },
+            "cut": {
+              "service_ms": {
+                "median": 17.2744,
+                "n": 8,
+                "min": 15.7209,
+                "max": 23.6705
+              },
+              "submit_ms": {
+                "median": 0.9256,
+                "n": 8,
+                "min": 0.7607,
+                "max": 1.2672
+              },
+              "cpu.encode": {
+                "median": 0.7045,
+                "n": 8,
+                "min": 0.5691999999999999,
+                "max": 0.9355
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 8,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00039999999999999996,
+                "n": 8,
+                "min": 0.0003,
+                "max": 0.0009
+              },
+              "cpu.preparation": {
+                "median": 0.004200000000000001,
+                "n": 8,
+                "min": 0.0035,
+                "max": 0.0061
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 8,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.027200000000000002,
+                "n": 8,
+                "min": 0.0222,
+                "max": 0.0312
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0032500000000000003,
+                "n": 8,
+                "min": 0.0026,
+                "max": 0.0051
+              },
+              "cpu.submit": {
+                "median": 0.10994999999999999,
+                "n": 8,
+                "min": 0.0858,
+                "max": 0.1884
+              },
+              "cpu.upload": {
+                "median": 0.07680000000000001,
+                "n": 8,
+                "min": 0.0593,
+                "max": 0.0962
+              },
+              "cpu.visibility": {
+                "median": 0.004149999999999999,
+                "n": 8,
+                "min": 0.0038,
+                "max": 0.005699999999999999
+              },
+              "span_ms": {
+                "median": 16.019455999999998,
+                "n": 8,
+                "min": 14.249984,
+                "max": 22.460416000000002
+              },
+              "shading_ms": {
+                "median": 0.6364319999999999,
+                "n": 8,
+                "min": 0.6128,
+                "max": 0.904608
+              },
+              "primary_ms": {
+                "median": 13.517312,
+                "n": 8,
+                "min": 11.574272,
+                "max": 19.75296
+              },
+              "reconstruction_ms": {
+                "median": 0.508432,
+                "n": 8,
+                "min": 0.487392,
+                "max": 0.661824
+              },
+              "post_ms": {
+                "median": 0.040448,
+                "n": 8,
+                "min": 0.034816,
+                "max": 0.0768
+              }
+            },
+            "recovered": {
+              "service_ms": {
+                "median": 6.7661,
+                "n": 120,
+                "min": 4.5789,
+                "max": 10.2079
+              },
+              "submit_ms": {
+                "median": 0.7581,
+                "n": 120,
+                "min": 0.4747,
+                "max": 1.4273
+              },
+              "cpu.encode": {
+                "median": 0.56165,
+                "n": 120,
+                "min": 0.359,
+                "max": 1.1154
+              },
+              "cpu.packing": {
+                "median": 0.0,
+                "n": 120,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.poll": {
+                "median": 0.00039999999999999996,
+                "n": 120,
+                "min": 0.00019999999999999998,
+                "max": 0.0012
+              },
+              "cpu.preparation": {
+                "median": 0.00195,
+                "n": 120,
+                "min": 0.0011,
+                "max": 0.008
+              },
+              "cpu.shadow_encode": {
+                "median": 0.0,
+                "n": 120,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "cpu.shadow_preparation": {
+                "median": 0.0153,
+                "n": 120,
+                "min": 0.008199999999999999,
+                "max": 0.052899999999999996
+              },
+              "cpu.shadow_upload": {
+                "median": 0.0027,
+                "n": 120,
+                "min": 0.0017000000000000001,
+                "max": 0.0118
+              },
+              "cpu.submit": {
+                "median": 0.08905,
+                "n": 120,
+                "min": 0.0629,
+                "max": 0.2274
+              },
+              "cpu.upload": {
+                "median": 0.0513,
+                "n": 120,
+                "min": 0.0244,
+                "max": 0.09670000000000001
+              },
+              "cpu.visibility": {
+                "median": 0.0031,
+                "n": 120,
+                "min": 0.00039999999999999996,
+                "max": 0.0078
+              },
+              "span_ms": {
+                "median": 5.69088,
+                "n": 120,
+                "min": 3.7611519999999996,
+                "max": 9.135104
+              },
+              "shading_ms": {
+                "median": 0.810336,
+                "n": 120,
+                "min": 0.614336,
+                "max": 2.0944000000000003
+              },
+              "primary_ms": {
+                "median": 2.653696,
+                "n": 120,
+                "min": 1.6179199999999998,
+                "max": 4.809728
+              },
+              "reconstruction_ms": {
+                "median": 0.7192160000000001,
+                "n": 120,
+                "min": 0.553888,
+                "max": 1.807072
+              },
+              "post_ms": {
+                "median": 0.073728,
+                "n": 120,
+                "min": 0.039936,
+                "max": 0.47206400000000004
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "last_queue_audit": {
+    "host_unix_seconds": 1794243638.7838593,
+    "available_mbytes": 5536.265625,
+    "rustc_count": 22,
+    "compilers": [
+      {
+        "pid": 61032,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 50856,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 51408,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 52532,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 34660,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 45480,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 34196,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 54316,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 55856,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 4344,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 50524,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 55792,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 38076,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 15436,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 58628,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 9028,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 21220,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 47924,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 6036,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 50516,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 58624,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 46592,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 42600,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 45268,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 57976,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 19088,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 55804,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 55388,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 56980,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 60448,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 27188,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 44076,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 54792,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 25176,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 54224,
+        "name": "cargo.exe"
+      },
+      {
+        "pid": 39032,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 24880,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 6904,
+        "name": "rustc.exe"
+      },
+      {
+        "pid": 26852,
+        "name": "rustc.exe"
+      }
+    ],
+    "lease_owner": null,
+    "root_order": "[root order] 2026-11-09T15:37:58.560174+00:00 Queue addition: p-lts3 c-final (<=12 min, 8 GiB, COMPILER-QUIET) admits at the first moment with 8 GiB available and no compiler from any project, taking turns with p-retime's quiet checks (whichever is ready first; neither preempts a running lease). While either holds a quiet lease, p-nrt3, p-flat2, p-nsq3 and root run no cargo/rustc. Other units otherwise continue in request order. Running leases are not stopped by this order."
+  },
+  "cleanup": {
+    "raw_status": "blocked by automatic approval review",
+    "raw_files_remaining": 197,
+    "raw_bytes_remaining": 4901990400,
+    "manifest": "D:\\Coding\\renderlab-work\\p-retime\\raw-cleanup.json",
+    "target_path": "D:/Coding/pretime-target",
+    "target_exists": true,
+    "target_status": "blocked by automatic approval review: blocked by policy"
+  },
+  "campaign": {
+    "first_request_utc": "2026-11-09T13:58:43Z",
+    "deadline_utc": "2026-11-09T16:58:43Z",
+    "completed_pairs": 3,
+    "required_pairs": 8,
+    "status": "wait limit exhausted"
+  }
 }
