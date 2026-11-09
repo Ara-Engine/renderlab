@@ -240,6 +240,30 @@ VB = `primary_ms`, shading = `shading_ms`, TR1 = `reconstruction_ms`.
 - **Quarry:** within noise. Its ARA1 frames are dominated by GI settling (§1), which P-GI
   owns. ARA1's single first-cut sample swings by several ms.
 
+### On merged main (P-GI included)
+
+Root merged P-GI into main (bdec7b9) during this unit. `t3/p-nrt` was merged with it,
+cleanly: P-GI changed only GI files. A final A/B (lease-7b, 10:19-10:22 UTC, two
+interleaved repetitions) compared main bdec7b9 plus the ARA1 adapter rows (`bin/mbase.exe`
+1bcf3841...) against the merged branch (`bin/mcand.exe` e22ea7a0...). Result: **94/94 ARA1
+frames byte-identical** (three scenes' quality witnesses, the physical-sky witnesses and the
+timing captures).
+
+| Scene | Phase | main ms | main + P-NRT ms | Change | GPU span | VB | Shading |
+|---|---|---|---|---|---|---|---|
+| game-base | still | 10.41 | 8.99 | -14% | 9.47 → 7.96 | 1.18 → 0.40 | 3.35 → 2.95 |
+| game-base | moving | 10.78 | 9.39 | -13% | 9.88 → 8.45 | 1.56 → 0.41 | 2.89 → 2.46 |
+| game-base | cut | 12.38 | 10.59 | -14% | 11.18 → 9.44 | 1.55 → 0.38 | 3.06 → 2.57 |
+| game-base | recovered | 9.44 | 7.78 | -18% | 8.47 → 6.85 | 1.56 → 0.41 | 3.00 → 2.55 |
+| ara-pbr-oriented | still | 8.86 | 7.50 | -15% | 7.96 → 6.57 | 1.47 → 0.30 | 2.80 → 2.35 |
+| ara-pbr-oriented | moving | 7.75 | 6.13 | -21% | 6.81 → 5.15 | 1.48 → 0.31 | 2.73 → 2.29 |
+| ara-pbr-oriented | cut | 8.59 | 6.82 | -21% | 6.90 → 5.27 | 1.46 → 0.30 | 2.75 → 2.31 |
+| ara-pbr-oriented | recovered | 7.65 | 6.08 | -20% | 6.66 → 5.10 | 1.48 → 0.31 | 2.79 → 2.33 |
+| quarry-daylight | still | 11.39 | 11.38 | -0% | 10.13 → 10.12 | 0.72 → 0.73 | 0.69 → 0.67 |
+| quarry-daylight | moving | 11.74 | 11.29 | -4% | 10.48 → 10.02 | 0.72 → 0.74 | 0.65 → 0.62 |
+| quarry-daylight | cut | 18.69 | 17.54 | -6% | 16.96 → 15.58 | 0.76 → 0.78 | 0.77 → 0.74 |
+| quarry-daylight | recovered | 13.40 | 12.79 | -5% | 12.22 → 11.56 | 0.76 → 0.76 | 0.78 → 0.74 |
+
 **Against Ara raster** (ARA1: game 1.86/1.96/1.84, PBR 1.70/1.71/1.71, quarry 5.60/8.71/8.84 ms):
 non-RT remains 5.3x (game still), 4.6x (PBR still; 3.6x moving) and 2.2x (quarry still) slower after these changes.
 The target is not met; §5 ranks what remains.
