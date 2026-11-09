@@ -97,6 +97,12 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
   - Soft fading uses opaque depth only: particles don't fade against glass.
 - **No Unreal (Niagara) comparison** this push (rule 3).
 
+## Flat-surface noise (both paths)
+
+- **OPEN, quality defect: speckle on flat materials.** Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes".
+  - **What:** the courtyard crates use a constant, untextured material (`wood`, roughness 0.75), yet their faces show visible speckle and grain on both paths. It is worst on sun-lit top faces: `D:/Coding/renderlab-work/v010-check/out-rt/frame-016.png`, `out-nonrt/frame-016.png`, and RT `frame-047.png` at the end of the flight. That makes it renderer noise. It may be the same issue as RD1's "spinning crate mottled with GI on".
+  - **Status:** unit P-FLAT is bisecting it against a path-traced reference. Its candidates are GI, local soft-shadow rays, the rough-specular fallback, sun-shadow ray counts, TR1 history and fog. It also checks the ground, arch and wall.
+
 ## Non-RT sun shadows
 
 - **OPEN, quality shortfall: grainy, harder penumbrae on non-RT.** The v0.1.0 clean-clone `game_scene` run shows grainy sun-shadow edges on non-RT at frame 16 (`D:/Coding/renderlab-work/v010-check/out-nonrt/frame-016.png`). RT's same frame (`out-rt/frame-016.png`) is clean.
