@@ -5,10 +5,11 @@ from pathlib import Path
 import statistics
 import subprocess
 import time
+from p_mem_schedule import latest_order
 
 root=Path(os.environ.get("P_MEM_OUT","D:/Coding/renderlab-work/p-mem"))
 schedule=Path("E:/renderlab-work/gpu-schedule.md")
-order=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith("[root order]"))
+order=latest_order(schedule)
 with schedule.open("a",encoding="utf-8") as f:
     f.write(f"\np-mem retime admitted {time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())} (8 GiB admission passed; COMPILER-QUIET until p-mem retime window released).\n")
 out=root/"retime"
@@ -20,7 +21,7 @@ for scene in ["game-base","quarry-daylight"]:
     assert len(track)==88
     spec["frames"]=[dict(frame,capture=False) for _ in range(8) for frame in track]
     for index,tag in enumerate(["baseline1080","candidate","candidate","baseline1080"]):
-        latest=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith("[root order]"))
+        latest=latest_order(schedule)
         if latest!=order and "Running leases are not stopped" not in latest:
             raise RuntimeError("new root order; release and re-read")
         order=latest

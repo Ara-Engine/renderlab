@@ -34,6 +34,18 @@ reservation. These 64 MiB block-packing differences are why live, reserved and
 DXGI usage must remain separate; no universal driver-reservation saving follows
 from a single pair.
 
+Maximum captured DXGI local usage includes upload and the nineteen capture
+boundaries, rather than just the final warm sample. This exposes the temporary
+second GI generation in the 64-light case; it still does not certify an
+instantaneous startup peak.
+
+| Scene | RT before -> after MiB | non-RT before -> after MiB |
+|---|---:|---:|
+| game-base | 1131.047 -> 1035.047 | 1435.797 -> 1339.797 |
+| PBR oriented | 1199.047 -> 1103.047 | 1375.797 -> 1279.797 |
+| 64 point lights | 1362.797 -> 1234.797 | 2051.547 -> 1923.547 |
+| quarry daylight | 3375.547 -> 3343.547 | 4177.422 -> 3944.234 |
+
 ARA1's historical Ara local/dedicated values were game 633.9/618.7 MiB,
 PBR 749.1/651.2 MiB, quarry daylight 3388.2/1965.8 MiB (hybrid/raster).
 Only the fresh RT quarry snapshot falls below that historical counterpart.
@@ -244,6 +256,10 @@ This is process-local usage, not a board-wide delta. Reservation includes host
 blocks and free tails. Values are samples, not an instantaneous startup-peak
 certificate.
 
+Feature/topology transitions retain old and new backing until GPU completion.
+Their transient peak can exceed the warm table; these savings do not certify a
+worst-case transition or startup peak.
+
 Hardware: RTX 4070 SUPER, NVIDIA 617.14, Ryzen 7800X3D, Vulkan, release,
 1920x1080, 16x anisotropy. The harness combines the registered timing size with
 the quality spec's nineteen capture points and asserts every other frame field
@@ -265,9 +281,12 @@ order checks and owner-prefixed release gates. Short non-quarry jobs admitted at
 >=7168 MiB per root's amendment; quarry at >=8192, runtime guard always 2048.
 No owned compiler ran through another unit's compiler-quiet hold. Output and the
 two-job Cargo target stayed under `D:/Coding/renderlab-work/p-mem/`.
-Raw RF and Q-walk dumps above 5 MB were summarized and removed; retained evidence
-is JSON/CSV/logs and inspected PNGs. Target cleanup is recorded in the final
-handoff after the last build.
+Raw RF and Q-walk dumps above 5 MB were summarized and removed. Sixty-six
+representative PNGs were inspected, individually and in three contact sheets;
+their retained-image manifest is under the local evidence's `report/` directory.
+Automatic approval review blocked the subsequent deletion of unretained PNGs
+with "blocked by policy", so those additional PNGs remain. Target cleanup is
+recorded in the final handoff after the last build.
 
 Public replay helpers:
 
@@ -286,6 +305,11 @@ registered ARA1 phase2 directory, overridden with `P_MEM_SCENES`. The fixture
 helper reuses the registered RF and Q-walk inputs and emits per-suite logs.
 Record-mode post capture is explicit. Build separately with `-j 2` and the
 worker target on D:, obeying any active compiler hold.
+
+Schedule readers stream line by line so the growing shared history is never
+copied wholesale. The final retime's first preflight (13:06 UTC) deferred at
+6935 MiB with foreign compilers active, before any GPU execution. Its rejected
+preflight is retained separately; it contributes no timing result.
 
 ## Timing screen and limits
 

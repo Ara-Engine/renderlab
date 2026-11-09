@@ -5,14 +5,15 @@ are reused; output is redirected to a per-suite log and full-image hashes.
 """
 import json,os,subprocess,sys,hashlib
 from pathlib import Path
+from p_mem_schedule import latest_order
 
 root=Path(os.environ.get('P_MEM_OUT','D:/Coding/renderlab-work/p-mem'))
 tag,kind=sys.argv[1:]
 binary=root/'bin'/f'{tag}-tests.exe'
 schedule=Path('E:/renderlab-work/gpu-schedule.md')
-order=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith('[root order]'))
+order=latest_order(schedule)
 for mode in ['rt','nonrt']:
-    latest=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith('[root order]'))
+    latest=latest_order(schedule)
     if latest!=order:
         if 'Running leases are not stopped' not in latest and 'p-mem baseline' not in latest:raise RuntimeError('new root hold')
         order=latest

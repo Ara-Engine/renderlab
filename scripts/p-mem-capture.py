@@ -5,17 +5,18 @@ P_MEM_CAPTURE_ONLY=1 skips RF/post suites; use p-mem-fixtures.py for explicit su
 """
 import json,os,sys,subprocess,time,hashlib
 from pathlib import Path
+from p_mem_schedule import latest_order
 
 root=Path(os.environ.get('P_MEM_OUT','D:/Coding/renderlab-work/p-mem'))
 source=Path(os.environ.get('P_MEM_SCENES','D:/Coding/renderlab-work/ara1/phase2-scenes'))
 schedule=Path('E:/renderlab-work/gpu-schedule.md')
-order=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith('[root order]'))
+order=latest_order(schedule)
 tag=sys.argv[1]
 binary=root/'bin'/f'{tag}.exe'
 cases=sys.argv[2:] or ['game-base','ara-pbr-oriented','game-lights','quarry-daylight']
 for case in cases:
     for mode in ['rt','nonrt']:
-        latest=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith('[root order]'))
+        latest=latest_order(schedule)
         if latest!=order:
             if 'Running leases are not stopped' not in latest and 'p-mem baseline' not in latest: raise RuntimeError('new root hold; release and re-read')
             order=latest
@@ -46,7 +47,7 @@ for case in cases:
         print(tag,case,mode,'seconds',round(time.monotonic()-start,2),'allocated/reserved MiB',m['allocated_bytes']/2**20,m['reserved_bytes']/2**20,'dxgi',m['dxgi'],flush=True)
 if 'quarry-base' not in cases and os.environ.get('P_MEM_CAPTURE_ONLY')!='1':
     for kind in ['rf','post']:
-        latest=next(x for x in reversed(schedule.read_text().splitlines()) if x.startswith('[root order]'))
+        latest=latest_order(schedule)
         if latest!=order:
             if 'Running leases are not stopped' not in latest and 'p-mem baseline' not in latest:raise RuntimeError('new root hold')
             order=latest
