@@ -230,6 +230,16 @@ const PI:f32=3.141592653589793;
 // All contributions are nonnegative: saturating each exposed contribution and
 // their sum at the storage ceiling equals saturating the final exposed sum.
 fn exposed_product(a:vec3<f32>, b:vec3<f32>) -> vec3<f32> {
+    // P-NRT fast path, bit-identical to the form below: power-of-two scaling keeps round-to-
+    // nearest unchanged inside the normal range, so when a*b is a finite normal and the
+    // exposed product is at least normal, (a*b)*exposure equals ldexp of the mantissa product
+    // at the unclamped exponent; past 2^17 both saturate to 65504. Exact zeros stay zero.
+    let e=lighting.exposure;
+    let ab=a*b;let p=ab*e;
+    let lowest=vec3<f32>(1.17549435e-38);
+    let normal=(ab>=lowest)&(ab<=vec3<f32>(3.0e38))&(p>=lowest);
+    let zero=(ab==vec3<f32>(0.0))&((a==vec3<f32>(0.0))|(b==vec3<f32>(0.0)));
+    if all(normal|zero) && e>=1.17549435e-38 && e<=3.0e38 {return min(p,vec3<f32>(65504.0));}
     let ap=frexp(a);
     let bp=frexp(b);
     let ep=frexp(vec3<f32>(lighting.exposure));
@@ -342,14 +352,28 @@ fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
         let r2=r*r;
         t=clamp((r2*r2-a8)/(b8-a8),0.0,1.0);
     }
+    // P-NRT: a zero blend weight (every mirror lookup) makes the second level's finite
+    // texels contribute exactly zero, so its four taps are skipped; the sum is unchanged.
+    let levels=select(2,1,single || t==0.0);
     var values:array<vec3<f32>,2>;
-    for (var i=0; i<select(2,1,single); i++) {
+    for (var i=0; i<levels; i++) {
         values[i]=environment_level(d,select(lo,hi,i==1));
     }
     if single { return values[0]; }
     return values[0]*(1.0-t)+values[1]*t;
 }
 fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
+    // P-NRT fast path, bit-identical as exposed_product's: every partial product a nonnegative
+    // finite normal, so ((energy*response)*exposure)*intensity rounds as the mantissa form at
+    // the unclamped exponent; past 2^17 both saturate. Exact zeros stay zero.
+    let ex=lighting.exposure;let gain=lighting.map.z;
+    let ab=energy*response;let abe=ab*ex;let p=abe*gain;
+    let lowest=vec3<f32>(1.17549435e-38);let highest=vec3<f32>(3.0e38);
+    let normal=(ab>=lowest)&(ab<=highest)&(abe>=lowest)&(abe<=highest)&(p>=lowest);
+    let zero=(ab==vec3<f32>(0.0))&((energy==vec3<f32>(0.0))|(response==vec3<f32>(0.0)));
+    if all(normal|zero) && ex>=1.17549435e-38 && ex<=3.0e38 && gain>=1.17549435e-38 && gain<=3.0e38 {
+        return min(p,vec3<f32>(65504.0));
+    }
     let a=frexp(energy);
     let b=frexp(response);
     let e=frexp(vec3<f32>(lighting.exposure));

@@ -600,9 +600,13 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // A silhouette pixel: some 3x3 sample of this frame shows another surface. The other
     // surface is the nearest such sample's (edge neighbours before corners).
     var other=-1;
+    // P-NRT: tr1_moving is a pure function of the placement and tr1_near_skin only ORs, so a
+    // placement equal to the last one tested (`tested`, placement + 1) adds nothing; a ring
+    // is nearly always one or two placements.
+    var tested=0u;
     for(var i=0;i<9;i+=1) {
         let v=tr1_ring(i);
-        if v!=0u {tr1_near_skin=tr1_near_skin || tr1_moving(v-1u);}
+        if v!=0u && v!=tested {tested=v;tr1_near_skin=tr1_near_skin || tr1_moving(v-1u);}
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
@@ -622,8 +626,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     if tr1.flags.x==0u && tr1.flags.z!=0u {
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         let second=tr1_second(p).id;
-        if first!=0u {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
-        if second!=0u && second!=TR1_NONE {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
+        if first!=0u && first!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
+        if second!=0u && second!=TR1_NONE && second!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
     if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin && !s.moved {
         // A still silhouette keeps its two surfaces whatever this frame's 3x3 shows: whether

@@ -978,12 +978,13 @@ impl PrimaryState {
                 // M7-R1: Soft shading traces reflection rays on the shared TLAS.
                 entries.push(scene(2));
             }
-            // M7-R1n: non-RT shading traces them in software (reflection_software.rs).
+            // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
+            // as vec4 words (P-NRT), so a binding holds at least one.
             if !device
                 .features()
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             {
-                entries.push(read(SOFTWARE_REFLECTIONS, 4));
+                entries.push(read(SOFTWARE_REFLECTIONS, 16));
             }
             entries
         });

@@ -224,8 +224,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write_png(&out.join(format!("frame-{index:04}.png")), &image)?;
             }
         }
+        // P-NRT: render()'s own CPU breakdown, to attribute the CPU share of service time.
+        let c = &report.cpu;
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         rows.push(json!({"index":index,"phase":frame.phase,"cut":frame.cut,
-            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,"triangles":report.scene.triangles}));
+            "frame_id":report.frame.0,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,"triangles":report.scene.triangles,
+            "cpu_parts_ms":{"preparation":ms(c.preparation),"shadow_preparation":ms(c.shadow_preparation),
+                "shadow_upload":ms(c.shadow_upload),"shadow_encode":ms(c.shadow_encode),"visibility":ms(c.visibility),
+                "packing":ms(c.packing),"upload":ms(c.upload),"encode":ms(c.encode),"submit":ms(c.submit),"poll":ms(c.poll)}}));
         for sample in engine.poll()?.gpu {
             gpu.push(gpu_row(sample));
         }

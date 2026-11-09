@@ -96,6 +96,69 @@ pub(crate) fn build(data: &MeshData<'_>) -> Adjacency {
     result
 }
 
+/// P-NRT: the visibility buffer's fallback-scan candidates (`visibility_buffer::repair_source`)
+/// per halfedge, flat: the halfedge count H, H + 1 offsets into the list (relative to its
+/// start), then the list. A missing-neighbour halfedge's scan accepts only another triangle with
+/// exactly two corners at the edge's endpoint positions, visited in ascending primitive order.
+/// Each halfedge lists exactly the triangles with two corners at its endpoints' welding keys,
+/// ascending. Signed zeros are equal, a superset of the shader's float equality, so the resolve
+/// iterating this list with its own checks equals its whole-mesh scan. Paired halfedges list
+/// nothing; the scan never runs for them.
+pub(crate) fn repair_candidates(data: &MeshData<'_>, adjacency: &Adjacency) -> Vec<u32> {
+    use std::collections::HashMap;
+    let mut ids = HashMap::with_capacity(data.vertices.len());
+    let canonical: Vec<u32> = (data.vertices.iter().enumerate())
+        .map(|(i, v)| {
+            let key = v.position.map(|x| if x == 0. { 0 } else { x.to_bits() });
+            *ids.entry(key).or_insert(i as u32)
+        })
+        .collect();
+    drop(ids);
+    let corner = |i: usize| canonical[data.indices[i] as usize];
+    let triangles = data.indices.len() / 3;
+    // Triangles at each welded position, ascending (a triangle once per distinct corner).
+    let mut around: Vec<Vec<u32>> = vec![vec![]; data.vertices.len()];
+    for t in 0..triangles {
+        let c = [corner(3 * t), corner(3 * t + 1), corner(3 * t + 2)];
+        for (k, &p) in c.iter().enumerate() {
+            if !c[..k].contains(&p) {
+                around[p as usize].push(t as u32);
+            }
+        }
+    }
+    let mut out = vec![(triangles * 3) as u32];
+    out.extend(std::iter::repeat_n(0, triangles * 3 + 1));
+    let mut list: Vec<u32> = vec![];
+    for h in 0..triangles * 3 {
+        out[1 + h] = list.len() as u32;
+        if adjacency.neighbours[h] != MISSING {
+            continue;
+        }
+        let (t, e) = (h / 3, h % 3);
+        let (a, b) = (corner(3 * t + (e + 1) % 3), corner(3 * t + (e + 2) % 3));
+        let start = list.len();
+        for &other in around[a as usize].iter().chain(if a == b { &[][..] } else { &around[b as usize][..] }) {
+            let o = other as usize;
+            let shared = (0..3).filter(|&k| [a, b].contains(&corner(3 * o + k))).count();
+            if o != t && shared == 2 {
+                list.push(other);
+            }
+        }
+        list[start..].sort_unstable();
+        let mut kept = start;
+        for i in start..list.len() {
+            if i == start || list[i] != list[kept - 1] {
+                list[kept] = list[i];
+                kept += 1;
+            }
+        }
+        list.truncate(kept);
+    }
+    out[1 + triangles * 3] = list.len() as u32;
+    out.extend(list);
+    out
+}
+
 /// Owned immutable CPU geometry prepared for upload. Created by
 /// `Renderer::prepare_mesh_uploads`; moving source vectors avoids geometry copies
 /// and keeps the adjacency inseparable from the exact vertices/indices it describes.
@@ -264,6 +327,66 @@ mod tests {
         let degenerate = fixture(&p, &[0, 0, 1]);
         assert_eq!(degenerate.degenerate_halfedges, 1);
         assert!(degenerate.neighbours.iter().all(|&n| n == MISSING));
+    }
+
+    #[test]
+    fn repair_candidates_equal_the_shaders_whole_mesh_scan() {
+        // The resolve's scan (visibility_buffer::repair_source) by float equality: every other
+        // triangle with exactly two corners at the halfedge's endpoints, ascending.
+        let scan = |p: &[[f32; 3]], indices: &[u32], h: usize| -> Vec<u32> {
+            let at = |i: usize| p[indices[i] as usize];
+            let (t, e) = (h / 3, h % 3);
+            let (e0, e1) = (at(3 * t + (e + 1) % 3), at(3 * t + (e + 2) % 3));
+            (0..indices.len() / 3)
+                .filter(|&o| o != t && (0..3).filter(|&k| at(3 * o + k) == e0 || at(3 * o + k) == e1).count() == 2)
+                .map(|o| o as u32)
+                .collect()
+        };
+        let p = [
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [0., 1., 0.],
+            [0., -1., 0.],
+            [0., 0., 1.],
+            [5., 5., 5.],
+            [6., 5., 5.],
+            [5., 6., 5.],
+            [-0., 0., 0.],
+        ];
+        // Nonmanifold edge 0-1, a duplicate, a collapsed pair at 5, a degenerate edge at 0
+        // with a signed-zero twin (8), and a lone boundary triangle.
+        for indices in [
+            &[0, 1, 2, 1, 0, 3, 0, 1, 4, 5, 6, 7][..],
+            &[5, 6, 7, 5, 5, 4, 6, 7, 2][..],
+            &[0, 1, 2, 0, 1, 2, 8, 0, 1, 1, 2, 3][..],
+            &[0, 1, 2, 1, 0, 3][..],
+        ] {
+            let vertices: Vec<_> = (p.iter())
+                .map(|&position| Vertex {
+                    position,
+                    normal: [0., 0., 1.],
+                    uv: [0.; 2],
+                    color: [1.; 4],
+                })
+                .collect();
+            let data = MeshData {
+                vertices: &vertices,
+                indices,
+            };
+            let adjacency = build(&data);
+            let flat = repair_candidates(&data, &adjacency);
+            let h_count = flat[0] as usize;
+            assert_eq!(h_count, indices.len());
+            let (offsets, list) = flat[1..].split_at(h_count + 1);
+            for h in 0..h_count {
+                let listed = &list[offsets[h] as usize..offsets[h + 1] as usize];
+                if adjacency.neighbours[h] == MISSING {
+                    assert_eq!(listed, scan(&p, indices, h), "halfedge {h} of {indices:?}");
+                } else {
+                    assert!(listed.is_empty());
+                }
+            }
+        }
     }
 
     #[test]
