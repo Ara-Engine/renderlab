@@ -66,6 +66,7 @@ def lease(label, command):
             if sample['compilers'] or sample['available_mbytes'] < 8192:
                 runner.LOCK.rmdir()
                 raise RuntimeError('admission changed')
+            value['admission_mib'] = sample['available_mbytes']
         if path.name.endswith('-preflight.json') and not value['games'] and not value['gpu_processes'] and value['available_mbytes'] >= 8192:
             post(f'p-verify {label} admitted {runner.utc()}')
         original_save(path, value)
@@ -134,6 +135,11 @@ def build(unit):
         sample = runner.resource_sample()
         if sample['compilers'] or sample['available_mbytes'] < 8192:
             return 3
+        # Git archives retain old mtimes; a reused target can otherwise treat a
+        # different snapshot's library as fresh. Preserve bytes, refresh mtimes.
+        for source in tree.rglob('*'):
+            if source.is_file():
+                os.utime(source, None)
         with (OUT / f'{unit}-build.log').open('w') as log:
             child = sp.Popen(command, cwd=tree, env=os.environ | dict(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS='2'), stdout=log, stderr=sp.STDOUT, creationflags=sp.CREATE_NO_WINDOW)
             stopped = threading.Event()
@@ -171,7 +177,7 @@ if __name__ == '__main__':
         raise SystemExit(build(sys.argv[2]))
     if sys.argv[1] == 'retime':
         retime = load('retime', REPO / 'scripts/p-retime.py')
-        retime.OUT = OUT / 'retime'
+        retime.OUT = Path(os.environ.get('PVERIFY_RETIME_ROOT', str(OUT / 'retime')))
         for directory in ['bin', 'scenes']:
             destination = retime.OUT / directory
             destination.mkdir(parents=True, exist_ok=True)
@@ -193,6 +199,19 @@ if __name__ == '__main__':
                 rejected.parent.mkdir(parents=True, exist_ok=True)
                 folder.rename(rejected)
             sp.run([sys.executable, '-B', __file__, 'retime', case, mode, prefix], check=True)
+    if sys.argv[1] in {'lts-batch', 'lts-fixtures'}:
+        mode = sys.argv[1]
+        module = load('lts', REPO / ('scripts/p-lts3-batch.py' if mode == 'lts-batch' else 'scripts/p-lts3-fixtures.py'))
+        module.ROOT = OUT / 'lts3'
+        binaries = module.ROOT / 'bin'
+        binaries.mkdir(parents=True, exist_ok=True)
+        for source in Path('D:/Coding/renderlab-work/p-lts3/bin').glob('*.exe'):
+            if not (binaries / source.name).exists():
+                os.link(source, binaries / source.name)
+        source = inspect.getsource(module.main).replace('!= "p-lts3"', '!= "p-verify"')
+        exec(source, module.__dict__)
+        sys.argv = [mode, *sys.argv[2:]]
+        module.main()
     if sys.argv[1] == 'wait':
         _, runner = load('retime', REPO / 'scripts/p-retime.py').load_runner()
         end = time.monotonic() + float(sys.argv[2])

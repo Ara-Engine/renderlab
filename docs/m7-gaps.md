@@ -446,10 +446,11 @@ The original final guarded retime never admitted before the unit time box.
 [P-RETIME](p-retime.md) now clears the suspected soft quarry default regression:
 quiet ABBA still service is RT 13.59 -> 13.03 ms and non-RT 20.22 -> 19.25 ms;
 camera motion is 10.40 -> 9.60 / 22.95 -> 20.95 ms, with byte-identical captures.
-The separate full-track ARA1 RT quarry also improves; its non-RT pair and quiet
-unshadowed certification remain open after P-RETIME's three-hour wait expired.
-The final queue audit had only 5536 MiB available, 17 Cargo and 22 rustc processes;
-no unshadowed regression verdict is inferred. The uniform-light/packed-index-cache prototype demonstrated no
+The separate full-track ARA1 RT quarry also improves; its non-RT pair remains
+open. [P-VERIFY](p-verify.md) subsequently closes unshadowed certification:
+quiet ABBA still service is 8.722→4.755 ms RT and 9.994→9.041 ms non-RT,
+all 76 HDR/76 PNG witnesses identical, with all measured phase means improving.
+The uniform-light/packed-index-cache prototype demonstrated no
 gain in its contended screen and is unretained. All light/shadow budgets remain intact.
 
 LC1 ([m7-lc1.md](m7-lc1.md)), LC2 ([m7-lc2.md](m7-lc2.md)) and LC3 ([m7-lc3.md](m7-lc3.md)): clustered point/spot lights with soft local shadows. LC3 removes the selected-light limit on RT heads and raises the cached map pool from 4 to 128 lights by default. The soft sun renders with further lights. LC3 evidence is recorded in its unit note; no new Unreal or path-traced comparison was run tonight.
@@ -607,11 +608,16 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   GI allocation cannot simply be deferred: lighting upload precedes GI prepare
   and would change the first frame's binding. Existing BLAS compaction and
   upload retirement already operate and are not new P-MEM savings.
-- Non-RT timing deltas in the contended identity runs are unresolved.
+- Non-RT timing deltas in the original contended identity runs were unresolved.
   [P-RETIME](p-retime.md) built a clean packed-BVH-only pair on `dc0d4ea`, with
   only the runtime BVH Rust/WGSL files from `241b87b`, but game/quarry non-RT
-  timings never admitted before its three-hour wait limit. The packed-BVH
-  regression verdict remains open. No frame-time regression clearance or
+  timings did not admit before that unit's wait limit. P-VERIFY subsequently
+  observes no substantive game regression, but does **not** clear quarry:
+  two quiet ABBA campaigns (16 tracks per binary) give moving service
+  9.878→10.420 ms and first cut 39.115→41.495 ms, with large tail variation
+  affecting both binaries. All image witnesses match. Packing causality is
+  unresolved; **DON'T MERGE/clear the packed-only change** on these results.
+  No quarry frame-time regression clearance or
   performance superiority follows from the memory/hash proof. Ordinary PP1's
   baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
   record-only sweep proves cross-build identity while leaving that gate strict.
@@ -637,8 +643,8 @@ baseline/C binaries live under D:/Coding/renderlab-work/p-lts3.
 [P-VERIFY](p-verify.md) tracks the outstanding P-NRT3, P-RETIME, P-NSQ3,
 P-FLAT2 and P-LTS3 C acceptance work in that priority order. Initial GPU
 admission was deferred by foreign Cargo builds despite more than 8 GiB free.
-No gate is closed and no new performance or quality claim follows from a
-queued run. Frozen-binary identities and the resource audit are under
+Queued runs alone close no gate. Subsequent measured verdicts are recorded
+below and in P-VERIFY; frozen-binary identities and the resource audit are under
 `D:/Coding/renderlab-work/p-verify`.
 
 P-NRT3 is now a measured **DON'T MERGE**: its staged final binary fails GI

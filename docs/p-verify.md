@@ -79,17 +79,51 @@ Lease elapsed 156.75 seconds; 1265 resource samples show zero compiler overlap
 and minimum 10295 MiB available. Resource audit is
 `lease/runs/nrt3-l2-mutex1.json`. No speed comparison is certified.
 
-## P-RETIME open checks — pending
+## P-RETIME — MERGE A; DON'T MERGE packed BVH
 
 | Gate | Regression verdict | Numbers |
 |---|---|---|
-| A, 64 unshadowed lights, RT | Unresolved | No new quiet pair |
-| A, 64 unshadowed lights, non-RT | Unresolved | No new quiet pair |
-| Packed BVH only, non-RT game | Unresolved | No new quiet pair |
-| Packed BVH only, non-RT quarry | Unresolved | No new quiet pair |
+| A, 64 unshadowed lights, RT | **NO observed regression** | Still service 8.722→4.755 ms |
+| A, 64 unshadowed lights, non-RT | **NO observed regression** | Still service 9.994→9.041 ms |
+| Packed BVH only, non-RT game | **NO substantive observed regression** | Moving 10.823→10.809 ms; recovered +0.015 ms, within noise |
+| Packed BVH only, non-RT quarry | **YES observed slowdown; no clearance** | Combined moving 9.878→10.420 ms, cut 39.115→41.495 ms |
 
-Reuse the accepted soft-quarry evidence in `p-retime.md`; it does not close
-these open checks. No regression yes/no is inferred from missing measurements.
+All four checks preserve all 76 float-HDR and 76 PNG witnesses across four
+ABBA process blocks. Each process runs four 88-pose tracks: eight tracks per
+binary. Compiler samples are zero. Hardware/build identities, scene and asset
+hashes, samples and dispersion are in [machine-readable evidence](p-verify-retime-results.json).
+These are release/Vulkan, 1920×1080, fixed authored scenes/settings, with no
+clock control. Service and GPU span are distinct; no Ara/Unreal claim is made.
+
+Mean drained service milliseconds, original eight tracks per binary:
+
+| Pair | Still | Moving | First cut | Recovered |
+|---|---:|---:|---:|---:|
+| A RT | 8.722→4.755 | 10.463→6.630 | 26.050→21.970 | 10.734→7.660 |
+| A non-RT | 9.994→9.041 | 10.609→9.692 | 11.114→10.064 | 9.858→8.840 |
+| Packed game non-RT | 7.602→7.521 | 10.823→10.809 | 36.671→36.568 | 9.912→9.927 |
+| Packed quarry non-RT | 7.301→7.374 | 9.844→10.602 | 38.715→42.377 | 10.849→14.302 |
+
+One packed-quarry candidate track had broad GPU timing outliers. A targeted
+second quiet ABBA (eight additional tracks per binary) also preserved every
+witness and had zero compiler overlap, but broad tail variation affected both
+binaries. Its service is 7.350→7.427 / 9.913→10.237 / 39.516→40.612 /
+15.945→14.100 ms. Combining both campaigns without discarding any samples
+gives 7.325→7.401 / 9.878→10.420 / 39.115→41.495 / 13.397→14.201 ms.
+Moving/cut means are about 5.5%/6.1% higher; the cause and tail distribution
+remain unresolved. This is observed slowdown, not proof of packing causality.
+No further campaign was run and no regression clearance is claimed for quarry.
+
+The exact isolated packed pair is `dc0d4ea` plus only `src/gi_bvh.rs` and
+`shaders/gi_rays_software.wgsl` from `241b87b`; the unrelated merged-memory
+executable was not used. A is `71f7228`→`6112205`. Reuse prior accepted soft
+quarry evidence in `p-retime.md`; the separate ARA1 daylight non-RT A gap was
+outside this work list and stays open. The 3.5 ms light target stays unmet.
+
+Mutex intervals: 19:14:04.314–19:20:40.507 UTC (396.193 s) and
+19:28:37.202–19:31:22.858 UTC (165.657 s). First campaign per-process RAM
+minima: RT lights 13133 MiB, non-RT lights 13378, game 13228, quarry 12112.
+No renderer implementation or build was needed for this item.
 
 ## P-NSQ3 — pending
 
