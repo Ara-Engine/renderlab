@@ -30,7 +30,7 @@ pub(super) const FRAME_BYTES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
-pub(super) const SHADE_TILE: [u32; 2] = [4, 4];
+pub(super) const SHADE_TILE: [u32; 2] = [8, 4];
 /// Pixels per clear block in the shading dispatch; WGSL PRIMARY_CLEAR_TILE must match.
 pub(super) const CLEAR_TILE: [u32; 2] = [16, 16];
 /// Traced fresh visibility takes receiver coverage from the tile flag and hit record,

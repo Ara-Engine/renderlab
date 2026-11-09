@@ -46,18 +46,19 @@ const PRIMARY_CLEAR_TILE=16u;
 // clear colour (or the visible sky, primary_miss); uncovered tiles take it without reading
 // their stale hit records.
 // Visibility is the module's hard_shadow: inline ray or counts.
-// Sixteen-pixel groups shade the gather-bound soft image about a fifth faster than
-// 32; primary_ray_gpu.rs SHADE_TILE must match.
+// One 32-invocation group shades an 8x4 region; primary_ray_gpu.rs SHADE_TILE must match.
+// Mixed-program lists keep their independent 4x4 tiles.
 // The dispatch holds the region's groups in its first rows, then one row per
 // PRIMARY_CLEAR_TILE image rows of clear blocks: every pixel outside the region takes the
 // clear colour from a few large blocks, because launching a shading group per
 // background tile cost more than its stores (primary_ray_gpu.rs encode_primary_shade).
-@compute @workgroup_size(4,4) fn primary_shade_tiles(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(8,4) fn primary_shade_tiles(@builtin(global_invocation_id) grid:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let region=primary_region;
-    let shaded=(region.zw-region.xy)/vec2<u32>(4u);
+    let shaded=(region.zw-region.xy+vec2<u32>(7u,3u))/vec2<u32>(8u,4u);
     let size=textureDimensions(primary_hit);
     if group.y>=shaded.y {
         // Each lane stores one column of a clear block, skipping the region.
+        if lane>=PRIMARY_CLEAR_TILE {return;}
         let base=vec2<u32>(group.x,group.y-shaded.y)*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);
         for(var k=0u;k<PRIMARY_CLEAR_TILE;k+=1u) {
             let p=base+vec2<u32>(0u,k);
@@ -67,7 +68,7 @@ const PRIMARY_CLEAR_TILE=16u;
     }
     if group.x>=shaded.x {return;}
     let id=grid+vec3<u32>(region.xy,0u);
-    if any(id.xy>=size) {return;}
+    if any(id.xy>=size) || any(id.xy>=region.zw) {return;}
     if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
         textureStore(primary_hdr,vec2<i32>(id.xy),primary_miss(id.xy,size,primary_frame.clear));
         return;
