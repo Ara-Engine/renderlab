@@ -41,8 +41,19 @@ fn at_sun_coverage(d:vec3<f32>) -> f32 {
     let normal=offset/max(separation,1e-7);
     return at_rim_coverage(radius-separation,abs(dot(normal,dx)),abs(dot(normal,dy)));
 }
+// Distance (m) to the backdrop's implicit planet ground, or an effectively infinite
+// sky. Keep altitude separate from planet radius, and rationalize the near root:
+// subtracting nearly equal planet-scale squares loses metre-scale fog distances.
+fn at_fog_backdrop_distance(d:vec3<f32>) -> f32 {
+    let h=atmosphere.eye.w;
+    let b=(at_bottom()+h)*d.y;
+    let c=h*(2.0*at_bottom()+h);
+    let disc=b*b-c;
+    if b>=0.0 || disc<0.0 { return 1e30; }
+    return 1000.0*c/(-b+sqrt(disc));
+}
 // The visible sky along world direction d, exposed: the sky-view LUT plus the sun's disk,
-// through the height fog to infinity.
+// through fog up to the implicit ground or the distant sky.
 fn atmosphere_sky(d:vec3<f32>) -> vec3<f32> {
     var sky=textureSampleLevel(atmosphere_skyview,dfg_sampler,at_skyview_uv(d),0.0).rgb;
     let radius=atmosphere.albedo.w;
@@ -56,9 +67,10 @@ fn atmosphere_sky(d:vec3<f32>) -> vec3<f32> {
         if ground<0.0 { sky+=at_sun_transmittance()*limb*coverage/(AT_PI*radius*radius); }
     }
     var exposed=at_exposed(sky);
+    let fog_end=at_fog_backdrop_distance(d);
     if at_on(ATMOSPHERE_HEIGHT_FOG) {
         let start=select(atmosphere.fog.w,max(atmosphere.fog.w,atmosphere.volume.x),at_on(ATMOSPHERE_VOLUMETRIC));
-        let depth=at_fog_depth(atmosphere.eye.xyz,d,start,1e5);
+        let depth=at_fog_depth(atmosphere.eye.xyz,d,start,min(fog_end,1e5));
         let t=exp(-depth);
         exposed=exposed*t+at_exposed(at_fog_source(d))*(1.0-t);
     }
@@ -66,7 +78,7 @@ fn atmosphere_sky(d:vec3<f32>) -> vec3<f32> {
         let clip=atmosphere.view_projection*vec4<f32>(atmosphere.eye.xyz+d,1.0);
         let ndc=clip.xy/max(clip.w,1e-6);
         let uv=vec2<f32>(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
-        let v=at_volume(uv,f32(AT_FROXEL_SLICES),0u,AT_FROXEL_SLICES);
+        let v=at_volume(uv,at_froxel_coordinate(min(fog_end,atmosphere.volume.x))*f32(AT_FROXEL_SLICES),0u,AT_FROXEL_SLICES);
         exposed=exposed*v.a+at_exposed(v.rgb);
     }
     return exposed;

@@ -31,7 +31,7 @@ struct AtmosphereUniform {
     fog:vec4<f32>,
     // Fog single-scattering albedo, w its Henyey-Greenstein g.
     fog_albedo:vec4<f32>,
-    // Volumetric fog: range (m), extra uniform extinction (/m), history weight, unused.
+    // Volumetric fog: range (m), extra uniform extinction (/m), history weight, sample count.
     volume:vec4<f32>,
     // The previous frame's camera (m), w 1 when history may be read.
     previous_eye:vec4<f32>,
