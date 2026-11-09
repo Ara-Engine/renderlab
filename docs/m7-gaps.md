@@ -132,7 +132,7 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
 
 ## Non-RT frame cost (M8, P-NRT)
 
-- **OPEN: P-NRT3's two-submit split and batched GI drain (branch `t3/p-nrt3` 9e4d474) are NOT merged. The candidate doesn't render.** P-VERIFY's admitted l2 run found that `final.exe` fails `Device::create_shader_module` for "indirect cache kernels" with a WGSL redefinition of `gi_wg_base`. The original is an `array<u32,GI_SETUP_CELLS>` (composed line 1992); the batched gather adds a scalar `u32` of the same name (line 2684). Game-base and ara-pbr candidate runs both exit 1 with no image. Fix: rename the new scalar, rebuild, then rerun l2 (identity) and q1 (quiet timing). The two-submit split itself is untested.
+- **OPEN: P-NRT3b repairs P-NRT3's shader blocker; promotion remains pending.** On `t3/p-nrt3b`, merged with main `9fd0a9e`, the batched gather scalar is renamed to `gi_drain_base`. CPU Naga validation passes for both ray sources and direction counts. Fresh-current-main comparisons pass ARA1 (164/164 captured PNGs) and Q-walk (186/186 recorded hashes) on both paths. RF also passes with 26/26 float buffers identical; MP1 non-RT passes with 7/7 PNGs identical. MP1 RT, lib and separate-change quiet timings/traces remain pending; bounded leases resume after alternating owners. No performance promotion is claimed. See [p-nrt3b.md](p-nrt3b.md); the original unverified branch and old binaries remain historical evidence.
 - **OPEN, performance: non-RT is still 3-5x Ara raster's service time on the matched scenes.**
   P-NRT's byte-identical changes (docs/p-nrt.md §2) cut ARA1 service by 13-18% on game-base
   (still 11.30 → 9.79 ms) and 17-21% on ara-pbr (still 9.43 → 7.79 ms). The quarry stays within

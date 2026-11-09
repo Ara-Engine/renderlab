@@ -29,10 +29,11 @@ Initial candidate capture build: 153 s; candidate lib build: 101 s. Base capture
 - ARA1 non-RT: 82/82 captured PNGs byte-identical.
 - Q-walk RT: 93/93 recorded frame hashes identical.
 - Q-walk non-RT: 93/93 recorded frame hashes identical.
-- RF1-RF10 non-RT baseline passes. Candidate interrupted by bounded first-lease deadline; no candidate pass claimed.
-- RF RT, MP1 and full lib suite pending.
+- RF1-RF10: both baseline/candidate tests pass on both paths; all 13 saved float buffers per path are byte-identical (26/26 total).
+- MP1 non-RT: both tests pass; 7/7 saved PNGs byte-identical.
+- MP1 RT and full lib suite pending.
 
-First lease `l2-1` reached its bounded deadline at 750 s. Its completed captures/tests remain valid; interrupted steps must resume. A newer root order alternates P-NRT3b with P-GIE. The unadmitted second waiter was withdrawn, and follow-up waits for P-GIE's anchored release.
+Leases `l2-1` and `l2-2b` each reached their bounded deadlines at 750 s. The second stopped in baseline MP1 RT. Its completed captures/tests remain valid; interrupted steps must resume. Root orders alternated P-NRT3b with P-GIE, then P-R2. The unadmitted second waiter was withdrawn, and follow-up waits for P-GIE's anchored release.
 
 ## Timing and latency limits
 
