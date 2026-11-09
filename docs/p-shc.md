@@ -199,9 +199,18 @@ second cached build invocation took about one second per final artifact. No new
 Unreal or path-traced campaign ran. The three-hour unit ends with the latency and
 cold-startup goals explicitly missed.
 
-Cleanup status is recorded after the target-removal attempt; retained executables,
+Automatic approval review rejected the exact-path, containment-checked PowerShell
+removal of both owned Cargo targets, stating only **"blocked by policy"**. No
+alternative deletion method was attempted. They remain for coordinator cleanup:
+
+- `D:/Coding/renderlab-work/p-shc/target`: 2,346,629,105 bytes.
+- `D:/Coding/renderlab-work/p-shc/target-before`: 685,336,369 bytes.
+- Total: 3,031,965,474 bytes (3.03 GB).
+
+No owned GPU process, build, lease waiter or poller remains. Retained executables,
 JSON/log summaries and inspected PNGs stay outside the targets. No raw GPU dumps
-were written.
+were written. The compiler hold through P-LTS's following quarry retry was
+recorded and relayed to the other active workers.
 
 The next structural candidate is separating unchanged engine work from user
 shading. It needs a typed, shading-model-independent interface and measured buffer,
