@@ -12,7 +12,10 @@
 // like any other. An instance with cooked near-field masks (instance word 23, their base)
 // lets a cell on it also block the directions its query triangle's vertex masks all block
 // (gi_near_blocked); the cut is still traced over the whole ray.
-@group(0) @binding(35) var<storage,read> gi_geometry:array<u32>;
+// P-NRT2: read as 16-byte words. src/gi_bvh.rs starts every instance record, node, leaf and
+// position on one, so each is a few vec4 loads of the same words; index and mask words read
+// singly (gi_gw).
+@group(0) @binding(35) var<storage,read> gi_geometry:array<vec4<u32>>;
 // The source-winding normal; the hit's instance, its triangle's position indices (in the
 // mesh's array) and barycentrics (weights of the second and third vertices).
 struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
@@ -21,8 +24,10 @@ const GI_BVH_EMPTY:u32=0xffffffffu;
 const GI_BVH_STACK:u32=48u;
 // Instance records follow a 16-word header; src/gi_bvh.rs INSTANCE_WORDS must match.
 const GI_INSTANCE_WORDS:u32=32u;
-fn gi_gf(i:u32) -> f32 { return bitcast<f32>(gi_geometry[i]); }
-fn gi_gv(i:u32) -> vec3<f32> { return vec3<f32>(gi_gf(i),gi_gf(i+1u),gi_gf(i+2u)); }
+fn gi_gw(i:u32) -> u32 { return gi_geometry[i>>2u][i&3u]; }
+// The 16-byte word at word `i`, a multiple of four.
+fn gi_gq(i:u32) -> vec4<u32> { return gi_geometry[i>>2u]; }
+fn gi_gqf(i:u32) -> vec4<f32> { return bitcast<vec4<f32>>(gi_geometry[i>>2u]); }
 fn gi_safe_inverse(d:vec3<f32>) -> vec3<f32> {
     let tiny=select(vec3<f32>(-1e-30),vec3<f32>(1e-30),d>=vec3<f32>(0.0));
     return vec3<f32>(1.0)/select(d,tiny,abs(d)<vec3<f32>(1e-30));
@@ -57,33 +62,38 @@ fn gi_triangle(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, 
 }
 // The near-field mask base of instance `inst` (0: none).
 fn gi_near_base(inst:u32) -> u32 {
-    if inst>=gi_geometry[0] { return 0u; }
-    return gi_geometry[16u+inst*GI_INSTANCE_WORDS+23u];
+    if inst>=gi_gw(0u) { return 0u; }
+    return gi_gw(16u+inst*GI_INSTANCE_WORDS+23u);
 }
 // Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance.
 fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hit:bool) -> GiHit {
     var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
-    let instances=gi_geometry[0];
+    let instances=gi_gw(0u);
     for(var i=0u;i<instances;i+=1u) {
+        // Record words 0-11 rows, 12-17 world lo/hi, 18-21 nodes, leaves, positions, indices,
+        // 22 root, 23 near-field base.
         let r=16u+i*GI_INSTANCE_WORDS;
-        if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,best.t) { continue; }
-        let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
+        let q3=gi_gq(r+12u);let q4=gi_gq(r+16u);
+        let lo=bitcast<vec3<f32>>(q3.xyz);let hi=vec3<f32>(bitcast<f32>(q3.w),bitcast<vec2<f32>>(q4.xy));
+        if !gi_slab(origin,world_inv,lo,hi,tmin,best.t) { continue; }
+        let r0=gi_gqf(r);let r1=gi_gqf(r+4u);let r2=gi_gqf(r+8u);
         // Unnormalized object-space direction: t is the same parameter in both spaces.
         let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
         let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
         let inv=gi_safe_inverse(d);
-        let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];
-        let positions=gi_geometry[r+20u];let indices=gi_geometry[r+21u];
-        stack[0]=gi_geometry[r+22u];
+        let q5=gi_gq(r+20u);
+        let nodes=q4.z;let leaves=q4.w;
+        let positions=q5.x;let indices=q5.y;
+        stack[0]=q5.z;
         var sp=1u;
         while sp>0u {
             sp-=1u;
             let child=stack[sp];
             if (child&GI_BVH_LEAF)!=0u {
                 let l=leaves+(child&~GI_BVH_LEAF)*8u;
-                let first=gi_geometry[l+4u];let count=gi_geometry[l+5u];
+                let lw=gi_gq(l+4u);let first=lw.x;let count=lw.y;
                 // Two triangles a step: both triangles' indices, then both triangles'
                 // positions, load before either is tested, so a leaf costs half the dependent
                 // round trips. They are tested in leaf order, the second against the first's
@@ -93,14 +103,14 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                     let x=indices+first+k;
                     let two=k+3u<count;
                     let y=select(x,x+3u,two);
-                    let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
-                    let ja=gi_geometry[y];let jb=gi_geometry[y+1u];let jc=gi_geometry[y+2u];
-                    let a=gi_gv(positions+ia*4u);
-                    let b=gi_gv(positions+ib*4u);
-                    let c=gi_gv(positions+ic*4u);
-                    let a2=gi_gv(positions+ja*4u);
-                    let b2=gi_gv(positions+jb*4u);
-                    let c2=gi_gv(positions+jc*4u);
+                    let ia=gi_gw(x);let ib=gi_gw(x+1u);let ic=gi_gw(x+2u);
+                    let ja=gi_gw(y);let jb=gi_gw(y+1u);let jc=gi_gw(y+2u);
+                    let a=gi_gqf(positions+ia*4u).xyz;
+                    let b=gi_gqf(positions+ib*4u).xyz;
+                    let c=gi_gqf(positions+ic*4u).xyz;
+                    let a2=gi_gqf(positions+ja*4u).xyz;
+                    let b2=gi_gqf(positions+jb*4u).xyz;
+                    let c2=gi_gqf(positions+jc*4u).xyz;
                     let h=gi_triangle(o,d,a,b,c,tmin,best.t);
                     if h.x>=0.0 {
                         // The source-winding normal through the inverse transpose. r0-r2 are
@@ -120,15 +130,18 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
                 }
                 continue;
             }
+            // Node words 0-2 origin, 3-5 step, 6-9 children, 10-12 lower and 13-15 upper byte
+            // planes, 16-19 errors (unread).
             let n=nodes+child*20u;
-            let origin_q=gi_gv(n);let step=gi_gv(n+3u);
+            let n0=gi_gq(n);let n1=gi_gq(n+4u);let n2=gi_gq(n+8u);let n3=gi_gq(n+12u);
+            let origin_q=bitcast<vec3<f32>>(n0.xyz);let step=vec3<f32>(bitcast<f32>(n0.w),bitcast<vec2<f32>>(n1.xy));
             // The four children's entry distances (misses above best.t), then pushed far to
             // near so the nearest is visited first: closest-hit rays shrink best.t early and
             // first-hit rays reach a blocker sooner. The order is fixed by the distances.
             var t0=3.4028235e38;var t1=3.4028235e38;var t2=3.4028235e38;var t3=3.4028235e38;
-            let c0=gi_geometry[n+6u];let c1=gi_geometry[n+7u];let c2=gi_geometry[n+8u];let c3=gi_geometry[n+9u];
-            let lx=gi_geometry[n+10u];let ly=gi_geometry[n+11u];let lz=gi_geometry[n+12u];
-            let hx=gi_geometry[n+13u];let hy=gi_geometry[n+14u];let hz=gi_geometry[n+15u];
+            let c0=n1.z;let c1=n1.w;let c2=n2.x;let c3=n2.y;
+            let lx=n2.z;let ly=n2.w;let lz=n3.x;
+            let hx=n3.y;let hy=n3.z;let hz=n3.w;
             for(var s=0u;s<4u;s+=1u) {
                 let next=select(select(select(c3,c2,s==2u),c1,s==1u),c0,s==0u);
                 if next==GI_BVH_EMPTY { continue; }
@@ -175,15 +188,15 @@ fn gi_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
 // keeps no render triangle (a cooked cut is not the drawn mesh), so cell shading evaluates
 // the placement's material over its whole texture (gi_hit_primitive: none).
 fn gi_hit_identity(inst:u32, tri:vec3<u32>) -> u32 {
-    if inst>=gi_geometry[0] { return 0u; }
+    if inst>=gi_gw(0u) { return 0u; }
     let r=16u+inst*GI_INSTANCE_WORDS;
-    let own=gi_geometry[r+24u];
+    let own=gi_gw(r+24u);
     if own!=0u { return own; }
-    let map=gi_geometry[r+25u];
-    let n=gi_geometry[r+26u];
+    let map=gi_gw(r+25u);
+    let n=gi_gw(r+26u);
     var found=0u;
     for(var i=0u;i<n;i+=1u) {
-        if gi_geometry[map+2u*i]<=tri.x { found=gi_geometry[map+2u*i+1u]; }
+        if gi_gw(map+2u*i)<=tri.x { found=gi_gw(map+2u*i+1u); }
     }
     return found;
 }
@@ -214,8 +227,8 @@ fn gi_near_blocked(base:u32, tri:vec3<u32>, bary:vec2<f32>, back:bool, d:vec3<f3
     let bit=1u<<(b%32u);
     let stride=2u*words;
     var s=0.0;
-    if (gi_geometry[at+tri.x*stride]&bit)!=0u { s+=1.0-bary.x-bary.y; }
-    if (gi_geometry[at+tri.y*stride]&bit)!=0u { s+=bary.x; }
-    if (gi_geometry[at+tri.z*stride]&bit)!=0u { s+=bary.y; }
+    if (gi_gw(at+tri.x*stride)&bit)!=0u { s+=1.0-bary.x-bary.y; }
+    if (gi_gw(at+tri.y*stride)&bit)!=0u { s+=bary.x; }
+    if (gi_gw(at+tri.z*stride)&bit)!=0u { s+=bary.y; }
     return s>=0.999;
 }

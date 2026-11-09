@@ -375,6 +375,12 @@ impl Renderer {
     pub fn atmosphere(&self) -> Atmosphere {
         self.atmosphere.settings
     }
+    /// Restarts volumetric fog history and its sample sequence on the next lit frame.
+    /// Call alongside reconstruction/GI resets after a camera cut or teleport.
+    pub fn reset_atmosphere_history(&mut self) {
+        self.atmosphere.previous = None;
+        self.atmosphere.frame = 0;
+    }
     #[cfg(test)]
     pub(crate) fn test_fog_quality(&mut self, tile: u32, samples: u32) {
         assert!([8, 16].contains(&tile) && (1..=2).contains(&samples));

@@ -57,11 +57,14 @@ impl Blas {
             near: vec![],
         })
     }
+    /// Words this mesh's records take, rounded up to a 16-byte word (P-NRT2): every mesh then
+    /// starts on one, so the shader reads nodes, leaves and positions as whole vec4s.
     fn words(&self) -> usize {
-        self.bvh.nodes.len() * 20
+        (self.bvh.nodes.len() * 20
             + self.bvh.leaves.len() * 8
             + self.bvh.positions.len() * 4
-            + self.bvh.indices.len()
+            + self.bvh.indices.len())
+        .next_multiple_of(4)
     }
     /// The base word of the near-field masks cooked under exactly `model`, given this
     /// mesh's mask bases in the packed buffer; 0 when none matches.

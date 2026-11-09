@@ -304,6 +304,17 @@ fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i3
     let xy=(face.yz+vec2<f32>(1.0))*f32(size)*0.5-vec2<f32>(0.5);
     let p=vec2<i32>(floor(xy));
     let t=fract(xy);
+    // P-NRT2: a footprint inside its face (almost every lookup) reads its four texels as
+    // environment_remap's in-face branch does, in straight-line loads the GPU issues together
+    // instead of four branchy taps; the same texels and the same blend.
+    if all(p>=vec2<i32>(0)) && all(p<vec2<i32>(size-1)) {
+        let layer=bank+i32(face.x);
+        let a=textureLoad(tex,p,layer,mip).rgb;
+        let b=textureLoad(tex,p+vec2<i32>(1,0),layer,mip).rgb;
+        let c=textureLoad(tex,p+vec2<i32>(0,1),layer,mip).rgb;
+        let e=textureLoad(tex,p+vec2<i32>(1,1),layer,mip).rgb;
+        return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
+    }
     let a=environment_tap(tex,i32(face.x),p,size,mip,bank);
     let b=environment_tap(tex,i32(face.x),p+vec2<i32>(1,0),size,mip,bank);
     let c=environment_tap(tex,i32(face.x),p+vec2<i32>(0,1),size,mip,bank);
@@ -354,13 +365,13 @@ fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
     }
     // P-NRT: a zero blend weight (every mirror lookup) makes the second level's finite
     // texels contribute exactly zero, so its four taps are skipped; the sum is unchanged.
-    let levels=select(2,1,single || t==0.0);
-    var values:array<vec3<f32>,2>;
-    for (var i=0; i<levels; i++) {
-        values[i]=environment_level(d,select(lo,hi,i==1));
-    }
-    if single { return values[0]; }
-    return values[0]*(1.0-t)+values[1]*t;
+    // P-NRT2: both levels in straight-line code (no local array), so the second level's
+    // loads issue with the first's; a skipped level stays the zero the array held.
+    let first=environment_level(d,lo);
+    var second=vec3<f32>(0.0);
+    if !(single || t==0.0) { second=environment_level(d,hi); }
+    if single { return first; }
+    return first*(1.0-t)+second*t;
 }
 fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
     // P-NRT fast path, bit-identical as exposed_product's: every partial product a nonnegative
