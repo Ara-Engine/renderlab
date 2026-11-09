@@ -960,7 +960,11 @@ impl PrimaryState {
                 texture(6, uint),
                 texture(7, uint),
                 texture(21, uint),
-                buffer(29, wgpu::BufferBindingType::Storage { read_only: false }, 20),
+                buffer(
+                    29,
+                    wgpu::BufferBindingType::Storage { read_only: false },
+                    20,
+                ),
             ],
         );
         let penumbra_trace_bindings = group(
@@ -1173,7 +1177,10 @@ impl PrimaryState {
                 &[Some(&check_bindings), Some(&array_bindings)],
             ),
             check_bindings,
-            penumbra_list_layout: layout("P-RTS penumbra list ABI", &[Some(&penumbra_list_bindings)]),
+            penumbra_list_layout: layout(
+                "P-RTS penumbra list ABI",
+                &[Some(&penumbra_list_bindings)],
+            ),
             penumbra_list_bindings,
             penumbra_trace_layout: layout(
                 "P-RTS penumbra trace ABI",
@@ -1478,7 +1485,11 @@ impl PrimaryState {
         };
         [
             pipeline(&*self.penumbra_list_layout, &list, "primary_penumbra_list"),
-            pipeline(&*self.penumbra_trace_layout, module, "primary_penumbra_trace"),
+            pipeline(
+                &*self.penumbra_trace_layout,
+                module,
+                "primary_penumbra_trace",
+            ),
         ]
     }
 

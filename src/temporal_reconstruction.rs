@@ -1346,10 +1346,17 @@ mod tests {
         assert!(off.contains("for(var j=lane;j<primary_frame.sampling.x;j+=1u)"));
         assert!(!off.contains("primary_penumbra_trace"));
         let trace = trace_source_with(&kernels[1], true).unwrap();
-        assert!(trace.contains("fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y"));
+        assert!(trace.contains(
+            "fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y"
+        ));
         // P-RTS: probes trace sampling.y; listed pixels stride the whole budget.
         assert_eq!(trace.matches("j<primary_frame.sampling.y;j+=1u").count(), 1);
-        assert_eq!(trace.matches("bitcast<f32>(primary_frame.sampling.w),wide)").count(), 1);
+        assert_eq!(
+            trace
+                .matches("bitcast<f32>(primary_frame.sampling.w),wide)")
+                .count(),
+            1
+        );
         assert_eq!(
             trace
                 .matches("j<primary_frame.sampling.x;j+=PENUMBRA_LANES")
