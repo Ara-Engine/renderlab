@@ -1839,6 +1839,9 @@ impl Renderer {
             skin: None,
             clusters,
             repair_scan: adjacency.is_none_or(|a| a.ambiguous_halfedges != 0),
+            repair_edges: adjacency
+                .filter(|a| a.ambiguous_halfedges != 0)
+                .map(|a| crate::receiver_adjacency::repair_candidates(data, a).into()),
             acceleration,
             tangent,
             renderer: self.identity.clone(),

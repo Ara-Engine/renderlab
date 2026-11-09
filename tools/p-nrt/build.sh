@@ -2,8 +2,10 @@
 # P-NRT candidate builds outside the GPU lease, two jobs, in a target outside any
 # `renderlab`/`renderlab-work` path segment so build scripts never trip other units' guards.
 # Each build is killed, and the script exits 2, when a schedule line written after it starts
-# restricts compilers (QUIET, compiler, cargo, rustc): root's compiler-quiet windows apply to
-# background builds too.
+# opens a compiler-quiet window (a root order naming QUIET or "no cargo", or an owner's
+# "QUIET active" line): those windows apply to background builds too. Cargo's unit hash
+# ignores the tree path, so a second tree in the same target looks fresh unless its files
+# are newer than the last build: touch them first (snapshots are marker-checked in plans).
 #   tools/p-nrt/build.sh TARGET NAME=TREE[:lib] ...   (snapshots into p-nrt/bin/NAME.exe)
 S=/e/renderlab-work/gpu-schedule.md
 T=$1; shift
@@ -14,7 +16,7 @@ run() {  # run cargo in the background; abort on a new compiler-restricting line
   "$@" &
   pid=$!
   while kill -0 $pid 2>/dev/null; do
-    if tail -n +"$((watch_from + 1))" "$S" 2>/dev/null | grep -v '^\[m7-p-nrt' | grep -q -i -E 'QUIET|compiler|no cargo|rustc'; then
+    if tail -n +"$((watch_from + 1))" "$S" 2>/dev/null | grep -q -E '^\[root order\].*(QUIET|no cargo)|QUIET active'; then
       taskkill //PID "$(cat /proc/$pid/winpid)" //T //F >/dev/null 2>&1
       echo "ABORTED: a new schedule line restricts compilers"; exit 2
     fi

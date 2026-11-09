@@ -6,7 +6,7 @@
 
 The latest anchored `[root order]` line must still hash to --expected-order when the
 lock is taken. The lock is awaited in-process at 50 ms, bounded by --wait-seconds; a
-changed order withdraws the waiter. 6 GiB available RAM at admission, 2 GiB runtime
+changed order withdraws the waiter. 8 GiB available RAM at admission, 2 GiB runtime
 guard. Other units' `build-script-build.exe` is not counted as a foreign renderer.
 """
 import argparse
@@ -47,7 +47,7 @@ def main():
     os.environ.update(N8_OWNER=OWNER, N8_OUT=str(ROOT / "lease"))
     spec.loader.exec_module(n8)
     runner = n8.s1.runner
-    runner.PREFLIGHT_MEMORY_MBYTES = 6144
+    runner.PREFLIGHT_MEMORY_MBYTES = 8192
     runner.RUNTIME_MEMORY_MBYTES = 2048
     wrapped = runner.state
 
@@ -76,16 +76,23 @@ def main():
 
     # The lock is polled at 50 ms; the (large) schedule once a second.
     deadline = time.monotonic() + a.wait_seconds
-    gates, checked = released(), time.monotonic()
-    while runner.LOCK.exists() or not gates:
-        if time.monotonic() >= deadline:
-            print("DEFERRED: GPU lock occupied", flush=True)
-            return 3
-        time.sleep(.05)
-        if time.monotonic() - checked >= 1:
-            current()
-            gates, checked = released(), time.monotonic()
-    current()
+
+    def roomy():
+        # Contend only with admission RAM available, so a claimed lease never defers on it.
+        return runner.resource_sample()["available_mbytes"] >= runner.PREFLIGHT_MEMORY_MBYTES + 128
+
+    def wait_free():
+        gates, room, checked = released(), roomy(), time.monotonic()
+        while runner.LOCK.exists() or not gates or not room:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.05)
+            if time.monotonic() - checked >= 1:
+                current()
+                gates, room, checked = released(), roomy(), time.monotonic()
+        current()
+        return True
+
     original_save = runner.save
 
     def save(path, value):
@@ -104,7 +111,15 @@ def main():
         p.error("command required")
     sys.argv = [str(REPO / "scripts/n8-run.py"), "--label", a.label, "--minutes", str(a.minutes), "--record-resources", "--", *command]
     try:
-        return runner.main()
+        # Another owner can take the lock between our poll and the runner's mkdir: the
+        # runner then defers (3) without claiming, and we wait again until the deadline.
+        while True:
+            if not wait_free():
+                print("DEFERRED: GPU lock occupied", flush=True)
+                return 3
+            code = runner.main()
+            if code != 3 or n8.s1.claimed:
+                return code
     finally:
         if n8.s1.claimed:
             with n8.s1.SCHEDULE.open("a", encoding="utf-8") as f:

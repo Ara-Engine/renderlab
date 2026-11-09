@@ -248,7 +248,7 @@ pub(super) fn repair_source() -> String {
         + s[start..]
             .find("            var direct_pending=true;")
             .unwrap();
-    s.replace_range(start..end, "            if neighbour==0xffffffffu && primary_repair_scan[batch]==0u {continue;}\n            var search=0u;\n");
+    s.replace_range(start..end, "            let range=primary_repair_range(batch,trace.record.y,edge);\n            if neighbour==0xffffffffu && range.x==range.y {continue;}\n            var search=range.x;\n");
     let start = s
         .find("                    if !rayQueryProceed(&query)")
         .unwrap();
@@ -256,14 +256,30 @@ pub(super) fn repair_source() -> String {
         + s[start..]
             .find("                }\n                var common_vertices")
             .unwrap();
-    s.replace_range(start..end, "                    let words=arrayLength(&primary_indices[batch].data);\n                    let triangles=select(words/3u,(words-1u)/6u,words%3u==1u);\n                    if search>=triangles {break;}candidate_primitive=search;search+=1u;\n                    if candidate_primitive==trace.record.y {continue;}\n                    v=primary_triangle_vertices(batch,candidate_primitive);\n                    var shared_count=0u;for(var j=0u;j<3u;j+=1u) {shared_count+=u32(all(v[j]==e0)||all(v[j]==e1));}\n                    if shared_count!=2u || !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}\n                    if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}\n");
+    s.replace_range(start..end, "                    let words=arrayLength(&primary_indices[batch].data);\n                    let end=select(select(words/3u,(words-1u)/6u,words%3u==1u),range.y,range.z!=0u);\n                    if search>=end {break;}candidate_primitive=select(search,primary_repair_scan[search],range.z!=0u);search+=1u;\n                    if candidate_primitive==trace.record.y {continue;}\n                    v=primary_triangle_vertices(batch,candidate_primitive);\n                    var shared_count=0u;for(var j=0u;j<3u;j+=1u) {shared_count+=u32(all(v[j]==e0)||all(v[j]==e1));}\n                    if shared_count!=2u || !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}\n                    if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}\n");
     assert!(!s.contains("rayQuery") && !s.contains("ray_query"));
     s
 }
+/// The resolve's fallback-scan policy (`VisibilityBuffer::new` writes it): a
+/// missing-neighbour halfedge's scan range. With z = 1, x..y index this policy's list of the
+/// halfedge's candidates: every triangle with two corners at the edge's endpoint positions,
+/// ascending, a superset of what the scan accepts. Otherwise x..y are primitives: y past the
+/// mesh for a whole-mesh scan (meshes without lists, LOD triangles), or x == y for none.
+/// Visiting only listed candidates leaves the repair unchanged.
+const REPAIR_POLICY: &str = "@group(0) @binding(30) var<storage,read> primary_repair_scan:array<u32>;
+fn primary_repair_range(batch:u32,primitive:u32,edge:u32)->vec3<u32> {
+    let s=primary_repair_scan[batch];
+    if s==0u {return vec3<u32>(0u);}
+    let whole=vec3<u32>(0u,0xffffffffu,0u);
+    if s==0xffffffffu {return whole;}
+    let h=primitive*3u+edge;
+    if h>=primary_repair_scan[s-1u] {return whole;}
+    return vec3<u32>(primary_repair_scan[s+h],primary_repair_scan[s+h+1u],1u);
+}";
 pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let head = primary_ray_gpu::non_rt_heads(wgsl)?;
     Ok(format!(
-        "{}\n@group(0) @binding(30) var<storage,read> primary_repair_scan:array<u32>;\n{}\n{}",
+        "{}\n{REPAIR_POLICY}\n{}\n{}",
         head[0],
         repair_source(),
         include_str!("../shaders/visibility_buffer_resolve.wgsl")
@@ -701,20 +717,33 @@ impl VisibilityBuffer {
             REJECT_HEADER + count.max(1) as u64 * 4,
             storage | wgpu::BufferUsages::INDIRECT,
         );
-        let repair_scan = Buffer::new(
-            r,
-            "N1c ambiguous-edge fallback policy",
-            crate::TRACED_DRAWS as u64 * 4,
-            storage,
-        );
-        let flags = words(
-            draws
-                .iter()
-                .map(|d| u32::from(d.mesh.repair_scan))
-                .chain(std::iter::repeat(0))
-                .take(crate::TRACED_DRAWS as usize),
-        );
-        r.queue.write_buffer(&repair_scan.value, 0, &flags);
+        // Per draw (resolve_source's primary_repair_range): 0 never scans, u32::MAX scans the
+        // whole mesh, else 1 + the word offset of the mesh's halfedge count H, then H + 1
+        // absolute offsets of its candidate lists, then the lists
+        // (receiver_adjacency::repair_candidates), once per mesh.
+        let mut policy = vec![0u32; crate::TRACED_DRAWS as usize];
+        let mut placed: Vec<(*const u32, u32)> = vec![];
+        for (i, d) in draws.iter().take(policy.len()).enumerate() {
+            policy[i] = match (d.mesh.repair_scan, &d.mesh.repair_edges) {
+                (false, _) => 0,
+                (true, None) => u32::MAX,
+                (true, Some(lists)) => match placed.iter().find(|(p, _)| *p == lists.as_ptr()) {
+                    Some(&(_, at)) => at + 1,
+                    None => {
+                        let at = policy.len() as u32;
+                        let halfedges = lists[0] as usize;
+                        let base = at + 2 + halfedges as u32;
+                        policy.push(lists[0]);
+                        policy.extend(lists[1..halfedges + 2].iter().map(|o| base + o));
+                        policy.extend_from_slice(&lists[halfedges + 2..]);
+                        placed.push((lists.as_ptr(), at));
+                        at + 1
+                    }
+                },
+            };
+        }
+        let repair_scan = Buffer::new(r, "N1c ambiguous-edge fallback policy", policy.len() as u64 * 4, storage);
+        r.queue.write_buffer(&repair_scan.value, 0, &words(policy.iter().copied()));
         let image_size = Buffer::new(r, "N1c image size", 16, wgpu::BufferUsages::UNIFORM);
         r.queue.write_buffer(
             &image_size.value,

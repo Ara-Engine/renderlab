@@ -121,7 +121,7 @@ const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec
 // ---- M7-R1n software reflections (docs/m7-r1n.md) ----
 /// The non-RT shading heads' software reflection geometry (src/reflection_software.rs).
 pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
-    "@group(0) @binding(36) var<storage,read> rl_geometry:array<u32>;\n";
+    "@group(0) @binding(36) var<storage,read> rl_geometry:array<vec4<u32>>;\n";
 const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
 /// R1's two ray queries and their software replacements: the hit's light visibility, and
 /// the reflection ray itself, which yields the same hit record. The queries' declarations

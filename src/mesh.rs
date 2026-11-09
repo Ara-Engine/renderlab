@@ -57,6 +57,9 @@ pub struct Mesh {
     /// Visibility-buffer clusters: original geometry, or an attached clusterLOD hierarchy.
     pub(crate) clusters: Option<crate::renderer::visibility_buffer::Clusters>,
     pub(crate) repair_scan: bool,
+    /// With `repair_scan`, each halfedge's fallback-scan candidates
+    /// (`receiver_adjacency::repair_candidates`); `None` scans the whole mesh.
+    pub(crate) repair_edges: Option<std::sync::Arc<[u32]>>,
     pub(crate) renderer: std::sync::Arc<()>,
     pub(crate) acceleration:
         Option<std::sync::Arc<crate::renderer::hardware_shadow_gpu::MeshAcceleration>>,

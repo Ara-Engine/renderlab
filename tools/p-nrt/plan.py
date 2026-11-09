@@ -142,7 +142,7 @@ def main():
             record["error"] = repr(e)
         failed |= record.get("exit_code") != 0
         results.append(record)
-        print(json.dumps({k: record.get(k) for k in ("utc", "exit_code", "seconds", "error")} | {"out": step["out"]}), flush=True)
+        print(json.dumps({k: record.get(k) for k in ("utc", "exit_code", "seconds", "error")} | {"out": step.get("out", step.get("path"))}), flush=True)
         plan_path.with_suffix(".results.json").write_text(json.dumps(results, indent=1) + "\n")
     return 1 if failed else 0
 

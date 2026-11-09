@@ -11,15 +11,17 @@
 //! registration, no shared projection (P0's W8 and C7, docs/m7-p0-claims.md).
 use crate::Mat4;
 
-/// Largest mesh that gets software reflection geometry (56 bytes a triangle): larger meshes
+/// Largest mesh that gets software reflection geometry (about 64 bytes a triangle): larger meshes
 /// are not hit by non-RT reflection rays (docs/m7-r1n.md, gaps).
 pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
 /// Triangles per leaf at most; the WGSL leaf tag holds the count in three bits.
 const LEAF_TRIANGLES: usize = 4;
 /// Words per node: child 0 bounds (lo, hi), child 1 bounds, then the two tagged child IDs.
 const NODE_WORDS: usize = 16;
-/// Words per triangle: corner a, edges b - a and c - a, then the drawn primitive index.
-const TRIANGLE_WORDS: usize = 10;
+/// Words per triangle: corner a, edges b - a and c - a, the drawn primitive index, then two
+/// pad words. P-NRT: every node, triangle and instance record starts on a 16-byte boundary,
+/// so the WGSL traversal reads them as whole vec4 words.
+const TRIANGLE_WORDS: usize = 12;
 /// A child ID's leaf tag: `LEAF | first_triangle << 3 | count`.
 const LEAF: u32 = 0x8000_0000;
 /// Words before the instance records; WGSL RS_HEADER_WORDS must match. Word 0 is the count.
@@ -128,7 +130,7 @@ impl Builder<'_> {
             let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);
             self.triangles
                 .extend([a, e1, e2].iter().flatten().map(|v| v.to_bits()));
-            self.triangles.push(t);
+            self.triangles.extend([t, 0, 0]);
             points.extend([a, b, c]);
         }
         let (lo, hi) = bounds(points.into_iter());
