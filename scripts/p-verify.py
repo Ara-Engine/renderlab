@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import subprocess as sp
+import shutil
+import hashlib
 import sys
 import threading
 import time
@@ -35,7 +37,20 @@ def post(line):
     print(line, flush=True)
 
 
+def check_nsq(path):
+    data = Path(path).read_bytes()
+    missing = [key for key in (b'RENDERLAB_VSM_SHADER', b'RENDERLAB_VSC_SHADER') if key not in data]
+    if missing:
+        raise RuntimeError(f'INVALID NSQ screen binary: missing override keys {missing}')
+    return hashlib.sha256(data).hexdigest()
+
+
 def lease(label, command):
+    if label.startswith('nsq3'):
+        digest = check_nsq(OUT / 'bin/nsq3.exe')
+        metadata = json.loads((OUT / 'bin/nsq3-build.json').read_text())
+        if metadata['binary_sha256'] != digest:
+            raise RuntimeError('NSQ staged binary no longer matches its build identity')
     retime = load('retime', REPO / 'scripts/p-retime.py')
     n8, runner = retime.load_runner()
     runner.OWNER = 'p-verify'
@@ -154,7 +169,18 @@ def build(unit):
             monitor = threading.Thread(target=monitor_memory)
             monitor.start()
             try:
-                return child.wait(timeout=810)
+                code = child.wait(timeout=810)
+                if code == 0 and unit == 'nsq3':
+                    executable = target / 'release/examples/p_nsq_screen.exe'
+                    digest = check_nsq(executable)
+                    destination = OUT / 'bin/nsq3.exe'
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(executable, destination)
+                    (destination.parent / 'nsq3-build.json').write_text(json.dumps(dict(
+                        commit='c981356', binary_sha256=digest,
+                        screen_patch_sha256=hashlib.sha256(Path('D:/Coding/renderlab-work/p-nsq3/tools/screen-override.patch').read_bytes()).hexdigest()), indent=2))
+                    print('STAGED valid NSQ screen', digest, flush=True)
+                return code
             except sp.TimeoutExpired:
                 sp.run(['taskkill', '/PID', str(child.pid), '/T', '/F'], creationflags=sp.CREATE_NO_WINDOW)
                 child.wait()

@@ -125,13 +125,57 @@ Mutex intervals: 19:14:04.314–19:20:40.507 UTC (396.193 s) and
 minima: RT lights 13133 MiB, non-RT lights 13378, game 13228, quarry 12112.
 No renderer implementation or build was needed for this item.
 
-## P-NSQ3 — pending
+## P-NSQ3 — MERGE 8 lanes
 
 | Gate | Result | Numbers |
 |---|---|---|
-| Build screen override on `c981356` | Awaiting compiler gate | Source archive and patch prepared |
-| q1 byte identity and lower cut time | Not run | No lane count retained |
-| Merge recommendation | DON'T MERGE pending evidence | No measured cut benefit |
+| Correct screen build on `c981356` | PASS | Both override keys and staged SHA checked before admission |
+| q1 execution | PASS | 14/14 steps, 146.04 s lease |
+| Default 8-lane identity | PASS | 46/46 captured decoded-RGBA frames identical |
+| Lower cut visibility cost | PASS | Game 31.410→26.720 ms; quarry 30.891→9.277 ms |
+| Merge recommendation | **MERGE default 8 lanes** | Retain 8; other counts not broadly quality-certified |
+
+The correct binary is
+`2c661ab8edacd7cc84573308ca2894df910710132b8e0390b0bf2ef5404d0dc4`.
+Both shipped shader files exactly match the tested `f8` variants. The screen
+build includes only the prescribed release-override patch. Cargo reports
+1m26s; complete guarded build wall is 168.89 s. This is build preparation,
+not a renderer development-loop benchmark.
+
+One preceding build reused a stale library because archived sources retained
+older mtimes in the shared target. The binary-key check detected missing
+overrides, but its outer shell initially continued; that screen was stopped
+after 44.72 s and **all its results are INVALID**, archived separately. The
+helper now refreshes snapshot mtimes before Cargo, stages only a binary with
+both override keys, and rechecks keys/hash before any NSQ schedule request.
+A focused negative check proves an invalid binary launches no command and
+takes no lease. No tracked renderer source was changed. P-FLAT2's original
+game/lib binaries separately contain its complete final resolve source.
+
+GPU milliseconds (game baseline and f8 each have two interleaved runs):
+
+| Workload | Before cut visibility | 4 lanes | 8 lanes | 32 lanes | Before→8 cut span |
+|---|---:|---:|---:|---:|---:|
+| Game | 31.410 | 27.680 | 26.720 | 31.352 | 36.817→31.998 |
+| Quarry | 30.891 | Not screened | 9.277 | Not screened | 45.595→23.722 |
+
+Game moving span rises approximately 10.294→10.434 ms and recovered
+8.957→9.091 ms; retain this small cost explicitly. Quarry moving span falls
+12.908→10.622 ms and recovered 14.570→12.183 ms. No quality setting changed.
+
+Identity covers eight game timing witnesses, 24 wide/original-sun game quality
+witnesses and 14 quarry timing/quality witnesses. The baseline repeat and
+4-/32-lane timing witnesses also match. This screen collects final RGBA, not
+resolved HDR or every uncaptured pose. Verified visually:
+`nsq3/inspection.png`, full game/quarry cut frames, baseline against f8.
+[Machine-readable evidence](p-verify-nsq3-results.json) records every run,
+scene identity and timing. This is bounded non-RT screen acceptance, not an
+engine-wide performance claim.
+
+Valid mutex interval: 20:12:08.981–20:14:35.532 UTC, 146.551 s. Resource audit:
+1246 samples, zero compiler overlap, minimum 10762 MiB available. Timing used
+optimized release without the Vulkan validation layer. Both builds and the
+invalid attempt's intervals remain in the shared-queue ledger.
 
 ## P-FLAT2 — DON'T MERGE
 

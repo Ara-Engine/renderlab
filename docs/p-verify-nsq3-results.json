@@ -1,0 +1,349 @@
+{
+  "commit": "c981356",
+  "build": {
+    "commit": "c981356",
+    "binary_sha256": "2c661ab8edacd7cc84573308ca2894df910710132b8e0390b0bf2ef5404d0dc4",
+    "screen_patch_sha256": "79f1e4ca0a91c6a151008b2491bab33d6efb45be05b4f8f841c81c4098d46ee5"
+  },
+  "default8_identical_frames": 46,
+  "all14_steps_passed": true,
+  "rows": [
+    {
+      "name": "t-game-base-0",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "c1a6cbc57b66c4db666f4bf2c971b9874c01eabd0d16cb434d6ab24e7f89ca87",
+      "times": {
+        "still": {
+          "visibility_ms": 2.812416,
+          "span_ms": 7.192576000000001
+        },
+        "moving": {
+          "visibility_ms": 5.502464,
+          "span_ms": 10.2912
+        },
+        "cut": {
+          "visibility_ms": 31.419392,
+          "span_ms": 36.808704
+        },
+        "recovered": {
+          "visibility_ms": 5.458944000000001,
+          "span_ms": 8.961024
+        }
+      }
+    },
+    {
+      "name": "t-game-f8",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "6becc06fa442cb8aad3ab191fd2cc55b30b5df58301c76ef052a3eb4bc9b46a6",
+      "times": {
+        "still": {
+          "visibility_ms": 2.876416,
+          "span_ms": 7.259648
+        },
+        "moving": {
+          "visibility_ms": 5.603327999999999,
+          "span_ms": 10.41152
+        },
+        "cut": {
+          "visibility_ms": 26.68544,
+          "span_ms": 31.961088
+        },
+        "recovered": {
+          "visibility_ms": 5.582847999999999,
+          "span_ms": 9.091072
+        }
+      }
+    },
+    {
+      "name": "t-game-f32",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "2bd49c173fe674f5e6316517d310599145c7609ec9408c2c203faca33b9a3c69",
+      "times": {
+        "still": {
+          "visibility_ms": 2.8636160000000004,
+          "span_ms": 7.2535039999999995
+        },
+        "moving": {
+          "visibility_ms": 5.612544,
+          "span_ms": 10.423295999999999
+        },
+        "cut": {
+          "visibility_ms": 31.351808000000002,
+          "span_ms": 36.717568
+        },
+        "recovered": {
+          "visibility_ms": 5.588992,
+          "span_ms": 9.125888
+        }
+      }
+    },
+    {
+      "name": "t-game-f4",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "99bd6a65d37e14f1a31b50416efa47a3c39ead207b94553a4fc3a995d5f45f75",
+      "times": {
+        "still": {
+          "visibility_ms": 2.8656639999999998,
+          "span_ms": 7.224832
+        },
+        "moving": {
+          "visibility_ms": 5.606399999999999,
+          "span_ms": 10.41408
+        },
+        "cut": {
+          "visibility_ms": 27.679744,
+          "span_ms": 32.944128000000006
+        },
+        "recovered": {
+          "visibility_ms": 5.581824,
+          "span_ms": 9.077760000000001
+        }
+      }
+    },
+    {
+      "name": "t-game-base-1",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "ca5c4fa0cf0b62583e317703acc8867b3440023736c41025ef3a3af9d1ad9a33",
+      "times": {
+        "still": {
+          "visibility_ms": 2.8185599999999997,
+          "span_ms": 7.218176
+        },
+        "moving": {
+          "visibility_ms": 5.479424,
+          "span_ms": 10.298368
+        },
+        "cut": {
+          "visibility_ms": 31.401984000000002,
+          "span_ms": 36.825088
+        },
+        "recovered": {
+          "visibility_ms": 5.45792,
+          "span_ms": 8.952832
+        }
+      }
+    },
+    {
+      "name": "t-game-f8-1",
+      "captured_frames": 4,
+      "scene_sha256": "cff5e0156b79921a7fb90d0793d6c758a8e5a7309337a63649359d99bc60529e",
+      "run_sha256": "2d8d258016e15c428b3b6332992c301a8b899258e9a1f853fe247a8db34b3f7d",
+      "times": {
+        "still": {
+          "visibility_ms": 2.87232,
+          "span_ms": 7.23968
+        },
+        "moving": {
+          "visibility_ms": 5.624832,
+          "span_ms": 10.456575999999998
+        },
+        "cut": {
+          "visibility_ms": 26.755072000000002,
+          "span_ms": 32.033792
+        },
+        "recovered": {
+          "visibility_ms": 5.585920000000001,
+          "span_ms": 9.091072
+        }
+      }
+    },
+    {
+      "name": "q-wide-base",
+      "captured_frames": 12,
+      "scene_sha256": "04c4f6648416d35d770c9a50db0ecc3db27c60b9e3b248ee73aba9ced3040578",
+      "run_sha256": "253c9e969cd947fc86ac1f8c6edb5e48a195aa5b06fe82d78f8f7488832c9d4b",
+      "times": {
+        "still": {
+          "visibility_ms": 0.8304640000000001,
+          "span_ms": 2.9844480000000004
+        },
+        "moving": {
+          "visibility_ms": 2.01472,
+          "span_ms": 4.060672
+        },
+        "cut": {
+          "visibility_ms": 13.570048,
+          "span_ms": 15.642624000000001
+        },
+        "recovered": {
+          "visibility_ms": 2.038784,
+          "span_ms": 3.971072
+        }
+      }
+    },
+    {
+      "name": "q-wide-f8",
+      "captured_frames": 12,
+      "scene_sha256": "04c4f6648416d35d770c9a50db0ecc3db27c60b9e3b248ee73aba9ced3040578",
+      "run_sha256": "219652c9910a64d9777c21edf3503e618e5799d946f3cd4ae9ae19055e93a040",
+      "times": {
+        "still": {
+          "visibility_ms": 0.809472,
+          "span_ms": 2.8477439999999996
+        },
+        "moving": {
+          "visibility_ms": 1.0250240000000002,
+          "span_ms": 3.0571520000000003
+        },
+        "cut": {
+          "visibility_ms": 4.66432,
+          "span_ms": 6.759424
+        },
+        "recovered": {
+          "visibility_ms": 1.149952,
+          "span_ms": 3.03616
+        }
+      }
+    },
+    {
+      "name": "q-orig-base",
+      "captured_frames": 12,
+      "scene_sha256": "679b3c83131e9e8fab6ed477725b64d531f58b093878624eee088a9cd86ff305",
+      "run_sha256": "2e70ce0d8f915e309c11c9e6f0c1aeda76093245396e35ec49652dfe68b8aae8",
+      "times": {
+        "still": {
+          "visibility_ms": 0.583168,
+          "span_ms": 2.582528
+        },
+        "moving": {
+          "visibility_ms": 1.120768,
+          "span_ms": 3.1616
+        },
+        "cut": {
+          "visibility_ms": 6.984704000000001,
+          "span_ms": 9.029632
+        },
+        "recovered": {
+          "visibility_ms": 1.1776,
+          "span_ms": 3.099648
+        }
+      }
+    },
+    {
+      "name": "q-orig-f8",
+      "captured_frames": 12,
+      "scene_sha256": "679b3c83131e9e8fab6ed477725b64d531f58b093878624eee088a9cd86ff305",
+      "run_sha256": "2e62d44fa6e03c74de8515431fb2a586d106680ee9cbaa4f8508ef3b553ffb41",
+      "times": {
+        "still": {
+          "visibility_ms": 0.557056,
+          "span_ms": 2.5891840000000004
+        },
+        "moving": {
+          "visibility_ms": 0.7424,
+          "span_ms": 2.768896
+        },
+        "cut": {
+          "visibility_ms": 3.390464,
+          "span_ms": 5.518336000000001
+        },
+        "recovered": {
+          "visibility_ms": 0.823296,
+          "span_ms": 2.717696
+        }
+      }
+    },
+    {
+      "name": "t-quarry-base",
+      "captured_frames": 4,
+      "scene_sha256": "e3efc56e3f743e4b0543c755049a60cb13e3f559ed373d7dbe9ab3fb8f635b9a",
+      "run_sha256": "3b42560b7d5df009eb0235ec1dd58bdc053c892c809ae4e37ebb75a018c87bd9",
+      "times": {
+        "still": {
+          "visibility_ms": 1.333248,
+          "span_ms": 10.345984
+        },
+        "moving": {
+          "visibility_ms": 3.87584,
+          "span_ms": 12.908031999999999
+        },
+        "cut": {
+          "visibility_ms": 30.891008,
+          "span_ms": 45.594624
+        },
+        "recovered": {
+          "visibility_ms": 4.436992,
+          "span_ms": 14.570496
+        }
+      }
+    },
+    {
+      "name": "t-quarry-f8",
+      "captured_frames": 4,
+      "scene_sha256": "e3efc56e3f743e4b0543c755049a60cb13e3f559ed373d7dbe9ab3fb8f635b9a",
+      "run_sha256": "adf79d2c9e9dcf613063f869bb3a6a05af3c7c2aa15ad0c74416da94cadebc78",
+      "times": {
+        "still": {
+          "visibility_ms": 1.292288,
+          "span_ms": 10.386944
+        },
+        "moving": {
+          "visibility_ms": 1.5534080000000001,
+          "span_ms": 10.621952
+        },
+        "cut": {
+          "visibility_ms": 9.27744,
+          "span_ms": 23.721984000000003
+        },
+        "recovered": {
+          "visibility_ms": 1.9527679999999998,
+          "span_ms": 12.182528
+        }
+      }
+    },
+    {
+      "name": "qq-base",
+      "captured_frames": 10,
+      "scene_sha256": "10bfd3f225ec6b20fd3330dd41e96056cc0eaa8a2024e8ef29b0f0b0530ba1ce",
+      "run_sha256": "e281f6b5919d60818ded62e4c882cbf8552849a6218e06c437045e600077ee88",
+      "times": {
+        "still": {
+          "visibility_ms": 0.917504,
+          "span_ms": 8.643584
+        },
+        "moving": {
+          "visibility_ms": 2.7412479999999997,
+          "span_ms": 5.421568000000001
+        },
+        "cut": {
+          "visibility_ms": 22.81984,
+          "span_ms": 26.996736000000002
+        },
+        "recovered": {
+          "visibility_ms": 2.9183999999999997,
+          "span_ms": 6.311935999999999
+        }
+      }
+    },
+    {
+      "name": "qq-f8",
+      "captured_frames": 10,
+      "scene_sha256": "10bfd3f225ec6b20fd3330dd41e96056cc0eaa8a2024e8ef29b0f0b0530ba1ce",
+      "run_sha256": "d4ca84c2efdb119d06023e2e343bf4a5781e8fc525f5eda2160ea1fa9e418eba",
+      "times": {
+        "still": {
+          "visibility_ms": 0.8888320000000001,
+          "span_ms": 8.80896
+        },
+        "moving": {
+          "visibility_ms": 0.889856,
+          "span_ms": 3.6746239999999997
+        },
+        "cut": {
+          "visibility_ms": 3.705856,
+          "span_ms": 7.66976
+        },
+        "recovered": {
+          "visibility_ms": 0.954368,
+          "span_ms": 3.9505920000000003
+        }
+      }
+    }
+  ],
+  "identity_log_sha256": "116b7a4aa541f65cebae707ad8167aaea3be20355f542dae002f3781f66bb274"
+}

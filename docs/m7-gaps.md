@@ -661,3 +661,10 @@ reads higher non-RT arch speckle (0.017 versus 0.016). No perceptible regression
 is established by these tiny slope differences, but the requested acceptance
 floor remains unproved. **DON'T MERGE**; remaining matrix stopped after the
 floor miss. Default `light_budget` remains 0.
+
+P-NSQ3's 8-lane split passes its registered quiet screen: all 46 captured
+default-candidate RGBA frames match. Cut visibility drops 31.410→26.720 ms on
+game and 30.891→9.277 ms on quarry; cut span 36.817→31.998 /
+45.595→23.722 ms. **MERGE 8 lanes**, with game moving/recovered span cost
+about +0.14 ms kept explicit. Quarry moving/recovered improve. Wider HDR,
+uncaptured-pose and engine-wide claims are not established by this screen.
