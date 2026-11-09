@@ -153,6 +153,30 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
     frame. A CPU sampling profile of `submit_frame` is the next step; no profiler is
     installed.
   - **64 shadowed local lights (P-LTS):** +27 ms of deferred shading.
+- **P-NRT2 update** ([p-nrt2.md](p-nrt2.md); profile of main `a5ae72a` at frame ~1200, 1080p).
+  - Two more exact changes, both byte-identical and neither measurable in the frame:
+    environment lookups load in-face texels in straight-line code (about 1-2% of shading under a
+    physical sky), and the GI software rays read whole vec4 records (no measured change in the
+    quarry span). The target is still missed.
+  - What remains, ranked by size:
+    - **GI fill in ARA1's frames 1-87.** ARA1's span is 1.7 ms (game-base) to about 7 ms
+      (quarry) above the settled frame. The drain's per-frame cost is not the record loads.
+      Profile a drain frame (a trace at about frame 20 of a cut) before the next change. Fewer
+      drain frames need a W2-compatible schedule with a settle-quality proof.
+    - **The synchronous CPU gap is 1.8-2.1 ms.** `render()` is about 0.85 ms (encode 0.67-0.89)
+      and the rest is completion and submit latency. Splitting the frame into two submits would
+      overlap encode with the first half's GPU work; it must check that no `write_buffer` lands
+      between the submits.
+    - **R1n traversal is about 31% of game-base shading** (box slabs, triangle tests, the local
+      stack). A different BVH would change which of two equal-t triangles wins (shared edges),
+      so an exact one needs a traversal-independent tie rule first.
+    - **Under a physical sky, the environment texel loads are about 26% of shading**, now as
+      straight-line loads. An exact further cut needs fewer lookups, not cheaper ones.
+    - The GI cache cannot idle on still views under TR1 jitter without a 256-frame zero-work
+      confirmation. That idle would never trigger inside ARA1's 39 still frames.
+    - The GI light key Debug-formats every light each frame (`prepare_gi`). That is small, and
+      matters only in many-light scenes; a memo must keep its exact equality semantics
+      (`-0.0`, NaN).
 
 ## RT shadows
 
@@ -217,6 +241,7 @@ AT1, [m7-at1.md](m7-at1.md), followed by [VF1](m7-vf1.md), [AT2](m7-at2.md) and 
 
 - **Shafts improved; complete motion stability remains open.** VF2's two-window room shows distinct beams with dark air between them on actual non-RT and RT, especially at 0.01/m density. Eight-pixel columns, two decorrelated samples (four on history resets), visibility-only history and default HG g=0.8 replace the coarse single-sample RGB-history path. Density and height falloff are unchanged. Thin/distant shafts remain soft; repeating slat gaps can still merge into a broad volume. A non-RT moving-sun frame lights the wall beside the windows unexpectedly; resident shadow coverage, sun-basis changes and reconstruction are not isolated. No leak-free or scored temporal-equivalence claim. [VF2](m7-vf2.md).
 
+- **Camera cuts reset volumetric fog history (P-NRT2, fixed).** `Engine::cut()` now calls `Renderer::reset_atmosphere_history()`. Before this, the first frames after a cut or teleport reprojected the old view's froxel history. On the pixels the fix changes, about 90% move toward a fresh render of the same view on both paths ([p-nrt2.md](p-nrt2.md)). Renderer-level callers that cut without `Engine` must call it themselves; `cut_reconstruction()` does not, because transmission changes also call it.
 - **Non-RT volumetric coverage is bounded by resident shadow pages.** VF1 reads Virtual's top depth layer without triangle walks or new page requests. Missing or stale fine pages fall back through coarser valid levels, then to sunlight. Fog in a volume with no resident pages can still leak sunlight. Depth-map resolution, the caster LOD and sun-basis hysteresis can differ from the RT fog's exact centre-sun rays. Conventional raster fog has the sun cascades' coverage limit. Dedicated fog page demand and a measured soft sun disk remain open.
 - **The analytic height fog's sun term is unshadowed** beyond the 128 m volumetric range, and everywhere while volumetric fog is off. Dense fog in those shadowed spaces can glow. VF2 fixes a separate backdrop error: fog now stops at the implicit planet-ground hit instead of integrating underground to an opaque unshadowed colour (from 1 m altitude, a 10-degree-down ray stops at 5.7588 m, not 128 m/100 km). The actual WGSL distance regression passes.
 - **No matched Unreal comparison.** Neither Unreal's SkyAtmosphere nor its ExponentialHeightFog was measured tonight (no new Unreal campaigns). The medium is Hillaire 2020's Earth, the same model Unreal's SkyAtmosphere implements, but no image or timing comparison exists.
