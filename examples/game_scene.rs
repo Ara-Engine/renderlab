@@ -19,19 +19,24 @@
 //! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
 //! `--exposure`, and `--quarry MANIFEST`,
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
-//! keys `asset`, `limits`, `environment`, `exposure_stops`).
+//! keys `asset`, `limits`, `environment`, `exposure_stops`). `--diag KEY=VALUE` (repeatable)
+//! sets estimator switches the public settings do not expose, for bisecting image defects
+//! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`).
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK \
 //!     cargo run --example game_scene -- --path rt --out D:/Coding/renderlab-work/api1/rt
 //! ```
+#[path = "../support/estimator_diag.rs"]
+mod diag;
 #[path = "../support/environment_controls.rs"]
 #[allow(dead_code)]
 mod environment_controls;
 #[path = "../support/limits.rs"]
 mod policy;
 
+use diag::Diag;
 use renderlab::{asset, engine::*};
 use sha2::{Digest, Sha256};
 use std::{f32::consts::PI, fs, path::PathBuf, time::Instant};
@@ -89,6 +94,7 @@ struct Args {
     reload_probe: bool,
     night_lanterns: bool,
     local_shadow_count: Option<u32>,
+    diag: Vec<(String, String)>,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -124,6 +130,7 @@ impl Args {
             reload_probe: false,
             night_lanterns: false,
             local_shadow_count: None,
+            diag: Vec::new(),
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -183,6 +190,11 @@ impl Args {
                 "--night-lanterns" => a.night_lanterns = true,
                 "--local-shadow-count" => a.local_shadow_count = Some(value()?.parse()?),
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
+                "--diag" => {
+                    let v = value()?;
+                    let (key, setting) = v.split_once('=').ok_or("--diag KEY=VALUE")?;
+                    a.diag.push((key.into(), setting.into()));
+                }
                 "--render-scale" => {
                     a.scale = match value()?.as_str() {
                         "native" => RenderScale::Native,
@@ -254,6 +266,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_or(if args.hour < 16.0 { -14.5 } else { -11.0 }, |s| s as f32)
     });
     let mut preparation = Vec::new();
+    // Scene switches (`flicker=0`: a steady fire light; `lamp=post`: v0.1.0's lamp placement,
+    // with each soft source inside its own fixture; `sun=0`: no sun) stay here; the rest are
+    // estimator switches.
+    let (scene_keys, estimator_keys): (Vec<_>, Vec<_>) = args
+        .diag
+        .iter()
+        .cloned()
+        .partition(|(k, _)| matches!(k.as_str(), "flicker" | "lamp" | "sun"));
+    let diag = Diag::parse(&estimator_keys)?;
+    let steady_fire = scene_keys.iter().any(|(k, v)| k == "flicker" && v == "0");
+    let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
+    let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
+    // A soft source must clear its own fixture, or every receiver sees it partly blocked: a
+    // permanent penumbra that shadow rays sample as grain (P-FLAT). The post lamp's head hangs
+    // beside its post under a wider cap, and the arch light sits one source radius plus one
+    // bulb radius below its bulb (v0.1.0 had the spot inside the post, 75-80 % blocked).
+    let (lamp_offset, arch_drop) = if legacy_lamps {
+        (Vec3::ZERO, 0.2)
+    } else {
+        (Vec3::new(0.22, 0.0, -0.22), 0.25)
+    };
 
     let mut engine = Engine::new(
         &adapter,
@@ -261,7 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             experimental_ray_query,
             pipeline_cache: args.pipeline_cache.clone(),
-            settings: Settings {
+            settings: diag.settings(Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
                 render_scale: args.scale,
@@ -294,10 +327,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ReflectionSettings::off()
                 },
                 ..Default::default()
-            },
+            }),
             ..Default::default()
         },
     )?;
+    diag.apply(&mut engine, path, args.scale)?;
     let engine_seconds = start.elapsed().as_secs_f64();
     engine.resize(args.size[0], args.size[1])?;
     eprintln!(
@@ -509,7 +543,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.03, 0.5, 0.03),
         ),
     )?;
-    let post_lamp = at(3.0, 3.2, 3.0);
+    let post_top = at(3.0, 3.2, 3.0);
+    let post_lamp = post_top + lamp_offset;
     engine.spawn(
         cube,
         iron,
@@ -519,8 +554,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cube,
         iron,
         boxed(
-            post_lamp + Vec3::new(0.0, 0.12, 0.0),
-            Vec3::new(0.4, 0.08, 0.4),
+            post_top + 0.5 * lamp_offset + Vec3::new(0.0, 0.12, 0.0),
+            Vec3::new(0.4 + lamp_offset.x.abs(), 0.08, 0.4 + lamp_offset.z.abs()),
         ),
     )?;
     engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
@@ -542,14 +577,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.hour + frame.saturating_sub(args.sun_after) as f32 / FPS * args.sun_speed / 15.0
     };
     let scene_sun = |hour| {
-        Sun::at_hour(hour, LATITUDE).map(|sun| Sun {
-            illuminance: if args.night_lanterns {
-                [0.03, 0.04, 0.08]
-            } else {
-                sun.illuminance
-            },
-            ..sun
-        })
+        Sun::at_hour(hour, LATITUDE)
+            .filter(|_| !no_sun)
+            .map(|sun| Sun {
+                illuminance: if args.night_lanterns {
+                    [0.03, 0.04, 0.08]
+                } else {
+                    sun.illuminance
+                },
+                ..sun
+            })
     };
     engine.set_sun(scene_sun(sun_hour(0)))?;
     if args.night_lanterns {
@@ -608,10 +645,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The facade shadows every contributing RT local, or up to 128 cached map lights.
     // Source radii retain soft penumbrae on both paths.
     let lanterns = |t: f32| {
-        let flicker = 0.85 + 0.1 * (23.0 * t).sin() + 0.05 * (37.0 * t + 1.0).sin();
+        let ft = if steady_fire { 0.0 } else { t };
+        let flicker = 0.85 + 0.1 * (23.0 * ft).sin() + 0.05 * (37.0 * ft + 1.0).sin();
         let mut lights = vec![
             Light::Point {
-                position: arch_lamp - Vec3::new(0.0, 0.2, 0.0),
+                position: arch_lamp - Vec3::new(0.0, arch_drop, 0.0),
                 candela: [
                     30_000.0 * lamp_scale,
                     21_000.0 * lamp_scale,
@@ -717,7 +755,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ground = at(3.0 * walk.sin(), 0.0, -1.0 + 3.0 * walk.cos());
         let heading = walk.cos().atan2(-walk.sin());
         let focus = hero.update(&mut engine, ground, heading, t)?;
-        engine.set_lights(&lanterns(t))?;
+        engine.set_lights(&diag.lights(lanterns(t)))?;
         engine.set_transform(
             spinner,
             Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
@@ -733,14 +771,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 5.5 - 2.0 * (t / 2.0).min(1.0),
                 radius * orbit.cos(),
             );
-        let camera = Camera::look_at(
-            eye,
-            focus.lerp(anchor + Vec3::Y, 0.5),
-            Vec3::Y,
-            55f32.to_radians(),
-            0.05,
-            500.0,
-        )?;
+        let target = focus.lerp(anchor + Vec3::Y, 0.5);
+        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
         let begin = Instant::now();
         let report = engine.render(&camera)?;
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
@@ -767,7 +799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sun_hour": hour, "cpu_sun_update_ms": sun_update_ms,
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
-            "rgba8_sha256": image_hash,
+            "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
             "hdr_sha256": hdr_hash,
         }));
         last_camera = Some(camera);
@@ -857,7 +889,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
-        "night_lanterns": args.night_lanterns, "local_lights": lanterns(0.0).len(),
+        "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0)).len(),
+        "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,

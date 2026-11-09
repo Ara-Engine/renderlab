@@ -99,9 +99,19 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 ## Flat-surface noise (both paths)
 
-- **OPEN, quality defect: speckle on flat materials.** Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes".
-  - **What:** the courtyard crates use a constant, untextured material (`wood`, roughness 0.75), yet their faces show visible speckle and grain on both paths. It is worst on sun-lit top faces: `D:/Coding/renderlab-work/v010-check/out-rt/frame-016.png`, `out-nonrt/frame-016.png`, and RT `frame-047.png` at the end of the flight. That makes it renderer noise. It may be the same issue as RD1's "spinning crate mottled with GI on".
-  - **Status:** unit P-FLAT is bisecting it against a path-traced reference. Its candidates are GI, local soft-shadow rays, the rough-specular fallback, sun-shadow ray counts, TR1 history and fog. It also checks the ground, arch and wall.
+Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes". P-FLAT ([p-flat.md](p-flat.md)) found three causes.
+
+- **Fixed (P-FLAT): the courtyard's spot lamp sat inside its own iron post.** 74-82 % of its source disk was blocked for every receiver, so every spot-lit pixel was a permanent penumbra that LC2's four rays sampled as grain. The arch light also clipped its bulb. Both lamps now clear their fixtures (`examples/game_scene.rs`; `--diag lamp=post` restores the old placement).
+  - RT crate tops in flight: speckle 0.759 → 0.079, sides 0.270 → 0.044, arch 0.059 → 0.015.
+  - The crates get the spot's light: both paths agree within 1.6 codes, where they differed by 6.8.
+- **OPEN, quality defect (owner P-NRT): TR1 never accumulates history in this scene, on either path.** Either of two triggers suffices:
+  - `reconstruction_key` hashes every local light's intensity, so the flickering fire restarts every pixel every frame.
+  - A walking character's skinned-pose `shadow_bounds` is a world AABB pushed twice the scene size along the sun. Under a low sun it covers the crates, and `tr1_history` rejects all static history inside it every animated frame.
+
+  Every stochastic estimator then shows its per-frame noise in motion. Removing both triggers (proxy: steady fire, rigid hero) takes the fixed courtyard's crate tops to 0.041 (RT) and 0.065 (non-RT) from 0.079 and 0.278. Functions and suggested directions: [p-flat.md](p-flat.md) section 6.
+- **OPEN (owner P-NSQ): the non-RT sun lookup leaves a fixed per-receiver pattern on flat surfaces.** It measures 0.631 on the crates on a still camera and 0.025 with the sun off. Its residual is frame-invariant (correlation 0.995 across 150 frames), so TR1 cannot average it. This is the non-RT sun-penumbra gap below, measured on a flat material.
+- **Reference:** the matched courtyard (dusk sun, uniform sky, no local lights or character) against a 16,384-spp path trace. RT crate tops sit at or below the reference's own grain (0.021-0.045 against 0.080-0.096, RMS 1.3 codes). Non-RT is clean in flight but 0.509 on a still camera (RMS 4.5 codes). The path tracer has no point or spot lights, so local-light quality has no path-traced reference yet.
+- The ground, arch and wall stay at 0.006-0.06 on RT.
 
 ## Non-RT sun shadows
 
