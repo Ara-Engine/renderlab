@@ -101,14 +101,19 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 
 Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes". P-FLAT ([p-flat.md](p-flat.md)) found three causes.
 
+- **Current status (P-FLAT2's fresh measure on main ee361f5, real fire and Fox, frames 8-47).** Crate-top speckle is 0.079 on RT and 0.075 on non-RT. The path-traced reference's own grain is 0.080-0.096, so both paths are at or below it. Main started at 0.759 (RT) and 0.278 (non-RT); P-FLAT's lamp fix and P-NSQ's non-RT shadow fix brought them down. Crate sides are 0.044 on RT and 0.024 on non-RT.
+- **OPEN, improvement beyond the reference grain:** P-FLAT2's exact light-range history ([p-flat2.md](p-flat2.md), branch `t3/p-flat2` 68a902b, NOT merged) cuts crate tops to 0.057 on RT and 0.054 on non-RT, with flicker slopes within noise of main's. Its final silhouette build was never compiled, and none of its acceptance tests ran (RF, Q-walk, SK1, MQ1, MV1, object motion, lib), because outside builds blocked the host. `light_budget` stays 0. The plan is in D:/Coding/renderlab-work/p-flat2/plans/w2.json.
+
 - **Fixed (P-FLAT): the courtyard's spot lamp sat inside its own iron post.** 74-82 % of its source disk was blocked for every receiver, so every spot-lit pixel was a permanent penumbra that LC2's four rays sampled as grain. The arch light also clipped its bulb. Both lamps now clear their fixtures (`examples/game_scene.rs`; `--diag lamp=post` restores the old placement).
   - RT crate tops in flight: speckle 0.759 → 0.079, sides 0.270 → 0.044, arch 0.059 → 0.015.
   - The crates get the spot's light: both paths agree within 1.6 codes, where they differed by 6.8.
-- **OPEN, quality defect (owner P-NRT): TR1 never accumulates history in this scene, on either path.** Either of two triggers suffices:
-  - `reconstruction_key` hashes every local light's intensity, so the flickering fire restarts every pixel every frame.
-  - A walking character's skinned-pose `shadow_bounds` is a world AABB pushed twice the scene size along the sun. Under a low sun it covers the crates, and `tr1_history` rejects all static history inside it every animated frame.
-
-  Every stochastic estimator then shows its per-frame noise in motion. Removing both triggers (proxy: steady fire, rigid hero) takes the fixed courtyard's crate tops to 0.041 (RT) and 0.065 (non-RT) from 0.079 and 0.278. Functions and suggested directions: [p-flat.md](p-flat.md) section 6.
+- **Partly fixed (P-FLAT-TR1, [p-flat-tr1.md](p-flat-tr1.md)): TR1's two history resets in this scene.**
+  - **The walking character's rejection box is fixed.** With one shadowed sun, `tr1_caster_shadow` tests receivers against the swept bounds' own shadow, a conservative disk-wide test, instead of a world AABB stretched along the sun. Frames that drop history somewhere use the 64-ray restart budget. SK1's fixture shows no trailing shadow on either path. RF1-RF10 and the Q-walk stay byte-identical to main.
+  - **OPEN, quality defect: a flickering local light still restarts every pixel every frame** (`Reconstruction::light_budget` 0, main's behaviour). In the courtyard that keeps every flight frame a restart, so the crates keep main's numbers (RT tops 0.079, non-RT 0.278).
+  - **What the opt-in budget does and why it isn't the default.** A positive `light_budget` continues history under MQ1's 3x3 box, capped near the changed light from its distance, range and intensity change alone (B'). It improves every crop: RT crate tops 0.079 to 0.058-0.063, non-RT 0.278 to 0.198-0.220, and the wall, ground and arch on both paths. But it follows the fire's flicker slightly less than main does (wall slope 0.980 vs 0.985 RT, 0.980 vs 0.982 non-RT; ground 0.988 vs 0.996 and 0.989 vs 0.994), so root's bar keeps it off.
+  - **Remaining lag source and fix directions.** On frames where the flicker barely changes, the cap allows history that still holds earlier intensities. Two directions:
+    - size the cap from the light's change since the history's oldest sample, not since the last frame;
+    - restart within a fixed fraction of the light's range.
 - **OPEN (owner P-NSQ): the non-RT sun lookup leaves a fixed per-receiver pattern on flat surfaces.** It measures 0.631 on the crates on a still camera and 0.025 with the sun off. Its residual is frame-invariant (correlation 0.995 across 150 frames), so TR1 cannot average it. This is the non-RT sun-penumbra gap below, measured on a flat material.
 - **Reference:** the matched courtyard (dusk sun, uniform sky, no local lights or character) against a 16,384-spp path trace. RT crate tops sit at or below the reference's own grain (0.021-0.045 against 0.080-0.096, RMS 1.3 codes). Non-RT is clean in flight but 0.509 on a still camera (RMS 4.5 codes). The path tracer has no point or spot lights, so local-light quality has no path-traced reference yet.
 - The ground, arch and wall stay at 0.006-0.06 on RT.
@@ -121,12 +126,13 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
 ## Non-RT sun shadows
 
 - **FIXED (P-NSQ, [p-nsq.md](p-nsq.md)): grainy, harder penumbrae on non-RT.** Two causes. The walk cap turned wide penumbrae into umbra, and each pixel's 8 directions were the same every frame, so TR1 could not integrate them. Virtual now takes RT's sampling under TR1: directions rotated every frame, 256/64/32/8 a frame by `ReconstructionShadowBudget`. It also drops the full-march walk cap (a truncated walk blocks only its own direction). Wide-sun game crop .02669 -> .02398 against the path-traced reference (RT .02374). The courtyard penumbrae now match RT's width, still and in flight. S2 held-frame penumbra grain 13.4-14.5 -> 1.4-2.3 (RT 1.3-1.7). RT is byte-identical.
-  - **OPEN: quarry near-field speckle.** The quarry contact crop is .01505 against main's .01496 (RT .01485): about 100 single-pixel speckles a frame in gravel and along rock contacts, which the old cap hid. Occluders right at the receiver are not presented by the exact march. A near-field-only cap fixes the quarry (.01491) but costs the wide-sun crop 0.4%, so it was not taken. The next attempt should find those occluders exactly near the origin.
-  - **OPEN: cost.** Moving frames +2.6-3.3 ms (32 directions), cut frames +28-30 ms (256 directions, RT's cold budget), quarry held frames +0.7 ms, at 1080p. Paid back by P-NRT/P-RTS work, not by lowering the budget.
+  - **OPEN: quarry near-field speckle.** The quarry contact crop is .01505 against main's .01496 (RT .01485): about 100 single-pixel speckles a frame in gravel and along rock contacts, which the old cap hid. Occluders right at the receiver are not presented by the exact march. A near-field-only cap fixes the quarry (.01491) but costs the wide-sun crop 0.4%, so it was not taken. The next attempt should find those occluders exactly near the origin. P-NSQ2 ([p-nsq2.md](p-nsq2.md)) located the missed occluders: surfaces under the receiver mesh's own top layer within two texels of the ray origin (scan overhangs), which the peel layer skips unless `peel_own` is on. Testing them there and letting them block only by an exact hit gives .01493, but costs both game crops .00001-.00002 and the quarry +3.4 ms moving / +24 ms on cuts, so it was not merged. Next: find why its exact hits darken game penumbrae, and present those occluders without a walk.
+  - **OPEN: cost.** Moving frames +2.6-3.3 ms (32 directions), cut frames +28-30 ms (256 directions, RT's cold budget), quarry held frames +0.7 ms, at 1080p. Paid back by P-NRT/P-RTS work, not by lowering the budget. P-NSQ2 measured where the cut goes (game 31.7 ms: map march about 24 ms, 1-ring walk 4-5 ms, setup and directions under 3.4 ms; quarry 32.8 ms: march 28 ms). No single part of the march is more than 2.1 ms of it. Two byte-identical candidates failed: a whole-disk clear proof that skips every batch's march (no gain; the pixels it proves were already cheap) and a ring replay across batches (40% slower, from registers). Next: share the shared steps' candidate walks across batches through workgroup memory, checked for occupancy in Nsight first. P-NSQ3 ([p-nsq3.md](p-nsq3.md)) built an exact launch-shape candidate, NOT VERIFIED: on several-batch frames the Surface walk splits a pixel's batches over up to 8 of its queue lanes and sums their counts after a barrier, with no added shared memory. Each batch's lookup is unchanged, so the result should be byte-identical. No timing or identity screen ran: every lease stopped on the 2 GiB RAM guard while other builds compiled, and the quiet lease never started. Next: one quiet ~3 min lease (`p-nsq3/plans/q1.json`).
   - **Residual:** on S2's camera tracks, held-frame penumbra grain stays 0.4-0.6 codes above RT's.
 
 ## Non-RT frame cost (M8, P-NRT)
 
+- **OPEN: P-NRT3's two-submit split and batched GI drain (branch `t3/p-nrt3` 9e4d474) are NOT merged. The candidate doesn't render.** P-VERIFY's admitted l2 run found that `final.exe` fails `Device::create_shader_module` for "indirect cache kernels" with a WGSL redefinition of `gi_wg_base`. The original is an `array<u32,GI_SETUP_CELLS>` (composed line 1992); the batched gather adds a scalar `u32` of the same name (line 2684). Game-base and ara-pbr candidate runs both exit 1 with no image. Fix: rename the new scalar, rebuild, then rerun l2 (identity) and q1 (quiet timing). The two-submit split itself is untested.
 - **OPEN, performance: non-RT is still 3-5x Ara raster's service time on the matched scenes.**
   P-NRT's byte-identical changes (docs/p-nrt.md §2) cut ARA1 service by 13-18% on game-base
   (still 11.30 → 9.79 ms) and 17-21% on ara-pbr (still 9.43 → 7.79 ms). The quarry stays within
@@ -450,9 +456,14 @@ pass byte identity, including all 28 float-HDR/56 PNG full-quarry witnesses on b
 paths. Clean shadowed pairs measure 10.098 to 6.632 ms RT and 15.864 to 13.685 ms
 non-RT. Latest unshadowed diagnostics are 8.841 to 4.652 ms RT and 10.018 to 8.955 ms
 non-RT; they are not quiet certification because of a reported overlapping build.
-The final guarded retime never admitted before the unit time box. Quarry soft-default
-probes show a possible regression under contention and need isolation before a quarry
-performance claim. The uniform-light/packed-index-cache prototype demonstrated no
+The original final guarded retime never admitted before the unit time box.
+[P-RETIME](p-retime.md) now clears the suspected soft quarry default regression:
+quiet ABBA still service is RT 13.59 -> 13.03 ms and non-RT 20.22 -> 19.25 ms;
+camera motion is 10.40 -> 9.60 / 22.95 -> 20.95 ms, with byte-identical captures.
+The separate full-track ARA1 RT quarry also improves; its non-RT pair and quiet
+unshadowed certification remain open after P-RETIME's three-hour wait expired.
+The final queue audit had only 5536 MiB available, 17 Cargo and 22 rustc processes;
+no unshadowed regression verdict is inferred. The uniform-light/packed-index-cache prototype demonstrated no
 gain in its contended screen and is unretained. All light/shadow budgets remain intact.
 
 LC1 ([m7-lc1.md](m7-lc1.md)), LC2 ([m7-lc2.md](m7-lc2.md)) and LC3 ([m7-lc3.md](m7-lc3.md)): clustered point/spot lights with soft local shadows. LC3 removes the selected-light limit on RT heads and raises the cached map pool from 4 to 128 lights by default. The soft sun renders with further lights. LC3 evidence is recorded in its unit note; no new Unreal or path-traced comparison was run tonight.
@@ -610,12 +621,26 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   GI allocation cannot simply be deferred: lighting upload precedes GI prepare
   and would change the first frame's binding. Existing BLAS compaction and
   upload retirement already operate and are not new P-MEM savings.
-- Non-RT timing deltas in the contended identity runs remain unresolved. The
-  13:06 retime deferred before GPU work (6935 MiB and active compilers); the
-  13:41 retime passed 8 GiB/no-build preflight but the runtime guard caught new
-  foreign cargo/rustc processes and aborted before any complete A/B pair. No
-  frame-time regression clearance or performance superiority follows from the
-  memory/hash proof. A future quiet frozen-binary ABBA replay is still required.
-  Ordinary PP1's
+- Non-RT timing deltas in the contended identity runs are unresolved.
+  [P-RETIME](p-retime.md) built a clean packed-BVH-only pair on `dc0d4ea`, with
+  only the runtime BVH Rust/WGSL files from `241b87b`, but game/quarry non-RT
+  timings never admitted before its three-hour wait limit. The packed-BVH
+  regression verdict remains open. No frame-time regression clearance or
+  performance superiority follows from the memory/hash proof. Ordinary PP1's
   baseline neutral-HDR assertion is also a separate P-POST gap; P-MEM's explicit
   record-only sweep proves cross-build identity while leaving that gate strict.
+
+
+## M8 local lights follow-up (P-LTS3, 2026-11-09)
+
+[P-LTS3](p-lts3.md) promotes no renderer change. Current-main profiling still
+selects light_sample (22.9% sampled states), unit_normal (10.5%) and light-index
+reads (7.5%); achieved occupancy is unavailable. BRDF hoisting, exact scaled-normal
+reuse and tangent memoization showed no established benefit under contention.
+A conservative froxel-plane culling prototype is archived, with 199 lib tests,
+24 LC PNGs, 960p and odd-edge pairs passing identity; its remaining 1080p pair,
+128/129 boundary, MP1, courtyard, full quarry and quiet timing are unresolved.
+The 3.5 ms target on both paths remains open. No quiet before/after numbers or
+complete quality promotion are claimed. Preserve the 128-shadow budget, every
+contributing RT light and LC2 softness in the follow-up. Raw summaries and staged
+baseline/C binaries live under D:/Coding/renderlab-work/p-lts3.

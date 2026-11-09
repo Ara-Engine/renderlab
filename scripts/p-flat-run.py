@@ -41,6 +41,16 @@ def root_hold(text):
     literal = os.environ.get("RENDERLAB_PFLAT_AFTER_LINE")
     if literal and not re.search(rf"^{re.escape(literal)}", text, re.M):
         return literal
+    # The slot root gave: RENDERLAB_PFLAT_AFTER_RE="REGEX@LINE" proceeds once an owner line
+    # after schedule line LINE matches REGEX (anchored at its start), and holds on any newer
+    # [root order], which may move the slot.
+    explicit = os.environ.get("RENDERLAB_PFLAT_AFTER_RE")
+    if explicit:
+        pattern, _, line = explicit.rpartition("@")
+        lines = text.splitlines()[int(line):]
+        if any(l.startswith("[root order]") for l in lines):
+            return "a newer [root order]"
+        return None if re.search(pattern, "\n".join(lines), re.M) else pattern
     orders = list(re.finditer(r"^\[root order\]", text, re.M))
     if not orders:
         return None

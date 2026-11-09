@@ -66,6 +66,7 @@ impl Diag {
                         "tr-blur-budget" => r.blur_budget = v.parse()?,
                         "tr-motion-box" => r.motion_box = on(v),
                         "tr-view-budget" => r.view_budget = v.parse()?,
+                        "tr-light-budget" => r.light_budget = v.parse()?,
                         "tr-rotate" => r.rotate_directions = on(v),
                         "tr-catmull-rom" => r.catmull_rom = on(v),
                         other => return Err(format!("unknown diag key {other}").into()),

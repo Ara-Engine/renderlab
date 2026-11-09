@@ -13,7 +13,7 @@ Per class and frame it reports, in display codes (0-255) of Rec.709 luma:
   and, with --reference DIR (same frames, same camera), the RGB RMS against it and the
   reference's own speckle (its floor: penumbrae, gradients and split-half noise).
 
-    py -3 -B scripts/p-flat-score.py OUT.json RUN_DIR [RUN_DIR ...] [--reference REF_DIR]
+    py -3 -B scripts/p-flat-score.py OUT.json RUN_DIR [RUN_DIR ...] [--reference REF_DIR] [--frames 8,16]
 """
 import json
 import math
@@ -79,8 +79,9 @@ def scene(t, fox, head=(3.0, 3.2, 3.0)):
 DECALS = [((0.0, -0.6), 2.6, 2.6, 0.3), ((1.5, 4.6), 4.0, 2.8, -0.4)]
 
 
-def labels(eye, target, t, fox, size, head=(3.0, 3.2, 3.0)):
-    """Per-pixel face id (object * 8 + face) and class label."""
+def labels(eye, target, t, fox, size, head=(3.0, 3.2, 3.0), points=False):
+    """Per-pixel face id (object * 8 + face) and class label; with `points`, also each pixel's
+    world hit point (infinite where the ray misses)."""
     w, h = size
     eye, target = np.array(eye, float), np.array(target, float)
     f = target - eye
@@ -145,6 +146,8 @@ def labels(eye, target, t, fox, size, head=(3.0, 3.2, 3.0)):
             best = np.where(hit, ts, best)
             face = np.where(hit, 1000 + k, face)
             label = np.where(hit, OCCLUDER, label)
+    if points:
+        return face.reshape(h, w), label.reshape(h, w), (eye + best[:, None] * d).reshape(h, w, 3)
     return face.reshape(h, w), label.reshape(h, w)
 
 
@@ -182,6 +185,8 @@ def load(path):
 
 
 MASKS = {}
+# --frames F,F,...: score only those frames (every-frame runs).
+FRAMES = None
 
 
 def masks(entry, run, size):
@@ -210,7 +215,7 @@ def frames_of(run_dir, still):
     out = []
     for f in run["frames"]:
         png = run_dir / f"frame-{f['frame']:03d}.png"
-        if not png.exists():
+        if not png.exists() or (FRAMES is not None and f["frame"] not in FRAMES):
             continue
         t = f.get("t", 0.0 if still else f["frame"] / FPS)
         eye, target = (f["eye"], f["target"]) if "eye" in f else camera(t, fox)
@@ -255,6 +260,11 @@ def main():
     if "--reference" in args:
         i = args.index("--reference")
         reference = Path(args[i + 1])
+        del args[i:i + 2]
+    if "--frames" in args:
+        i = args.index("--frames")
+        global FRAMES
+        FRAMES = {int(v) for v in args[i + 1].split(",")}
         del args[i:i + 2]
     still = "--still" in args
     args = [a for a in args if a != "--still"]

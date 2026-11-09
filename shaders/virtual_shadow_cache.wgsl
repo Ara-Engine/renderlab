@@ -333,6 +333,22 @@ override VSC_PROBE_Y:u32=8u;
 override VSC_SPREAD:u32=8u;
 override VSC_LANES:u32=8192u;
 override VSC_PERSIST:u32=4096u;
+// P-NSQ3: on a frame of several direction batches (P-NSQ's budget), each queued pixel takes at
+// least this many lanes (a power of two, at most 32), and its lanes split its batches
+// (vsc_walk). One lane walking all 32 batches of a cut held its warp until its pixel's last
+// batch; a pixel's batches cost about alike, so split lanes finish together.
+override VSC_BATCH_LANES:u32=8u;
+// The queued walk's lanes per pixel: vsc_args' spread, and with persistent workgroups on a
+// several-batch frame at least VSC_BATCH_LANES, rounded down to a power of two so that a pixel's
+// lanes share a 32-lane chunk. (vsc_args' dispatch may then have fewer workgroups than lanes;
+// persistent workgroups take chunks until vsc_missed's own lane count is covered.)
+fn vsc_spread()->u32 {
+    let spread=max(vsm_scratch.spread,1u);
+    if VSC_PERSIST==0u || vsm.nsq.x<=1u {return spread;}
+    return max(1u<<(31u-countLeadingZeros(spread)),min(vsm.nsq.x,VSC_BATCH_LANES));
+}
+// A pixel's batches split over this many of its lanes.
+fn vsc_split()->u32 {return select(min(vsc_spread(),vsm.nsq.x),1u,VSC_PERSIST==0u);}
 fn vsc_cursor()->u32 {return arrayLength(&vsm_scratch.words)-1u;}
 @compute @workgroup_size(1) fn vsc_args() {
     let n=atomicLoad(&vsm_scratch.queue);
@@ -381,41 +397,79 @@ var<workgroup> vsc_wg_sort_base:array<u32,8>;
         atomicStore(&vsm_scratch.words[2u*k+1u],0u);
     }
 }
+// The pixel this lane finishes after its chunk's barrier (vsc_finish): its queue entry (VSM_NONE:
+// none), point and march level.
+var<private> vsc_entry:u32;
+var<private> vsc_pixel:vec2<u32>;
+var<private> vsc_level:u32;
 // The exact walk for queue lane g (each queued pixel on `spread` lanes), with Exact's setup
-// (vsm_prepare: the pixel's receiver point, directions and per-pixel jitter). Word 2k+1 gets bit
-// 31, the visible count, the start level << 4 and the work's bit length << 8 for vsc_claim.
+// (vsm_prepare: the pixel's receiver point, directions and per-pixel jitter). The pixel's first
+// vsc_split() lanes walk every vsc_split()-th batch from their own and leave their visible count
+// and work in their slots of vsm_wg_dirs (directions no longer needed), as exact floats: counts
+// are at most 256, and work is clamped where only its bit length up to 15 is read.
 fn vsc_walk(g:u32) {
-    let spread=max(vsm_scratch.spread,1u);
-    if g%spread!=0u {return;}
+    vsc_entry=VSM_NONE;
+    vsm_wg_dirs[0][vsm_lane]=0.0;vsm_wg_dirs[1][vsm_lane]=0.0;
+    let spread=vsc_spread();
+    let split=vsc_split();
+    let lane=g%spread;
+    if lane>=split {return;}
     let slot_k=g/spread;
     if slot_k>=atomicLoad(&vsm_scratch.queue) {return;}
     let k=vsm_scratch.pad0+slot_k;
     let word=atomicLoad(&vsm_scratch.words[2u*k]);
     let id=vec2<u32>(word&0xffffu,word>>16u);
     let px=vsm_prepare(id);
-    if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
-    let visible=vsm_walk_batches(px);
-    vsm_visible(id,visible);
+    if !px.valid {
+        if lane==0u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));}
+        return;
+    }
+    let visible=vsm_walk_batches(px,lane,split);
+    vsm_wg_dirs[0][vsm_lane]=f32(visible);
+    vsm_wg_dirs[1][vsm_lane]=f32(min(vsm_batch_work,1u<<20u));
+    if lane==0u {vsc_entry=k;vsc_pixel=id;vsc_level=px.level;}
+}
+// After the chunk's barrier: a pixel's first lane sums its lanes' counts and work and writes the
+// count, and word 2k+1 gets bit 31, the verdict's code, the start level << 4 and the work's bit
+// length << 8 for vsc_claim.
+fn vsc_finish() {
+    let k=vsc_entry;
+    if k==VSM_NONE {return;}
+    var visible=0u;
+    var total=0u;
+    for(var i=0u;i<vsc_split();i+=1u) {
+        visible+=u32(vsm_wg_dirs[0][vsm_lane+i]);
+        total+=u32(vsm_wg_dirs[1][vsm_lane+i]);
+    }
+    vsm_visible(vsc_pixel,visible);
     // The verdict's visible code (0..n8e.x): over several batches (P-NSQ), 0 or n8e.x when
     // solid and 1 when partial (only solidity and the solid count are read).
     var code=visible;
     if vsm.nsq.x>1u {code=select(select(1u,vsm.n8e.x,visible==vsm_total()),0u,visible==0u);}
-    let start=u32((i32(vsm.levels[0].info.y)+i32(min(px.level,15u)))&15);
-    let work=min(15u,32u-countLeadingZeros(vsm_batch_work));
+    let start=u32((i32(vsm.levels[0].info.y)+i32(min(vsc_level,15u)))&15);
+    let work=min(15u,32u-countLeadingZeros(total));
     atomicStore(&vsm_scratch.words[2u*k+1u],0x80000000u|code|(start<<4u)|(work<<8u));
 }
 var<workgroup> vsc_wg_chunk:u32;
 // The queued pixels, 32 lanes a workgroup: one chunk each (VSC_PERSIST 0), or chunks from the
-// cursor until the queue's lanes are taken. A chunk is claimed only after the last one is done.
+// cursor until the queue's lanes are taken. A chunk is claimed only after the last one is done,
+// whose barrier also keeps the next chunk's directions from overwriting the slots vsc_finish read.
 @compute @workgroup_size(32) fn vsc_missed(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     vsm_lane=li;
-    if VSC_PERSIST==0u {vsc_walk(gid.x);return;}
-    let lanes=atomicLoad(&vsm_scratch.queue)*max(vsm_scratch.spread,1u);
+    if VSC_PERSIST==0u {
+        vsc_walk(gid.x);
+        workgroupBarrier();
+        vsc_finish();
+        return;
+    }
+    let lanes=atomicLoad(&vsm_scratch.queue)*vsc_spread();
     loop {
         if li==0u {vsc_wg_chunk=atomicAdd(&vsm_scratch.words[vsc_cursor()],1u);}
         let t=workgroupUniformLoad(&vsc_wg_chunk);
         if t*32u>=lanes {break;}
         vsc_walk(t*32u+li);
+        workgroupBarrier();
+        vsc_finish();
     }
 }
 
