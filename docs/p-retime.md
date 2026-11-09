@@ -62,6 +62,32 @@ when Renderlab or other-project builds started after admission. Initial collecto
 attempts also used an obsolete `lc1-*.json` filename; LC2 writes `lc2-*.json`.
 Those incomplete sequences contribute no retained result.
 
+## Full-track RT quarry daylight
+
+The independent ARA1 daylight workload also passes byte identity across all 76
+HDR and 76 PNG witnesses per block. Eight track repeats per binary, ABBA order,
+zero observed compilers. Cells are mean GPU span / drained service milliseconds.
+
+| Phase | Before A | A |
+|---|---:|---:|
+| Still | 3.30 / 4.32 | 2.93 / 3.88 |
+| Moving | 4.21 / 5.17 | 3.63 / 4.53 |
+| First cut | 20.67 / 21.96 | 17.66 / 18.95 |
+| Recovered | 6.22 / 7.14 | 5.80 / 6.70 |
+
+The process audits contain 1086 resource samples; minimum available RAM was
+6600.55 MiB. [Machine-readable evidence](p-retime-results.json) records the frozen
+binary identities, timing samples, hashes and per-process audit summaries.
+
+The original admission loop read but failed to enforce an order putting another
+unit NEXT. Its prematurely started non-RT lease was stopped and is unscored.
+The corrected parser gates on the NEXT owner's actual release after the latest
+root order, with a second check at lock claim. Focused checks cover both NEXT
+spellings and reject release phrases quoted by other owners. The coordinator's
+explicit p-lts3 handoff was awaited in a CPU-only schedule reader before restart.
+Automatic approval review blocked cleanup of the stopped token-owned lock;
+subsequent coordinated leases establish that the stale lock was cleared.
+
 ## Remaining measurements
 
 The ARA1 adapter will run eight complete 88-pose tracks per binary at 1920x1080,
@@ -70,6 +96,6 @@ moving 64-71, first cut 72 and recovered 80-87. The quality spec's capture flags
 are carried onto all tracks; every expected PNG and resolved-HDR hash is required.
 The original scene settings and poses are unchanged.
 
-The unshadowed 64-light A pairs, ARA1 daylight quarry A pairs, and isolated packed
-BVH game/quarry non-RT pairs remain pending a compiler-quiet window. No verdict
+The unshadowed 64-light A pairs, ARA1 daylight quarry non-RT A pair, and isolated
+packed BVH game/quarry non-RT pairs remain pending a compiler-quiet window. No verdict
 is inferred for those pending measurements from the completed fixture pair.

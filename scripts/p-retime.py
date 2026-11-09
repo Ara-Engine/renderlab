@@ -68,8 +68,8 @@ def release_line(owner,line):
 
 def next_owner(directive):
     """A running X followed by Y is NEXT gates on Y, not on X's release."""
-    explicit = re.search(r"p-retime must not take another lease until a line starting '([^']+)'",directive)
-    following = re.search(r'\bthen ([a-z0-9_-]+)\b[^.]*?\bis NEXT\b',directive)
+    explicit = re.search(r"p-retime must not take another lease until a line starting '([^']+)'",directive,re.IGNORECASE)
+    following = re.search(r'\bthen ([a-z0-9_-]+)\b[^.]*?\bis NEXT\b',directive,re.IGNORECASE)
     match = explicit or following
     return match.group(1) if match and match.group(1)!='p-retime' else None
 
@@ -84,6 +84,7 @@ def wait_owner(owner, after):
             for line in lines:
                 if line.startswith('[root order] ') and line.split()[2]>=after:
                     started = True
+                    released = False
                 elif started and release_line(owner,line):
                     released = True
         if released:
@@ -350,6 +351,7 @@ if __name__=='__main__':
     elif sys.argv[1]=='wait-owner': raise SystemExit(wait_owner(*sys.argv[2:]))
     elif sys.argv[1]=='check-gate':
         assert next_owner('Queue: p-retime a-quarry-rt (running), then p-lts3 a-quiet (6 min) is NEXT.')=='p-lts3'
+        assert next_owner('Queue: p-nsq3 (current), then p-lts3 a-quiet is next, then p-retime.')=='p-lts3'
         assert next_owner("p-retime must not take another lease until a line starting 'p-lts3' that says released appears.")=='p-lts3'
         assert next_owner('Queue: root, then units; p-retime takes the first genuinely quiet window.') is None
         assert release_line('p-lts3','p-lts3 a-quiet window released now')

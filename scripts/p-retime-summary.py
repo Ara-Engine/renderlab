@@ -33,3 +33,15 @@ for prefix,case,mode in [('a','soft-quarry','rt'),('a','soft-quarry','nonrt'),
         audit_samples=sum(r['audit_samples'] for r in selected),min_available_mib=min(r['min_available_mib'] for r in selected),timings=timings))
     print(json.dumps(result[-1]),flush=True)
 (ROOT / 'summary.json').write_text(json.dumps(result,indent=2))
+if '--export' in sys.argv:
+    processes = []
+    for row in rows:
+        folder = ROOT / 'runs' / row['case'] / row['mode'] / f"{row['index']}-{row['variant']}"
+        audit = json.loads((folder / 'audit.json').read_text())
+        processes.append({k:v for k,v in row.items() if k!='report'} | dict(
+            start_unix=audit['start'],end_unix=audit['end'],
+            fixture_timings={k:v for k,v in row.get('report',{}).items() if k.startswith('time_')}))
+    public = dict(complete=len(result)==8,builds=json.loads((ROOT / 'builds.json').read_text()),
+        results=result,processes=processes)
+    destination = Path(__file__).resolve().parents[1] / 'docs/p-retime-results.json'
+    destination.write_text(json.dumps(public,indent=2)+'\n')
