@@ -9,6 +9,12 @@ one still runs:
       200 ms / 4 submits), then the target is killed (it keeps running after ngfx).
   {"kind": "capture", "binary": EXE, "scene": JSON, "out": DIR, "mode": "nonrt"}
       ARA1 capture adapter without validation layers: engine.json timing and PNGs.
+  {"kind": "build", "tree": DIR, "target": DIR, "out": LOG}
+      Release ara1_capture build; only inside our own lease (build scripts trip guards).
+  {"kind": "copy", "source": EXE, "out": EXE, "marker": TEXT}
+      Snapshot a built exe; fails unless the embedded shader text `marker` is in it.
+  {"kind": "exec", "command": [...], "env": {...}, "out": LOG}
+      A test-binary step (Q-walk, RF fixtures, lib suite) without validation layers.
 """
 import hashlib
 import json
@@ -90,9 +96,34 @@ def copy(step):
     # guards against a stale binary from a shared target.
     data = Path(step["source"]).read_bytes()
     found = step["marker"].encode() in data if step.get("marker") else None
+    if step.get("absent") and step["absent"].encode() in data:
+        found = False
     Path(step["out"]).parent.mkdir(parents=True, exist_ok=True)
     Path(step["out"]).write_bytes(data)
     return dict(exit_code=0 if found is not False else 1, marker_found=found, sha256=digest(step["out"]))
+
+
+def execute(step):
+    # A test-binary step (Q-walk, RF fixtures, the lib suite): `command` with `env` added and
+    # validation layers removed, output to `out`.
+    env = release_env() | step.get("env", {})
+    start = time.monotonic()
+    Path(step["out"]).parent.mkdir(parents=True, exist_ok=True)
+    with open(step["out"], "w", encoding="utf-8") as log:
+        result = subprocess.run(step["command"], cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                creationflags=FLAGS, timeout=step.get("timeout", 300))
+    return dict(exit_code=result.returncode, seconds=time.monotonic() - start)
+
+
+def wait(step):
+    # Block (bounded) until a file another process writes exists, e.g. a candidate exe that
+    # tools/p-nrt/build.sh snapshots outside the lease.
+    start = time.monotonic()
+    while not Path(step["path"]).exists():
+        if time.monotonic() - start > step.get("timeout", 300):
+            return dict(exit_code=1, seconds=time.monotonic() - start)
+        time.sleep(1)
+    return dict(exit_code=0, seconds=time.monotonic() - start)
 
 
 def main():
@@ -105,7 +136,8 @@ def main():
         try:
             if "binary" in step:
                 record["binary_sha256"] = digest(step["binary"])
-            record |= {"trace": trace, "capture": capture, "build": build, "copy": copy}[step["kind"]](step)
+            record |= {"trace": trace, "capture": capture, "build": build, "copy": copy, "exec": execute,
+                       "wait": wait}[step["kind"]](step)
         except Exception as e:  # recorded; the next step still runs
             record["error"] = repr(e)
         failed |= record.get("exit_code") != 0
