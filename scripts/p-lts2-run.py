@@ -66,6 +66,9 @@ def main():
             if a.quiet:
                 with SCHEDULE.open("a", encoding="utf-8") as f:
                     f.write(f"\n[p-lts2 QUIET active] owner=p-lts2 label={a.label} QUIET active; no foreign builds until owner release.\n")
+        if path.name.endswith("-preflight.json") and not value["games"] and not value["gpu_processes"] and value["available_mbytes"] >= a.admission_mib:
+            with SCHEDULE.open("a", encoding="utf-8") as f:
+                f.write(f"\np-lts2 {a.label} admitted {runner.utc()} ({a.admission_mib} MiB admission passed).\n")
         original_save(path, value)
 
     runner.save = save

@@ -1,7 +1,7 @@
 // MP1 (docs/m7-mp1.md): per-program tile lists for mixed-program traced and
 // visibility-buffer frames. An engine kernel with no program code, compiled once.
-// The dispatch is the single-program shading dispatch's grid (primary_ray_gpu.rs
-// encode_shade_group): the region's 4x4 shading tiles in the first rows, then rows of
+// The dispatch keeps its own 4x4 list grid, independently of single-program shading:
+// the region's list tiles in the first rows, then rows of
 // 16x16 clear blocks over the image. Each region tile is appended to the list of every
 // frame slot (program) whose pixels it holds; tiles holding misses or uncovered trace
 // tiles, and every clear block, go to slot 0, which writes the clear colour. Each list
