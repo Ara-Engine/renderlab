@@ -11,9 +11,10 @@ share one parent, so its program cache warms once.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 
-ROOT = Path("D:/Coding/renderlab-work/p-nrt")
+ROOT = Path(os.environ.get("PNRT_ROOT", "D:/Coding/renderlab-work/p-nrt"))
 ARA1 = Path("D:/Coding/renderlab-work/ara1/phase2-scenes")
 CASES = ("game-base", "ara-pbr-oriented", "quarry-daylight")
 

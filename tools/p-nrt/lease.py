@@ -19,8 +19,8 @@ import sys
 import time
 
 REPO = Path(__file__).resolve().parents[2]
-ROOT = Path("D:/Coding/renderlab-work/p-nrt")
-OWNER = "m7-p-nrt"
+ROOT = Path(os.environ.get("PNRT_ROOT", "D:/Coding/renderlab-work/p-nrt"))  # P-NRT2: PNRT_ROOT, PNRT_OWNER
+OWNER = os.environ.get("PNRT_OWNER", "m7-p-nrt")
 sys.path.insert(0, str(REPO / "tools/ara1"))
 from lease import order_state  # noqa: E402  (ARA1's anchored-order reader)
 

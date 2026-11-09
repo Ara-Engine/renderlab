@@ -9,14 +9,21 @@
 #   tools/p-nrt/build.sh TARGET NAME=TREE[:lib] ...   (snapshots into p-nrt/bin/NAME.exe)
 S=/e/renderlab-work/gpu-schedule.md
 T=$1; shift
-BIN=/d/Coding/renderlab-work/p-nrt/bin
+BIN=${PNRT_BIN:-/d/Coding/renderlab-work/p-nrt/bin}
 mkdir -p "$BIN"
 watch_from=$(wc -l < "$S")
+# P-NRT2: a quiet window opened by an owner's "LABEL admitted" line (root orders such as "D
+# screen with a COMPILER-QUIET prefix") is state, not a new line: refuse to start while any
+# PNRT_QUIET_LEASES owner/label pair is admitted without its "window released".
+if [ -n "$PNRT_QUIET_LEASES" ]; then
+  open=$(grep -E "^($PNRT_QUIET_LEASES) .*(admitted|window released)" "$S" | tail -1)
+  case "$open" in *admitted*) echo "REFUSED: quiet window open: $open"; exit 2;; esac
+fi
 run() {  # run cargo in the background; abort on a new compiler-restricting line
   "$@" &
   pid=$!
   while kill -0 $pid 2>/dev/null; do
-    if tail -n +"$((watch_from + 1))" "$S" 2>/dev/null | grep -q -E '^\[root order\].*(QUIET|no cargo)|QUIET active'; then
+    if tail -n +"$((watch_from + 1))" "$S" 2>/dev/null | grep -q -E "${PNRT_QUIET:-^\[root order\].*(QUIET|no cargo)|QUIET active}"; then
       taskkill //PID "$(cat /proc/$pid/winpid)" //T //F >/dev/null 2>&1
       echo "ABORTED: a new schedule line restricts compilers"; exit 2
     fi

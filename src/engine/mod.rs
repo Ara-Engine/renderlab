@@ -1010,10 +1010,12 @@ impl Engine {
         }
     }
     /// Starts the next frame without history: a camera cut or teleport. Temporal
-    /// reconstruction restarts and streamed textures verify the new view; the GI cache
-    /// refills its newly seen cells over a few frames on its own.
+    /// reconstruction and volumetric fog history restart, and streamed textures verify the
+    /// new view; the GI cache refills its newly seen cells over a few frames on its own.
+    /// (Fog resets here, not in `cut_reconstruction`, which transmission changes also call.)
     pub fn cut(&mut self) {
         self.renderer.cut_reconstruction();
+        self.renderer.reset_atmosphere_history();
         self.renderer.mark_camera_cut();
     }
     /// Presents a surface texture rendered with `render_to`.
