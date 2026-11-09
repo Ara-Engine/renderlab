@@ -97,6 +97,19 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
   - Soft fading uses opaque depth only: particles don't fade against glass.
 - **No Unreal (Niagara) comparison** this push (rule 3).
 
+## Flat-surface noise (both paths)
+
+- **OPEN, quality defect: speckle on flat materials.** Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes".
+  - **What:** the courtyard crates use a constant, untextured material (`wood`, roughness 0.75), yet their faces show visible speckle and grain on both paths. It is worst on sun-lit top faces: `D:/Coding/renderlab-work/v010-check/out-rt/frame-016.png`, `out-nonrt/frame-016.png`, and RT `frame-047.png` at the end of the flight. That makes it renderer noise. It may be the same issue as RD1's "spinning crate mottled with GI on".
+  - **Status:** unit P-FLAT is bisecting it against a path-traced reference. Its candidates are GI, local soft-shadow rays, the rough-specular fallback, sun-shadow ray counts, TR1 history and fog. It also checks the ground, arch and wall.
+
+## Non-RT sun shadows
+
+- **OPEN, quality shortfall: grainy, harder penumbrae on non-RT.** The v0.1.0 clean-clone `game_scene` run shows grainy sun-shadow edges on non-RT at frame 16 (`D:/Coding/renderlab-work/v010-check/out-nonrt/frame-016.png`). RT's same frame (`out-rt/frame-016.png`) is clean.
+  - **Likely cause (P-NRT's profile):** Virtual sun shadows evaluate N8e's 8 directions per receiver per frame, which is the setting's maximum. The 16-triangle walk cap counts undecided directions as blocked. N8e recorded both as cost-driven partial-shadow trades.
+  - **Rule:** under the no-quality-reduction rule these are not accepted trades. The penumbra must match the path-traced reference, soft and noise-free in motion, without capping directions or walks to buy time.
+  - **Owner:** unit P-NSQ.
+
 ## RT shadows
 
 [RTDEF2](rtdef2.md) selects traced primaries, Interactive and TR1 for capable
@@ -308,7 +321,12 @@ G3 ([m7-g3.md](m7-g3.md)) added a fixed-weight cell-space filter of the sky and 
 - **Other losses** (G3). Isolated rocks lose to cache-off at −14 stops by 0.06-0.34 codes and win at −10. They now beat Lumen HW and SW. Multi-surface is 0.09-0.25 codes behind Lumen HW at −14 stops and ahead at −10. In U0b's TR1 pan, silhouette loses to G2b-GC1's default at three witnesses (worst: non-RT frame 128, +0.37 / +0.93): the gaps between small gravel stones open slightly where the reference is darker. Against ES1's unoccluded diagnostic it was not re-scored.
 - **Filter memory** (G3). The filter's sources take 88 bytes a slot (88 MiB at 2^20 slots); section "Memory" of m7-g3.md has the process totals.
 - **Path-traced re-score (TR2, [m7-tr2.md](m7-tr2.md), retained references).** On TR1's visible-sky walk the cache removes most of the shared lighting error on RT: single-surface L0 error falls from 25.8 codes at the cold frame to 5.9 by frame 10 and 3.1 by frame 35, and TR1 now beats TSR Epic on 218 of 256 pooled rows. On non-RT it stays at 25.8-26.6 for all 40 frames (bounce settles in about 93 frames). On RT, 2-3-pixel bright spots (145-253 codes against a reference of about 0) appear on interior rock as the cache converges and persist through still frames; they are the walk's only remaining losses to TSR (maxima). G3's filter was merged after this walk; whether it changes these spots is unmeasured.
-- **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each.
+- **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each. **With TR1 on (the default) the cache never idles** (P-GI, [p-gi.md](p-gi.md)): every frame's camera is jittered, so the idle key changes every frame and a still view runs the probe (about 0.45 ms) and the other passes forever. The jitter sequence has a 256-frame period (`sample_offset(k & 0xff)`), so an exact idle would need a full period of frames with no cache work, confirmed by GPU feedback.
+- **P-GI cost status** ([p-gi.md](p-gi.md)). Byte-identical changes cut the gather and filter passes in cuts and the shading lookup's bucket walk; see that document for the moving and cut timings. What remains, measured by ablation on the RT shading pass (camera moving): the lookup is about 0.80 ms, of which contrast refine's finer reads are about 0.25 ms, the bucket walk about 0.18 ms and the rest about 0.37 ms; four corner records already load in parallel. The probe (about 0.45 ms on both paths) is unchanged.
+  - **Non-RT's capped gather drain dominates ARA1's early frames** (P-NRT's tail runs: about 9 ms of extra span over frames 1-88 of the quarry, 2.9 ms on the game scene). Faster software closest-hit rays and the gather fast path shorten each drain frame. The drain's length (the cap, 8,192 cells a frame) is unchanged.
+  - **Cold records carry 8 unused words** with the default 64 directions (sized for 128): 32 MiB at 2^20 slots. Packing them moves the light bits, and `src/light_cluster_tests.rs` hard-codes their offset (`cold+31`), so it needs P-LTS's agreement.
+  - **Shading workgroups are 4x4** (`primary_shade_tiles`, 16 invocations, half a 32-lane warp on NVIDIA). The lookup is latency-bound at that occupancy. Not GI's file; recorded for the shading owners.
+  - **Nsight attribution for GI failed** in P-GI's trace (the real-time shader profiler attributed samples only to the traced-primary pipeline); the ablation table in p-gi.md section 2 stands in for it.
 - **Moving objects mottle.** In the courtyard (`examples/game_scene.rs`), the spinning crate shows blocky light and dark patches on both paths in frames 008-032, and it is clean with `--no-gi` (RD1, [m7-rd1.md](m7-rd1.md) section 3; not investigated further).
 - **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.
 

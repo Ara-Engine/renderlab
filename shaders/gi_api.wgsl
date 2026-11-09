@@ -13,30 +13,29 @@ fn gi_hot_load(slot:u32) -> GiHot {
     let at=(GI_HEADER+slot*GI_HOT_WORDS)>>2u;
     return GiHot(gi_table[at],gi_table[at+1u],gi_table[at+2u],gi_table[at+3u],gi_table[at+4u],gi_table[at+5u]);
 }
-// The slot a key's insert tries first: its start offset in its bucket.
-fn gi_hot_start(key:vec2<u32>) -> u32 {
-    return ((key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u))+(gi_start(key)&(GI_BUCKET-1u));
-}
-// The record of `key` given the record at its start slot, with r0.x zero when it is
-// absent. The start record loads before its key is compared, so the usual case (the
-// insert found its own start slot free) costs one memory round trip; otherwise the rest
-// of the bucket is searched in the order gi_find uses.
-fn gi_hot_settle(first:GiHot, key:vec2<u32>) -> GiHot {
+// The record of `key`, with r0.x zero when it is absent, searched in the order gi_find uses.
+// The start record loads before its key is compared, so the usual case (the insert found its
+// own start slot free) costs one memory round trip. The next slot's key word loads with it
+// (P-GI): a key whose start slot was taken usually sits one slot on, and then costs two round
+// trips instead of the walk's three. An empty slot ends the search, as in gi_find.
+fn gi_hot_find(key:vec2<u32>) -> GiHot {
     let none=GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
-    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }
-    // An empty slot ends the search, as in gi_find.
-    if first.r0.x==0u { return none; }
     let bucket=(key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u);
-    for(var i=1u;i<GI_BUCKET;i+=1u) {
+    let first=gi_hot_load(bucket+(gi_start(key)&(GI_BUCKET-1u)));
+    let next_slot=bucket+((gi_start(key)+1u)&(GI_BUCKET-1u));
+    // Word 0 of the next record, as the x of its first vector (gi_hot_load's r0).
+    let next=gi_table[(GI_HEADER+next_slot*GI_HOT_WORDS)>>2u].x;
+    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }
+    if first.r0.x==0u { return none; }
+    if (next&GI_KEY_BITS)==key.x { return gi_hot_load(next_slot); }
+    if next==0u { return none; }
+    for(var i=2u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         let word=gi_word(gi_hot(slot));
         if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }
         if word==0u { break; }
     }
     return none;
-}
-fn gi_hot_find(key:vec2<u32>) -> GiHot {
-    return gi_hot_settle(gi_hot_load(gi_hot_start(key)),key);
 }
 
 // One level's lookup, as weighted coefficient sums (gi_sample): the sky's L2 in cached units

@@ -1676,7 +1676,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
     var orphan=false;
     for(var l=base;l<min(base+1u+GI_PARENT_ROUNDS,levels);l+=1u) {
         let cell=vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)));
-        let slot=gi_find(gi_key(l,bin,cell));
+        let slot=gi_find_pair(gi_key(l,bin,cell));
         if slot==0xffffffffu {
             if l==base && band!=0u { gi_request_one(l,bin,cell,band); }
             if l==base { cause=GI_W_GATHER_ABSENT; orphan=tertiary; }
@@ -1716,6 +1716,8 @@ var<workgroup> gi_wg_bounce:array<f32,12u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
 var<workgroup> gi_wg_rays:atomic<u32>;
+// Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
+var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
 fn gi_gather_period(count:u32) -> u32 {
@@ -1743,7 +1745,12 @@ fn gi_gather_period(count:u32) -> u32 {
         let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
             && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
         let live=queued && slot%period==phase;
-        workgroupBarrier();
+        // Every lane reads the same slot, so `live` is the workgroup's: broadcast as a uniform
+        // value (the load carries the barrier that ordered lane 0's resets), so a cell outside
+        // this frame's slot group, or not queued, skips the sums and their reduction, which
+        // gathered zeros for it (P-GI: a capped cut defers 140-200k cells a frame).
+        if lane==0u { gi_wg_live=select(0u,1u,live); }
+        if workgroupUniformLoad(&gi_wg_live)!=0u {
         for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
         if live {
             let c=gi_cell(slot);
@@ -1837,6 +1844,7 @@ fn gi_gather_period(count:u32) -> u32 {
             gi_queue_shade(slot);
             gi_schedule(slot,left);
         }
+        }
         // Outside this frame's slot group: next frame's queue, the schedule unchanged.
         if queued && !live && lane==0u {
             atomicAdd(&gi_work[GI_W_GATHER_DEFERRED],1u);
@@ -1873,7 +1881,7 @@ fn gi_filter_neighbour(level:u32, bin:u32, q:vec3<f32>, n:vec3<f32>, du:i32, dv:
     var p=q+(f32(du)*vec3<f32>(gi_corner_offset(bin,1u))+f32(dv)*vec3<f32>(gi_corner_offset(bin,2u)))*edge;
     let na=dot(n,axis);
     if abs(na)>0.3 { p-=axis*clamp(dot(p-q,n)/na,-1.5*edge,1.5*edge); }
-    return gi_find(gi_key(level,bin,vec3<i32>(floor(gi_lattice(p,edge,bin)))));
+    return gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(p,edge,bin)))));
 }
 // The share of the open sky's irradiance about the gi_y direction (gi_sh_basis) that slot m's
 // unfiltered sky value holds, channel mean; `open` is the unoccluded value there.
@@ -2002,6 +2010,8 @@ fn gi_filter_cell(slot:u32) {
 // queues it, and its item then reads this cell's source as it is then). Once every schedule
 // has ended the values are the same; during a camera cut, which queues nearly every cell,
 // rewriting each up to nine times made cut frames 3-10 ms slower (docs/m7-g3.md).
+// This frame's filter mark in the per-slot claim words, 1 to 0x3fffffff (gi_filter).
+fn gi_filter_mark() -> u32 { return gi_word(GI_H_FRAME)%0x3fffffffu+1u; }
 @compute @workgroup_size(64) fn gi_filter(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
     for(var i=id.x;i<count*9u;i+=groups.x*64u) {
@@ -2014,6 +2024,12 @@ fn gi_filter_cell(slot:u32) {
             let def=gi_table[cold+GI_C_DEF];
             slot=gi_filter_neighbour(def&0xffu,def>>8u,gi_point(cold),gi_unpack_normal(gi_table[cold+GI_C_NORMAL]),i32(j%3u)-1,i32(j/3u)-1);
             if slot==0xffffffffu || (gi_table[gi_cold(slot)+GI_C_STATE]&(GI_SHADE|GI_BQUEUED))!=0u { continue; }
+            // A neighbour of several queued cells is rewritten once (P-GI): the first item to
+            // mark its claim word with this frame's mark does it, and every rewrite would write
+            // the same words. Marks stay below any claim value (whose band fills the top two
+            // bits, gi_miss_claim), so claims still win and resolve clears them; consecutive
+            // frames' marks differ.
+            if atomicExchange(&gi_work[GI_W_CLAIMS+slot],gi_filter_mark())==gi_filter_mark() { continue; }
         }
         gi_filter_cell(slot);
     }
