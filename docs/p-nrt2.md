@@ -130,7 +130,7 @@ marked p2.
 | ARA1 1080p timing captures (frames 39, 71 and 87; every scene and repetition), cand2 vs base | byte-identical (100/100 frames, both rows) |
 | cand3 vs base: game-base, ara-pbr, game-atmosphere and game-fog quality witnesses | 69/76 identical; the 7 that differ are exactly game-fog frames 72-87, the cut and its recovery (the fog fix) |
 | Q-walk (quarry walk, 93 frames, TR1 on), non-RT, cand3 vs base | 93/93 frame hashes identical |
-| RF1-RF10 non-RT after 32 TR1 frames, RT witnesses, lib suite | see p2 below |
+| RF1-RF10 non-RT after 32 TR1 frames, RT witnesses, lib suite | see lease p2 below |
 
 **Fog-cut fix** (fog on, GI off so the cache's fill does not mask it):
 - `fogcut`: 40 frames at ARA1's still pose, then `Engine::cut()` to ARA1's cut pose.
@@ -151,7 +151,21 @@ marked p2.
 The cut frame is closer to the fresh view on both paths: error on the affected pixels falls by
 about 42%. The images are in `runs/p1/fog-*`.
 
-P2_PLACEHOLDER
+**Lease p2** (p1 hit its 15-minute bound during the candidate's RF run):
+
+| Check | Result |
+|---|---|
+| RF1-RF10 non-RT after 32 TR1 frames (`gpu_r0a_current`), cand3 vs base | 13/13 poses byte-identical (26/26 f32 and JSON files) |
+| Lib suite, `cand3-lib.exe --test-threads=2` | **198 passed, 0 failed, 164 ignored** |
+
+**RT path.** Only the environment change reaches RT shading modules; the GI change is non-RT
+code. RT identity is covered by:
+- the fog-cut scenes, whose pre-cut frames and fresh renders are identical on RT, though they
+  use a uniform sky;
+- ARA1's game-atmosphere RT quality witnesses, which do exercise the physical sky's cube
+  lookups: cand2 (lease p3) against base (lease p2) is 19/19 byte-identical.
+
+RT Q-walk and RT RF were not run (lease time).
 
 ## Timings (M)
 
