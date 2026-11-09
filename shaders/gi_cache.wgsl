@@ -1724,7 +1724,7 @@ var<workgroup> gi_wg_list:array<u32,GI_GATHER_LANES>;
 var<workgroup> gi_wg_listed:atomic<u32>;
 var<workgroup> gi_wg_appends:atomic<u32>;
 var<workgroup> gi_wg_n:u32;
-var<workgroup> gi_wg_base:u32;
+var<workgroup> gi_drain_base:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
 fn gi_gather_period(count:u32) -> u32 {
@@ -1786,12 +1786,12 @@ fn gi_gather_period(count:u32) -> u32 {
                 base=atomicAdd(&gi_work[gi_frame.bounce.y],appends);
                 atomicAdd(&gi_work[GI_W_BQUEUE],appends);
             }
-            gi_wg_base=base;
+            gi_drain_base=base;
             gi_wg_n=atomicLoad(&gi_wg_listed);
         }
         let listed=workgroupUniformLoad(&gi_wg_n);
         if deferred {
-            let a=gi_wg_base+mine;
+            let a=gi_drain_base+mine;
             if a<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.y+1u+a],slot); }
         }
         for(var j=0u;j<listed;j+=1u) {
