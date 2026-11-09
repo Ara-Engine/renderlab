@@ -233,6 +233,7 @@ fn reconstruction(v: &serde_json::Value) -> Reconstruction {
     b("catmull_rom", &mut s.catmull_rom);
     b("spatial_start", &mut s.spatial_start);
     b("rotate_directions", &mut s.rotate_directions);
+    b("upscale_interpolation", &mut s.upscale_interpolation);
     if let Some(scale) = v["scale"].as_str() {
         s.scale = match scale {
             "native" => crate::RenderScale::Native,

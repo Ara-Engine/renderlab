@@ -69,6 +69,12 @@ pub struct Reconstruction {
     /// surface-identity history does not trail them. Zero turns the cap off. Programs that
     /// declare nothing are unaffected.
     pub view_budget: f32,
+    /// TR2 (docs/m7-tr2.md): upscaled frames weight every internal sample of the pixel's
+    /// surface by a tent whose radius shrinks from the internal sample spacing (young history
+    /// interpolates the internal grid instead of repeating its nearest sample, which stepped
+    /// the finest moving highlights) to one output pixel as the history reaches
+    /// `sharp_window`. Off: the nearest sample alone (TR1b). Native frames are unaffected.
+    pub upscale_interpolation: bool,
     /// Internal resolution of reconstructed frames: every pass renders at this fraction of
     /// the target size and TR1 reconstructs the target from the jittered samples.
     pub scale: RenderScale,
@@ -113,6 +119,7 @@ impl Default for Reconstruction {
             rotate_directions: true,
             motion_box: true,
             view_budget: 0.25,
+            upscale_interpolation: true,
             scale: RenderScale::Native,
         }
     }
@@ -982,7 +989,8 @@ impl Renderer {
         // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3;
+            | u32::from((moved || (posed && !state.reset)) && settings.motion_box) << 3
+            | u32::from(settings.upscale_interpolation) << 4;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
