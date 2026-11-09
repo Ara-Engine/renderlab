@@ -573,6 +573,8 @@ pub struct Renderer {
     /// The program pipeline sets the last frame drew with, which reloads recreate
     /// eagerly; other sets compile when a frame first needs them.
     hot: Vec<(u64, program_gpu::Variant)>,
+    // P-SHC: last frame's MP1 list variants, alongside its ordinary hot sets.
+    hot_lists: Vec<(u64, bool, usize)>,
     /// Program pipelines go through this driver cache when the device enables
     /// `Features::PIPELINE_CACHE`, so recompiling a source seen before (a revert, an A/B
     /// toggle) is a cache hit; see `program_gpu::ProgramCache`.
@@ -1090,6 +1092,7 @@ impl Renderer {
             primary_sources: None,
             programs: vec![slot],
             hot: vec![],
+            hot_lists: vec![],
             program_cache,
             standard,
             next_program: 1,

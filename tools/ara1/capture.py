@@ -78,7 +78,9 @@ def require_lease():
     if not expected:raise RuntimeError("run through tools/ara1/lease.py; no lease order token")
     check_order(expected)
     owner=json.loads(Path("D:/Coding/renderlab-work/gpu-slot.lock/owner.json").read_text())
-    if owner["owner"]!="m7-ara1":raise RuntimeError("not inside ARA1 lease")
+    # P-SHC reuses devloop under its own n8 lease; keep ARA1's default owner.
+    expected_owner=os.environ.get("ARA1_LEASE_OWNER","m7-ara1")
+    if owner["owner"]!=expected_owner:raise RuntimeError("not inside "+expected_owner+" lease")
     return expected,owner
 
 

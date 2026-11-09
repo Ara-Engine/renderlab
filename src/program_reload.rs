@@ -9,10 +9,20 @@ struct Recipe {
     layouts: Vec<Owned<wgpu::PipelineLayout>>,
 }
 
+// P-SHC: mixed-program lists must finish compiling before a reload is published.
+// Otherwise the worker validates modules, but the next frame blocks in ensure_lists.
+struct ListRecipe {
+    streamed: usize,
+    shading: usize,
+    layout: Owned<wgpu::PipelineLayout>,
+}
+
 struct Prepared {
     compiled: Compiled,
     variants: Vec<Variant>,
     built: Vec<Vec<Built>>,
+    lists: Vec<(usize, usize, Owned<wgpu::ComputePipeline>)>,
+    glass: Option<([u8; 32], Owned<wgpu::ComputePipeline>)>,
     compile: Duration,
 }
 
@@ -22,6 +32,8 @@ pub(crate) struct ProgramReload {
     revision: Revision,
     primary_hash: [u8; 32],
     variants: Vec<Variant>,
+    lists: u8,
+    glass: Option<wgpu::ComputePipeline>,
     started: Instant,
     policy: crate::shader_compiler::CompilePolicy,
     worker: JoinHandle<(Result<Prepared, Error>, Duration)>,
@@ -44,6 +56,14 @@ impl ProgramReload {
                 .iter()
                 .filter(|(id, _)| *id == self.program.id())
                 .all(|(_, variant)| self.variants.contains(variant))
+            && renderer
+                .hot_lists
+                .iter()
+                .filter(|(id, _, _)| *id == self.program.id())
+                .all(|&(_, streamed, shading)| {
+                    self.lists & (1 << (usize::from(streamed) * 2 + shading)) != 0
+                })
+            && renderer.tp_reload_pipeline(self.program.id()) == self.glass.as_ref()
     }
 }
 
@@ -140,12 +160,46 @@ impl Renderer {
                 Recipe { variant, layouts }
             })
             .collect();
+        let mut list_recipes = Vec::new();
+        let mut lists = 0;
+        for &(_, streamed, shading) in self
+            .hot_lists
+            .iter()
+            .filter(|(id, _, _)| *id == program.id())
+        {
+            let streamed = usize::from(streamed);
+            let Some(pipeline) = slot.pipelines.list[streamed][shading].as_ref() else {
+                continue;
+            };
+            let groups: [_; 4] =
+                std::array::from_fn(|group| pipeline.get_bind_group_layout(group as u32));
+            list_recipes.push(ListRecipe {
+                streamed,
+                shading,
+                layout: ledger.own(
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("background program list ABI"),
+                        bind_group_layouts: &groups.each_ref().map(Some),
+                        immediate_size: 0,
+                    }),
+                    ResourceKind::PipelineLayout,
+                ),
+            });
+            lists |= 1 << (streamed * 2 + shading);
+        }
+        let started = Instant::now();
+        let glass = self.tp_reload_pipeline(program.id()).cloned();
+        let glass_recipe =
+            self.tp_reload_recipe(program.id(), source)
+                .map_err(|e| ReloadError::Rejected {
+                    diagnostic: e.to_string(),
+                    compile: started.elapsed(),
+                })?;
         let label = program.label().to_owned();
         let text = source.to_owned();
-        let started = Instant::now();
         let fault = self.fault.clone();
         let worker = std::thread::spawn(move || {
-            let result = (|| {
+            let result = std::thread::scope(|scope| {
                 let abi = ProgramAbi {
                     device: &device,
                     ledger: &ledger,
@@ -169,6 +223,38 @@ impl Renderer {
                     &label,
                     &text,
                 )?;
+                let glass_worker = glass_recipe.map(|recipe| {
+                    let device = device.clone();
+                    let ledger = ledger.clone();
+                    let cache = cache.clone();
+                    scope.spawn(move || {
+                        let scopes = OperationScopes::new(&device);
+                        let module = ledger.own(
+                            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                                label: Some("background glass reflection"),
+                                source: wgpu::ShaderSource::Wgsl(recipe.source.into()),
+                            }),
+                            ResourceKind::ShaderModule,
+                        );
+                        let pipeline = crate::shader_compiler::with_policy(policy, || {
+                            ledger.own(
+                                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                                    label: Some("background glass reflection"),
+                                    layout: Some(&recipe.layout),
+                                    module: &module,
+                                    entry_point: Some("tp_reflect"),
+                                    compilation_options: Default::default(),
+                                    cache: cache.as_ref(),
+                                }),
+                                ResourceKind::ComputePipeline,
+                            )
+                        });
+                        match scopes.finish() {
+                            Some(error) => Err(scope_error("glass reflection", error, &[])),
+                            None => Ok((recipe.key, pipeline)),
+                        }
+                    })
+                });
                 let module_time = started.elapsed();
                 let vertex_identity = Sha256::digest(raster.as_bytes()).into();
                 let jobs = recipes.iter().flat_map(|recipe| {
@@ -245,22 +331,81 @@ impl Renderer {
                     }
                     built.push(set);
                 }
-                let compile = started.elapsed();
+                let mut list_modules = Vec::new();
+                for recipe in &list_recipes {
+                    let stage = if recipe.streamed == 0 {
+                        Stage::Traced
+                    } else {
+                        Stage::TracedStreamed
+                    };
+                    let composed = program::compose_list(
+                        &traced.as_ref().unwrap()[recipe.shading],
+                        &text,
+                        stage,
+                        program::declares_parameters(&text),
+                    );
+                    let scopes = OperationScopes::new(&device);
+                    let module = module(&abi, &label, &composed);
+                    if let Some(error) = scopes.finish() {
+                        return Err(scope_error(&label, error, &[composed]));
+                    }
+                    list_modules.push((composed, module));
+                }
+                let mut lists = Vec::new();
+                for (recipe, (pipeline, error)) in list_recipes.iter().zip(in_parallel(
+                    &device,
+                    list_recipes
+                        .iter()
+                        .zip(&list_modules)
+                        .map(|(recipe, (_, module))| {
+                            let abi = &abi;
+                            move || {
+                                crate::shader_compiler::with_policy(policy, || {
+                                    abi.ledger.own(
+                                        abi.device.create_compute_pipeline(
+                                            &wgpu::ComputePipelineDescriptor {
+                                                label: Some("background program list shading"),
+                                                layout: Some(&recipe.layout),
+                                                module,
+                                                entry_point: Some("primary_shade_list"),
+                                                compilation_options: Default::default(),
+                                                cache: abi.cache,
+                                            },
+                                        ),
+                                        ResourceKind::ComputePipeline,
+                                    )
+                                })
+                            }
+                        }),
+                )) {
+                    if let Some(error) = error {
+                        return Err(scope_error(&label, error, &[]));
+                    }
+                    lists.push((recipe.streamed, recipe.shading, pipeline));
+                }
+                for (composed, module) in list_modules {
+                    abi.modules.insert(&composed.source, module);
+                }
+                let glass = glass_worker
+                    .map(|worker| worker.join().unwrap())
+                    .transpose()?;
                 if std::env::var_os("RENDERLAB_RELOAD_PROFILE").is_some() {
                     eprintln!(
                         "program_reload_profile modules_ms={:.3} pipelines_ms={:.3} pipelines={} parallel=true",
                         module_time.as_secs_f64() * 1e3,
-                        (compile - module_time).as_secs_f64() * 1e3,
-                        pipeline_count(&built)
+                        (started.elapsed() - module_time).as_secs_f64() * 1e3,
+                        pipeline_count(&built) + lists.len() as u64 + u64::from(glass.is_some())
                     );
                 }
                 Ok(Prepared {
                     compiled,
                     variants: recipes.iter().map(|r| r.variant).collect(),
                     built,
-                    compile,
+                    lists,
+                    glass,
+                    compile: started.elapsed(),
                 })
-            })();
+            });
             if let Err(Error::Fault(error)) = &result {
                 let _ = fault.set(error.clone());
             }
@@ -272,6 +417,8 @@ impl Renderer {
             revision: self.revision,
             primary_hash: self.primary_hash,
             variants,
+            lists,
+            glass,
             started,
             policy,
             worker,
@@ -296,6 +443,8 @@ impl Renderer {
             compiled,
             variants,
             built,
+            lists,
+            glass,
             compile,
         } = match prepared {
             Ok(prepared) => prepared,
@@ -321,6 +470,21 @@ impl Renderer {
             built,
             compile,
         );
+        self.pipelines.created += lists.len() as u64;
+        self.program_cache.count(lists.len() as u64);
+        let slot = self
+            .programs
+            .iter_mut()
+            .find(|s| s.id == reload.program.id())
+            .unwrap();
+        for (streamed, shading, pipeline) in lists {
+            slot.pipelines.list[streamed][shading] = Some(pipeline);
+        }
+        if let Some((key, pipeline)) = glass {
+            self.pipelines.created += 1;
+            self.program_cache.count(1);
+            self.tp_install_reload(reload.glass.as_ref().unwrap(), key, pipeline);
+        }
         self.programs
             .iter_mut()
             .find(|s| s.id == reload.program.id())

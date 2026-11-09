@@ -12,6 +12,13 @@ pub(super) struct GlassReflections {
     pub pipeline: Owned<wgpu::ComputePipeline>,
     pub key: [u8; 32],
 }
+// P-SHC: the glass hit shader depends on the first opaque program. Compile that
+// dependent pipeline in the same reload transaction, retaining its existing targets.
+pub(crate) struct ReflectionReload {
+    pub(crate) source: String,
+    pub(crate) layout: Owned<wgpu::PipelineLayout>,
+    pub(crate) key: [u8; 32],
+}
 pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(head.as_bytes());
@@ -67,6 +74,46 @@ fn rl_glass_parameter_batch(batch:u32)->u32 {
     s
 }
 impl Renderer {
+    pub(crate) fn tp_reload_pipeline(&self, program: u64) -> Option<&wgpu::ComputePipeline> {
+        self.primary.as_ref().filter(|p| p.program == program)?;
+        self.transparency.reflections.as_ref().map(|r| &*r.pipeline)
+    }
+
+    pub(crate) fn tp_reload_recipe(
+        &self,
+        program: u64,
+        text: &str,
+    ) -> Result<Option<ReflectionReload>, Error> {
+        let Some(pipeline) = self.tp_reload_pipeline(program) else {
+            return Ok(None);
+        };
+        let groups: [_; 4] = std::array::from_fn(|i| pipeline.get_bind_group_layout(i as u32));
+        let parameters = crate::program::declares_parameters(text);
+        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
+        Ok(Some(ReflectionReload {
+            source: source(&head, text, parameters),
+            layout: self.tp_pipeline_layout("background glass reflection ABI", &groups.each_ref()),
+            key: key(&self.source, text, parameters),
+        }))
+    }
+
+    pub(crate) fn tp_install_reload(
+        &mut self,
+        previous: &wgpu::ComputePipeline,
+        key: [u8; 32],
+        pipeline: Owned<wgpu::ComputePipeline>,
+    ) {
+        if let Some(reflections) = self
+            .transparency
+            .reflections
+            .as_mut()
+            .filter(|r| *r.pipeline == *previous)
+        {
+            reflections.pipeline = pipeline;
+            reflections.key = key;
+        }
+    }
+
     pub(super) fn tp_reflections(&self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
         let limits = self.device.limits();
         if limits.max_color_attachments < 3 || limits.max_color_attachment_bytes_per_sample < 32 {

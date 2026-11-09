@@ -463,6 +463,115 @@ fn finite(hdr: &[u8]) -> bool {
         .all(|b| crate::decode_f16(u16::from_le_bytes([b[0], b[1]])).is_finite())
 }
 
+/// P-SHC: a mixed program's worker must compile its active list before publication.
+/// Rendering during compilation keeps the old revision; the first new frame compiles
+/// nothing. Exercise both watcher/background and synchronous API transactions.
+#[test]
+#[ignore = "GPU lease; RENDERLAB_ES1_PATH"]
+fn gpu_shc_mixed_reload() {
+    let mut r = renderer();
+    r.set_reconstruction(crate::Reconstruction::off()).unwrap();
+    r.set_indirect(crate::IndirectSettings::off()).unwrap();
+    let mut scene = Scene::new(&mut r);
+    let custom = r
+        .try_create_program(&ProgramDescriptor {
+            label: "reload",
+            source: CUSTOM,
+        })
+        .unwrap();
+    let standard = r.standard_program().clone();
+    let materials: Vec<_> = (0..9)
+        .map(|i| {
+            material(
+                &mut r,
+                if i % 2 == 0 { &standard } else { &custom },
+                0.6,
+                0.0,
+            )
+        })
+        .collect();
+    let refs: Vec<_> = materials.iter().collect();
+    let before = render(&mut r, &mut scene, &refs, false, 1).0;
+    let created = r.pipelines.created;
+    let revision = r.revision;
+    let edited = CUSTOM.replace("ambient(s.n)*0.5", "ambient(s.n)*0.47");
+    assert_ne!(edited, CUSTOM);
+    let reload = r.start_program_reload(&custom, &edited).unwrap();
+    assert!(reload.current(&r));
+    assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
+    assert_eq!(r.revision, revision);
+    assert_eq!(r.pipelines.created, created);
+    r.finish_program_reload(reload).unwrap();
+    assert_eq!(r.pipelines.created, created + 1);
+    let after = render(&mut r, &mut scene, &refs, false, 1).0;
+    assert_eq!(
+        r.pipelines.created,
+        created + 1,
+        "first new frame must not compile a list"
+    );
+    assert_ne!(after, before);
+    let bad = r.start_program_reload(&custom, "bad WGSL").unwrap();
+    assert!(r.finish_program_reload(bad).is_err());
+    assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, after);
+    r.reload_program(&custom, CUSTOM).unwrap();
+    let restored_created = r.pipelines.created;
+    assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
+    assert_eq!(
+        r.pipelines.created, restored_created,
+        "sync reload must also install a complete list"
+    );
+    let pending = r.start_program_reload(&custom, &edited).unwrap();
+    let shading = if nonrt() { 0 } else { 1 };
+    r.ensure_lists(&[custom.id()], true, shading).unwrap();
+    assert!(
+        !pending.current(&r),
+        "newly used list invalidates an older recipe"
+    );
+    pending.discard();
+
+    assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
+    let created = r.pipelines.created;
+    r.reload_program(&custom, CUSTOM).unwrap();
+    assert_eq!(
+        r.pipelines.created,
+        created + 1,
+        "unused warmed variants must stay lazy"
+    );
+
+    // A genuinely new, GI-capable program exercises the driver's long compile,
+    // rather than certifying responsiveness with a cached or tiny shader.
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    assert_eq!(
+        crate::STANDARD_PROGRAM.matches("return exposed;").count(),
+        1
+    );
+    let source = crate::STANDARD_PROGRAM.replace(
+        "return exposed;",
+        &format!(
+            "return exposed*vec3<f32>({},1.0,1.0);",
+            0.6 + f64::from(salt) / 1e10
+        ),
+    );
+    let background = r.start_program_reload(&standard, &source).unwrap();
+    let mut max_frame_ms = 0.0f64;
+    let mut active_frames = 0;
+    for _ in 0..8 {
+        active_frames += usize::from(!background.is_finished());
+        let start = std::time::Instant::now();
+        assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
+        max_frame_ms = max_frame_ms.max(start.elapsed().as_secs_f64() * 1e3);
+    }
+    background.discard();
+    eprintln!("SHC background active_frames={active_frames} max_frame_ms={max_frame_ms:.3}");
+    assert!(
+        max_frame_ms < 2000.0,
+        "background compilation blocked the render thread"
+    );
+}
+
 #[test]
 #[ignore = "GPU lease; RENDERLAB_ES1_PATH, RENDERLAB_ES1_OUT"]
 fn gpu_mp1_mixed_programs() {

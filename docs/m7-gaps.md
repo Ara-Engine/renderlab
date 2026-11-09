@@ -353,6 +353,34 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 
 ## Startup
 
+P-SHC ([p-shc.md](p-shc.md)) fixes a mixed-program reload transaction gap: active
+MP1 list pipelines and dependent glass hit shading now compile before publication,
+and unused list variants stay lazy. The corrected game probe requires a real source
+change; the old `return exposed;` seam had become stale after emission was added.
+On the original-runtime/final release pair, complete game RGBA8 and HDR frames 0/47
+are byte-identical on both paths; drained frame cost is within 0.3%. Eight complete
+old-image readbacks during a new heavy background compile finish in at most
+83.5/75.8 ms (RT/non-RT), without publishing the pending revision.
+
+- **The latency target remains open.** Fresh edit/readback is 21.612 → 20.818 s RT
+  and 23.770 → 21.143 s non-RT in the paired game screen, still far above 1–2 s.
+  Native driver compilation accounts for over 99% of the profiled heavy pipeline
+  API call. Loop hints, runtime bounds, opaque fixed counts and disabled optimization
+  did not solve it; NoInline screens hit the 6 GiB guard. All are reverted.
+- Cached repeats improve to 93.8/42.5 ms (RT/non-RT); the RT glass pipeline now uses
+  the program cache. Cache-off first-image samples are 28.595 → 28.761 s RT and
+  27.131 → 27.633 s non-RT, with an uncontrolled private cache. No cold-startup gain
+  or engine-wide speedup is established. Full ARA1/quarry remeasurement remains open.
+  The final compiler-quiet, fresh-initial-program / empty-application-cache pair is
+  24.257 → 27.224 s RT and 30.023 → 24.183 s non-RT; populated replay is
+  0.756 → 0.813 s / 0.779 → 0.811 s, with identical cached/uncached images.
+  Those single samples likewise show no consistent cold-startup gain.
+- Reload coverage is bounded: ordinary hot sets, the last mixed frame's active
+  lists and the current dependent glass pipeline. Other lazy engine/cell/transparent
+  variants and prelude transactions can still require first-use work. Separating
+  unchanged engine work from programmable shading needs measured frame-cost and
+  complete-image gates; it is not shipped here.
+
 PC1 ([m7-pc1.md](m7-pc1.md)) persists engine and program Vulkan pipeline caches before
 initialization. Full-image identity passes on game/quarry, RT/non-RT, dev/release.
 The shared-machine release RT game sample falls from 48.771 s with an empty application
