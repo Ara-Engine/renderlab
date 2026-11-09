@@ -49,8 +49,6 @@ struct Tr1Frame {
     flags:vec4<u32>,
     // SK1: swept moving-caster shadow volume; w enables receiver-history rejection.
     shadow_lo:vec4<f32>,
-    // xyz: the volume's upper corner; w: the largest sun turn (radians) since the previous
-    // frame (TR2: view-dependent highlights slide with it, tr1_history).
     shadow_hi:vec4<f32>,
 };
 const TR1_CATMULL_ROM:u32=1u;
@@ -397,10 +395,8 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     // direction turns, so surface-identity history lags it. Cap the window so the lag, in
     // pixels of the reflected image weighted by the program's declared share, stays within
     // the view budget: 1 + budget / drift, as the blur budget above.
-    // TR2: a sun turn slides a highlight's reflected direction as a view turn of the same
-    // angle does.
     if s.view>0.0 && tr1.starts.w>0.0 {
-        let drift=s.view*(tr1_view_turn(s)+tr1.shadow_hi.w);
+        let drift=s.view*tr1_view_turn(s);
         if drift>0.0 {
             let cap=1.0+tr1.starts.w/drift;
             h.window=min(h.window,cap);

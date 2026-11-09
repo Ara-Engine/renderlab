@@ -1066,12 +1066,9 @@ impl Renderer {
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
-        // shadow_hi.w carries the sun turn (TR2): view-dependent highlights slide with it as
-        // with a view turn (MQ2's drift).
-        let sun_turn = if state.reset { 0.0 } else { turn };
-        let (lo, hi) = shadow_bounds.map_or((Vec3::ZERO, Vec3::ZERO), |b| (b.min, b.max));
-        let rejecting = if shadow_bounds.is_some() { 1. } else { 0. };
-        for value in [lo.x, lo.y, lo.z, rejecting, hi.x, hi.y, hi.z, sun_turn] {
+        for value in shadow_bounds.map_or([0.; 8], |b| {
+            [b.min.x, b.min.y, b.min.z, 1., b.max.x, b.max.y, b.max.z, 0.]
+        }) {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
