@@ -2230,14 +2230,16 @@ impl Renderer {
         let mut boxes: Vec<[f32; 6]> = vec![];
         let previous = std::mem::take(&mut self.gi.bounds);
         if !previous.is_empty() {
+            // A skinned caster can change within identical aggregate bounds. One flag per
+            // placement, in `bounds` order, collected once (P-GI: searching the draws per
+            // placement made this loop quadratic in placements).
+            let deforming: Vec<bool> = draws
+                .iter()
+                .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
+                .collect();
             for i in 0..bounds.len().max(previous.len()) {
                 let (a, b) = (previous.get(i), bounds.get(i));
-                // A skinned caster can change within identical aggregate bounds.
-                let deforming = draws
-                    .iter()
-                    .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
-                    .nth(i)
-                    .unwrap_or(false);
+                let deforming = deforming.get(i).copied().unwrap_or(false);
                 if a == b && !deforming {
                     continue;
                 }
