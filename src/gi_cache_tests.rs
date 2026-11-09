@@ -3391,8 +3391,8 @@ fn g2_nonrt() -> bool {
 /// capture prefixes scripts/m7-g2-score.py reads.
 fn g2_variant(name: &str) -> IndirectSettings {
     // G2's own settings (4 px cells, 2^19 slots, every blocked direction, three gathers, no
-    // gather cap): its default candidate and ES1's comparators keep their G2 meaning now that
-    // the defaults changed (G2b).
+    // gather cap, no cell-space filter): its default candidate and ES1's comparators keep their
+    // G2 meaning now that the defaults changed (G2b, G3).
     let g2 = IndirectSettings {
         enabled: true,
         cell_pixels: 4.0,
@@ -3401,6 +3401,7 @@ fn g2_variant(name: &str) -> IndirectSettings {
         gather_stride: 1,
         gather_cells: u32::MAX,
         claim_cells: u32::MAX,
+        filter: 0,
         ..Default::default()
     };
     match name {
@@ -3435,6 +3436,9 @@ fn g2_variant(name: &str) -> IndirectSettings {
                     "g" => s.gathers = value.parse().unwrap(),
                     "gs" => s.gather_stride = value.parse().unwrap(),
                     "cc" => s.claim_cells = value.parse().unwrap(),
+                    // G3: the cell-space filter's bits and its tent edge weight in hundredths.
+                    "f" => s.filter = value.parse().unwrap(),
+                    "fe" => s.filter_edge = value.parse::<f32>().unwrap() / 100.0,
                     _ => panic!("unknown G2b variant token {token}"),
                 }
             }
@@ -3844,7 +3848,7 @@ fn gpu_g2_quarry() {
                                 "claim": pass(|p| p.claim + p.resolve), "scan": pass(|p| p.scan),
                                 "setup": pass(|p| p.setup), "rays": pass(|p| p.rays),
                                 "finish": pass(|p| p.finish), "gather": pass(|p| p.gather),
-                                "light": pass(|p| p.light), "shade": pass(|p| p.shade),
+                                "light": pass(|p| p.light), "shade": pass(|p| p.shade), "filter": pass(|p| p.filter),
                             });
                             slot["counters"] = counters(&mut r);
                         } else {
@@ -3934,7 +3938,7 @@ fn gpu_g2_quarry() {
                         .iter()
                         .map(|p| json!({"total": p.total(), "probe": p.probe, "claim": p.claim + p.resolve,
                             "scan": p.scan, "setup": p.setup, "rays": p.rays, "finish": p.finish,
-                            "gather": p.gather, "light": p.light, "shade": p.shade}))
+                            "gather": p.gather, "light": p.light, "shade": p.shade, "filter": p.filter}))
                         .collect();
                     rows[v.as_str()] =
                         json!({"spans": spans, "passes_us": passes, "counters": counts});

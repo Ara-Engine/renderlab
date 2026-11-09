@@ -78,7 +78,7 @@ def build(profile):
         print(f"built {profile} {kind} in {time.monotonic()-started:.1f}s", flush=True)
 
 
-def batch(label, profile):
+def batch(label, profile, extra_args=(), scenes_override=None, before_process=None, modes_override=None):
     if profile == "final":
         for item in ("dev", "release", "probe", "driver"):
             code = batch(f"{label}-{item}", item)
@@ -119,20 +119,25 @@ def batch(label, profile):
         git_head=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()), indent=2))
     rows = json.loads((out / "summary.json").read_text()) if (out / "summary.json").exists() else []
     scenes = ["game"] if profile in ("probe", "driver") else ["game", "quarry"]
+    if scenes_override is not None: scenes = list(scenes_override)  # CC1's short rejection gate.
     for scene in scenes:
         for path in ("rt", "nonrt"):
             cache = out / f"cache-{scene}-{path}"
             modes = ["probe"] if profile == "probe" else (["off", "cold", "warm", "corrupt"] if profile == "driver" else ["off", "cold", "warm"])
+            if modes_override is not None: modes = list(modes_override)  # CC1's paired quarry screen.
             for mode in modes:
                 if any(r["scene"] == scene and r["path"] == path and r["mode"] == mode for r in rows): continue
                 directory = out / f"{scene}-{path}-{mode}"
                 command = [str(binary), "--path", path, "--out", str(directory), "--frames", "2", "--every", "1",
                            "--size", "1280x720" if scene == "game" else "1920x1080"]
+                command += list(extra_args)  # CC1: reuse PC1's matrix with a drained timing segment.
                 command += ["--no-pipeline-cache"] if mode in ("off", "driver") else ["--pipeline-cache", str(cache)]
                 if scene == "quarry": command += ["--quarry", str(quarry)]
                 if profile == "driver": env.update(RENDERLAB_STARTUP_PROFILE_DRIVER="1", RENDERLAB_RELOAD_PROFILE="1")
                 if profile == "probe": command += ["--reload-probe", "--no-temporal", "--no-gi"]
                 completed = (directory / "run.json").exists()
+                if not completed and before_process is not None and not before_process(scene, path, mode):
+                    return 75  # CC1: yield before an asset load when memory is insufficient.
                 if not completed and yield_requested(out, f"{scene}:{path}:{mode}"): return 75
                 if not completed and mode == "cold" and cache.exists():
                     # A killed cold process can leave partial cache data. Remove only

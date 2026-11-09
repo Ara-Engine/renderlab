@@ -57,6 +57,9 @@ const TR1_SPATIAL_START:u32=2u;
 // continued histories are clamped to the plain min/max box of this frame's 3x3 samples (all
 // nine samples, no mean or variance: P0's box, docs/m7-p0-claims.md).
 const TR1_BOX:u32=8u;
+// TR2 (docs/m7-tr2.md): upscaled young history interpolates the internal grid
+// (Reconstruction::upscale_interpolation).
+const TR1_UPSCALE_INTERPOLATION:u32=16u;
 @group(0) @binding(40) var<storage,read> tr1:Tr1Frame;
 // This frame's shaded samples (a copy of the HDR target before this pass).
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
@@ -137,10 +140,34 @@ fn tr1_weight(p:vec2<i32>)->f32 {
 
 // The hit record's placement + 1 at a pixel's sample, or zero: uncovered trace tiles keep
 // stale records, and every pixel there is background.
-fn tr1_id(p:vec2<i32>)->u32 {
-    let q=tr1_map(p);
+fn tr1_sample_id(q:vec2<i32>)->u32 {
     if textureLoad(primary_tiles,vec2<u32>(q)/PRIMARY_TILE,0).x==0u {return 0u;}
     return textureLoad(primary_hit,q,0).x;
+}
+fn tr1_id(p:vec2<i32>)->u32 {return tr1_sample_id(tr1_map(p));}
+
+// TR2 (upscaled frames): this frame's samples of surface `id` around output pixel p, each
+// weighted by a separable tent of radius `r` output pixels at its jittered position:
+// (weighted mean, total weight). At r = 1 it is TR1b's nearest-sample tent, widened to every
+// sample inside it; at r = the internal sample spacing it interpolates the internal grid
+// (weights sum to 1 where every sample shows the surface). The 3x3 internal samples around
+// the nearest one cover any r up to the spacing.
+fn tr1_gather(p:vec2<i32>,id:u32,r:vec2<f32>)->vec4<f32> {
+    let dims=vec2<i32>(textureDimensions(tr1_sample));
+    let base=vec2<i32>(floor(fma(vec2<f32>(p)+vec2<f32>(0.5),tr1_ratio,-tr1.jitter.xy)));
+    var sum=vec3<f32>(0.0);
+    var total=0.0;
+    for(var i=0;i<9;i+=1) {
+        let q=base+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+        if any(q<vec2<i32>(0)) || any(q>=dims) {continue;}
+        let d=abs((vec2<f32>(q)+vec2<f32>(0.5)+tr1.jitter.xy)/tr1_ratio-vec2<f32>(p)-vec2<f32>(0.5))/r;
+        let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
+        if w<=0.0 || tr1_sample_id(q)!=id {continue;}
+        sum=fma(textureLoad(tr1_sample,q,0).xyz,vec3<f32>(w),sum);
+        total+=w;
+    }
+    if total<=0.0 {return vec4<f32>(0.0);}
+    return vec4<f32>(sum/total,total);
 }
 
 // A sample's surface: world point (w = 1) or background direction (w = 0), its identity,
@@ -525,10 +552,19 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     if tr1.flags.x==0u {h=tr1_history(p,s,size);}
     if h.weight>0.0 {
         // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
-        let w=tr1_weight(p);
+        var w=tr1_weight(p);
+        var x=sample;
+        if !tr1_native() && (tr1.flags.y&TR1_UPSCALE_INTERPOLATION)!=0u {
+            // TR2: young history interpolates the internal grid; the tent narrows to one output
+            // pixel as the history reaches the sharp window.
+            let young=clamp(1.0-h.weight/max(tr1.starts.x,1.0),0.0,1.0);
+            let g=tr1_gather(p,s.id,mix(vec2<f32>(1.0),max(1.0/tr1_ratio,vec2<f32>(1.0)),young));
+            x=g.xyz;
+            w=min(g.w,1.0);
+        }
         let n=clamp(h.weight+w,1.0,max(h.window,1.0));
         // m' = m + w (x - m) / n', with the multiply-add pinned so replays are bit-identical.
-        return vec4<f32>(fma(sample-h.colour,vec3<f32>(w/n),h.colour),n);
+        return vec4<f32>(fma(x-h.colour,vec3<f32>(w/n),h.colour),n);
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
         let start=tr1_spatial(p,s.id,size);

@@ -73,7 +73,124 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
             ..Default::default()
         }
     };
-    pollster::block_on(adapter.request_device(&descriptor)).unwrap()
+    // CC1: opt-in native compiler timing for the stage-ablation diagnostic below.
+    if std::env::var_os("RENDERLAB_CC1_PROFILE").is_some() {
+        crate::shader_compiler::request_device(&adapter, &descriptor)
+            .unwrap()
+            .unwrap()
+    } else {
+        pollster::block_on(adapter.request_device(&descriptor)).unwrap()
+    }
+}
+
+/// CC1 diagnostic: compile the same mixed-program kernel with one stage removed at a
+/// time. No ablated pipeline renders a frame. Native SPIR-V bytes and driver time are
+/// captured together, including a unique live tint to exclude the private driver cache.
+#[test]
+#[ignore = "CC1 shared GPU lease; RENDERLAB_CC1_PROFILE and RENDERLAB_CC1_OUT"]
+fn gpu_cc1_codegen() {
+    fn body(source: &str, name: &str, replacement: &str) -> String {
+        let start = source.find(&format!("fn {name}(")).unwrap();
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 1;
+        let end = source[open + 1..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                depth += match c {
+                    '{' => 1,
+                    '}' => -1,
+                    _ => 0,
+                };
+                (depth == 0).then_some(open + 1 + i)
+            })
+            .unwrap();
+        format!("{}{{{replacement}}}{}", &source[..open], &source[end + 1..])
+    }
+    let r = renderer();
+    let out = PathBuf::from(std::env::var("RENDERLAB_CC1_OUT").unwrap());
+    std::fs::create_dir_all(&out).unwrap();
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let program = include_str!("../examples/game_scene.wgsl");
+    let source = crate::program::compose_list(
+        &r.primary_sources.as_ref().unwrap().1[1],
+        program,
+        crate::program::Stage::Traced,
+        true,
+    )
+    .source;
+    let mut rows = Vec::new();
+    let cases = std::env::var("RENDERLAB_CC1_CASES")
+        .unwrap_or_else(|_| "full,no-hit-shade,no-gi,no-lights,no-decals,no-software".into());
+    for (index, variant) in cases.split(',').enumerate() {
+        if variant == "no-software" && !nonrt() {
+            continue;
+        }
+        let mut edited = match variant {
+            "no-hit-shade" => {
+                let from = "rl_finite(shade(hs,h.input))";
+                assert_eq!(source.matches(from).count(), 1);
+                source.replace(from, "vec3<f32>(0.0)")
+            }
+            "no-gi" => body(&source, "gi_prepare", "gi_rx_valid=false;"),
+            "no-lights" => body(&source, "light_count", "return 0u;"),
+            "no-decals" => body(&source, "decal_inputs", "return decal_none();"),
+            "no-software" => body(&source, "rs_trace", "return RsHit(tmax,vec4<u32>(0u));"),
+            "full" => source.clone(),
+            other => std::fs::read_to_string(
+                PathBuf::from(std::env::var("RENDERLAB_CC1_VARIANTS").unwrap()).join(format!(
+                    "{other}-{}.wgsl",
+                    if nonrt() { "nonrt" } else { "rt" }
+                )),
+            )
+            .unwrap(),
+        };
+        edited = edited.replace(
+            "return exposed;",
+            &format!(
+                "return exposed*vec3<f32>({},1.0,1.0);",
+                0.8 + f64::from(salt % 100000 + index as u32) / 1e6
+            ),
+        );
+        std::fs::write(out.join(format!("{variant}.wgsl")), &edited).unwrap();
+        let ir = naga::front::wgsl::parse_str(&edited)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&edited)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&ir)
+        .unwrap();
+        crate::shader_compiler::take_timings(&r.device);
+        let scopes = OperationScopes::new(&r.device);
+        let started = std::time::Instant::now();
+        let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(variant),
+            source: wgpu::ShaderSource::Wgsl(edited.into()),
+        });
+        let module_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
+        let _pipeline = r
+            .primary
+            .as_ref()
+            .unwrap()
+            .list_pipeline(&r.device, &r.ledger, &module, 1, false, None);
+        let pipeline_ms = started.elapsed().as_secs_f64() * 1e3;
+        let native = crate::shader_compiler::take_timings(&r.device);
+        assert!(scopes.finish().is_none(), "{variant} pipeline rejected");
+        assert_eq!(native.len(), 1, "{variant}: native compilation missing");
+        let row = serde_json::json!({"variant":variant, "module_ms":module_ms,"pipeline_ms":pipeline_ms,
+            "native":native.iter().map(|t| serde_json::json!({"kind":t.kind,"ms":t.duration.as_secs_f64()*1e3,"bytes":t.shader_bytes,"cache_hit":t.application_cache_hit})).collect::<Vec<_>>()});
+        eprintln!("CC1 {row}");
+        rows.push(row);
+        std::fs::write(
+            out.join("codegen.json"),
+            serde_json::to_vec_pretty(&rows).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 fn renderer() -> Renderer {

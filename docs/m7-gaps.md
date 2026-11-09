@@ -255,7 +255,15 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 **Against the path-traced reference** (kept for the record; re-scored once G2's cache is the default): TR1b is worse than no-AA in 149 of 256 pooled rows on both paths, almost all from the lighting error both images share in that backlit view (shadowed rock 3,600× brighter than the reference), which pixel integration moves further from a near-black reference.
 
-**Against TSR Epic** (TR1b's settings before tonight; not re-scored with tonight's defaults):
+**Against TSR Epic on current main (TR2, [m7-tr2.md](m7-tr2.md)).** Re-scored with the same references and TSR rows on main `08aa1ba` (MV1, RQ1; TR2 leaves native frames byte-identical):
+- **RT: the gap is mostly closed, by G2's default GI cache, not by reconstruction.** Visible-sky walk: TR1 worse than TSR Epic in **35 of 256** pooled rows (was 216), 84 of 626 aged pools (was 586). Q-walk: 18,746 wins / **2,783** losses (was 12,716 / 8,811); edge at frame 64 12.45 vs TSR 17.81 (L0). The 35 sky losses are all single-pixel maxima: 2-3-pixel bright spots on interior rock that appear as the GI cache converges (§GI).
+- **Non-RT keeps the lighting gap:** sky walk worse in 218 of 256 rows, Q-walk 12,334 / 9,192. Its GI settles in about 93 frames after a cut and the sky walk has 40, so the shadowed-rock error stays at about 26 codes all walk.
+- **Revealed pixels next to edges** still lose on Q-walk (age 3: RT 8.69, non-RT 9.48 vs 7.70). Moving pixels within about 1.5 px of an edge resample bilinearly and keep 3-5 samples. TR2's Catmull-Rom-next-to-edges screen (16- or 32-sample windows) helped background-centre and the hold step but cost moving interiors 1-1.7 %, and lost 350-500 more rows to TSR: rejected.
+- **Return-segment flicker regressed since TR1b's recorded run** (Q-walk 127→128: RT 4.36 → 5.25, non-RT 4.36 → 5.03; TSR 3.43). Both paths, so not GI alone; not isolated (candidates: the overnight radius-1 start and paired jitter).
+- **U1b's gate** now fails 396-418 of 776 comparisons (was 458-462): light-track failures fell (no restart under the 0.064-rad turn cap), camera-track failures did not (216-218 vs 220). MQ2's view cap does not appear to engage in U1b's fixture: a sun-turn term added to its drift left the light track byte-identical. Needs a check of the fixture's view hint.
+- TR1b's lighting-matched 64-spp control predates the GI default and is stale on RT; the no-AA gate on the sky walk was not re-scored against it.
+
+**Against TSR Epic, TR1b's recorded rows** (TR1b's settings before the overnight defaults):
 - Q-walk: revealed pixels (age 3, all-covered L0 9.64 vs 7.70), background-centre next to edges (0.419 vs 0.371 at frame 64), edges at L0 by under 1 % (17.98 vs 17.81); +4-stop populations where the converged still image is itself above TSR's.
 - U1b's 776-comparison specular gate fails (458–462 failed comparisons): view-dependent shading lags under camera motion; light-track turns restart the history.
 - S2G sun 0.25°/frame on non-RT loses (15,476 wins, 26,772 losses): Virtual's shadowed shading under a turning sun.
@@ -276,7 +284,7 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 **Upscaling presets** (quality 2/3, performance 1/2; opt-in, native is the default):
 - Inspected only: no scores against references or TSR at reduced internal resolution, and no 4K output (a later unit).
-- On S2G's moving glossy reliefs both presets alias the finest specular stripes (stepped edges) where TR1 native does not; on the quarry they are slightly softer than native.
+- On S2G's moving glossy reliefs both presets aliased the finest specular stripes (stepped edges). TR2's `upscale_interpolation` (default on: young history interpolates the internal grid, narrowing to one output pixel as it fills) removes most of it on the quality preset; the performance preset keeps some stepping on the finest stripes. On the quarry they are slightly softer than native, unchanged by TR2.
 - Timing is one functional (not QUIET) run: Q-walk RT p50 0.93 ms (quality) and 0.73 ms (performance) against TR1 native's 1.47 ms; non-RT 1.71 and 1.45 against 2.37.
 - The internal size is rounded per axis, so targets whose size isn't divisible by 3 (quality) or 2 (performance) render at a very slightly different aspect.
 - The capable 1x RT viewer now renders traced primaries with TR1 (RTDEF2). Upscaling presets remain library settings; the viewer has no preset flag.
@@ -287,15 +295,19 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 
 G2b ([m7-g2b.md](m7-g2b.md)): the world radiance cache is on by default on both paths, with bounce light and ES1's blocked sky specular, in G2's measured configuration (4 px cells) plus a per-frame gather cap. `IndirectSettings::off()` switches it off. It beats the cache-off image on 20 of 22 quarry populations after TR1 and Lumen HW/SW Epic on all-covered quarry error (G2's tables).
 
+G3 ([m7-g3.md](m7-g3.md)) added a fixed-weight cell-space filter of the sky and bounce values, contrast refine (2 px cells only at visibility edges such as crevice mouths) and bounce fill, on by default (`filter` 15). Every quarry population is better than G2b-GC1's default on both paths. TR1x64 pinholes are at the cache-off level (RT 142 to 65, non-RT 122 to 68, against 74). The cave's mottle is mostly gone, and G3 now beats Lumen HW on edge, isolated and faint.
+
 - **Cost against Lumen** (GC1, [m7-gc1.md](m7-gc1.md); functional runs, not quiet-classified). With the camera moving after a cut has drained, the default cache adds +1.60-2.01 ms on RT and +1.90-2.98 ms on non-RT (p50 1.68 / 2.51) over the cache-off frame, down from +1.98-2.22 / +2.75-2.95 on main before GC1. Lumen Epic's GI pass on the same quarry is 1.24 ms (HW) and 1.21 ms (SW), so the 2x target still misses by about 2.6-3.2x (RT) and 3.1-4.9x (non-RT).
   - **Largest stage: the shading pass's increment**, +1.01 ms (RT) and +0.78-0.88 ms (non-RT). It grew since G2b's +0.6 as main's shading grew, and is codegen-sensitive (a lookup variant that saved 0.1 ms on RT cost 0.07 ms with the cache off and lost on non-RT).
   - Next: the probe (0.43-0.45 ms on both paths), and on non-RT the query points of new cells (0.34 ms), gathers (0.22 ms) and their visibility rays (0.14 ms).
   - Not built: a half-resolution lookup with geometry-aware upsampling (a separate pass would take the lookup's registers out of the shading shader), level hysteresis, and an on-screen-first cut gather order.
-- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 23 frames (RT) and 93 frames, about 1.5 s (non-RT), not 8 frames (GC1: gathers whose hits are all final stop early, a fifth fewer cut gathers; G2b read 28 frames and 2-4 s). While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse.
-- **Crevice mouths.** Dark streaks and pinholes at crevice mouths remain (TR1x64 pinholes on the merged TR1b default: RT 142 and non-RT 128, against cache-off's 74). Measured fix: 2 px cells (pinholes at the cache-off level, every quarry population better), opt-in only: it speckles flat surfaces on SV and needs a 448 MiB table, over the non-RT device's 256 MiB buffer limit. No per-pixel short-ray check was built.
-- **Enclosed cavities.** A coarse per-cell mottle shows in cavities lit through narrow openings (the quarry's cave and hollow) where the reference is smooth. The hollow is also about 5.5 codes too dark: es1open beats the cache there by 3.6-4.5 codes. More gathers (up to 7) do not change it. It needs a fixed-weight cell-space filter or more directions per cell.
-- **Other losses kept from G2.** On isolated rocks and background-centre the cache loses to cache-off at TR1x64. Against ES1's unoccluded diagnostic it loses on 10-16 populations by 0.1-0.6 codes. It loses to Lumen HW on edge and multi-surface.
-- **Path-traced re-score not done.** TR1's visible-sky walk was not re-scored against the path-traced reference with the cache on: no new reference campaign tonight. The shared lighting error should shrink with the cache's sky occlusion; this is unmeasured.
+  - **G3 adds +0.38 ms (RT) and +0.25 ms (non-RT)** to a moving frame ([m7-g3.md](m7-g3.md) section 5): the filter pass (about 0.10 ms) and, mostly, the finer reads at contrast-refined cells in shading (+0.22 ms). The half-resolution lookup is still not built: its blended values (13 RGB coefficients) read four times per pixel would move about as many bytes as the corner records do today. It needs its own unit, with a trace.
+- **Camera cuts.** The 20-67 ms gather frames are gone (gather cap). The worst cut frame is now 11.3 ms (RT) and 18.9 ms (non-RT, cell creation in the first frame, unbounded by default). Bounce then settles over about 23 frames (RT) and 93 frames, about 1.5 s (non-RT), not 8 frames (GC1: gathers whose hits are all final stop early, a fifth fewer cut gathers; G2b read 28 frames and 2-4 s). While non-RT drains, flat surfaces speckle (SV test scene); `gather_cells: u32::MAX` restores fast settle with the big cut frames. An opt-in claim cap bounds cell creation but settled the test scene worse. Since G3, cells waiting for their first gather take their gathered neighbours' bounce, so non-RT's SV speckle settles much sooner (gaps-pose error at frame 8: 16.4% to 11.1%). But G3's refined cells add about a fifth more cells and gathers to a cut. The worst cut frame is now 14.2 ms (RT) and 18.5 ms (non-RT), and non-RT's gather queue drains after frame 100.
+- **Crevice mouths** (G3). Pinholes are at the cache-off level (TR1x64 pose 0: RT 65, non-RT 68, cache-off 74), and the streak in the gap right of the central slab is lighter and narrower. Some darkening at mouths remains narrower than a 2 px cell. No per-pixel short-ray check was built.
+- **Enclosed cavities** (G3). The cave's coarse mottle is mostly gone (fine-scale error 8.2 to 6.9 codes), but the cave stays about 4-5 codes too bright. The hollow's error fell from 13.6 to 10.1 (RT), near es1open's 9.9, but it is still about 5.2-5.5 codes too dark, and one darker band remains under the slab's lip. Likely cause (I): gathers read the hit cell's value at its query point, not at the hit, so rays leaving through a gap narrower than a cell may read a shadowed point. The fix would be direct light evaluated at gather hits, a transport change.
+- **Other losses** (G3). Isolated rocks lose to cache-off at −14 stops by 0.06-0.34 codes and win at −10. They now beat Lumen HW and SW. Multi-surface is 0.09-0.25 codes behind Lumen HW at −14 stops and ahead at −10. In U0b's TR1 pan, silhouette loses to G2b-GC1's default at three witnesses (worst: non-RT frame 128, +0.37 / +0.93): the gaps between small gravel stones open slightly where the reference is darker. Against ES1's unoccluded diagnostic it was not re-scored.
+- **Filter memory** (G3). The filter's sources take 88 bytes a slot (88 MiB at 2^20 slots); section "Memory" of m7-g3.md has the process totals.
+- **Path-traced re-score (TR2, [m7-tr2.md](m7-tr2.md), retained references).** On TR1's visible-sky walk the cache removes most of the shared lighting error on RT: single-surface L0 error falls from 25.8 codes at the cold frame to 5.9 by frame 10 and 3.1 by frame 35, and TR1 now beats TSR Epic on 218 of 256 pooled rows. On non-RT it stays at 25.8-26.6 for all 40 frames (bounce settles in about 93 frames). On RT, 2-3-pixel bright spots (145-253 codes against a reference of about 0) appear on interior rock as the cache converges and persist through still frames; they are the walk's only remaining losses to TSR (maxima). G3's filter was merged after this walk; whether it changes these spots is unmeasured.
 - **Still frames after a cut** run the cache passes for up to 16 + 64 x (gathers + 1) frames while capped gathers may still be pending, about 0.5-1 ms each.
 - **Moving objects mottle.** In the courtyard (`examples/game_scene.rs`), the spinning crate shows blocky light and dark patches on both paths in frames 008-032, and it is clean with `--no-gi` (RD1, [m7-rd1.md](m7-rd1.md) section 3; not investigated further).
 - **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.
@@ -351,16 +363,35 @@ uncontrolled NVIDIA private cache, not a universal speedup or a QUIET-window cla
   37.497 s with persistence off. A real unseen program edit still took 31.335 s to
   readback; 95.7 ms of module work was followed by a 31.081 s first-use mixed-program
   list pipeline compile. Background/prewarmed creation of unseen variants remains open.
+- CC1's [native stage screen](m7-cc1.md) attributes substantial driver work to GI
+  lookup, reflection hit shading and non-RT traversal. Removing any one is not a
+  shipping fix. Sharing the user surface/shade call sites lowered the paired native
+  compile from 36.854/34.182 s to 23.582/15.883 s (RT/non-RT), with identical game
+  pixels, but raised release frame time by 84%/16%; it was rejected and reverted.
+  Splitting trace/hit shading into smaller independently compiled programmable
+  stages and a correct background fallback remain open. Large cold-compile gains
+  on both paths without a steady-state cost have not been established.
+- CC1 retains a single-call-site GI refinement loop with unchanged sampling order.
+  Completed game comparisons (both builds/paths, all cache modes) and quarry
+  comparisons (dev both paths, release RT) are bit-identical, with no observed
+  frame-time regression. Release game disabled-cache startup is 30.760 -> 21.356 s
+  RT and 36.540 -> 22.370 s non-RT; populated-cache samples are 0.833 -> 0.630 s
+  and 0.603 -> 0.571 s. The smaller pipeline was privately warm afterward, so the
+  entire startup reduction cannot be credited to CC1. Cold compilation still
+  takes tens of seconds. Release non-RT quarry, quarry empty/populated-cache runs
+  and the complete new-edit matrix remain unverified after yielding to ARA1's
+  held window; those gaps are not replaced with inferred numbers.
 - A driver-private-cache hit can already make startup fast. The dev matrix shows no
   consistent extra benefit from persistence, and one non-RT warm sample is slower.
-- Warm quarry preparation remains 9.479/27.306 s in dev and 4.415/15.236 s in release
+- PC1 measured warm quarry preparation at 9.479/27.306 s in dev and 4.415/15.236 s in release
   (RT/non-RT); resource/geometry/ray preparation and upload dominate non-RT. This unit
   changes no GI, acceleration-structure or asset-cooking algorithms.
 - The timed quarry is the engine example with the complete registered scan asset and
   game props, using its game camera. Startup of the low-level viewer/quarry walk was
   not measured; its legacy program-only cache setter does not persist all startup kernels.
-- The program edit check uses the API, without GI/TR1, on RT. File-watch debounce,
-  physical scanout, a separate non-RT reload timing and native-only driver/SPIR-V
-  attribution were not measured. Corrupt-file/key tests pass on CPU; GPU replay after
+- PC1's program edit check uses the API, without GI/TR1, on RT. CC1 adds native
+  driver/SPIR-V stage attribution on both paths; its fresh API edit/readback matrix
+  was not completed. File-watch debounce, physical scanout and a separate non-RT
+  reload timing remain unmeasured. Corrupt-file/key tests pass on CPU; GPU replay after
   corruption or an actual driver update remains untested. Cache files are bounded to
   64 MiB and concurrent writers retain the last complete snapshot.
