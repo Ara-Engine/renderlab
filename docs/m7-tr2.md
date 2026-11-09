@@ -125,9 +125,27 @@ The frame-word layout, bindings and every native-scale expression are unchanged.
 
 Frames 8, 24 and 40 on both paths (`inspect/flight-b2-crops.png`): the lamp post, crate and arch edges and the moving cube's silhouette are anti-aliased on both paths. What still reads as noise is lighting: sparkle specks on the gold sphere (both paths) and speckle on crate faces and the red wall on non-RT, the GI cache's non-RT settling speckle recorded in the GI gaps. TR2 changes none of these frames.
 
-### 3.2 Final binary checks (lease `tr2-s4b`)
+### 3.2 Final binary checks (lease `tr2-s4d`, binary `b3` = code at `c84db6e`)
 
-PENDING.
+| Check | Result |
+|---|---|
+| RF1-RF10 after 32 TR1 frames per pose (`gpu_r0a_current`, `RENDERLAB_R1_TR1=1`), `b3` vs `a2` | **13/13 poses byte-identical on RT and on non-RT** |
+| S2G 0.5 px frame 80, quality and performance, `b3` vs the screened interpolation (`a`, before the MV1/RQ1 merges) | mean \|difference\| 0.01-0.03 codes over the inspected crop (RQ1 changed the relief's reflections); the smoothing is the same |
+| Lib suite (`b3`, release test binary, inside the lease) | **194 passed, 0 failed, 160 ignored; exit 0** |
+| `cargo fmt --check` on the changed Rust files | clean |
+
+**Timing** (one run; Q-walk, 1920×1080 target, 2 visits × 160 frames after warm-up per variant, in one process per path; GPU frame span and the resolve pass, ms; functional lease right after ARA1's held window, not QUIET; RTX 4070 SUPER, NVIDIA 617.14, release test binary `b3`):
+
+| Variant | RT span p50 / p95 | RT resolve p50 | Non-RT span p50 / p95 | Non-RT resolve p50 |
+|---|---:|---:|---:|---:|
+| TR1 off | 3.72 / 4.39 | — | 2.61 / 2.90 | — |
+| TR1 native (default) | 4.14 / 4.49 | 0.491 | 3.11 / 3.44 | 0.448 |
+| Quality, nearest sample (TR1b) | 2.83 / 2.94 | 0.427 | 2.31 / 2.51 | 0.413 |
+| **Quality, interpolation (TR2 default)** | 2.78 / 2.89 | **0.455** | 2.34 / 2.53 | **0.442** |
+| Performance, nearest sample (TR1b) | 2.09 / 2.25 | 0.397 | 2.02 / 2.22 | 0.391 |
+| **Performance, interpolation (TR2 default)** | 2.08 / 2.21 | **0.421** | 2.00 / 2.19 | **0.415** |
+
+The interpolation costs +0.024-0.029 ms in the resolve pass on both paths; the frame-span differences are within this run's noise. Spans are higher than TR1b's recorded run (RT native 1.47 ms then) because main's default frame now includes the GI cache and later features; the native resolve pass itself is 0.49 / 0.45 ms (TR1b: 0.405 RT), grown with MQ1/MQ2/MV1's work in it.
 
 ## 4. Misses and remaining gaps
 
@@ -149,10 +167,10 @@ Unchanged: acceptance, weights and the new gather read surface identity and samp
 
 ## 7. Evidence, timing and reproduction
 
-Hardware: RTX 4070 SUPER, NVIDIA 617.14, Windows 11. Bulk evidence under `D:/Coding/renderlab-work/tr2` (scores, summaries, inspected PNGs; raw frames deleted after summarizing). Binaries (staged copies of release test binaries and dev `game_scene`): `a` (pre-merge main + TR2 options off), `a2` (merged main behaviour), `b2`, `b3` (this branch).
+Hardware: RTX 4070 SUPER, NVIDIA 617.14, Windows 11. Bulk evidence under `D:/Coding/renderlab-work/tr2` (116 MB kept: score JSON/logs, `scores/s4-summary.json`, `ana/`, inspected PNGs in `inspect/`; 24.15 GiB of raw frames, RF images and superseded binaries deleted after summarizing, listed in `deleted-raw.json`). Kept binaries (release test binary and dev `game_scene`): `a2` (merged main's behaviour: TR2 option off) and `b3` (this branch's code). The Cargo target was deleted.
 
 - Screens: `plans/s1-q`, `plans/s1-sky` (base / edge / edge window 32), `plans/s2-s2g`, `plans/s2-qp` (presets with and without interpolation); scored with `tools/score.sh` (scripts/m7-tr1-score.py `score`, `compare`, `pooled` against `ue-sky/runs/*-tsr-epic/score.json`), `tools/attr.py`, `tools/rowdiff.py`; crops with `tools/crops.py`.
 - Identity: `plans/s3-q-{a2,b2}`, `plans/s3-sky-{a2,b2}` (frame hashes, `--no-write`), `runs/ex`.
 - U1b: `u1b/` with `tools/u1b-score.sh` (TR1b §7.2's procedure, scorer unchanged).
-- Leases: `tr2-s1` (2.1 min), `tr2-s2` (4.8 min), `tr2-s3` (8.7 min), `tr2-s4b`; all headless, functional (not QUIET), ≤15 min, holding for root's b11/b12 merge gates (order of 2026-11-08 23:44Z).
+- Leases: `tr2-s1` (2.1 min), `tr2-s2` (4.8 min), `tr2-s3` (8.7 min), `tr2-s4d`; all headless, functional (not QUIET), ≤15 min, holding for root's b11/b12 merge gates (order of 2026-11-08 23:44Z) and ARA1's held window (00:37Z). **Schedule error:** a waiter for ARA1's held window matched the quoted done-text inside the root order itself and queued `tr2-s4c`, which took the lock at 00:37:51Z, inside the held window, before ARA1 started. It ran two RF steps and was stopped, and the lock was released with a release line at 00:39:05Z. The re-armed waiter ignores `[root order]` lines.
 - Time: implementation about 40 min; verification (builds, leases, lease waits, scoring) about 1 h 45 min, most of it lease queueing and CPU scoring.
