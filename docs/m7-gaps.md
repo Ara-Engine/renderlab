@@ -97,6 +97,13 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
   - Soft fading uses opaque depth only: particles don't fade against glass.
 - **No Unreal (Niagara) comparison** this push (rule 3).
 
+## Non-RT sun shadows
+
+- **OPEN, quality shortfall: grainy, harder penumbrae on non-RT.** The v0.1.0 clean-clone `game_scene` run shows grainy sun-shadow edges on non-RT at frame 16 (`D:/Coding/renderlab-work/v010-check/out-nonrt/frame-016.png`). RT's same frame (`out-rt/frame-016.png`) is clean.
+  - **Likely cause (P-NRT's profile):** Virtual sun shadows evaluate N8e's 8 directions per receiver per frame, which is the setting's maximum. The 16-triangle walk cap counts undecided directions as blocked. N8e recorded both as cost-driven partial-shadow trades.
+  - **Rule:** under the no-quality-reduction rule these are not accepted trades. The penumbra must match the path-traced reference, soft and noise-free in motion, without capping directions or walks to buy time.
+  - **Owner:** unit P-NSQ.
+
 ## RT shadows
 
 [RTDEF2](rtdef2.md) selects traced primaries, Interactive and TR1 for capable
