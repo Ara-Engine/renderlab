@@ -73,6 +73,14 @@ struct VsmFrame {
     // a rolling frame); z the walk cap (0: none); w bit 0 on a rolling frame that moved casters
     // (N8f: every tile is visited, see vsm_reached).
     n8e:vec4<u32>,
+    // P-NSQ (docs/p-nsq.md): x the receiver's batches of n8e.x directions this frame (TR1's
+    // shadow budget over eight; 1 otherwise), y the frame's rotation into each pixel's
+    // direction sequence (TR1 frames; 0 otherwise). Batch b evaluates sequence indices
+    // y + 8b + j, so a frame tests RT Interactive's directions [y, y + 8x). z: 1 when a
+    // direction one of whose candidate walks ran out of steps is blocked at the march's end
+    // (`truncated_walks_block`, vsm_march). w: a candidate walk's step budget at the
+    // receiver's level (`walk_steps`; 0: VSM_WALK_STEPS).
+    nsq:vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 
@@ -586,10 +594,19 @@ fn vsm_shear_at(j:u32)->vec3<f32> {return vec3<f32>(vsm_wg_shear[3u*j][vsm_lane]
 // holding all eight directions.
 var<private> vsm_centre:vec3<f32>;
 var<private> vsm_cone:f32;
+// The pixel's direction sequence (vsm_prepare): its R2 shift, the light basis and disk slope.
+var<private> vsm_seq_shift:vec2<f32>;
+var<private> vsm_seq_l:vec3<f32>;
+var<private> vsm_seq_u:vec3<f32>;
+var<private> vsm_seq_v:vec3<f32>;
+var<private> vsm_seq_slope:f32;
 // N8e: the directions this frame evaluates (bit j: vsm_dir(j)); the others start blocked
 // and are not counted. Walk triangles tested so far (the walk cap).
 var<private> vsm_active:u32;
 var<private> vsm_visits:u32;
+// P-NSQ: directions a candidate walk could not decide this march (it ran out of steps before
+// locating the triangle under its aim; vsm_top_hits bit 10).
+var<private> vsm_undecided:u32;
 // N8m: ring triangles tested, the receiver's work besides its walk visits (the tile order's cost).
 var<private> vsm_ring_tests:u32;
 // Diagnostics (VSM_DEBUG only): the trace scripts/n8-diagnose.py classifies, two uvec4s per
@@ -1049,6 +1066,9 @@ fn vsm_top_hits(r:VsmReceiver,id:u32,placement:u32,mask:u32,primary:u32,q:vec3<f
                 if (hits&stop)==stop {return vec2<u32>(hits,t);}
             }
         }
+        // P-NSQ: the sample's own walk ran out of steps before locating the triangle under
+        // its aim, so this candidate is undecided for the walk's directions (bit 10).
+        if !located && !stopped && phase==0u {hits|=0x400u;}
         // A refinement aim beyond the walk's reach keeps the previous phase's verdict.
         if !located && !stopped && phase>0u {break;}
         below=false;
@@ -1202,6 +1222,7 @@ fn vsm_texel_hits(r:VsmReceiver,ring:f32,p:vec2<f32>,cell:vec2<i32>,level:u32,lo
             }
             let found=vsm_top_hits(r,located,placement,m,k,qk,sk,steps);
             let hits=found.x;
+            if (hits&0x400u)!=0u {vsm_undecided|=m;}
             if attempt>0u {
                 if (hits&0x1ffu)!=0u {blocked|=1u<<k;}
                 continue;
@@ -1232,6 +1253,7 @@ fn vsm_texel_hits(r:VsmReceiver,ring:f32,p:vec2<f32>,cell:vec2<i32>,level:u32,lo
 // open direction sample its own texel, as N8b did. Returns the directions left open.
 fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
     var open=open0;
+    vsm_undecided=0u;
     let p=vsm_light(vsm_shared_origin);
     let near=vsm.params.x;
     // The cone's radius per unit height around the central ray, and the thin origins'
@@ -1272,7 +1294,7 @@ fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
     let ratio=pow(end/h,1.0/f32(count));
     let texel=vsm_texel(level);
     let lo=vsm.levels[level].origin.xy;
-    let steps=VSM_WALK_STEPS<<min(level-level0,VSM_WALK_SHIFT);
+    let steps=select(VSM_WALK_STEPS,vsm.nsq.w,vsm.nsq.w!=0u)<<min(level-level0,VSM_WALK_SHIFT);
     for(var k=0u;k<count;k+=1u) {
         h*=ratio;
         let start=below;
@@ -1328,7 +1350,10 @@ fn vsm_march(r:VsmReceiver,ring:f32,level0:u32,open0:u32)->u32 {
     }
     if h>=clear {break;}
     }
-    return open;
+    // P-NSQ `truncated_walks_block`: an open direction that a candidate walk could not decide
+    // takes that map texel's verdict (its surface is above the ray there): blocked. Every
+    // other open direction marched to its end with each candidate decided: open.
+    return open&~select(0u,vsm_undecided,vsm.nsq.z!=0u);
 }
 
 // ---- The lookup passes ----
@@ -1361,27 +1386,60 @@ fn vsm_prepare(id:vec2<u32>)->VsmPixel {
     let l=-light.travel_outer.xyz;
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
     let seed=vsm_hash(id.x+id.y*size.x);
-    let shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
-    let slope=view.texel.z;
+    vsm_seq_shift=vec2<f32>(f32(seed>>8u),f32(vsm_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
+    vsm_seq_l=l;vsm_seq_u=u;vsm_seq_v=v;
+    vsm_seq_slope=view.texel.z;
     // N8e: the first k directions of the eight are evaluated.
     vsm_active=0xffu>>(8u-vsm.n8e.x);
-    // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
-    vsm_dir_store(0u,vsm_direction(0u,shift,l,u,v,slope));vsm_dir_store(1u,vsm_direction(1u,shift,l,u,v,slope));
-    vsm_dir_store(2u,vsm_direction(2u,shift,l,u,v,slope));vsm_dir_store(3u,vsm_direction(3u,shift,l,u,v,slope));
-    vsm_dir_store(4u,vsm_direction(4u,shift,l,u,v,slope));vsm_dir_store(5u,vsm_direction(5u,shift,l,u,v,slope));
-    vsm_dir_store(6u,vsm_direction(6u,shift,l,u,v,slope));vsm_dir_store(7u,vsm_direction(7u,shift,l,u,v,slope));
     vsm_own=vsm_tri(out.r.batch,out.r.primitive);
     vsm_shared_origin=vsm_origin(out.r,l);
-    vsm_prepare_rays(l);
+    vsm_directions(0u);
     out.valid=true;
     out.level=textureLoad(vsm_level_in,p,0).x;
     out.l=l;
     return out;
 }
+// P-NSQ: batch b's eight directions of the prepared pixel's sequence (vsm.nsq), and their rays.
+fn vsm_directions(b:u32) {
+    let base=vsm.nsq.y+8u*b;
+    let shift=vsm_seq_shift;let l=vsm_seq_l;let u=vsm_seq_u;let v=vsm_seq_v;let slope=vsm_seq_slope;
+    // Constant-index stores only (docs: runtime-indexed stores misbehaved on NVIDIA).
+    vsm_dir_store(0u,vsm_direction(base,shift,l,u,v,slope));vsm_dir_store(1u,vsm_direction(base+1u,shift,l,u,v,slope));
+    vsm_dir_store(2u,vsm_direction(base+2u,shift,l,u,v,slope));vsm_dir_store(3u,vsm_direction(base+3u,shift,l,u,v,slope));
+    vsm_dir_store(4u,vsm_direction(base+4u,shift,l,u,v,slope));vsm_dir_store(5u,vsm_direction(base+5u,shift,l,u,v,slope));
+    vsm_dir_store(6u,vsm_direction(base+6u,shift,l,u,v,slope));vsm_dir_store(7u,vsm_direction(base+7u,shift,l,u,v,slope));
+    vsm_prepare_rays(l);
+}
+// Directions a pixel evaluates this frame: n8e.x per batch, nsq.x batches.
+fn vsm_total()->u32 {return vsm.n8e.x*vsm.nsq.x;}
+// P-NSQ: the prepared pixel's visible directions over every batch of the frame. Each batch is
+// N8e's lookup of eight directions (its walk cap counts that batch's visits); vsm_batch_work is the
+// pixel's ring tests and walk visits over all batches (the walk orders' estimate).
+var<private> vsm_batch_work:u32;
+fn vsm_walk_batches(px:VsmPixel)->u32 {
+    let r=px.r;
+    var visible=0u;
+    vsm_batch_work=0u;
+    for(var b=0u;b<vsm.nsq.x;b+=1u) {
+        if b>0u {vsm_directions(b);}
+        vsm_visits=0u;
+        let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
+        var blocked=ring.blocked;
+        if VSM_DEBUG && b==0u {vsm_dbg.x=ring.blocked|(min(px.level,0xffu)<<24u);}
+        if VSM_FAR && px.level!=VSM_NONE && blocked!=0xffu {
+            let open=vsm_march(r,ring.radius,px.level,0xffu&~blocked);
+            if VSM_DEBUG && b==0u {vsm_dbg.x|=((0xffu&~blocked)&~open)<<8u;}
+            blocked=0xffu&~open;
+        }
+        visible+=countOneBits(vsm_active&~blocked);
+        vsm_batch_work+=vsm_ring_tests+vsm_visits;
+    }
+    return visible;
+}
 override VSM_CAP_RULE:u32=0u;
-// The pixel's count from `visible` of the frame's k directions.
+// The pixel's count from `visible` of the frame's directions (vsm_total).
 fn vsm_visible(id:vec2<u32>,visible:u32) {
-    let k=vsm.n8e.x;
+    let k=vsm_total();
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>((256u*visible+k/2u)/k));
 }
 // N8f: whether this frame's moved casters can change pixel id's count under a kept camera:
@@ -1431,18 +1489,9 @@ fn vsm_lookup_tile(group:vec2<u32>,local:vec2<u32>) {
     if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
     let r=px.r;
     if VSM_SKIP==2u {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(u32(dot(vsm_shear_at(r.primitive&7u),vsm_own[0])>1e30)+256u));return;}
-    vsm_visits=0u;
-    let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
-    var blocked=ring.blocked;
-    vsm_dbg.x=ring.blocked|(min(px.level,0xffu)<<24u);
-    if VSM_FAR && px.level!=VSM_NONE && blocked!=0xffu {
-        let open=vsm_march(r,ring.radius,px.level,0xffu&~blocked);
-        vsm_dbg.x|=((0xffu&~blocked)&~open)<<8u;
-        blocked=0xffu&~open;
-    }
-    vsm_visible(id,countOneBits(vsm_active&~blocked));
+    vsm_visible(id,vsm_walk_batches(px));
     // The tile's work for the next frame's order: its heaviest lane's, where it is not light.
-    let work=vsm_ring_tests+vsm_visits;
+    let work=vsm_batch_work;
     if VSM_PERSIST!=0u && VSM_ORDER && !casters && work>=VSM_HEAVY {
         atomicMax(&vsm_scratch.words[VSM_HEAD+vsm_tile_count()+tile.y*vsm_tile_grid().x+tile.x],work);
     }

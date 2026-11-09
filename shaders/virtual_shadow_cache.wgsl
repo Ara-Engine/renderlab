@@ -229,7 +229,7 @@ fn vsc_find(c:VscCell,slot:u32,side:u32)->u32 {
             if VSC_STATS {atomicAdd(&vsc_stats[4],1u);}
             return VSC_UNSHOWN|((value>>19u)&7u);
         }
-        return select(0u,vsm.n8e.x,(value&1u)!=0u);
+        return select(0u,vsm_total(),(value&1u)!=0u);
     }
     return VSC_MISS;
 }
@@ -394,19 +394,15 @@ fn vsc_walk(g:u32) {
     let id=vec2<u32>(word&0xffffu,word>>16u);
     let px=vsm_prepare(id);
     if !px.valid {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(256u));return;}
-    let r=px.r;
-    vsm_visits=0u;
-    let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));
-    var blocked=ring.blocked;
-    if VSM_FAR && px.level!=VSM_NONE && blocked!=0xffu {
-        let open=vsm_march(r,ring.radius,px.level,0xffu&~blocked);
-        blocked=0xffu&~open;
-    }
-    let visible=countOneBits(vsm_active&~blocked);
+    let visible=vsm_walk_batches(px);
     vsm_visible(id,visible);
+    // The verdict's visible code (0..n8e.x): over several batches (P-NSQ), 0 or n8e.x when
+    // solid and 1 when partial (only solidity and the solid count are read).
+    var code=visible;
+    if vsm.nsq.x>1u {code=select(select(1u,vsm.n8e.x,visible==vsm_total()),0u,visible==0u);}
     let start=u32((i32(vsm.levels[0].info.y)+i32(min(px.level,15u)))&15);
-    let work=min(15u,32u-countLeadingZeros(vsm_ring_tests+vsm_visits));
-    atomicStore(&vsm_scratch.words[2u*k+1u],0x80000000u|visible|(start<<4u)|(work<<8u));
+    let work=min(15u,32u-countLeadingZeros(vsm_batch_work));
+    atomicStore(&vsm_scratch.words[2u*k+1u],0x80000000u|code|(start<<4u)|(work<<8u));
 }
 var<workgroup> vsc_wg_chunk:u32;
 // The queued pixels, 32 lanes a workgroup: one chunk each (VSC_PERSIST 0), or chunks from the

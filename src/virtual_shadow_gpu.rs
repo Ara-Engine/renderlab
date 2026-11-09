@@ -39,8 +39,11 @@ const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the 64 per-batch horizon offsets and (first record, recorded) pairs,
-/// and N8e's uvec4.
-const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 768 + 16;
+/// N8e's uvec4 and P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`).
+const FRAME_BYTES: usize =
+    6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 768 + 16 + 16;
+/// `VsmFrame::nsq`: direction batches and the frame's sequence rotation (docs/p-nsq.md).
+const SAMPLING_OFFSET: u64 = (FRAME_BYTES - 16) as u64;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
@@ -118,8 +121,12 @@ pub struct VirtualShadowSettings {
     /// what it was for (docs/non-rt-n8b.md S1), and the receiver's own relief there cost the
     /// quarry 0.85 ms for few blocks.
     pub first_block: u32,
-    /// N8e: directions evaluated per frame, 1-8: the first of each receiver's R2 sequence.
-    /// Visibility is the visible share of those (docs/non-rt-n8e.md).
+    /// N8e: directions evaluated per batch, 1-8: the first of each receiver's R2 sequence.
+    /// Visibility is the visible share of those (docs/non-rt-n8e.md). P-NSQ: on TR1 frames
+    /// the Exact and Surface lookups follow RT Interactive's sampling: the engine's
+    /// `ReconstructionShadowBudget` sets the batches (its ray count over eight, so 256, 64,
+    /// 32 or 8 directions with the default 8) and every frame rotates each pixel's sequence
+    /// as RT does, so TR1's history integrates the disk (docs/p-nsq.md).
     pub directions: u32,
     /// N8e walk cap: once a receiver's exact walks have visited this many triangles and one
     /// of its directions is proven blocked, its undecided directions are taken as blocked
@@ -146,6 +153,15 @@ pub struct VirtualShadowSettings {
     /// Which lookup decides visibility from the shared clipmap: Surface by default,
     /// Exact for the reference (docs/non-rt-n8p.md).
     pub lookup: VirtualLookup,
+    /// P-NSQ (docs/p-nsq.md), Exact and Surface lookups: a direction one of whose candidate
+    /// walks ran out of steps before locating the triangle under its aim is blocked once its
+    /// march ends (that map texel's surface is above the ray), and only that direction.
+    /// Every other direction keeps its exact verdict.
+    pub truncated_walks_block: bool,
+    /// Triangles one candidate walk may cross at the receiver's level before it is
+    /// undecided (N8b's 8); each coarser level doubles it, up to four times. Walks that
+    /// locate their triangle sooner stop sooner, so a larger budget costs only long walks.
+    pub walk_steps: u32,
 }
 
 /// The per-pixel decision of `SoftShadows::Virtual` (`VirtualShadowSettings::lookup`).
@@ -200,6 +216,8 @@ impl Default for VirtualShadowSettings {
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
             lookup: VirtualLookup::Surface,
+            truncated_walks_block: false,
+            walk_steps: 8,
         }
     }
 }
@@ -216,9 +234,10 @@ impl VirtualShadowSettings {
             || !(1..=8).contains(&self.directions)
             || ![1, 2, 4, 8, 16].contains(&self.refresh)
             || !(self.sun_hysteresis.is_finite() && (0.0..=0.05).contains(&self.sun_hysteresis))
+            || !(1..=256).contains(&self.walk_steps)
         {
             return Err(Error::InvalidInput(
-                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel, finite caster error, 1..=8 directions, refresh 1/2/4/8/16, hysteresis in [0, 0.05] rad",
+                "virtual shadow settings: near > 0, pages a power of two in [4,32], 2..=64 samples, positive texel, finite caster error, 1..=8 directions, refresh 1/2/4/8/16, hysteresis in [0, 0.05] rad, 1..=256 walk steps",
             ));
         }
         Ok(())
@@ -1350,6 +1369,46 @@ impl Renderer {
         Ok(())
     }
 
+    /// P-NSQ: this frame's rotation into each pixel's direction sequence: TR1's (RT
+    /// Interactive's `temporal_reconstruction::rotation`) on reconstructed frames of the Exact
+    /// and Surface lookups, else 0. Map and Hybrid keep N8k's fixed directions.
+    fn virtual_rotation(&self, s: VirtualShadowSettings) -> u32 {
+        let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
+        self.reconstruction_frame
+            .filter(|_| exact && self.reconstruction.rotate_directions)
+            .map_or(0, super::primary_ray_gpu::temporal_reconstruction::rotation)
+    }
+
+    /// P-NSQ: after TR1 chose this frame's shadow budget (`prepare_reconstruction`), the
+    /// Exact and Surface lookups evaluate it in batches of eight, like RT Interactive's rays.
+    /// Frames without TR1, Map and Hybrid keep one batch.
+    pub(super) fn prepare_virtual_sampling(&mut self) {
+        let Some(rays) = self
+            .reconstruction_state
+            .as_ref()
+            .map(|r| r.shadow_rays)
+            .filter(|_| self.reconstruction_frame.is_some())
+        else {
+            return;
+        };
+        let Some(state) = self.virtual_shadows.as_ref() else {
+            return;
+        };
+        if !matches!(
+            state.settings.lookup,
+            VirtualLookup::Exact | VirtualLookup::Surface
+        ) {
+            return;
+        }
+        let Some(r) = state.resources.as_ref() else {
+            return;
+        };
+        let batches = (rays / 8).max(1);
+        self.queue
+            .write_buffer(&r.frame, SAMPLING_OFFSET, &batches.to_ne_bytes());
+        self.uploads.shadows += 4;
+    }
+
     /// Restart virtual shadows from the current scene, camera, sun and settings. The next
     /// frame rebuilds requested pages and looks up every pixel, discarding rolling counts
     /// and map hysteresis from earlier frames. In-flight resources retire normally.
@@ -1463,6 +1522,7 @@ impl Renderer {
             self.virtual_shadows = Some(state);
         }
         self.ensure_virtual_casters(draws)?;
+        let rotation = self.virtual_rotation(self.virtual_settings);
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
@@ -1593,14 +1653,14 @@ impl Renderer {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
         } else {
+            // SK1: deformation invalidates caster pages even at a fixed model matrix. One flag
+            // per placement, in placement order (collected once: P-NRT's O(placements^2) find).
+            let deforming: Vec<bool> = draws
+                .iter()
+                .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
+                .collect();
             for (p, model) in models.iter().enumerate() {
-                // SK1: deformation invalidates caster pages even at a fixed model matrix.
-                let deforming = draws
-                    .iter()
-                    .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
-                    .nth(p)
-                    .unwrap_or(false);
-                if *model != cache.models[p] || deforming {
+                if *model != cache.models[p] || deforming.get(p).copied().unwrap_or(false) {
                     let [a0, a1] = rect(&cache.bounds[p]);
                     let [b0, b1] = rect(&bounds[p]);
                     rects.push([a0.min(b0), a1.max(b1)]);
@@ -2123,6 +2183,9 @@ impl Renderer {
             let o = state.cache.origins[i].unwrap_or_default();
             key.extend([o[0] as u64, o[1] as u64, u64::from(state.cache.epochs[i])]);
         }
+        // P-NSQ: a frame that rotates the directions never keeps counts of other directions
+        // (TR1's lattice repeats its centre offset at k = 255 and 0, one matrix for both).
+        key.push(u64::from(rotation));
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
@@ -2183,6 +2246,13 @@ impl Renderer {
             u32::from(state.casters_only),
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
+        }
+        // P-NSQ: one batch and this frame's rotation; prepare_virtual_sampling raises the batches
+        // once TR1 has chosen its budget.
+        let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
+        let truncated = u32::from(exact && s.truncated_walks_block);
+        for value in [1, rotation, truncated, s.walk_steps] {
+            frame.extend_from_slice(&u32::to_ne_bytes(value));
         }
         debug_assert_eq!(frame.len(), FRAME_BYTES);
         let state = self.virtual_shadows.as_mut().unwrap();
@@ -2742,7 +2812,13 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         }
-        assert_eq!(FRAME_BYTES, 1680);
+        assert_eq!(FRAME_BYTES, 1696);
+        // P-NSQ: the sampling uvec4 is VsmFrame's last member, after N8e's.
+        assert_eq!(SAMPLING_OFFSET, 1680);
+        let source = shader_source();
+        let n8e = source.find("    n8e:vec4<u32>,").unwrap();
+        let nsq = source.find("    nsq:vec4<u32>,").unwrap();
+        assert!(n8e < nsq && source[nsq..].trim_start_matches("    nsq:vec4<u32>,").trim_start().starts_with("};"));
         // The encoder reads the lookup schedule's defaults from the shader.
         assert_eq!(schedule_defaults(&shader_source()), (4096, true));
         assert_eq!(

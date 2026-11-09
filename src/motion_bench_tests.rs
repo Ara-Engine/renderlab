@@ -840,6 +840,10 @@ fn gpu_motion_bench_batch() {
                 ("TR1-Auto16", SoftShadows::Interactive),
                 ("TR1-Auto32", SoftShadows::Interactive),
                 ("TR1-warm", SoftShadows::Interactive),
+                // P-NSQ (docs/p-nsq.md): Virtual under TR1 with main's sampling (eight fixed
+                // directions a frame) and with RT's (rotated, 256/64/32/8 in batches of eight).
+                ("TR1-Virtual-fixed8", SoftShadows::Virtual),
+                ("TR1-Virtual-Auto32", SoftShadows::Virtual),
             ] {
                 // N8 is a disk-light mode; a zero radius takes the hard path.
                 if !selected("modes", name) || (mode == SoftShadows::Virtual && radius == 0.) {
@@ -848,20 +852,26 @@ fn gpu_motion_bench_batch() {
                 const TR1_WARM: usize = 256;
                 let reconstruction = crate::Reconstruction {
                     enabled: name.starts_with("TR1"),
+                    rotate_directions: name != "TR1-Virtual-fixed8",
                     ..Default::default()
                 };
                 r.set_reconstruction(reconstruction).unwrap();
-                let active_rays = name
-                    .strip_prefix("TR1-")
-                    .and_then(|s| s.strip_prefix("Auto").unwrap_or(s).parse().ok())
-                    .unwrap_or(8);
+                let auto = name.starts_with("TR1-Auto") || name == "TR1-Virtual-Auto32";
+                let active_rays = match name {
+                    "TR1-Virtual-fixed8" => 8,
+                    "TR1-Virtual-Auto32" => 32,
+                    _ => name
+                        .strip_prefix("TR1-")
+                        .and_then(|s| s.strip_prefix("Auto").unwrap_or(s).parse().ok())
+                        .unwrap_or(8),
+                };
                 r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
-                    cold_rays: if name.starts_with("TR1-Auto") {
+                    cold_rays: if auto {
                         256
                     } else {
                         active_rays
                     },
-                    reset_rays: if name.starts_with("TR1-Auto") {
+                    reset_rays: if auto {
                         64
                     } else {
                         active_rays
@@ -880,6 +890,21 @@ fn gpu_motion_bench_batch() {
                 let path = directory.join(name);
                 fs::create_dir_all(&path).unwrap();
                 r.set_soft_shadows(mode);
+                // P-NSQ: the fixed-eight mode keeps main's N8e walk cap; the other takes the
+                // manifest's settings (the current defaults).
+                if name.starts_with("TR1-Virtual") {
+                    let base = exact_virtual_settings(&m);
+                    r.set_virtual_shadow_settings(if name == "TR1-Virtual-fixed8" {
+                        crate::VirtualShadowSettings {
+                            walk_cap: 16,
+                            truncated_walks_block: false,
+                            ..base
+                        }
+                    } else {
+                        base
+                    })
+                    .unwrap();
+                }
                 // Separate uninterrupted production replays from diagnostic readbacks.
                 let mut records = vec![];
                 for repeat in 0..repeats {

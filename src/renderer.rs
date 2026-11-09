@@ -3095,6 +3095,10 @@ impl Renderer {
             if let Some(index) = self.reconstruction_frame {
                 self.ensure_reconstruction()?;
                 self.prepare_reconstruction(camera, index, draws);
+                // P-NSQ: non-RT sun visibility samples TR1's shadow budget, as RT does.
+                if soft && self.soft_mode == crate::SoftShadows::Virtual {
+                    self.prepare_virtual_sampling();
+                }
             }
         }
         if lit {
