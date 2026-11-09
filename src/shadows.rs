@@ -9,8 +9,7 @@ pub enum SoftShadows {
     Exact,
     /// Eight directions on the legacy unreconstructed path. With TR1, the engine's
     /// `ReconstructionShadowBudget` raises cold/moving sampling (256/32 rays by
-    /// default), returning to eight after a stable hold; on RT devices only penumbra
-    /// pixels trace beyond eight (docs/p-rts.md). Shading stays programmable.
+    /// default), returning to eight after a stable hold. Shading stays programmable.
     Interactive,
     /// Opt-in temporal film accumulation (docs/m6-temporal-primaries.md): each frame
     /// traces one jittered primary per pixel with eight rotated directions and the frame's

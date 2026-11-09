@@ -218,10 +218,8 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
 /// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
 /// Materials still receive the same visibility value and shading inputs.
-/// P-RTS (docs/p-rts.md): when a frame's budget exceeds 16, every receiver first traces
-/// eight of the budget's directions and eight over a cone twice the sun's; only pixels whose
-/// 3x3 window holds both a blocked and a visible probe trace the budget, exactly as before.
-/// Receivers whose whole window agrees take the unanimous 0 or 256.
+/// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
+/// the budget only near shadow edges; with it off every receiver traces the budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconstructionShadowBudget {
     pub cold_rays: u32,
