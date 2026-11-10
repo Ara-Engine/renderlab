@@ -57,6 +57,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
         Pass::BufferArrayProbe,
+        Pass::HandleArrayProbe,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
         Pass::VisibilityResolve,
@@ -274,3 +275,6 @@ mod transparency_hit_depth_reference;
 mod primary_check_cases;
 #[path = "ara_backend/primary_check_reference.rs"]
 mod primary_check_reference;
+
+#[path = "ara_backend/cases/handle_arrays.rs"]
+mod handle_array_cases;

@@ -24,10 +24,11 @@ pub(super) fn adapt(source: &mut String, module: &naga::Module) -> Result<()> {
         .global_variables
         .iter()
         .filter_map(|(handle, global)| {
-            if let naga::TypeInner::BindingArray {
-                size: naga::ArraySize::Constant(n),
-                ..
-            } = module.types[global.ty].inner
+            if matches!(global.space, naga::AddressSpace::Storage { .. })
+                && let naga::TypeInner::BindingArray {
+                    size: naga::ArraySize::Constant(n),
+                    ..
+                } = module.types[global.ty].inner
             {
                 Some((handle, global, n.get()))
             } else {

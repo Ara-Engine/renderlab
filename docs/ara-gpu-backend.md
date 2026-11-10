@@ -714,3 +714,31 @@ and inset-probe branches remain unproven. Native Vulkan is pending.
 
 Checkpoint: all 31 focused tests pass with API/shader validation and API-only;
 47 exported SPIR-V stages validate for Vulkan 1.3. No backend clippy diagnostics.
+
+## Fixed sampled-image and sampler arrays
+
+`Input::Images` and `Input::Samplers` use the same packet-tail scheme as buffer
+arrays: a head word points at buffer-absolute words containing arbitrary heap
+indices. Reflection checks exact source counts, image dimensions/sample classes,
+and regular versus comparison sampler heaps. Packets borrow every image owner
+and declare each view to the graph. Samplers remain immutable device-cached state.
+
+Naga MSL prints handle arrays as `constant NagaArgumentBufferWrapper<T>*` and
+element access as `[i].inner`, including hidden helper-function parameters. The
+shared adapter replaces only that parameter type with a lazy `AraImageArray` or
+`AraSamplerArray`; its `operator[]` resolves one heap slot. Auxiliary image entry
+structs precede generated helper bodies. Naga binding-array targets remain buffer
+arguments; texture/sampler binding attributes would be rejected by its writer.
+WGSL algorithms remain unchanged. SPIR-V uses the same AST first-index rewrite
+as buffer arrays and aliases typed image/sampler arrays onto bindings 5, 2 or 6.
+
+The conformance replay uses noncontiguous/duplicated 2D color/depth slots, nearest
+and linear filtering, clamp/repeat/mirror addressing and four comparison modes.
+Dynamic indices, constant indices, texture dimensions and mip counts match the
+CPU reference within 1e-6; tail canaries are exact. Two differently mapped packets
+are submitted before the first CPU wait. Wrong count, sample type and comparison
+heap are rejected. All 32 focused tests and 48 SPIR-V stages pass with Metal API
+and shader validation. Native Vulkan is pending. Array/3D/uint image proxy forms
+are supported by reflection but not yet claimed as native-proven by this probe;
+storage-image binding arrays are explicitly unsupported. Binding-array indices
+retain Naga's unchecked policy and must be within their logical source count.

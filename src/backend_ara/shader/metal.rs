@@ -66,6 +66,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let (mut source, translation) =
         msl::write_string(&module, &info, &options, &msl::PipelineOptions::default())?;
     repair_per_vertex_members(&mut source, &module)?;
+    super::handle_arrays::adapt(&mut source, &module)?;
     super::buffer_arrays::adapt(&mut source, &module)?;
     let names = translation
         .entry_point_names
@@ -76,11 +77,13 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         .iter()
         .position(|e| e.name == pass.entry())
         .context("selected entry not emitted")?;
-    source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraWriteVolumeEntry {ulong unused; texture3d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\n");
+    let mut aux = String::new();
+    aux.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraWriteVolumeEntry {ulong unused; texture3d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    aux.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
+    aux.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
+    aux.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
+    aux.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\n");
+    source = aux + &source;
     let entry = wrap(
         &mut source,
         &module,
@@ -232,6 +235,26 @@ fn wrap(
                 super::InputKind::Buffer { .. } => buffer_at(parameter, &slot)?,
                 super::InputKind::BufferArray { .. } => {
                     super::buffer_arrays::argument(parameter, ordinal)?
+                }
+                super::InputKind::ImageArray {
+                    dimension, sample, ..
+                } => super::handle_arrays::argument(
+                    parameter,
+                    ordinal,
+                    "textures",
+                    Some(super::heap_interface::image_entry(dimension, sample)?),
+                )?,
+                super::InputKind::SamplerArray { comparison, .. } => {
+                    super::handle_arrays::argument(
+                        parameter,
+                        ordinal,
+                        if comparison {
+                            "comparison_samplers"
+                        } else {
+                            "samplers"
+                        },
+                        None,
+                    )?
                 }
                 super::InputKind::Sampler { comparison } => format!(
                     "top.{}[{slot}].state",

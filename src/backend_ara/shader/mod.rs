@@ -1,6 +1,7 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
 mod array_access;
 mod buffer_arrays;
+mod handle_arrays;
 mod heap_interface;
 mod mesh_interface;
 mod metal;
@@ -27,6 +28,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 pub enum Pass {
     /// Shared frontend conformance probe; not a Renderlab rendering pass.
     BufferArrayProbe,
+    /// Shared sampled-handle array conformance probe; not a rendering pass.
+    HandleArrayProbe,
     /// Original software raster of projected cluster triangles into packed visibility.
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
@@ -109,6 +112,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::HandleArrayProbe => include_str!("../shaders/handle_array_probe.wgsl").into(),
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
             Self::PrimaryCheck => {
                 let [head, _] = crate::renderer::primary_ray_gpu::non_rt_heads(include_str!(
@@ -305,7 +309,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::BufferArrayProbe
+            Self::HandleArrayProbe
+                | Self::BufferArrayProbe
                 | Self::VisibilitySoftware
                 | Self::VisibilityResolve
                 | Self::PostPrimarySurface
@@ -389,7 +394,7 @@ impl Pass {
             Self::VisibilityResolve => "resolve",
             Self::VisibilityHardware => "fs",
             Self::VisibilitySoftware => "raster",
-            Self::BufferArrayProbe => "probe",
+            Self::BufferArrayProbe | Self::HandleArrayProbe => "probe",
             Self::VisibilityCull => "cull",
             Self::VisibilityFinish => "finish",
             Self::VisibilityReset => "reset",

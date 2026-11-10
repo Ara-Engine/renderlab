@@ -59,7 +59,9 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
     let mut image_data = BTreeMap::new();
     for spec in &layout {
         match spec.kind {
-            InputKind::BufferArray { .. } => anyhow::bail!("unexpected toon buffer array"),
+            InputKind::BufferArray { .. }
+            | InputKind::ImageArray { .. }
+            | InputKind::SamplerArray { .. } => anyhow::bail!("unexpected toon binding array"),
             InputKind::Buffer { minimum, .. } => {
                 if [
                     key(0, 0),
@@ -237,7 +239,11 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
             let mut values = Vec::new();
             for spec in &layout {
                 let input = match spec.kind {
-                    InputKind::BufferArray { .. } => anyhow::bail!("unexpected toon buffer array"),
+                    InputKind::BufferArray { .. }
+                    | InputKind::ImageArray { .. }
+                    | InputKind::SamplerArray { .. } => {
+                        anyhow::bail!("unexpected toon binding array")
+                    }
                     InputKind::Buffer { .. } => Input::Buffer(match spec.key {
                         InputKey {
                             group: 0,

@@ -103,7 +103,7 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
                 declarations.push_str(&format!("@group(0) @binding({}) var ara_storage_{i}:binding_array<texture_storage_{dim}<{},write>>;\n",1600+i,super::heap_interface::storage_wgsl(format)?));
                 names.insert(input.name.as_str(), format!("ara_storage_{i}[{slot}]"));
             }
-            InputKind::Sampler { comparison } => {
+            InputKind::Sampler { comparison } | InputKind::SamplerArray { comparison, .. } => {
                 let name = if comparison {
                     format!("ara_comparison_{i}")
                 } else {
@@ -118,9 +118,16 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
                         "sampler"
                     }
                 ));
-                names.insert(input.name.as_str(), format!("{name}[{slot}]"));
+                if matches!(input.kind, InputKind::SamplerArray { .. }) {
+                    arrays.push(array_rewrite(module, input, &name, &slot)?);
+                } else {
+                    names.insert(input.name.as_str(), format!("{name}[{slot}]"));
+                }
             }
-            InputKind::Image { dimension, sample } => {
+            InputKind::Image { dimension, sample }
+            | InputKind::ImageArray {
+                dimension, sample, ..
+            } => {
                 let dim = match dimension {
                     ViewDimension::D2 => "2d",
                     ViewDimension::D2Array => "2d_array",
@@ -142,7 +149,16 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
                     "@group(0) @binding({}) var ara_image_{i}:binding_array<{ty}>;\n",
                     700 + i
                 ));
-                names.insert(input.name.as_str(), format!("ara_image_{i}[{slot}]"));
+                if matches!(input.kind, InputKind::ImageArray { .. }) {
+                    arrays.push(array_rewrite(
+                        module,
+                        input,
+                        &format!("ara_image_{i}"),
+                        &slot,
+                    )?);
+                } else {
+                    names.insert(input.name.as_str(), format!("ara_image_{i}[{slot}]"));
+                }
             }
         }
     }
@@ -159,4 +175,25 @@ struct AraPacketWords {{values:array<u32>,}};
 {out}
 "#
     ))
+}
+
+fn array_rewrite(
+    module: &naga::Module,
+    input: &super::ShaderInput,
+    name: &str,
+    slot: &str,
+) -> Result<super::array_access::ArrayRewrite> {
+    let (global, _) = module
+        .global_variables
+        .iter()
+        .find(|(_, g)| {
+            g.binding
+                .is_some_and(|b| b.group == input.key.group && b.binding == input.key.binding)
+        })
+        .context("packet handle array missing")?;
+    Ok(super::array_access::ArrayRewrite {
+        global,
+        prefix: format!("{name}[ara_packet[ara_root.w0].values[{slot} + u32("),
+        suffix: ")]]".into(),
+    })
 }

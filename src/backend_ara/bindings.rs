@@ -18,6 +18,10 @@ pub enum Input<'a> {
     Buffers(&'a [&'a StorageBuffer]),
     /// Immutable sampled view, with its native dimension retained.
     Image(&'a Texture),
+    /// Fixed logical array of sampled views.
+    Images(&'a [&'a Texture]),
+    /// Fixed logical array of immutable cached sampler descriptions.
+    Samplers(&'a [SamplerDesc]),
     /// Cached regular or comparison sampler description.
     Sampler(SamplerDesc),
 }
@@ -88,30 +92,49 @@ impl<'a> HeapBindings<'a> {
                     start
                 }
                 (InputKind::Image { dimension, sample }, Input::Image(t)) => {
-                    ensure!(
-                        t.view.dimension == dimension
-                            && t.shape.samples == ara_gpu::texture::SampleCount::One,
-                        "image {} has the wrong view dimension",
-                        required.name
-                    );
-                    let actual = match t.format {
-                        Format::Depth16Unorm | Format::Depth32Float => SampleType::Depth,
-                        Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint => SampleType::Uint,
-                        Format::Rgba8
-                        | Format::Rgba8Srgb
-                        | Format::Rgba32Float
-                        | Format::Rgba16Float
-                        | Format::Rgb10A2
-                        | Format::R32Float
-                        | Format::R16Float
-                        | Format::Rg16Float => SampleType::Float,
-                    };
-                    ensure!(
-                        actual == sample,
-                        "image {} has the wrong sample type",
-                        required.name
-                    );
+                    validate_image(t, dimension, sample, &required.name)?;
                     t.sampled
+                }
+                (
+                    InputKind::ImageArray {
+                        count,
+                        dimension,
+                        sample,
+                    },
+                    Input::Images(images),
+                ) => {
+                    ensure!(
+                        images.len() == count as usize,
+                        "image array {} has the wrong length",
+                        required.name
+                    );
+                    for image in images {
+                        validate_image(image, dimension, sample, &required.name)?;
+                    }
+                    let start = u32::try_from(words.len())
+                        .context("input packet exceeds 32-bit indexing")?;
+                    words.extend(images.iter().map(|image| image.sampled));
+                    start
+                }
+                (InputKind::SamplerArray { count, comparison }, Input::Samplers(samplers)) => {
+                    ensure!(
+                        samplers.len() == count as usize,
+                        "sampler array {} has the wrong length",
+                        required.name
+                    );
+                    ensure!(
+                        samplers
+                            .iter()
+                            .all(|desc| desc.compare.is_some() == comparison),
+                        "sampler array {} uses the wrong heap",
+                        required.name
+                    );
+                    let start = u32::try_from(words.len())
+                        .context("input packet exceeds 32-bit indexing")?;
+                    for desc in samplers {
+                        words.push(gpu.sampler(desc)?.index);
+                    }
+                    start
                 }
                 (InputKind::StorageImage { dimension, format }, Input::Image(t)) => {
                     ensure!(
@@ -214,7 +237,10 @@ impl<'a> HeapBindings<'a> {
                         Access::ShaderRead
                     },
                 )),
-                Input::Sampler(_) => {}
+                Input::Images(images) => {
+                    uses.extend(images.iter().map(|t| t.usage(Access::ShaderRead)))
+                }
+                Input::Sampler(_) | Input::Samplers(_) => {}
             }
         }
         uses
@@ -230,4 +256,30 @@ impl<'a> HeapBindings<'a> {
         graph.forget(Resource::Buffer(self.record.buffer));
         self.record.retire(gpu)
     }
+}
+
+fn validate_image(
+    t: &Texture,
+    dimension: ara_gpu::texture::ViewDimension,
+    sample: SampleType,
+    name: &str,
+) -> Result<()> {
+    ensure!(
+        t.view.dimension == dimension && t.shape.samples == ara_gpu::texture::SampleCount::One,
+        "image {name} has the wrong view dimension"
+    );
+    let actual = match t.format {
+        Format::Depth16Unorm | Format::Depth32Float => SampleType::Depth,
+        Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint => SampleType::Uint,
+        Format::Rgba8
+        | Format::Rgba8Srgb
+        | Format::Rgba32Float
+        | Format::Rgba16Float
+        | Format::Rgb10A2
+        | Format::R32Float
+        | Format::R16Float
+        | Format::Rg16Float => SampleType::Float,
+    };
+    ensure!(actual == sample, "image {name} has the wrong sample type");
+    Ok(())
 }

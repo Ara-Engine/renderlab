@@ -46,6 +46,22 @@ pub enum InputKind {
         /// Scalar or depth interpretation.
         sample: SampleType,
     },
+    /// Fixed logical array of sampled views, retaining each element owner.
+    ImageArray {
+        /// Number of source binding-array elements.
+        count: u32,
+        /// Required native view dimension.
+        dimension: ViewDimension,
+        /// Required texel interpretation.
+        sample: SampleType,
+    },
+    /// Fixed logical array of cached immutable samplers.
+    SamplerArray {
+        /// Number of source binding-array elements.
+        count: u32,
+        /// Selects the comparison heap when true.
+        comparison: bool,
+    },
     /// Write-only storage image, with an exact portable format.
     StorageImage {
         /// Shader view dimension.
@@ -90,17 +106,34 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
             let naga::ArraySize::Constant(count) = size else {
                 bail!("source binding array needs a fixed element count");
             };
-            let AddressSpace::Storage { access } = g.space else {
-                bail!("only storage buffer binding arrays are ported");
-            };
-            ensure!(
-                matches!(module.types[base].inner, TypeInner::Struct { .. }),
-                "binding-array elements must be storage structs"
-            );
-            InputKind::BufferArray {
-                count: count.get(),
-                minimum: layout[base].size,
-                writable: access.contains(naga::StorageAccess::STORE),
+            match g.space {
+                AddressSpace::Storage { access } => {
+                    ensure!(
+                        matches!(module.types[base].inner, TypeInner::Struct { .. }),
+                        "binding-array elements must be storage structs"
+                    );
+                    InputKind::BufferArray {
+                        count: count.get(),
+                        minimum: layout[base].size,
+                        writable: access.contains(naga::StorageAccess::STORE),
+                    }
+                }
+                AddressSpace::Handle => match handle_kind(&module.types[base].inner)? {
+                    InputKind::Image { dimension, sample } => {
+                        image_entry(dimension, sample)?;
+                        InputKind::ImageArray {
+                            count: count.get(),
+                            dimension,
+                            sample,
+                        }
+                    }
+                    InputKind::Sampler { comparison } => InputKind::SamplerArray {
+                        count: count.get(),
+                        comparison,
+                    },
+                    _ => bail!("only sampled image and sampler handle arrays are supported"),
+                },
+                _ => bail!("unsupported binding-array address space"),
             }
         } else {
             match g.space {
@@ -177,6 +210,37 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
         "invalid selected resource keys"
     );
     Ok(inputs)
+}
+fn handle_kind(inner: &TypeInner) -> Result<InputKind> {
+    Ok(match *inner {
+        TypeInner::Sampler { comparison } => InputKind::Sampler { comparison },
+        TypeInner::Image {
+            dim,
+            arrayed,
+            class,
+        } => {
+            let dimension = match (dim, arrayed) {
+                (ImageDimension::D2, false) => ViewDimension::D2,
+                (ImageDimension::D2, true) => ViewDimension::D2Array,
+                (ImageDimension::D3, false) => ViewDimension::D3,
+                _ => bail!("unsupported handle-array image dimension"),
+            };
+            let sample = match class {
+                ImageClass::Sampled {
+                    kind: ScalarKind::Float,
+                    multi: false,
+                } => SampleType::Float,
+                ImageClass::Sampled {
+                    kind: ScalarKind::Uint,
+                    multi: false,
+                } => SampleType::Uint,
+                ImageClass::Depth { multi: false } => SampleType::Depth,
+                _ => bail!("unsupported handle-array image class"),
+            };
+            InputKind::Image { dimension, sample }
+        }
+        _ => bail!("unsupported handle-array element"),
+    })
 }
 pub(super) fn slot(ordinal: usize) -> String {
     format!("top.buffers[top.root[0]].data[(top.root[1] >> 2) + {ordinal}]")
