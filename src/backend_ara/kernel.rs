@@ -1,8 +1,10 @@
 //! Reflected compute entries share one heap packet and graph declaration path.
-use super::{bindings::HeapBindings, cache::ShaderCache, graph::Graph, shader::Pass};
+use super::{
+    bindings::HeapBindings, buffer::StorageBuffer, cache::ShaderCache, graph::Graph, shader::Pass,
+};
 use anyhow::{Result, ensure};
 use ara_gpu::{
-    GpuDevice, Pipeline,
+    Access, GpuDevice, Pipeline, Resource,
     commands::{Command, Recorder},
     cooked::RenderState,
 };
@@ -40,14 +42,50 @@ impl Kernel {
             "invalid kernel packet or extent"
         );
         graph.node_uses(rec, &inputs.uses())?;
+        self.dispatch(
+            rec,
+            inputs,
+            Command::Dispatch(std::array::from_fn(|i| extent[i].div_ceil(self.threads[i]))),
+        );
+        Ok(())
+    }
+    /// Consume GPU-produced dispatch arguments without a CPU readback. The source
+    /// buffer must declare native indirect usage and cannot alias writable inputs.
+    pub fn record_indirect(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        inputs: &HeapBindings<'_>,
+        arguments: &StorageBuffer,
+        offset: u64,
+    ) -> Result<()> {
+        ensure!(
+            inputs.pass() == self.pass
+                && offset.is_multiple_of(4)
+                && offset
+                    .checked_add(12)
+                    .is_some_and(|end| end <= arguments.len),
+            "invalid indirect kernel packet/range"
+        );
+        let mut uses = inputs.uses();
+        uses.push((Resource::Buffer(arguments.buffer), Access::Indirect).into());
+        graph.node_uses(rec, &uses)?;
+        self.dispatch(
+            rec,
+            inputs,
+            Command::DispatchIndirect {
+                arguments: arguments.buffer,
+                offset,
+            },
+        );
+        Ok(())
+    }
+    fn dispatch(&self, rec: &mut Recorder, inputs: &HeapBindings<'_>, command: Command) {
         rec.push(Command::BeginPass(format!("ara::{:?}", self.pass)));
         rec.push(Command::Pipeline(self.pipeline));
         rec.push(Command::Constants(inputs.roots()));
-        rec.push(Command::Dispatch(std::array::from_fn(|i| {
-            extent[i].div_ceil(self.threads[i])
-        })));
+        rec.push(command);
         rec.push(Command::EndPass);
-        Ok(())
     }
     /// Retire after submitting every referencing list.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {

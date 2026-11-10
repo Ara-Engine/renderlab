@@ -6,7 +6,7 @@ merges. This is incremental migration work, not whole-renderer parity.
 
 The first slice uses the existing `shaders/post.wgsl` and `post_tone.wgsl` directly.
 `src/backend_ara/shader` centralizes naga heap adaptation and checked SPIR-V repairs
-proven in Ara's replay. Reusable typed textures, settings records, post encoders and a persistent whole-image
+proven in Ara's replay. Reusable typed textures, settings records, post encoders and a persistent mip/layer
 state tracker are present. CPU-reference replays and a stored-HDR Metal example
 are described below. Vulkan runs remain pending.
 
@@ -60,7 +60,7 @@ The shader adapters are shared in one module, not repeated in each pass:
 
 The graph generates dependencies from declared direct resource uses. It preserves
 states across submissions, rejects undefined reads and write aliases, and orders
-same-state storage writes. It currently schedules only whole images/buffers on
+same-state storage writes. It schedules whole buffers and whole or mip/layer image views on
 Graphics. Range splitting, async queues and transient aliasing remain later work.
 
 ## First visible Metal output
@@ -353,7 +353,7 @@ plus display. The original conversion is single-sample; transparency composition
 particle simulation/billboards and native Vulkan remain pending.
 
 When Ara activates this external backend, its workspace must patch the pinned
-Ara git dependency to its local ara-gpu package. This unifies Rust package identity
+Ara git dependency to its local ara-gpu package. Patch the optional ara-sdl3-src package to the local workspace too when using its native window feature. This unifies Rust package identity
 so Renderlab borrows the existing device; compiling git and path copies together
 would produce distinct device types. This is an engine-integration dependency
 step, not another GPU device or descriptor-set model.
@@ -426,7 +426,7 @@ use the reflected packet and `Kernel` encoder, including a real comparison sampl
 and writable particle storage. Shader group sizes are reflected once at pipeline
 creation. The graph sees the particle record as a read/write storage dependency.
 
-A fixed 17-slot emitter uses20 allocated records: wrapped spawn counter0xfffffffe,
+A fixed 17-slot emitter uses 20 allocated records: wrapped spawn counter0xfffffffe,
 five births across the capacity wrap, random position/velocity/lifetime, drag and
 gravity, already dead/never alive particles, exact-boundary expiry, and three tail
 sentinels. Two directional lights, an ignored point light, nonunit camera exposure
@@ -500,12 +500,12 @@ Invalid bounds, overlapping writes and undefined reads are rejected before graph
 or recorder mutation. `Texture::view` now carries dimension and subresource bounds
 as one native view description.
 
-Two17×11 visibility frames produce171 exact float texels across five mips each.
+Two 17×11 visibility frames produce 171 exact float texels across five mips each.
 Both complete rebuilds and their full-pyramid readbacks are submitted before the
 first CPU wait, covering read-after-write, overwrite-after-read and reinitialization
 of the same allocation. The native replay also checks invalid read/alias/range
-rejection. All18 replays pass with Metal API/shader validation; all35 exported
-SPIR-V stages validate. There are27 original entries plus display transfer.
+rejection. All 18 replays pass with Metal API/shader validation; all 35 exported
+SPIR-V stages validate. There are 27 original entries plus display transfer.
 Native Vulkan, including mixed mip layouts, remains pending.
 
 The shared SPIR-V repair's independent review found no must-fix issue. Unknown
@@ -516,11 +516,11 @@ unsupported grouped-decoration checks also fail before rewriting.
 ## Mixed-program tile bins and GPU counter reset
 
 The original `program_bins` kernel now produces per-program tile lists and indirect
-arguments through seven reflected inputs. Runtime arrays of atomic32-bit values
+arguments through seven reflected inputs. Runtime arrays of atomic 32-bit values
 use the common buffer adapter; the existing workgroup scratch path retains the
 source's shared atomic mask and barriers. `ProgramBins` resets argument words and
 only each list's count header with ordered Ara fill commands, preserving unused
-list storage, then dispatches the original4×4 kernel. Dispatch metadata must match
+list storage, then dispatches the original 4×4 kernel. Dispatch metadata must match
 the supplied source RlList/region records, as documented by BinDispatch.
 
 The independent23×19 fixture spans five program slots, offset/widened region
@@ -533,6 +533,42 @@ untouched trailing sentinels. Concurrent atomic append order is intentionally
 unspecified, so the reference checks sets plus duplicate absence rather than byte
 order. The65535-workgroup argument-row rollover is outside this fixture.
 
-There are28 original entries plus display transfer. All19 replays pass with Metal
-API/shader validation; all36 SPIR-V stages validate. Native Vulkan execution and
+There are 28 original entries plus display transfer. All 19 replays pass with Metal
+API/shader validation; all 36 SPIR-V stages validate. Native Vulkan execution and
 consumption of these arguments by deferred shading remain pending.
+
+
+## Two-phase cluster cull, argument generation and reset
+
+Three unchanged visibility stages now use reflected packets: `cull`, `finish` and
+`reset`. The first classifies the full cluster set; the second pass consumes the
+first pass's GPU-written next-dispatch record at byte 48, with separate output
+argument buffers. There is no CPU count readback between stages. Finish generates
+software/hardware and pyramid arguments; reset preserves all sixteen working words
+in diagnostic history, clears them, and clears the shared reject header for pass 0.
+
+The independent f64 reference uses 16 clusters, five LOD groups, three affine models,
+a 32×32 viewport and two constant HZB pyramids. It covers owner/refined cut decisions,
+frustum rejection, near/eye-plane hardware fallback, small software/large hardware
+routing, mirrors, and a shear case that requires conservative affine LOD scaling.
+Five previous-pyramid rejects are retested; four recover and one remains occluded.
+Both cull/finish snapshots match unordered lists, exact counters, indirect/pyramid
+arguments and unused canaries. Reset runs pass 1 then pass 0 to prove header retention
+and clearing, and exact history copies. Decisions stay away from floating-point
+classification boundaries; rasterization and boundary precision are separate work.
+
+Intermediate snapshots exposed a Metal cross-encoder dependency bug in Ara.
+Its fix is pinned at 168ae55e1: late dependencies in an open compute encoder now
+also wait on producers in earlier encoders. The Ara native regression failed before
+the fix and passes afterward. The complete Renderlab replay retains all intermediate
+snapshots and ordinary pass timing; it uses no bypass or intermediate CPU wait.
+
+The image-range graph review found no must-fix defect and highlighted that Metal
+conservatively synchronizes stages rather than checking Vulkan layouts. A new pure
+`Graph::plan` contract test now verifies exact per-cell before/after accesses,
+whole-state inheritance/expansion, layer separation, import/forget and rejection
+without state mutation. Actual mixed-mip Vulkan execution remains pending.
+
+There are 31 original entries plus display transfer. All 21 focused tests pass,
+including Metal API/shader-validated replays and the pure barrier-plan check; all 39
+SPIR-V stages validate. Native Vulkan and full visibility raster/shading remain pending.

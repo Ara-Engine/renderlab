@@ -2,7 +2,7 @@
 use anyhow::{Result, ensure};
 use ara_gpu::{
     Access, Barrier, Image, Resource,
-    commands::{Command, Recorder},
+    commands::Recorder,
     sync::{BarrierRange, ResourceBarrier},
     texture::ImageViewDesc,
 };
@@ -120,6 +120,12 @@ impl Graph {
     /// mips/layers can be read and written in one node; overlapping writes cannot.
     /// Invalid declarations leave both the tracker and recorder unchanged.
     pub fn node_uses(&mut self, rec: &mut Recorder, uses: &[ResourceUse]) -> Result<()> {
+        rec.barrier_ranges(self.plan(uses)?);
+        Ok(())
+    }
+    /// Validate a node and advance scheduled states, returning its exact barriers.
+    /// Record these dependencies before executing the node. Errors change no state.
+    pub fn plan(&mut self, uses: &[ResourceUse]) -> Result<Vec<ResourceBarrier>> {
         let mut registered = Vec::new();
         for use_ in uses {
             if let ResourceUse::Image {
@@ -266,9 +272,6 @@ impl Graph {
                 self.states.push((key, after));
             }
         }
-        if !barriers.is_empty() {
-            rec.push(Command::Barriers(barriers));
-        }
-        Ok(())
+        Ok(barriers)
     }
 }

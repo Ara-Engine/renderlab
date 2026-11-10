@@ -23,6 +23,12 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Non-RT cluster cut, frustum and two-phase HZB classification.
+    VisibilityCull,
+    /// Cull output counters to indirect raster/pyramid/cull arguments.
+    VisibilityFinish,
+    /// Preserve counters and reset working words/header for the next frame.
+    VisibilityReset,
     /// Mixed-program tile lists and indirect dispatch arguments.
     ProgramBins,
     /// Base reversed-Z minimum depth from the visibility buffer.
@@ -87,6 +93,16 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::VisibilityCull | Self::VisibilityFinish | Self::VisibilityReset => format!(
+                "{}\n{}",
+                include_str!("../../../shaders/visibility_buffer.wgsl"),
+                if matches!(self, Self::VisibilityReset) {
+                    include_str!("../../../shaders/visibility_buffer_reset.wgsl")
+                } else {
+                    include_str!("../../../shaders/visibility_buffer_cull.wgsl")
+                }
+            )
+            .into(),
             Self::ProgramBins => include_str!("../../../shaders/program_bins.wgsl").into(),
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
@@ -235,6 +251,9 @@ impl Pass {
                 | Self::HzbBase
                 | Self::HzbReduce
                 | Self::ProgramBins
+                | Self::VisibilityCull
+                | Self::VisibilityFinish
+                | Self::VisibilityReset
         )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
@@ -296,6 +315,9 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::VisibilityCull => "cull",
+            Self::VisibilityFinish => "finish",
+            Self::VisibilityReset => "reset",
             Self::ProgramBins => "program_bins",
             Self::HzbBase => "base",
             Self::HzbReduce => "reduce",

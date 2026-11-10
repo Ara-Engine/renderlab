@@ -56,6 +56,9 @@ fn upload(
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
+        Pass::VisibilityCull,
+        Pass::VisibilityFinish,
+        Pass::VisibilityReset,
         Pass::ProgramBins,
         Pass::HzbBase,
         Pass::HzbReduce,
@@ -190,3 +193,11 @@ mod hzb_cases;
 mod program_bins_cases;
 #[path = "ara_backend/program_bins.rs"]
 mod program_bins_reference;
+
+#[path = "ara_backend/cases/visibility_cull.rs"]
+mod visibility_cull_cases;
+#[path = "ara_backend/visibility_cull.rs"]
+mod visibility_cull_reference;
+
+#[path = "ara_backend/cases/graph.rs"]
+mod graph_cases;
