@@ -288,7 +288,7 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     ))
 }
 /// The shared declarations, the per-draw array size, then one stage.
-fn stage_source(stage: &str) -> String {
+pub(crate) fn stage_source(stage: &str) -> String {
     format!(
         "{}\nconst PRIMARY_BATCHES:u32={}u;\n{stage}",
         include_str!("../shaders/visibility_buffer.wgsl"),

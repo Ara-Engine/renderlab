@@ -197,7 +197,7 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
     let dummy = StorageBuffer::new(&mut gpu, &[0; 64])?;
     let arrays: Vec<Vec<_>> = (0..5)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|i| batches.get(&i).map_or(&dummy, |b| &b.buffers[which]))
                 .collect()
         })
@@ -205,14 +205,14 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
     let fallback = &batches[&3];
     let image_arrays: Vec<Vec<_>> = (0..3)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|i| &batches.get(&i).unwrap_or(fallback).images[which])
                 .collect()
         })
         .collect();
     let sampler_arrays: Vec<Vec<_>> = (0..3)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|i| batches.get(&i).unwrap_or(fallback).samplers[which])
                 .collect()
         })

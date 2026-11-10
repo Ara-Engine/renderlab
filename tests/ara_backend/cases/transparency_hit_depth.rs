@@ -43,7 +43,7 @@ fn transparency_hit_depth_native_replay_against_cpu() -> Result<()> {
     }
     let arrays: Vec<Vec<_>> = (0..2)
         .map(|i| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|index| batches.get(&index).map_or(&dummy, |b| &b[i]))
                 .collect()
         })

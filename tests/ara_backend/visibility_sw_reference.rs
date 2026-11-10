@@ -30,7 +30,7 @@ pub struct Fixture {
     pub dispatch: [u32; 3],
     /// Original hardware draw arguments: 384 vertices and one instance per cluster.
     pub hardware_args: [u32; 4],
-    /// Two actual data owners at logical array indices 3 and 37.
+    /// Two actual data owners at logical array indices 3 and 173.
     pub batches: Vec<Batch>,
     /// Visibility source dimensions.
     pub viewport: [u32; 2],
@@ -302,11 +302,11 @@ pub fn fixture() -> Fixture {
             record.map(f32::to_bits)
         })
         .collect();
-    let placements = vec![0xc000_0003, 0xc000_0025, 0x8000_0003];
+    let placements = vec![0xc000_0003, 0xc000_00ad, 0x8000_0003];
     // Physical owner order is deliberately opposite logical index order.
     let mut batches = vec![
         Batch {
-            index: 37,
+            index: 173,
             words: vec![0xdead_0037; 7],
         },
         Batch {

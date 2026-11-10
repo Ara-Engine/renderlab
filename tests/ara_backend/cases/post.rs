@@ -109,17 +109,19 @@ fn bloom_and_tone_native_replay_against_cpu() -> Result<()> {
         let bytes = gpu.read(read)?;
         let actual: Vec<f32> = if bpp == 16 {
             bytes
-                .chunks_exact(4)
-                .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| f32::from_le_bytes(*v))
                 .collect()
         } else if bpp == 4 {
             bytes.iter().map(|v| *v as f32 / 255.).collect()
         } else {
             bytes
-                .chunks_exact(2)
-                .map(|v| {
-                    f16::from_bits(u16::from_le_bytes(v.try_into().expect("two bytes"))).to_f32()
-                })
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|v| f16::from_bits(u16::from_le_bytes(*v)).to_f32())
                 .collect()
         };
         ensure!(

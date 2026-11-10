@@ -23,7 +23,7 @@ use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
 pub(crate) mod hardware_shadow_gpu;
 use hardware_shadow_gpu::HardwareState;
 #[path = "fresh_shadow_gpu.rs"]
-mod fresh_shadow_gpu;
+pub(crate) mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
 pub(crate) mod primary_ray_gpu;

@@ -42,7 +42,7 @@ fn primary_geometry_check_retry_queue_native_replay() -> Result<()> {
     let dummy = StorageBuffer::new(&mut gpu, &[0; 16])?;
     let arrays: Vec<Vec<_>> = (0..2)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|i| batches.get(&i).map_or(&dummy, |b| &b[which]))
                 .collect()
         })

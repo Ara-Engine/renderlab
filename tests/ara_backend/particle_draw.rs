@@ -8,8 +8,8 @@ use renderlab::{Mat4, Vec3};
 pub struct Fixture {
     /// `TpFrame`, 336 bytes in source-layout words.
     pub frame: [u32; 84],
-    /// `TpEmitter`, 160 bytes; capacity is five while storage contains padding.
-    pub emitter: [u32; 40],
+    /// `TpEmitter`, 512 bytes; capacity is five while storage contains padding.
+    pub emitter: [u32; 128],
     /// Eight source-layout particles, including readable padding records.
     pub particles: Vec<[u32; 12]>,
     /// Far-to-near packed keys, followed by zero-depth dead/padded ranks.
@@ -192,7 +192,7 @@ pub fn render(fixture: &Fixture) -> Image {
                 if depth > opaque {
                     continue;
                 }
-                let uv = [(px - left) / (right - left), (bottom - py) / (bottom - top)];
+                let uv = [(px - left) / (right - left), (py - top) / (bottom - top)];
                 let (shape, tint) = if textured {
                     let sprite = sample(&fixture.sprite, uv);
                     (sprite[3], Vec3::new(sprite[0], sprite[1], sprite[2]))
@@ -243,7 +243,8 @@ pub fn fixture(textured: bool) -> Fixture {
     put(&mut frame, 60, &[0., 1., 0., 0.]);
     put(&mut frame, 64, &[24., 20., 1. / 24., 1. / 20.]);
     frame[76..80].copy_from_slice(&[0, 0, 24, 20]);
-    let mut emitter = [0; 40];
+    let mut emitter = [0; 128];
+    emitter[124] = 1f32.to_bits(); // Preserve square sprites in the extended ABI.
     put(&mut emitter, 12, &[0.8, 0.35, 0.2, 0.8]);
     put(&mut emitter, 16, &[0.2, 0.55, 0.9, 0.35]);
     put(&mut emitter, 20, &[0.12, 0.06, 0.03, 10.]);

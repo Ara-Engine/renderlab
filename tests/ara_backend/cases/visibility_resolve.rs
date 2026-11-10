@@ -52,7 +52,7 @@ fn source_triangle_receiver_resolve_native_replay_against_cpu() -> Result<()> {
     }
     let arrays: Vec<Vec<_>> = (0..3)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|i| batches.get(&i).map_or(&dummy, |b| &b[which]))
                 .collect()
         })

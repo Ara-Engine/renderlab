@@ -42,7 +42,7 @@ impl ParticleSortBuffers {
         let forward = -camera.view().inverse().z_axis.truncate();
         frame[48..51].copy_from_slice(&eye.to_array());
         frame[52..55].copy_from_slice(&forward.to_array());
-        let mut emitter = [0f32; 40];
+        let mut emitter = [0f32; 128];
         emitter[32] = f32::from_bits(capacity);
         emitter[37] = sorted_len as f32;
         let keys = vec![0xdeadbeefu32; sorted_len as usize];

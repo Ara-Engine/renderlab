@@ -56,7 +56,7 @@ fn hit_based_post_velocity_depth_and_history_native_replay() -> Result<()> {
     }
     let arrays: Vec<Vec<_>> = (0..3)
         .map(|which| {
-            (0..64)
+            (0..renderlab::TRACED_DRAWS)
                 .map(|index| {
                     batches.get(&index).map_or(&dummy, |b| match which {
                         0 => &b.vertices,
@@ -167,8 +167,10 @@ fn hit_based_post_velocity_depth_and_history_native_replay() -> Result<()> {
     for (frame, read) in snapshots.into_iter().enumerate() {
         let bytes = gpu.read(read)?;
         let actual: Vec<[f32; 4]> = bytes
-            .chunks_exact(16)
-            .map(bytemuck::pod_read_unaligned)
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|bytes| bytemuck::pod_read_unaligned(bytes))
             .collect();
         let expected = &f.expected[frame];
         ensure!(actual.len() == expected.len(), "post image length differs");

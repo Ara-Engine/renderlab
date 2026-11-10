@@ -5,8 +5,8 @@ use renderlab::{Mat4, Vec3};
 pub struct Fixture {
     /// `TpFrame`: three matrices followed by nine vec4 records, 336 bytes.
     pub frame: [u32; 84],
-    /// `TpEmitter`: nine float vec4 records and raw u32 counts, 160 bytes.
-    pub emitter: [u32; 40],
+    /// `TpEmitter`: extended source-layout controls, raw u32 counts and curve records, 512 bytes.
+    pub emitter: [u32; 128],
     /// `LightingUniform`: eye/count, constant environment/exposure and map control.
     pub lighting: [u32; 12],
     /// Three 80-byte light records; the middle point light must be ignored.
@@ -83,7 +83,7 @@ fn incident(lighting: &[u32; 12], lights: &[[u32; 20]]) -> Vec3 {
 /// nor `tp.sun_lux` scales the result. Records beyond capacity remain untouched.
 pub fn update(
     frame: &[u32; 84],
-    emitter: &[u32; 40],
+    emitter: &[u32; 128],
     particles: &[[u32; 12]],
     lighting: &[u32; 12],
     lights: &[[u32; 20]],
@@ -114,14 +114,39 @@ pub fn update(
             let fraction = uniform(&mut seed);
             let lifetime = f32::from_bits(emitter[28]) * (1. - fraction)
                 + f32::from_bits(emitter[29]) * fraction;
+            // The extended source draws an initial burst age, then a spread age;
+            // disabled velocity-box controls still consume three random coordinates.
+            let _burst_age = uniform(&mut seed);
             let age =
                 dt * ((spawned - 1 - spawn_index) as f32 + uniform(&mut seed)) / spawned as f32;
-            let velocity = vector(emitter, 4) + ball(&mut seed) * f32::from_bits(emitter[7]);
-            let position =
-                vector(emitter, 0) + ball(&mut seed) * f32::from_bits(emitter[3]) + velocity * age;
+            let _box = [uniform(&mut seed), uniform(&mut seed), uniform(&mut seed)];
+            let initial_velocity =
+                vector(emitter, 4) + ball(&mut seed) * f32::from_bits(emitter[7]);
+            let origin = vector(emitter, 0) + ball(&mut seed) * f32::from_bits(emitter[3]);
+            // Analytic constant-acceleration motion with linear drag over birth age.
+            let drag = f64::from(f32::from_bits(emitter[11]));
+            let time = f64::from(age);
+            let attenuation = (-drag * time).exp();
+            let travel = if drag < 1e-4 {
+                time
+            } else {
+                -(-drag * time).exp_m1() / drag
+            };
+            let acceleration_travel = if drag < 1e-4 {
+                time * time * 0.5
+            } else {
+                (time - travel) / drag
+            };
+            let a = vector(emitter, 8).as_dvec3();
+            let velocity = (initial_velocity.as_dvec3() * attenuation + a * travel).as_vec3();
+            let position = (origin.as_dvec3()
+                + initial_velocity.as_dvec3() * travel
+                + a * acceleration_travel)
+                .as_vec3();
+            let phase = (first.wrapping_add(spawn_index) % 100_000) as f32 * 0.013;
             *particle = [
                 position.x, position.y, position.z, age, velocity.x, velocity.y, velocity.z,
-                lifetime, 0., 0., 0., 0.,
+                lifetime, 0., 0., 0., phase,
             ];
         } else if particle[3] < particle[7] {
             let attenuation = (-f32::from_bits(emitter[11]) * dt).exp();
@@ -135,7 +160,7 @@ pub fn update(
         // A particle that dies during this step retains its old irradiance and W.
         if particle[3] < particle[7] {
             particle[8..11].copy_from_slice(&irradiance.to_array());
-            particle[11] = 0.;
+            // Incident-light refresh preserves the per-particle noise phase.
         }
     }
     output
@@ -164,7 +189,7 @@ pub fn fixture() -> Fixture {
     frame[76..80].copy_from_slice(&[0, 0, 32, 24]);
     put(&mut frame, 80, &[0.125, 0.001, 1., 0.]);
 
-    let mut emitter = [0; 40];
+    let mut emitter = [0; 128];
     put(&mut emitter, 0, &[0.5, 1.25, -2., 0.65]);
     put(&mut emitter, 4, &[1., 0.75, -0.5, 0.8]);
     put(&mut emitter, 8, &[0.4, -9.5, 0.25, 0.75]);

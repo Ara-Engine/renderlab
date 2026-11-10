@@ -57,7 +57,9 @@ fn software_and_hardware_cluster_raster_native_replay() -> Result<()> {
         );
         gaps.push(StorageBuffer::new(&mut gpu, &[0; 16])?);
     }
-    let array: Vec<_> = (0..64).map(|i| batches.get(&i).unwrap_or(&dummy)).collect();
+    let array: Vec<_> = (0..renderlab::TRACED_DRAWS)
+        .map(|i| batches.get(&i).unwrap_or(&dummy))
+        .collect();
     let mut packets = Vec::new();
     for pass in [Pass::VisibilitySoftware, Pass::VisibilityHardware] {
         let values: Vec<_> = inputs(pass)?

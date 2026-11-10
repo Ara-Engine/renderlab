@@ -905,3 +905,51 @@ validate. The independent scoped review found no must-fix issues. Clippy adds no
 warnings in the backend library or new Glass files; existing fixture warnings
 remain. Ara is now pinned to **0b4308e18**, including both reviewed Vulkan
 queue-family fixes and main d8015f178.
+
+## Fresh receiver raster and current-main integration (entry 45)
+
+`receiver_raster::Receivers` uses the original `vs`/`fs_receiver` pair from the
+fresh-shadow source factory. It clears the world/epsilon, raw geometric normal/thin
+sign and reversed-depth attachments once, then retains depth winners over ordered
+mesh draws. Color attachments select their actual mip/layer. This prepass executes
+no ray queries; visibility tracing remains a separate pass.
+
+The scalar fixture uses perspective, mirrored/sheared models and reordered instance
+slots, translated to X≈384 with a compensated camera. Three separately recorded
+mesh draws check attachment preservation. Four queued sidedness/thinness variants
+match 338 covered pixels each, with exact misses, epsilon1/2048 and thin sign;
+maximum world error is 0.000091552734 (three f32 ULPs at384), normal/depth error
+5.96e-8. Tangent streams, clipping and multisample receivers remain unproven.
+The independent review found a missing packet-contract check; a same-family,
+zero-binding program was accepted before the fix and is now rejected before graph
+or command mutation. The fixture records that failing-before/passing-after probe.
+
+Renderlab main **f820af9** is merged. Its original source factories now supply the
+256-entry draw constant to visibility and program binning. The replay arrays/list
+records use the public `TRACED_DRAWS` value; original software/hardware visibility
+and authored primary shading actually fetch logical owner173, beyond the old limit.
+No shader repair was required, and the lazy packet frontend needed no capacity change.
+
+Main also extends `TpEmitter` to512 bytes and changes birth motion and texture UVs.
+The sort record and replay inputs now use that ABI. The CPU birth oracle accounts
+for the extra random draws, analytically integrates acceleration/drag, and preserves
+noise phase; it differs by at most1.20e-6. Billboard sampling uses the new top-left
+UV convention. Extended shapes, forces, curves and flipbooks are compiled but are
+not CPU-reference proven by these default-extension fixtures. All original wgpu
+changes on this branch remain visibility seams only.
+
+All **38** focused tests pass in both Metal validation modes; **61** standard
+SPIR-V stages plus four variants validate for Vulkan1.3. Backend library and
+integration clippy report no diagnostics; existing warnings outside this module
+remain. Vulkan execution of every migrated pass is pending for the PC.
+
+The Ara0b4308e18 CPU barrier benchmark was rerun after the native hardening:
+200 alternating AB/BA pairs after20 warmups, 256 barriers, timestamps disabled,
+with GPU waits excluded from CPU time. Individual/batched total p50 is
+**131.416/15.208µs**, p95 **165.667/35.125µs**; record p50 **3.208/0.500µs**, submit
+p50 **128.333/14.708µs**. This is a microbenchmark, not a renderer-frame speed claim.
+The unchanged `ara-dev gpu` guard accepted it: foreign CPU mean5.82%, peak11.33%
+without a sustained breach; GPU peak0.64%. Evidence stays in Ara's ignored
+`target/ara-gpu/barrier-timing-review.{json,log}` and
+`target/ara-dev/gpu-load/90104-1794339026238.json`. The numbers are also on Ara PR#5;
+its head remains0b4308e18, so this measurement does not change the Vulkan gate target.

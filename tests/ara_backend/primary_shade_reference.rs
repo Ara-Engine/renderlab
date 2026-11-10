@@ -34,7 +34,7 @@ pub struct Sampled {
 
 /// One actual owner shared by every logical material/geometry array.
 pub struct Batch {
-    /// Logical index 3 or 37, independent of physical owner order.
+    /// Logical index 3 or 173, independent of physical owner order.
     pub index: u32,
     /// Original three-vec4 vertex packing: position/normal, normal/UV, colour.
     pub vertices: Vec<[u32; 4]>,
@@ -56,8 +56,8 @@ pub struct Batch {
 
 /// One original per-program list record, followed by its dispatch shape.
 pub struct List {
-    /// 272-byte RlList: slot/base/capacity/flags, then64 packed owner program IDs.
-    pub record: [u32; 68],
+    /// RlList: slot/base/capacity/flags, then TRACED_DRAWS packed owner program IDs.
+    pub record: [u32; 4 + renderlab::TRACED_DRAWS as usize],
     /// Workgroup counts, including one surplus group to test the length guard.
     pub dispatch: [u32; 3],
 }
@@ -356,7 +356,7 @@ fn batch(index: u32, owner: u32) -> Batch {
     }
 }
 
-/// Two owners at3/37, mixed hit tiles, stale uncovered pixels and partial 16x16
+/// Two owners at3/173, mixed hit tiles, stale uncovered pixels and partial 16x16
 /// clear blocks. The two lists partition hit work and reproduce the full dispatch.
 pub fn fixture() -> Fixture {
     let size = [19, 9];
@@ -393,7 +393,7 @@ pub fn fixture() -> Fixture {
             })
             .collect(),
     );
-    buffers.insert(key(1, 5), vec![3, 0x8000_0025]);
+    buffers.insert(key(1, 5), vec![3, 0x8000_00ad]);
     let mut lighting = vec![0; 12];
     lighting[2] = 2f32.to_bits();
     lighting[7] = 1f32.to_bits();
@@ -436,9 +436,9 @@ pub fn fixture() -> Fixture {
         }
         list_words[base] = entries.len() as u32;
         list_words[base + 1..base + 1 + entries.len()].copy_from_slice(&entries);
-        let mut record = [0; 68];
+        let mut record = [0; 4 + renderlab::TRACED_DRAWS as usize];
         record[..4].copy_from_slice(&[slot as u32, base as u32, 16, 0]);
-        record[4 + 37] = 1;
+        record[4 + 173] = 1;
         lists.push(List {
             record,
             dispatch: [entries.len() as u32 + 1, 1, 1],
@@ -452,7 +452,7 @@ pub fn fixture() -> Fixture {
         coverage: vec![1, 1, 0, 0, 1, 0, 0, 0, 0],
         region,
         buffers,
-        batches: vec![batch(37, 1), batch(3, 0)],
+        batches: vec![batch(173, 1), batch(3, 0)],
         list_words,
         lists,
         tiles_dispatch: [2, 3, 1],

@@ -138,8 +138,7 @@ fn fraction_exponent(value: f32) -> (f32, i32) {
 fn exposed_product(a: Vec3, b: Vec3, exposure: f32) -> Vec3 {
     let product = a * b;
     let exposed = product * exposure;
-    let fast = exposure >= f32::MIN_POSITIVE
-        && exposure <= 3e38
+    let fast = (f32::MIN_POSITIVE..=3e38).contains(&exposure)
         && (0..3).all(|channel| {
             (product[channel] >= f32::MIN_POSITIVE
                 && product[channel] <= 3e38

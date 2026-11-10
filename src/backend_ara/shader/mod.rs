@@ -42,6 +42,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original depth-winning geometric shadow receiver prepass.
+    ReceiverRaster,
     /// Original transparency multisample background seed.
     TransparencySeed,
     /// Original caller-programmed transparent pane composition.
@@ -134,6 +136,11 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::ReceiverRaster => crate::renderer::fresh_shadow_gpu::shader_source(include_str!(
+                "../../../shaders/scene.wgsl"
+            ))
+            .expect("embedded fresh receiver composition")
+            .into(),
             Self::TransparencyGlass => crate::backend_ara::transparency_glass::source(
                 include_str!("../shaders/glass_material.wgsl"),
             )
@@ -188,29 +195,27 @@ impl Pass {
             )
             .expect("embedded visibility resolve composition")
             .into(),
-            Self::VisibilityHardware => format!(
-                "{}\n{}",
-                include_str!("../../../shaders/visibility_buffer.wgsl"),
-                include_str!("../../../shaders/visibility_buffer_raster.wgsl")
+            Self::VisibilityHardware => crate::renderer::visibility_buffer::stage_source(
+                include_str!("../../../shaders/visibility_buffer_raster.wgsl"),
             )
             .into(),
-            Self::VisibilitySoftware => format!(
-                "{}\n{}",
-                include_str!("../../../shaders/visibility_buffer.wgsl"),
-                include_str!("../../../shaders/visibility_buffer_sw.wgsl")
+            Self::VisibilitySoftware => crate::renderer::visibility_buffer::stage_source(
+                include_str!("../../../shaders/visibility_buffer_sw.wgsl"),
             )
             .into(),
-            Self::VisibilityCull | Self::VisibilityFinish | Self::VisibilityReset => format!(
-                "{}\n{}",
-                include_str!("../../../shaders/visibility_buffer.wgsl"),
-                if matches!(self, Self::VisibilityReset) {
-                    include_str!("../../../shaders/visibility_buffer_reset.wgsl")
-                } else {
-                    include_str!("../../../shaders/visibility_buffer_cull.wgsl")
-                }
-            )
-            .into(),
-            Self::ProgramBins => include_str!("../../../shaders/program_bins.wgsl").into(),
+            Self::VisibilityCull | Self::VisibilityFinish | Self::VisibilityReset => {
+                crate::renderer::visibility_buffer::stage_source(
+                    if matches!(self, Self::VisibilityReset) {
+                        include_str!("../../../shaders/visibility_buffer_reset.wgsl")
+                    } else {
+                        include_str!("../../../shaders/visibility_buffer_cull.wgsl")
+                    },
+                )
+                .into()
+            }
+            Self::ProgramBins => {
+                crate::renderer::primary_ray_gpu::program_lists::bin_source().into()
+            }
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
@@ -341,7 +346,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::TransparencyGlass
+            Self::ReceiverRaster
+                | Self::TransparencyGlass
                 | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::VisibilityHardware
@@ -362,7 +368,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::TransparencyGlass
+            Self::ReceiverRaster
+                | Self::TransparencyGlass
                 | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::PrimaryTrace
@@ -390,7 +397,10 @@ impl Pass {
         )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
-        if matches!(self, Self::MeshToon | Self::TransparencyGlass) {
+        if matches!(
+            self,
+            Self::MeshToon | Self::TransparencyGlass | Self::ReceiverRaster
+        ) {
             (4, 0)
         } else {
             (3, 0)
@@ -441,6 +451,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",
             Self::TransparencySeed => "tp_seed_fs",
             Self::FallbackPresent => "fs_present",

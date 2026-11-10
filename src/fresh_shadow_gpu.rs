@@ -6,7 +6,7 @@ use crate::pipeline_compilation::PipelineDevice;
 pub(super) const TILE: [u32; 2] = [2, 2];
 
 /// Compose only after the hardware path has checked affine geometry and marker order.
-pub(super) fn shader_source(source: &str) -> Result<String, Error> {
+pub(crate) fn shader_source(source: &str) -> Result<String, Error> {
     compose(source, include_str!("../shaders/fresh_shadows.wgsl"))
 }
 

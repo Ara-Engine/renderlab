@@ -191,7 +191,7 @@ pub fn rasterize_with(
                 }
             })
             .collect();
-        for triangle in fixture.indices.chunks_exact(3) {
+        for triangle in fixture.indices.as_chunks::<3>().0.iter() {
             let mut vertices = [
                 projected[triangle[0] as usize],
                 projected[triangle[1] as usize],

@@ -32,8 +32,8 @@ pub struct Fixture {
     pub region: [u32; 4],
     /// Storage u32 records: low 29 bits name a batch; high bits are placement flags.
     pub placements: Vec<u32>,
-    /// 272-byte RlList uniform: four header words then 64 batch-to-slot words.
-    pub list: [u32; 68],
+    /// RlList uniform: four header words then TRACED_DRAWS batch-to-slot words.
+    pub list: [u32; 4 + renderlab::TRACED_DRAWS as usize],
     /// Allocated frame-program slots, including a hidden program with no live hits.
     pub slots: u32,
     /// Workgroup counts; the entry's local size is 4x4x1.
@@ -118,7 +118,7 @@ pub fn reference(fixture: &Fixture) -> Expected {
                         0
                     } else {
                         let batch = fixture.placements[(placement - 1) as usize] & 0x1fff_ffff;
-                        assert!(batch < 64);
+                        assert!(batch < renderlab::TRACED_DRAWS);
                         fixture.list[4 + batch as usize]
                     };
                     assert!(program < fixture.slots);
@@ -168,7 +168,7 @@ pub fn fixture() -> Fixture {
         0xe000_003f,
         0x6000_0000,
     ];
-    let mut list = [0; 68];
+    let mut list = [0; 4 + renderlab::TRACED_DRAWS as usize];
     // Count header + all 25 region tiles + all four clear blocks + three spare words.
     list[2] = 33;
     for (batch, program) in [(0, 0), (3, 1), (17, 2), (42, 3), (63, 4)] {

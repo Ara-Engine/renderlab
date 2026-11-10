@@ -19,7 +19,7 @@ mod shadow_visibility_filter;
 pub(super) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
 #[path = "program_lists.rs"]
-pub(super) mod program_lists;
+pub(crate) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the

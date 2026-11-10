@@ -4,7 +4,7 @@ use renderlab::backend_ara::{buffer::StorageBuffer, hzb::Hzb};
 fn visibility(size: [u32; 2], frame: u32) -> Vec<[u32; 2]> {
     (0..size[0] * size[1])
         .map(|i| {
-            let z = if (i + frame * 3) % 29 == 0 {
+            let z = if (i + frame * 3).is_multiple_of(29) {
                 0.
             } else {
                 0.05 + ((i * 17 + frame * 11) % 97) as f32 * 0.009

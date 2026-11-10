@@ -34,3 +34,6 @@ pub mod transparency_seed;
 pub mod visibility_cull;
 pub mod visibility_raster;
 pub mod volumes;
+
+/// Depth-winning geometric receivers for the fresh visibility path.
+pub mod receiver_raster;

@@ -116,7 +116,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
     };
     if matches!(
         pass,
-        Pass::MeshDiagnostic | Pass::MeshToon | Pass::TransparencyGlass
+        Pass::MeshDiagnostic | Pass::MeshToon | Pass::TransparencyGlass | Pass::ReceiverRaster
     ) {
         // Ara reserves attributes0..10 for the converter ABI. Explicit streams
         // map WGSL locationN to native attribute11+N on every mesh shader.

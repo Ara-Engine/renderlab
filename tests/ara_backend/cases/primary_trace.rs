@@ -92,10 +92,10 @@ fn production_primary_trace_and_receivers_native_replay_against_cpu() -> Result<
             .collect(),
     )?;
     let dummy = StorageBuffer::new(&mut gpu, &[0; 16])?;
-    let vertex_array: Vec<_> = (0..64)
+    let vertex_array: Vec<_> = (0..renderlab::TRACED_DRAWS)
         .map(|i| meshes.get(&i).map_or(&dummy, |m| &m.vertices))
         .collect();
-    let index_array: Vec<_> = (0..64)
+    let index_array: Vec<_> = (0..renderlab::TRACED_DRAWS)
         .map(|i| meshes.get(&i).map_or(&dummy, |m| &m.indices))
         .collect();
     let models = StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&f.models))?;
