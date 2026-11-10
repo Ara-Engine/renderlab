@@ -8,7 +8,7 @@ pub struct Model {
     pub altitude: f32,
 }
 impl Model {
-    fn medium(&self, h: f32) -> (Vec3, Vec3, Vec3, Vec3) {
+    pub(super) fn medium(&self, h: f32) -> (Vec3, Vec3, Vec3, Vec3) {
         let m = self.medium;
         let dr = (-h.max(0.) * (1. / m.rayleigh_scale_height_km)).exp();
         let dm = (-h.max(0.) * (1. / m.mie_scale_height_km)).exp();
@@ -24,7 +24,7 @@ impl Model {
             mie,
         )
     }
-    fn sphere(&self, p: Vec3, d: Vec3, r: f32) -> f32 {
+    pub(super) fn sphere(&self, p: Vec3, d: Vec3, r: f32) -> f32 {
         let b = p.dot(d);
         let c = p.dot(p) - r * r;
         let disc = b * b - c;
@@ -43,7 +43,7 @@ impl Model {
     fn unit_uv(&self, x: f32, n: f32) -> f32 {
         0.5 / n + x * (1. - 1. / n)
     }
-    fn trans_sample(&self, image: &Image, r: f32, mu: f32) -> Vec3 {
+    pub(super) fn trans_sample(&self, image: &Image, r: f32, mu: f32) -> Vec3 {
         let bottom = self.medium.ground_radius_km;
         let top = self.medium.top_radius_km;
         if mu < -(1. - bottom * bottom / (r * r)).max(0.).sqrt() {
@@ -164,7 +164,7 @@ impl Model {
             pixels,
         }
     }
-    fn multi_sample(&self, image: &Image, r: f32, mu: f32) -> Vec3 {
+    pub(super) fn multi_sample(&self, image: &Image, r: f32, mu: f32) -> Vec3 {
         let u = (mu * 0.5 + 0.5).clamp(0., 1.);
         let v = ((r - self.medium.ground_radius_km)
             / (self.medium.top_radius_km - self.medium.ground_radius_km))

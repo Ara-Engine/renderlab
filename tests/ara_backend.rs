@@ -64,6 +64,8 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::MotionBlur,
         Pass::DepthOfField,
         Pass::LightCluster,
+        Pass::AtmosphereAerial,
+        Pass::AtmosphereFogIntegrate,
         Pass::AtmosphereTransmittance,
         Pass::AtmosphereMultiscatter,
         Pass::AtmosphereSky,
@@ -113,3 +115,8 @@ mod skinning_cases;
 
 #[path = "ara_backend/cases/post_surface.rs"]
 mod post_surface_cases;
+
+#[path = "ara_backend/cases/volumes.rs"]
+mod volume_cases;
+#[path = "ara_backend/volumes.rs"]
+mod volume_reference;

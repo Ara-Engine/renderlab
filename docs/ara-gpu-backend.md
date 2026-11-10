@@ -218,3 +218,20 @@ references pass for both variants: max error 1.20e-7, cut velocities exactly zer
 This is camera motion; object motion still belongs to the later primary-surface
 port. There are 16 original Renderlab entry points plus display transfer, and
 20 exported SPIR-V stages validate. Vulkan execution remains pending.
+
+## Camera-volume aerial and fog integrators
+
+Two more unchanged WGSL entries produce the packed 96-slice camera volume:
+`at_aerial_volume` writes slices64..96 and `at_fog_integrate` writes0..64 from
+resolved visibility/extinction. The frontend adds typed writable3D heap views;
+SPIR-V aliases that view onto storage binding3 by generated variable identity.
+The camera record retains the original432-byte layout, flags, fog parameters,
+matrices and integer grid. No sun-visibility stub or temporal replacement is linked.
+
+A translated camera and fixed3×2×64 visibility/extinction stream feed independent
+scalar references. Both native stages differ by at most0.000488282, below0.002;
+the aerial write preserves the initialized fog region, and the subsequent fog
+write preserves all aerial slices. The full9-test replay suite passes with Metal
+API/shader validation; all22 SPIR-V stages validate. This brings the port to18
+original Renderlab entries plus display transfer. Visibility injection and fog
+history remain for the later shadow/temporal phase; Vulkan execution is pending.

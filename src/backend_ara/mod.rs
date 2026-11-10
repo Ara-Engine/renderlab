@@ -14,3 +14,4 @@ pub mod post_surface;
 pub mod shader;
 pub mod skinning;
 pub mod transfer;
+pub mod volumes;

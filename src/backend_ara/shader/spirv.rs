@@ -270,6 +270,10 @@ fn atmosphere_interface(body: &str, pass: Pass, original: &naga::Module) -> Resu
         ("atmosphere_sampler", "ara_samplers[ara_root.w5]"),
         ("at_specular_out", "ara_outputs[ara_root.w4]"),
         ("at_diffuse_out", "ara_outputs[ara_root.w4]"),
+        ("at_volume_out", "ara_volume_outputs[ara_root.w4]"),
+        ("at_scatter_out", "ara_volume_outputs[ara_root.w4]"),
+        ("at_scatter", "ara_luts[ara_root.w7]"),
+        ("at_history", "ara_luts[ara_root.w6]"),
     ]);
     let out = rewrite_globals(body, &names, original)?;
     let output = if pass.environment() {
@@ -281,6 +285,8 @@ fn atmosphere_interface(body: &str, pass: Pass, original: &naga::Module) -> Resu
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
+@group(0) @binding(9) var ara_volume_outputs:binding_array<texture_storage_3d<rgba16float,write>>;
+@group(0) @binding(7) var ara_luts:binding_array<texture_3d<f32>>;
 @group(0) @binding(1) var<storage,read> ara_atmospheres:binding_array<AtmosphereUniform>;
 @group(0) @binding(5) var ara_textures:binding_array<texture_2d<f32>>;
 @group(0) @binding(3) var ara_outputs:binding_array<{output}>;
@@ -310,6 +316,8 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
             let name = std::str::from_utf8(&bytes)?;
             let remap = if name == "ara_depths" {
                 Some((11, 5))
+            } else if name == "ara_volume_outputs" {
+                Some((9, 3))
             } else if name == "ara_luts" {
                 Some((7, 5))
             } else if name == "ara_frames" {

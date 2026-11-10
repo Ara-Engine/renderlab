@@ -139,7 +139,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     source.replace_range(start..close + 1, &ordinary);
     let entry = format!("ara_{}", pass.entry());
     let builtin = builtins.join(", ");
-    source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraWriteVolumeEntry {ulong unused; texture3d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
@@ -220,6 +220,11 @@ fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
             "at_transmittance_out" | "at_multiscatter_out" | "at_skyview_out" => {
                 "((device AraWriteImageEntry*)top.storage_images)[top.root[4]].texture".into()
             }
+            "at_volume_out" | "at_scatter_out" => {
+                "((device AraWriteVolumeEntry*)top.storage_images)[top.root[4]].texture".into()
+            }
+            "at_history" => "((device AraVolumeEntry*)top.textures)[top.root[6]].texture".into(),
+            "at_scatter" => "((device AraVolumeEntry*)top.textures)[top.root[7]].texture".into(),
             "at_specular_out" | "at_diffuse_out" => {
                 "((device AraWriteCubeImageEntry*)top.storage_images)[top.root[4]].texture".into()
             }

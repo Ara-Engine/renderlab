@@ -13,6 +13,7 @@ use ara_gpu::{
 pub struct AtmosphereParameters {
     /// Storage record to declare and retire.
     pub record: StorageBuffer,
+    pub(crate) grid: Option<[u32; 2]>,
 }
 impl AtmosphereParameters {
     /// Validate physical settings; the LUTs are per unit extraterrestrial sun illuminance.
@@ -22,6 +23,75 @@ impl AtmosphereParameters {
         toward_sun: crate::Vec3,
         altitude_km: f32,
     ) -> Result<Self> {
+        let values = Self::medium_values(medium, toward_sun, altitude_km)?;
+        Ok(Self {
+            record: StorageBuffer::new(gpu, bytemuck::cast_slice(&values))?,
+            grid: None,
+        })
+    }
+    /// Camera-volume record with the original fog settings and unjittered matrices.
+    /// LUTs remain per unit extraterrestrial illuminance; no exposure is applied here.
+    pub fn for_camera(
+        gpu: &mut GpuDevice,
+        settings: crate::Atmosphere,
+        toward_sun: crate::Vec3,
+        camera: crate::Camera,
+        viewport: [u32; 2],
+        grid: [u32; 2],
+    ) -> Result<Self> {
+        settings.validate()?;
+        ensure!(
+            viewport.into_iter().chain(grid).all(|n| n > 0),
+            "empty atmosphere viewport/grid"
+        );
+        let eye = camera.view().inverse().w_axis.truncate();
+        let altitude = (eye.y - settings.medium.ground_height) * 1e-3;
+        let mut values = Self::medium_values(settings.medium, toward_sun, altitude)?;
+        values[32..35].copy_from_slice(&eye.to_array());
+        let flags = u32::from(settings.sky)
+            | (u32::from(settings.sky && settings.sun_disk) * 2)
+            | (u32::from(settings.aerial_perspective) * 4)
+            | (u32::from(settings.height_fog.is_some()) * 8)
+            | (u32::from(settings.volumetric_fog.is_some()) * 16);
+        values[27] = f32::from_bits(flags);
+        let fog = settings.height_fog.unwrap_or(crate::HeightFog {
+            density: 0.,
+            ..Default::default()
+        });
+        values[36..40].copy_from_slice(&[
+            fog.density,
+            fog.falloff,
+            fog.base_height,
+            fog.start_distance,
+        ]);
+        values[40..43].copy_from_slice(&fog.albedo);
+        values[43] = fog.anisotropy;
+        let volume = settings.volumetric_fog.unwrap_or_default();
+        values[44..48].copy_from_slice(&[
+            volume.distance,
+            volume.extra_density,
+            volume.history_weight,
+            2.,
+        ]);
+        values[48..51].copy_from_slice(&eye.to_array());
+        let matrix = camera.matrix(viewport[0], viewport[1]);
+        values[52..68].copy_from_slice(&matrix.to_cols_array());
+        values[68..84].copy_from_slice(&matrix.inverse().to_cols_array());
+        values[84..100].copy_from_slice(&matrix.to_cols_array());
+        values[100] = f32::from_bits(grid[0]);
+        values[101] = f32::from_bits(grid[1]);
+        values[104] = viewport[0] as f32;
+        values[105] = viewport[1] as f32;
+        Ok(Self {
+            record: StorageBuffer::new(gpu, bytemuck::cast_slice(&values))?,
+            grid: Some(grid),
+        })
+    }
+    fn medium_values(
+        medium: crate::AtmosphereMedium,
+        toward_sun: crate::Vec3,
+        altitude_km: f32,
+    ) -> Result<[f32; 108]> {
         crate::Atmosphere {
             medium,
             ..Default::default()
@@ -64,9 +134,7 @@ impl AtmosphereParameters {
             [0.; 3],
             altitude_km.clamp(1e-3, medium.top_radius_km - medium.ground_radius_km - 1e-3),
         );
-        Ok(Self {
-            record: StorageBuffer::new(gpu, bytemuck::cast_slice(&values))?,
-        })
+        Ok(values)
     }
 }
 /// Resource set shared by the four dependent LUT nodes.

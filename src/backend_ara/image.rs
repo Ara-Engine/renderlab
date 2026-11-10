@@ -15,6 +15,8 @@ pub struct Texture {
     pub size: [u32; 2],
     /// Texel representation.
     pub format: Format,
+    /// Parent shape retained for validating dimensions and subresource views.
+    pub shape: ImageShape,
     pub(crate) sampled: u32,
     pub(crate) storage: Option<u32>,
 }
@@ -45,6 +47,11 @@ impl Texture {
                 image,
                 size: [side; 2],
                 format,
+                shape: ImageShape {
+                    layers: 6,
+                    mip_levels: levels,
+                    ..Default::default()
+                },
                 sampled: gpu.sampled_image(image, false)?.index,
                 storage: None,
             };
@@ -61,6 +68,11 @@ impl Texture {
                     image,
                     size: [(side >> mip).max(1); 2],
                     format,
+                    shape: ImageShape {
+                        layers: 6,
+                        mip_levels: 1,
+                        ..Default::default()
+                    },
                     sampled: gpu.sampled_view(image, desc)?.index,
                     storage: Some(gpu.storage_view(image, desc)?.index),
                 });
@@ -74,15 +86,24 @@ impl Texture {
     }
     /// Allocate a sampled single-mip 3D colour LUT.
     pub fn volume(gpu: &mut GpuDevice, side: u32, format: Format) -> Result<Self> {
+        Self::volume_shape(gpu, [side; 3], format, false)
+    }
+    /// Allocate a sampled non-cubic volume, optionally publishing a writable view.
+    pub fn volume_shape(
+        gpu: &mut GpuDevice,
+        size: [u32; 3],
+        format: Format,
+        storage: bool,
+    ) -> Result<Self> {
         Self::shaped(
             gpu,
-            [side; 2],
+            [size[0], size[1]],
             format,
-            false,
+            storage,
             false,
             ImageShape {
                 dimension: ara_gpu::texture::TextureDimension::D3,
-                depth: side,
+                depth: size[2],
                 ..Default::default()
             },
         )
@@ -143,6 +164,7 @@ impl Texture {
                 image,
                 size,
                 format,
+                shape,
                 sampled,
                 storage,
             }),

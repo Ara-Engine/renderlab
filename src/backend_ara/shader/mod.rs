@@ -27,6 +27,10 @@ pub enum Pass {
     EnvironmentSpecular,
     /// Cosine-weighted diffuse irradiance of the procedural sky.
     EnvironmentDiffuse,
+    /// Thirty-two cumulative aerial perspective slices.
+    AtmosphereAerial,
+    /// Sixty-four cumulative fog slices from resolved visibility/extinction.
+    AtmosphereFogIntegrate,
     /// Forty-step transmittance LUT.
     AtmosphereTransmittance,
     /// Multiple-scattering transfer LUT.
@@ -80,6 +84,38 @@ impl Pass {
                 )
                 .into()
             }
+            Self::AtmosphereFogIntegrate => {
+                let kernels = include_str!("../../../shaders/atmosphere.wgsl");
+                let head = kernels
+                    .split_once("@compute")
+                    .expect("atmosphere declarations")
+                    .0;
+                let start = kernels
+                    .find("@compute @workgroup_size(8,8) fn at_fog_integrate")
+                    .expect("fog integrator");
+                let end = kernels
+                    .find("// ---- Procedural environment source")
+                    .expect("environment boundary");
+                format!(
+                    "{}{}{}",
+                    include_str!("../../../shaders/atmosphere_common.wgsl"),
+                    head,
+                    &kernels[start..end]
+                )
+                .into()
+            }
+            Self::AtmosphereAerial => {
+                let kernels = include_str!("../../../shaders/atmosphere.wgsl");
+                let end = kernels
+                    .find("// Low-discrepancy offset")
+                    .expect("aerial boundary");
+                format!(
+                    "{}{}",
+                    include_str!("../../../shaders/atmosphere_common.wgsl"),
+                    &kernels[..end]
+                )
+                .into()
+            }
             Self::AtmosphereTransmittance
             | Self::AtmosphereMultiscatter
             | Self::AtmosphereSky
@@ -116,6 +152,8 @@ impl Pass {
         matches!(
             self,
             Self::EnvironmentSpecular
+                | Self::AtmosphereAerial
+                | Self::AtmosphereFogIntegrate
                 | Self::EnvironmentDiffuse
                 | Self::AtmosphereTransmittance
                 | Self::AtmosphereMultiscatter
@@ -146,6 +184,8 @@ impl Pass {
             Self::EnvironmentSpecular => "at_environment_specular",
             Self::EnvironmentDiffuse => "at_environment_diffuse",
             Self::LightCluster => "lc_build",
+            Self::AtmosphereAerial => "at_aerial_volume",
+            Self::AtmosphereFogIntegrate => "at_fog_integrate",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
             Self::AtmosphereMultiscatter => "at_multiscatter_lut",
             Self::AtmosphereSky => "at_skyview_lut",
