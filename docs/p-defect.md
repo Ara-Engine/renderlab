@@ -6,7 +6,7 @@ Unit P-DEFECT, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10, branc
 
 | Defect | Cause | Change | Verdict |
 |---|---|---|---|
-| White pixels in glossy reflections | **Caustic paths (M, C).** A glossy ray that reaches a near-mirror hit (chrome 0.02-0.04, gold) where that hit's own sun highlight is gets the hit's exact delta-light GGX lobe: up to 65504 from one ray in hundreds. The reflected highlight's energy was missing everywhere else. | **Path regularization at reflection hits**: while a hit is shaded, every engine `brdf` lobe widens by the reflection ray's cone (GGX alpha² + 8 spread²). Energy kept, spread over the cone. | **MERGE** (`7556121`, `6b61d19`), pending lease C's game-scene check below |
+| White pixels in glossy reflections | **Caustic paths (M, C).** A glossy ray that reaches a near-mirror hit (chrome 0.02-0.04, gold) where that hit's own sun highlight is gets the hit's exact delta-light GGX lobe: up to 65504 from one ray in hundreds. The reflected highlight's energy was missing everywhere else. | **Path regularization at reflection hits**: while a hit is shaded, every engine `brdf` lobe widens by the reflection ray's cone (GGX alpha² + 8 spread²). Energy kept, spread over the cone. | **MERGE** (`7556121`, `6b61d19`) |
 | Non-RT blotches on lit flat faces | **The capped gather drain (M).** Non-RT got a quarter of RT's gather budget (8,192 vs 32,768 cells a frame), so bounce drained for about 100 frames after a cut. P-SHOW's "settled" plinth blotches were frames 16 after a cut at that budget, which the old every-frame relight had been averaging away. | **One gather budget, 32,768, on both paths.** | **MERGE** (`d0538f3`). The relight scaffolding stays until a Showcase capture confirms (below) |
 | Stair-stepped glass rim | **Thin-slab refraction magnifies the opaque image (M, I)**: near a sphere's rim the slab's shift grows quickly, so the refracted band enlarges the pixel steps of whatever is behind. RT adds a dotted rim: one mirror ray per pixel at grazing, with no history for glass (C). | Centroid varyings, a footprint-filtered refraction lookup, a lobe floor for glass reflections and a neighbour fallback for edge fragments (`t3/p-defect-glass`). | **DON'T MERGE**: not visibly better. The fix is a refraction model, not filtering (below) |
 
@@ -32,7 +32,7 @@ All three defects reproduce:
 **Width.** Three widths were screened:
 - 0.5 spread²: the glow appeared, but grainy on cuts.
 - 2 spread²: smooth when held, but white speckle on the game scene's spinning glossy crate, a moving object with short history (`regress-check.png`).
-- 8 spread² (committed): the highlight spans about all of a pixel's strata.
+- 8 spread² (committed): the highlight spans about all of a pixel's strata. The crate's speckle is gone on both paths (`crate-3way.png`: base, 2 and 8 spread²), and its reflection is smooth and slightly brighter than base's.
 
 The reflected highlight widens by about √2 of the receiver's lobe (I). That is invisible next to the turntable's own 0.35 lobe.
 
@@ -43,15 +43,16 @@ The reflected highlight widens by about √2 of the receiver's lobe (I). That is
 | base (main) | 12 / 15 | 24 | 87.2 | 0.25 |
 | 0.5 spread² | 244 / 264 | 2 | 89.1 | 0.94 |
 | 2 spread² | 121 / 19 | 1 | 89.2 | 0.59 |
-| 8 spread² | see section 7 | | | |
+| **8 spread² (merged)** | **4 / 2** | **2** | **89.3** | **0.33** |
 | reference (16k spp, same pose) | | 3 | 90.8 | 1.54 (its own noise) |
 
 "White pixels" counts pixels at least 40 codes over their 5x5 median and above 120. Inspected sheets:
+- `p-defect-turntable-final.png`: base against the merged 8 spread², at the cut (RT frame 0, non-RT frame 1), held, moving (frame 16) and at dusk, plus the reference;
 - `turntable-still-3way.png`: base, 0.5 and 2 spread², cut and held, both paths, and the reference;
 - `turntable-motion.png`: moving frames 4 and 16;
 - `turntable-ref.png`.
 
-Base's white pixels are gone, and the glow the reference shows is back, which restores about half of base's missing 3.6 codes. In motion the glow carries the reference's own fine grain. It also removes base's golden sparkle where the turntable reflects the gold sphere next to the glass ball.
+With 8 spread², base's white pixels are gone at the cut and while held, on both paths. The glow the reference shows is back, which restores about half of base's missing 3.6 codes. In motion the glow carries the reference's own fine grain. It also removes base's golden sparkle where the turntable reflects the gold sphere next to the glass ball.
 
 **Cost (M).** One add per `brdf` call. Drained 120-frame timing, matched scene, 720p: RT 2.85 → 2.90 ms a frame, non-RT 6.89 → 6.87 ms: within noise.
 
@@ -116,7 +117,7 @@ Patent mapping:
 - **Leases** through `scripts/n8-run.py`, owner `p-defect`:
   - `pdefect-a`: 22 runs, 8.6 min. Its quick lib run caught the R0b probe's missing declaration, fixed in `7556121`.
   - `pdefect-b2`: 20 runs, 5.3 min. Lib: **206 passed, 0 failed, 164 ignored**.
-  - `pdefect-c`: see section 7.
+  - `pdefect-c`: candidate 3 (the merged code), 11 runs, 4.6 min. Lib: **206 passed, 0 failed, 164 ignored**.
 - **Time:** about 1 h 15 min of code and analysis; about 15 min of GPU leases; about 2 h queued behind Ara's builds and leases and P-SHOW's.
 - **Showcase:** a worktree of Ara `908e11d6b` patched to this branch is prepared at `D:/Coding/renderlab-work/p-defect/showcase` (`tools/showcase/showcase.py`). Its cold perf build did not complete; resume with `showcase.py --root D:/Coding/renderlab-work/p-defect/showcase build`.
 - **Evidence** in `D:/Coding/renderlab-work/p-defect/`: `runs/{a,b2,c}` (frames and `run.json`), `scores-*.json`, `crops/`, `plans/`, `tools/` (lease, build, batch and scorer), `bin/*/build.json`, and `design-glossy.md`.
