@@ -169,7 +169,8 @@ fn particle_sources(prelude: &str) -> [String; 2] {
     );
     ["TP_PARTICLES_SIM", "TP_PARTICLES_DRAW"].map(|s| format!("{common}{}", section(s)))
 }
-fn hit_depth_source() -> String {
+/// Share the original hit-to-view-distance composition across native backends.
+pub(crate) fn hit_depth_source() -> String {
     format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}{}",
         crate::TRACED_DRAWS,

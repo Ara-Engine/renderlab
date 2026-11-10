@@ -682,3 +682,18 @@ Sky depth 1e8, alpha 1 and the history-off/behind velocities match exactly.
 All 29 focused tests and 45 exported SPIR-V stages pass on Metal with API/shader
 validation and structural/native-entry audits. Vulkan execution is pending. There
 are 35 original entries plus display; temporal reconstruction remains a later phase.
+
+## Transparency hit depth (entry 36)
+
+The original `transparency.wgsl::tp_depth_hits` runs from its existing standalone
+composer, exposed by one crate-visibility change. It consumes primary hit/tile
+textures, models/placements and two fixed buffer arrays. The source keeps signed
+linear distance; it does not apply post surface's minimum-depth clamp.
+
+Four queued frame updates cover forward/reverse directions, an oblique cropped
+scene and an empty scene. The independent f64 geometry oracle shares raw primary
+fixture data, not its post-render results. All 35 depth texels match within 2.39e-7;
+the 12/12/23/35 miss values are exactly 1e30. Tiny positive and negative distances
+remain near ±0.0005 rather than clamping to 0.001. All 30 focused Metal tests and 46
+SPIR-V stages pass; native Vulkan remains pending. There are 36 original entries
+plus display transfer.

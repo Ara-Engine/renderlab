@@ -35,6 +35,8 @@ pub enum Pass {
     VisibilityResolve,
     /// Primary-hit rigid/skinned/sky velocity and view depth for post filters.
     PostPrimarySurface,
+    /// Opaque hit geometry to the transparency pass's signed view distance.
+    TransparencyHitDepth,
     /// Non-RT cluster cut, frustum and two-phase HZB classification.
     VisibilityCull,
     /// Cull output counters to indirect raster/pyramid/cull arguments.
@@ -106,6 +108,9 @@ impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
+            Self::TransparencyHitDepth => {
+                crate::renderer::transparency_gpu::hit_depth_source().into()
+            }
             Self::PostPrimarySurface => {
                 let [head, _] = crate::renderer::primary_ray_gpu::non_rt_heads(include_str!(
                     "../../../shaders/scene.wgsl"
@@ -292,6 +297,7 @@ impl Pass {
                 | Self::VisibilitySoftware
                 | Self::VisibilityResolve
                 | Self::PostPrimarySurface
+                | Self::TransparencyHitDepth
                 | Self::VisibilityHardware
                 | Self::MeshToon
                 | Self::ParticleUpdate
@@ -364,6 +370,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",
             Self::VisibilityResolve => "resolve",
             Self::VisibilityHardware => "fs",
