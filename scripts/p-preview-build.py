@@ -100,14 +100,6 @@ def pending_requests():
             for owner in ("ara-pr-gate", "ara-integration", "root", "p-s4c", "p-show"):
                 if line.startswith(owner+" unit complete"):
                     pending = {key for key in pending if key[0] != owner}
-    latest = order() or ""
-    if "Queue: p-show" in latest:
-        completed = False
-        with SCHEDULE.open(encoding="utf-8", errors="replace") as lines:
-            for line in lines:
-                if line.strip() == latest: completed = False
-                if line.startswith("p-show unit complete"): completed = True
-        if not completed: pending.add(("p-show", "root-priority"))
     return pending
 
 

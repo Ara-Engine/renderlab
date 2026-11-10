@@ -1,10 +1,15 @@
-import importlib.util,os,sys,time,subprocess,shutil
+import importlib.util,os,sys,time,subprocess,shutil,datetime
 from pathlib import Path
 root=Path("D:/Coding/renderlab-work/p-preview")
 spec=importlib.util.spec_from_file_location("guard",Path(__file__).with_name("p-preview-build.py"));g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
 label=sys.argv[1]; command=sys.argv[2:]
+deadline_text=os.environ.get("P_PREVIEW_DEADLINE")
+deadline=datetime.datetime.fromisoformat(deadline_text) if deadline_text else None
+def minutes_left():
+ return min(14, int((deadline-datetime.datetime.now(datetime.timezone.utc)).total_seconds()/60)-4) if deadline else 14
 g.post(f"[p-preview request] owner=p-preview label={label} <=14 min: quiet ARA1/lib verification, >=8 GiB/5 GB, no compiler; Ara first {g.utc()}")
 while True:
+ if minutes_left()<1: raise SystemExit("Unit deadline: no GPU lease admitted")
  pending=g.pending_requests()
  order=g.order()
  if "HOLD:" in (order or ""):raise RuntimeError(order)
@@ -12,5 +17,5 @@ while True:
  time.sleep(5)
 print(order,flush=True)
 env=os.environ|{"N8_OWNER":"p-preview","N8_OUT":str(root/"lease")}
-code=subprocess.call([sys.executable,"-B","scripts/n8-run.py","--label",label,"--minutes","14","--no-build-contention","--record-resources","--runtime-memory-mbytes","8192","--",*command],env=env)
+code=subprocess.call([sys.executable,"-B","scripts/n8-run.py","--label",label,"--minutes",str(minutes_left()),"--no-build-contention","--record-resources","--runtime-memory-mbytes","8192","--",*command],env=env)
 sys.exit(code)

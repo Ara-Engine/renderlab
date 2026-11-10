@@ -5,7 +5,7 @@ binary=max((root/"target/release/deps").glob("renderlab-*.exe"),key=lambda p:p.s
 binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest()
 mode=sys.argv[1]
 cases={
- "screen":[("rt","before",None),("rt","ssa","--ssa-rewrite"),("rt","local","--eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --ccp --simplify-instructions --eliminate-dead-code-aggressive"),("rt","inline","--eliminate-dead-branches --merge-return --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --eliminate-dead-code-aggressive"),("rt","scalar","--scalar-replacement=0 --convert-local-access-chains --eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --eliminate-dead-code-aggressive"),("rt","opt","-O"),("nonrt","before",None),("nonrt","opt","-O")],
+ "screen":[("rt","before",None),("nonrt","before",None),("rt","opt","-O"),("nonrt","opt","-O"),("rt","ssa","--ssa-rewrite"),("rt","local","--eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --ccp --simplify-instructions --eliminate-dead-code-aggressive"),("rt","inline","--eliminate-dead-branches --merge-return --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --eliminate-dead-code-aggressive"),("rt","scalar","--scalar-replacement=0 --convert-local-access-chains --eliminate-local-single-block --eliminate-local-single-store --ssa-rewrite --eliminate-dead-code-aggressive")],
  "lib":[("rt","lib",None)]
 }[mode]
 for path,label,passes in cases:

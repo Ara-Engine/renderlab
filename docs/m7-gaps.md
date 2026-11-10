@@ -518,13 +518,16 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 
 ## Startup
 
-P-PREVIEW ([p-preview.md](p-preview.md)) adds an opt-in two-stage SPIR-V
-preprocessing experiment to the existing program watcher, including a same-source
-full-pipeline promotion that preserves temporal history. Release compilation and
-200 CPU library tests pass. **Still open:** fresh-edit latency on both paths,
-preview/full HDR and inspected-image correctness, full-swap timing and hitch.
-GPU verification is queued behind Ara and P-SHOW; no preview default is promoted.
-Engine-prelude reloads still use the existing synchronous transaction.
+P-PREVIEW ([p-preview.md](p-preview.md)): **DON'T MERGE as a completed
+optimization.** Opt-in SPIR-V preview / full-pipeline promotion plumbing builds;
+200 CPU lib tests pass. Fresh full-only edits take 49.625 s RT / 51.567 s non-RT
+in its mixed 1080p fixture. SSA alone takes 48.989 s RT, with byte-identical
+preview/full HDR and an inspected matching PNG pair, but no clear latency win.
+Local cleanup also misses (49.458 s RT, exact HDR). Full swaps at 97.682 s, with a 0.252 ms install poll / 56.586 ms first full readback;
+maximum old/preview frame readbacks are 113.371 / 75.520 ms. Both-path successful
+preview performance, cheapest-pass selection and defaults-on / moving-image
+verification remain open. GPU admission came at 08:00:26 UTC, late in the three-hour
+unit. No new preview default is promoted. Prelude reloads remain synchronous.
 
 P-SHC2 ([p-shc2.md](p-shc2.md)) has **no production structural split** and
 does not meet the 1–2 s first-new-shader target. Its compile-only buffered-input
