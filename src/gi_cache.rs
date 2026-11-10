@@ -874,13 +874,21 @@ pub(super) fn kernel_source(software: bool, directions: u32) -> String {
         .iter()
         .map(|w| format!("{w}u"))
         .collect();
-    let kernels = kernels.replace(
+    let mut kernels = kernels.replace(
         line,
         &format!(
             "const GI_NEIGHBOURS:array<u32,256>=array<u32,256>({});",
             words.join(",")
         ),
     );
+    // Keep the hardware module unchanged, including its original gather entry.
+    if software {
+        kernels.push('\n');
+        kernels.push_str(&gi_shader(
+            "gi_gather_software.wgsl",
+            include_str!("../shaders/gi_gather_software.wgsl"),
+        ));
+    }
     format!(
         "{enables}{}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}\n{cells}\n{rays}\n{kernels}",
         include_str!("../shaders/scene.wgsl"),
@@ -1805,7 +1813,14 @@ impl Renderer {
             rays: compute("gi_rays", main),
             finish: compute("gi_finish", main),
             integrate: compute("gi_integrate", main),
-            gather: compute("gi_gather", main),
+            gather: compute(
+                if software {
+                    "gi_gather_batched"
+                } else {
+                    "gi_gather"
+                },
+                main,
+            ),
             light: compute("gi_light", main),
             filter: compute("gi_filter", main),
         };
