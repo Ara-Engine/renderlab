@@ -71,7 +71,7 @@ def foreign_requests():
     pending = {}
     with SCHEDULE.open(encoding="utf-8", errors="replace") as lines:
         for line in lines:
-            for owner in ("ara-pr-gate", "ara-integration", "ara-vk", "p-show2"):
+            for owner in ("ara-pr-gate", "ara-integration", "ara-vk", "ara-wscene", "p-show2"):
                 if line.startswith(f"[{owner} request]") or line.startswith(f"[{owner} reservation]"):
                     pending[owner] = True
                 elif line.startswith(f"{owner} ") and " window released" in line:
