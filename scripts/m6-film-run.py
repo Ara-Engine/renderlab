@@ -59,6 +59,67 @@ def resource_sample():
     return dict(host_unix_seconds=time.time(), available_mbytes=memory.available/(1024**2), rustc_count=count)
 
 
+WATCH_CHILD_MBYTES = float(os.environ.get("RENDERLAB_WATCH_CHILD_MB", 8192))
+WATCH_FREE_MBYTES = float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 8192))
+
+
+def memory_watch_sample(root_pid):
+    """Machine available MiB and the largest working set (MiB) in root_pid's process tree.
+
+    The always-on watchdog (coordinator rule, 2026-11-10): an admission bar is not a memory
+    guard, so every leased child tree is sampled once a second, apart from --runtime-memory-mbytes.
+    """
+    class Memory(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("load", wintypes.DWORD)] + [
+            (name, ctypes.c_ulonglong) for name in ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]
+    class Process(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+            ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+            ("parent", wintypes.DWORD), ("priority", wintypes.LONG), ("flags", wintypes.DWORD),
+            ("name", wintypes.WCHAR*260)]
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in ("peak_ws", "ws", "qpp", "qp", "qnpp", "qnp", "pagefile", "peak_pagefile")]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Process)]
+    kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Process)]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    memory = Memory(); memory.size = ctypes.sizeof(memory)
+    kernel.GlobalMemoryStatusEx(ctypes.byref(memory))
+    parents = {}
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+    entry = Process(); entry.size = ctypes.sizeof(entry)
+    try:
+        valid = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while valid:
+            parents[entry.pid] = entry.parent
+            valid = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel.CloseHandle(snapshot)
+    tree, grew = {root_pid}, True
+    while grew:
+        more = {pid for pid, parent in parents.items() if parent in tree} - tree
+        grew = bool(more); tree |= more
+    largest, largest_pid = 0.0, None
+    for pid in tree:
+        handle = kernel.OpenProcess(0x1000 | 0x0010, False, pid)  # QUERY_LIMITED_INFORMATION | VM_READ
+        if not handle:
+            continue
+        try:
+            counters = Counters(); counters.cb = ctypes.sizeof(counters)
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                ws = max(counters.ws, counters.pagefile) / 2**20
+                if ws > largest:
+                    largest, largest_pid = ws, pid
+        finally:
+            kernel.CloseHandle(handle)
+    return memory.available / 2**20, largest, largest_pid
+
+
 def utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -199,6 +260,20 @@ def main():
                     stop.wait(.1)
             resource_thread = threading.Thread(target=resource_monitor) if a.record_resources else None
             if resource_thread: resource_thread.start()
+            def memory_watchdog():
+                while not stop.is_set():
+                    try:
+                        free, largest, pid = memory_watch_sample(child.pid)
+                        if largest > WATCH_CHILD_MBYTES or free < WATCH_FREE_MBYTES:
+                            failure.append(f"memory watchdog: process {pid} at {largest:.0f} MiB (limit {WATCH_CHILD_MBYTES:g}), "
+                                           f"machine available {free:.0f} MiB (floor {WATCH_FREE_MBYTES:g})")
+                            print("MEMORY WATCHDOG:", failure[-1], flush=True)
+                            terminate_owned_tree(); return
+                    except Exception as e:
+                        failure.append(f"memory watchdog error: {e}")
+                    stop.wait(1)
+            watchdog_thread = threading.Thread(target=memory_watchdog)
+            watchdog_thread.start()
             try:
                 child.wait(timeout=max(1, a.minutes * 60 - (time.monotonic() - start) - 90))
             except subprocess.TimeoutExpired:
@@ -208,6 +283,7 @@ def main():
             finally:
                 stop.set()
                 thread.join()
+                watchdog_thread.join()
                 if resource_thread: resource_thread.join()
         binary = Path(cmd[0])
         record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start,
