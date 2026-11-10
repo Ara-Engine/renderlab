@@ -189,13 +189,17 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);
-        var radiance=rl_sky(d,cone_alpha);
+        // Only a miss looks up the sky: the compiler does not sink a lookup the hit
+        // branch overwrites (P-SKY, docs/p-sky.md).
+        var radiance=vec3<f32>(0.0);
         if hit.kind!=0u {
             let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
             rl_load_parameters(h.batch);
             let hs=surface(h.input);
             radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
             shaded=true;
+        } else {
+            radiance=rl_sky(d,cone_alpha);
         }
         sum+=radiance;
         valid+=1u;

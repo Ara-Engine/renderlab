@@ -313,7 +313,7 @@ fn probe_source(probes: &[Probe]) -> String {
         .join(",\n");
     // A program: each pixel column evaluates one probe through the engine environment.
     format!(
-        "struct Surface {{ column:u32 }};\nfn surface(input:SurfaceInput)->Surface {{ return Surface(input.pixel.x); }}\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(s.column,{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=vec3<f32>(0.0);\n if lighting.map.w<0.0 {{ rgb=environment_radiance(d,max(probe.w,0.0)); }} else {{ rgb=environment_legacy_lod(d,max(probe.w,0.0)); }}\n if probe.w<0.0 {{ rgb=environment_bilinear(environment_diffuse,d,0,0); }}\n return environment_product(rgb,vec3<f32>(1.0));\n}}\n",
+        "struct Surface {{ column:u32 }};\nfn surface(input:SurfaceInput)->Surface {{ return Surface(input.pixel.x); }}\nfn shade(s:Surface,input:SurfaceInput)->vec3<f32> {{\n let probes=array<vec4<f32>,{}>({records});\n let probe=probes[min(s.column,{}u)];\n let d=environment_direction(probe.xyz);\n var rgb=vec3<f32>(0.0);\n if lighting.map.w<0.0 {{ rgb=environment_radiance(d,max(probe.w,0.0)); }} else {{ rgb=environment_legacy_lod(d,max(probe.w,0.0)); }}\n if probe.w<0.0 {{ rgb=environment_diffuse_at(d); }}\n return environment_product(rgb,vec3<f32>(1.0));\n}}\n",
         probes.len(),
         probes.len() - 1,
     )
@@ -351,12 +351,12 @@ fn run_probes(r: &mut Renderer, probes: &[Probe]) -> Vec<[f32; 3]> {
 }
 
 #[test]
-#[ignore = "exclusive Vulkan slot; featureless RLE2 bank split, r^4 interpolation and replacement"]
-fn gpu_environment_independent_banks_without_float_filter_feature() {
+#[ignore = "exclusive Vulkan slot; filtered RLE2 bank split, r^4 interpolation and replacement"]
+fn gpu_environment_independent_banks_filtered() {
     let _validation = validation::begin(true);
     let mut r = environment_renderer(SampleCount::One);
     assert!(
-        !r.device()
+        r.device()
             .features()
             .contains(wgpu::Features::FLOAT32_FILTERABLE)
     );
@@ -516,7 +516,7 @@ fn gpu_environment_independent_registered_runtime_reconstruction() {
     fs::create_dir_all(evidence_dir()).unwrap();
     fs::write(evidence_dir().join("rle2-runtime-reconstruction.json"),serde_json::to_vec_pretty(&serde_json::json!({
         "queries":538,"max_allowance_ratio":maximum,"delta_queries":289,"mip0_peak_fraction":peak_fraction,"mip0_peak_angle_degrees":peak_angle,
-        "float32_filter_feature":false,"lookup":"actual renderer WGSL with r^4 and seam-aware textureLoad; exposed f16 readback", "rows":output
+        "float32_filter_feature":true,"lookup":"actual renderer WGSL with r^4 and filtered cube-array samples; exposed f16 readback", "rows":output
     })).unwrap()).unwrap();
     eprintln!(
         "RLE2 actual runtime 538 queries max allowance={maximum}; delta 289 peak fraction={peak_fraction}"
@@ -818,7 +818,7 @@ fn gpu_environment_ownership_admission_and_reload() {
     for source in [
         SOURCE.to_owned() + "\nnot_wgsl",
         SOURCE.replace(
-            "var environment_diffuse:texture_2d_array<f32>",
+            "var environment_diffuse:texture_cube_array<f32>",
             "var environment_diffuse:texture_2d<f32>",
         ),
     ] {

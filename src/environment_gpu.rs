@@ -30,7 +30,7 @@ fn cube(
     );
     let view = ledger.own(
         texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
             ..Default::default()
         }),
         ResourceKind::TextureView,
@@ -209,7 +209,8 @@ impl Renderer {
         Ok(())
     }
     /// Bounded immediate upload. Busy performs no packing, allocation or queue write.
-    /// Uses textureLoad on RGB32F arrays, without optional float filtering features.
+    /// RGBA32F arrays: specular and diffuse lookups sample their cube-array views with
+    /// hardware filtering (`FLOAT32_FILTERABLE`, part of `RECEIVER_FEATURES`).
     pub fn try_upload_environment(
         &mut self,
         data: &PreparedEnvironment,

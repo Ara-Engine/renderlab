@@ -103,7 +103,7 @@ fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
 // times the constant environment.
 fn ambient(n:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 {
-        return environment_bilinear(environment_diffuse,environment_direction(n),0,0)*lighting.map.z;
+        return environment_diffuse_at(environment_direction(n))*lighting.map.z;
     }
     return PI*lighting.environment;
 }
@@ -114,7 +114,7 @@ fn environment_constant() -> vec3<f32> { return lighting.environment; }
 // Prepared diffuse irradiance and prefiltered radiance, before intensity and exposure;
 // combine them with `environment_product`.
 fn environment_irradiance(n:vec3<f32>) -> vec3<f32> {
-    return environment_bilinear(environment_diffuse,environment_direction(n),0,0);
+    return environment_diffuse_at(environment_direction(n));
 }
 fn environment_reflection(direction:vec3<f32>, roughness:f32) -> vec3<f32> {
     return environment_radiance(environment_direction(direction),roughness);

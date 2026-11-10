@@ -94,9 +94,11 @@ pub use transparency::{
 };
 pub use wgpu;
 
-/// Raster shadow receivers read the actual triangle's world-space vertices.
-/// Callers must request this native Vulkan device feature.
-pub const RECEIVER_FEATURES: wgpu::Features = wgpu::Features::SHADER_PER_VERTEX;
+/// Raster shadow receivers read the actual triangle's world-space vertices, and
+/// environment lookups filter the RGBA32F field in the texture unit (P-SKY,
+/// docs/p-sky.md). Callers must request these device features.
+pub const RECEIVER_FEATURES: wgpu::Features =
+    wgpu::Features::SHADER_PER_VERTEX.union(wgpu::Features::FLOAT32_FILTERABLE);
 
 /// Device memory hints Renderlab recommends for `wgpu::DeviceDescriptor::memory_hints`:
 /// wgpu's 8-64 MiB blocks. Smaller blocks saved more space but regressed quarry

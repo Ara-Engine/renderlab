@@ -209,14 +209,7 @@ fn gpu_vulkan_helper_boundaries() {
             true,
             &["surface", "shade", "material_normal", "brdf"],
         ),
-        ("bilinear", false, &["environment_bilinear"]),
         ("radiance", false, &["environment_radiance"]),
-        (
-            "bilinear+radiance",
-            false,
-            &["environment_bilinear", "environment_radiance"],
-        ),
-        ("tap", false, &["environment_tap"]),
         ("all", false, &[]),
     ];
     let combinations: &[(&str, bool, &[&str])] = &[
