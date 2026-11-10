@@ -853,3 +853,23 @@ validation modes, 53 standard SPIR-V stages plus two authored/override variants
 validated. Native Vulkan remains pending. No new backend clippy diagnostics.
 The quiet CPU timing guard again refused the run at 17.98% foreign CPU load
 (threshold 10%); no timing sample was accepted or added.
+
+## Transparency seed and fallback presentation (entries 42–43)
+
+`transparency_seed::Seed` uses the original TP_AA_SEED section. A backed
+`MsaaColor` keeps four RGBA16Float coverage samples for subsequent pane draws;
+`resolve_to` preserves those samples and validates its single-level destination.
+The 7×5 replay copies nonuniform HDR and alpha exactly in two queued frames,
+including a second resolve from the same multisample contents.
+
+`FallbackPresent` uses the original scene.wgsl vs_present/fs_present pair. It maps
+RGB as value/(1+value), writes alpha one, and selects the target's actual mip/layer
+through Ara's portable raster-attachment API. Its half-float target differs from
+the CPU reference by at most 0.00048828125. This is separate from post tone and
+the explicit display-transfer shader. No shader body changes were needed.
+
+All 36 focused tests pass with API/shader validation and API-only validation;
+57 standard SPIR-V stages plus two authored/override variants validate. Native
+Vulkan is pending, and backend library/integration clippy has no diagnostics.
+The latest scoped AS review had no must-fix findings. Its small negative-test
+follow-up now checks the specific caller-material diagnostic.

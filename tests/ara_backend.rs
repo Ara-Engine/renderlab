@@ -61,6 +61,8 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::PrimaryRayProbe,
         Pass::PrimaryTrace,
         Pass::PrimaryTraceReceivers,
+        Pass::TransparencySeed,
+        Pass::FallbackPresent,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
         Pass::VisibilityResolve,
@@ -332,3 +334,6 @@ mod primary_ray_reference;
 mod primary_trace_cases;
 #[path = "ara_backend/primary_trace_reference.rs"]
 mod primary_trace_reference;
+
+#[path = "ara_backend/cases/fullscreen_leaves.rs"]
+mod fullscreen_leaf_cases;

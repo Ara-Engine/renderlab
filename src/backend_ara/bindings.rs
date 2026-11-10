@@ -230,6 +230,21 @@ impl<'a> HeapBindings<'a> {
                 }
             })
     }
+    /// Retained scalar image at its original source key.
+    pub fn image(&self, key: InputKey) -> Option<&Texture> {
+        self.layout
+            .iter()
+            .zip(&self.values)
+            .find_map(|(spec, value)| {
+                if spec.key == key
+                    && let Input::Image(image) = value
+                {
+                    Some(*image)
+                } else {
+                    None
+                }
+            })
+    }
     /// Every reachable input and packet use, for union with a whole raster batch.
     pub fn uses(&self) -> Vec<ResourceUse> {
         let mut uses = vec![ResourceUse::Whole(

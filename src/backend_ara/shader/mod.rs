@@ -42,6 +42,10 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original transparency multisample background seed.
+    TransparencySeed,
+    /// Original scene fallback Reinhard presenter.
+    FallbackPresent,
     /// Original single-program deferred shading of primary tiles.
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
@@ -128,6 +132,10 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::TransparencySeed => {
+                crate::renderer::transparency_gpu::section("TP_AA_SEED").into()
+            }
+            Self::FallbackPresent => include_str!("../../../shaders/scene.wgsl").into(),
             Self::PrimaryTrace | Self::PrimaryTraceReceivers => {
                 crate::backend_ara::primary_trace::source()
                     .expect("original primary trace seams remain valid")
@@ -327,7 +335,9 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::VisibilityHardware
+            Self::TransparencySeed
+                | Self::FallbackPresent
+                | Self::VisibilityHardware
                 | Self::Tone
                 | Self::Display
                 | Self::AtmosphereBackdrop
@@ -342,7 +352,9 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::PrimaryTrace
+            Self::TransparencySeed
+                | Self::FallbackPresent
+                | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
@@ -374,7 +386,11 @@ impl Pass {
         }
     }
     pub(super) fn vertex(self) -> &'static str {
-        if matches!(self, Self::ParticleBillboard) {
+        if matches!(self, Self::TransparencySeed) {
+            "tp_seed_vs"
+        } else if matches!(self, Self::FallbackPresent) {
+            "vs_present"
+        } else if matches!(self, Self::ParticleBillboard) {
             "tp_particle_vs"
         } else if matches!(self, Self::AtmosphereBackdrop) {
             "vs_sky"
@@ -414,6 +430,8 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransparencySeed => "tp_seed_fs",
+            Self::FallbackPresent => "fs_present",
             Self::PrimaryTrace => "primary_trace",
             Self::PrimaryTraceReceivers => "primary_trace_receivers",
             Self::PrimaryRayProbe => "primary_probe",

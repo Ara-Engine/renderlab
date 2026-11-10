@@ -43,7 +43,7 @@ fn glass_samples() -> u32 {
 }
 
 /// One `// ---- NAME ----` section of the shader.
-fn section(name: &str) -> &'static str {
+pub(crate) fn section(name: &str) -> &'static str {
     let start = SHADER.find(&format!("// ---- {name} ----")).unwrap();
     let end = SHADER.find(&format!("// ---- end {name} ----")).unwrap();
     &SHADER[start..end]

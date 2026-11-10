@@ -34,7 +34,9 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
         "conformance material silently used at runtime"
     );
     ensure!(
-        HeapBindings::new(&mut gpu, Pass::PrimaryShadeList, &[]).is_err(),
+        HeapBindings::new(&mut gpu, Pass::PrimaryShadeList, &[])
+            .err()
+            .is_some_and(|e| e.to_string().contains("caller material WGSL")),
         "program-only packet accepted"
     );
     // Caller-authored text, not the Pass family's built-in replay material.
