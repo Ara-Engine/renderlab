@@ -750,9 +750,16 @@ Reported by Ara's integration thread through `ara capture` on the RTX 4070 SUPER
   - The same build starts in 24-30 s on Radeon 760M (RADV).
   - Smaller scenes on the PC show the scale. The first decal capture took 89 s RT and 90 s non-RT. A later scene adding one emissive and one glass shape took another 110 s on non-RT, against 14 s on RT.
   - The pipeline cache (`Compilation`, pipeline_compilation.rs) and the program cache (`ProgramCache`, program_gpu.rs) are written only in `Drop`, so a killed process keeps nothing and every retry is cold.
-  - Next:
-    - persist both caches after each compile batch;
-    - find why each new program or glass variant costs a full ~100 s on NVIDIA non-RT. Leads are the non-RT shading kernel size (P-SHC2: non-RT compile 41 s) and the optimiser-processed SPIR-V path from P-PREVIEW (driver compile about 6x faster).
+  - **P-PIPE (2026-11-10, [p-pipe.md](p-pipe.md), t3/p-pipe):**
+    - FIXED: both caches save during compilation. A killed game scene restarts in 34.8 s non-RT and 42.1 s RT, against 125.5 / 143.0 s cold; warm starts take 0.9 s. Images are identical.
+    - FIXED: the unused Hard/Soft traced shading variant no longer compiles at start, which halves single-program cold starts (RT test scene 148.6 to 74.6 s).
+    - FIXED, product defect: cold starts could use unbounded driver memory. Each program shading kernel holds about 4.5-5 GB of NVIDIA compiler memory while it compiles, and the engine compiled them all at once (18.3 GB private in lease pipe1). A process-wide limit now keeps one native compile in flight by default. Measured cold peaks: 5.1-6.1 GB, also with two engines.
+    - Measured cause of the ~100 s: the program shading kernel is 89-96% of cold start on both paths. Standard program 69-96 s, toon 26-31 s, glass reflection 8 s; all engine kernels together 5-7 s. The cost comes from engine helpers composed into every program's kernel.
+  - Still open:
+    - Ara's 120 s limit. Cold game-scene starts are 125-143 s, serial under the memory limit, so a first attempt can still miss and the retry succeeds. The fix is moving GI lookup and local-shadow visibility out of the program kernel (census boundaries 3-4, draft PR #11); measure its frame cost against these compile numbers.
+    - Quarry startup memory. The warm quarry reaches 8 GB private before its first image, from scene preparation or upload staging (main reaches 8.5 GB at 16 s). It cannot run under the 8 GB lease watchdog.
+    - Trust policy. An edit to the standard program switches all 24 of its kernels from unchecked to checked; pin programs to checked after a frame-time A/B. GI-cell and glass reflected-hit pipelines compose user text through the unchecked engine API.
+    - The lease runner (scripts/m6-film-run.py) forces the Khronos validation layer on every child, so n8-run timings since F0 include it.
 - **OPEN, programmable shading: reflection hits shade with the receiver's program and the hit's material.**
   - A program that adds a per-material glow in `shade` makes every reflection it shows glow at its own value; with an emissive map, the hit's textures stand in for the map.
   - The bridge works around it by marking emissive materials in base-colour alpha.
