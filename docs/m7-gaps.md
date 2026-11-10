@@ -700,3 +700,16 @@ codes. Open:
   speck fix. Fade-band-only scaling saved nothing.
 - **Standing scene:** `tools/showcase/showcase.py` drives Ara's player against a Renderlab
   checkout; the content is fetched by Ara's own sample tool, not committed here.
+
+## M8 Unreal yardstick (P-YARD2, 2026-11-10)
+
+[P-YARD2](p-yard.md#p-yard2-result-2026-11-10-branch-t3p-yard2-on-main-71ea355) measured the matched quarry at 1080p against UE 5.7.4 Lumen + TSR, every preset, on main `71ea355` (release). Renderlab's full-frame error against the path-traced reference is 19-23% below the best Unreal preset on both paths, still, moving and on the cut. Speed is not at the 3x target. Ranked by visible impact:
+
+1. **Motion flicker and flat-surface grain, both paths.** Quarry flicker (frame step minus the reference's step) is 4.39 RT / 4.44 non-RT against 3.66-3.79 for every Lumen preset, so Renderlab is steadier than no Unreal configuration. In the dim S4 interior every flat wall and the door carry heavy blotchy grain (non-RT worse), still visible after the door stops; Unreal HW is smooth. This is the visible loss a viewer sees first, the same family as the non-RT GI grain already listed under Flat-surface noise and P-SHOW.
+2. **Non-RT frame cost.** 8.65 ms still / 10.57 moving against SW Lumen Epic's 4.02 / 4.12: 2.2-2.6x slower, about 6.5-7.7x off a 3x target (1.34-1.37 ms). The image is better than every Unreal preset including HW Cinematic, so this is pure speed.
+3. **Cut-frame spike.** 12.6 ms RT and 43.1 ms non-RT on the cut frame against Unreal's flat 4.1-4.5 (Unreal's cut costs nothing extra). It is a one-frame hitch, plus a visible quality dip (edge error 14.72 against HW Epic's 14.28 on that frame).
+4. **Lifted narrow-crevice occlusion.** In the quarry's cut view, the deep crevice the reference shows near black reads as lit grey stone on both paths. HW Lumen Epic/Cinematic keep it darker; SW Lumen is worse than Renderlab. This is GI/sky visibility in narrow gaps (see GI, and U0b's occluded population).
+5. **Stray bright pixels on moving edges and revealed ground (RT).** S4 frames 64 and 76 show single bright pixels along the sliding door's edge, and the newly revealed shadowed ground outside is speckled at frame 88. Unreal has neither. This is on Islam's watch list.
+6. **RT speed.** 3.82 ms still / 4.26 moving against HW Lumen Epic's 4.50 / 4.57: 1.07-1.18x faster, about 2.5-2.8x off a 3x target (1.50 ms).
+
+Unreal flaws Renderlab already beats here: SW Lumen's sun leak through S4's thin walls, SW Lumen's broken S5 mirror, and Unreal's softer, flatter quarry texture and colour. Neither engine leaves a visible ghost trail on the door or mirror benches; Unreal's door edge shows a faint doubled strip mid-slide. A view with a moving object over a lit background, rather than the black exterior sky here, would stress trails harder; that bench is still missing.
