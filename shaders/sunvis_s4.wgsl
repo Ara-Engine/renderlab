@@ -2,7 +2,7 @@
 // the Surface lookup's queued pixels. src/sunvis_s4.rs appends this file to the surface cache
 // module (virtual_shadow.wgsl + virtual_shadow_cache.wgsl) as its own module, and dispatches
 // s4_missed in place of vsc_missed on frames of 8 or more direction batches (cuts and history
-// restarts). Moving and still frames keep the march.
+// restarts) where src/sunvis_s4.rs `chosen` expects it to beat the march. Other frames keep the march.
 //
 // Per 32-lane chunk of the queue (one pixel a lane, Exact's receiver, origin and directions):
 //   1. tile volume: the chunk's origins in the sun frame (q across, h toward the sun), their q box,
@@ -313,7 +313,9 @@ fn s4_run(g:u32,n:u32,li:u32) {
         var visible=0u;
         for(var w=0u;w<8u;w+=1u) {visible+=countOneBits(~s4_mask[w][li]);}
         vsm_visible(id,visible);
-        let code=select(select(1u,vsm.n8e.x,visible==total),0u,visible==0u);
+        // vsc_finish's verdict code: the count of one batch, or solidity over several.
+        var code=visible;
+        if vsm.nsq.x>1u {code=select(select(1u,vsm.n8e.x,visible==total),0u,visible==0u);}
         let start=u32((i32(vsm.levels[0].info.y)+i32(min(s4_px.level,15u)))&15);
         // The walk order's estimate for the frames that march again: heavy where the pixel is
         // partly shadowed (penumbrae walk longest), light elsewhere.

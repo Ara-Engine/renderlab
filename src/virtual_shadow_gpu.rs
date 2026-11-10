@@ -164,11 +164,13 @@ pub struct VirtualShadowSettings {
     /// undecided (32; N8b used 8); each coarser level doubles it, up to four times. Walks that
     /// locate their triangle sooner stop sooner, so a larger budget costs only long walks.
     pub walk_steps: u32,
-    /// P-S4B (docs/p-s4b.md): on Surface frames of 8 or more direction batches (cuts and
-    /// history restarts), each queued pixel's directions are decided by S4's occluder-centric
-    /// gather instead of the march: every direction's exact hit test over every triangle in its
-    /// cone, on game-class scenes whose GI keeps full-detail geometry (src/sunvis_s4.rs). Other
-    /// frames and scenes keep the march.
+    /// P-S4B/P-S4C (docs/p-s4b.md, docs/p-s4c.md): on Surface frames of 8 or more direction
+    /// batches (cuts and history restarts) where it is measured to beat the march
+    /// (`sunvis_s4::chosen`: large screens, small suns), each queued pixel's directions are
+    /// decided by S4's occluder-centric gather instead of the march: every direction's exact hit
+    /// test over every triangle in its cone, on game-class scenes whose GI keeps full-detail
+    /// geometry (src/sunvis_s4.rs). Other frames and scenes keep the march. Scaffolding until S4
+    /// replaces the march everywhere (docs/p-s4c.md "Retiring the march"), then it goes.
     pub occluder_gather: bool,
 }
 
@@ -1423,10 +1425,13 @@ impl Renderer {
         self.queue
             .write_buffer(&r.frame, SAMPLING_OFFSET, &batches.to_ne_bytes());
         self.uploads.shadows += 4;
-        // P-S4B: the occluder gather serves frames of 8 or more batches.
+        // P-S4C: the occluder gather serves the frames where it beats the march.
+        let pixels = u64::from(r.size[0]) * u64::from(r.size[1]);
+        let disk = self.shadows.settings.directional_disk_angle;
         let state = self.virtual_shadows.as_mut().unwrap();
         if let Some(s4) = state.s4.as_mut() {
-            s4.frame = state.stats.occluder_gather_ready && batches >= sunvis_s4::MIN_BATCHES;
+            s4.frame =
+                state.stats.occluder_gather_ready && sunvis_s4::chosen(batches, pixels, disk);
             state.stats.occluder_gather_frame = s4.frame;
         }
     }

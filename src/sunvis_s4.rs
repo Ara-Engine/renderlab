@@ -1,8 +1,9 @@
 //! P-S4B (docs/p-s4b.md, docs/design-nonrt-sunvis-s4.md): S4, occluder-centric sun visibility for
 //! the Surface lookup's queued pixels on frames of 8 or more direction batches (cuts and history
-//! restarts). shaders/sunvis_s4.wgsl describes the pass; this module owns its geometry (every
-//! caster triangle's plane record behind a light-space BVH2), its module and pipeline, and the
-//! per-frame decision. Moving and still frames keep the march, so their passes are unchanged.
+//! restarts) where it beats the march (`chosen`, P-S4C: docs/p-s4c.md). shaders/sunvis_s4.wgsl
+//! describes the pass; this module owns its geometry (every caster triangle's plane record behind
+//! a light-space BVH2), its module and pipeline, and the per-frame decision. Other frames keep the
+//! march, so their passes are unchanged.
 //!
 //! Geometry comes from the non-RT GI's full-detail triangles (`gi_bvh::Blas::exact`: built from
 //! the drawn mesh's own positions and indices), placed by the draws' instance transforms in f64.
@@ -21,8 +22,29 @@ pub(crate) mod math;
 
 /// The largest scene S4 serves (records are 96 bytes a triangle).
 pub(super) const MAX_TRIANGLES: usize = 1 << 21;
-/// Frames with at least this many direction batches run S4 (cuts: 32, restarts: 8).
+/// Only frames with at least this many direction batches may run S4 (cuts: 32, restarts: 8).
+/// On fewer, S4 costs as much as on a cut (its traversal and classification do not depend on
+/// the budget: docs/p-s4c.md measured 8.1 ms on a 1080p still frame against the march's 2.8).
 pub(super) const MIN_BATCHES: u32 = 8;
+/// The break-even screen size for the original sun (0.00465 rad), pixels.
+const BREAK_EVEN_PIXELS: f64 = 0.75e6;
+const BREAK_EVEN_DISK: f64 = 0.00465;
+
+/// P-S4C (docs/p-s4c.md "Per-frame choice"): whether S4 or the march decides this frame's queued
+/// pixels, from inputs known before dispatch: the frame's direction batches, the screen's pixels
+/// and the sun disk's angular radius. The scene's geometry (`S4::prepare`) is checked by the
+/// caller.
+/// - The march's cut cost grows faster than the pixel count (its walks step finer texels:
+///   960x540 to 1080p, 3.5 to 26.5 ms), S4's much slower (5.1 to 9.1 ms), so S4 wins above a
+///   screen size.
+/// - A wider sun widens every tile's cone and penumbra, which costs S4 more than the march
+///   (wide sun, 0.04 rad: 960x540 17.5 against 5.1 ms, 1080p a tie).
+/// - The rule fits those four measurements: S4 from 0.75 M pixels at the original sun, growing
+///   with the square root of the disk (2.2 M at 0.04 rad, above 1080p).
+pub(super) fn chosen(batches: u32, pixels: u64, disk: f32) -> bool {
+    let disk = f64::from(disk).max(BREAK_EVEN_DISK);
+    batches >= MIN_BATCHES && pixels as f64 >= BREAK_EVEN_PIXELS * (disk / BREAK_EVEN_DISK).sqrt()
+}
 const HEADER_WORDS: usize = 16;
 const NODE_WORDS: usize = 16;
 const RECORD_WORDS: usize = 24;
@@ -460,6 +482,20 @@ mod tests {
         }
         assert!(seen.iter().all(|&n| n == 1));
         assert!(words[3] as usize <= MAX_DEPTH);
+    }
+
+    /// The measured choices (docs/p-s4c.md): S4 on the 1080p game cut, the march on the 960x540
+    /// cuts, the wide sun's 1080p cut (a tie) and every frame of fewer than 8 batches.
+    #[test]
+    fn chosen_follows_the_measured_break_even() {
+        let (hd, half) = (1920 * 1080, 960 * 540);
+        assert!(chosen(32, hd, 0.00465));
+        assert!(chosen(8, hd, 0.0));
+        assert!(!chosen(4, hd, 0.00465));
+        assert!(!chosen(32, half, 0.00465));
+        assert!(!chosen(32, half, 0.04));
+        assert!(!chosen(32, hd, 0.04));
+        assert!(chosen(32, 3840 * 2160, 0.04));
     }
 
     /// The gather binds only its layout: the exact lookup's group 0, its records, the lighting.
