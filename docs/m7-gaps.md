@@ -665,3 +665,16 @@ The 3.5 ms target on both paths remains open. No quiet before/after numbers or
 complete quality promotion are claimed. Preserve the 128-shadow budget, every
 contributing RT light and LC2 softness in the follow-up. Raw summaries and staged
 baseline/C binaries live under D:/Coding/renderlab-work/p-lts3.
+
+## M8 non-RT gather follow-up (P-GATHER, 2026-11-10)
+
+[P-GATHER](p-gather.md) recommends retaining batched queue screening only on the
+software path. Quiet 1080p moving medians: game 11.2180 -> 11.0572 ms, quarry
+11.5544 -> 11.2573 ms. All 51 A/B HDR hashes and 43 PNGs match; inspected quarry
+cut-to-settle has no missing or newly delayed bounce; 200 lib tests pass. RT
+module text and gather entry stay unchanged. Uniform speed remains open: game
+cut is +0.6122 ms, quarry moving mean has tails, and the unchanged RT early-still
+phase remains variable (7.4641 -> 8.4665 ms pooled medians in this small cohort).
+These are disclosed measurements, not a new visual defect or an Unreal victory.
+The owned Cargo target cleanup is blocked by automatic approval policy; see the
+unit report for the exact path and handoff.
