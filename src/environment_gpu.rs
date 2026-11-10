@@ -276,8 +276,12 @@ impl Renderer {
                 bytes - diffuse_bytes
             },
         );
-        let specular_second = independent.then(|| {
-            cube(
+        // P-SHOW2: a legacy chain's narrow levels, banked at BANK_SIZE (environment::bank_legacy).
+        let banked = (!independent)
+            .then(|| crate::environment::bank_legacy(data.specular_radiance()))
+            .flatten();
+        let specular_second = if independent {
+            Some(cube(
                 &self.device,
                 &self.ledger,
                 data.specular_radiance()[0].size(),
@@ -285,8 +289,20 @@ impl Renderer {
                 138,
                 wgpu::TextureFormat::Rgba32Float,
                 23 * data.specular_radiance()[0].texels().len() as u64 * 16,
-            )
-        });
+            ))
+        } else {
+            banked.as_ref().map(|(_, banks)| {
+                cube(
+                    &self.device,
+                    &self.ledger,
+                    crate::environment::BANK_SIZE,
+                    1,
+                    6 * banks.len() as u32,
+                    wgpu::TextureFormat::Rgba32Float,
+                    banks.iter().map(|b| b.len() as u64).sum(),
+                )
+            })
+        };
         let mut hash = Sha256::new();
         for (target, mips) in [
             (&diffuse, std::slice::from_ref(data.diffuse_irradiance())),
@@ -331,6 +347,27 @@ impl Renderer {
                 self.uploads.write_calls += 1;
             }
         }
+        if let (Some((_, banks)), Some(target)) = (&banked, &specular_second) {
+            let size = crate::environment::BANK_SIZE;
+            for (k, packed) in banks.iter().enumerate() {
+                hash.update(packed);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: k as u32 * 6 },
+                        ..target._texture.as_image_copy()
+                    },
+                    packed,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size * 16),
+                        rows_per_image: Some(size),
+                    },
+                    wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+                );
+                self.uploads.texture_writes += 1;
+                self.uploads.write_calls += 1;
+            }
+        }
         hash.update(data.diffuse_irradiance().size().to_ne_bytes());
         hash.update(data.specular_radiance()[0].size().to_ne_bytes());
         hash.update([u8::from(independent)]);
@@ -366,6 +403,7 @@ impl Renderer {
             specular_second,
             lobes,
             independent,
+            banked: banked.is_some(),
             levels,
             yaw: data.metadata().rotation_y_radians,
             hash: hash.finalize().into(),

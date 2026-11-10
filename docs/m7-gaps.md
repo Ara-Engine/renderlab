@@ -689,9 +689,9 @@ scene with any skinned mesh never settled. Fixed by comparing pose revisions: RT
 13.7-16.0 ms (still, moving and cut), non-RT shadow compute -1.2 to -1.6 ms; images within a few
 codes. Open:
 
-- **Non-RT GI still churns on skinned scenes (scaffolding).** Software-ray frames keep the old rule
-  because the settled cache shows blocky GI cells on flat white faces, which the churn averaged
-  away. Remove the switch in `gi_cache.rs` with the non-RT grain fix: about -12 to -16 ms on Showcase.
+- **CLOSED (P-SHOW2): non-RT GI churn on skinned scenes.** The software-ray relight switch is deleted
+  ([p-show2.md](p-show2.md) section 2): Showcase non-RT still 55.2 → 33.1 ms (GI 20.5 → 0.9 ms),
+  plinths clean at 1x, still, moving and on cuts.
 - **Animated characters relight one eighth of every GI cell per frame** (about 13 ms RT on
   Showcase while a pose changes). A relight bounded to cells whose gathers can see the moved
   caster's swept box is the next lever.
@@ -710,9 +710,10 @@ codes. Open:
   - **OPEN:** just after a cut the glow carries fine grain for a few frames, as the reference's own grain does.
   - **OPEN:** unverified on Showcase itself (no Ara build this unit).
 - **FIXED on our scenes: non-RT GI blotches after cuts.** Non-RT gathered 8,192 cells a frame against RT's 32,768, so bounce drained for about 100 frames after a cut. One budget of 32,768 on both paths: clean by frame 8 on the matched scene, and settled holds match RT. Cost about +0.4-0.8 ms per drain frame at 720p.
-  - **OPEN:** P-SHOW's software-ray relight scaffolding in `gi_cache.rs` stays until one Showcase non-RT still with it removed shows clean plinths. That removal is the measured 43 → 31 ms.
+  - **CLOSED (P-SHOW2):** the relight scaffolding is deleted; Showcase's plinths are clean without it. It also explains main's non-RT regression from this unit: with the switch on, every skinned-scene frame drained at the new 4x budget (+3.6 to +7.4 ms).
 - **OPEN: stair-stepped glass rim (both paths).** The thin-slab screen-space refraction magnifies the opaque image near a sphere's rim, so its pixel steps show as stairs. RT adds a dotted rim: one mirror ray per pixel, no glass history. Centroid varyings, a footprint-filtered lookup and a glass reflection lobe floor (`t3/p-defect-glass`) were not visibly better and are not merged. Next: traced thick refraction through the back face on both paths, replacing the screen copy.
-- **OPEN: glossy method change.** Lower-rate tracing with energy-keeping, firefly-robust reconstruction: proposal and patent mapping in p-defect.md section 5. Re-screen P-SHOW's 4-strata variant on top of the regularization first.
+- **OPEN: glossy method change.** Lower-rate tracing with energy-keeping, firefly-robust reconstruction: proposal and patent mapping in p-defect.md section 5. Re-screen P-SHOW's 4-strata variant on top of the regularization first. P-SHOW2 built the screens (`RENDERLAB_GLOSSY_MAX`, branch `t3/p-show2-screens`) but ran none; time them after the sky-map lookup fix, which moves most of the glossy cost under a sky map.
+- **Hit regularization costs nothing measurable on Showcase RT** (P-SHOW2: shading 7.74 vs 7.71 ms still).
 
 ## M8 Unreal yardstick (P-YARD2, 2026-11-10)
 
@@ -726,3 +727,15 @@ codes. Open:
 6. **RT speed.** 3.82 ms still / 4.26 moving against HW Lumen Epic's 4.50 / 4.57: 1.07-1.18x faster, about 2.5-2.8x off a 3x target (1.50 ms).
 
 Unreal flaws Renderlab already beats here: SW Lumen's sun leak through S4's thin walls, SW Lumen's broken S5 mirror, and Unreal's softer, flatter quarry texture and colour. Neither engine leaves a visible ghost trail on the door or mirror benches; Unreal's door edge shows a faint doubled strip mid-slide. A view with a moving object over a lit background, rather than the black exterior sky here, would stress trails harder; that bench is still missing.
+
+## M8 Showcase follow-through (P-SHOW2, 2026-11-10)
+
+[P-SHOW2](p-show2.md), Showcase at 1080p through Ara's bridge (`ede758f7a`, Sky::Map), with a named per-pass GPU timeline (`RENDERLAB_PASS_LOG`) and ablations (`RENDERLAB_ABLATE`).
+
+- **FIXED: main's non-RT regression on skinned scenes.** P-SHOW's relight switch made every frame a GI drain frame, at P-DEFECT's 4x gather budget. Deleted: non-RT still 55.2 → 33.1 ms (GI 20.5 → 0.9 ms), plinths clean still, moving and on cuts.
+- **HALF FIXED: Sky::Map cost.** A 16-texel legacy chain sent glossy and hit lookups through the cross-face slow path; narrow levels are now banked at load. RT still with the map 52.5 → 33.9 ms, image within 2 codes.
+  - **OPEN, top cost:** about 17 ms of RT shading still remains under any map (25.1 vs 8.5 ms constant sky), and the integration thread sees the same with full-size independent banks. Profile the per-ray environment lookups (RGBA32F, two levels, 16 strata, every hit).
+  - **OPEN:** the atmosphere's own GPU-made legacy chain is not banked; check its narrow levels' cost too.
+- **OPEN: aluminium ball (both paths).** The untraced half of a 0.42 metal's lobe uses sky visibility about the normal, so ground-facing reflections read as sky. A directional-visibility fix is built behind a screen switch (`t3/p-show2-screens`), unmeasured; screen it on `reflection_matched --stage --metal-balls` against the path tracer.
+- **OPEN: glossy at a lower rate.** Screens built (`RENDERLAB_GLOSSY_MAX`), not run. Time them after the map lookup cost, which dominates glossy under a sky.
+- **Unexplained:** Showcase RT constant-sky spans spread 16-20 ms across leases on this machine. Root's 11.0 → 13.3 ms was a release-against-dev comparison, not a regression P-SHOW2 could reproduce.
