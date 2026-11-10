@@ -219,18 +219,7 @@ impl Renderer {
             data.specular_layout(),
             SpecularLayout::IndependentRoughness { .. }
         );
-        // P-SHOW2: small legacy chains are banked at load (environment::bank_legacy).
-        let banked = (!independent)
-            .then(|| crate::environment::bank_legacy(data.specular_radiance()))
-            .flatten();
-        let levels = data.specular_radiance().len() as u32;
-        let required_layers = if independent {
-            252
-        } else if banked.is_some() {
-            6 * levels
-        } else {
-            6
-        };
+        let required_layers = if independent { 252 } else { 6 };
         if self.device.limits().max_texture_array_layers < required_layers {
             return Err(Error::InvalidInput(
                 "environment exceeds device array layers",
@@ -273,32 +262,26 @@ impl Renderer {
             wgpu::TextureFormat::Rgba32Float,
             diffuse_bytes,
         );
-        let specular = match &banked {
-            Some((size, banks)) => cube(
-                &self.device,
-                &self.ledger,
-                *size,
-                1,
-                6 * levels,
-                wgpu::TextureFormat::Rgba32Float,
-                banks.iter().map(|b| b.len() as u64).sum(),
-            ),
-            None => cube(
-                &self.device,
-                &self.ledger,
-                data.specular_radiance()[0].size(),
-                if independent { 1 } else { levels },
-                if independent { 252 } else { 6 },
-                wgpu::TextureFormat::Rgba32Float,
-                if independent {
-                    42 * data.specular_radiance()[0].texels().len() as u64 * 16
-                } else {
-                    bytes - diffuse_bytes
-                },
-            ),
-        };
-        let specular_second = independent.then(|| {
-            cube(
+        let levels = data.specular_radiance().len() as u32;
+        let specular = cube(
+            &self.device,
+            &self.ledger,
+            data.specular_radiance()[0].size(),
+            if independent { 1 } else { levels },
+            if independent { 252 } else { 6 },
+            wgpu::TextureFormat::Rgba32Float,
+            if independent {
+                42 * data.specular_radiance()[0].texels().len() as u64 * 16
+            } else {
+                bytes - diffuse_bytes
+            },
+        );
+        // P-SHOW2: a legacy chain's narrow levels, banked at BANK_SIZE (environment::bank_legacy).
+        let banked = (!independent)
+            .then(|| crate::environment::bank_legacy(data.specular_radiance()))
+            .flatten();
+        let specular_second = if independent {
+            Some(cube(
                 &self.device,
                 &self.ledger,
                 data.specular_radiance()[0].size(),
@@ -306,8 +289,20 @@ impl Renderer {
                 138,
                 wgpu::TextureFormat::Rgba32Float,
                 23 * data.specular_radiance()[0].texels().len() as u64 * 16,
-            )
-        });
+            ))
+        } else {
+            banked.as_ref().map(|(_, banks)| {
+                cube(
+                    &self.device,
+                    &self.ledger,
+                    crate::environment::BANK_SIZE,
+                    1,
+                    6 * banks.len() as u32,
+                    wgpu::TextureFormat::Rgba32Float,
+                    banks.iter().map(|b| b.len() as u64).sum(),
+                )
+            })
+        };
         let mut hash = Sha256::new();
         for (target, mips) in [
             (&diffuse, std::slice::from_ref(data.diffuse_irradiance())),
@@ -315,27 +310,6 @@ impl Renderer {
         ] {
             for (mip, level) in mips.iter().enumerate() {
                 let is_specular = std::ptr::eq(target, &specular);
-                if let (true, Some((size, banks))) = (is_specular, &banked) {
-                    let packed = &banks[mip];
-                    hash.update(packed);
-                    self.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            mip_level: 0,
-                            origin: wgpu::Origin3d { x: 0, y: 0, z: mip as u32 * 6 },
-                            ..target._texture.as_image_copy()
-                        },
-                        packed,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(size * 16),
-                            rows_per_image: Some(*size),
-                        },
-                        wgpu::Extent3d { width: *size, height: *size, depth_or_array_layers: 6 },
-                    );
-                    self.uploads.texture_writes += 1;
-                    self.uploads.write_calls += 1;
-                    continue;
-                }
                 let (target, mip, layer) = if independent && is_specular {
                     if mip < 42 {
                         (target, 0, mip as u32 * 6)
@@ -368,6 +342,27 @@ impl Renderer {
                         height: level.size(),
                         depth_or_array_layers: 6,
                     },
+                );
+                self.uploads.texture_writes += 1;
+                self.uploads.write_calls += 1;
+            }
+        }
+        if let (Some((_, banks)), Some(target)) = (&banked, &specular_second) {
+            let size = crate::environment::BANK_SIZE;
+            for (k, packed) in banks.iter().enumerate() {
+                hash.update(packed);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: k as u32 * 6 },
+                        ..target._texture.as_image_copy()
+                    },
+                    packed,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size * 16),
+                        rows_per_image: Some(size),
+                    },
+                    wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
                 );
                 self.uploads.texture_writes += 1;
                 self.uploads.write_calls += 1;

@@ -321,14 +321,23 @@ fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i3
     let e=environment_tap(tex,i32(face.x),p+vec2<i32>(1,1),size,mip,bank);
     return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
 }
-// A legacy chain's level count; a banked chain (src/environment.rs bank_legacy) adds 0.5.
+// A legacy chain's level count; a chain with banked narrow levels adds 0.5 (P-SHOW2).
 fn environment_legacy_levels() -> f32 { return floor(lighting.map.w); }
+// The first banked level: levels narrower than src/environment.rs BANK_SIZE (32) are
+// banked in environment_specular_second at that size (bank_legacy); wider ones keep mips.
+fn environment_bank_start() -> i32 {
+    let n=textureDimensions(environment_specular,0).x;
+    return select(0,i32(firstLeadingBit(n/32u))+1,n>=32u);
+}
 fn environment_level(d:vec3<f32>, level:i32) -> vec3<f32> {
     let legacy=lighting.map.w>0.0;
-    let banked=legacy && fract(lighting.map.w)>0.0;
+    if legacy && fract(lighting.map.w)>0.0 {
+        let start=environment_bank_start();
+        if level>=start { return environment_bilinear(environment_specular_second,d,0,(level-start)*6); }
+    }
     let second=!legacy && level>=42;
-    let mip=select(0,level,legacy && !banked);
-    let bank=select((level-select(0,42,second))*6,select(0,level*6,banked),legacy);
+    let mip=select(0,level,legacy);
+    let bank=select((level-select(0,42,second))*6,0,legacy);
     if second { return environment_bilinear(environment_specular_second,d,mip,bank); }
     return environment_bilinear(environment_specular,d,mip,bank);
 }

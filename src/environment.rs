@@ -18,7 +18,7 @@ pub(crate) struct EnvironmentInner {
     /// lobes; None binds the renderer's empty table.
     pub lobes: Option<EnvironmentCube>,
     pub independent: bool,
-    /// A legacy mip chain stored as equal-size banks (`bank_legacy`).
+    /// A legacy mip chain whose narrow levels are banked in `specular_second` (`bank_legacy`).
     pub banked: bool,
     pub yaw: f32,
     pub levels: u32,
@@ -148,25 +148,25 @@ pub(crate) fn upload_bytes(
         ))
 }
 
-/// Legacy mip chains with level-0 faces at most this wide are banked at load.
-pub(crate) const BANK_MAX_SIZE: u32 = 64;
-/// Banked levels are at least this wide.
-const BANK_MIN_SIZE: u32 = 32;
+/// The face size of a legacy chain's banked levels (`bank_legacy`). Every level narrower
+/// than this is banked; shaders/scene.wgsl `environment_bank_start` uses the same rule.
+pub(crate) const BANK_SIZE: u32 = 32;
 
-/// P-SHOW2 (docs/p-show2.md): a small legacy mip chain as equal-size array banks, one per
-/// level, each texel the chain's own exact cube-bilinear value (shaders/scene.wgsl
-/// `environment_bilinear`, seams and corners included) at the texel's centre direction.
-/// The chain's 8- to 1-texel levels sent almost every shading lookup through the
-/// cross-face slow path (Showcase's Sky::Map: +38 ms of glossy shading at 1080p). In banks
-/// at least BANK_MIN_SIZE wide, almost every lookup stays inside its face. The bank size
-/// and the packed RGBA32F levels, or None for larger chains, which keep their mips.
-pub(crate) fn bank_legacy(levels: &[CubeLevel]) -> Option<(u32, Vec<Vec<u8>>)> {
-    let first = levels.first()?.size();
-    if first > BANK_MAX_SIZE {
+/// P-SHOW2 (docs/p-show2.md): a legacy mip chain's levels narrower than BANK_SIZE, as
+/// equal-size array banks of BANK_SIZE faces. Each texel is the level's own exact
+/// cube-bilinear value (shaders/scene.wgsl `environment_bilinear`, seams and corners
+/// included) at the texel's centre direction. On 8- to 1-texel levels almost every shading
+/// lookup crossed a face edge into the slow cross-face path: Showcase's 16-texel Sky::Map
+/// cost +38 ms of glossy shading at 1080p. In the banks almost every lookup stays inside
+/// its face. Levels at least BANK_SIZE wide keep their exact mips. Returns the first banked
+/// level and the packed RGBA32F banks, or None when no level is narrower.
+pub(crate) fn bank_legacy(levels: &[CubeLevel]) -> Option<(usize, Vec<Vec<u8>>)> {
+    let start = levels.iter().take_while(|l| l.size() >= BANK_SIZE).count();
+    if start == levels.len() {
         return None;
     }
-    let size = first.max(BANK_MIN_SIZE);
-    let banks = levels
+    let size = BANK_SIZE;
+    let banks = levels[start..]
         .iter()
         .map(|level| {
             let mut bytes = Vec::with_capacity((6 * size * size * 16) as usize);
@@ -184,7 +184,7 @@ pub(crate) fn bank_legacy(levels: &[CubeLevel]) -> Option<(u32, Vec<Vec<u8>>)> {
             bytes
         })
         .collect();
-    Some((size, banks))
+    Some((start, banks))
 }
 
 // CPU mirrors of shaders/scene.wgsl's face selection and exact cube-bilinear lookup.
@@ -280,21 +280,30 @@ mod bank_tests {
         std::array::from_fn(|c| f32::from_ne_bytes(bank[i * 16 + c * 4..i * 16 + c * 4 + 4].try_into().unwrap()))
     }
 
-    /// Banking reproduces a full-size level's texels (its centres are its own exact
-    /// lookups), keeps a constant level constant, and leaves large chains as mips.
+    /// Levels at least BANK_SIZE wide keep their mips; a narrower level's bank holds its own
+    /// lookups at the bank's texel centres: a level linear in its texel coordinates reads
+    /// back exactly inside each face, on every face (row-major, face-major), and a
+    /// constant stays constant. Chains with no narrow level are not banked.
     #[test]
-    fn small_legacy_chains_bank_their_own_lookups() {
-        let full = level(32, |i| [i as f32, (i % 7) as f32, 1.0]);
-        let constant = level(2, |_| [3.0, 4.0, 5.0]);
-        let reference = full.texels().to_vec();
-        let (size, banks) = bank_legacy(&[full, constant]).unwrap();
-        assert_eq!((size, banks.len()), (32, 2));
-        for (i, texel) in reference.iter().enumerate() {
-            let got = read(&banks[0], i);
-            assert!((0..3).all(|c| (got[c] - texel[c]).abs() <= 1e-3 * texel[c].max(1.0)), "{i}: {got:?} {texel:?}");
+    fn legacy_chains_bank_their_narrow_levels() {
+        let n = 16usize;
+        let linear = level(16, |i| [(i % n) as f32, ((i % (n * n)) / n) as f32, (i / (n * n)) as f32]);
+        let chain = [level(64, |_| [1.0; 3]), level(32, |_| [1.0; 3]), linear, level(8, |_| [3.0, 4.0, 5.0])];
+        let (start, banks) = bank_legacy(&chain).unwrap();
+        assert_eq!((start, banks.len()), (2, 2));
+        let size = BANK_SIZE as usize;
+        for face in 0..6 {
+            for y in 1..size - 2 {
+                for x in 1..size - 2 {
+                    let got = read(&banks[0], face * size * size + y * size + x);
+                    let want = [x, y].map(|v| (v as f32 + 0.5) / 2.0 - 0.5);
+                    assert!((got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4, "{face} {x} {y}: {got:?}");
+                    assert_eq!(got[2], face as f32);
+                }
+            }
         }
         let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|c| (a[c] - b[c]).abs() <= 1e-5 * b[c]);
-        assert!((0..6 * 32 * 32).all(|i| close(read(&banks[1], i), [3.0, 4.0, 5.0])));
-        assert!(bank_legacy(&[level(128, |_| [1.0; 3])]).is_none());
+        assert!((0..6 * size * size).all(|i| close(read(&banks[1], i), [3.0, 4.0, 5.0])));
+        assert!(bank_legacy(&chain[..2]).is_none());
     }
 }
