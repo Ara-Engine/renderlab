@@ -163,13 +163,8 @@ fn lut_sample(f: &Fixture, rgb: [f32; 3]) -> [f32; 3] {
     }
     out
 }
-/// Scalar tone/grade/LUT/vignette reference for fixtures with grain and aberration disabled.
+/// Scalar tone/grade/LUT/vignette, channel aberration and wrapping grain hash.
 pub fn tone(colour: &Image, bloom: &Image, f: &Fixture) -> Image {
-    assert_eq!(f.settings[11], 0., "grain must be disabled in this fixture");
-    assert_eq!(
-        f.settings[16], 0.,
-        "aberration must be disabled in this fixture"
-    );
     let size = colour.size;
     let pixels = (0..size[0] * size[1])
         .map(|i| {
@@ -177,7 +172,18 @@ pub fn tone(colour: &Image, bloom: &Image, f: &Fixture) -> Image {
                 ((i % size[0]) as f32 + 0.5) / size[0] as f32,
                 ((i / size[0]) as f32 + 0.5) / size[1] as f32,
             ];
-            let hdr = mix(sample(colour, uv), sample(bloom, uv), f.settings[0]);
+            let hdr_at = |uv| mix(sample(colour, uv), sample(bloom, uv), f.settings[0]);
+            let mut hdr = hdr_at(uv);
+            if f.settings[16] > 0. {
+                let radial = uv.map(|v| v * 2. - 1.);
+                let squared = radial[0] * radial[0] + radial[1] * radial[1];
+                let shift = [
+                    radial[0] * squared * f.settings[16] / size[0] as f32,
+                    radial[1] * squared * f.settings[16] / size[1] as f32,
+                ];
+                hdr[0] = hdr_at([uv[0] + shift[0], uv[1] + shift[1]])[0];
+                hdr[2] = hdr_at([uv[0] - shift[0], uv[1] - shift[1]])[2];
+            }
             let mut rgb = std::array::from_fn::<_, 3, _>(|c| {
                 let x = (hdr[c] * f.settings[12 + c]).max(0.);
                 let x = if f.settings[15] > 0.5 {
@@ -198,7 +204,20 @@ pub fn tone(colour: &Image, bloom: &Image, f: &Fixture) -> Image {
             let r = uv.map(|x| x * 2. - 1.);
             let edge = ((r[0] * r[0] + r[1] * r[1] - 0.15) / (1.8 - 0.15)).clamp(0., 1.);
             let edge = edge * edge * (3. - 2. * edge);
-            let rgb = rgb.map(|x| (x * (1. - f.settings[10] * edge)).clamp(0., 1.));
+            let mut rgb = rgb.map(|x| x * (1. - f.settings[10] * edge));
+            if f.settings[11] > 0. {
+                let mut h = (i % size[0]).wrapping_mul(0x9e3779b9)
+                    ^ (i / size[0]).wrapping_mul(0x85ebca6b)
+                    ^ (f.settings[3] as u32).wrapping_mul(0xc2b2ae35);
+                h = (h ^ (h >> 16)).wrapping_mul(0x7feb352d);
+                h = (h ^ (h >> 15)).wrapping_mul(0x846ca68b);
+                let hash = ((h ^ (h >> 16)) >> 8) as f32 / 16777216.;
+                let signal = ((rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) * 4.)
+                    .clamp(0., 1.)
+                    .sqrt();
+                rgb = rgb.map(|x| x + (hash - 0.5) * f.settings[11] * signal);
+            }
+            let rgb = rgb.map(|x| x.clamp(0., 1.));
             [rgb[0], rgb[1], rgb[2], 1.]
         })
         .collect();

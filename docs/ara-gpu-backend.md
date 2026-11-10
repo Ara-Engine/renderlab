@@ -270,3 +270,17 @@ camera view, matching the actual packet input rather than assuming look-at
 construction preserved the requested eye bit-for-bit. All 11 replay tests pass;
 all 25 SPIR-V stages validate. There are 20 original entries plus display.
 Particle simulation/lighting/draw and all native Vulkan runs remain pending.
+
+## Runtime post settings and complete persistent bloom
+
+The post settings record now supports ordered GPU updates, with transfer usage
+and transactional allocation inherited from the shared storage buffer helper.
+An eight-submission replay updates the same record, draws tone and snapshots
+outputs before the first host wait. The scalar oracle covers both tone curves,
+LUT on/off, chromatic aberration and the exact wrapping integer grain hash with
+changing frame indices. Max tone error is 0.000879109 (tolerance 0.003).
+The same fixture exercises the public persistent six-level bloom chain at 65×33,
+including its coarsest self-tent: max error 0.002929688 (tolerance 0.004).
+All 12 replay tests pass with Metal API/shader validation. Native Vulkan remains
+pending. Strict native float flags apply to every pass; no performance claim is
+made for this development configuration.

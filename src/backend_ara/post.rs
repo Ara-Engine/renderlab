@@ -1,12 +1,13 @@
 //! The reusable post-pass encoder. No device creation, upload or wait inside a pass.
-use super::{cache::ShaderCache, graph::Graph, image::Texture, shader::Pass};
+use super::{
+    buffer::StorageBuffer, cache::ShaderCache, graph::Graph, image::Texture, shader::Pass,
+};
 use anyhow::{Result, ensure};
 use ara_gpu::{
     Access, Buffer, GpuDevice, Pipeline, Resource, RootConstants,
     commands::{Attachment, Command, Recorder},
     cooked::RenderState,
     descriptors::Format,
-    vk,
 };
 
 /// Exact 80-byte Settings record shared with the original post WGSL.
@@ -22,10 +23,28 @@ impl SettingsRecord {
             words.iter().all(|v| v.is_finite()),
             "post settings must be finite"
         );
-        let buffer = gpu.create_buffer(80, vk::BufferUsageFlags::STORAGE_BUFFER, true)?;
-        gpu.upload(buffer, bytemuck::cast_slice(words))?;
-        let slot = gpu.storage_buffer(buffer)?.index;
-        Ok(Self { buffer, slot })
+        let record = StorageBuffer::new(gpu, bytemuck::cast_slice(words))?;
+        Ok(Self {
+            buffer: record.buffer,
+            slot: record.slot,
+        })
+    }
+    /// Schedule settings after earlier reads, without a host overwrite or CPU wait.
+    pub fn update(&self, graph: &mut Graph, rec: &mut Recorder, words: &[f32; 20]) -> Result<()> {
+        ensure!(
+            words.iter().all(|v| v.is_finite()),
+            "post settings must be finite"
+        );
+        graph.node(
+            rec,
+            &[(Resource::Buffer(self.buffer), Access::CopyDestination)],
+        )?;
+        rec.push(Command::UpdateBuffer {
+            destination: self.buffer,
+            offset: 0,
+            bytes: bytemuck::cast_slice(words).to_vec(),
+        });
+        Ok(())
     }
 }
 /// Direct heap inputs; their image identities also supply graph reachability.

@@ -120,6 +120,8 @@ mod post_surface_cases;
 
 #[path = "ara_backend/cases/particles.rs"]
 mod particle_cases;
+#[path = "ara_backend/cases/post_runtime.rs"]
+mod post_runtime_cases;
 #[path = "ara_backend/cases/sky.rs"]
 mod sky_cases;
 #[path = "ara_backend/sky.rs"]
