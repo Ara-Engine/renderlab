@@ -51,7 +51,7 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
 @group(0) @binding(33) var tp_reflection_geometric:texture_2d<f32>;
-@group(0) @binding(38) var<uniform> rl_glass_programs:array<vec4<u32>,16>;
+@group(0) @binding(38) var<uniform> rl_glass_programs:array<vec4<u32>,PRIMARY_BATCHES/4>;
 fn rl_glass_parameter_batch(batch:u32)->u32 {
     return select(0u,batch,rl_glass_programs[batch>>2u][batch&3u]==0u);
 }
@@ -129,7 +129,7 @@ impl Renderer {
         let program_slots = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("TP2 reflected hit program slots"),
-                size: 256,
+                size: 4 * u64::from(crate::TRACED_DRAWS),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -187,7 +187,11 @@ impl Renderer {
                 entry(31, COMPUTE, texture(UNFILTERED)),
                 entry(32, COMPUTE, texture(UNFILTERED)),
                 entry(33, COMPUTE, texture(UNFILTERED)),
-                entry(38, COMPUTE, uniform(false, 256)),
+                entry(
+                    38,
+                    COMPUTE,
+                    uniform(false, 4 * u64::from(crate::TRACED_DRAWS)),
+                ),
             ],
         );
         let pipeline_layout = self.tp_pipeline_layout(

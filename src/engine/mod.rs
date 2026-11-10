@@ -29,11 +29,12 @@ pub use crate::asset::{
 };
 pub use crate::cutout::{AlphaMask, CutoutMesh, cutout};
 pub use crate::{
-    AtmosphereMedium, Camera, ColourLut, Decal, DecalBlend, DecalTexture, DecalTextureKind,
-    DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, FrameId, FrameReport, HeightFog,
-    Light, Limits, LocalShadows, MAX_PARTICLES, Mat4, MeshData, PostSettings, ReflectionSettings,
-    ReloadError, ReloadReport, RenderScale, Renderer, Tonemapper, Transparency, Value, Vec3,
-    Vertex, VolumetricFog,
+    AtmosphereMedium, Camera, ColorKey, ColourLut, Decal, DecalBlend, DecalTexture,
+    DecalTextureKind, DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, Flipbook,
+    Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
+    MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
+    ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
+    Transparency, Value, Vec3, Vertex, VolumetricFog,
 };
 
 use crate::{
@@ -248,9 +249,14 @@ pub struct Engine {
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
 /// External adapters should use these flags too; explicit wgpu environment overrides apply.
+///
+/// Debug object names (`InstanceFlags::DEBUG`) are opt-in with `WGPU_DEBUG=1` (capture
+/// tools), not a default of debug builds: with several devices alive, naming objects
+/// through the Vulkan validation layer segfaulted inside Ubuntu's 1.4.341 loader
+/// running the SDK's 1.4.363 layer (4 of 10 concurrent runs; 0 of 10 without names).
 pub fn instance_flags() -> wgpu::InstanceFlags {
     wgpu::InstanceFlags::default()
-        .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+        .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL | wgpu::InstanceFlags::DEBUG)
         .with_env()
 }
 

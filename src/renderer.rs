@@ -2426,7 +2426,12 @@ impl Renderer {
         let jittered;
         let camera = match self.reconstruction_frame {
             Some(k) => {
-                jittered = camera.jittered(temporal_reconstruction::sample_offset(k));
+                let offset = if temporal_reconstruction::p_still("nojitter") {
+                    [0.0; 2]
+                } else {
+                    temporal_reconstruction::sample_offset(k)
+                };
+                jittered = camera.jittered(offset);
                 &jittered
             }
             None => camera,

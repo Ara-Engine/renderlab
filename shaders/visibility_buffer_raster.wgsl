@@ -5,7 +5,7 @@
 @group(0) @binding(3) var<storage,read> lists:array<u32>;
 @group(0) @binding(8) var<storage,read_write> visibility:array<atomic<u64>>;
 // Its own group: wgpu forbids binding arrays beside uniform buffers.
-@group(2) @binding(8) var<storage,read> cluster_data:binding_array<U32s,64>;
+@group(2) @binding(8) var<storage,read> cluster_data:binding_array<U32s,PRIMARY_BATCHES>;
 struct Out {
     @builtin(position) position:vec4<f32>,
     @location(0) @interpolate(flat) payload:u32,

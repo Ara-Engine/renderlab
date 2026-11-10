@@ -142,7 +142,9 @@ impl Renderer {
         if count > MAX_TRANSPARENT_DRAWS
             || count as u32 > self.device.limits().max_texture_array_layers
         {
-            return Err(Error::InvalidInput("more than 64 transparent shadow draws"));
+            return Err(Error::InvalidInput(
+                "more than TRACED_DRAWS transparent shadow draws",
+            ));
         }
         let matrix = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
         let mut data = bytes_of(&matrix.to_cols_array());

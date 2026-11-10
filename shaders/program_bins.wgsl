@@ -8,7 +8,7 @@
 // is then shaded by its program's own pipeline in one indirect dispatch
 // (program_traced_list.wgsl).
 // Must match program_traced_list.wgsl RlList and primary_ray_gpu.rs ProgramLists.
-struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,16> };
+struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,PRIMARY_BATCHES/4> };
 @group(0) @binding(0) var bins_hit:texture_2d<u32>;
 @group(0) @binding(1) var bins_coverage:texture_2d<u32>;
 @group(0) @binding(2) var<storage,read> bins_region:vec4<u32>;

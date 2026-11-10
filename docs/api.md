@@ -172,7 +172,7 @@ let bush = engine.create_mesh(&card.data())?;
 let leaves = engine.create_material(&MaterialDesc { thin: true, ..leaf_material })?;
 ```
 
-**Particles (TP1).** `create_emitter(&EmitterDescriptor, sprite: Option<TextureId>) -> EmitterId` starts a GPU emitter that simulates and draws every frame until `remove_emitter`. It is lit by the sun (with its shadows and glass tint) and the environment, sorted on the GPU, faded against opaque depth (soft particles) and fogged. Leave `EmitterDescriptor::texture` None and pass the sprite by id. `update_emitter` changes a live emitter (same capacity and sprite presence). `set_particle_step(seconds)` sets the simulation time per frame (default 1/60); set it to the game's frame time. Particles cast no shadows. Fire and other light sources should pair the emitter with a point light, as the example's brazier does.
+**Particles (TP1).** `create_emitter(&EmitterDescriptor, sprite: Option<TextureId>) -> EmitterId` starts a GPU emitter that simulates and draws every frame until `remove_emitter`. It is lit by the sun (with its shadows and glass tint) and the environment, sorted on the GPU, faded against opaque depth (soft particles) and fogged. Leave `EmitterDescriptor::texture` None and pass the sprite by id. `update_emitter` changes a live emitter (same capacity and sprite presence). `set_particle_step(seconds)` sets the simulation time per frame (default 1/60); set it to the game's frame time. Particles spawn in a sphere, a box or a cone (`SpawnShape`) with per-axis velocity variation (`velocity_box`), feel curl-noise, vortex and attractor forces (`Forces`) besides gravity and drag, can bounce off a plane (`PlaneCollision`), and follow colour and size curves of up to `MAX_CURVE_KEYS` keys (`ColorKey`, `SizeKey`). A sprite can be a flipbook (`Flipbook`: a grid of frames cross-faded at a rate over each particle's age, or once over its life), taller than wide (`aspect`), turned by a random angle per particle (`random_rotation`), and can face the camera, stretch along the particle's on-screen velocity, or lie in a plane (`SpriteAlignment`); sprite textures are read upright (image row 0 at the top). `prewarm` starts an emitter as if it had run that many seconds, so a still frame or a capture shows its steady population at once; `burst` spawns a count in its first frame. Particles cast no shadows. Fire and other light sources should pair the emitter with a point light, as the example's brazier does.
 
 ## Lighting and exposure
 
@@ -304,7 +304,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 ## Current limits
 
 - At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
-- At most 64 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once.
+- At most 256 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once. Per-batch program, glass-reflection and virtual-shadow tables share this limit; transparent draw slots also follow `TRACED_DRAWS`.
 - Materials must be double-sided while the sun casts shadows.
 - Map heads shadow at most 128 local lights (`Settings::local_shadows`); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Coarse tail tiles, changed-light full-detail map redraws and reflection-hit visibility remain limitations. Budget reductions and removal/reindexing of the light vector do not guarantee a smooth fade. See [Lights gaps](m7-gaps.md#lights).
 - Glass casts coloured sun shadows only (no local-light shadows) and is invisible to GI rays; particles cast no shadows (TP1, TP2).
@@ -326,6 +326,8 @@ renderlab::engine re-exports Camera, Light, Mat4, Vec3, MeshData, Vertex, Value,
                              RenderScale, AtmosphereMedium, HeightFog, VolumetricFog,
                              LocalShadows, PostSettings, Tonemapper, DepthOfField, ColourLut,
                              ReflectionSettings, Transparency, EmitterDescriptor, MAX_PARTICLES,
+                             SpawnShape, Forces, PlaneCollision, ColorKey, SizeKey, SpriteAlignment, Flipbook,
+                             MAX_CURVE_KEYS,
                              AlphaMask, CutoutMesh, cutout, ClipPlayer, AnimationPose,
                              SkinnedAsset, Influence, Primitive,
                              Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,

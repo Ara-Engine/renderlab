@@ -824,6 +824,7 @@ fn gpu_tp1_scene() {
         texture: Some(&puff),
         capacity: 192,
         seed: 7,
+        ..Default::default()
     };
     let smoke = EmitterDescriptor {
         position: fire_at + up * 0.6,
@@ -842,6 +843,7 @@ fn gpu_tp1_scene() {
         texture: Some(&puff),
         capacity: 256,
         seed: 11,
+        ..Default::default()
     };
 
     let render = |r: &mut Renderer,
@@ -1202,4 +1204,397 @@ fn gpu_tp2_fixture() {
             &read_texture(&r, &target, 4),
         );
     }
+}
+
+/// Reads an emitter's particles back: (position, age) and (velocity, lifetime) per slot.
+fn read_particles(r: &Renderer, emitter: usize) -> Vec<([f32; 4], [f32; 4])> {
+    let e = &r.transparency.emitters[emitter];
+    let size = e.particles.size();
+    let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("emitter readback"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = r.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(&e.particles, 0, &buffer, 0, size);
+    r.queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    r.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(20)),
+        })
+        .unwrap();
+    let data = slice.get_mapped_range().unwrap();
+    let floats: Vec<f32> = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
+        .collect();
+    floats
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .map(|p| ([p[0], p[1], p[2], p[3]], [p[4], p[5], p[6], p[7]]))
+        .collect()
+}
+
+/// Spawn shapes, prewarm, bursts, plane collision, a vortex and colour and size curves,
+/// read back from the particle buffers (and an image of the curves for inspection).
+#[test]
+#[ignore = "GPU; TP1_PATH rt|nonrt and TP1_OUT"]
+fn gpu_emitter_shapes_prewarm_forces() {
+    let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
+    let out = PathBuf::from(env("RENDERLAB_TP1_OUT").unwrap());
+    std::fs::create_dir_all(&out).unwrap();
+    let rt = path != "nonrt";
+    let (device, queue) = device(rt);
+    let mut r = if rt {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            HardwareShadowOptions::default(),
+            SOURCE,
+        )
+        .unwrap()
+    } else {
+        Renderer::new_with_options(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            SOURCE,
+        )
+        .unwrap()
+    };
+    if rt {
+        r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    }
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(0.25, 0.5, -1.0),
+                lux: [20000.; 3],
+            }],
+            environment: [80.; 3],
+            exposure_stops: -12.0,
+        },
+        &Shadows::default(),
+    )
+    .unwrap();
+    r.set_atmosphere(crate::Atmosphere::off()).unwrap();
+    let (width, height) = (640, 360);
+    let target = r.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("emitter fixture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let floor_vertices = [
+        vertex([-6., -5., 0.], [0., 0., 1.], [0., 0.]),
+        vertex([6., -5., 0.], [0., 0., 1.], [1., 0.]),
+        vertex([6., 7., 0.], [0., 0., 1.], [1., 1.]),
+        vertex([-6., 7., 0.], [0., 0., 1.], [0., 1.]),
+    ];
+    let floor_mesh = upload_mesh(&mut r, &floor_vertices, &[0, 1, 2, 0, 2, 3]);
+    let ground = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.3, 0.3, 0.3, 1.0],
+            roughness: 0.8,
+            ..Default::default()
+        },
+    );
+    let mut floor = upload_instances(&mut r, &[Mat4::IDENTITY]);
+    let glow = |rgb: [f32; 3]| rgb.map(|c| c * 60000.0);
+    let colours = [
+        crate::ColorKey {
+            t: 0.0,
+            color: [0.0; 4],
+            emission: glow([1.0, 0.05, 0.02]),
+        },
+        crate::ColorKey {
+            t: 0.5,
+            color: [0.0; 4],
+            emission: glow([0.05, 1.0, 0.05]),
+        },
+        crate::ColorKey {
+            t: 1.0,
+            color: [0.0; 4],
+            emission: glow([0.05, 0.1, 1.0]),
+        },
+    ];
+    let sizes = [
+        crate::SizeKey { t: 0.0, size: 0.05 },
+        crate::SizeKey { t: 0.5, size: 0.25 },
+        crate::SizeKey { t: 1.0, size: 0.05 },
+    ];
+    let base = EmitterDescriptor {
+        spawn_rate: 0.0,
+        lifetime: [3.0, 3.0],
+        velocity: Vec3::ZERO,
+        velocity_spread: 0.0,
+        drag: 0.0,
+        fade: [0.0, 0.0],
+        soft_distance: 0.0,
+        color: [[0.0; 4]; 2],
+        emission: [glow([1.0, 0.8, 0.5]); 2],
+        size: [0.08; 2],
+        capacity: 1024,
+        ..Default::default()
+    };
+    // 0: a box falling onto the floor, prewarmed 2 s at 200 per second.
+    let falling = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(-2.5, 0.0, 1.0),
+            spawn_shape: crate::SpawnShape::Box {
+                half_extent: Vec3::new(1.0, 0.5, 0.25),
+            },
+            spawn_rate: 200.0,
+            acceleration: Vec3::new(0.0, 0.0, -9.8),
+            collision: Some(crate::PlaneCollision {
+                normal: Vec3::Z,
+                offset: 0.0,
+                restitution: 0.5,
+            }),
+            prewarm: 2.0,
+            ..base
+        })
+        .unwrap();
+    // 1: a burst of 300 in a cone 1.5 m tall and 0.6 m wide at the top.
+    let cone = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            spawn_shape: crate::SpawnShape::Cone {
+                axis: Vec3::new(0.0, 0.0, 1.5),
+            },
+            spawn_radius: 0.6,
+            burst: 300,
+            ..base
+        })
+        .unwrap();
+    // 2: colour and size curves over a prewarmed population of every age.
+    let curves = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(2.5, 0.0, 0.3),
+            spawn_radius: 0.05,
+            spawn_rate: 150.0,
+            lifetime: [2.0, 2.0],
+            velocity: Vec3::new(0.0, 0.0, 0.9),
+            color_keys: &colours,
+            size_keys: &sizes,
+            prewarm: 2.0,
+            ..base
+        })
+        .unwrap();
+    // 3: a vortex about +z through (0, 3, 1).
+    let vortex = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(0.0, 3.0, 1.0),
+            spawn_radius: 0.8,
+            spawn_rate: 300.0,
+            forces: crate::Forces {
+                vortex_center: Vec3::new(0.0, 3.0, 1.0),
+                vortex_axis: Vec3::new(0.0, 0.0, 4.0),
+                ..Default::default()
+            },
+            ..base
+        })
+        .unwrap();
+    // 4: streaks stretched four times along their sideways velocity.
+    let streaks = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(-1.2, -1.5, 2.2),
+            spawn_radius: 0.2,
+            spawn_rate: 40.0,
+            lifetime: [1.0, 1.0],
+            velocity: Vec3::new(1.5, 0.0, 0.0),
+            size: [0.05; 2],
+            alignment: crate::SpriteAlignment::Velocity { stretch: 4.0 },
+            prewarm: 1.0,
+            ..base
+        })
+        .unwrap();
+    // 5: a 2x2 flipbook of rings lying on the floor: frame k is a ring of radius (k+1)/4.
+    let rings = {
+        let (size, cell) = (128u32, 64u32);
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let frame = (y / cell) * 2 + x / cell;
+                let p = [x % cell, y % cell].map(|c| (c as f32 + 0.5) / cell as f32 * 2.0 - 1.0);
+                let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+                let ring = (-((r - (frame + 1) as f32 * 0.22) / 0.06).powi(2)).exp();
+                let i = ((y * size + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, (ring * 255.0) as u8]);
+            }
+        }
+        upload_texture(&mut r, crate::asset::TextureRole::BaseColorSrgb, size, rgba)
+    };
+    let ripple = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(1.2, -1.8, 0.02),
+            spawn_radius: 0.0,
+            burst: 1,
+            lifetime: [100.0, 100.0],
+            size: [1.6; 2],
+            emission: [glow([0.2, 0.6, 1.0]); 2],
+            texture: Some(&rings),
+            flipbook: Some(crate::Flipbook {
+                grid: [2, 2],
+                fps: 1.5,
+                over_life: false,
+            }),
+            alignment: crate::SpriteAlignment::Plane { normal: Vec3::Z },
+            capacity: 1,
+            ..base
+        })
+        .unwrap();
+    // 6: a burst beside a prewarm: the burst is born now, not across the window (review
+    // of #6). 7: a prewarm longer than the ring holds keeps the newest births.
+    let fresh_burst = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(-4.0, 3.0, 1.0),
+            lifetime: [1.0, 3.0],
+            burst: 100,
+            prewarm: 2.0,
+            ..base
+        })
+        .unwrap();
+    let newest = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(4.0, 3.0, 1.0),
+            spawn_rate: 100.0,
+            lifetime: [10.0, 10.0],
+            prewarm: 10.0,
+            capacity: 10,
+            ..base
+        })
+        .unwrap();
+    let camera = Camera::look_at(
+        Vec3::new(0., -7., 3.),
+        Vec3::new(0., 0.5, 0.8),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.05,
+        50.,
+    )
+    .unwrap();
+    let mut render = |r: &mut Renderer| {
+        let mut draws = vec![Draw::new(&floor_mesh, &mut floor).with_material(&ground)];
+        while r
+            .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+            .unwrap()
+            .is_none()
+        {
+            r.test_drain("emitter fixture admission");
+        }
+    };
+    // One frozen frame: only prewarm and the burst can have spawned.
+    r.set_particle_step(0.0).unwrap();
+    render(&mut r);
+    r.test_drain("emitter fixture first frame");
+    let alive = |p: &([f32; 4], [f32; 4])| p.1[3] > 0.0 && p.0[3] < p.1[3];
+    let fallen = read_particles(&r, 0);
+    let live: Vec<_> = fallen.iter().filter(|p| alive(p)).collect();
+    assert!(
+        (380..=400).contains(&live.len()),
+        "prewarmed box: {} live",
+        live.len()
+    );
+    for (p, _) in &live {
+        assert!(p[2] >= -1e-4, "a particle fell through the plane: {p:?}");
+        assert!(
+            (p[0] + 2.5).abs() <= 1.0 + 1e-4 && p[1].abs() <= 0.5 + 1e-4,
+            "{p:?}"
+        );
+    }
+    // Two seconds of fall: most have reached the floor, some have bounced.
+    let low = live.iter().filter(|(p, _)| p[2] < 0.05).count();
+    assert!(
+        low > live.len() / 2,
+        "{low} of {} near the floor",
+        live.len()
+    );
+    let cone_live: Vec<_> = read_particles(&r, 1).into_iter().filter(alive).collect();
+    assert_eq!(cone_live.len(), 300, "burst");
+    for (p, _) in &cone_live {
+        let radial = (p[0] * p[0] + p[1] * p[1]).sqrt();
+        assert!((0.0..=1.5 + 1e-4).contains(&p[2]), "{p:?}");
+        assert!(radial <= 0.6 * p[2] / 1.5 + 1e-4, "outside the cone: {p:?}");
+    }
+    let ages: Vec<f32> = read_particles(&r, 2)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, _)| p[3])
+        .collect();
+    assert!(ages.len() >= 290, "prewarmed curves: {}", ages.len());
+    assert!(
+        ages.iter().any(|a| *a < 0.2) && ages.iter().any(|a| *a > 1.8),
+        "ages span the life"
+    );
+    let burst_ages: Vec<f32> = read_particles(&r, 6)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, _)| p[3])
+        .collect();
+    assert_eq!(burst_ages.len(), 100, "burst beside a prewarm");
+    assert!(
+        burst_ages.iter().all(|a| *a <= 1.0 / 60.0 + 1e-6),
+        "{burst_ages:?}"
+    );
+    let newest_ages: Vec<f32> = read_particles(&r, 7)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, _)| p[3])
+        .collect();
+    assert_eq!(newest_ages.len(), 10, "a full ring");
+    // Ten births at 100 per second: the last tenth of a second.
+    assert!(
+        newest_ages.iter().all(|a| *a <= 0.1 + 1e-4),
+        "{newest_ages:?}"
+    );
+    // Half a second of running: the vortex turns its particles anticlockwise about +z.
+    r.set_particle_step(1.0 / 60.0).unwrap();
+    for _ in 0..30 {
+        render(&mut r);
+    }
+    r.test_drain("emitter fixture motion");
+    let swirl: f32 = read_particles(&r, 3)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, v)| (p[0] - 0.0) * v[1] - (p[1] - 3.0) * v[0])
+        .sum();
+    assert!(swirl > 0.0, "vortex angular momentum {swirl}");
+    write_png(
+        &out.join(format!("emitters-{path}.png")),
+        width,
+        height,
+        &read_texture(&r, &target, 4),
+    );
+    drop((
+        falling,
+        cone,
+        curves,
+        vortex,
+        streaks,
+        ripple,
+        fresh_burst,
+        newest,
+    ));
 }
