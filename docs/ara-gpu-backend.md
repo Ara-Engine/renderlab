@@ -336,3 +336,21 @@ unlit/diagnostic path; lit forward has not been replaced by a simplified shader.
 Its Metal4 per-vertex and pending Vulkan barycentric requirements remain above.
 All native Vulkan runs remain pending. Shared disk space recovered to161GiB;
 the backend still uses one3.6GiB build tree and11MiB of replay artifacts.
+
+## Transparency raster-depth conversion
+
+`tp_depth_raster` now runs unchanged from the original TP_FRAME and
+TP_DEPTH_RASTER sections. It reuses the depth-input heap adapter with a scalar
+R32Float storage output. A rendered 17×11 depth fixture is consumed in a later
+graphics submission without an intervening CPU wait. View distances differ from
+an independent reversed-Z projection formula by at most5.67e-7 (tolerance1e-5),
+and all nine background pixels retain the exact1e30 miss sentinel. All14 native
+replay tests pass; all28 SPIR-V stages validate. There are22 original entries
+plus display. The original conversion is single-sample; transparency composition,
+particle simulation/billboards and native Vulkan remain pending.
+
+When Ara activates this external backend, its workspace must patch the pinned
+Ara git dependency to its local ara-gpu package. This unifies Rust package identity
+so Renderlab borrows the existing device; compiling git and path copies together
+would produce distinct device types. This is an engine-integration dependency
+step, not another GPU device or descriptor-set model.

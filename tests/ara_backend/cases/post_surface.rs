@@ -3,7 +3,7 @@ use super::*;
 use ara_gpu::{commands::Attachment, texture::SampleCount};
 use renderlab::backend_ara::post_surface::{PostCameraFrame, RasterDepth, RasterPostSurface};
 
-fn depth_at(x: u32, y: u32) -> f32 {
+pub(super) fn depth_at(x: u32, y: u32) -> f32 {
     if x < 8 {
         0.6
     } else if y < 5 {

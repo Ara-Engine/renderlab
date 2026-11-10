@@ -19,6 +19,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Opaque raster depth to transparency view-space distance, preserving misses.
+    TransparencyDepth,
     /// Original indexed, instanced unlit/diagnostic mesh draw.
     MeshDiagnostic,
     /// Far-to-near2048-key workgroup particle ordering.
@@ -69,26 +71,20 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::TransparencyDepth => format!(
+                "{}{}",
+                transparency_section("TP_FRAME"),
+                transparency_section("TP_DEPTH_RASTER")
+            )
+            .into(),
             Self::MeshDiagnostic => include_str!("../../../shaders/scene.wgsl").into(),
             Self::ParticleSort => {
-                let source = include_str!("../../../shaders/transparency.wgsl");
-                let section = |name: &str| {
-                    let marker = format!("// ---- {name} ----");
-                    let end = format!("// ---- end {name} ----");
-                    source
-                        .split_once(&marker)
-                        .expect("particle section")
-                        .1
-                        .split_once(&end)
-                        .expect("particle section end")
-                        .0
-                };
-                let sim = section("TP_PARTICLES_SIM");
+                let sim = transparency_section("TP_PARTICLES_SIM");
                 let sort = sim
                     .split_once("const TP_SORT_THREADS")
                     .expect("particle sort kernel")
                     .1;
-                format!("{}{}\n@group(0) @binding(40) var<storage,read_write> tp_particles:array<TpParticle>;\n@group(0) @binding(41) var<storage,read_write> tp_sorted:array<u32>;\nconst TP_SORT_THREADS{}",section("TP_FRAME"),section("TP_PARTICLES"),sort).into()
+                format!("{}{}\n@group(0) @binding(40) var<storage,read_write> tp_particles:array<TpParticle>;\n@group(0) @binding(41) var<storage,read_write> tp_sorted:array<u32>;\nconst TP_SORT_THREADS{}",transparency_section("TP_FRAME"),transparency_section("TP_PARTICLES"),sort).into()
             }
             Self::AtmosphereBackdrop => format!(
                 "{}{}",
@@ -189,8 +185,11 @@ impl Pass {
             "vs"
         }
     }
-    pub(super) fn surface(self) -> bool {
-        matches!(self, Self::RasterSurface | Self::RasterSurfaceFour)
+    pub(super) fn depth_input(self) -> bool {
+        matches!(
+            self,
+            Self::RasterSurface | Self::RasterSurfaceFour | Self::TransparencyDepth
+        )
     }
     pub(super) fn skin(self) -> bool {
         matches!(self, Self::SkinVertices | Self::SkinClusters)
@@ -229,6 +228,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransparencyDepth => "tp_depth_raster",
             Self::MeshDiagnostic => "fs",
             Self::ParticleSort => "tp_particles_sort",
             Self::RasterSurface | Self::RasterSurfaceFour => "surface_raster",
@@ -309,4 +309,17 @@ pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()
     validate(module)?;
     naga::compact::compact(module, naga::compact::KeepUnused::No);
     Ok(())
+}
+
+fn transparency_section(name: &str) -> &'static str {
+    let source = include_str!("../../../shaders/transparency.wgsl");
+    let marker = format!("// ---- {name} ----");
+    let end = format!("// ---- end {name} ----");
+    source
+        .split_once(&marker)
+        .expect("embedded transparency section")
+        .1
+        .split_once(&end)
+        .expect("embedded transparency section end")
+        .0
 }

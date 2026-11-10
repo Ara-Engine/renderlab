@@ -260,9 +260,9 @@ fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
             .with_context(|| format!("unmapped particle resource {name}"))?;
         return buffer_argument(parameter, resource as u32);
     }
-    if pass.surface() {
+    if pass.depth_input() {
         return Ok(match name {
-            "scene_depth" => format!(
+            "scene_depth" | "tp_raster_depth" => format!(
                 "((device {}*)top.textures)[top.root[0]].texture",
                 if matches!(pass, Pass::RasterSurfaceFour) {
                     "AraDepthMsEntry"
@@ -270,8 +270,8 @@ fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
                     "AraDepthEntry"
                 }
             ),
-            "frame" => buffer_argument(parameter, 1)?,
-            "surface" => {
+            "frame" | "tp" => buffer_argument(parameter, 1)?,
+            "surface" | "tp_depth_out" => {
                 "((device AraWriteImageEntry*)top.storage_images)[top.root[2]].texture".into()
             }
             _ => bail!("unmapped raster surface resource {name}"),

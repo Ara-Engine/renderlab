@@ -53,6 +53,9 @@ impl RasterDepth {
     pub fn image(&self) -> Image {
         self.image
     }
+    pub(crate) fn sampled(&self) -> u32 {
+        self.slot
+    }
     /// Attachment width and height.
     pub fn size(&self) -> [u32; 2] {
         self.size

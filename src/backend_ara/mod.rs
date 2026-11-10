@@ -19,3 +19,5 @@ pub mod transfer;
 pub mod volumes;
 
 pub mod mesh;
+
+pub mod transparency_depth;

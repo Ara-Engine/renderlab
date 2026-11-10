@@ -95,7 +95,7 @@ fn adapt(pass: Pass) -> Result<String> {
     if matches!(pass, Pass::ParticleSort) {
         return particle_interface(&body, &original);
     }
-    if pass.surface() {
+    if pass.depth_input() {
         return surface_interface(&body, pass, &original);
     }
     if pass.skin() {
@@ -533,6 +533,9 @@ fn surface_interface(body: &str, pass: Pass, original: &naga::Module) -> Result<
         ("scene_depth", "ara_depths[ara_root.w0]"),
         ("frame", "ara_post_frames[ara_root.w1]"),
         ("surface", "ara_surfaces[ara_root.w2]"),
+        ("tp_raster_depth", "ara_depths[ara_root.w0]"),
+        ("tp", "ara_post_frames[ara_root.w1]"),
+        ("tp_depth_out", "ara_surfaces[ara_root.w2]"),
     ]);
     let out = rewrite_globals(body, &names, original)?;
     let depth = if matches!(pass, Pass::RasterSurfaceFour) {
@@ -540,13 +543,18 @@ fn surface_interface(body: &str, pass: Pass, original: &naga::Module) -> Result<
     } else {
         "texture_depth_2d"
     };
+    let (frame, format) = if matches!(pass, Pass::TransparencyDepth) {
+        ("TpFrame", "r32float")
+    } else {
+        ("PostFrame", "rgba32float")
+    };
     Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
 @group(0) @binding(11) var ara_depths:binding_array<{depth}>;
-@group(0) @binding(1) var<storage,read> ara_post_frames:binding_array<PostFrame>;
-@group(0) @binding(3) var ara_surfaces:binding_array<texture_storage_2d<rgba32float,write>>;
+@group(0) @binding(1) var<storage,read> ara_post_frames:binding_array<{frame}>;
+@group(0) @binding(3) var ara_surfaces:binding_array<texture_storage_2d<{format},write>>;
 {out}
 "#
     ))
