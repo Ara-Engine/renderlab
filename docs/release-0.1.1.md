@@ -71,4 +71,12 @@ The full per-feature list is in [m7-gaps.md](m7-gaps.md). The largest:
 
 ## Clean-clone check
 
-[CLEAN-CLONE]
+A fresh `git clone` of `27ab341` from GitHub (the release commit minus this paragraph) was built in its own debug target with no private assets and no Fox, on 2026-11-10 at about 02:00 UTC.
+
+| Check | Result |
+|---|---|
+| `cargo test -p renderlab --lib` | 200 passed, 0 failed, 164 ignored (GPU-only) |
+| `game_scene --path rt --frames 48 --every 8` | exit 0, 72 s debug; frames inspected |
+| `game_scene --path nonrt --frames 48 --every 8` | exit 0, 68 s debug; frames inspected |
+
+All three ran in one GPU lease (`root-v011-checks-1`, 148 s) on the RTX 4070 SUPER.
