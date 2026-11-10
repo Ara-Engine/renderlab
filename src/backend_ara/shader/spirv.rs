@@ -58,13 +58,14 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
                 if words[at] & 0xffff == 71
                     && count == 4
                     && words[at + 2] == 33
-                    && words[at + 3] == 7
+                    && matches!(words[at + 3], 7 | 8)
                 {
-                    words[at + 3] = 5;
+                    words[at + 3] = if words[at + 3] == 8 { 1 } else { 5 };
                 }
                 at += count;
             }
             repair_image_arguments(&mut words)?;
+            strip_workgroup_array_strides(&mut words)?;
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),
@@ -74,12 +75,15 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
         .collect()
 }
 fn adapt(pass: Pass) -> String {
-    let body = pass
-        .source()
+    let source = pass.source();
+    let body = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("@group("))
         .collect::<Vec<_>>()
         .join("\n");
+    if matches!(pass, Pass::LightCluster) {
+        return cluster_interface(&body);
+    }
     let mut names = BTreeMap::from([
         ("input_colour", "ara_textures[ara_root.w0]"),
         ("colour", "ara_textures[ara_root.w0]"),
@@ -202,6 +206,106 @@ fn repair_image_arguments(words: &mut [u32]) -> Result<()> {
             }
         }
         at += count;
+    }
+    Ok(())
+}
+
+fn cluster_interface(body: &str) -> String {
+    let names = BTreeMap::from([
+        ("lights", "ara_lights[ara_root.w0].values"),
+        ("clusters", "ara_clusters[ara_root.w1]"),
+        ("frame", "ara_frames[ara_root.w2]"),
+    ]);
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if let Some(v) = names.get(word.as_str()) {
+            out.push_str(v);
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in body.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    format!(
+        r#"enable wgpu_binding_array;
+struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
+var<immediate> ara_root:AraRoot;
+struct AraLights {{values:array<Light>,}};
+@group(0) @binding(1) var<storage,read> ara_lights:binding_array<AraLights>;
+@group(0) @binding(8) var<storage,read> ara_frames:binding_array<LcFrame>;
+@group(0) @binding(3) var ara_clusters:binding_array<texture_storage_2d<r32uint,write>>;
+{out}
+"#
+    )
+}
+
+// Naga 30 decorates workgroup arrays with ArrayStride although explicit workgroup
+// layout is not enabled. Strip only workgroup-exclusive arrays; shared ABI types
+// must fail rather than changing storage-buffer layouts.
+fn strip_workgroup_array_strides(words: &mut Vec<u32>) -> Result<()> {
+    let mut types = BTreeMap::<u32, Vec<u32>>::new();
+    let mut wg = Vec::new();
+    let mut others = Vec::new();
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        match words[at] & 0xffff {
+            28 | 29 => {
+                types.insert(words[at + 1], vec![words[at + 2]]);
+            }
+            30 => {
+                types.insert(words[at + 1], words[at + 2..at + count].to_vec());
+            }
+            32 => {
+                if words[at + 2] == 4 {
+                    wg.push(words[at + 3]);
+                } else {
+                    others.push(words[at + 3]);
+                }
+            }
+            _ => {}
+        }
+        at += count;
+    }
+    fn walk(roots: Vec<u32>, types: &BTreeMap<u32, Vec<u32>>) -> std::collections::BTreeSet<u32> {
+        let mut pending = roots;
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                if let Some(children) = types.get(&id) {
+                    pending.extend(children);
+                }
+            }
+        }
+        seen
+    }
+    let wg = walk(wg, &types);
+    let others = walk(others, &types);
+    at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        if words[at] & 0xffff == 71
+            && count == 4
+            && words[at + 2] == 6
+            && wg.contains(&words[at + 1])
+        {
+            ensure!(
+                !others.contains(&words[at + 1]),
+                "workgroup array layout is also used by a storage/uniform ABI"
+            );
+            words.drain(at..at + count);
+        } else {
+            at += count;
+        }
     }
     Ok(())
 }

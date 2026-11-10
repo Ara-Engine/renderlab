@@ -5,7 +5,7 @@ use naga::back::msl;
 
 /// Translate original WGSL and adapt only its entry interface to Ara's global heap.
 pub fn msl(pass: Pass) -> Result<MetalProgram> {
-    let mut module = parse(pass.source())?;
+    let mut module = parse(pass.source().as_ref())?;
     for (_, global) in module.global_variables.iter_mut() {
         if global.space == naga::AddressSpace::Uniform {
             global.space = naga::AddressSpace::Storage {
@@ -38,6 +38,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
             entry.name.clone(),
             msl::EntryPointResources {
                 resources: bindings.clone(),
+                sizes_buffer: Some(30),
                 ..Default::default()
             },
         );
@@ -73,41 +74,102 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let args = split_args(&source[open + 1..close]);
     let mut plain = Vec::new();
     let mut calls = Vec::new();
+    let mut builtins = Vec::new();
+    let mut workgroups = Vec::new();
     for arg in args {
+        if !arg.contains("[[") && arg.starts_with("threadgroup ") {
+            let (ty, name) = arg
+                .rsplit_once(' ')
+                .context("workgroup argument missing name")?;
+            let ty = ty
+                .strip_suffix('&')
+                .context("workgroup argument must be a reference")?;
+            workgroups.push(format!("{ty} {name};"));
+            plain.push(arg.into());
+            calls.push(name.into());
+            continue;
+        }
         let (parameter, attribute) = arg
             .split_once("[[")
-            .context("entry argument has no binding")?;
+            .with_context(|| format!("entry argument has no binding: {arg}"))?;
         let parameter = parameter.trim();
         let identifier = parameter
             .split_whitespace()
             .last()
             .context("entry argument missing name")?
             .trim_start_matches('&');
-        let call = if attribute.contains("thread_position_in_grid") {
-            "ara_id".to_owned()
+        let (call, builtin) = if identifier == "_buffer_sizes" {
+            (String::from("ara_sizes"), None)
+        } else if attribute.contains("thread_position_in_grid") {
+            (
+                "ara_id".to_owned(),
+                Some("uint3 ara_id [[thread_position_in_grid]]"),
+            )
+        } else if attribute.contains("thread_position_in_threadgroup") {
+            (
+                "ara_local".to_owned(),
+                Some("uint3 ara_local [[thread_position_in_threadgroup]]"),
+            )
+        } else if attribute.contains("threadgroup_position_in_grid") {
+            (
+                "ara_group".to_owned(),
+                Some("uint3 ara_group [[threadgroup_position_in_grid]]"),
+            )
+        } else if attribute.contains("thread_index_in_threadgroup") {
+            (
+                "ara_lane".to_owned(),
+                Some("uint ara_lane [[thread_index_in_threadgroup]]"),
+            )
         } else if attribute.contains("position") {
-            "ara_position".to_owned()
+            (
+                "ara_position".to_owned(),
+                Some("float4 ara_position [[position]]"),
+            )
         } else {
-            resource(identifier)?
+            (resource(identifier, parameter, pass)?, None)
         };
+        if let Some(builtin) = builtin {
+            builtins.push(builtin);
+        }
         plain.push(parameter.to_string());
         calls.push(call);
     }
     let ordinary = format!("{result_type} {name}({})", plain.join(", "));
     source.replace_range(start..close + 1, &ordinary);
     let entry = format!("ara_{}", pass.entry());
-    let builtin = if matches!(pass, Pass::Tone | Pass::Display) {
-        "float4 ara_position [[position]]"
-    } else {
-        "uint3 ara_id [[thread_position_in_grid]]"
-    };
+    let builtin = builtins.join(", ");
     source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     let return_call = if result_type == "void" {
         format!("{name}({});", calls.join(", "))
     } else {
         format!("return {name}({});", calls.join(", "))
     };
-    source.push_str(&format!("{stage} {result_type} {entry}(constant TopLevel& top [[buffer(2)]], {builtin}) {{ {return_call} }}\n"));
+    let mut sizes = Vec::new();
+    for (_, global) in module.global_variables.iter() {
+        if module.types[global.ty]
+            .inner
+            .needs_host_buffer_byte_size(&module.types)
+        {
+            let root = buffer_root(
+                pass,
+                global
+                    .name
+                    .as_deref()
+                    .context("runtime buffer missing name")?,
+            )?;
+            sizes.push(format!("uint(top.buffers[top.root[{root}]].metadata)"));
+        }
+    }
+    let size_init = if calls.iter().any(|v| v == "ara_sizes") {
+        format!("_mslBufferSizes ara_sizes = {{{}}};", sizes.join(","))
+    } else {
+        String::new()
+    };
+    // Synthetic lengths are thread-local values read from immutable heap metadata,
+    // not another native constant-buffer binding. Preserve naga's bounds checks.
+    source = source.replace("constant _mslBufferSizes&", "thread const _mslBufferSizes&");
+    source.push_str(&format!("{stage} {result_type} {entry}(constant TopLevel& top [[buffer(2)]], {builtin}) {{ {} {size_init} {return_call} }}\n",workgroups.join(" ")));
     let vertex_entry = module
         .entry_points
         .iter()
@@ -119,7 +181,18 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         vertex_entry,
     })
 }
-fn resource(name: &str) -> Result<String> {
+fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if matches!(pass, Pass::LightCluster) {
+        return Ok(match name {
+            "lights" => buffer_argument(parameter, 0)?,
+            "frame" => buffer_argument(parameter, 2)?,
+            "clusters" => {
+                "((device AraWriteUintImageEntry*)top.storage_images)[top.root[1]].texture".into()
+            }
+            _ => bail!("unmapped light-cluster parameter {name}"),
+        });
+    }
+
     Ok(match name {
         "input_colour" | "colour" => "top.textures[top.root[0]].texture".into(),
         "second_colour" | "bloom" => "top.textures[top.root[1]].texture".into(),
@@ -169,4 +242,35 @@ fn split_args(args: &str) -> Vec<&str> {
         output.push(args[start..].trim());
     }
     output
+}
+
+fn buffer_argument(parameter: &str, root: u32) -> Result<String> {
+    let (ty, _) = parameter
+        .rsplit_once(' ')
+        .context("buffer parameter type missing")?;
+    let ty = ty.trim();
+    ensure!(
+        ty.contains("device "),
+        "expected storage parameter: {parameter}"
+    );
+    if let Some(value) = ty.strip_suffix('&') {
+        Ok(format!(
+            "*reinterpret_cast<{}*>(top.buffers[top.root[{root}]].data)",
+            value.trim()
+        ))
+    } else if ty.ends_with('*') {
+        Ok(format!(
+            "reinterpret_cast<{ty}>(top.buffers[top.root[{root}]].data)"
+        ))
+    } else {
+        bail!("unexpected storage parameter {parameter}")
+    }
+}
+fn buffer_root(pass: Pass, name: &str) -> Result<u32> {
+    match (pass, name) {
+        (Pass::LightCluster, "lights") => Ok(0),
+        (Pass::LightCluster, "frame") => Ok(2),
+        (_, "settings") => Ok(5),
+        _ => bail!("unmapped runtime buffer {name}"),
+    }
 }

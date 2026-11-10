@@ -13,6 +13,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Packed u16 clustered-light lists in an R32Uint image.
+    LightCluster,
     /// Display-linear to sRGB transfer into an UNORM presentation image.
     Display,
     /// Nine-tap tent downsample into RGBA16Float.
@@ -29,15 +31,34 @@ pub enum Pass {
     Tone,
 }
 impl Pass {
-    pub(super) fn source(self) -> &'static str {
+    pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Tone => TONE,
-            Self::Display => include_str!("../shaders/display.wgsl"),
-            _ => POST,
+            Self::LightCluster => {
+                (crate::light_cluster::constants() + crate::light_cluster::KERNEL).into()
+            }
+            Self::Tone => TONE.into(),
+            Self::Display => include_str!("../shaders/display.wgsl").into(),
+            _ => POST.into(),
         }
     }
+    pub(crate) fn threads(self) -> anyhow::Result<[u32; 3]> {
+        let module = parse(self.source().as_ref())?;
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == self.entry())
+            .ok_or_else(|| anyhow::anyhow!("selected WGSL entry missing"))?;
+        anyhow::ensure!(
+            entry.stage == naga::ShaderStage::Compute
+                && entry.workgroup_size.iter().all(|v| *v > 0),
+            "selected pass is not a concrete compute entry"
+        );
+        Ok(entry.workgroup_size)
+    }
+
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::LightCluster => "lc_build",
             Self::Downsample => "downsample",
             Self::Upsample => "upsample",
             Self::TileMax => "tile_max",
@@ -53,7 +74,7 @@ pub struct MetalProgram {
     pub source: String,
     /// Selected compute or fragment entry point.
     pub entry: String,
-    /// Fullscreen vertex entry, present only for tone.
+    /// Fullscreen vertex entry, present for fullscreen raster passes.
     pub vertex_entry: Option<String>,
 }
 /// One SPIR-V entry compiled against Ara's global descriptor bindings and roots.

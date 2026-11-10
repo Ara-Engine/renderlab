@@ -1,0 +1,46 @@
+//! Immutable storage records shared by leaf encoders.
+use anyhow::{Result, ensure};
+use ara_gpu::{Buffer, Device, GpuDevice, Resource, vk};
+/// One published storage allocation; explicit retirement belongs to its owner.
+pub struct StorageBuffer {
+    /// Arena identity, for graph edges and readback.
+    pub buffer: Buffer,
+    /// Capacity in bytes.
+    pub len: u64,
+    pub(crate) slot: u32,
+}
+impl StorageBuffer {
+    /// Upload a nonempty, four-byte-aligned record outside frame encoding.
+    pub fn new(gpu: &mut GpuDevice, bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            !bytes.is_empty() && bytes.len().is_multiple_of(4),
+            "storage records need aligned bytes"
+        );
+        let buffer = gpu.create_buffer(
+            bytes.len() as u64,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            true,
+        )?;
+        let result = (|| -> Result<u32> {
+            gpu.upload(buffer, bytes)?;
+            Ok(gpu.storage_buffer(buffer)?.index)
+        })();
+        match result {
+            Ok(slot) => Ok(Self {
+                buffer,
+                len: bytes.len() as u64,
+                slot,
+            }),
+            Err(error) => {
+                gpu.retire(Resource::Buffer(buffer))?;
+                Err(error)
+            }
+        }
+    }
+    /// Retire after all lists referencing this record have been submitted.
+    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        Ok(gpu.retire(Resource::Buffer(self.buffer))?)
+    }
+}

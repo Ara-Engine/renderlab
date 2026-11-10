@@ -61,6 +61,7 @@ pub struct PostPasses {
     depth_of_field: Pipeline,
     tone: Pipeline,
     display: Pipeline,
+    groups: [[u32; 3]; 5],
     sampler: u32,
     output_format: Format,
 }
@@ -71,6 +72,18 @@ impl PostPasses {
             matches!(output_format, Format::Rgba32Float | Format::Rgba8),
             "unsupported tone output format"
         );
+        let groups = [
+            Pass::Downsample,
+            Pass::Upsample,
+            Pass::TileMax,
+            Pass::MotionBlur,
+            Pass::DepthOfField,
+        ]
+        .map(Pass::threads)
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .expect("five compute entries");
         let mut created = Vec::new();
         for pass in [
             Pass::Downsample,
@@ -129,6 +142,7 @@ impl PostPasses {
             display,
             sampler,
             output_format,
+            groups,
         })
     }
 
@@ -141,12 +155,12 @@ impl PostPasses {
         inputs: &FilterInputs<'_>,
         output: &Texture,
     ) -> Result<()> {
-        let pipeline = match pass {
-            Pass::Downsample => self.downsample,
-            Pass::Upsample => self.upsample,
-            Pass::TileMax => self.tile_max,
-            Pass::MotionBlur => self.motion_blur,
-            Pass::DepthOfField => self.depth_of_field,
+        let (pipeline, group) = match pass {
+            Pass::Downsample => (self.downsample, self.groups[0]),
+            Pass::Upsample => (self.upsample, self.groups[1]),
+            Pass::TileMax => (self.tile_max, self.groups[2]),
+            Pass::MotionBlur => (self.motion_blur, self.groups[3]),
+            Pass::DepthOfField => (self.depth_of_field, self.groups[4]),
             _ => anyhow::bail!("not a filter pass"),
         };
         ensure!(
@@ -185,8 +199,8 @@ impl PostPasses {
             ],
         }));
         rec.push(Command::Dispatch([
-            output.size[0].div_ceil(8),
-            output.size[1].div_ceil(8),
+            output.size[0].div_ceil(group[0]),
+            output.size[1].div_ceil(group[1]),
             1,
         ]));
         rec.push(Command::EndPass);

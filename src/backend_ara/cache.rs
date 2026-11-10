@@ -44,7 +44,13 @@ impl ShaderCache {
             "{}{}{}",
             pass.source(),
             include_str!("shader/metal.rs"),
-            include_str!("shader/spirv.rs")
+            format!(
+                "{}{}{}{}",
+                include_str!("shader/spirv.rs"),
+                include_str!("shader/mod.rs"),
+                include_str!("cache.rs"),
+                include_str!("../../Cargo.lock")
+            )
         );
         let key = format!(
             "{:x}",
@@ -105,7 +111,7 @@ impl ShaderCache {
             for (stage, entry) in entries {
                 let reflection = format!("{entry}.json");
                 let value = if stage == Stage::Compute {
-                    serde_json::json!({"EntryPoint":entry,"state":{"tg_size":[8,8,1]}})
+                    serde_json::json!({"EntryPoint":entry,"state":{"tg_size":pass.threads()?}})
                 } else {
                     serde_json::json!({"EntryPoint":entry,"state":{}})
                 };
@@ -150,7 +156,7 @@ pub fn emit_spirv(pass: Pass, dir: &Path) -> Result<Vec<CookedStage>> {
     std::fs::create_dir_all(dir)?;
     let mut stages = Vec::new();
     for stage in shader::spirv(pass)? {
-        let name = format!("{}-{}.spv", pass.entry(), stage.entry);
+        let name = format!("{pass:?}-{}.spv", stage.entry);
         let bytes: Vec<_> = stage.words.iter().flat_map(|w| w.to_le_bytes()).collect();
         std::fs::write(dir.join(&name), &bytes)?;
         let kind = match stage.stage {

@@ -43,7 +43,7 @@ writes, Slang or MSC. A failed compile does not replace an existing PostPasses o
 
 Run `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 cargo +1.99.1 test -p renderlab --features backend-ara --test ara_backend -- --nocapture --test-threads=1`.
 This executes actual cached native metallibs through Ara's normal loader and
-compares all five outputs with independent scalar references (tolerance 0.003;
+compares all six bloom/tone/display outputs with independent scalar references (tolerance 0.003;
 half-precision bloom stores). The same public encoders and test run on Vulkan.
 
 The shader adapters are shared in one module, not repeated in each pass:
@@ -84,3 +84,39 @@ values); tile maximum is exact. Bloom/tone/display retain 0.003. No speed claim 
 made from these small replay fixtures. Strict Rust 1.99 clippy is blocked by existing
 warnings in the wgpu/asset files (including the new chunks_exact_to_as_chunks lint);
 these files are PC-owned and were not changed to silence them.
+
+## Clustered-light culling: seventh Renderlab family
+
+The original LC1 source and constants/packing/header helpers are reused unchanged.
+Mixed bounded/unbounded point/spot/directional lights, overflow (133 lights, 128
+stored) and empty input each match every count and stored u16 index in all 13,824
+clusters on Metal. Vulkan execution is pending; the emitted stage is validated on
+Mac along with the post stages.
+
+Three additional shared interface steps were required:
+- MSL runtime-array bounds checks get naga's size record from the heap descriptor's
+  byte-length metadata. This thread-local record replaces only the generated size
+  parameter's address space; bounds checks stay enabled.
+- MSL workgroup reference arguments become scratch declarations in the native
+  wrapper. Naga's initialization and barriers remain in the generated algorithm.
+- SPIR-V workgroup-only arrays lose naga's invalid ArrayStride decoration. A type
+  shared with a storage/uniform ABI is rejected rather than changing that ABI.
+The LC frame has a typed descriptor alias at buffer binding 1; it shares the raw
+buffer heap with the light array. These are checked output-interface adaptations.
+
+Compute group sizes now come from each WGSL entry, for reflection and dispatch.
+Cache keys include adapter/cache source and Cargo.lock, so frontend/compiler/flag
+changes invalidate artifacts too. The post checkpoint received an independent
+Opus 5.5 read-only review. No blocking Metal algorithm bug was found; cache-key and
+threadgroup-size findings were fixed before the next leaf checkpoint. Further
+frontend generalization and concurrent frame submission are still migration work.
+
+Cargo feature unification: enabling Ara also enables serde_json `preserve_order`
+and `float_roundtrip` through Ara's dependencies. Ara-feature verification is scoped
+to `--test ara_backend`; the cooker's feature-on JSON/report golden suite has not
+been certified. Default builds exclude these Ara feature edges, although Cargo.lock
+updates serde_json from 1.0.149 to 1.0.154. Two ash versions are linked only in the
+opt-in backend build (existing wgpu HAL and Ara); do not exchange their native types.
+
+This migration was explicitly authorized by Islam on 2026-11-10. Earlier statements
+that Ara integration is deferred describe the previous phase, not this branch's scope.
