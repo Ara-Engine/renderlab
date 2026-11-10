@@ -2,7 +2,7 @@
 
 Provisional name for an independent Rust renderer. Public repository: [Ara-Engine/renderlab](https://github.com/Ara-Engine/renderlab). The license remains undecided.
 
-Current version: **0.1.2**: the GPU-layer speed-up, byte-identical to 0.1.1 ([release notes](docs/release-0.1.2.md)). [0.1.1](docs/release-0.1.1.md) carries the patent flag on the non-RT sun-shadow method; the first complete base was [0.1.0](docs/release-0.1.0.md).
+Current version: **0.1.2**: the GPU-layer speed-up plus S4 sun shadows on large non-RT cut frames ([release notes](docs/release-0.1.2.md)). [0.1.1](docs/release-0.1.1.md) carries the patent flag on the non-RT sun-shadow method; the first complete base was [0.1.0](docs/release-0.1.0.md).
 
 ## Use it as an engine renderer
 
