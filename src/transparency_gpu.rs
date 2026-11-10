@@ -365,10 +365,13 @@ impl EmitterParams {
         )
     }
     /// `window`: the span this step's spawns are spread over, seconds (0: the step).
+    /// `burst`: how many of this step's spawns (the last, youngest) are burst births,
+    /// aged within the step rather than across `window`.
     fn uniform(
         &self,
         first: u32,
         spawned: u32,
+        burst: u32,
         textured: bool,
         window: f32,
     ) -> [u8; EMITTER_BYTES as usize] {
@@ -426,7 +429,7 @@ impl EmitterParams {
         );
         let fo = &self.forces;
         v4(&mut f, 44, self.velocity_box.extend(0.0).to_array());
-        v4(&mut f, 48, [fo.curl[0], fo.curl[1], 0.0, 0.0]);
+        v4(&mut f, 48, [fo.curl[0], fo.curl[1], burst as f32, 0.0]);
         v4(&mut f, 52, fo.vortex_center.extend(0.0).to_array());
         v4(&mut f, 56, fo.vortex_axis.extend(0.0).to_array());
         v4(
@@ -1738,24 +1741,31 @@ impl Renderer {
         for e in &mut self.transparency.emitters {
             // A new emitter's first step spawns its prewarm span (no longer than a life:
             // older particles would be dead), spread over that span, plus its burst.
-            let window = e.warm.min(e.params.lifetime[1]);
-            e.carry += f64::from(e.params.spawn_rate)
-                * if window > 0.0 {
-                    f64::from(window)
-                } else {
-                    step
-                };
-            let spawned =
-                (e.carry.floor() as u64 + u64::from(e.burst)).min(u64::from(e.params.capacity));
+            // The burst is born this step; rate births fill the prewarm window (or the
+            // step). Past the ring's capacity only the newest births are kept: the
+            // window shrinks to the span they cover, and the spawn ordinal skips the
+            // older births as a running ring would have overwritten them.
+            let capacity = u64::from(e.params.capacity);
+            let burst = u64::from(e.burst).min(capacity);
+            let mut window = f64::from(e.warm.min(e.params.lifetime[1]));
+            e.carry += f64::from(e.params.spawn_rate) * if window > 0.0 { window } else { step };
+            let births = e.carry.floor() as u64;
             e.carry -= e.carry.floor();
+            let kept = births.min(capacity - burst);
+            if window > 0.0 && births > kept {
+                window *= kept as f64 / births as f64;
+                e.spawned += births - kept;
+            }
             (e.warm, e.burst) = (0.0, 0);
             let first = e.spawned as u32;
+            let spawned = kept + burst;
             e.spawned += spawned;
             let textured = e.sprite.is_some();
             self.queue.write_buffer(
                 &e.uniform,
                 0,
-                &e.params.uniform(first, spawned as u32, textured, window),
+                &e.params
+                    .uniform(first, spawned as u32, burst as u32, textured, window as f32),
             );
         }
         // ---- GPU ----

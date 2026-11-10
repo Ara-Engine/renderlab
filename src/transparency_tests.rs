@@ -1465,6 +1465,27 @@ fn gpu_emitter_shapes_prewarm_forces() {
             ..base
         })
         .unwrap();
+    // 6: a burst beside a prewarm: the burst is born now, not across the window (review
+    // of #6). 7: a prewarm longer than the ring holds keeps the newest births.
+    let fresh_burst = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(-4.0, 3.0, 1.0),
+            lifetime: [1.0, 3.0],
+            burst: 100,
+            prewarm: 2.0,
+            ..base
+        })
+        .unwrap();
+    let newest = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(4.0, 3.0, 1.0),
+            spawn_rate: 100.0,
+            lifetime: [10.0, 10.0],
+            prewarm: 10.0,
+            capacity: 10,
+            ..base
+        })
+        .unwrap();
     let camera = Camera::look_at(
         Vec3::new(0., -7., 3.),
         Vec3::new(0., 0.5, 0.8),
@@ -1527,6 +1548,27 @@ fn gpu_emitter_shapes_prewarm_forces() {
         ages.iter().any(|a| *a < 0.2) && ages.iter().any(|a| *a > 1.8),
         "ages span the life"
     );
+    let burst_ages: Vec<f32> = read_particles(&r, 6)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, _)| p[3])
+        .collect();
+    assert_eq!(burst_ages.len(), 100, "burst beside a prewarm");
+    assert!(
+        burst_ages.iter().all(|a| *a <= 1.0 / 60.0 + 1e-6),
+        "{burst_ages:?}"
+    );
+    let newest_ages: Vec<f32> = read_particles(&r, 7)
+        .iter()
+        .filter(|p| alive(p))
+        .map(|(p, _)| p[3])
+        .collect();
+    assert_eq!(newest_ages.len(), 10, "a full ring");
+    // Ten births at 100 per second: the last tenth of a second.
+    assert!(
+        newest_ages.iter().all(|a| *a <= 0.1 + 1e-4),
+        "{newest_ages:?}"
+    );
     // Half a second of running: the vortex turns its particles anticlockwise about +z.
     r.set_particle_step(1.0 / 60.0).unwrap();
     for _ in 0..30 {
@@ -1545,5 +1587,14 @@ fn gpu_emitter_shapes_prewarm_forces() {
         height,
         &read_texture(&r, &target, 4),
     );
-    drop((falling, cone, curves, vortex, streaks, ripple));
+    drop((
+        falling,
+        cone,
+        curves,
+        vortex,
+        streaks,
+        ripple,
+        fresh_burst,
+        newest,
+    ));
 }

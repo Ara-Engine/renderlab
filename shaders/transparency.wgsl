@@ -220,7 +220,7 @@ struct TpEmitter {
                              // w span this step's spawns spread over (s; 0: the step)
     shape:vec4<f32>,         // x 0 sphere, 1 box (yzw half extents), 2 cone (yzw axis)
     velocity_box:vec4<f32>,  // xyz per-axis velocity half range
-    curl:vec4<f32>,          // x frequency, y strength
+    curl:vec4<f32>,          // x frequency, y strength, z this step's burst births
     vortex_center:vec4<f32>,
     vortex_axis:vec4<f32>,   // xyz axis scaled by strength
     attractor:vec4<f32>,     // xyz position, w strength
@@ -358,8 +358,15 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
         var seed=tp_hash((first+k)^tp_hash(tp_emitter.counts.w));
         let life=mix(tp_emitter.life.x,tp_emitter.life.y,tp_unit(&seed));
         // Births spread evenly over the step, so a steady rate shows no banding.
-        let window=select(dt,tp_emitter.misc.w,tp_emitter.misc.w>0.0);
-        let age=window*(f32(spawned-1u-k)+tp_unit(&seed))/f32(spawned);
+        // The last `burst` spawns are this step's burst, born within the step; the others
+        // spread over the prewarm window (or the step), oldest first.
+        let burst=u32(tp_emitter.curl.z);
+        let rate=spawned-min(burst,spawned);
+        var age=dt*tp_unit(&seed);
+        if k<rate {
+            let window=select(dt,tp_emitter.misc.w,tp_emitter.misc.w>0.0);
+            age=window*(f32(rate-1u-k)+tp_unit(&seed))/f32(rate);
+        }
         let box=vec3<f32>(tp_unit(&seed),tp_unit(&seed),tp_unit(&seed))*2.0-vec3<f32>(1.0);
         let v0=tp_emitter.velocity.xyz+tp_ball(&seed)*tp_emitter.velocity.w+box*tp_emitter.velocity_box.xyz;
         let start=tp_emitter.position.xyz+tp_spawn_offset(&seed);
