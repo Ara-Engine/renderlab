@@ -2864,7 +2864,11 @@ impl Renderer {
             variant: if temporal {
                 Some(Variant::Temporal)
             } else if traced {
-                Some(Variant::Traced)
+                Some(Variant::Traced(if soft {
+                    primary_ray_gpu::Shading::Soft
+                } else {
+                    primary_ray_gpu::Shading::Hard
+                }))
             } else if fresh {
                 Some(Variant::Fresh)
             } else if hardware_shadowed {
@@ -2980,7 +2984,10 @@ impl Renderer {
             self.ensure_lists(&programs, streaming, usize::from(soft))?;
             self.ensure_bins()?;
         } else if streaming {
-            self.ensure_streamed(programs.first().copied().unwrap_or(self.standard.id()))?;
+            self.ensure_streamed(
+                programs.first().copied().unwrap_or(self.standard.id()),
+                usize::from(soft),
+            )?;
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {

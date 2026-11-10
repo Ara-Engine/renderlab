@@ -138,7 +138,9 @@ impl Renderer {
                                 .get_bind_group_layout(group as u32),
                             Variant::Fresh => slot.pipelines.fresh.as_ref().unwrap()[index]
                                 .get_bind_group_layout(group as u32),
-                            Variant::Traced => slot.pipelines.traced.as_ref().unwrap()[index]
+                            Variant::Traced(shading) => slot.pipelines.traced[shading as usize]
+                                .as_ref()
+                                .unwrap()
                                 .get_bind_group_layout(group as u32),
                             Variant::Temporal => slot
                                 .pipelines
@@ -301,11 +303,12 @@ impl Renderer {
                                                 abi.cache,
                                             ))
                                         }
-                                        Variant::Traced | Variant::Temporal => {
-                                            let module = if recipe.variant == Variant::Temporal {
-                                                m.temporal.as_ref().unwrap()
-                                            } else {
-                                                &m.traced.as_ref().unwrap()[index]
+                                        Variant::Traced(_) | Variant::Temporal => {
+                                            let module = match recipe.variant {
+                                                Variant::Traced(shading) => {
+                                                    &m.traced.as_ref().unwrap()[shading as usize]
+                                                }
+                                                _ => m.temporal.as_ref().unwrap(),
                                             };
                                             Built::Compute(abi.ledger.own(
                                                 abi.device.create_compute_pipeline(

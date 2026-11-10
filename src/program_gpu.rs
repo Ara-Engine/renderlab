@@ -12,7 +12,7 @@ use crate::pipeline_compilation::PipelineDevice;
 use crate::program::{
     self, Composed, MaterialParameters, ParameterLayout, ProgramShared, STANDARD_PROGRAM, Stage,
 };
-use primary_ray_gpu::film_accumulation;
+use primary_ray_gpu::{Shading, film_accumulation};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -57,7 +57,9 @@ mod toon_tests;
 pub(crate) use program_reload::ProgramReload;
 
 /// A program pipeline set a frame shades with. Raster sets are pairs indexed by tangent
-/// stream; the traced set is indexed by `Shading`.
+/// stream. Traced sets are one pipeline per `Shading`: a frame shades with one of them, so
+/// each compiles only when a frame first needs it (P-PIPE: compiling the unused one cost a
+/// cold start about 70 s and 5 GB of driver memory on NVIDIA).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Variant {
     /// Lit raster frames without shadows, or with light-space shadow maps.
@@ -66,15 +68,18 @@ pub(crate) enum Variant {
     Hardware,
     /// Raster frames with fresh soft visibility counts.
     Fresh,
-    /// Traced primary visibility: Hard and Soft shading.
-    Traced,
+    /// Traced primary visibility, shaded Hard or Soft.
+    Traced(Shading),
     /// Traced temporal film accumulation (`SoftShadows::Temporal`): one shading pipeline.
     Temporal,
 }
 impl Variant {
-    /// Pipelines in the set: raster sets by tangent stream, traced by `Shading`.
+    /// Pipelines in the set: raster sets by tangent stream; traced and temporal sets one.
     pub fn len(self) -> usize {
-        if self == Variant::Temporal { 1 } else { 2 }
+        match self {
+            Variant::Traced(_) | Variant::Temporal => 1,
+            _ => 2,
+        }
     }
 }
 
@@ -85,23 +90,32 @@ pub(crate) struct ProgramPipelines {
     pub lit: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub hardware: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
-    pub traced: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    /// By `Shading`.
+    pub traced: [Option<Owned<wgpu::ComputePipeline>>; 2],
     pub temporal: Option<Owned<wgpu::ComputePipeline>>,
     /// Traced shading whose sampling helpers record texture residency requests
-    /// (`Renderer::ensure_streamed`): built only when a frame streams textures.
-    pub streamed: Option<[Owned<wgpu::ComputePipeline>; 2]>,
+    /// (`Renderer::ensure_streamed`), by `Shading`: built only when a frame streams
+    /// textures with that shading.
+    pub streamed: [Option<Owned<wgpu::ComputePipeline>>; 2],
     /// MP1: tile-list shading of mixed-program frames, without and with texture
     /// streaming, then by `Shading` (`Renderer::ensure_lists`). Built by the first mixed
     /// frame that needs one.
     pub list: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
 }
 impl ProgramPipelines {
+    /// Tests: swaps probe shading pipelines in for both traced sets (both built).
+    #[cfg(test)]
+    pub(crate) fn swap_traced(&mut self, probe: &mut [Owned<wgpu::ComputePipeline>; 2]) {
+        for (set, probe) in self.traced.iter_mut().zip(probe) {
+            std::mem::swap(set.as_mut().unwrap(), probe);
+        }
+    }
     pub fn has(&self, variant: Variant) -> bool {
         match variant {
             Variant::Lit => self.lit.is_some(),
             Variant::Hardware => self.hardware.is_some(),
             Variant::Fresh => self.fresh.is_some(),
-            Variant::Traced => self.traced.is_some(),
+            Variant::Traced(shading) => self.traced[shading as usize].is_some(),
             Variant::Temporal => self.temporal.is_some(),
         }
     }
@@ -121,7 +135,7 @@ impl ProgramPipelines {
             Variant::Lit => self.lit = Some([render(next()), render(next())]),
             Variant::Hardware => self.hardware = Some([render(next()), render(next())]),
             Variant::Fresh => self.fresh = Some([render(next()), render(next())]),
-            Variant::Traced => self.traced = Some([compute(next()), compute(next())]),
+            Variant::Traced(shading) => self.traced[shading as usize] = Some(compute(next())),
             Variant::Temporal => self.temporal = Some(compute(next())),
         }
     }
@@ -221,11 +235,11 @@ impl ProgramModules {
             Variant::Lit => true,
             Variant::Hardware => self.hardware.is_some(),
             Variant::Fresh => self.fresh.is_some(),
-            Variant::Traced => self.traced.is_some(),
+            Variant::Traced(_) => self.traced.is_some(),
             Variant::Temporal => self.temporal.is_some(),
         }
     }
-    /// Pipeline `index` of `variant`: the tangent stream, or `Shading` for traced.
+    /// Pipeline `index` of `variant`: the tangent stream for raster sets, else 0.
     fn pipeline(&self, abi: &ProgramAbi<'_>, variant: Variant, index: usize) -> Built {
         let lit = |module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout| {
             Built::Render(mesh_pipeline(
@@ -250,11 +264,11 @@ impl ProgramModules {
                 index == 1,
                 abi.cache,
             )),
-            Variant::Traced => Built::Compute(abi.primary.unwrap().shade_pipeline(
+            Variant::Traced(shading) => Built::Compute(abi.primary.unwrap().shade_pipeline(
                 abi.device,
                 abi.ledger,
-                &self.traced.as_ref().unwrap()[index],
-                index,
+                &self.traced.as_ref().unwrap()[shading as usize],
+                shading as usize,
                 abi.cache,
             )),
             Variant::Temporal => Built::Compute(abi.primary.unwrap().film_shade_pipeline(
@@ -722,9 +736,9 @@ impl Renderer {
         let programs = draws
             .into_iter()
             .map(|m| m.map_or(standard, |m| m.program.id()));
-        let mut programs: Vec<u64> = if matches!(variant, Variant::Traced | Variant::Temporal) {
+        let mut programs: Vec<u64> = if matches!(variant, Variant::Traced(_) | Variant::Temporal) {
             let (distinct, _) = primary_ray_gpu::program_lists::frame_slots(programs);
-            if variant == Variant::Traced && distinct.len() > 1 {
+            if matches!(variant, Variant::Traced(_)) && distinct.len() > 1 {
                 return vec![];
             }
             vec![distinct.first().copied().unwrap_or(standard)]
@@ -733,7 +747,8 @@ impl Renderer {
         };
         programs.sort_unstable();
         programs.dedup();
-        let reset = (variant == Variant::Temporal).then_some(Variant::Traced);
+        // Temporal frames are soft; their reset frames shade Soft.
+        let reset = (variant == Variant::Temporal).then_some(Variant::Traced(Shading::Soft));
         programs
             .into_iter()
             .flat_map(|id| std::iter::once((id, variant)).chain(reset.map(|v| (id, v))))
@@ -801,7 +816,8 @@ impl Renderer {
             Variant::Lit,
             Variant::Hardware,
             Variant::Fresh,
-            Variant::Traced,
+            Variant::Traced(Shading::Hard),
+            Variant::Traced(Shading::Soft),
         ]
         .into_iter()
         .filter(|&v| self.programs[0].modules.has(v))
@@ -905,8 +921,8 @@ impl Renderer {
     /// Program `id`'s streamed traced shading (`Stage::TracedStreamed`), built the first
     /// time a frame streams textures with it. Reloads and visibility changes drop it, so
     /// default frames never compile or bind it.
-    pub(super) fn ensure_streamed(&mut self, id: u64) -> Result<(), Error> {
-        if self.program_slot(id).pipelines.streamed.is_some() {
+    pub(super) fn ensure_streamed(&mut self, id: u64, shading: usize) -> Result<(), Error> {
+        if self.program_slot(id).pipelines.streamed[shading].is_some() {
             return Ok(());
         }
         let heads = &self.primary_sources.as_ref().unwrap().1;
@@ -916,28 +932,29 @@ impl Renderer {
             .map(|i| program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters));
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
-        let modules = sources
-            .each_ref()
-            .map(|c| module(&abi, &slot.label, c, slot.source == STANDARD_PROGRAM));
-        let pipelines = [0, 1].map(|i| {
-            abi.primary.unwrap().streamed_pipeline(
-                abi.device,
-                abi.ledger,
-                &modules[i],
-                i,
-                abi.cache,
-            )
+        // Modules are cheap (naga); only the pipeline this frame shades with compiles.
+        let modules = slot.modules.streamed.clone().unwrap_or_else(|| {
+            sources
+                .each_ref()
+                .map(|c| module(&abi, &slot.label, c, slot.source == STANDARD_PROGRAM))
         });
+        let pipeline = abi.primary.unwrap().streamed_pipeline(
+            abi.device,
+            abi.ledger,
+            &modules[shading],
+            shading,
+            abi.cache,
+        );
         if let Some(error) = scopes.finish() {
             return Err(match scope_error(&slot.label, error, &sources) {
                 Error::Fault(Fault(message)) => self.fail(message),
                 other => other,
             });
         }
-        self.pipelines.created += 2;
+        self.pipelines.created += 1;
         let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
         slot.modules.streamed = Some(modules);
-        slot.pipelines.streamed = Some(pipelines);
+        slot.pipelines.streamed[shading] = Some(pipeline);
         Ok(())
     }
 
@@ -1189,9 +1206,10 @@ mod compile_profile {
                 Variant::Lit,
                 Variant::Hardware,
                 Variant::Fresh,
-                Variant::Traced,
+                Variant::Traced(Shading::Hard),
+                Variant::Traced(Shading::Soft),
             ] {
-                for index in 0..2 {
+                for index in 0..variant.len() {
                     serial += 1;
                     let tint =
                         f32::from_bits(0x3f000000 | (salt.wrapping_add(serial) & 0x003fffff));

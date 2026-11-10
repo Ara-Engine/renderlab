@@ -424,9 +424,9 @@ impl Renderer {
                     slot.modules.traced = None;
                     slot.modules.temporal = None;
                     slot.modules.streamed = None;
-                    slot.pipelines.traced = None;
+                    slot.pipelines.traced = Default::default();
                     slot.pipelines.temporal = None;
-                    slot.pipelines.streamed = None;
+                    slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
                 }
                 self.primary_sources = None;
@@ -472,9 +472,9 @@ impl Renderer {
                     slot.modules.traced = Some(modules);
                     slot.modules.temporal = Some(temporal);
                     slot.modules.streamed = None;
-                    slot.pipelines.traced = None;
+                    slot.pipelines.traced = Default::default();
                     slot.pipelines.temporal = None;
-                    slot.pipelines.streamed = None;
+                    slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
@@ -729,8 +729,8 @@ pub(super) struct InteractiveKernels<'a> {
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
-#[derive(Clone, Copy)]
-pub(super) enum Shading {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shading {
     /// Inline `hard_shadow` rays, or none.
     Hard,
     /// Fresh visibility counts, Exact or Interactive.
@@ -2676,7 +2676,7 @@ impl Renderer {
         } else {
             &program.pipelines.traced
         };
-        let pipeline = &set.as_ref().unwrap()[shading as usize];
+        let pipeline = set[shading as usize].as_ref().unwrap();
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
     /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks

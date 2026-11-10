@@ -278,8 +278,8 @@ pub(super) fn receiver_paired_with(
             &r.ledger,
             &read(["kernels-hard", "kernels-soft"]),
         ));
-        *r.test_standard().traced.as_mut().unwrap() =
-            shading_pipelines(r, &read(["traced-hard", "traced-soft"]));
+        r.test_standard().traced =
+            shading_pipelines(r, &read(["traced-hard", "traced-soft"])).map(Some);
     }
     let mut separate = m["separate_interactive"].as_str().map(|path| {
         let source = fs::read_to_string(path).unwrap();
@@ -347,7 +347,7 @@ pub(super) fn receiver_paired_with(
                 }
                 if baseline {
                     std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
-                    std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
+                    r.test_standard().swap_traced(&mut old_shade);
                 }
                 let report = traced_frame(r, color, &poses[pair % 2], asset, true);
                 if pair < 2
@@ -407,7 +407,7 @@ pub(super) fn receiver_paired_with(
                 }
                 if baseline {
                     std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
-                    std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
+                    r.test_standard().swap_traced(&mut old_shade);
                 }
                 if pair >= warmup {
                     pending.insert(report.frame.0, (pair - warmup, mode, baseline));
@@ -757,7 +757,7 @@ fn gpu_receiver_policy_centres() {
         for baseline in [true, false] {
             if baseline {
                 std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
+                r.test_standard().swap_traced(&mut old_shade);
             }
             for (mode, name) in ["hard", "exact", "interactive"].into_iter().enumerate() {
                 r.set_shadows(if mode == 0 { &hard } else { &soft })
@@ -774,23 +774,23 @@ fn gpu_receiver_policy_centres() {
                 );
                 fs::write(out.join(format!("{prefix}.rgba16f")), capture(&mut r)).unwrap();
                 let v = &mut visibility[usize::from(!baseline)];
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), v);
+                r.test_standard().swap_traced(v);
                 let s = &mut sun[usize::from(!baseline)];
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), s);
+                r.test_standard().swap_traced(s);
                 traced_frame(&mut r, &color, &camera, &mut asset, true);
                 fs::write(out.join(format!("{prefix}.sun.rgba16f")), capture(&mut r)).unwrap();
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), s);
+                r.test_standard().swap_traced(s);
                 traced_frame(&mut r, &color, &camera, &mut asset, true);
                 fs::write(
                     out.join(format!("{prefix}-visibility.rgba16f")),
                     capture(&mut r),
                 )
                 .unwrap();
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), v);
+                r.test_standard().swap_traced(v);
             }
             if baseline {
                 std::mem::swap(r.pipeline.primary.as_mut().unwrap(), &mut old);
-                std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut old_shade);
+                r.test_standard().swap_traced(&mut old_shade);
             }
         }
     }

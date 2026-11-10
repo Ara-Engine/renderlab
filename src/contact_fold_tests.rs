@@ -272,14 +272,14 @@ fn gpu_contact_fold_batch() {
                     // A visibility-only program reads the actual hard/soft production estimator.
                     let program = crate::program::standard_returning(VISIBILITY);
                     let mut probe = centre_shading(&r, &program, true);
-                    std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut probe);
+                    r.test_standard().swap_traced(&mut probe);
                     frame(&mut r, &mut scene);
                     fs::write(
                         out.join(format!("{name}-visibility.rgba16f")),
                         settled(&mut r),
                     )
                     .unwrap();
-                    std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut probe);
+                    r.test_standard().swap_traced(&mut probe);
                 }
                 // Price production only: no captures/diagnostic passes inside the measured block.
                 for _ in 0..8 {

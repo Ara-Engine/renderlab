@@ -222,9 +222,11 @@ impl PipelineDevice {
 ///
 /// P-PIPE: every engine and reload worker in the process shares the limit, so callers
 /// that fan out one thread per pipeline (`program_gpu::in_parallel`) cannot run
-/// unbounded native compiles at once. Each NVIDIA compile of a large shading kernel
-/// holds its own compiler memory; unbounded, a cold start of two RT engines reached
-/// 18 GB private. `RENDERLAB_PIPELINE_COMPILES` sets the limit (default 4, at least 1).
+/// unbounded native compiles at once. On NVIDIA 617 each compile of a program shading
+/// kernel (~230 KB SPIR-V) holds about 4.5-5 GB of driver memory while it runs; two at
+/// once passed 8 GB and unbounded cold starts reached 18 GB private. The default of one
+/// keeps a cold start near one kernel's peak (docs/p-pipe.md) at the cost of compiling
+/// serially. `RENDERLAB_PIPELINE_COMPILES` raises it (at least 1).
 struct CompileSlot;
 static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
 impl CompileSlot {
@@ -234,7 +236,7 @@ impl CompileSlot {
             std::env::var("RENDERLAB_PIPELINE_COMPILES")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(4usize)
+                .unwrap_or(1usize)
                 .max(1)
         })
     }

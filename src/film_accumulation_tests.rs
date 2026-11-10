@@ -463,10 +463,10 @@ fn centre_frames(
                 interactive_outputs(r)[1].clone()
             };
             fs::write(prefix.with_extension("u32"), counts).unwrap();
-            std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut sun);
+            r.test_standard().swap_traced(&mut sun);
             traced_frame(r, color, camera, asset, true);
             fs::write(prefix.with_extension("sun.rgba16f"), capture(r)).unwrap();
-            std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut sun);
+            r.test_standard().swap_traced(&mut sun);
             swap(r, &mut pipeline);
         }
     }
@@ -842,7 +842,7 @@ fn temporal_acceptance(
             // T-0: a reset frame equals Interactive's frame, byte for byte. Reset frames shade
             // with the program's traced pipelines, so the variant stays installed throughout.
             r.set_soft_shadows(crate::SoftShadows::Interactive);
-            std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut centre);
+            r.test_standard().swap_traced(&mut centre);
             traced_frame(r, color, camera, asset, true);
             let interactive = [settled(r), interactive_outputs(r).concat()];
             reset_film(r);
@@ -889,7 +889,7 @@ fn temporal_acceptance(
                 }
             }
             std::mem::swap(r.test_standard().temporal.as_mut().unwrap(), &mut temporal);
-            std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut centre);
+            r.test_standard().swap_traced(&mut centre);
             results.insert(format!("p{pose}/{name}"), serde_json::json!(digests));
             if !watched.is_empty() {
                 fs::write(

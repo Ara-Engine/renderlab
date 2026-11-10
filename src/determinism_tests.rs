@@ -405,7 +405,7 @@ pub(super) fn investigate(
     let mut fresh = shading_pipelines(r, &sources);
     let fresh_image = shade(r, &fresh[1]);
     std::mem::swap(
-        &mut r.test_standard().traced.as_mut().unwrap()[1],
+        r.test_standard().traced[1].as_mut().unwrap(),
         &mut fresh[1],
     );
     let mut old_images = vec![];
@@ -413,7 +413,7 @@ pub(super) fn investigate(
         old_images.push(difference(deviant, &shade(r, &fresh[1]), 8));
     }
     std::mem::swap(
-        &mut r.test_standard().traced.as_mut().unwrap()[1],
+        r.test_standard().traced[1].as_mut().unwrap(),
         &mut fresh[1],
     );
     let module = seeded_module(r);
