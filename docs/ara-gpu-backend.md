@@ -1152,15 +1152,21 @@ on `NonRt`, with GI, temporal reconstruction and reflections on. Read against
 `Renderer::submit_frame`, the families split into what is already ported and only
 needs assembling, and what the default image needs in addition.
 
-**Smallest engine-path frame, from ported passes only.** `HardwareRt` at
-`Quality::Reference` with GI, temporal reconstruction and reflections off encodes:
-TLAS build, camera trace with receivers (entries 40-41), fresh exact sun visibility
-(46), programmable primary shading (38-39), then atmosphere, transparency and post.
-`Quality::Reference` selects `SoftShadows::Exact`, which takes the fresh-visibility
-branch rather than the Interactive trace. Every one of those passes replays on Metal
-today, so this frame is assembly work like the forward frame, and it is the first
-picture comparable with an engine render: correct soft sun shadows, sky, glass. Apple
-silicon has ray queries, so this is also the path a Mac would run.
+**Smallest engine-path frame.** `HardwareRt` at `Quality::Reference` with GI,
+temporal reconstruction and reflections off encodes: TLAS build, camera trace with
+receivers (entries 40-41), fresh exact sun visibility (46), programmable primary
+shading, then atmosphere, transparency and post. `Quality::Reference` selects
+`SoftShadows::Exact`, which takes the fresh-visibility branch rather than the
+Interactive trace. The trace and the fresh visibility replay on Metal today. The
+shading does not yet in the form this frame needs: entries 38-39 were replayed with
+the **non-RT hard head** (`non_rt_sources`, where `hard_shadow` returns one and no
+scene is declared), and this frame composes the same program on the **hardware soft
+head** (`heads()[1]`: it reads the fresh counts and declares the scene for
+local-light shadow rays). That is one new variant of a ported entry, with ray
+queries already supported by the adapter in three other passes, not a new family.
+With it, this frame is assembly work like the forward frame, and it is the first
+picture comparable with an engine render: correct soft sun shadows, sky, glass.
+Apple silicon has ray queries, so this is also the path a Mac would run.
 
 **Then, by how much of the default image each one changes:**
 
