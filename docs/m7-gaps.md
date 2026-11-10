@@ -789,8 +789,12 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   - 96% of the residual energy is on surface interiors, rising with texture contrast: 9.5 codes RMS where the reference changes by 20+ codes per pixel, 2.3 on flat areas.
   - GI off moves it by 0.03 and reflections off by nothing; the two paths differ by 0.05; no jitter reaches only 4.15.
   - Cause (code and a 1-D replay): the Catmull-Rom history fetch keeps a fixed 16-frame window. Its fraction-dependent softening changes every frame and accumulates, so texture shimmers. Bilinear is already capped by T1b's blur budget.
-  - Candidate, default off: `Reconstruction::sharp_blur_budget`. The GPU screen (budgets 1, 2, 4 on both paths, S4/S5 ghost checks) was deferred while Islam played.
-  - The model warns that a budget of 1 lets per-sample noise through in penumbrae, and that 2 is the safer start.
+  - **Partly FIXED:** `Reconstruction::sharp_blur_budget` 2 (default on) caps that window by the fetch fraction. Flicker RT 4.39 → 4.32, non-RT 4.44 → 4.38. Moving error improves, cost is unchanged and there is no added trail.
+  - **Still OPEN, the remaining gap to Unreal (3.68):** one-frame bright flashes along thin cracks and crevice edges.
+    - They are 26% of the energy, against Unreal's 16%; steps above 40 codes are 8% against 2%.
+    - Without the >20-code steps, Renderlab is at 3.73 and Unreal at 3.38.
+    - They are not GI and not Catmull-Rom/bilinear switching.
+    - Next: capture TR1's per-pixel restart mask, to tell geometric-tap rejection on the scan's crack triangles from glints in the fresh sample.
 - **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
 - **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
 - **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.

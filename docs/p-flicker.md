@@ -15,8 +15,19 @@ Unit P-FLICKER, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10/11, b
   - 96% of the residual energy is on surface interiors, not edges. It rises steeply with the reference's texture contrast: 65% of it lies where the reference changes by 10 or more codes per pixel. There the residual is 9.5 codes RMS; on flat areas it is 2.3.
   - No jitter reaches only 4.15. The heat map ([energy-base-cap-rt.png](#2-flicker-split)) is spread over every textured rock and gravel face, brightest on the sunlit gravel.
 - **Cause (C, 1-D model).** A moving pixel whose 16 history taps validate resamples history by Catmull-Rom with a fixed 16-frame window. Catmull-Rom is free of second-moment blur, but it still softens texture by an amount that depends on the fetch fraction, which changes every frame. A fixed window lets that frame-varying blur accumulate, so texture shimmers. Bilinear already caps its window by T1b's blur budget; Catmull-Rom has no such cap.
-- **Candidate (code ready, GPU screen pending).** `Reconstruction::sharp_blur_budget` caps the Catmull-Rom window at `1 + budget / sum f(1-f)`, the bilinear rule with its own budget. Zero, the current default, keeps the fixed window, so frames with it at zero are unchanged.
-  - In the 1-D model, a budget of 1 lowers flicker by 15-34% at walk-to-pan speeds and lowers static error too. Slow motion is unchanged.
+- **MERGE: `Reconstruction::sharp_blur_budget` = 2, default on (`d053fca`).** It caps the Catmull-Rom window at `1 + 2 / sum f(1-f)`, the bilinear rule with its own budget.
+  - Flicker: RT 4.392 → **4.323** (-1.6%), non-RT 4.438 → **4.375** (-1.4%).
+  - Moving full-frame error: RT 7.237 → 7.123, non-RT 7.722 → 7.633.
+  - Still, cut and recover frames are byte-identical, because no other frame takes that path. Moving edge error is unchanged.
+  - Cost is unchanged in interleaved visits: RT moving 4.30 / 4.30 → 4.30 / 4.29 ms, non-RT 10.66 / 10.69 → 10.65 / 10.66.
+  - The S4 door changes only on its moving edge, with no added trail. S5 is identical.
+  - Lib tests: 207 passed.
+  - The model's gain (15-34%) did not carry over: the quarry's excess is mostly elsewhere (next point).
+- **Gate missed: flicker is still above Unreal's.** 4.32 / 4.38 against 3.68 / 3.69. Excluding steps above 20 codes, Renderlab is at 3.73 and Unreal at 3.38. The remaining gap is single-pixel flashes along thin cracks and crevice edges:
+  - 1,792 pixels a frame flash by more than 20 codes, against Unreal's 1,109;
+  - steps above 40 codes carry 8% of Renderlab's energy and 2% of Unreal's;
+  - the rock step sheet shows them as dotted bright lines along cracks that neither Unreal's step nor the reference's has.
+  - `cr=0` (no Catmull-Rom/bilinear switching) does not remove them (4.424), and neither does GI off. They are the next unit's target (section 4).
 - **Not the cause (M):** the GI cell churn P-STILL suspected. In motion the cache creates 56 cells a frame and bucket-full fires about 9 times a frame, but GI off moves flicker by only 0.03, so the eviction follow-up cannot close this gap. It stays a cost item (P-STILL §4.2), not a flicker item.
 
 | Quarry 1080p, GPU span p50 (ms) | P-YARD2 / P-STILL (old) | P-FLICKER, layer off (new) | vs Unreal Epic, new |
@@ -30,6 +41,7 @@ Unit P-FLICKER, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10/11, b
 | non-RT cut | 43.11 | 42.81-44.30 | 10.4-10.8x slower (4.11) |
 | non-RT after cut | 8.71 | 9.00-9.03 | 2.2x slower (4.04) |
 | Flicker, moving (RT / non-RT) | 4.392 / 4.438 | 4.392 / 4.438 | HW Epic 3.680, SW Epic 3.686 |
+| Flicker with budget 2 (merged) | | 4.323 / 4.375 | still above Epic by 17% / 19% |
 
 New ranges are the two timing visits (`base-t0`, `base-t1`). Cut frames are single observations. Unreal Epic is P-YARD2's (D3D12, unaffected).
 
@@ -149,12 +161,56 @@ Longer windows are worse and shorter ones better. A sharper kernel helps a littl
 
 ## 4. GPU screen
 
-**Pending.** Planned lease `pflk-l3` (one binary, `sharp_blur_budget` 0 / 1 / 2 / 4):
-- the quarry yardstick on both paths: flicker, full-frame error still/moving/cut, timing;
-- the S4 door and S5 mirror benches at K = 0 and 1 on both paths, for ghosting and grain, judged by eye;
-- Unreal HW/SW Epic quarry recaptures (`tools/p-flicker/ue.py`) for side-by-side clips and the per-contrast split against Unreal. P-YARD2's Unreal captures were deleted after scoring, so P-YARD2's scores and timings are reused, but its pixels are gone.
+GPU work was held from 21:28 to 23:09 UTC while Islam played (`cs2`). The screen then ran as leases `pflk-l3` (183 s), `pflk-l4` (timing and lib) and `pflk-ue2` (Unreal).
 
-Blocked from 21:28 UTC: `cs2` (Islam's game, 10 GB private) was running, and AGENTS.md defers GPU work and measurement builds while he plays. Free RAM was 8.8-9.3 GiB, under the brief's 10 GiB start bar.
+**Quarry yardstick** (P-YARD2's scorer and references, 32 moving pairs; the control from the new binary at budget 0 is byte-identical to main on all 125 frames):
+
+| Run | Flicker L0 | Flicker L4 | Error still | Error moving | Error cut | Error recover | Edge moving |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| RT main | 4.392 | 5.053 | 6.630 | 7.237 | 7.711 | 6.939 | 11.56 |
+| RT budget 1 | 4.314 | 4.993 | 6.630 | 7.070 | 7.711 | 6.939 | 11.54 |
+| **RT budget 2 (default)** | **4.323** | 4.985 | 6.630 | 7.123 | 7.711 | 6.939 | 11.54 |
+| RT budget 4 | 4.379 | 5.039 | 6.630 | 7.215 | 7.711 | 6.939 | 11.56 |
+| RT `cr=0` (bilinear only) | 4.424 | 5.076 | 6.630 | 7.197 | 7.711 | 6.939 | 11.54 |
+| non-RT main | 4.438 | 5.111 | 7.278 | 7.722 | 8.257 | 7.524 | 11.95 |
+| non-RT budget 1 | 4.377 | 5.077 | 7.278 | 7.609 | 8.257 | 7.524 | 11.94 |
+| **non-RT budget 2 (default)** | **4.375** | 5.052 | 7.278 | 7.633 | 8.257 | 7.524 | 11.93 |
+| UE HW Lumen Epic (recaptured) | 3.680 | | | 8.94 (P-YARD2) | | | |
+| UE SW Lumen Epic (recaptured) | 3.686 | | | 9.90 (P-YARD2) | | | |
+
+- **Budgets 1 and 2** are within noise of each other on the quarry. 2 is the default because the noise model shows budget 1 letting sampling noise through in penumbrae.
+- **Contrast split.** The Unreal recapture reproduces P-YARD2's flicker to three decimals. Its split has the same shape as Renderlab's (96% interior, energy rising with contrast) at about 15% lower RMS in every bin: 7.74 against 9.42 at contrast 20 and above, 1.97 against 2.22 on flat areas.
+- **Timing, interleaved visits in one lease** (A = budget 0, B = default):
+
+| GPU p50 ms (vs Epic) | A0 | B0 | A1 | B1 |
+|---|---:|---:|---:|---:|
+| RT still | 3.48 | 3.38 | 3.37 | 3.38 (1.33x faster than HW Epic 4.50) |
+| RT moving | 4.30 | 4.30 | 4.30 | 4.29 (1.07x faster than 4.57) |
+| RT cut | 12.71 | 12.64 | 12.66 | 12.71 (2.8x slower than 4.52) |
+| non-RT still | 8.55 | 8.64 | 8.68 | 8.58 (2.1x slower than SW Epic 4.02) |
+| non-RT moving | 10.66 | 10.65 | 10.69 | 10.66 (2.6x slower than 4.12) |
+| non-RT cut | 43.10 | 42.19 | 43.99 | 44.18 (10.7x slower than 4.11) |
+
+  An earlier single budget-2 visit read RT moving 4.74 ms, with CPU submit also up 30%. That was contention, and the interleaved visits replace it.
+- **Ghosting shots (RL#10 shots our benches can show), inspected by eye.**
+  - The S4 sliding door (frames 64, 76, 88, 110, both paths) differs only along the moving door edge: 70-280 pixels over 8 codes, with the same look and no trail or smear (`docs/p-flicker/s4-door-edge.jpg`, `s4-door-rt.jpg`).
+  - The pre-existing stray bright pixels on that edge are present with and without the change.
+  - The flat-wall grain (GI, P-YARD2 item 1) is untouched.
+  - The S5 mirror with the moving cube is byte-identical: no receiver moves.
+- **Clips at playback speed** (30 fps, walk frames 160-223, Renderlab main | budget 2 | Unreal HW Epic):
+  - `D:/Coding/renderlab-work/p-flicker/sheets/rock.gif` and `gravel.gif`;
+  - step sheets `rock-steps.png` / `gravel-steps.png`, reduced copies in `docs/p-flicker/`.
+  - Renderlab is visibly sharper and more detailed than Unreal in both clips.
+  - Its steps show dotted bright flashes along cracks that Unreal's do not. That is the shimmer a viewer sees.
+
+**Next (for the next flicker unit):**
+- The crack flashes are one-frame, sign-balanced and contact-enriched.
+- They are neither Catmull-Rom/bilinear switching (`cr=0` keeps them) nor GI.
+- Candidates:
+  - TR1's geometric tap test intermittently rejecting history on the scan's tiny crack triangles (a restart shows the raw jittered sample);
+  - sun-visibility or normal-map glints in the fresh sample.
+- One diagnostic capture with TR1's per-pixel restart/accept mask would separate them.
+- If restarts dominate, a geometry-tolerant tap test on near-coplanar crack faces is the fix. With the patent policy suspended, a per-pixel variance clamp of the fresh sample is also open.
 
 ## 5. Harness
 
@@ -176,4 +232,11 @@ Blocked from 21:28 UTC: `cs2` (Islam's game, 10 GB private) was running, and AGE
 - Release `p_yard_capture` from main `f64c82e` plus the adapter knobs; renderer source clean for the base runs.
 - Builds: 151 s for the first build, with one Cargo command, the build slot and the stillkit mutex, after admission.
 - Leases through `scripts/n8-run.py --quarry-lease` (12 GiB child cap, 8 GiB machine floor): `pflk-l1` (235 s) and `pflk-l2` (149 s). Free RAM was 17-20 GiB at both starts.
-- Unreal side: P-YARD2's evidence (UE 5.7.4, D3D12 SM6).
+- Further leases:
+  - `pflk-l3` (183 s, screen);
+  - `pflk-l4` (interleaved timing, default-build identity, then lib tests: 207 passed, 167 ignored);
+  - `pflk-ue2` (Unreal HW/SW Epic captures, 33 + 26 s, camera readback OK).
+- Candidate builds: 40 s each, plus the lib test binary (3 min 33 s), one at a time after admission.
+- Unreal: UE 5.7.4 CL51494982, U0's Lumen package, D3D12 SM6. P-YARD2's timings are reused.
+- Time: about 1 h 40 min of code and analysis and about 12 min of GPU leases, with GPU work held for 1 h 41 min while Islam played.
+- Cleanup: the Cargo target and the raw HDR captures (16.6 MB per frame) were deleted. Unreal natives were deleted after the split and clips. `D:/Coding/renderlab-work/p-flicker` keeps the logs, `engine.json` timings and counts, `split/split.json`, `score/quality.json`, the timing JSONs, the energy maps and the inspected sheets and clips.
