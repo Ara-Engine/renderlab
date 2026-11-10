@@ -1125,3 +1125,64 @@ LUT, grain.
 
 The M5-A `display.png` is the first Renderlab image shown through Ara end to end, from
 scene data to display bytes, with no wgpu device and no CPU tone mapping.
+
+### The atmosphere on the same frame
+
+With an active `ForwardScene::atmosphere` the frame adds `encode_atmosphere` in its
+order: transmittance, multiscatter, sky-view and ambient LUTs, the five-level
+procedural specular cube and the diffuse cube, and the aerial slices of the camera
+volume. The sky backdrop then replaces the clear under the mesh pass, the lit pass
+reads the LUTs, the volume and the cubes in place of the "off" views, the lighting
+uniform carries `EnvironmentState::uniform` for the procedural chain, and
+`Atmosphere::transmittance` scales the directional records as `sun_scale` does.
+Volumetric fog is rejected: its inject and temporal kernels are not ported.
+
+`forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky` holds the assembly,
+not the sky's radiance. A low sun's transmittance (0.72, 0.49, 0.26) reaches the
+floor exactly once, within the photometry tolerance; the backdrop replaces a black
+clear; and a floor facing away from the sun is black without the procedural
+environment and blue-weighted with it. The sky's own values rest on the stage replays
+and on the cross-layer comparison, which is the only whole-image check of this level:
+`ara_frame --atmosphere` renders M5-A under the physical sky on either layer.
+
+## Order for the engine's default paths
+
+`Engine` selects traced primary visibility on `HardwareRt` and the visibility buffer
+on `NonRt`, with GI, temporal reconstruction and reflections on. Read against
+`Renderer::submit_frame`, the families split into what is already ported and only
+needs assembling, and what the default image needs in addition.
+
+**Smallest engine-path frame, from ported passes only.** `HardwareRt` at
+`Quality::Reference` with GI, temporal reconstruction and reflections off encodes:
+TLAS build, camera trace with receivers (entries 40-41), fresh exact sun visibility
+(46), programmable primary shading (38-39), then atmosphere, transparency and post.
+`Quality::Reference` selects `SoftShadows::Exact`, which takes the fresh-visibility
+branch rather than the Interactive trace. Every one of those passes replays on Metal
+today, so this frame is assembly work like the forward frame, and it is the first
+picture comparable with an engine render: correct soft sun shadows, sky, glass. Apple
+silicon has ray queries, so this is also the path a Mac would run.
+
+**Then, by how much of the default image each one changes:**
+
+1. **GI cache, hardware-ray variant** (`gi_cache.wgsl`, `gi_cells.wgsl`, `gi_api.wgsl`,
+   about 2,800 lines): sky occlusion and bounce light. Without it every surface reads
+   the unoccluded environment, the largest visible difference from the default image.
+2. **Temporal reconstruction** (`temporal_resolve.wgsl`, 789 lines): the default
+   antialiasing and the history the Interactive shadows and GI lean on. Exact shadows
+   do not need it, so the picture is comparable before it, only aliased.
+3. **Traced reflections** (`reflections.wgsl` and the program reflection lobe): replace
+   sky specular on glossy and mirror surfaces; visible wherever a scene has them.
+4. **Interactive trace and film** (`primary_interactive`, the penumbra list and trace,
+   `film_accumulation`): the realtime-quality sun shadows and their repair. They
+   approximate what Exact already draws, so they change cost more than the picture.
+5. **The non-RT default: virtual shadow maps, the surface cache and S4**
+   (`virtual_shadow*.wgsl`, `sunvis_s4.wgsl`, about 3,800 lines), then software GI and
+   reflection rays. The largest family, and it only matters on devices without ray
+   queries. Its unshadowed base is already ported: the visibility buffer's cull,
+   rasters, HZB and receiver resolve (through entry 34) and primary shading (38-39).
+   A `NonRt` frame without sun shadows is therefore also assembly work.
+
+Decals and streamed textures are tables and uploads rather than passes; they follow
+whichever scene needs them. `Engine` itself takes wgpu textures, so "an engine frame
+through Ara" means a second entry point over the same scene description, as
+`forward::render` is for the forward path, until the two are unified.

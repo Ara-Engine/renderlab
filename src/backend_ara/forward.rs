@@ -5,16 +5,20 @@
 //! replayed alone. It covers what `Renderer::try_render_view(.., ViewMode::Lit)`
 //! encodes on an untraced frame with the atmosphere, sun and local shadows, GI,
 //! decals and transmission off: every such input is bound with the same "off"
-//! contents the wgpu renderer binds. With post settings it continues through
+//! contents the wgpu renderer binds. With an active atmosphere it adds
+//! `encode_atmosphere`: the four LUTs, the procedural environment cube, the aerial
+//! volume, sun transmittance on the directional records and the sky backdrop under
+//! the mesh pass (volumetric fog is not assembled). With post settings it continues through
 //! `PostGpu::encode` and the tone stage: motion surface, tile maximum, motion blur,
 //! bloom, tone and the display transfer. [`render`] is one-shot; it owns nothing
 //! across frames, so the frame is always the first after a cut.
 use super::{
-    atmosphere::AtmosphereParameters,
+    atmosphere::{AtmosphereParameters, AtmospherePasses, AtmosphereSun, AtmosphereTargets},
     bindings::{HeapBindings, Input},
     bloom::Bloom,
     buffer::StorageBuffer,
     cache::ShaderCache,
+    environment::EnvironmentPasses,
     graph::Graph,
     image::Texture,
     light_cluster::{ClusterInputs, LightClusters},
@@ -22,8 +26,10 @@ use super::{
     post::{FilterInputs, PostPasses, SettingsRecord, ToneInputs},
     post_surface::{PostCameraFrame, RasterDepth, RasterPostSurface},
     shader::{InputKey, InputKind, Pass, Program, SampleType},
+    sky::SkyPass,
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
+    volumes::VolumePasses,
 };
 use crate::{light_cluster as lc, lighting::PackedLighting};
 use anyhow::{Context, Result, bail, ensure};
@@ -57,6 +63,8 @@ pub struct ForwardScene<'a> {
     pub camera: crate::Camera,
     /// Target extent in pixels.
     pub size: [u32; 2],
+    /// `Atmosphere::off()` leaves the uniform environment. Volumetric fog must be off.
+    pub atmosphere: crate::Atmosphere,
     /// `None` stops at the exposed HDR target. Depth of field is not assembled yet.
     pub post: Option<crate::PostSettings>,
 }
@@ -77,6 +85,19 @@ pub fn post_record(settings: &crate::PostSettings, height: u32) -> [f32; 20] {
     settings.record(1, height, LUT_SIDE, false)
 }
 const LUT_SIDE: u32 = 2;
+/// `atmosphere_gpu::FROXEL_TILE`: output pixels per camera-volume cell.
+const FROXEL_TILE: u32 = 8;
+
+/// What an active atmosphere produces for the sky backdrop and the lit pass.
+struct Sky {
+    luts: AtmosphereTargets,
+    /// Camera volume: fog in slices 0..64 (zero here), aerial perspective in 64..96.
+    volume: Texture,
+    scatter: Texture,
+    /// The procedural diffuse and specular cubes, when the environment is on.
+    environment: Option<[Texture; 2]>,
+    kernels: (AtmospherePasses, VolumePasses, Option<EnvironmentPasses>),
+}
 
 fn key(group: u32, binding: u32) -> InputKey {
     InputKey { group, binding }
@@ -129,6 +150,29 @@ pub fn render(
     uniform[..32].copy_from_slice(&packed.uniform(eye));
     let mut records = packed.records.clone();
     records.resize(records.len().max(crate::lighting::LIGHT_BYTES), 0);
+    // `Renderer::atmosphere_sun` and `sun_scale`: the first directional light.
+    let settings = scene.atmosphere;
+    settings.validate()?;
+    let sun = scene.lighting.lights.iter().find_map(|l| match *l {
+        crate::Light::Directional { travel, lux } => Some((-travel.normalize(), lux)),
+        _ => None,
+    });
+    if settings.active() {
+        ensure!(
+            settings.volumetric_fog.is_none(),
+            "forward frame does not assemble volumetric fog yet"
+        );
+        if let (true, Some((toward, _))) = (settings.sun_transmittance, sun) {
+            records = crate::atmosphere::scale_directional(
+                &records,
+                settings.transmittance(eye.y - settings.medium.ground_height, toward),
+            );
+        }
+        if settings.environment {
+            // `EnvironmentState::uniform` for the unrotated five-level procedural chain.
+            uniform[32..].copy_from_slice(bytemuck::cast_slice(&[1f32, 0., 1., 5.]));
+        }
+    }
     let mut frame = lc::header(&scene.camera, size, packed.count, true, &[]);
     frame[100..104].copy_from_slice(&crate::LocalShadows::default().near.to_ne_bytes());
     let cluster_inputs = ClusterInputs {
@@ -146,26 +190,116 @@ pub fn render(
     camera[64..68].copy_from_slice(&(crate::ViewMode::Lit as u32).to_ne_bytes());
     let camera = StorageBuffer::new(gpu, &camera)?;
     let lighting = StorageBuffer::new(gpu, &uniform)?;
-    let toward_sun = scene
-        .lighting
-        .lights
-        .iter()
-        .find_map(|l| match l {
-            crate::Light::Directional { travel, .. } => Some(-*travel),
-            _ => None,
-        })
-        .unwrap_or(crate::Vec3::Y);
-    let atmosphere = AtmosphereParameters::for_camera(
+    let grid = if settings.active() {
+        size.map(|n| n.div_ceil(FROXEL_TILE))
+    } else {
+        [1, 1]
+    };
+    let (toward_sun, illuminance) = sun.unwrap_or((crate::Vec3::Y, [0.; 3]));
+    let atmosphere = AtmosphereParameters::for_camera_with_sun(
         gpu,
-        crate::Atmosphere::off(),
-        toward_sun,
+        settings,
+        AtmosphereSun {
+            toward_sun,
+            illuminance,
+            exposure: packed.exposure,
+        },
         scene.camera,
         size,
-        [1, 1],
+        grid,
     )?;
     for buffer in [&camera, &lighting, &atmosphere.record] {
         graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
     }
+
+    // `Renderer::encode_atmosphere`, in its order. Stale LUTs: this is a first frame.
+    let sky = if settings.active() {
+        let luts = AtmosphereTargets::new(gpu)?;
+        let volume = Texture::volume_shape(gpu, [grid[0], grid[1], 96], Format::Rgba16Float, true)?;
+        let scatter =
+            Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, false)?;
+        // wgpu zero-initialises these; the kernels write only part of each.
+        for (image, texels) in [
+            (luts.transmittance.image, 256 * 65),
+            (volume.image, grid[0] * grid[1] * 96),
+            (scatter.image, grid[0] * grid[1] * 64),
+        ] {
+            staging.push(transfer::upload(
+                gpu,
+                &mut graph,
+                &mut rec,
+                image,
+                &vec![0; texels as usize * 8],
+            )?);
+        }
+        let lut_kernels = AtmospherePasses::new(gpu, cache)?;
+        for stage in [
+            Pass::AtmosphereTransmittance,
+            Pass::AtmosphereMultiscatter,
+            Pass::AtmosphereSky,
+            Pass::AtmosphereAmbient,
+        ] {
+            lut_kernels.record(&mut graph, &mut rec, stage, &atmosphere, &luts)?;
+        }
+        let mut environment = None;
+        let mut environment_kernels = None;
+        if settings.environment {
+            let kernels = EnvironmentPasses::new(gpu, cache)?;
+            let (specular, levels) = Texture::cube_chain(gpu, 128, 5)?;
+            for level in &levels {
+                kernels.record(
+                    &mut graph,
+                    &mut rec,
+                    Pass::EnvironmentSpecular,
+                    &atmosphere,
+                    &luts.sky,
+                    level,
+                )?;
+            }
+            let (diffuse, levels) = Texture::cube_chain(gpu, 16, 1)?;
+            kernels.record(
+                &mut graph,
+                &mut rec,
+                Pass::EnvironmentDiffuse,
+                &atmosphere,
+                &luts.sky,
+                &levels[0],
+            )?;
+            environment = Some([diffuse, specular]);
+            environment_kernels = Some(kernels);
+        }
+        let volume_kernels = VolumePasses::new(gpu, cache)?;
+        volume_kernels.record(
+            &mut graph,
+            &mut rec,
+            Pass::AtmosphereAerial,
+            &atmosphere,
+            &luts,
+            &scatter,
+            &volume,
+        )?;
+        Some(Sky {
+            luts,
+            volume,
+            scatter,
+            environment,
+            kernels: (lut_kernels, volume_kernels, environment_kernels),
+        })
+    } else {
+        None
+    };
+    // The atmosphere's products where it ran; everything else falls through below.
+    let sky_image = |key: InputKey| -> Option<&Texture> {
+        let sky = sky.as_ref()?;
+        match (key.group, key.binding) {
+            (3, 51) => Some(&sky.luts.transmittance),
+            (3, 52) => Some(&sky.luts.sky),
+            (3, 53) => Some(&sky.volume),
+            (3, 6) => sky.environment.as_ref().map(|e| &e[0]),
+            (3, 7) => sky.environment.as_ref().map(|e| &e[1]),
+            _ => None,
+        }
+    };
 
     // Every other reflected input is a feature that is off in this frame. The wgpu
     // renderer binds zero-filled buffers and zero-initialised textures there.
@@ -193,7 +327,7 @@ pub fn render(
                 buffers.insert(spec.key, buffer);
             }
             InputKind::Image { dimension, sample } => {
-                if spec.key == key(3, 24) {
+                if spec.key == key(3, 24) || sky_image(spec.key).is_some() {
                     continue;
                 }
                 let (format, texel) = match sample {
@@ -280,7 +414,9 @@ pub fn render(
                     })
                 }
                 InputKind::Image { .. } if spec.key == key(3, 24) => Input::Image(&lists),
-                InputKind::Image { .. } => Input::Image(&inputs[&spec.key]),
+                InputKind::Image { .. } => {
+                    Input::Image(sky_image(spec.key).unwrap_or_else(|| &inputs[&spec.key]))
+                }
                 InputKind::Sampler { .. } => Input::Sampler(SamplerDesc::default()),
                 _ => bail!("forward frame cannot supply {}", spec.name),
             };
@@ -298,10 +434,26 @@ pub fn render(
         .zip(&packets)
         .map(|(geometry, bindings)| ToonDraw { geometry, bindings })
         .collect();
-    // `Renderer::lit_clear`: the uniform environment, exposed, in f64.
+    // `Renderer::lit_clear`: the uniform environment, exposed, in f64. The sky
+    // backdrop replaces it on every pixel when the atmosphere draws one.
     let clear = packed
         .environment
         .map(|v| (f64::from(v) * f64::from(packed.exposure)).min(65504.0) as f32);
+    let backdrop = match sky.as_ref().filter(|_| settings.sky) {
+        Some(sky) => {
+            let backdrop = SkyPass::new(gpu, cache, Format::Rgba16Float)?;
+            backdrop.record(
+                &mut graph,
+                &mut rec,
+                &atmosphere,
+                &sky.luts,
+                &sky.volume,
+                &output,
+            )?;
+            Some(backdrop)
+        }
+        None => None,
+    };
     pass.record(
         &mut graph,
         &mut rec,
@@ -309,7 +461,9 @@ pub fn render(
         &MeshAttachments {
             color: &output,
             depth: &depth,
-            clear_color: Some([clear[0], clear[1], clear[2], 1.0]),
+            clear_color: backdrop
+                .is_none()
+                .then_some([clear[0], clear[1], clear[2], 1.0]),
             clear_depth: Some(0.0),
         },
     )?;
@@ -469,6 +623,28 @@ pub fn render(
         .chain([camera, lighting])
     {
         buffer.retire(gpu)?;
+    }
+    if let Some(backdrop) = backdrop {
+        backdrop.retire(gpu)?;
+    }
+    if let Some(sky) = sky {
+        let (luts, volumes, environment) = sky.kernels;
+        luts.retire(gpu)?;
+        volumes.retire(gpu)?;
+        if let Some(environment) = environment {
+            environment.retire(gpu)?;
+        }
+        post_images.extend(
+            [
+                sky.luts.transmittance,
+                sky.luts.multiscatter,
+                sky.luts.sky,
+                sky.volume,
+                sky.scatter,
+            ]
+            .into_iter()
+            .chain(sky.environment.into_iter().flatten()),
+        );
     }
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;

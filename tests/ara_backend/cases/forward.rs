@@ -137,6 +137,7 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
                 lighting,
                 camera,
                 size: SIZE,
+                atmosphere: renderlab::Atmosphere::off(),
                 post: None,
             },
         )?
@@ -325,6 +326,7 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
                 100.,
             )?,
             size,
+            atmosphere: renderlab::Atmosphere::off(),
             post: Some(settings),
         },
     )?;
@@ -415,6 +417,139 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
         "forward display: {} pixels inside the CPU post replay's bounds; HDR peak {brightest}, {} distinct display colours",
         display.len() / 4,
         distinct.len()
+    );
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The atmosphere on the frame: sun transmittance reaches the directional light exactly
+/// once, the backdrop replaces the clear, and the procedural environment lights a
+/// surface the sun cannot. The sky's own radiance is the stage replays' business and
+/// the cross-layer comparison's; this holds the assembly.
+#[test]
+fn forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky() -> Result<()> {
+    use renderlab::Atmosphere;
+    let path = root("forward-atmosphere");
+    let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    // A floor that leaves the frame's corners to the backdrop.
+    let vertices = [
+        [-1.5, -1.5, 0.],
+        [1.5, -1.5, 0.],
+        [1.5, 1.5, 0.],
+        [-1.5, 1.5, 0.],
+    ]
+    .map(|position| Vertex {
+        position,
+        normal: [0., 0., 1.],
+        uv: [0.; 2],
+        color: [1.; 4],
+    });
+    let mut frame = |travel: Vec3, atmosphere: Atmosphere| -> Result<Vec<[f32; 4]>> {
+        let bytes = render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                objects: &[ForwardObject {
+                    vertices: &vertices,
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    transform: Mat4::IDENTITY,
+                    material: MaterialDescriptor {
+                        base_color: BASE,
+                        metallic: 0.,
+                        roughness: 1.,
+                        ..Default::default()
+                    },
+                }],
+                lighting: &Lighting {
+                    lights: vec![Light::Directional {
+                        travel,
+                        lux: [1000.; 3],
+                    }],
+                    exposure_stops: -8.,
+                    ..Default::default()
+                },
+                camera,
+                size: SIZE,
+                atmosphere,
+                post: None,
+            },
+        )?
+        .hdr;
+        Ok(bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f16::from_bits(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]])).to_f32()
+                })
+            })
+            .collect())
+    };
+    let centre = 48 * 128 + 64;
+    let base = DVec3::from_array([BASE[0], BASE[1], BASE[2]].map(f64::from));
+
+    // Sun in front of the floor, low enough for a strongly coloured transmittance.
+    let travel = Vec3::new(-0.9, -0.2, -0.4);
+    let sun_only = Atmosphere {
+        sun_disk: false,
+        aerial_perspective: false,
+        environment: false,
+        height_fog: None,
+        volumetric_fog: None,
+        ..Default::default()
+    };
+    let image = frame(travel, sun_only)?;
+    let toward = -travel.normalize();
+    let transmittance = sun_only.transmittance(0., toward);
+    ensure!(
+        transmittance[2] < 0.9 * transmittance[0] && transmittance[0] < 0.99,
+        "fixture sun is not attenuated: {transmittance:?}"
+    );
+    let expected = brdf(DVec3::Z, DVec3::Z, toward.as_dvec3(), base, 0., 1.) * 1000. / 256.;
+    for channel in 0..3 {
+        let expected = expected[channel] * f64::from(transmittance[channel]);
+        let actual = f64::from(image[centre][channel]);
+        ensure!(
+            (actual - expected).abs() <= 0.002 + expected * 0.01,
+            "attenuated sun channel {channel}: got {actual} expected {expected}"
+        );
+    }
+    let corner = image[0];
+    ensure!(
+        corner[..3].iter().all(|v| v.is_finite() && *v > 0.),
+        "backdrop did not replace the black clear: {corner:?}"
+    );
+
+    // Sun behind the floor: only the sky can light it.
+    let behind = Vec3::new(-0.3, -0.6, 0.4);
+    let dark = frame(behind, sun_only)?[centre];
+    let lit = frame(
+        behind,
+        Atmosphere {
+            environment: true,
+            ..sun_only
+        },
+    )?[centre];
+    ensure!(
+        dark[..3].iter().all(|v| *v < 1e-4),
+        "floor facing away from the sun is lit without an environment: {dark:?}"
+    );
+    ensure!(
+        lit[..3].iter().all(|v| v.is_finite() && *v > 1e-3) && lit[2] > lit[0],
+        "procedural environment did not light the floor as a blue-weighted sky: {lit:?}"
+    );
+    println!(
+        "forward atmosphere: sun transmittance {transmittance:?} applied once; backdrop {corner:?}; sky-lit floor {lit:?}"
     );
     gpu.assert_clean()?;
     Ok(())

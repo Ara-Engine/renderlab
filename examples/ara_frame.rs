@@ -5,7 +5,10 @@
 //! a point and a spot light) through the forward lit path and writes the exposed HDR
 //! target. `--backend wgpu` is the existing renderer; `--backend ara` is the optional
 //! ara-gpu backend (`--features backend-ara`), which is the only one that runs on
-//! Metal. Both turn the same features off: atmosphere, local shadows.
+//! Metal. Both turn the same features off: local shadows always, and the atmosphere
+//! unless `--atmosphere` asks for the physical sky (sky and sun disk, sun
+//! transmittance, procedural environment, aerial perspective and height fog; no
+//! volumetric fog, which the Ara frame does not assemble yet).
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -33,10 +36,17 @@ const GRID: [usize; 2] = [24, 16];
 fn main() -> Result<(), Failure> {
     let mut args = std::env::args().skip(1);
     let (mut backend, mut output, mut size) = (None, None, [960u32, 640]);
+    let mut atmosphere = renderlab::Atmosphere::off();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
+            "--atmosphere" => {
+                atmosphere = renderlab::Atmosphere {
+                    volumetric_fog: None,
+                    ..Default::default()
+                }
+            }
             "--size" => {
                 let value = args.next().ok_or("--size WIDTHxHEIGHT")?;
                 let (w, h) = value.split_once('x').ok_or("--size WIDTHxHEIGHT")?;
@@ -53,8 +63,8 @@ fn main() -> Result<(), Failure> {
     let output = output.ok_or("--output DIR")?;
     let fixture = lighting_fixture::Fixture::new();
     let (hdr, display) = match backend.as_deref() {
-        Some("wgpu") => wgpu_frame(&fixture, size)?,
-        Some("ara") => ara_frame(&fixture, size, Path::new(&output))?,
+        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere)?,
+        Some("ara") => ara_frame(&fixture, size, atmosphere, Path::new(&output))?,
         _ => return Err("--backend wgpu|ara".into()),
     };
     write(
@@ -63,13 +73,18 @@ fn main() -> Result<(), Failure> {
         &hdr,
         &display,
         backend.as_deref().unwrap_or_default(),
+        atmosphere.active(),
     )
 }
 
 /// The exposed HDR target and the displayed image of one frame.
 type Frame = (Vec<u8>, Vec<u8>);
 
-fn wgpu_frame(fixture: &lighting_fixture::Fixture, size: [u32; 2]) -> Result<Frame, Failure> {
+fn wgpu_frame(
+    fixture: &lighting_fixture::Fixture,
+    size: [u32; 2],
+    atmosphere: renderlab::Atmosphere,
+) -> Result<Frame, Failure> {
     use renderlab::*;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -93,7 +108,7 @@ fn wgpu_frame(fixture: &lighting_fixture::Fixture, size: [u32; 2]) -> Result<Fra
         include_str!("../shaders/scene.wgsl"),
     )?;
     // The frame the ara backend assembles today: everything else is a later level.
-    r.set_atmosphere(Atmosphere::off())?;
+    r.set_atmosphere(atmosphere)?;
     r.set_local_shadows(LocalShadows {
         count: 0,
         ..Default::default()
@@ -174,6 +189,7 @@ fn wgpu_frame(fixture: &lighting_fixture::Fixture, size: [u32; 2]) -> Result<Fra
 fn ara_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
+    atmosphere: renderlab::Atmosphere,
     output: &Path,
 ) -> Result<Frame, Failure> {
     use renderlab::backend_ara::{cache::ShaderCache, forward};
@@ -203,6 +219,7 @@ fn ara_frame(
             lighting: &fixture.lighting,
             camera: fixture.camera(0),
             size,
+            atmosphere,
             post: Some(renderlab::PostSettings::default()),
         },
     )?;
@@ -210,7 +227,12 @@ fn ara_frame(
     Ok((pixels.hdr, pixels.display.ok_or("post did not run")?))
 }
 #[cfg(not(feature = "backend-ara"))]
-fn ara_frame(_: &lighting_fixture::Fixture, _: [u32; 2], _: &Path) -> Result<Frame, Failure> {
+fn ara_frame(
+    _: &lighting_fixture::Fixture,
+    _: [u32; 2],
+    _: renderlab::Atmosphere,
+    _: &Path,
+) -> Result<Frame, Failure> {
     Err("--backend ara needs --features backend-ara".into())
 }
 
@@ -246,6 +268,7 @@ fn write(
     bytes: &[u8],
     display: &[u8],
     backend: &str,
+    atmosphere: bool,
 ) -> Result<(), Failure> {
     let pixels = size[0] as usize * size[1] as usize;
     if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
@@ -284,7 +307,8 @@ fn write(
     fs::write(
         dir.join("frame.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "scene": "M5-A authored v1, pose 0, forward lit, atmosphere and local shadows off, default post",
+            "scene": "M5-A authored v1, pose 0, forward lit, local shadows off, default post",
+            "atmosphere": if atmosphere { "physical sky without volumetric fog" } else { "off" },
             "backend": backend,
             "width": size[0],
             "height": size[1],
@@ -310,6 +334,9 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
     let (ja, jb) = (record(a)?, record(b)?);
     if ja["width"] != jb["width"] || ja["height"] != jb["height"] {
         return Err("frames differ in extent".into());
+    }
+    if ja["atmosphere"] != jb["atmosphere"] {
+        return Err("frames differ in atmosphere setting".into());
     }
     println!(
         "{} ({}) against {} ({}), {}x{}",
