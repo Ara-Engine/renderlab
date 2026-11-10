@@ -29,6 +29,7 @@ pub mod sky;
 pub mod toon;
 pub mod transfer;
 pub mod transparency_depth;
+pub mod transparency_glass;
 pub mod transparency_seed;
 pub mod visibility_cull;
 pub mod visibility_raster;

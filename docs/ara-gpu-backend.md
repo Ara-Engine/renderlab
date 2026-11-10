@@ -873,3 +873,35 @@ All 36 focused tests pass with API/shader validation and API-only validation;
 Vulkan is pending, and backend library/integration clippy has no diagnostics.
 The latest scoped AS review had no must-fix findings. Its small negative-test
 follow-up now checks the specific caller-material diagnostic.
+
+## Programmable transparent panes (entry 44)
+
+`transparency_glass::program` composes the original non-RT glass source with
+caller-authored material WGSL. `Glass` draws into the retained four-sample HDR
+attachment with depth/blending disabled, matching the source renderer. Resolve
+that attachment into the packet's behind-color image between overlapping panes.
+`Program` and the native cache now support raster families with explicit render
+state; the compute convenience path rejects a raster program.
+
+The 8×6 replay runs two sorted panes with nonuniform HDR behind color, opaque-depth
+rejection, distinct material/parameter/base-texture records and a mirrored model.
+It checks both intermediate resolves against scalar composition, then repeats
+with a single-sided backface and with zero packed opacity. Untouched pixels stay
+exact; changed channels are within two half ULPs. The authored shade differs
+observably from the conformance material, so this proves caller code is compiled.
+All resources are initialized and both pane submissions precede the first wait.
+Fractional MSAA edges, tangent streams, refraction thickness, active atmosphere,
+and declared reflection/transmittance hooks remain unproven by this fixture.
+
+No new per-pass naga repair was needed: this reuses the shared packet adapter,
+Metal4 per-vertex input support and vertex locations11+N. Both default and authored
+raster pairs pass `spirv-val` for Vulkan1.3; native Vulkan needs fragment barycentric
+capability negotiation and remains pending. The source factory gains only crate
+visibility, with no edits to the original shading algorithm.
+
+All **37** focused tests pass with Metal API+shader validation and API-only
+validation. **59** standard SPIR-V stages plus four authored/override stages
+validate. The independent scoped review found no must-fix issues. Clippy adds no
+warnings in the backend library or new Glass files; existing fixture warnings
+remain. Ara is now pinned to **0b4308e18**, including both reviewed Vulkan
+queue-family fixes and main d8015f178.

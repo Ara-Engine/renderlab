@@ -170,7 +170,7 @@ fn heap_bound_primary_ray_query_native_replay_against_cpu() -> Result<()> {
     for (i, packet) in packets.iter().enumerate() {
         let f = &fixtures[i];
         ensure!(
-            programs[i].threads() == [8, 4, 1]
+            programs[i].threads()? == [8, 4, 1]
                 && f.write_world == (i == 1)
                 && f.dispatch() == [3, 3, 1],
             "query config differs"

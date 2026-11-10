@@ -1,8 +1,8 @@
 //! Content-addressed native artifacts; production pipeline loading stays in ara-gpu.
 use super::shader::{self, Pass};
-use anyhow::Result;
 #[cfg(target_os = "macos")]
-use anyhow::{Context, ensure};
+use anyhow::Context;
+use anyhow::{Result, ensure};
 use ara_gpu::{
     GpuDevice, Pipeline,
     cooked::{self, CookedPipeline, CookedStage, RenderState, Stage},
@@ -46,12 +46,20 @@ impl ShaderCache {
     }
     /// Compile a caller-authored compute program through the same native cache.
     pub fn program(&self, gpu: &mut GpuDevice, program: &shader::Program) -> Result<Pipeline> {
-        self.pipeline_source(
-            gpu,
-            program.pass(),
-            program.source(),
-            RenderState::default(),
-        )
+        ensure!(
+            !program.pass().raster(),
+            "raster programs require explicit render state"
+        );
+        self.program_state(gpu, program, RenderState::default())
+    }
+    /// Compile caller-authored raster WGSL with explicit attachments and vertex state.
+    pub fn program_state(
+        &self,
+        gpu: &mut GpuDevice,
+        program: &shader::Program,
+        state: RenderState,
+    ) -> Result<Pipeline> {
+        self.pipeline_source(gpu, program.pass(), program.source(), state)
     }
     fn pipeline_source(
         &self,

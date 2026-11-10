@@ -62,6 +62,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::PrimaryTrace,
         Pass::PrimaryTraceReceivers,
         Pass::TransparencySeed,
+        Pass::TransparencyGlass,
         Pass::FallbackPresent,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
@@ -337,3 +338,8 @@ mod primary_trace_reference;
 
 #[path = "ara_backend/cases/fullscreen_leaves.rs"]
 mod fullscreen_leaf_cases;
+
+#[path = "ara_backend/cases/transparency_glass.rs"]
+mod transparency_glass_cases;
+#[path = "ara_backend/transparency_glass_reference.rs"]
+mod transparency_glass_reference;

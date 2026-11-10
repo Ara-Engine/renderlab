@@ -72,7 +72,7 @@ const MAP_SHADOW: &str = "fn hard_shadow(light:Light, receiver:Receiver, l:vec3<
 /// A transparent material's module: its program composed on `head` (the hardware prelude
 /// on RT renderers; otherwise the prelude with the map's sun visibility), then the pass's
 /// entry with the program's composite.
-fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String {
+pub(crate) fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String {
     let head = if rt {
         head.to_owned()
     } else {

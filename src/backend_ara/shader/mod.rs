@@ -44,6 +44,8 @@ pub enum Pass {
     PrimaryTraceReceivers,
     /// Original transparency multisample background seed.
     TransparencySeed,
+    /// Original caller-programmed transparent pane composition.
+    TransparencyGlass,
     /// Original scene fallback Reinhard presenter.
     FallbackPresent,
     /// Original single-program deferred shading of primary tiles.
@@ -132,6 +134,10 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::TransparencyGlass => crate::backend_ara::transparency_glass::source(
+                include_str!("../shaders/glass_material.wgsl"),
+            )
+            .into(),
             Self::TransparencySeed => {
                 crate::renderer::transparency_gpu::section("TP_AA_SEED").into()
             }
@@ -335,7 +341,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::TransparencySeed
+            Self::TransparencyGlass
+                | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::VisibilityHardware
                 | Self::Tone
@@ -347,12 +354,16 @@ impl Pass {
         )
     }
     pub(crate) fn program_only(self) -> bool {
-        matches!(self, Self::PrimaryShadeTiles | Self::PrimaryShadeList)
+        matches!(
+            self,
+            Self::PrimaryShadeTiles | Self::PrimaryShadeList | Self::TransparencyGlass
+        )
     }
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::TransparencySeed
+            Self::TransparencyGlass
+                | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
@@ -379,7 +390,7 @@ impl Pass {
         )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
-        if matches!(self, Self::MeshToon) {
+        if matches!(self, Self::MeshToon | Self::TransparencyGlass) {
             (4, 0)
         } else {
             (3, 0)
@@ -430,6 +441,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransparencyGlass => "fs_transparent",
             Self::TransparencySeed => "tp_seed_fs",
             Self::FallbackPresent => "fs_present",
             Self::PrimaryTrace => "primary_trace",

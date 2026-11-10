@@ -327,7 +327,7 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
         size: args.len,
     });
     packet.import(&mut graph);
-    let threads = program.threads();
+    let threads = program.threads()?;
     let extent = std::array::from_fn(|i| f.tiles_dispatch[i] * threads[i]);
     kernel.record(&mut graph, &mut rec, &packet, extent)?;
     let hdr = images[&key(0, 18)];

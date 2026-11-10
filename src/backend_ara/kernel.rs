@@ -55,6 +55,10 @@ impl Kernel {
         program: &super::shader::Program,
     ) -> Result<Self> {
         ensure!(
+            !program.pass().raster(),
+            "compute kernels require a compute program"
+        );
+        ensure!(
             program.pass() != Pass::VisibilitySoftware || gpu.info().buffer_int64_atomics,
             "software visibility needs unsigned 64-bit buffer min/max atomics"
         );
@@ -70,7 +74,7 @@ impl Kernel {
             pipeline: cache.program(gpu, program)?,
             pass: program.pass(),
             contract: program.contract(),
-            threads: program.threads(),
+            threads: program.threads()?,
         })
     }
     /// Dispatch enough groups for a nonzero logical extent. The original shader

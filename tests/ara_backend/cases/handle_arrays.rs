@@ -60,7 +60,7 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
             .replace("@workgroup_size(4)", "@workgroup_size(2)"),
     )?;
     ensure!(
-        authored.threads() == [2, 1, 1],
+        authored.threads()? == [2, 1, 1],
         "authored workgroup size ignored"
     );
     let authored_kernel = Kernel::from_program(&mut gpu, &cache, &authored)?;

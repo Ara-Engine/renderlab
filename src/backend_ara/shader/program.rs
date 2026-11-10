@@ -1,27 +1,28 @@
-//! Caller-authored compute WGSL with one immutable reflected packet contract.
+//! Caller-authored WGSL with one immutable reflected packet contract.
 use super::{Pass, ShaderInput};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-/// Prepared WGSL for a selected compute entry family. Prepare outside recording;
+/// Prepared WGSL for a selected compute or raster entry family. Prepare outside recording;
 /// pipelines and packets retain their own contract identity after this is dropped.
 pub struct Program {
     pass: Pass,
     source: String,
     inputs: Vec<ShaderInput>,
-    threads: [u32; 3],
+    threads: Option<[u32; 3]>,
     contract: [u8; 32],
 }
 impl Program {
-    /// Validate caller WGSL and reflect only the chosen entry. The family selects
+    /// Validate caller WGSL and reflect only the chosen entry or raster pair. The family selects
     /// its entry name and wrapper convention, while the program owns its code.
     pub fn new(pass: Pass, source: impl Into<String>) -> Result<Self> {
-        ensure!(
-            pass.indirect() && !pass.raster(),
-            "program needs a compute packet family"
-        );
+        ensure!(pass.indirect(), "program needs a reflected packet family");
         let source = source.into();
         let inputs = super::heap_interface::from_source(pass, &source)?;
-        let threads = super::threads_source(pass, &source)?;
+        let threads = if pass.raster() {
+            None
+        } else {
+            Some(super::threads_source(pass, &source)?)
+        };
         let contract = contract(pass, &inputs);
         Ok(Self {
             pass,
@@ -35,13 +36,14 @@ impl Program {
     pub fn inputs(&self) -> &[ShaderInput] {
         &self.inputs
     }
-    /// Selected compute family.
+    /// Selected compute or raster family.
     pub fn pass(&self) -> Pass {
         self.pass
     }
-    /// Resolved workgroup size, including source override defaults.
-    pub fn threads(&self) -> [u32; 3] {
+    /// Resolved compute workgroup size; raster programs return an error.
+    pub fn threads(&self) -> Result<[u32; 3]> {
         self.threads
+            .context("raster programs have no compute workgroup size")
     }
     /// Emit native Metal source through the shared heap adapter.
     pub fn msl(&self) -> Result<super::MetalProgram> {
