@@ -42,6 +42,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original source-sided shadow depth raster.
+    ShadowRaster,
     /// Original fresh geometric ray-query shadow visibility.
     FreshVisibility,
     /// Original depth-winning geometric shadow receiver prepass.
@@ -138,6 +140,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::ShadowRaster => include_str!("../../../shaders/scene.wgsl").into(),
             Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(
                 crate::backend_ara::fresh_visibility::Mode::Exact,
             )
@@ -353,7 +356,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::ReceiverRaster
+            Self::ShadowRaster
+                | Self::ReceiverRaster
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
                 | Self::FallbackPresent
@@ -375,7 +379,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::FreshVisibility
+            Self::ShadowRaster
+                | Self::FreshVisibility
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
@@ -415,7 +420,9 @@ impl Pass {
         }
     }
     pub(super) fn vertex(self) -> &'static str {
-        if matches!(self, Self::TransparencySeed) {
+        if matches!(self, Self::ShadowRaster) {
+            "vs_shadow"
+        } else if matches!(self, Self::TransparencySeed) {
             "tp_seed_vs"
         } else if matches!(self, Self::FallbackPresent) {
             "vs_present"
@@ -459,6 +466,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ShadowRaster => "fs_shadow",
             Self::FreshVisibility => "fresh_compute",
             Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",

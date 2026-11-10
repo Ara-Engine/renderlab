@@ -982,3 +982,29 @@ validation. **62** standard SPIR-V stages plus five authored/override variants
 validate for Vulkan1.3, including the eight-direction specialization. The scoped
 independent review has no must-fix findings, and backend library/integration clippy
 has no diagnostics. Native Vulkan remains pending.
+
+## Shadow-map raster and atlas selection (entry 47)
+
+`shadow_raster::ShadowRaster` runs the unchanged scene `vs_shadow`/`fs_shadow`
+pair with the original depth-only Greater state and zero clear. Its vertex stage
+reads builtin instance indices, unlike the regular mesh stage's location4 slot
+stream. `ShadowDraw` therefore carries a checked native model range. The encoder
+binds only the48-byte vertex stream and index buffer; a range starting at1 really
+reads model rows1 and2. Source-sided winding/discard stays in the original shader.
+
+`Texture::depth_atlas` publishes a parent and narrow2D views ordered by mip/layer.
+The replay writes mip1 layers0 and1 of a two-mip, three-layer Depth32Float atlas,
+with a range1..3 followed by row0, mirrored/sheared models and two sidedness modes.
+All four queued depth snapshots match the scalar raster reference:338 covered
+pixels, exact cleared misses and maximum error5.96e-8. Every mip0 layer and mip1
+layer2 preserves its initialized canary. An oversized model range is rejected
+before drawing. Contracts, table bounds and selected view dimensions are checked.
+
+No new shader rewrite was needed; the shared adapter maps the explicit position
+attribute to Ara's native location11, leaving the builtin instance index intact.
+Clipping, dynamic bias, deformation updates and multisample shadows are outside
+this fixture. The independent review has no must-fix findings.
+
+All **40** focused tests pass with Metal API+shader validation and API-only
+validation. **64** standard SPIR-V stages plus five variants validate for Vulkan1.3;
+backend library/integration clippy has no diagnostics. Native Vulkan remains pending.

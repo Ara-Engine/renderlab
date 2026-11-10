@@ -40,3 +40,6 @@ pub mod receiver_raster;
 
 /// Fresh directional shadow queries from geometric receiver images.
 pub mod fresh_visibility;
+
+/// Original source-sided shadow depth raster into selected atlas subresources.
+pub mod shadow_raster;

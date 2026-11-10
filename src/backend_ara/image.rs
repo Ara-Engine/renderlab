@@ -246,6 +246,59 @@ impl Texture {
         }
         result
     }
+    /// Allocate a reversed-depth atlas and one narrow 2D view per mip/layer.
+    /// Views are ordered mip first, then layer; retire the returned parent once.
+    pub fn depth_atlas(
+        gpu: &mut GpuDevice,
+        size: [u32; 2],
+        layers: u32,
+        levels: u32,
+    ) -> Result<(Self, Vec<Self>)> {
+        let parent = Self::shaped(
+            gpu,
+            size,
+            Format::Depth32Float,
+            false,
+            true,
+            ImageShape {
+                layers,
+                mip_levels: levels,
+                ..Default::default()
+            },
+        )?;
+        let result = (|| -> Result<Vec<Self>> {
+            let mut views = Vec::new();
+            for mip in 0..levels {
+                for layer in 0..layers {
+                    let view = ImageViewDesc {
+                        dimension: ViewDimension::D2,
+                        base_mip: mip,
+                        mip_count: 1,
+                        base_layer: layer,
+                        layer_count: 1,
+                    };
+                    views.push(Self {
+                        image: parent.image,
+                        size: size.map(|n| (n >> mip).max(1)),
+                        format: parent.format,
+                        shape: ImageShape::default(),
+                        allocation: parent.allocation,
+                        view,
+                        sampled: gpu.sampled_view(parent.image, view)?.index,
+                        storage: None,
+                    });
+                }
+            }
+            Ok(views)
+        })();
+        match result {
+            Ok(views) => Ok((parent, views)),
+            Err(error) => {
+                gpu.retire(ara_gpu::Resource::Image(parent.image))?;
+                Err(error)
+            }
+        }
+    }
     /// Allocate a sampled single-mip 3D colour LUT.
     pub fn volume(gpu: &mut GpuDevice, side: u32, format: Format) -> Result<Self> {
         Self::volume_shape(gpu, [side; 3], format, false)

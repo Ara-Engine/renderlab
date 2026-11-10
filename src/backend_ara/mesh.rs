@@ -130,6 +130,27 @@ impl MeshGeometry {
             first_instance: 0,
         });
     }
+    // Shadow source uses builtin(instance_index), not the location4 slot stream.
+    pub(crate) fn native_instance_uses(&self) -> [(Resource, Access); 2] {
+        [
+            (Resource::Buffer(self.buffers[0].buffer), Access::Vertex),
+            (Resource::Buffer(self.buffers[1].buffer), Access::Index),
+        ]
+    }
+    pub(crate) fn draw_native_instances(&self, rec: &mut Recorder, first: u32, count: u32) {
+        rec.push(Command::DrawVertexBuffers {
+            vertices: vec![VertexBinding {
+                buffer: self.buffers[0].buffer,
+                offset: 0,
+            }],
+            indices: self.buffers[1].buffer,
+            first_index: 0,
+            index_count: self.index_count,
+            vertex_offset: 0,
+            instances: count,
+            first_instance: first,
+        });
+    }
     /// Queue a bounded model/normal-table range after prior draws. Geometry,
     /// slots and heap identities remain stable while earlier frames are in flight.
     pub fn update_models(
