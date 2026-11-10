@@ -102,15 +102,20 @@ impl Diag {
                 "shadow-filter" => d.shadow_filter = Some(on(v)),
                 "shadow-budget" => {
                     let n: Vec<u32> = v.split(',').map(str::parse).collect::<Result<_, _>>()?;
-                    let [cold, reset, active, held, settle] = n[..] else {
-                        return Err("shadow-budget COLD,RESET,ACTIVE,HELD,SETTLE".into());
+                    // CUT (P-CUT's cut-ramp rays per frame) defaults to COLD: no ramp.
+                    let (&[cold, reset, active, held, settle], cut) =
+                        (&n[..n.len().min(5)], n.get(5))
+                    else {
+                        return Err("shadow-budget COLD,RESET,ACTIVE,HELD,SETTLE[,CUT]".into());
                     };
+                    let cut = cut.copied().unwrap_or(cold);
                     d.shadow_budget = Some(ReconstructionShadowBudget {
                         cold_rays: cold,
                         reset_rays: reset,
                         active_rays: active,
                         held_rays: held,
                         settle_frames: settle,
+                        cut_rays: cut,
                     });
                 }
                 "lights" => d.light_mask = Some(v.parse()?),

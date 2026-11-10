@@ -8,6 +8,10 @@
 //! `capture` writes each `capture` frame's post-reconstruction HDR (the Tonemap input, as
 //! Unreal's native decode) as raw RGBA f16 `hdr-NNNN.bin`; `timing` reads nothing back.
 //! Both write `engine.json` with every frame's GPU render span.
+//!
+//! P-CUT (docs/p-cut.md): `P_CUT_RAMP=0` traces the cut's whole shadow budget in the cut
+//! frame (pre-P-CUT, `cut_rays = cold_rays`); `P_YARD_CAPTURE_FROM=N` captures only frames
+//! from index N.
 use renderlab::{asset, engine::*};
 use serde::Deserialize;
 use serde_json::json;
@@ -248,6 +252,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         illuminance: sun.lux,
         angular_radius: sun.angular_radius,
     }))?;
+    if env::var("P_CUT_RAMP").as_deref() == Ok("0") {
+        let budget = engine.renderer().reconstruction_shadow_budget();
+        engine.renderer_mut().set_reconstruction_shadow_budget(
+            renderlab::ReconstructionShadowBudget {
+                cut_rays: budget.cold_rays,
+                ..budget
+            },
+        )?;
+    }
+    let capture_from: usize = env::var("P_YARD_CAPTURE_FROM").map_or(Ok(0), |v| v.parse())?;
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut rows = Vec::new();
     let mut gpu = Vec::new();
@@ -277,7 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             timeout: Some(std::time::Duration::from_secs(60)),
         })?;
         let service_ms = start.elapsed().as_secs_f64() * 1e3;
-        if capture && frame.capture {
+        if capture && frame.capture && index >= capture_from {
             let mut hdr = engine
                 .renderer_mut()
                 .try_capture_hdr()?
@@ -302,7 +316,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         rows.push(
             json!({"index":index,"state":frame.state,"cut":frame.cut,"frame_id":report.frame.0,
-            "triangles":report.scene.triangles,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms}),
+            "triangles":report.scene.triangles,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms,
+            "shadow_rays":engine.renderer().reconstruction_shadow_rays()}),
         );
         gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
     }
@@ -315,6 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "adapter":engine.adapter_info().name,"debug_build":cfg!(debug_assertions),
             "scene_ready_ms":ready_ms,"settings":format!("{:?}",engine.settings()),
             "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,
+            "shadow_budget":format!("{:?}",engine.renderer().reconstruction_shadow_budget()),
             "timing_scope":"GPU render span: first pass to present end, GPU timestamps; one frame in flight",
         }))?,
     )?;

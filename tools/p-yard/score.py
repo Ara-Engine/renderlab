@@ -22,20 +22,25 @@ import json
 from pathlib import Path
 import sys
 
+import os
+
 import numpy as np
 from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-yard2")
+# P-CUT: P_YARD_WORK moves the evidence root (default: P-YARD2's).
+WORK = Path(os.environ.get("P_YARD_WORK", "D:/Coding/renderlab-work/p-yard2"))
 REFS = Path("E:/renderlab-work/m7-u0b/reference/quarry-final")
 MANIFEST = json.loads((HERE / "manifest.json").read_text())
 POPS = ("all-covered", "image", "edge", "silhouette", "occluded", "contact", "lit", "solid")
 STATES = ("still", "walk", "hold", "return", "cut", "recover")
 LABELS = {"ue-low": "UE Low", "ue-med": "UE Medium", "ue-sw-h": "UE SW Lumen High", "ue-sw-e": "UE SW Lumen Epic",
           "ue-sw-c": "UE SW Lumen Cinematic", "ue-hw-h": "UE HW Lumen High", "ue-hw-e": "UE HW Lumen Epic",
-          "ue-hw-c": "UE HW Lumen Cinematic", "rl-rt": "Renderlab RT", "rl-nonrt": "Renderlab non-RT"}
+          "ue-hw-c": "UE HW Lumen Cinematic", "rl-rt": "Renderlab RT", "rl-nonrt": "Renderlab non-RT",
+          "rl-rt-base": "Renderlab RT (cut in one frame)", "rl-nonrt-base": "Renderlab non-RT (cut in one frame)"}
 PATH = {"ue-low": "non-RT", "ue-med": "non-RT", "ue-sw-h": "non-RT", "ue-sw-e": "non-RT", "ue-sw-c": "non-RT",
-        "ue-hw-h": "RT", "ue-hw-e": "RT", "ue-hw-c": "RT", "rl-rt": "RT", "rl-nonrt": "non-RT"}
+        "ue-hw-h": "RT", "ue-hw-e": "RT", "ue-hw-c": "RT", "rl-rt": "RT", "rl-nonrt": "non-RT",
+        "rl-rt-base": "RT", "rl-nonrt-base": "non-RT"}
 
 
 def save(path, value):

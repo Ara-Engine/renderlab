@@ -249,6 +249,7 @@ fn renderer_with_features(validate: bool, extra: wgpu::Features) -> Renderer {
             active_rays: 8,
             held_rays: 8,
             settle_frames: 16,
+            cut_rays: 8,
         })
         .unwrap();
     renderer

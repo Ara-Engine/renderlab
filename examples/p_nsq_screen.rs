@@ -3,8 +3,8 @@
 //!
 //! `p_nsq_screen SCENE.json OUT VARIANT...`, each VARIANT `name:key=value,...` with keys
 //! `path` (nonrt|rt), `rot` (0|1: TR1's per-frame direction rotation), `budget`
-//! (cold/reset/active/held rays), `cap` (walk cap), `trunc` (0|1), `steps` (walk steps), `march`
-//! (march samples), `fb` (first-step block mode), `lookup` (surface|exact), `tr1` (0|1) and
+//! (cold/reset/active/held[/cut] rays; cut defaults to cold, P-CUT), `cap` (walk cap),
+//! `trunc` (0|1), `steps` (walk steps), `march` (march samples), `fb` (first-step block mode), `lookup` (surface|exact), `tr1` (0|1) and
 //! `gather` (0|1: P-S4B's occluder gather on cut frames, docs/p-s4b.md).
 //! `P_NSQ_FRAMES` lists the frames to capture (default: the scene's capture flags).
 #[allow(dead_code)]
@@ -85,14 +85,17 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
             }
             "budget" => {
                 let n: Vec<u32> = value.split('/').map(str::parse).collect::<Result<_, _>>()?;
-                let [cold_rays, reset_rays, active_rays, held_rays] = n[..] else {
-                    return Err("budget c/r/a/h".into());
+                let (&[cold_rays, reset_rays, active_rays, held_rays], cut) =
+                    (&n[..n.len().min(4)], n.get(4))
+                else {
+                    return Err("budget c/r/a/h[/cut]".into());
                 };
                 v.budget = Some(renderlab::ReconstructionShadowBudget {
                     cold_rays,
                     reset_rays,
                     active_rays,
                     held_rays,
+                    cut_rays: cut.copied().unwrap_or(cold_rays),
                     ..Default::default()
                 });
             }

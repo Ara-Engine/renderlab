@@ -1390,13 +1390,13 @@ impl Renderer {
     }
 
     /// P-NSQ: this frame's rotation into each pixel's direction sequence: TR1's (RT
-    /// Interactive's `temporal_reconstruction::rotation`) on reconstructed frames of the Exact
+    /// Interactive's `shadow_rotation`, with P-CUT's cut ramp) on reconstructed frames of the Exact
     /// and Surface lookups, else 0. Map and Hybrid keep N8k's fixed directions.
     fn virtual_rotation(&self, s: VirtualShadowSettings) -> u32 {
         let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
         self.reconstruction_frame
             .filter(|_| exact && self.reconstruction.rotate_directions)
-            .map_or(0, super::primary_ray_gpu::temporal_reconstruction::rotation)
+            .map_or(0, |k| self.shadow_rotation(k))
     }
 
     /// P-NSQ: after TR1 chose this frame's shadow budget (`prepare_reconstruction`), the

@@ -284,10 +284,18 @@ const ROTATION_SEAM: (&str, &str) = (
 );
 const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 
-/// Engine-side sampling for reconstructed Interactive shadows. New targets/cuts use
-/// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
-/// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
+/// Engine-side sampling for reconstructed Interactive shadows. New targets/cuts trace
+/// `cold_rays` directions, scene-history restarts use `reset_rays`, and moving/young history
+/// uses `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
 /// Materials still receive the same visibility value and shading inputs.
+///
+/// P-CUT (docs/p-cut.md): with direction rotation on, a cold start spreads its `cold_rays`
+/// over `cold_rays / cut_rays` frames (the cut ramp). The cold frame and each following frame
+/// trace `cut_rays` directions from disjoint windows of the pixel's sequence, so by the
+/// ramp's last frame the history holds exactly the directions the cold frame alone used to
+/// trace, and a cut costs about a moving frame. `cut_rays == cold_rays` traces them all in
+/// the cold frame, as before P-CUT.
+///
 /// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
 /// the budget only near shadow edges; with it off every receiver traces the budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +305,8 @@ pub struct ReconstructionShadowBudget {
     pub active_rays: u32,
     pub held_rays: u32,
     pub settle_frames: u32,
+    /// Directions per frame of the cut ramp; values above `cold_rays` act as `cold_rays`.
+    pub cut_rays: u32,
 }
 impl Default for ReconstructionShadowBudget {
     fn default() -> Self {
@@ -306,6 +316,7 @@ impl Default for ReconstructionShadowBudget {
             active_rays: 32,
             held_rays: 8,
             settle_frames: 16,
+            cut_rays: 32,
         }
     }
 }
@@ -316,6 +327,7 @@ impl ReconstructionShadowBudget {
             self.reset_rays,
             self.active_rays,
             self.held_rays,
+            self.cut_rays,
         ]
         .into_iter()
         .any(|n| !(8..=256).contains(&n) || !n.is_power_of_two())
@@ -326,8 +338,20 @@ impl ReconstructionShadowBudget {
         }
         Ok(())
     }
-    fn rays(self, cold: bool, reset: bool, still: bool, held_frames: u32) -> u32 {
-        if cold {
+    /// Directions each cut-ramp frame traces.
+    fn cut_frame_rays(self) -> u32 {
+        self.cut_rays.min(self.cold_rays)
+    }
+    /// Frames of a cut ramp, the cold frame included (1: no ramp).
+    fn ramp_frames(self) -> u32 {
+        self.cold_rays / self.cut_frame_rays()
+    }
+    /// A frame's ray count. `ramp`: the frame belongs to a cut ramp, the cold frame included;
+    /// its later frames keep at least the ramp's count so their windows stay disjoint.
+    fn rays(self, cold: bool, ramp: bool, reset: bool, still: bool, held_frames: u32) -> u32 {
+        let rays = if cold && ramp {
+            self.cut_frame_rays()
+        } else if cold {
             self.cold_rays
         } else if reset {
             self.reset_rays
@@ -335,6 +359,46 @@ impl ReconstructionShadowBudget {
             self.held_rays
         } else {
             self.active_rays
+        };
+        if ramp {
+            rays.max(self.cut_frame_rays())
+        } else {
+            rays
+        }
+    }
+}
+
+/// P-CUT: a running cut ramp (`ReconstructionShadowBudget::cut_rays`). Ramp frame p (0 is
+/// the cold frame) rotates by `base + p * cut_rays`, so the ramp's frames trace the cold
+/// frame's former window `[base, base + cold_rays)` of each pixel's sequence exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CutRamp {
+    base: u32,
+    /// The ramp frame the next frame is.
+    next: u32,
+}
+impl CutRamp {
+    /// The ramp after a frame rotated by `rotation`: a cold frame starts one when the ramp
+    /// has more than one frame, a continued frame advances it, and a restart ends it.
+    fn after(
+        ramp: Option<Self>,
+        cold: bool,
+        reset: bool,
+        rotation: u32,
+        frames: u32,
+    ) -> Option<Self> {
+        if cold {
+            (frames > 1).then_some(Self {
+                base: rotation,
+                next: 1,
+            })
+        } else if reset {
+            None
+        } else {
+            ramp.filter(|r| r.next + 1 < frames).map(|r| Self {
+                next: r.next + 1,
+                ..r
+            })
         }
     }
 }
@@ -616,6 +680,8 @@ pub(in crate::renderer) struct ReconstructionState {
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
     held_frames: u32,
+    /// P-CUT: the cut ramp the next frame continues, if any.
+    ramp: Option<CutRamp>,
     pub shadow_rays: u32,
     /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
     /// penumbra pixels trace the full budget (docs/p-rts.md).
@@ -712,6 +778,7 @@ impl ReconstructionState {
             cut: false,
             reset: true,
             held_frames: 0,
+            ramp: None,
             shadow_rays: 8,
             probe_rays: 8,
         }
@@ -746,6 +813,18 @@ impl Renderer {
     }
     pub fn reconstruction_shadow_budget(&self) -> ReconstructionShadowBudget {
         self.reconstruction_shadow_budget
+    }
+    /// Sample k's direction rotation for RT Interactive and the non-RT Exact/Surface lookups:
+    /// `rotation(k)`, or the next window of a running cut ramp (P-CUT). Read before
+    /// `prepare_reconstruction` decides the frame, so an explicit cut starts from `rotation(k)`.
+    pub(in crate::renderer) fn shadow_rotation(&self, k: u64) -> u32 {
+        self.reconstruction_state
+            .as_ref()
+            .filter(|s| !s.cut)
+            .and_then(|s| s.ramp)
+            .map_or(rotation(k), |r| {
+                r.base + r.next * self.reconstruction_shadow_budget.cut_frame_rays()
+            })
     }
     /// Last prepared reconstructed frame's Interactive ray count, for telemetry.
     pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
@@ -979,6 +1058,8 @@ impl Renderer {
         index: u64,
         draws: &[PreparedDraw<'_>],
     ) {
+        // The rotation this frame's shadow kernels were given (prepared before this call).
+        let rotation = self.shadow_rotation(index);
         let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
         let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
         if self
@@ -1215,12 +1296,26 @@ impl Renderer {
         // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
         // pixels near a relit light) take the restart budget, as frames that restart every
         // pixel do: the restarted pixels keep main's per-pixel ray count.
-        state.shadow_rays = self.reconstruction_shadow_budget.rays(
+        // P-CUT: a cold start spreads its directions over the cut ramp's frames.
+        let budget = self.reconstruction_shadow_budget;
+        let ramp_frames = if settings.rotate_directions {
+            budget.ramp_frames()
+        } else {
+            1
+        };
+        let ramp = if cold {
+            ramp_frames > 1
+        } else {
+            !state.reset && state.ramp.is_some()
+        };
+        state.shadow_rays = budget.rays(
             cold,
+            ramp,
             state.reset || shadow_bounds.is_some() || relit,
             sampling_still,
             state.held_frames,
         );
+        state.ramp = CutRamp::after(state.ramp, cold, state.reset, rotation, ramp_frames);
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
         let primary = self.primary.as_ref().unwrap();
@@ -1651,14 +1746,16 @@ mod tests {
             active_rays: 32,
             held_rays: 8,
             settle_frames: 16,
+            cut_rays: 256,
         };
         assert!(budget.validate().is_ok());
-        assert_eq!(budget.rays(true, true, true, 100), 256);
-        assert_eq!(budget.rays(false, true, true, 100), 64);
-        assert_eq!(budget.rays(false, false, false, 0), 32);
-        assert_eq!(budget.rays(false, false, false, 100), 32);
-        assert_eq!(budget.rays(false, false, true, 15), 32);
-        assert_eq!(budget.rays(false, false, true, 16), 8);
+        assert_eq!(budget.ramp_frames(), 1);
+        assert_eq!(budget.rays(true, false, true, true, 100), 256);
+        assert_eq!(budget.rays(false, false, true, true, 100), 64);
+        assert_eq!(budget.rays(false, false, false, false, 0), 32);
+        assert_eq!(budget.rays(false, false, false, false, 100), 32);
+        assert_eq!(budget.rays(false, false, false, true, 15), 32);
+        assert_eq!(budget.rays(false, false, false, true, 16), 8);
         for rays in [0, 7, 12, 257] {
             assert!(
                 ReconstructionShadowBudget {
@@ -1669,5 +1766,44 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    /// P-CUT: the default ramp traces the cold frame's former 256 directions over 8 frames,
+    /// each exactly once, then hands over to the normal budget and rotation.
+    #[test]
+    fn cut_ramp_covers_the_cold_window_once() {
+        let budget = ReconstructionShadowBudget::default();
+        assert_eq!((budget.cut_frame_rays(), budget.ramp_frames()), (32, 8));
+        let frames = budget.ramp_frames();
+        let base = rotation(37);
+        let mut ramp = None;
+        let mut traced = vec![0u32; 512];
+        for p in 0..frames + 2 {
+            let cold = p == 0;
+            let used = ramp.map_or(base + 8 * p, |r: CutRamp| {
+                r.base + r.next * budget.cut_frame_rays()
+            });
+            let in_ramp = if cold { frames > 1 } else { ramp.is_some() };
+            let rays = budget.rays(cold, in_ramp, cold, false, 0);
+            if p < frames {
+                assert_eq!(rays, 32);
+                for j in used..used + rays {
+                    traced[j as usize] += 1;
+                }
+            } else {
+                assert!(!in_ramp);
+            }
+            ramp = CutRamp::after(ramp, cold, cold, used, frames);
+        }
+        let window = base as usize..(base + budget.cold_rays) as usize;
+        assert!(traced[window].iter().all(|&n| n == 1));
+        assert_eq!(traced.iter().sum::<u32>(), budget.cold_rays);
+        // A restart inside the ramp ends it; a partial restart keeps the reset count.
+        let started = CutRamp::after(None, true, true, base, frames);
+        assert_eq!(CutRamp::after(started, false, true, base, frames), None);
+        assert_eq!(budget.rays(false, true, true, false, 0), 64);
+        // Without direction rotation (or with cut_rays >= cold_rays) the cold frame is whole.
+        assert_eq!(CutRamp::after(None, true, true, base, 1), None);
+        assert_eq!(budget.rays(true, false, true, false, 0), 256);
     }
 }

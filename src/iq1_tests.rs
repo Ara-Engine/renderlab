@@ -371,6 +371,7 @@ fn gpu_iq1_quarry() {
         active_rays: 8,
         held_rays: 8,
         settle_frames: 16,
+        cut_rays: 8,
     })
     .unwrap();
     let lighting: serde_json::Value =

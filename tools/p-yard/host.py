@@ -3,6 +3,10 @@ GPU leases through scripts/n8-run.py (<=15 min). Builds also take the stillkit m
 
     py -3 -B tools/p-yard/host.py build              # release adapter, one Cargo command
     py -3 -B tools/p-yard/host.py lease LABEL MIN -- COMMAND...
+
+P-CUT: P_YARD_OWNER and P_YARD_WORK set the schedule owner and evidence root; P_YARD_AFTER lists
+Renderlab owners queued ahead (their open requests block admission). P_YARD_BUILD=lib-tests
+builds the dev lib-test binary instead of the release examples. TMP/TEMP go under WORK/tmp.
 """
 import importlib.util
 import inspect
@@ -16,8 +20,10 @@ import time
 import uuid
 
 REPO = Path(__file__).resolve().parents[2]
-OWNER = "p-yard2"
-WORK = Path("D:/Coding/renderlab-work/p-yard2")
+OWNER = os.environ.get("P_YARD_OWNER", "p-yard2")
+WORK = Path(os.environ.get("P_YARD_WORK", "D:/Coding/renderlab-work/p-yard2"))
+AFTER = tuple(o for o in os.environ.get("P_YARD_AFTER", "").split(",") if o)
+TMP = {"TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}
 SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 BUILD_SLOT = Path("D:/Coding/renderlab-work/build-slot.lock")
 TARGET = WORK / "target"
@@ -44,7 +50,7 @@ def foreign_requests():
     pending = {}
     with SCHEDULE.open(encoding="utf-8", errors="replace") as lines:
         for line in lines:
-            for owner in ("ara-pr-gate", "ara-integration", "ara-vk", "p-defect"):
+            for owner in ("ara-pr-gate", "ara-integration", "ara-vk", "p-defect", *AFTER):
                 if line.startswith(f"[{owner} request]") or line.startswith(f"[{owner} reservation]"):
                     pending[owner] = True
                 elif line.startswith(f"{owner} ") and " window released" in line:
@@ -75,8 +81,8 @@ def runner():
 def ready(r, label):
     sample = r.resource_sample()
     why = []
-    if "p-yard2" not in order():
-        why.append("root order does not list p-yard2")
+    if OWNER not in order():
+        why.append(f"root order does not list {OWNER}")
     if "HOLD" in order() and "LIFTED" not in order():
         why.append("hold")
     if r.LOCK.exists():
@@ -111,8 +117,14 @@ def wait_ready(r, label, minutes=90):
 
 def build():
     r = runner()
-    command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture"]
+    tests = os.environ.get("P_YARD_BUILD") == "lib-tests"
+    if tests:
+        command = ["cargo", "test", "-p", "renderlab", "--lib", "--no-run", "--locked", "-j", "2"]
+    else:
+        command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture",
+                   "--example", "p_nsq_screen"]
     WORK.mkdir(parents=True, exist_ok=True)
+    (WORK / "tmp").mkdir(exist_ok=True)
     post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=8 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -142,10 +154,16 @@ def build():
     try:
         with (WORK / "build.log").open("w") as log:
             code = sp.run(command, cwd=REPO, stdout=log, stderr=sp.STDOUT,
-                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2"}).returncode
-        if code == 0:
+                          env=os.environ | TMP | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2"}).returncode
+        if code == 0 and tests:
+            import re
+            exe = re.findall(r"Executable unittests src[\\/]lib\.rs \((.+?)\)", (WORK / "build.log").read_text(errors="replace"))
+            (WORK / "lib-tests.json").write_text(json.dumps(dict(executable=str(REPO / exe[-1]) if exe else None,
+                seconds=time.monotonic() - start, command=command), indent=2))
+        elif code == 0:
             BINARY.parent.mkdir(exist_ok=True)
             shutil.copy2(TARGET / "release/examples/p_yard_capture.exe", BINARY)
+            shutil.copy2(TARGET / "release/examples/p_nsq_screen.exe", BINARY.parent / "p_nsq_screen.exe")
             commit = sp.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
             dirty = sp.check_output(["git", "status", "--porcelain", "--", "src", "shaders", "crates", "Cargo.toml", "Cargo.lock"],
                                     cwd=REPO, text=True).strip()
@@ -170,7 +188,7 @@ def lease(label, minutes, command):
     r = runner()
     while True:
         wait_ready(r, label)
-        env = os.environ | {"N8_OWNER": OWNER, "N8_OUT": str(WORK / "lease")}
+        env = os.environ | TMP | {"N8_OWNER": OWNER, "N8_OUT": str(WORK / "lease")}
         code = sp.run(["py", "-3", "-B", str(REPO / "scripts/n8-run.py"), "--label", label, "--minutes", str(minutes),
                        "--fast-check", "--", *command], cwd=REPO, env=env).returncode
         if code != 3:

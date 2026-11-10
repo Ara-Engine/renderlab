@@ -3,6 +3,10 @@ Run inside this unit's n8-run lease. n8-run injects the Vulkan validation layer 
 correctness batches; timing and capture here run without it, as a shipping build does.
 
     py -3 -B tools/p-yard/rl.py STEP...   steps: SCENE:MODE:PATH[:VISIT], e.g. quarry:timing:rt:1
+
+P-CUT: PATH `rt-base`/`nonrt-base` runs the path with the cut's whole shadow budget in the cut
+frame (P_CUT_RAMP=0, pre-P-CUT). P_YARD_WORK moves the evidence root (binary in WORK/bin);
+P_YARD_CAPTURE_FROM passes through to the adapter.
 """
 import json
 import os
@@ -12,7 +16,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-yard2")
+WORK = Path(os.environ.get("P_YARD_WORK", "D:/Coding/renderlab-work/p-yard2"))
 BINARY = WORK / "bin/p_yard_capture.exe"
 
 
@@ -25,9 +29,12 @@ def run(step):
     out.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH")}
     env["RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK"] = "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK"
+    engine_path = path.removesuffix("-base")
+    if engine_path != path:
+        env["P_CUT_RAMP"] = "0"
     start = time.monotonic()
     with (out / "stdout.log").open("w") as log:
-        code = subprocess.run([str(BINARY), str(HERE / "manifest.json"), scene, path, str(out), mode],
+        code = subprocess.run([str(BINARY), str(HERE / "manifest.json"), scene, engine_path, str(out), mode],
                               stdout=log, stderr=subprocess.STDOUT, env=env, timeout=420,
                               creationflags=subprocess.CREATE_NO_WINDOW).returncode
     (out / "process.json").write_text(json.dumps(dict(step=step, exit_code=code, seconds=time.monotonic() - start,

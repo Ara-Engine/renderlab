@@ -1667,7 +1667,7 @@ impl Renderer {
         let rotation = self
             .reconstruction_frame
             .filter(|_| self.reconstruction.rotate_directions)
-            .map_or(0, temporal_reconstruction::rotation);
+            .map_or(0, |k| self.shadow_rotation(k));
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
         // Visible sky (Renderer::set_visible_environment): misses sample the selected map.
         let visible = self.environment.visible && self.environment.selected.is_some();

@@ -871,6 +871,11 @@ fn gpu_motion_bench_batch() {
                     active_rays,
                     held_rays: 8,
                     settle_frames: 16,
+                    cut_rays: if auto {
+                        crate::ReconstructionShadowBudget::default().cut_rays
+                    } else {
+                        active_rays
+                    },
                 })
                 .unwrap();
                 r.set_primary_visibility(if name == "Raster-Exact" {

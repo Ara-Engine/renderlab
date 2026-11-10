@@ -474,11 +474,14 @@ fn gpu_tr1_sequence() {
                settings: Reconstruction,
                write: bool| {
         r.set_reconstruction(Reconstruction::off()).unwrap();
+        let cold_rays = m["variants"][name]["cold_rays"]
+            .as_u64()
+            .or_else(|| m["variants"][name]["active_rays"].as_u64())
+            .unwrap_or(8) as u32;
+        // Recorded TR1 manifests trace their cold budget in the cold frame (pre-P-CUT).
         r.set_reconstruction_shadow_budget(crate::ReconstructionShadowBudget {
-            cold_rays: m["variants"][name]["cold_rays"]
-                .as_u64()
-                .or_else(|| m["variants"][name]["active_rays"].as_u64())
-                .unwrap_or(8) as u32,
+            cold_rays,
+            cut_rays: cold_rays,
             reset_rays: m["variants"][name]["reset_rays"]
                 .as_u64()
                 .or_else(|| m["variants"][name]["active_rays"].as_u64())

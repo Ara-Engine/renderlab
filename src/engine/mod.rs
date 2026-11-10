@@ -1031,7 +1031,9 @@ impl Engine {
     }
     /// Starts the next frame without history: a camera cut or teleport. Temporal
     /// reconstruction and volumetric fog history restart, and streamed textures verify the
-    /// new view; the GI cache refills its newly seen cells over a few frames on its own.
+    /// new view; the GI cache refills its newly seen cells over a few frames on its own, and
+    /// the sun's cold shadow budget spreads over the first frames (P-CUT, `cut_rays` of
+    /// `ReconstructionShadowBudget`), so the cut frame costs about a moving frame.
     /// (Fog resets here, not in `cut_reconstruction`, which transmission changes also call.)
     pub fn cut(&mut self) {
         self.renderer.cut_reconstruction();

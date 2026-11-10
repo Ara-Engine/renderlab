@@ -18,6 +18,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import time
 
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-yard2/ue")
+WORK = Path(os.environ.get("P_YARD_WORK", "D:/Coding/renderlab-work/p-yard2")) / "ue"
 U0 = Path("E:/renderlab-work/m7-u0/ue-package")
 U0B = Path("E:/renderlab-work/m7-u0b/ue-package")
 # Unreal's exec takes paths relative to the package, so the tiny macro files must share
