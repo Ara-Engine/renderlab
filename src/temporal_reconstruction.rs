@@ -34,6 +34,11 @@ pub struct Reconstruction {
     /// Window of moving pixels whose 4x4 history taps are all accepted, which resample by
     /// Catmull-Rom (second-moment blur free) instead of bilinear.
     pub sharp_window: f32,
+    /// P-FLICKER (docs/p-flicker.md): Catmull-Rom resampling also blurs, by an amount that
+    /// changes with the fetch fraction f every frame, so a fixed `sharp_window` shimmers on
+    /// moving texture. A positive budget caps that window at `1 + sharp_blur_budget / sum
+    /// f(1 - f)`, as `blur_budget` does for bilinear. Zero keeps the fixed window.
+    pub sharp_blur_budget: f32,
     /// Window of a moving silhouette's occluder coverage, which the occluder's motion
     /// carries; still silhouettes use `window`.
     pub coverage_window: f32,
@@ -121,6 +126,7 @@ impl Default for Reconstruction {
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
+            sharp_blur_budget: 0.0,
             coverage_window: 16.0,
             start_window: 4.0,
             start_radius: 1.0,
@@ -173,6 +179,7 @@ impl Reconstruction {
         ];
         let valid = windows.iter().all(|w| (1.0..=65536.0).contains(w))
             && (0.0..=f32::MAX).contains(&self.blur_budget)
+            && (0.0..=f32::MAX).contains(&self.sharp_blur_budget)
             && (0.0..=f32::MAX).contains(&self.turn_angle)
             && (0.0..=f32::MAX).contains(&self.view_budget)
             && (0.0..=f32::MAX).contains(&self.light_budget)
@@ -1313,6 +1320,8 @@ impl Renderer {
             }
             relit_words[20] = settings.light_budget;
         }
+        // relit_params.y (every frame): P-FLICKER's Catmull-Rom blur budget.
+        relit_words[21] = settings.sharp_blur_budget;
         for value in relit_words {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
