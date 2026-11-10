@@ -135,7 +135,7 @@ With sampling noise added to each frame's sample (Gaussian, codes), the trade ap
 | 10 | **2.12** / 2.79 / 2.20 | 3.82 / 4.23 / **3.79** |
 | 20 | **2.54** / 4.76 / 3.12 | **4.76** / 7.48 / 5.45 |
 
-A budget of 1 wins only where the fresh sample is clean, such as sunlit texture. Where it is noisy (penumbrae, GI cell borders), the shorter window lets that noise through. A budget of 2 keeps most of the texture gain and is roughly neutral at σ = 10. In 2-D, `sum f(1-f)` reaches 0.5 on diagonal motion, so a given budget cuts the window up to twice as hard as in this 1-D model. The screen therefore runs budgets 1, 2 and 4, and checks penumbrae and the S4 walls by eye. Sizing the budget from a per-pixel noise estimate is not an option: a colour-variance confidence is P-B/P-D's element. A sun-visibility-aware cap would bake a lighting-model assumption into TR1, against programmable shading.
+A budget of 1 wins only where the fresh sample is clean, such as sunlit texture. Where it is noisy (penumbrae, GI cell borders), the shorter window lets that noise through. A budget of 2 keeps most of the texture gain and is roughly neutral at σ = 10. In 2-D, `sum f(1-f)` reaches 0.5 on diagonal motion, so a given budget cuts the window up to twice as hard as in this 1-D model. The screen therefore runs budgets 1, 2 and 4, and checks penumbrae and the S4 walls by eye. With the patent policy suspended (Islam, 2026-11-10 22:48 UTC), the obvious next step is allowed: size the budget per pixel from a noise estimate, the local variance of this frame's 3x3 samples of the surface. Clean texture gets the short fraction-capped window and noisy pixels keep the long one. That is the patented element of US 10,116,916 / US 10,362,289 (P-B). A sun-visibility-aware cap is still not taken: it would bake a lighting-model assumption into TR1, against programmable shading.
 
 Longer windows are worse and shorter ones better. A sharper kernel helps a little; capping the window by the fraction helps most. The model has no lighting noise, so a shorter window is free there. On the quarry it may expose sampling noise (penumbrae, GI cell edges), which only the GPU screen can show.
 
@@ -145,7 +145,7 @@ Longer windows are worse and shorter ones better. A sharper kernel helps a littl
 - At 0 the uniform words are the same as main's, so the default image is unchanged.
 - The adapter knob `RENDERLAB_P_FLICKER_TR1=sharpblur=K` sets it for screens.
 
-**Patent notes.** The cap is sized from the fetch geometry alone (f), as T1b's bilinear budget is. No colour statistic, variance, history moment or lighting gradient enters, so P-B/P-D are not engaged. TR1's state stays private (W5), and no accumulation of jittered samples per GI cell is involved (M8-REJECT-JITTER-ACCUM untouched).
+**Patents (policy suspended 2026-11-10; numbers noted only).** The fraction cap uses fetch geometry alone and touches no flagged claim. The variance-sized variant above would use US 10,116,916 / US 10,362,289. Per-cell accumulation of jittered GI samples (US 10,614,613, M8-REJECT-JITTER-ACCUM) is now allowed, but this split shows GI is not the quarry flicker's source (GI off: 4.39 → 4.36). It does not compete with the TR1 fix here. It stays a lead for GI grain (S4 interior) and for letting still views idle, which P-STILL's cell-age-follows-unjittered-visibility option also targets.
 
 ## 4. GPU screen
 
