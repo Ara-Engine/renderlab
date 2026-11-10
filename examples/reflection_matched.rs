@@ -20,6 +20,11 @@
 //! `--diag KEY=VALUE` sets the game example's estimator bisect switches (P-FLAT,
 //! docs/p-flat.md).
 //!
+//! P-DEFECT's Showcase-like additions (docs/p-defect.md): `--stage` lays a glossy black
+//! dielectric turntable (Ara Showcase's: base 0.06, roughness 0.35) under the chrome and gold
+//! spheres, in the reference too; `--glass-balls` adds Showcase's clear and tinted glass balls
+//! (opacity 0, IOR 1.5, 0.6 m slab), which the path tracer cannot render.
+//!
 //! ```text
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK //!     cargo run --example reflection_matched -- --path nonrt --reference 16384 --write-frames 47 --out REF
 //! cargo run --example reflection_matched -- --path rt --matched --write-frames 16,32,47 --out RUN
@@ -71,6 +76,8 @@ struct Args {
     write_frames: Option<Vec<u32>>,
     hour: Option<f32>,
     diag: Vec<(String, String)>,
+    stage: bool,
+    glass_balls: bool,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -104,6 +111,8 @@ impl Args {
             write_frames: None,
             hour: None,
             diag: Vec::new(),
+            stage: false,
+            glass_balls: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -152,6 +161,8 @@ impl Args {
                 "--reference" => a.reference = Some(value()?.parse::<u32>()?.max(2)),
                 "--freeze" => a.freeze = Some(value()?.parse()?),
                 "--hour" => a.hour = Some(value()?.parse()?),
+                "--stage" => a.stage = true,
+                "--glass-balls" => a.glass_balls = true,
                 "--diag" => {
                     let v = value()?;
                     let (key, setting) = v.split_once('=').ok_or("--diag KEY=VALUE")?;
@@ -192,6 +203,9 @@ impl Args {
         }
         if a.reference.is_some() && (a.quarry.is_some() || a.sun_speed != 0.0) {
             return Err("--reference traces the procedural scene under a fixed sun only".into());
+        }
+        if a.reference.is_some() && a.glass_balls {
+            return Err("the path tracer has no transparent materials (--glass-balls)".into());
         }
         // The path tracer reproduces only the matched lighting.
         a.matched |= a.reference.is_some();
@@ -462,6 +476,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         paint,
         Mat4::from_translation(at(-2.5, 0.6, 3.0)),
     )?;
+    if args.stage {
+        // Showcase's turntable: glossy black dielectric, traced glossy (16 rays) on both paths.
+        let turntable = material(&mut engine, [0.06, 0.06, 0.065], 0.0, 0.35)?;
+        spawn(
+            &mut engine,
+            &mut placed,
+            cube,
+            turntable,
+            boxed(at(0.3, 0.01, 6.0), Vec3::new(7.0, 0.02, 4.0)),
+        )?;
+    }
+    if args.glass_balls {
+        for (center, base) in [
+            (at(3.0, 0.5, 4.8), [1.0, 1.0, 1.0]),
+            (at(-3.2, 0.5, 6.4), [0.55, 0.8, 0.65]),
+        ] {
+            let glass = engine.create_material(&MaterialDesc {
+                base_color: [base[0], base[1], base[2], 1.0],
+                roughness: 0.0,
+                transparency: Some(Transparency {
+                    opacity: 0.0,
+                    ior: 1.5,
+                    thickness: 0.6,
+                }),
+                ..Default::default()
+            })?;
+            engine.spawn(sphere, glass, boxed(center, Vec3::splat(0.5)))?;
+        }
+    }
     let hero_body = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
     let hero_head = spawn(&mut engine, &mut placed, sphere, toon, Mat4::IDENTITY)?;
 
