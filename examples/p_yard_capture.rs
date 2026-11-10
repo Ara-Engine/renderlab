@@ -249,6 +249,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         angular_radius: sun.angular_radius,
     }))?;
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
+    // P-STILL (docs/p-still.md): per-frame cache work counts; they read back every frame, so
+    // `count` runs are for counts, and their spans include the GI profile's empty passes.
+    let count = env::var_os("RENDERLAB_P_STILL_COUNT").is_some();
+    if count {
+        engine.renderer_mut().set_indirect_profiling(true);
+    }
+    let mut counts = Vec::new();
+    let mut last_gi_frames = 0;
     let mut rows = Vec::new();
     let mut gpu = Vec::new();
     let mut hdr_info = None;
@@ -300,6 +308,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::yield_now();
             }
         }
+        if count {
+            let r = engine.renderer_mut();
+            let stats = r.indirect_stats();
+            let ran = stats.frames != last_gi_frames;
+            last_gi_frames = stats.frames;
+            let c = r.indirect_counters()?.filter(|_| ran);
+            let profile = r.indirect_profile()?.filter(|_| ran);
+            let v = r.virtual_shadow_stats();
+            let walks = r.p_still_surface_walks();
+            let rays = r.reconstruction_shadow_rays();
+            counts.push(json!({"index":index,"state":frame.state,"gi_ran":ran,
+                "gi_idle_frames":stats.idle_frames,"gi_bounce_frames":stats.bounce_frames,
+                "gi":c.map(|c| json!({"misses":c.misses,"traces":c.traces,"integrates":c.integrates,
+                    "created":c.created,"invalidated":c.invalidated,"refreshed":c.refreshed,"rays":c.rays,
+                    "shades":c.shades,"gathers":c.gathers,"gather_rays":c.gather_rays,
+                    "light_rays":c.light_rays,"bounce_queued":c.bounce_queued,"full":c.full,"lost":c.lost})),
+                "gi_ms":profile.map(|p| json!({"total":p.total(),"probe":p.probe,"claim":p.claim+p.resolve,
+                    "scan":p.scan,"trace":p.trace(),"integrate":p.integrate,"gather":p.gather,
+                    "light":p.light,"shade":p.shade,"filter":p.filter})),
+                "vsm_page_work":v.page_work,"vsm_moved_rects":v.moved_rects,
+                "vsm_invalidated_levels":v.invalidated_levels,"s4_frame":v.occluder_gather_frame,
+                "surface_walks":walks,"shadow_rays":rays}));
+        }
         rows.push(
             json!({"index":index,"state":frame.state,"cut":frame.cut,"frame_id":report.frame.0,
             "triangles":report.scene.triangles,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms}),
@@ -314,7 +345,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "engine":"renderlab","scene":name,"path":path,"mode":mode,"size":spec.size,
             "adapter":engine.adapter_info().name,"debug_build":cfg!(debug_assertions),
             "scene_ready_ms":ready_ms,"settings":format!("{:?}",engine.settings()),
-            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,
+            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts,
+            "p_still":env::var("RENDERLAB_P_STILL").unwrap_or_default(),
             "timing_scope":"GPU render span: first pass to present end, GPU timestamps; one frame in flight",
         }))?,
     )?;

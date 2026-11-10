@@ -2469,9 +2469,15 @@ impl Renderer {
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
+        // P-STILL knob (docs/p-still.md): key idleness on the unjittered view.
+        let key_camera = if super::primary_ray_gpu::temporal_reconstruction::p_still("gi-stable") {
+            camera.unjittered()
+        } else {
+            *camera
+        };
         let idle_key: [u8; 32] = {
             let mut h = Sha256::new();
-            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(matrix_bytes(key_camera.matrix(size[0], size[1])));
             h.update(&self.gi.arrays.as_ref().unwrap().instances);
             h.update(environment);
             h.update(format!("{s:?}").as_bytes());
@@ -2496,7 +2502,7 @@ impl Renderer {
         // do not age toward eviction while nothing is probed.
         let view_key: [u8; 32] = {
             let mut h = Sha256::new();
-            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(matrix_bytes(key_camera.matrix(size[0], size[1])));
             h.update(&self.gi.arrays.as_ref().unwrap().instances);
             h.update(format!("{s:?}").as_bytes());
             h.update(region.map(u32::to_le_bytes).concat());
