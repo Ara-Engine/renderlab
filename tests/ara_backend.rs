@@ -366,3 +366,6 @@ mod shadow_raster_cases;
 mod transmission_shadow_cases;
 #[path = "ara_backend/transmission_shadow_reference.rs"]
 mod transmission_shadow_reference;
+
+#[path = "ara_backend/cases/forward.rs"]
+mod forward_cases;

@@ -47,6 +47,23 @@ impl ToonPass {
             format,
         })
     }
+    /// The same lit raster family for a caller-composed program, such as the standard
+    /// program; its packets come from `HeapBindings::for_program`.
+    pub fn program(
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        program: &super::shader::Program,
+        format: Format,
+    ) -> Result<Self> {
+        ensure!(
+            program.pass() == Pass::MeshToon,
+            "lit mesh pass needs a lit raster program"
+        );
+        Ok(Self {
+            pipeline: cache.program_state(gpu, program, mesh_state(format))?,
+            format,
+        })
+    }
     /// Declare the union before rendering, then record all materials in one native
     /// raster scope. Optional effects keep their real initialized input resources.
     pub fn record(

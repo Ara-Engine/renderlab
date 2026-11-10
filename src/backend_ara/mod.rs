@@ -46,3 +46,6 @@ pub mod shadow_raster;
 
 /// Per-object colored sun-transmission atlas layers.
 pub mod transmission_shadow;
+
+/// The forward lit frame assembled from the ported passes.
+pub mod forward;

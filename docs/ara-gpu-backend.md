@@ -1054,3 +1054,50 @@ unproven here.
 All **42** focused tests pass with Metal API and shader validation from a clean
 build, and the SPIR-V cohort including `TransmissionShadow` passes `spirv-val` for
 Vulkan 1.3. Native Vulkan remains pending.
+
+## First assembled frame: forward lit
+
+`backend_ara::forward::render` is the first code that assembles a frame from the
+ported passes instead of replaying one alone. It covers what
+`Renderer::try_render_view(.., ViewMode::Lit)` encodes on an untraced frame with the
+atmosphere, shadows, GI, decals and transmission off: the LC1 cluster build, then the
+lit mesh pass with the **standard** program (`scene.wgsl` + `programs/standard.wgsl`,
+composed by `program::compose` exactly as the wgpu lit raster variant), into the
+exposed `Rgba16Float` HDR target, read back as `try_capture_hdr` returns it.
+
+Inputs come from Renderlab's own writers: `PackedLighting` records and uniform,
+`light_cluster::header`, `MaterialDescriptor::bytes`, `mesh::matrix_bytes`, the
+prepared DFG. Every other reflected input of the lit interface is a feature that is
+off; it is bound with what the wgpu renderer binds there (zero-filled records and
+zero-initialised 1x1 views, the three 1x1 default material textures). The clear is
+`Renderer::lit_clear`. `ToonPass::program` builds the lit raster pipeline for any
+caller-composed program; `MeshToon` names that family, not the toon program.
+
+`forward_lit_frame_matches_closed_form_photometry` holds the frame to the oracle and
+tolerance of the wgpu renderer's own `gpu_lit_photometry_1x_4x`: a floor facing the
+camera, six metal/roughness materials, a directional, three point and one spot light
+one at a time (unbounded, ranged, out of range, cone falloff), the BRDF and
+attenuation in f64, and the uniform environment against an independent DFG
+quadrature. All **4,338** radiance samples are within `0.002 + 1%`; the worst uses
+7.0% of that allowance. Clustered local lights therefore reach shading through the
+GPU-built lists. Not covered: 4x, tilted and mirrored transforms (the oracle's last
+part), textures, more than one object per packet.
+
+`examples/ara_frame.rs` renders the authored **M5-A** lighting fixture (six spheres,
+floor, mirrored and double-sided panels; directional, point and spot light) on either
+layer with the same features off, and compares two outputs:
+
+```sh
+cargo run --example ara_frame -- --backend wgpu --output out/wgpu       # Linux/Windows
+cargo +1.99.1 run --features backend-ara --example ara_frame -- --backend ara --output out/ara
+cargo run --example ara_frame -- --compare out/wgpu out/ara
+```
+
+Each run writes the raw `frame.rgba16f`, a PNG for looking at, and `frame.json` with a
+24x16 grid of mean linear RGB that can travel as text. On this Mac the Ara frame
+renders at 960x640 under Metal API and shader validation with no nonfinite channel
+and an exact environment clear. **The wgpu frame has not been produced yet**: wgpu
+opens Vulkan only, and over MoltenVK 1.4.1 its device is lost during
+`Renderer::new_with_options`, so the reference must come from Linux or Windows. On
+non-macOS hosts `--backend ara` takes the SPIR-V path of the same cache, which has
+never executed.
