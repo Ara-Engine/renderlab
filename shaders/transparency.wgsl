@@ -216,8 +216,31 @@ struct TpEmitter {
     emission1:vec4<f32>,     // rgb, w size at death
     life:vec4<f32>,          // min, max lifetime; fade in, fade out
     counts:vec4<u32>,        // capacity, first spawn index (low 32 bits), spawn count, seed
-    misc:vec4<f32>,          // x soft distance, y sorted size (power of two), z textured
+    misc:vec4<f32>,          // x soft distance, y sorted size (power of two), z textured,
+                             // w span this step's spawns spread over (s; 0: the step)
+    shape:vec4<f32>,         // x 0 sphere, 1 box (yzw half extents), 2 cone (yzw axis)
+    velocity_box:vec4<f32>,  // xyz per-axis velocity half range
+    curl:vec4<f32>,          // x frequency, y strength
+    vortex_center:vec4<f32>,
+    vortex_axis:vec4<f32>,   // xyz axis scaled by strength
+    attractor:vec4<f32>,     // xyz position, w strength
+    plane:vec4<f32>,         // xyz unit normal (zero: no collision), w offset
+    curves:vec4<f32>,        // x restitution, y attractor softening, z colour keys, w size keys
+    color_t:vec4<f32>,
+    color_keys:array<vec4<f32>,4>,
+    emission_keys:array<vec4<f32>,4>,
+    size_t:vec4<f32>,
+    size_keys:vec4<f32>,
 };
+// A curve's interpolation weights at life fraction t: the key below (index) and the share
+// of the next. Keys hold their end values outside their range.
+fn tp_curve(times:vec4<f32>, count:u32, t:f32) -> vec2<f32> {
+    if t<=times[0] { return vec2<f32>(0.0,0.0); }
+    for(var i=1u;i<count;i+=1u) {
+        if t<times[i] { return vec2<f32>(f32(i-1u),(t-times[i-1u])/max(times[i]-times[i-1u],1e-6)); }
+    }
+    return vec2<f32>(f32(count-1u),0.0);
+}
 @group(0) @binding(42) var<uniform> tp_emitter:TpEmitter;
 @group(0) @binding(36) var tp_sprite:texture_2d<f32>;
 @group(0) @binding(33) var tp_sampler:sampler;
@@ -236,6 +259,54 @@ fn tp_ball(seed:ptr<function,u32>) -> vec3<f32> {
     let phi=tp_unit(seed)*6.2831853;
     let r=pow(tp_unit(seed),1.0/3.0);
     return vec3<f32>(sqrt(max(1.0-z*z,0.0))*vec2<f32>(cos(phi),sin(phi)),z)*r;
+}
+// Offset of a new particle from the emitter position, by spawn shape.
+fn tp_spawn_offset(seed:ptr<function,u32>) -> vec3<f32> {
+    let shape=tp_emitter.shape;
+    if shape.x==1.0 {
+        return (vec3<f32>(tp_unit(seed),tp_unit(seed),tp_unit(seed))*2.0-vec3<f32>(1.0))*shape.yzw;
+    }
+    if shape.x==2.0 {
+        let h=pow(tp_unit(seed),1.0/3.0);
+        let r=sqrt(tp_unit(seed))*h*tp_emitter.position.w;
+        let a=tp_unit(seed)*6.2831853;
+        // An orthonormal frame about the axis (Duff et al.'s branchless basis).
+        let length=max(length(shape.yzw),1e-12);
+        let n=shape.yzw/length;
+        let sign=select(-1.0,1.0,n.z>=0.0);
+        let b=-1.0/(sign+n.z);
+        let c=n.x*n.y*b;
+        let u=vec3<f32>(1.0+sign*n.x*n.x*b,sign*c,-sign*n.x);
+        let v=vec3<f32>(c,sign+n.y*n.y*b,-n.y);
+        return (u*cos(a)+v*sin(a))*r+shape.yzw*h;
+    }
+    return tp_ball(seed)*tp_emitter.position.w;
+}
+// Accelerations beyond gravity: curl noise, vortex and attractor (Ara's formulas).
+fn tp_forces(x:vec3<f32>, phase:f32) -> vec3<f32> {
+    var a=vec3<f32>(0.0);
+    if tp_emitter.curl.y!=0.0 {
+        let q=x*tp_emitter.curl.x+vec3<f32>(phase);
+        a+=tp_emitter.curl.y*vec3<f32>(cos(q.y)-cos(q.z),cos(q.z)-cos(q.x),cos(q.x)-cos(q.y));
+    }
+    a+=cross(tp_emitter.vortex_axis.xyz,x-tp_emitter.vortex_center.xyz);
+    if tp_emitter.attractor.w!=0.0 {
+        let d=tp_emitter.attractor.xyz-x;
+        a+=d*(tp_emitter.attractor.w/pow(dot(d,d)+tp_emitter.curves.y,1.5));
+    }
+    return a;
+}
+// Plane collision: push out of the plane and reflect inward velocity by the restitution.
+fn tp_collide(p:ptr<function,TpParticle>) {
+    let n=tp_emitter.plane.xyz;
+    if dot(n,n)==0.0 || (*p).position.w>=(*p).velocity.w { return; }
+    let distance=dot((*p).position.xyz,n)-tp_emitter.plane.w;
+    if distance>=0.0 { return; }
+    (*p).position=vec4<f32>((*p).position.xyz-distance*n,(*p).position.w);
+    let vn=dot((*p).velocity.xyz,n);
+    if vn<0.0 {
+        (*p).velocity=vec4<f32>((*p).velocity.xyz-(1.0+tp_emitter.curves.x)*vn*n,(*p).velocity.w);
+    }
 }
 // ---- end TP_PARTICLES ----
 
@@ -283,17 +354,32 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
         var seed=tp_hash((first+k)^tp_hash(tp_emitter.counts.w));
         let life=mix(tp_emitter.life.x,tp_emitter.life.y,tp_unit(&seed));
         // Births spread evenly over the step, so a steady rate shows no banding.
-        let age=dt*(f32(spawned-1u-k)+tp_unit(&seed))/f32(spawned);
-        let velocity=tp_emitter.velocity.xyz+tp_ball(&seed)*tp_emitter.velocity.w;
-        let position=tp_emitter.position.xyz+tp_ball(&seed)*tp_emitter.position.w+velocity*age;
-        p=TpParticle(vec4<f32>(position,age),vec4<f32>(velocity,life),vec4<f32>(0.0));
+        let window=select(dt,tp_emitter.misc.w,tp_emitter.misc.w>0.0);
+        let age=window*(f32(spawned-1u-k)+tp_unit(&seed))/f32(spawned);
+        let box=vec3<f32>(tp_unit(&seed),tp_unit(&seed),tp_unit(&seed))*2.0-vec3<f32>(1.0);
+        let v0=tp_emitter.velocity.xyz+tp_ball(&seed)*tp_emitter.velocity.w+box*tp_emitter.velocity_box.xyz;
+        let start=tp_emitter.position.xyz+tp_spawn_offset(&seed);
+        // Closed-form motion under drag d and acceleration a over the age (exact for any
+        // age, so a prewarmed population stands where a running one would).
+        let d=tp_emitter.acceleration.w;
+        let a=tp_emitter.acceleration.xyz;
+        let e=exp(-d*age);
+        let f=select((1.0-e)/max(d,1e-6),age,d<1e-4);
+        let g=select((age-f)/max(d,1e-6),0.5*age*age,d<1e-4);
+        let velocity=v0*e+a*f;
+        let position=start+v0*f+a*g;
+        // light.w: the particle's curl-noise phase, from its spawn ordinal (as Ara's).
+        let phase=f32((first+k)%100000u)*0.013;
+        p=TpParticle(vec4<f32>(position,age),vec4<f32>(velocity,life),vec4<f32>(0.0,0.0,0.0,phase));
     } else if p.position.w<p.velocity.w {
         let drag=exp(-tp_emitter.acceleration.w*dt);
-        let velocity=p.velocity.xyz*drag+tp_emitter.acceleration.xyz*dt;
+        var velocity=p.velocity.xyz*drag+tp_emitter.acceleration.xyz*dt;
+        velocity+=tp_forces(p.position.xyz,p.light.w)*dt;
         p.position=vec4<f32>(p.position.xyz+velocity*dt,p.position.w+dt);
         p.velocity=vec4<f32>(velocity,p.velocity.w);
     }
-    if p.position.w<p.velocity.w { p.light=vec4<f32>(tp_incident(p.position.xyz),0.0); }
+    tp_collide(&p);
+    if p.position.w<p.velocity.w { p.light=vec4<f32>(tp_incident(p.position.xyz),p.light.w); }
     tp_particles[slot]=p;
 }
 // Bitonic sort of (depth, slot) keys in one workgroup: far to near, dead particles last.
@@ -355,16 +441,31 @@ struct TpBillboard {
         return out;
     }
     let t=clamp(p.position.w/max(p.velocity.w,1e-6),0.0,1.0);
-    let size=mix(tp_emitter.emission0.w,tp_emitter.emission1.w,t);
+    var size=mix(tp_emitter.emission0.w,tp_emitter.emission1.w,t);
+    let size_keys=u32(tp_emitter.curves.w);
+    if size_keys>0u {
+        let w=tp_curve(tp_emitter.size_t,size_keys,t);
+        let i=u32(w.x);
+        size=mix(tp_emitter.size_keys[i],tp_emitter.size_keys[min(i+1u,size_keys-1u)],w.y);
+    }
     let world=p.position.xyz+(tp.right.xyz*corner.x+tp.up.xyz*corner.y)*(0.5*size);
     out.position=tp.view_projection*vec4<f32>(world,1.0);
     out.uv=corner*0.5+vec2<f32>(0.5);
     var color=mix(tp_emitter.color0,tp_emitter.color1,t);
+    var emitted=mix(tp_emitter.emission0.rgb,tp_emitter.emission1.rgb,t);
+    let color_keys=u32(tp_emitter.curves.z);
+    if color_keys>0u {
+        let w=tp_curve(tp_emitter.color_t,color_keys,t);
+        let i=u32(w.x);
+        let j=min(i+1u,color_keys-1u);
+        color=mix(tp_emitter.color_keys[i],tp_emitter.color_keys[j],w.y);
+        emitted=mix(tp_emitter.emission_keys[i].rgb,tp_emitter.emission_keys[j].rgb,w.y);
+    }
     let fade_in=select(1.0,clamp(t/tp_emitter.life.z,0.0,1.0),tp_emitter.life.z>0.0);
     let fade_out=select(1.0,clamp((1.0-t)/tp_emitter.life.w,0.0,1.0),tp_emitter.life.w>0.0);
     color.a*=fade_in*fade_out;
     out.color=color;
-    let emission=mix(tp_emitter.emission0.rgb,tp_emitter.emission1.rgb,t)*fade_in*fade_out;
+    let emission=emitted*fade_in*fade_out;
     // Scattered light (albedo/pi of the incident irradiance) and emission, unexposed: the
     // vertex stage cannot read the lighting group.
     out.radiance=p.light.rgb*(color.rgb/PI);
