@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
+backend-ara-window = ["backend-ara", "dep:ara-window"]
 backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:serde_json", "naga/msl-out", "naga/spv-out", "wgpu/vulkan-portability"]
 selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
@@ -71,3 +72,10 @@ opt-level = 2
 # The editable shader frontend is runtime work in the development viewer.
 [profile.dev.package.naga]
 opt-level = 2
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "8240cb06761dcc1a0e0842ce8279337c2e3ee8f9", optional = true }
+
+[[example]]
+name = "ara_post"
+required-features = ["backend-ara-window"]

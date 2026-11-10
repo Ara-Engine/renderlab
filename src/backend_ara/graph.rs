@@ -9,6 +9,10 @@ pub struct Graph {
     states: Vec<(Resource, Access)>,
 }
 impl Graph {
+    /// Remove a retired resource's scheduled state after its last list is submitted.
+    pub fn forget(&mut self, resource: Resource) {
+        self.states.retain(|(r, _)| *r != resource);
+    }
     /// Declare an external resource's state, or initialize a fresh resource as Undefined.
     pub fn import(&mut self, resource: Resource, access: Access) {
         if let Some((_, state)) = self.states.iter_mut().find(|(r, _)| *r == resource) {

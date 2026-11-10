@@ -56,7 +56,11 @@ pub struct ToneInputs<'a> {
 pub struct PostPasses {
     downsample: Pipeline,
     upsample: Pipeline,
+    tile_max: Pipeline,
+    motion_blur: Pipeline,
+    depth_of_field: Pipeline,
     tone: Pipeline,
+    display: Pipeline,
     sampler: u32,
     output_format: Format,
 }
@@ -67,28 +71,68 @@ impl PostPasses {
             matches!(output_format, Format::Rgba32Float | Format::Rgba8),
             "unsupported tone output format"
         );
-        let downsample = cache.pipeline(gpu, Pass::Downsample, RenderState::default())?;
-        let upsample = cache.pipeline(gpu, Pass::Upsample, RenderState::default())?;
-        let tone = cache.pipeline(
-            gpu,
+        let mut created = Vec::new();
+        for pass in [
+            Pass::Downsample,
+            Pass::Upsample,
+            Pass::TileMax,
+            Pass::MotionBlur,
+            Pass::DepthOfField,
             Pass::Tone,
-            RenderState {
-                color_formats: vec![output_format.vk().as_raw()],
+            Pass::Display,
+        ] {
+            let state = RenderState {
+                color_formats: match pass {
+                    Pass::Tone => vec![output_format.vk().as_raw()],
+                    Pass::Display => vec![Format::Rgba8.vk().as_raw()],
+                    _ => vec![],
+                },
                 ..Default::default()
-            },
-        )?;
-        let sampler = gpu
-            .sampler(&ara_gpu::sampler::SamplerDesc::default())?
-            .index;
+            };
+            match cache.pipeline(gpu, pass, state) {
+                Ok(pipeline) => created.push(pipeline),
+                Err(error) => {
+                    for pipeline in created {
+                        gpu.retire_pipeline(pipeline)?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let sampler = match gpu.sampler(&ara_gpu::sampler::SamplerDesc::default()) {
+            Ok(slot) => slot.index,
+            Err(error) => {
+                for pipeline in created {
+                    gpu.retire_pipeline(pipeline)?;
+                }
+                return Err(error.into());
+            }
+        };
+        let [
+            downsample,
+            upsample,
+            tile_max,
+            motion_blur,
+            depth_of_field,
+            tone,
+            display,
+        ] = created
+            .try_into()
+            .expect("one pipeline per fixed post pass");
         Ok(Self {
             downsample,
             upsample,
+            tile_max,
+            motion_blur,
+            depth_of_field,
             tone,
+            display,
             sampler,
             output_format,
         })
     }
-    /// Append one bloom kernel and its graph-generated dependencies.
+
+    /// Append one post compute kernel and its graph-generated dependencies.
     pub fn filter(
         &self,
         graph: &mut Graph,
@@ -100,6 +144,9 @@ impl PostPasses {
         let pipeline = match pass {
             Pass::Downsample => self.downsample,
             Pass::Upsample => self.upsample,
+            Pass::TileMax => self.tile_max,
+            Pass::MotionBlur => self.motion_blur,
+            Pass::DepthOfField => self.depth_of_field,
             _ => anyhow::bail!("not a filter pass"),
         };
         ensure!(
@@ -200,9 +247,55 @@ impl PostPasses {
         rec.push(Command::EndPass);
         Ok(())
     }
+    /// Encode the display transfer into RGBA8 UNORM; PNG readback and the Mac
+    /// presenter's UNORM surface receive already encoded values without CPU grading.
+    pub fn display(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        input: &Texture,
+        output: &Texture,
+    ) -> Result<()> {
+        ensure!(
+            output.format == Format::Rgba8 && output.size == input.size,
+            "display output must be same-size RGBA8 UNORM"
+        );
+        graph.node(
+            rec,
+            &[
+                (Resource::Image(input.image), Access::ShaderRead),
+                (Resource::Image(output.image), Access::Color),
+            ],
+        )?;
+        rec.push(Command::BeginPass("ara::DisplayTransfer".into()));
+        rec.push(Command::BeginRendering {
+            colors: vec![Attachment {
+                image: output.image,
+                clear: Some([0.; 4]),
+            }],
+            depth: None,
+            size: output.size,
+        });
+        rec.push(Command::Pipeline(self.display));
+        rec.push(Command::Constants(RootConstants {
+            words: [input.sampled, 0, 0, 0, 0, 0, 0, 0],
+        }));
+        rec.push(Command::Fullscreen);
+        rec.push(Command::EndRendering);
+        rec.push(Command::EndPass);
+        Ok(())
+    }
     /// Retire pipelines only after their last recorded lists have been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        for pipeline in [self.downsample, self.upsample, self.tone] {
+        for pipeline in [
+            self.downsample,
+            self.upsample,
+            self.tile_max,
+            self.motion_blur,
+            self.depth_of_field,
+            self.tone,
+            self.display,
+        ] {
             gpu.retire_pipeline(pipeline)?;
         }
         Ok(())

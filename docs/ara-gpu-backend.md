@@ -29,12 +29,16 @@ ShaderCache invokes metal/metallib on cache misses and passes hashed native arti
 to Ara's unchanged cooked loader. The caller supplies the cache path; no user-profile
 writes, Slang or MSC. A failed compile does not replace an existing PostPasses object.
 
-## Proven passes: 3
+## Proven Renderlab pass families: 6 (plus display transfer)
 
 | Pass | Metal CPU-reference replay | Vulkan |
 |---|---|---|
 | Bloom downsample | 17×11 → 9×6 → 5×3, max error 0.001953125 | Pending PC run |
 | Bloom upsample | Coarsest self-tent and reverse level, max error 0.001953125 | Pending PC run |
+| Velocity tile maximum | Partial edge tiles, exact output; eight submitted frames | Pending PC run |
+| Motion blur | Foreground/background depth and neighbour velocity, max error 0.00390625; eight frames | Pending PC run |
+| Depth of field | 48-tap near/far gather, max error 0.00390625; eight frames | Pending PC run |
+| Display transfer (new) | GPU sRGB encoding plus UNORM quantization, max error 0.002237 | Pending PC run |
 | Post tone | Filmic, white balance, contrast, saturation, vignette and 3D LUT, max error 0.000534 | Pending PC run |
 
 Run `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 cargo +1.99.1 test -p renderlab --features backend-ara --test ara_backend -- --nocapture --test-threads=1`.
@@ -58,3 +62,25 @@ The graph generates dependencies from declared direct resource uses. It preserve
 states across submissions, rejects undefined reads and write aliases, and orders
 same-state storage writes. It currently schedules only whole images/buffers on
 Graphics. Range splitting, async queues and transient aliasing remain later work.
+
+## First visible Metal output
+
+`cargo +1.99.1 run -p renderlab --features backend-ara-window --example ara_post`
+loads `tests/fixtures/ara-post.pfm`, runs the full six-level bloom down/up chain,
+tone and GPU display transfer, writes `target/ara-backend/first-metal.png`, and
+presents it in a native SDL Metal window. `--input <RGB PFM>`, `--output <PNG>`,
+`--headless` and `--seconds <0..300>` are supported. The PFM is a redistributable,
+self-authored synthetic linear HDR frame, not a capture of a migrated scene renderer.
+No wgpu device, CPU tone mapping, Slang or MSC runs in this example. The PNG is a
+raw readback of the GPU's already display-encoded RGBA8 output. The example retains
+resources and pipelines for the window lifetime and retires them before exit.
+The output PNG was visually inspected on the Mac. A separate desktop screenshot
+was unavailable: Computer Use returned `sky requires node_repl; configure
+NODE_REPL_TRUSTED_SERVICES`. Native presentation is verified by its completed-frame
+counter; this does not substitute for a desktop screenshot.
+
+New-filter tolerance is 0.004 (two half-float ULPs around the brightest fixture
+values); tile maximum is exact. Bloom/tone/display retain 0.003. No speed claim is
+made from these small replay fixtures. Strict Rust 1.99 clippy is blocked by existing
+warnings in the wgpu/asset files (including the new chunks_exact_to_as_chunks lint);
+these files are PC-owned and were not changed to silence them.

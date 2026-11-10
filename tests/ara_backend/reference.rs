@@ -204,3 +204,185 @@ pub fn tone(colour: &Image, bloom: &Image, f: &Fixture) -> Image {
         .collect();
     Image { size, pixels }
 }
+
+/// Independent linear-to-sRGB display transfer, before hardware UNORM quantization.
+pub fn display(input: &Image) -> Image {
+    Image {
+        size: input.size,
+        pixels: input
+            .pixels
+            .iter()
+            .map(|p| {
+                let mut out = *p;
+                for x in &mut out[..3] {
+                    let v = x.clamp(0., 1.);
+                    *x = if v <= 0.0031308 {
+                        v * 12.92
+                    } else {
+                        1.055 * v.powf(1. / 2.4) - 0.055
+                    };
+                }
+                out[3] = 1.;
+                out
+            })
+            .collect(),
+    }
+}
+
+/// Scalar maxima, including clamp replication at incomplete edge tiles.
+pub fn tile_max(aux: &Image) -> Image {
+    let size = aux.size.map(|n| n.div_ceil(16));
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let mut best = [0.; 4];
+            let mut distance = 0.;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let v = load(
+                        aux,
+                        (i % size[0] * 16 + x) as i32,
+                        (i / size[0] * 16 + y) as i32,
+                    );
+                    let d = v[0] * v[0] + v[1] * v[1];
+                    if d > distance {
+                        best = [v[0], v[1], 0., 0.];
+                        distance = d;
+                    }
+                }
+            }
+            half(best)
+        })
+        .collect();
+    Image { size, pixels }
+}
+fn length(v: [f32; 4]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+fn cone(d: f32, r: f32) -> f32 {
+    (1. - d / r.max(0.001)).clamp(0., 1.)
+}
+fn cylinder(d: f32, r: f32) -> f32 {
+    let a = (r - 1.).max(0.);
+    let b = r + 1.;
+    let t = ((d - a) / (b - a)).clamp(0., 1.);
+    1. - t * t * (3. - 2. * t)
+}
+/// Scalar depth-aware shutter gather with neighbour maximum direction.
+pub fn motion_blur(input: &Image, aux: &Image, tiles: &Image, settings: &[f32; 20]) -> Image {
+    let size = input.size;
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let x = (i % size[0]) as i32;
+            let y = (i / size[0]) as i32;
+            let a = load(aux, x, y);
+            let own = length(a);
+            let mut v = a;
+            let reach = (settings[2] / 16.).ceil() as i32;
+            for ty in -reach..=reach {
+                for tx in -reach..=reach {
+                    let b = load(tiles, x / 16 + tx, y / 16 + ty);
+                    if b[0] * b[0] + b[1] * b[1] > v[0] * v[0] + v[1] * v[1] {
+                        v = b;
+                    }
+                }
+            }
+            let radius = length(v);
+            let centre = load(input, x, y);
+            if radius < 0.5 {
+                return half(centre);
+            }
+            let mut sum = std::array::from_fn::<_, 3, _>(|c| centre[c] / own.max(1.));
+            let mut weight = 1. / own.max(1.);
+            for tap in 0..16 {
+                let t = (tap as f32 + 0.5) / 8. - 1.;
+                let q = [x as f32 + 0.5 + v[0] * t, y as f32 + 0.5 + v[1] * t];
+                let b = load(aux, q[0] as i32, q[1] as i32);
+                let d = t.abs() * radius;
+                let soft = 0.02f32.max(0.02 * a[2].min(b[2]));
+                let front = (1. - (b[2] - a[2]) / soft).clamp(0., 1.);
+                let back = (1. - (a[2] - b[2]) / soft).clamp(0., 1.);
+                let w = front * cone(d, length(b))
+                    + back * cone(d, own)
+                    + 2. * cylinder(d, length(b)) * cylinder(d, own);
+                let p = sample(input, [q[0] / size[0] as f32, q[1] / size[1] as f32]);
+                for c in 0..3 {
+                    sum[c] += p[c] * w;
+                }
+                weight += w;
+            }
+            half([
+                sum[0] / weight.max(1e-5),
+                sum[1] / weight.max(1e-5),
+                sum[2] / weight.max(1e-5),
+                centre[3],
+            ])
+        })
+        .collect();
+    Image { size, pixels }
+}
+/// Scalar 48-tap near/far lens gather, preserving foreground coverage.
+pub fn depth_of_field(input: &Image, aux: &Image, settings: &[f32; 20]) -> Image {
+    let size = input.size;
+    let coc =
+        |z: f32| (settings[5] * (z - settings[4]) / z.max(0.001)).clamp(-settings[6], settings[6]);
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let x = (i % size[0]) as i32;
+            let y = (i / size[0]) as i32;
+            let z = load(aux, x, y)[2];
+            let c = coc(z);
+            let centre = load(input, x, y);
+            let foreground = c < -0.5;
+            let mut far = [0.; 3];
+            let mut far_w = 0.;
+            if !foreground {
+                far.copy_from_slice(&centre[..3]);
+                far_w = 1.;
+            }
+            let mut near = [0.; 3];
+            let mut near_w = 0.;
+            let radius = if foreground { -c } else { settings[6] };
+            for tap in 0..48 {
+                let r = ((tap as f32 + 0.5) / 48.).sqrt() * radius;
+                let angle = tap as f32 * 2.399_963_1;
+                let q = [
+                    x as f32 + 0.5 + angle.cos() * r,
+                    y as f32 + 0.5 + angle.sin() * r,
+                ];
+                let nz = load(aux, q[0] as i32, q[1] as i32)[2];
+                let nc = coc(nz);
+                let colour = sample(input, [q[0] / size[0] as f32, q[1] / size[1] as f32]);
+                if nc < -0.5 {
+                    let w = cylinder(r, -nc) / (nc * nc).max(1.);
+                    for j in 0..3 {
+                        near[j] += colour[j] * w;
+                    }
+                    near_w += w;
+                }
+                let w = if c > 0.5 && nc > 0. && nz >= z - 0.02f32.max(z * 0.02) {
+                    cylinder(r, c.min(nc))
+                } else if foreground && nc >= -0.5 {
+                    cylinder(r, -c)
+                } else {
+                    0.
+                };
+                for j in 0..3 {
+                    far[j] += colour[j] * w;
+                }
+                far_w += w;
+            }
+            let mut out = centre;
+            let coverage = (near_w * radius * radius / 48.).clamp(0., 1.);
+            for j in 0..3 {
+                let f = if far_w > 1e-5 {
+                    far[j] / far_w
+                } else {
+                    centre[j]
+                };
+                out[j] = f * (1. - coverage) + near[j] / near_w.max(1e-6) * coverage;
+            }
+            half(out)
+        })
+        .collect();
+    Image { size, pixels }
+}

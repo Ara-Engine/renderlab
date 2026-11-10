@@ -60,7 +60,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let open = name_at + name.len();
     let close = matching_paren(&source, open)?;
     let prefix = source[start..name_at].to_string();
-    let stage = if matches!(pass, Pass::Tone) {
+    let stage = if matches!(pass, Pass::Tone | Pass::Display) {
         "fragment"
     } else {
         "kernel"
@@ -96,7 +96,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let ordinary = format!("{result_type} {name}({})", plain.join(", "));
     source.replace_range(start..close + 1, &ordinary);
     let entry = format!("ara_{}", pass.entry());
-    let builtin = if matches!(pass, Pass::Tone) {
+    let builtin = if matches!(pass, Pass::Tone | Pass::Display) {
         "float4 ara_position [[position]]"
     } else {
         "uint3 ara_id [[thread_position_in_grid]]"

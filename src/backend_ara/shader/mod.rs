@@ -13,26 +13,37 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Display-linear to sRGB transfer into an UNORM presentation image.
+    Display,
     /// Nine-tap tent downsample into RGBA16Float.
     Downsample,
     /// Convex 0.65 mix with a tent upsample into RGBA16Float.
     Upsample,
+    /// Per-16×16-tile maximum output-space velocity.
+    TileMax,
+    /// Depth-aware shutter integration along neighbour-max velocity.
+    MotionBlur,
+    /// Near/far thin-lens gather with foreground coverage.
+    DepthOfField,
     /// Fullscreen tone, grading and a sampled 3D LUT.
     Tone,
 }
 impl Pass {
     pub(super) fn source(self) -> &'static str {
-        if matches!(self, Self::Tone) {
-            TONE
-        } else {
-            POST
+        match self {
+            Self::Tone => TONE,
+            Self::Display => include_str!("../shaders/display.wgsl"),
+            _ => POST,
         }
     }
     pub(super) fn entry(self) -> &'static str {
         match self {
             Self::Downsample => "downsample",
             Self::Upsample => "upsample",
-            Self::Tone => "fs",
+            Self::TileMax => "tile_max",
+            Self::MotionBlur => "motion_blur",
+            Self::DepthOfField => "depth_of_field",
+            Self::Tone | Self::Display => "fs",
         }
     }
 }

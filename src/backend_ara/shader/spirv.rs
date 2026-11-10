@@ -10,7 +10,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
     let source = adapt(pass);
     let module = parse(&source)?;
     let info = validate(&module)?;
-    let entries: Vec<_> = if matches!(pass, Pass::Tone) {
+    let entries: Vec<_> = if matches!(pass, Pass::Tone | Pass::Display) {
         vec![
             (naga::ShaderStage::Vertex, "vs"),
             (naga::ShaderStage::Fragment, "fs"),
@@ -94,7 +94,7 @@ fn adapt(pass: Pass) -> String {
     ]);
     // Only replace globals actually declared by this module: `colour` is a local
     // in the filter module but a resource in the tone module.
-    if matches!(pass, Pass::Tone) {
+    if matches!(pass, Pass::Tone | Pass::Display) {
         names.retain(|name, _| {
             matches!(
                 *name,

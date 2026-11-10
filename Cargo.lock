@@ -100,6 +100,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ara-sdl3-src"
+version = "0.0.1-alpha"
+source = "git+https://github.com/Ara-Engine/ara?rev=8240cb06761dcc1a0e0842ce8279337c2e3ee8f9#8240cb06761dcc1a0e0842ce8279337c2e3ee8f9"
+dependencies = [
+ "cc",
+ "sdl3-sys",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -474,7 +483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1612,6 +1621,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "ara-gpu",
+ "ara-sdl3-src",
  "ash 0.38.0+1.3.281",
  "bytemuck",
  "glam 0.30.10",
@@ -1702,7 +1712,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1731,6 +1741,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sdl3-sys"
+version = "0.7.3+SDL-3.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e68da4d2bcf29a81a1ea71ec27b93bb27151d649c2b186eb5988ad4dcb17d11"
 
 [[package]]
 name = "semver"
@@ -2238,7 +2254,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
