@@ -156,3 +156,24 @@ function/private structs, removing only layout decorations on types exclusive to
 internal memory; any type shared with an external buffer ABI is rejected. All 14
 exported stages pass spirv-val for Vulkan 1.3. Integration test artifacts now follow
 Cargo's `CARGO_TARGET_TMPDIR`, including the configured bulk-output drive on PC.
+
+## Procedural environment: two more entry points
+
+`at_environment_specular` and `at_environment_diffuse` now use the original WGSL
+hemisphere integrations and cube-face convention. The specular output is one
+128×128, six-layer, five-mip RGBA32Float image; narrow array views select each
+128/64/32/16/8 output level. All views share their parent resource identity and
+retirement. Diffuse uses a six-layer cube. The shared adapter adds the corresponding
+writable array-texture entry type; no per-pass native bindings were added.
+
+A fixed nonuniform 33×19 half-float HDR sky checks all 130,944 specular texels and
+1,536 diffuse texels against independent GGX/cosine CPU integration. Max errors by
+specular mip: 0.00538504, 0.000394434, 0.000199467, 0.000162095, 0.000244439;
+diffuse 0.000145912. The unsmoothed base exposes half-texture interpolation precision:
+at its worst texel, ideal CPU is 1.9272321, GPU 1.9326172, and an 8-bit filter-fraction
+CPU probe is 1.9330912. The base tolerance is therefore 0.01; integrated outputs
+retain 0.004. This is a sampling-precision allowance, not a shader or quality setting
+change. Vulkan execution, including writable array-view descriptors, remains pending.
+
+There are now 13 Renderlab pass entry points plus the new display transfer. Shadowed
+fog and temporal history are still reserved for the later shadow/temporal phase.

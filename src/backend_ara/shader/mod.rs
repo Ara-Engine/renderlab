@@ -13,6 +13,10 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// GGX specular prefilter of the procedural sky, one array mip.
+    EnvironmentSpecular,
+    /// Cosine-weighted diffuse irradiance of the procedural sky.
+    EnvironmentDiffuse,
     /// Forty-step transmittance LUT.
     AtmosphereTransmittance,
     /// Multiple-scattering transfer LUT.
@@ -41,6 +45,24 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::EnvironmentSpecular | Self::EnvironmentDiffuse => {
+                let kernels = include_str!("../../../shaders/atmosphere.wgsl");
+                let head = kernels
+                    .split_once("@compute")
+                    .expect("embedded atmosphere starts with bindings")
+                    .0;
+                let environment = kernels
+                    .split_once("@group(0) @binding(16)")
+                    .expect("embedded atmosphere has environment declarations")
+                    .1;
+                format!(
+                    "{}{}@group(0) @binding(16){}",
+                    include_str!("../../../shaders/atmosphere_common.wgsl"),
+                    head,
+                    environment
+                )
+                .into()
+            }
             Self::AtmosphereTransmittance
             | Self::AtmosphereMultiscatter
             | Self::AtmosphereSky
@@ -64,10 +86,15 @@ impl Pass {
             _ => POST.into(),
         }
     }
+    pub(super) fn environment(self) -> bool {
+        matches!(self, Self::EnvironmentSpecular | Self::EnvironmentDiffuse)
+    }
     pub(super) fn atmosphere(self) -> bool {
         matches!(
             self,
-            Self::AtmosphereTransmittance
+            Self::EnvironmentSpecular
+                | Self::EnvironmentDiffuse
+                | Self::AtmosphereTransmittance
                 | Self::AtmosphereMultiscatter
                 | Self::AtmosphereSky
                 | Self::AtmosphereAmbient
@@ -90,6 +117,8 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::EnvironmentSpecular => "at_environment_specular",
+            Self::EnvironmentDiffuse => "at_environment_diffuse",
             Self::LightCluster => "lc_build",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
             Self::AtmosphereMultiscatter => "at_multiscatter_lut",

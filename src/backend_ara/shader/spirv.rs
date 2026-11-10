@@ -86,7 +86,7 @@ fn adapt(pass: Pass) -> String {
         return cluster_interface(&body);
     }
     if pass.atmosphere() {
-        return atmosphere_interface(&body);
+        return atmosphere_interface(&body, pass);
     }
     let mut names = BTreeMap::from([
         ("input_colour", "ara_textures[ara_root.w0]"),
@@ -313,7 +313,7 @@ fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
     Ok(())
 }
 
-fn atmosphere_interface(body: &str) -> String {
+fn atmosphere_interface(body: &str, pass: Pass) -> String {
     let names = BTreeMap::from([
         ("atmosphere", "ara_atmospheres[ara_root.w0]"),
         ("atmosphere_transmittance", "ara_textures[ara_root.w1]"),
@@ -323,6 +323,8 @@ fn atmosphere_interface(body: &str) -> String {
         ("at_multiscatter_out", "ara_outputs[ara_root.w4]"),
         ("at_skyview_out", "ara_outputs[ara_root.w4]"),
         ("atmosphere_sampler", "ara_samplers[ara_root.w5]"),
+        ("at_specular_out", "ara_outputs[ara_root.w4]"),
+        ("at_diffuse_out", "ara_outputs[ara_root.w4]"),
     ]);
     let mut out = String::new();
     let mut word = String::new();
@@ -343,13 +345,18 @@ fn atmosphere_interface(body: &str) -> String {
         }
     }
     flush(&mut word, &mut out);
+    let output = if pass.environment() {
+        "texture_storage_2d_array<rgba32float,write>"
+    } else {
+        "texture_storage_2d<rgba16float,write>"
+    };
     format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
 @group(0) @binding(1) var<storage,read> ara_atmospheres:binding_array<AtmosphereUniform>;
 @group(0) @binding(5) var ara_textures:binding_array<texture_2d<f32>>;
-@group(0) @binding(3) var ara_outputs:binding_array<texture_storage_2d<rgba16float,write>>;
+@group(0) @binding(3) var ara_outputs:binding_array<{output}>;
 @group(0) @binding(2) var ara_samplers:binding_array<sampler>;
 {out}
 "#

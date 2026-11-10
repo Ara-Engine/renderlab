@@ -260,7 +260,7 @@ impl Model {
             pixels,
         }
     }
-    fn sky_uv(&self, d: Vec3) -> [f32; 2] {
+    pub fn sky_uv(&self, d: Vec3) -> [f32; 2] {
         let bottom = self.medium.ground_radius_km;
         let r = bottom + self.altitude;
         let beta = ((r * r - bottom * bottom).max(0.).sqrt() / r)

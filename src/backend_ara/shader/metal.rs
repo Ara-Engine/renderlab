@@ -140,6 +140,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let entry = format!("ara_{}", pass.entry());
     let builtin = builtins.join(", ");
     source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     let return_call = if result_type == "void" {
         format!("{name}({});", calls.join(", "))
@@ -191,6 +192,9 @@ fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
             "at_skyview" => "top.textures[top.root[3]].texture".into(),
             "at_transmittance_out" | "at_multiscatter_out" | "at_skyview_out" => {
                 "((device AraWriteImageEntry*)top.storage_images)[top.root[4]].texture".into()
+            }
+            "at_specular_out" | "at_diffuse_out" => {
+                "((device AraWriteCubeImageEntry*)top.storage_images)[top.root[4]].texture".into()
             }
             "atmosphere_sampler" => "top.samplers[top.root[5]].state".into(),
             _ => bail!("unmapped atmosphere resource {name}"),

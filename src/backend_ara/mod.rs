@@ -5,6 +5,7 @@ pub mod atmosphere;
 pub mod bloom;
 pub mod buffer;
 pub mod cache;
+pub mod environment;
 pub mod graph;
 pub mod image;
 pub mod light_cluster;
