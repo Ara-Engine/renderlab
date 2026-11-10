@@ -132,8 +132,8 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 2] = [
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
     ),
     (
-        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.kind!=0u {\n            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);\n",
-        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        var radiance=rl_sky(d,cone_alpha);\n        if hit.x!=0u {\n            let h=rl_hit_input(hit,origin,d,width,spread,pixel);\n",
+        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);\n",
+        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let h=rl_hit_input(hit,origin,d,width,spread,pixel);\n",
     ),
 ];
 /// R1's ray-query declaration line.
