@@ -127,7 +127,7 @@ def build():
                    "--example", "p_nsq_screen"]
     WORK.mkdir(parents=True, exist_ok=True)
     (WORK / "tmp").mkdir(exist_ok=True)
-    post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=8 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
+    post(f"[{OWNER} request] owner={OWNER} {"lib-tests" if tests else "adapter"}: one Cargo command, atomic build slot + stillkit mutex; >={float(os.environ.get("P_YARD_MIN_MIB", 8192)) / 1024:g} GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.restype = ctypes.c_void_p
@@ -179,7 +179,7 @@ def build():
             (BUILD_SLOT / "owner.json").unlink()
             BUILD_SLOT.rmdir()
         kernel.ReleaseMutex(mutex)
-        post(f"{OWNER} adapter window released {r.utc()} (build exit {code}, {time.monotonic() - start:.0f} s; no owned build remains).")
+        post(f"{OWNER} {'lib-tests' if tests else 'adapter'} window released {r.utc()} (build exit {code}, {time.monotonic() - start:.0f} s; no owned build remains).")
     print((WORK / "build.log").read_text(errors="replace")[-3000:])
     return code
 
