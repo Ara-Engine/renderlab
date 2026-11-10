@@ -246,6 +246,39 @@ impl Texture {
         }
         result
     }
+    /// Publish one sampled 2D mip/slice inside this view. The returned identity
+    /// shares the parent's retirement and preserves full allocation bounds.
+    pub fn view_2d(&self, gpu: &mut GpuDevice, mip: u32, layer: u32) -> Result<Self> {
+        ensure!(
+            self.shape.dimension == ara_gpu::texture::TextureDimension::D2
+                && mip >= self.view.base_mip
+                && mip - self.view.base_mip < self.view.mip_count
+                && layer >= self.view.base_layer
+                && layer - self.view.base_layer < self.view.layer_count,
+            "2D view exceeds its parent mip/layer interval"
+        );
+        let view = ImageViewDesc {
+            dimension: ViewDimension::D2,
+            base_mip: mip,
+            mip_count: 1,
+            base_layer: layer,
+            layer_count: 1,
+        };
+        let sampled = gpu.sampled_view(self.image, view)?.index;
+        Ok(Self {
+            image: self.image,
+            size: self.size.map(|n| (n >> (mip - self.view.base_mip)).max(1)),
+            format: self.format,
+            shape: ImageShape {
+                samples: self.shape.samples,
+                ..Default::default()
+            },
+            allocation: self.allocation,
+            view,
+            sampled,
+            storage: None,
+        })
+    }
     /// Allocate a reversed-depth atlas and one narrow 2D view per mip/layer.
     /// Views are ordered mip first, then layer; retire the returned parent once.
     pub fn depth_atlas(
@@ -270,23 +303,7 @@ impl Texture {
             let mut views = Vec::new();
             for mip in 0..levels {
                 for layer in 0..layers {
-                    let view = ImageViewDesc {
-                        dimension: ViewDimension::D2,
-                        base_mip: mip,
-                        mip_count: 1,
-                        base_layer: layer,
-                        layer_count: 1,
-                    };
-                    views.push(Self {
-                        image: parent.image,
-                        size: size.map(|n| (n >> mip).max(1)),
-                        format: parent.format,
-                        shape: ImageShape::default(),
-                        allocation: parent.allocation,
-                        view,
-                        sampled: gpu.sampled_view(parent.image, view)?.index,
-                        storage: None,
-                    });
+                    views.push(parent.view_2d(gpu, mip, layer)?);
                 }
             }
             Ok(views)

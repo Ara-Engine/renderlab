@@ -43,3 +43,6 @@ pub mod fresh_visibility;
 
 /// Original source-sided shadow depth raster into selected atlas subresources.
 pub mod shadow_raster;
+
+/// Per-object colored sun-transmission atlas layers.
+pub mod transmission_shadow;

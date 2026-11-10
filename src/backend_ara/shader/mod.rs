@@ -42,6 +42,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original colored transmission layer from one transparent object.
+    TransmissionShadow,
     /// Original vertex-only transparency sun-shadow depth raster.
     TransparencySunShadow,
     /// Original source-sided shadow depth raster.
@@ -142,6 +144,12 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::TransmissionShadow => {
+                crate::renderer::transparency_gpu::transmission_shadow::draw_source(include_str!(
+                    "../../../shaders/scene.wgsl"
+                ))
+                .into()
+            }
             Self::TransparencySunShadow => format!(
                 "{}{}",
                 transparency_section("TP_FRAME"),
@@ -364,7 +372,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::TransparencySunShadow
+            Self::TransmissionShadow
+                | Self::TransparencySunShadow
                 | Self::ShadowRaster
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
@@ -388,7 +397,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::TransparencySunShadow
+            Self::TransmissionShadow
+                | Self::TransparencySunShadow
                 | Self::ShadowRaster
                 | Self::FreshVisibility
                 | Self::ReceiverRaster
@@ -433,7 +443,9 @@ impl Pass {
         matches!(self, Self::TransparencySunShadow)
     }
     pub(super) fn vertex(self) -> &'static str {
-        if self.vertex_only() {
+        if matches!(self, Self::TransmissionShadow) {
+            "tx_vs"
+        } else if self.vertex_only() {
             "tp_shadow_vs"
         } else if matches!(self, Self::ShadowRaster) {
             "vs_shadow"
@@ -481,6 +493,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransmissionShadow => "tx_fs",
             Self::TransparencySunShadow => "tp_shadow_vs",
             Self::ShadowRaster => "fs_shadow",
             Self::FreshVisibility => "fresh_compute",

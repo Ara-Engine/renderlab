@@ -1032,3 +1032,25 @@ All **41** focused tests pass with Metal API+shader validation and API-only
 validation. **65** standard SPIR-V stages plus five variants validate for Vulkan1.3;
 backend library/integration clippy has no diagnostics. The scoped shape review has
 no must-fix findings. Native Vulkan remains pending. No decision override was added.
+
+## Coloured sun transmission layers (entry 49)
+
+The original `tx_vs`/`tx_fs` pair from `transparency_shadow.rs` runs unchanged on
+`scene.wgsl`. `Transmission::record_layer` keeps Renderlab's scheduling: every
+transparent caster clears and draws its own `Rgba16Float` array layer (white, depth
+one, forward Less, no blend, no culling), and lighting combines layers afterwards.
+`Texture::view_2d` publishes one mip/slice of a parent and rejects a view outside
+the parent's interval; `depth_atlas` now builds its views through it.
+
+Four fixtures replay against an independent CPU reference: pane order, reversed
+layer placement with an oblique sun (Schlick's angular term), a mirrored pane with
+reversed triangles, and zero packed opacity. Each layer is read back after its own
+draw: clears, coverage and alpha are exact, RGB is within two half-float ULPs, depth
+within 2e-6. An HDR base texel makes the RGB clamp observable. A whole-array readback
+at the end equals the per-layer snapshots, so a later caster does not disturb an
+earlier layer. Sloped casters, clipping and textured (non-constant) bases remain
+unproven here.
+
+All **42** focused tests pass with Metal API and shader validation from a clean
+build, and the SPIR-V cohort including `TransmissionShadow` passes `spirv-val` for
+Vulkan 1.3. Native Vulkan remains pending.

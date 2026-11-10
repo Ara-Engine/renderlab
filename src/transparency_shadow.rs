@@ -29,7 +29,7 @@ struct TxVertex { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f3
 pub(crate) fn api_source() -> &'static str {
     API
 }
-pub(super) fn draw_source(head: &str) -> String {
+pub(crate) fn draw_source(head: &str) -> String {
     format!("{head}{DRAW}")
 }
 pub(crate) fn binding_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
