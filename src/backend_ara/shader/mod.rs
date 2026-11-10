@@ -1,5 +1,7 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
 mod metal;
+mod particle_interface;
+pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
 mod spirv;
 pub(crate) use skin_interface::SkinResource;
@@ -15,6 +17,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Far-to-near2048-key workgroup particle ordering.
+    ParticleSort,
     /// Camera velocity and linear depth from a single-sample raster depth image.
     RasterSurface,
     /// The same original kernel reading sample zero of a 4x raster depth image.
@@ -61,6 +65,26 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::ParticleSort => {
+                let source = include_str!("../../../shaders/transparency.wgsl");
+                let section = |name: &str| {
+                    let marker = format!("// ---- {name} ----");
+                    let end = format!("// ---- end {name} ----");
+                    source
+                        .split_once(&marker)
+                        .expect("particle section")
+                        .1
+                        .split_once(&end)
+                        .expect("particle section end")
+                        .0
+                };
+                let sim = section("TP_PARTICLES_SIM");
+                let sort = sim
+                    .split_once("const TP_SORT_THREADS")
+                    .expect("particle sort kernel")
+                    .1;
+                format!("{}{}\n@group(0) @binding(40) var<storage,read_write> tp_particles:array<TpParticle>;\n@group(0) @binding(41) var<storage,read_write> tp_sorted:array<u32>;\nconst TP_SORT_THREADS{}",section("TP_FRAME"),section("TP_PARTICLES"),sort).into()
+            }
             Self::AtmosphereBackdrop => format!(
                 "{}{}",
                 crate::atmosphere::api_source(),
@@ -197,6 +221,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ParticleSort => "tp_particles_sort",
             Self::RasterSurface | Self::RasterSurfaceFour => "surface_raster",
             Self::SkinVertices => "skin_vertices",
             Self::SkinClusters => "skin_clusters",

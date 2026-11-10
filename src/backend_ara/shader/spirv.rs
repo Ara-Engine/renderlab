@@ -69,6 +69,9 @@ fn adapt(pass: Pass) -> Result<String> {
         .filter(|line| !line.trim_start().starts_with("@group("))
         .collect::<Vec<_>>()
         .join("\n");
+    if matches!(pass, Pass::ParticleSort) {
+        return particle_interface(&body, &original);
+    }
     if pass.surface() {
         return surface_interface(&body, pass, &original);
     }
@@ -325,6 +328,8 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 Some((7, 5))
             } else if name == "ara_frames" {
                 Some((8, 1))
+            } else if let Some(name) = name.strip_prefix("ara_particle_") {
+                super::ParticleResource::from_name(name).map(|r| (200 + r as u32, 1))
             } else if let Some(name) = name.strip_prefix("ara_skin_") {
                 super::SkinResource::from_name(name).map(|r| (100 + r as u32, 1))
             } else {
@@ -489,6 +494,39 @@ var<immediate> ara_root:AraRoot;
 @group(0) @binding(11) var ara_depths:binding_array<{depth}>;
 @group(0) @binding(1) var<storage,read> ara_post_frames:binding_array<PostFrame>;
 @group(0) @binding(3) var ara_surfaces:binding_array<texture_storage_2d<rgba32float,write>>;
+{out}
+"#
+    ))
+}
+
+fn particle_interface(body: &str, original: &naga::Module) -> Result<String> {
+    let mut names = BTreeMap::new();
+    let mut declarations = String::new();
+    for r in super::ParticleResource::ALL {
+        let name = r.name();
+        names.insert(
+            name,
+            format!(
+                "ara_particle_{name}[ara_root.w{}]{}",
+                r as u32,
+                if r.array() { ".values" } else { "" }
+            ),
+        );
+        declarations.push_str(&format!(
+            "@group(0) @binding({}) var<storage,{}> ara_particle_{name}:binding_array<{}>;\n",
+            200 + r as u32,
+            if r.writes() { "read_write" } else { "read" },
+            r.ty()
+        ));
+    }
+    let out = rewrite_globals(body, &names, original)?;
+    Ok(format!(
+        r#"enable wgpu_binding_array;
+struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
+var<immediate> ara_root:AraRoot;
+struct AraParticles {{values:array<TpParticle>,}};
+struct AraWords {{values:array<u32>,}};
+{declarations}
 {out}
 "#
     ))

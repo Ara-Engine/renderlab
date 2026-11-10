@@ -252,3 +252,21 @@ so an absolute-only display-range tolerance would be inappropriate. All10 replay
 tests pass with Metal API/shader validation and all24 SPIR-V stages validate.
 There are19 original Renderlab entry points plus display transfer. This is a
 backdrop leaf, not complete opaque scene/lighting integration; Vulkan is pending.
+
+## Particle depth sorting
+
+The unchanged `tp_particles_sort` workgroup kernel now consumes four heap buffer
+indices: original frame/emitter records, particle state, and output keys. Source
+composition takes the original frame/particle definitions and sort section;
+lighting-dependent simulation and billboard drawing remain separate ports.
+The shared buffer-interface adapters retain runtime lengths and threadgroup
+scratch, with typed storage aliases on Vulkan. The 2,048-slot limit comes from
+the shader's fixed scratch and 11-bit slot encoding, not a new backend policy.
+
+A scalar total-order oracle checks every depth/slot key for capacities 1, 9 and
+2,048, including dead and nonpositive-depth slots, ties and power-of-two padding.
+All keys are exact on Metal. The oracle reconstructs the eye from the stored
+camera view, matching the actual packet input rather than assuming look-at
+construction preserved the requested eye bit-for-bit. All 11 replay tests pass;
+all 25 SPIR-V stages validate. There are 20 original entries plus display.
+Particle simulation/lighting/draw and all native Vulkan runs remain pending.

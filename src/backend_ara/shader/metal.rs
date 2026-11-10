@@ -185,6 +185,11 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     })
 }
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if matches!(pass, Pass::ParticleSort) {
+        let resource = super::ParticleResource::from_name(name)
+            .with_context(|| format!("unmapped particle resource {name}"))?;
+        return buffer_argument(parameter, resource as u32);
+    }
     if pass.surface() {
         return Ok(match name {
             "scene_depth" => format!(
@@ -317,6 +322,11 @@ fn buffer_at(parameter: &str, slot: &str) -> Result<String> {
     }
 }
 fn buffer_root(pass: Pass, name: &str) -> Result<u32> {
+    if matches!(pass, Pass::ParticleSort) {
+        return Ok(
+            super::ParticleResource::from_name(name).context("particle runtime buffer")? as u32,
+        );
+    }
     match (pass, name) {
         (Pass::LightCluster, "lights") => Ok(0),
         (Pass::LightCluster, "frame") => Ok(2),
