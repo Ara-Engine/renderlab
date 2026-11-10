@@ -193,3 +193,8 @@ recursive deletion of `D:/Coding/renderlab-work/p-preview`, stating **blocked by
 policy**. No alternate deletion method was attempted. The owned Cargo target and
 run output remain there for coordinator cleanup. No owned GPU job, build, waiter
 or lock remains; another owner's subsequent lease was left untouched.
+
+The final rerun recipe now puts full `-O` on both paths immediately after the
+baselines. The measured order in this unit was RT baseline, non-RT baseline, RT
+SSA, RT local cleanup, then the interrupted RT inlining setup. This ordering
+change is measurement scaffolding only; the tested Rust sources are unchanged.
