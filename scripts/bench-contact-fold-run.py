@@ -42,7 +42,8 @@ def save(path, value):
         claimed = True
         end = datetime.datetime.fromisoformat(value["utc"]) + datetime.timedelta(minutes=value["expected_minutes"])
         with SCHEDULE.open("a",encoding="utf-8") as f:
-            f.write(f"\n[{runner.OWNER} reservation] owner={runner.OWNER} end={end.isoformat()} label={value['label']}\n")
+            watch = f" watchdog child cap {value.get('watch_child_mbytes', 8192):g} MiB, machine floor {value.get('watch_free_mbytes', 8192):g} MiB" + (" (quarry lease)" if value.get("quarry_lease") else "")
+            f.write(f"\n[{runner.OWNER} reservation] owner={runner.OWNER} end={end.isoformat()} label={value['label']}{watch}\n")
     if path.name.endswith("-preflight.json"):
         foreground_before=foreground();value["foreground_read_only"]=foreground_before
     if isinstance(value,dict) and "command" in value:

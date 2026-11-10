@@ -774,3 +774,9 @@ Reported by Ara's integration thread through `ara capture` on the RTX 4070 SUPER
 | Valley | 1.9 | 5.0 | 6.4 |
 
 Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the constant sky, 7.4 of 15.2 ms.
+
+## M8 quarry load memory (P-PIPE, 2026-11-10)
+
+- **OPEN, product defect: loading the quarry peaks at 8.0-8.5 GB of private memory.** On main it reaches 8.5 GB within 16 s of start. The P-PIPE branch hits 8.0 GB at 48 s even warm, with almost no compiling, so this isn't the shader compiler. A player's machine has to load the scene too.
+  - **Short follow-up:** find whether the peak comes from scene preparation, upload staging or duplicate copies of the 13 M-triangle scan, then cut it.
+  - **Until then:** full-quarry leases run with the named `--quarry-lease` runner setting. It sets a 12 GiB watchdog child cap and starts only at 14 GiB available. The 8 GiB machine floor still applies and is still what kills the lease.

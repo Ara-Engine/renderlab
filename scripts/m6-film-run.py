@@ -59,8 +59,12 @@ def resource_sample():
     return dict(host_unix_seconds=time.time(), available_mbytes=memory.available/(1024**2), rustc_count=count)
 
 
-WATCH_CHILD_MBYTES = float(os.environ.get("RENDERLAB_WATCH_CHILD_MB", 8192))
-WATCH_FREE_MBYTES = float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 8192))
+# The environment may only tighten these. The one sanctioned raise is --quarry-lease
+# (coordinator, 2026-11-10): child cap 12 GiB, 14 GiB to start, machine floor still 8 GiB.
+WATCH_CHILD_MBYTES = min(8192.0, float(os.environ.get("RENDERLAB_WATCH_CHILD_MB", 8192)))
+WATCH_FREE_MBYTES = max(8192.0, float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 8192)))
+QUARRY_CHILD_MBYTES = 12288.0
+QUARRY_PREFLIGHT_MBYTES = 14336.0
 
 
 def memory_watch_sample(root_pid):
@@ -171,6 +175,8 @@ def main():
     p.add_argument("--contended-screen", action="store_true", help="authorized screen only: 5 GiB preflight, 3 GiB runtime, marked contended")
     p.add_argument("--record-resources", action="store_true", help="attach 10 Hz memory/rustc context to each timing sample")
     p.add_argument("--fast-check", action="store_true", help="correctness batch: 4 GiB preflight, 2 GiB runtime abort")
+    p.add_argument("--quarry-lease", action="store_true",
+                   help="full-quarry lease: watchdog child cap 12 GiB (machine floor stays 8 GiB), starts only at 14 GiB available")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
     preflight_floor = PREFLIGHT_MEMORY_MBYTES if PREFLIGHT_MEMORY_MBYTES is not None else (5120 if a.contended_screen else 6144)
@@ -183,6 +189,12 @@ def main():
         a.record_resources = True
     if RUNTIME_MEMORY_MBYTES is not None:
         a.runtime_memory_mbytes = RUNTIME_MEMORY_MBYTES
+    global WATCH_CHILD_MBYTES
+    if a.quarry_lease:
+        WATCH_CHILD_MBYTES = QUARRY_CHILD_MBYTES
+        preflight_floor = max(preflight_floor, QUARRY_PREFLIGHT_MBYTES)
+    print(f"memory watchdog: child cap {WATCH_CHILD_MBYTES:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB"
+          f"{' (quarry lease)' if a.quarry_lease else ''}", flush=True)
     if not 0 < a.minutes <= 45:
         p.error("lease must be at most 45 minutes")
     if not 0 <= a.wait_seconds <= 45:
@@ -208,7 +220,8 @@ def main():
                 save(runs / f"{a.label}-deferred.json", dict(utc=utc(), owner=(LOCK / "owner.json").read_text() if (LOCK / "owner.json").exists() else None))
                 return 3
             time.sleep(min(1,max(0,deadline-time.monotonic())))
-    owner = dict(owner=OWNER, utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label)
+    owner = dict(owner=OWNER, utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label,
+                 watch_child_mbytes=WATCH_CHILD_MBYTES, watch_free_mbytes=WATCH_FREE_MBYTES, quarry_lease=a.quarry_lease)
     save(LOCK / "owner.json", owner)
     start = time.monotonic()
     try:
