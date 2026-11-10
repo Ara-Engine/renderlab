@@ -1,107 +1,151 @@
 # P-STILL: cost that follows change
 
-Unit P-STILL, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10, branch `t3/p-still` from main `9e343a0`. This is a design unit with a counted-work gate: count what TR1's per-frame jitter makes the world-space caches redo, and build only if the count shows a clear win. Labels: **M** measured here, **C** read from code, **A** another unit's measurement, **I** inference.
+Unit P-STILL, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10, branch `t3/p-still` rebased on main v0.1.3 (`ebfc21b`). This is a design unit with a counted-work gate: count the cache work that TR1's per-frame jitter causes, then build only on a clear win. Labels: **M** measured here, **C** read from code, **A** another unit's measurement, **I** inference.
 
 ## Result
 
-**NO-GO for now. Nothing to merge, and the count gate was not run.** No GPU lease ran in the time box. The build slot and GPU were held by Ara work and p-show2 from 12:31 to 15:14 UTC. My first admitted lease (`pstill-c1`) was stopped by this unit's own build waiter, which was admitted at the same instant (no data). The requeued lease (`pstill-c2`) died inside its admission check with `WinError 1455` (paging file too small) during the C: emergency. Per the root steer it was not retried.
+**MERGE**: GI idleness is now keyed on the unjittered camera and the target size (`src/gi_cache.rs`, one hunk).
 
-What exists:
-- the diagnosis from code (section 1);
-- the design (section 3);
-- the counting harness and candidate knobs, built and ready (section 4). The count needs one 15-minute lease with six runs.
-- prior units' measurements that bound the win (section 2).
+- **Count gate (M).** On jittered still quarry frames, **all of the GI cache's work is jitter-only**: 0.57-0.66 ms of a 3.30-3.35 ms RT frame (17-20%) and 0.91-1.51 ms of a 7.96-8.59 ms non-RT frame (11-18%). With jitter off the cache does no work and idles.
+- **Cause (C, M).** The GI idle key hashed the jittered projection and the jittered `scene_pixels` rectangle. The quarry has background at its edges, so the rectangle moves a pixel with the jitter. A still view therefore never idled.
+- **Effect (M).** Still views idle after GI's existing drain bound (272 identical frames with the default gather cap):
+  - RT: 3.30 → 2.63 ms (-20%), now **1.71x faster than HW Lumen Epic** (4.50), up from 1.36x;
+  - non-RT: 7.96 → 7.03 ms (-12%), now **1.75x slower than SW Lumen Epic** (4.02), down from 1.98x.
+- **Yardstick unchanged (M).** P-YARD2's 160-frame still segment never reaches the bound. All 125 captured yardstick frames are **byte-identical** before and after, on both paths, so P-YARD2's still, moving, cut and flicker numbers stand as measured.
+- **Flicker (M, P-YARD2's scorer on the same manifest):** RT 4.392 before, 4.392 after; non-RT 4.438 before, 4.438 after. Unreal is at 3.66-3.79. This unit does not move it: flicker is scored on moving frames, which nothing here touches.
+- **Quality (M, inspected):**
+  - Idle still frames match the running cache within 1.1 codes, with no pixel over 2 codes.
+  - The first walk frames after idling differ on 1-3 pixels by up to 2.3 codes.
+  - After a later cut, RT differs on one 3x8 px gravel-gap patch and one pixel pair (17-20 pixels over 8 codes). Both are closer to the path-traced reference with the change (patch RMS 28.3 against 30.1). Every scored frame's full-frame error is equal or lower.
+- **Not taken (M):**
+  - Non-RT still sun visibility (4.2 ms) is TR1's penumbra sampling, not jitter waste: about 70k uncertified pixels walk 8 rotated directions a frame. Stopping them freezes noise.
+  - Virtual-shadow page work under jitter costs only about 0.05 ms.
+  - The lagged "drained" readback never fires under jitter, because the cache keeps creating about 3-54 cells a frame (section 4).
 
-| Quarry, 1080p (P-YARD2, A) | Renderlab ms | vs Unreal Epic | After this design (I, unmeasured) |
-|---|---:|---|---|
-| RT still | 3.82 | 1.18x faster (4.50) | about 3.0-3.4 ms if the GI passes idle: 1.3-1.5x faster |
-| RT moving | 4.26 | 1.07x faster (4.57) | unchanged by design |
-| non-RT still | 8.65 | 2.15x slower (4.02) | about 7.6-8.2 ms if GI idles; page-work share unknown |
-| non-RT moving | 10.57 | 2.57x slower (4.12) | unchanged by design |
-| Flicker (moving frames) | 4.39 RT / 4.44 non-RT | Unreal 3.66-3.79 | **expected unchanged** (section 5) |
+| Quarry, 1080p, GPU span p50 (ms) | Before | After | vs Unreal Epic, before → after |
+|---|---:|---:|---|
+| RT still, yardstick (frames 96-159) | 3.35 | 3.35 | 1.34x faster → same (identical frames) |
+| RT moving | 4.29 | 4.28 | 1.06x faster → same |
+| RT cut | 12.67 | 12.74 | 2.80x slower → same (one frame each, identical image) |
+| **RT still, held 272+ frames** | **3.30** | **2.63** | **1.36x → 1.71x faster** |
+| non-RT still, yardstick | 8.64 | 8.64 | 2.15x slower → same |
+| non-RT moving | 10.77 | 10.78 | 2.62x slower → same |
+| non-RT cut | 44.46 | 40.61 | 10.8x slower → same work (identical image; single-frame noise) |
+| **non-RT still, held 272+ frames** | **7.96** | **7.03** | **1.98x → 1.75x slower** |
+| Flicker, moving (RT / non-RT) | 4.392 / 4.438 | 4.392 / 4.438 | Unreal 3.66-3.79: unchanged |
 
-The flicker before/after was not measured. No change was built to measure.
+Unreal Epic numbers are from P-YARD2: HW Lumen 4.50 / 4.57 / 4.52, SW Lumen 4.02 / 4.12 / 4.11 for still / moving / cut.
 
-## 1. Where "still" is decided today (C)
+## 1. Where "still" is decided (C)
 
-TR1 jitters every reconstructed frame by one sub-pixel offset of a 256-point lattice (`temporal_reconstruction::sample_offset`), carried by the camera projection. P-NSQ rotates the non-RT sun directions with the same frame index: `rotation(k) = 8 (k mod 32)`.
+TR1 jitters every reconstructed frame by one offset of a 256-point lattice, carried by the projection. P-NSQ rotates non-RT sun directions with the same index.
 
-| Decision | Keyed on | On a still camera under TR1 |
+| Decision | Keyed on (main) | Under TR1 on a still camera |
 |---|---|---|
-| TR1's still test and shadow budget (`prepare_reconstruction`: `sampling_still`, `held_rays`) | the **unjittered** matrix, compared as bits on the CPU | Correct already. RT sun rays settle to 8 a pixel after 16 frames. P-YARD2's RT receiver pass is 0.50 ms still and 1.42 moving (M, re-read from its `engine.json`). |
-| GI cache idle (`gi_cache.rs` `idle_key`, `view_key`) | the **jittered** matrix | Never idle. The key changes every frame. |
-| GI idle bound with the default gather cap | `IDLE_AFTER_BOUNCE + 64 (gathers + 1)` = 272 identical frames | Even an unjittered still view stays busy 272 frames, longer than P-YARD's 160-frame still segment and ARA1's 39. |
-| Virtual-shadow page work (`virtual_shadow_gpu.rs` key) | the **jittered** matrix plus P-NSQ's rotation | Request, compaction and raster run every frame. |
-| Surface-cache "still" (`vsc` flag 2: walking pixels keep last frame's count) | page work off | Never still. **This is correct and should stay that way.** A walking pixel that kept its count would freeze its 8-direction sample instead of rotating it. TR1 would then converge to that one sample: frozen noise. |
+| TR1's still test and shadow budget (`sampling_still`, `held_rays`) | the unjittered matrix, as CPU bits | Correct. RT sun rays settle at 8 a pixel; no jitter cost was measured (receiver 0.50 ms with and without jitter). |
+| **GI cache idle** (`idle_key`, `view_key`) | the **jittered** matrix and jittered `scene_pixels` rectangle | **Never idle. Fixed here.** |
+| GI idle bound with the gather cap | 16 + 64 x (gathers + 1) = 272 identical frames | Unchanged (section 4). |
+| Virtual-shadow page work | the jittered matrix plus P-NSQ's rotation | Runs every frame, but costs about 0.05 ms (M). Left as is. |
+| Surface-cache "still" (walkers keep last count) | page work off | Never still, which is correct: freezing walkers would freeze their 8-direction sample. |
 
-P-YARD2's per-pass split (M, re-read from `D:/Coding/renderlab-work/p-yard2/rl/quarry/timing-*/*/engine.json`, medians):
+## 2. Counts (M)
 
-| Quarry | span | shading | receiver | visibility compute | reconstruction | present | other (GI cache, local shadows, ...) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| RT still | 3.33-4.30 | 0.93 | 0.50 | - | 0.47 | 0.63 | 0.81-0.91 |
-| RT walk | 4.26-4.50 | 0.93 | 1.42 | - | 0.47 | 0.62 | 0.82 |
-| non-RT still | 8.61-8.69 | 0.94 | 0.63 | 4.17-4.27 | 0.47 | 0.63 | 1.69 |
-| non-RT walk | 10.69-10.70 | 0.94 | 0.62 | 6.11-6.14 | 0.47 | 0.62 | 1.88 |
+Quarry, 1080p, RTX 4070 SUPER, NVIDIA 617.14, release `p_yard_capture` (main v0.1.3 + branch), per-frame counters read back (`RENDERLAB_P_STILL_COUNT`). The manifest is P-YARD's pose p0 held for 448 frames, then its walk, hold, return, cut and recover (`manifest-count.json`). Medians per state. GI ms is the cache's own profiled passes.
 
-On RT, a still frame already costs 0.9 ms less than a moving one, all in sun rays. On non-RT the still-to-moving difference is the sun-visibility pass (4.2 against 6.1 ms) at its held budget. The "other" bucket is the same still and moving, which is what a never-idle GI cache looks like.
+| Run | State | span | GI ran | GI ms | cells created | GI rays | gathers | sun walks | page work |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| RT base | still < 272 | 3.35 | 100% | 0.660 | 54.5 | 1,088 | 23 | - | - |
+| RT base | still ≥ 272 | 3.30 | 100% | 0.572 | 3 | 0 | 1 | - | - |
+| RT no jitter | still < 272 | 3.20 | 100% | 0.503 | 0 | 0 | 0 | - | - |
+| RT no jitter | still ≥ 272 | 2.61 | **0%** | 0 | 0 | 0 | 0 | - | - |
+| **RT P-STILL** | still ≥ 272 | **2.63** | **0%** | 0 | 0 | 0 | 0 | - | - |
+| RT base | walk | 4.31 | 100% | 0.707 | 143.5 | 5,056 | 153 | - | - |
+| non-RT base | still < 272 | 8.59 | 100% | 1.510 | 67.5 | 1,472 | 35 | 70,780 | 100% |
+| non-RT base | still ≥ 272 | 7.96 | 100% | 0.906 | 2 | 64 | 2 | 70,124 | 100% |
+| non-RT no jitter, no rotation | still ≥ 272 | 2.75 | 0% | 0 | 0 | 0 | 0 | 196 | 0% |
+| non-RT page key without jitter or rotation | still ≥ 272 | 7.98 | 100% | 0.898 | 2 | 64 | 2 | 70,120 | **0%** |
+| **non-RT P-STILL** | still ≥ 272 | **7.03** | **0%** | 0 | 0 | 0 | 0 | 70,124 | 100% |
 
-## 2. What the count would have to show, and what earlier units measured
+Jitter-only share on still frames:
 
-- **GI (A, [p-gi.md](p-gi.md) and [m7-gaps.md](m7-gaps.md)).** On a moving quarry frame the cache passes take 793 µs RT and 1,500 µs non-RT, of which the probe is about 445-459 µs and the filter about 103 µs. P-GI recorded that "still frames under TR1 never idle" and that the probe runs on every still frame. On a drained still view the gathers, setup and rays should be near zero, which leaves about **0.5-0.8 ms a frame of jitter-only GI work on both paths** (I). This is the most likely win.
-- **Showcase's 3.4 ms of still-frame GI (A, [p-show.md](p-show.md))** is not explained by jitter alone. Showcase RT "GI etc." is 4.4-5.1 ms still against 1.8-2.4 ms moving. A probe-sized jitter cost (about 0.5 ms) cannot make still frames dearer than moving ones. The likelier cause (I) is that Showcase's still capture starts 16 frames after a cut, so its still frames carry the capped gather drain. The `gi_ran`, `gathers` and `bounce_queued` per-frame counts would settle this. Showcase is P-SHOW2's harness and needs an Ara build, so it was not run here.
-- **Non-RT page work.** The share of the 4.2 ms still sun-visibility pass taken by the request, compaction and raster passes is unmeasured. `vsm-stable` isolates it.
+- **GI:** 100% of its work, which is 0.57-0.66 ms RT and 0.91-1.51 ms non-RT. About 0.5 ms of that is simply running the passes; the "no jitter, still < 272" row runs them with zero work. The rest is real cell creation that the sub-pixel offsets keep causing (54 cells a frame early on, about 3 after 272 frames).
+- **RT sun rays:** none.
+- **Non-RT sun visibility:** 4.2 ms, but it is caused by P-NSQ's rotation, not by change. Stopping it, as in the no-jitter/no-rotation row, freezes each penumbra pixel's 8-direction sample.
+- **Non-RT page work:** about 0.05 ms.
 
-## 3. Design
+Game and Showcase were not counted. Showcase's still capture (60 frames after 16 settle) never reaches 272, so it cannot change (I). P-SHOW's 3.4 ms of "still" GI on Showcase is the cut's drain plus this jitter cost, not jitter alone.
 
-Rule: **"still" is a CPU decision on the unjittered camera (bits), and a cache may idle only once its own lagged counters prove it has nothing left to do.** Jitter and direction rotation stay exactly as they are, because they are TR1's sampling, not change.
+## 3. The change and its screen (M)
 
-1. **GI keys on the unjittered view** (`gi-stable`). `idle_key` and `view_key` hash `camera.unjittered()`. This is safe because the GI cache's values are deterministic per key: W1 replaces values, and a fixed direction set re-traces to the same value. Re-running the passes on an unchanged view rewrites identical cells. Idling cannot freeze noise.
-2. **A drained signal instead of the 272-frame worst case** (`gi-drain`, `src/gi_drain.rs`):
-   - After each cache frame's passes, the 176-byte counter block goes into a 4-slot mappable ring.
-   - The next frame maps it, without stalling.
-   - Once 8 read-back cache frames in a row show zero misses, traces, integrates, created, invalidated, lost, shades, gathers, queued gathers and deferrals, the gather-capped idle bound drops to `IDLE_AFTER_BOUNCE` (16 identical frames).
-   - A table clear resets it.
-   - Relights, moved casters and environment changes still set flags, which never idle.
-   - Risk to check by count and by eye: a jitter offset not seen during the quiet frames could land a pixel in a cell that does not exist yet. The count's `created` on late still frames measures that directly. P-GI's "exact idle needs 256 zero-work frames" is the conservative alternative: correct, but it never triggers in practice.
-3. **Virtual-shadow page work keyed on the unjittered view without the rotation** (`vsm-stable`). The surface cache's still flag additionally requires unchanged jitter bits and rotation, so walking pixels keep resampling every frame as today (no frozen noise). Risk: pages a new jitter offset needs at a page or LOD boundary are not requested while page work is skipped. Check this by image diff on still and cut frames, both paths.
-4. **Not adopted: accumulating jittered samples into converged cache entries.** That is a per-cell running average. It is exactly US 10,614,613's (e)-(g), plus dependent 2 (jitter before quantizing), which W1 and C8 design around (section 6). The GI cache needs no such average anyway, since its values are deterministic. For sun visibility, accumulation belongs in TR1's per-pixel history, which already does it.
+`prepare_gi` now hashes `camera.unjittered()` and the target size instead of the jittered matrix and the jittered `scene_pixels` rectangle. The rectangle follows from the camera, the hashed placements and the size. Nothing else changes:
+- the drain bound;
+- the passes;
+- what an idle frame skips;
+- environment-only frames.
 
-## 4. Harness, ready to run (C; built, not run)
+The GI values are deterministic per key (W1: replaced from fixed direction sets), so an idle frame shows what a running one would. Only cells that later jitter offsets would have created are missing. The screen bounds that effect.
 
-- `RENDERLAB_P_STILL` knobs (`temporal_reconstruction::p_still`): `nojitter` (offset 0, the attribution baseline), `norotate`, `gi-stable`, `gi-drain` and `vsm-stable`. All are off unless set; with the variable unset the code paths match main.
-- `tools/p-still/count.rs`, included by `examples/p_yard_capture.rs` and `examples/ara1_capture.rs` under `RENDERLAB_P_STILL_COUNT`. Per frame it records:
-  - whether the GI cache ran, its counters and per-pass profile;
-  - virtual-shadow page work, moved rectangles and S4;
-  - the surface cache's queued walks (`Renderer::p_still_surface_walks`, doc-hidden);
+Screen lease `pstill-s1`: 10 runs, one binary, `RENDERLAB_P_STILL=gi-jittered` restoring main's key as the base.
+
+- **Yardstick, captured frames:** 125 of 125 byte-identical, both paths.
+- **Long still** (`manifest-still-capture.json`: frames 150, 300, 447, walk 456, cut 608 and recover 609/616/638):
+
+| Frame | RT: pixels > 8 / > 2 codes, max | RT error base → after | non-RT: > 8 / > 2, max | non-RT error base → after |
+|---|---|---|---|---|
+| 150 still (not idle yet) | 0 / 0, 0 | 6.635 → 6.635 | 0 / 0, 0 | 7.286 → 7.286 |
+| 300 still (idle) | 0 / 0, 0.06 | 6.630 → 6.630 | 0 / 0, 0.14 | 7.263 → 7.263 |
+| 447 still (idle) | 0 / 0, 0.33 | 6.628 → 6.628 | 0 / 0, 1.13 | 7.254 → 7.254 |
+| 456 walk, 8 frames after idle | 0 / 3, 2.29 | no reference | 0 / 1, 2.13 | no reference |
+| 608 cut | 20 / 53, 33.4 | 7.506 → 7.503 | 1 / 26, 8.2 | 8.035 → 8.034 |
+| 609 / 616 / 638 recover | 17-20 / 51-56, 19-30 | 7.448 → 7.445 ... 6.802 → 6.800 | 1-2 / 37-44, 8.4 | 7.994 → 7.993 ... 7.394 → 7.393 |
+
+The RT cut differences are one GI cell's patch in a gravel gap under the slab (3x8 px at (630-635, 570-578)) and a pixel pair at (559, 614). The cells differ because that region was not probed while idle. At 4x zoom, base and change look the same (`D:/Coding/renderlab-work/p-still/sheets/cutdiff-rt-609.png`; idle still sheets `still-{rt,nonrt}-NNNN.png` there show a black x8 difference). The changed patch is closer to the reference (patch RMS 28.3 against 30.1; pair 28.4 against 30.3; still so at recover frame 30). No stray bright pixels, grain or edge changes.
+
+## 4. What remains, ranked
+
+1. **Flicker on moving frames, 4.39 / 4.44 against Unreal's 3.66-3.79**, is untouched and is still the top visible gap. It needs its own unit on moving frames:
+   - GI cells created under motion (143 a frame RT, 689 without jitter's pre-seeded neighbours);
+   - the 32-direction moving sun budget;
+   - TR1's history weights.
+2. **Idle sooner than 272 frames.** The jittered cache keeps creating cells: 54 a frame for the first 272 frames, about 3 after.
+   - Likely cause (I): `evict_frames` is 120, below the jitter's 256-frame period, so cells seen only at some offsets are evicted and re-created.
+   - An eviction window of at least a jitter period, or no aging on still views, would let the counts reach zero. Then a lagged "drained" readback (prototyped and dropped here, because it never fired under jitter) could idle the yardstick's still frames too, worth 0.57-0.66 ms RT and 0.9-1.5 ms non-RT.
+3. **Non-RT still sun visibility, 4.2 ms**, is about 70k rotated 8-direction walks a frame. A per-pixel converged penumbra (stop after a full rotation period, resume on change) would need TR1's history to hold it without freezing noise or aliasing shadow edges. That is a design of its own.
+4. **Page work under jitter** (about 0.05 ms): not worth the risk of missing pages at boundaries.
+
+## 5. Patent notes ([m7-p0-claims.md](m7-p0-claims.md); policy in AGENTS.md)
+
+- **The change** only decides whether the GI cache runs on an unchanged view, from CPU bits. It is not an element of any flagged claim.
+- **W1 holds** (no counter or average; US 10,614,613 (f)-(g)).
+- **W2 holds:** nothing ranks cells or chooses rays (US 11,790,594).
+- **W3 holds:** lookups stay deterministic (US 12,423,782).
+- A world-space cache alone is allowed. No resampling is involved (US 11,315,310).
+- **Rejected, and not needed:** accumulating jittered samples into converged cells. That is a per-cell running average: US 10,614,613 (e)-(g) plus dependent 2 (jitter before quantizing), which W1 and C8 design around.
+
+## 6. Harness (kept)
+
+- **Knobs:** `RENDERLAB_P_STILL` (`temporal_reconstruction::p_still`) takes `nojitter` (offset 0, the attribution baseline) and `gi-jittered` (main's GI key, for A/Bs). Both are unset in shipping runs, and unset is the screened default path.
+- **Counts:** `tools/p-still/count.rs`, included by `examples/p_yard_capture.rs` and `examples/ara1_capture.rs` and switched on by `RENDERLAB_P_STILL_COUNT`. Per frame it records:
+  - GI ran, counters and pass profile;
+  - virtual-shadow page work;
+  - surface-cache queued walks (`Renderer::p_still_surface_walks`, doc-hidden);
   - TR1's shadow budget.
-- `tools/p-still/run.py`, `counts.py` (per-state medians, still split at frame 272), `flicker.py` (P-YARD2's scorer over this unit's captures, same manifest and metric) and `host.py` (build slot plus stillkit mutex, admission before locks, 6 GiB builds and 7 GiB quarry leases, TMP/TEMP on D:).
-- Manifests in `D:/Coding/renderlab-work/p-still/`:
-  - `manifest-count.json`: the P-YARD quarry with 448 still frames, then its walk, hold, return, cut and recover;
-  - `game-count.json`: ARA1 game-base with 400 still frames, then move and cut.
-- **Resume:** one build (`host.py build`, about 3 min warm, 1 min incremental). Then **run the build and the lease one after the other, never both waiters at once** (see section 7). Then one lease:
-  `run.py q-base:count:quarry:count:rt q-cand:count:quarry:count:rt:gi-stable+gi-drain+vsm-stable q-base:count:quarry:count:nonrt q-cand:count:quarry:count:nonrt:gi-stable+gi-drain+vsm-stable q-nojit:count:quarry:count:rt:nojitter q-nojit:count:quarry:count:nonrt:nojitter+norotate`
-  Then `counts.py` over the six runs.
-  - **The gate:** the jitter-only share is (base - nojitter) / base, per counter and per pass, on still frames; the candidate's saving is base - candidate.
-  - **If the gate passes:** capture `yard` runs (base and candidate, both paths), run `flicker.py`, and inspect still, cut and recover frames by eye.
-
-## 5. Flicker
-
-Flicker is scored on the walk and return frames: consecutive moving frames, 1 cm and 0.05° a frame. Every part of this design acts only on frames whose unjittered camera, scene and lighting are unchanged, so **it cannot change the moving-frame flicker number** (I, by construction; to be confirmed by `flicker.py` before any merge). The 4.39 / 4.44 against 3.66-3.79 gap comes from noise present while moving. P-YARD2 saw it as heavy grain on flat walls in S4, worse on non-RT. That needs its own unit on moving frames: GI cell level changes and new-cell starts under motion, the 32-direction moving sun budget, and TR1's history weights.
-
-A converged GI cache that stops re-running does not freeze noise, because its values are deterministic per key. A sun-visibility cache that stopped resampling would freeze noise, and this design keeps it resampling.
-
-## 6. Patent notes ([m7-p0-claims.md](m7-p0-claims.md), policy in AGENTS.md)
-
-- **Unjittered idle keys, and the CPU deciding stillness:** these are engine bookkeeping, not an element of any flagged claim.
-- **Lagged counter readback (`gi-drain`):** it decides only *whether* the cache runs at all on an unchanged view. It does not rank cells or choose which rays are cast, so W2 holds and US 11,790,594's ranking is avoided. It keeps no per-cell sample count, so W1 holds and US 10,614,613 (f)-(g) is avoided.
-- **World-space keys:** a world-space cache alone is allowed under the policy. No resampling or reservoirs are involved (US 11,315,310 needs them together with the cache). Lookups stay deterministic (W3, US 12,423,782).
-- **Rejected for patent reasons and not needed:** per-cell accumulation of jittered samples (US 10,614,613 (e)-(g) and dependent 2; W1, C8).
+- **Scripts:**
+  - `tools/p-still/run.py`: steps; it stops its capture process below 5 GiB free;
+  - `counts.py`;
+  - `flicker.py`: P-YARD2's scorer;
+  - `stillcheck.py`: long-still A/B against references;
+  - `host.py`: admission before locks, 10 GiB start, free-RAM-prefixed schedule lines, TMP/TEMP on D:, unreleased requests older than an hour treated as stale.
+- **Manifests** live in `D:/Coding/renderlab-work/p-still/`.
 
 ## 7. Process (M)
 
-- **Build 1** (`a38dd78`, both adapters, release): 183 s, admitted 13:03 UTC after Ara and p-show2.
-- **Lease `pstill-c1`** (13:03, 72 s): this unit's own second build waiter was admitted in the same second. Its cargo tripped the lease's guard ("contention or available memory below 2048 MiB"), so there is no data. The binary copy failed with WinError 32 because the lease was running that exe. That is a new memory: `own-build-and-lease-waiters-race`.
-- **Build 2** (`ed8ed95`, adds `gi-drain`): 53 s incremental. Binaries were copied by hand afterwards (`build.json` records the hashes).
-- **Lease `pstill-c2`**: queued from 14:05. It was restarted twice for root steers (TMP/TEMP on D:, then the 15:02 admission bars). At 15:13 it died in its admission check (`resource_sample`) with WinError 1455. No lock was held. It was not retried, and its release line was posted.
-- **Time:** about 1 h 10 min of reading, code and harness; about 2 h 50 min queued for the build slot and GPU.
-- **Cleanup:** the Cargo target, binaries and TMP folder on D: are deleted. `D:/Coding/renderlab-work/p-still` keeps 1.8 MB of logs, the build identities and the two count manifests for the resume. Nothing was written to C: or E: except the schedule lines.
+- **Session 1** (12:13-15:14 UTC): reading, code and harness. Two builds.
+  - Lease `pstill-c1` was killed by this unit's own build waiter racing it (memory `own-build-and-lease-waiters-race`).
+  - Lease `pstill-c2` died in its admission check with WinError 1455 during the C:/commit emergency, and was not retried.
+- **Session 2** (16:31-18:30): rebased on v0.1.3 with no conflicts, then:
+  - build 151 s, then count lease `pstill-c3` (6 runs, 91 s);
+  - candidate build 40 s, then screen lease `pstill-s1` (10 runs, 152 s).
+  - Free RAM stayed 13-18.6 GiB, and every build and lease was admitted before taking locks.
+- **Time:** about 1.5 h of code and analysis, about 4 min of GPU, and about 3.5 h queued behind Ara work and the memory emergency.
+- **Cleanup:** Cargo target, binaries, TMP and raw HDR captures (16.6 MB each) deleted. `D:/Coding/renderlab-work/p-still` keeps the logs, `engine.json` timings and counts, `counts-summary*.json`, `stillcheck.json`, `score/quality.json`, the manifests and the inspected crops.
