@@ -1196,6 +1196,22 @@ Still to read before building: the fresh-visibility records and tile size
 (`fresh_shadow_gpu.rs`), the TLAS instance layout (`hardware_shadow_gpu.rs`), and the
 material arrays (`prepare_primary_materials`).
 
+**A nearer step: ray-traced sun shadows on the forward frame.** Entries 45 and 46
+as ported are the forward path's fresh variant (`fresh_shadow_gpu::shader_source`:
+a receiver raster prepass, then `fresh_compute` reading world and normal images at
+bindings 3 and 4), not the traced kernel module's `fresh_compute`. So the frame
+`Renderer::new_with_hardware_shadows` draws when the sun has a disk angle and the
+frame is not traced is also assembly work: TLAS, receiver raster into world and
+normal targets with the frame's depth, 256-ray visibility into an `R32Uint` image,
+then the lit pass composed on the fresh prelude with the camera and that image in
+group 0. It needs the CPU shadow frame as well: `ShadowState::plan` builds the
+directional views with `shadow_plan::directional_oriented` and packs one record per
+view (matrix, near, far, depth and normal bias, camera depth, texel size, the tangent
+of the disk angle), and `prepare_hardware_bias` adds the ray depth rate. `plan` reads
+only settings and the previous bases, so it can become a function both layers call.
+The traced frame above uses a different `fresh_compute` (the soft kernel module,
+gated by the primary tiles and hit image), which has not been replayed.
+
 **Then, by how much of the default image each one changes:**
 
 1. **GI cache, hardware-ray variant** (`gi_cache.wgsl`, `gi_cells.wgsl`, `gi_api.wgsl`,
