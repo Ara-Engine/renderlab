@@ -66,6 +66,17 @@ def order():
     return latest or ""
 
 
+def fresh(line, minutes=60):
+    """A request is stale after an hour with no release: its runner died (the 15:14 memory
+    emergency left ara-vk's 15:08 request open with no process alive)."""
+    import datetime, re
+    m = re.findall(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", line)
+    if not m:
+        return True
+    at = datetime.datetime.fromisoformat(m[-1]).replace(tzinfo=datetime.timezone.utc)
+    return datetime.datetime.now(datetime.timezone.utc) - at < datetime.timedelta(minutes=minutes)
+
+
 def foreign_requests():
     """Ara work goes first: an Ara request after its last release blocks us."""
     pending = {}
@@ -73,7 +84,7 @@ def foreign_requests():
         for line in lines:
             for owner in ("ara-pr-gate", "ara-integration", "ara-vk", "ara-wscene", "p-show2"):
                 if line.startswith(f"[{owner} request]") or line.startswith(f"[{owner} reservation]"):
-                    pending[owner] = True
+                    pending[owner] = fresh(line)
                 elif line.startswith(f"{owner} ") and " window released" in line:
                     pending[owner] = False
     return [o for o, p in pending.items() if p]
