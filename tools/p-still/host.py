@@ -72,6 +72,12 @@ def runner():
     return r
 
 
+# Root order 2026-11-10T15:02: builds and short leases start at 6 GiB available; this unit's
+# full-quarry leases keep 7 GiB (quarry runs tripped the 2 GiB runtime guard below that).
+BUILD_MIB = 6144
+LEASE_MIB = 7168
+
+
 def ready(r, label):
     sample = r.resource_sample()
     why = []
@@ -85,7 +91,7 @@ def ready(r, label):
         why.append("build slot held")
     if sample["compilers"]:
         why.append("foreign compiler")
-    if sample["available_mbytes"] < 8192:
+    if sample["available_mbytes"] < (BUILD_MIB if label == "build" else LEASE_MIB):
         why.append(f"available {sample['available_mbytes']:.0f} MiB")
     if shutil.disk_usage("D:/").free < 5e9:
         why.append("D: below 5 GB")
@@ -113,7 +119,7 @@ def build():
     r = runner()
     command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture", "--example", "ara1_capture"]
     WORK.mkdir(parents=True, exist_ok=True)
-    post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=8 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
+    post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=6 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.restype = ctypes.c_void_p
