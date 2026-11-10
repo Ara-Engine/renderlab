@@ -128,6 +128,70 @@ P-SHOW2's Showcase RT shading is 25.1 ms with the map against 8.5 with the const
 - **I expect roughly 7–9 ms back on Showcase RT**, so the frame lands near 21–23 ms against 12. Non-RT should drop by about the same fraction of its premium.
 - The atmosphere sky should get faster too (game scene, Ara's outdoor levels). A saving much smaller than this on NVIDIA would mean NVIDIA already hid the manual filter's divergence and RGBA32F filtering costs more there. The cost-only screens in section 2 would separate those.
 
+## 7. P-SKY2: the other half, as far as the image allows
+
+The premium left after P-SKY was 8.5 ms (RT) and 9.4 ms (non-RT) on the Showcase-like scene. Same method: cost-only screens on the filtered path, then image-preserving candidates one at a time.
+- The machine was shared with another thread's builds, which slow this iGPU. So each row interleaves baseline and screen, and only differences inside a pair (or the fastest of alternating runs) are read.
+
+**Where the remaining time is (cost-only, RT, shading ms):**
+
+| Screen | Δ |
+|---|---:|
+| Reflection hits' specular lookup made constant | −4.1 |
+| One roughness level instead of two (every site) | −3.3 |
+| Escaped rays' sky lookup made constant | −3.0 |
+| Primary receivers' lookup made constant | −0.8 |
+| Hits' diffuse irradiance made constant | −0.5 |
+
+**What the suggested image-preserving cuts are worth:**
+- **One level where roughness sits on a knot.** Lookups only land exactly on a knot as mirrors (r = 0) and at r ≥ 1, and both already take one level. Glossy cones and material roughnesses fall between knots, so dropping the second level there changes the r⁴ blend. The −3.3 ms is cost-only.
+- **A prefiltered diffuse term stored once per hit, or a fetch shared between a hit's diffuse and specular inputs.** The hits' diffuse lookup is worth at most 0.5 ms even when replaced by a constant. The two inputs read different textures in different directions (normal against reflection), so there is no common fetch to share.
+- **One trilinear sample in place of two bilinear ones.** Measured on the legacy chain, where the hardware can do it: −0.45 ms. The texture unit pays for the eight texels either way. So a 3D-texture layout, the only way to blend independent knots in hardware, would gain little, and would bring back manual face selection. Not built.
+- **Fewer bytes per texel** is what moves the cost:
+
+  | Field format, Showcase-like RT map | Shading ms (fastest of 4) | Image |
+  |---|---:|---|
+  | RGBA32F (P-SKY) | 57.12 | |
+  | RGBA16F | 55.73 | max 1 code |
+  | RGB9E5 | 54.70 | max 1 code in this scene, but rejected |
+
+  RGB9E5's shared exponent quantizes the r⁴ interpolation test's values (1 + k⁴ alongside 2.0) to 1/128. That fails `gpu_environment_independent_banks_filtered`'s 0.0011 tolerance, a quality reduction by the repository's own gate. RGBA16F passes it.
+
+**Kept:**
+1. **Half floats for maps that fit them as given** (`Encoding`, src/environment.rs).
+   - RGBA16F when every nonzero texel already lies in half precision's normal range, 2⁻¹⁴ to 65504. Each value then moves by at most 2⁻¹¹ of itself, and none is flushed or clipped.
+   - Anything wider stays RGBA32F, for example a captured sun over dark ground, or the photometry test's 1e30 map.
+   - There is deliberately no range scale. A power-of-two scale had to divide the lighting intensity, and the range test (1e30 map at intensity 1e20) overflowed it to infinity. With no scale, the intensity, lobe table, GI and every program see exactly what they did.
+   - Ara's gradient and studio skies (hundreds of cd/m²) qualify.
+2. **One trilinear sample for an unbanked legacy chain.** This is the atmosphere's procedural sky: `textureSampleLevel` at the fractional level, through the environment sampler, whose mip filter is now linear. Integer levels elsewhere stay exact.
+
+**Before and after (P-SKY → P-SKY2, Radeon 760M, 1080p, still, shading ms):**
+
+| Scene, path, sky | P-SKY | P-SKY2 |
+|---|---:|---:|
+| Showcase-like, RT, map | 57.30 | **55.74** |
+| Showcase-like, non-RT, map | 104.73 | **102.73** |
+| Game scene, RT, atmosphere | 64.6 | **64.15** |
+| Game scene, RT, map | 65.1 | 65.1 (no measurable change: the map is a small part of this scene) |
+
+- The Showcase-like rows are the fastest of 4 alternating runs. The game-scene rows are quiet interleaved pairs.
+- **The map premium falls from 8.5 to about 6.8 ms on RT, and from 9.4 to about 6.5 ms on non-RT.**
+- Against main, the premium is down from 16.5 to 6.8 ms on RT and from 17.4 to 6.5 ms on non-RT.
+
+**Images, P-SKY → P-SKY2** (8-bit, 1080p; moving is the 48-frame camera path, 7 frames each):
+
+| Capture | Max difference | Worst frame, pixels over 2 codes | Pixels over 8 codes |
+|---|---:|---:|---:|
+| Showcase-like, RT, still / moving | 1 / 1 | 0 / 0 | 0 |
+| Showcase-like, non-RT, still / moving | 3 / 4 | 1 / 6 | 0 |
+| Game scene, RT, atmosphere, moving | 1 | 0 | 0 |
+| Game scene, RT, map, moving | 1 | 0 | 0 |
+
+- Inspected as main | branch | difference ×8: the difference panes are black, and the reflections, horizon and sky are the same.
+- On the GPU tests, `axes_yaw_poles_seams_and_mips` (a map that takes half floats), `constant_photometry_and_compatibility` (including the 1e30 range test, which stays f32) and `independent_banks_filtered` all pass.
+
+**What remains is the lookups themselves.** Each glossy-ray miss and each reflection hit makes two filtered half-float samples, and the primary makes two more. Taking any of them away changes what the image integrates. The next step would be fewer rays (design-glossy-rate.md), not cheaper lookups.
+
 ## Process
 
 - Implementation, about 1.5 h. Verification, about 1.5 h, including the GPU lock held about 25 minutes by another thread's compiler server.

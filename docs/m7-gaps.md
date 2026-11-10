@@ -803,3 +803,8 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   - The first run of each succeeded. Every run after the first ring reset lost the device.
   - Still captures and the Showcase-like scene were unaffected.
   - Not investigated yet.
+- **P-SKY2 (stacked on P-SKY): half-float maps where lossless, one trilinear sample for the atmosphere's chain.**
+  - The Showcase-like map premium goes to about 6.8 ms on RT and 6.5 ms on non-RT, from 16.5 and 17.4 on main.
+  - Images within 4 codes.
+  - What remains is the lookups' own sampling; [p-sky.md](p-sky.md) section 7 has the screens.
+  - **Rejected by its quality gate:** RGB9E5, which is 1 ms faster but fails the r⁴ interpolation tolerance.
