@@ -499,8 +499,6 @@ pub(super) struct VirtualState {
     /// request, compaction and raster passes and only runs the lookup.
     key: Vec<u64>,
     page_work: bool,
-    /// P-STILL: the last frame's jitter bits and direction rotation.
-    sampling: Option<[u32; 3]>,
     /// N8e rolling refresh: frames since the last full lookup, whether the next frame may
     /// roll (cleared by the renderer when another pass writes the visibility target), and
     /// this frame's schedule word (`VsmFrame::n8e.y`; 0 looks up every tile).
@@ -1121,7 +1119,6 @@ impl VirtualState {
             levels: 0,
             key: vec![],
             page_work: true,
-            sampling: None,
             history_frames: 0,
             rolling: false,
             schedule: 0,
@@ -1399,7 +1396,6 @@ impl Renderer {
         let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
         self.reconstruction_frame
             .filter(|_| exact && self.reconstruction.rotate_directions)
-            .filter(|_| !super::primary_ray_gpu::temporal_reconstruction::p_still("norotate"))
             .map_or(0, super::primary_ray_gpu::temporal_reconstruction::rotation)
     }
 
@@ -2226,12 +2222,7 @@ impl Renderer {
         let casters = state.casters.as_ref().unwrap();
         // Compare the uploaded view-projection's bits on the CPU: projection jitter,
         // aspect and depth planes can change receivers without changing the view/FOV.
-        // P-STILL knob (docs/p-still.md): page work keyed on the unjittered view, and the
-        // direction rotation kept out of the key; the surface cache's still frames still need
-        // an unchanged jitter and rotation (below), so walking pixels keep sampling.
-        let stable = super::primary_ray_gpu::temporal_reconstruction::p_still("vsm-stable");
-        let key_camera = if stable { camera.unjittered() } else { *camera };
-        let mut key: Vec<u64> = key_camera
+        let mut key: Vec<u64> = camera
             .matrix(size.width, size.height)
             .to_cols_array()
             .iter()
@@ -2261,11 +2252,7 @@ impl Renderer {
         }
         // P-NSQ: a frame that rotates the directions never keeps counts of other directions
         // (TR1's lattice repeats its centre offset at k = 255 and 0, one matrix for both).
-        if !stable {
-            key.push(u64::from(rotation));
-        }
-        let sampling = [camera.jitter()[0].to_bits(), camera.jitter()[1].to_bits(), rotation];
-        let resampled = state.sampling.replace(sampling).is_some_and(|s| s != sampling);
+        key.push(u64::from(rotation));
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
@@ -2301,8 +2288,7 @@ impl Renderer {
             // producer and its cut; the camera only chooses which cells are asked for. A still
             // frame (N8e's rolling condition, N8f's casters-only frames included) keeps the
             // target's counts where nothing changed them.
-            let still =
-                was_rolling && (!state.page_work || casters_only) && !rebuild && !resampled;
+            let still = was_rolling && (!state.page_work || casters_only) && !rebuild;
             let producer = vec![
                 self.primary_mode as u64,
                 u64::from(self.lod_pixels.to_bits()),

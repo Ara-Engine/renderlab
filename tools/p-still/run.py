@@ -3,7 +3,7 @@
     py -3 -B tools/p-still/run.py STEP...   STEP: NAME:MANIFEST:SCENE:MODE:PATH[:KNOBS]
       MANIFEST: count (D:/.../p-still/manifest-count.json), yard (tools/p-yard/manifest.json) or game
       MODE: capture | timing | count (timing plus per-frame cache counts)
-      KNOBS: '+'-separated RENDERLAB_P_STILL flags (nojitter, norotate, gi-stable, vsm-stable)
+      KNOBS: '+'-separated RENDERLAB_P_STILL flags (nojitter, gi-jittered)
 """
 import json
 import os
@@ -18,7 +18,8 @@ import host  # noqa: E402  (run_guarded: the 5 GiB stop)
 HERE = Path(__file__).resolve().parent
 WORK = Path("D:/Coding/renderlab-work/p-still")
 BINARY = WORK / "bin/p_yard_capture.exe"
-MANIFESTS = {"count": WORK / "manifest-count.json", "yard": HERE.parent / "p-yard/manifest.json"}
+MANIFESTS = {"count": WORK / "manifest-count.json", "stillcap": WORK / "manifest-still-capture.json",
+             "yard": HERE.parent / "p-yard/manifest.json"}
 
 
 def run(step):
