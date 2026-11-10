@@ -1174,6 +1174,28 @@ With it, this frame is assembly work like the forward frame, and it is the first
 picture comparable with an engine render: correct soft sun shadows, sky, glass.
 Apple silicon has ray queries, so this is also the path a Mac would run.
 
+What that assembly has to reproduce from `Renderer::prepare_primary`, read from the
+source and not yet built:
+
+- **Frame record, 144 bytes** (`primary_frame`): inverse view-projection at 0, the
+  exposed clear RGBA (`lit_clear`, alpha one) at 64, a word at 80 set when any
+  placement is single-sided, direction rotation at 84 and the visibility-filter flag
+  at 88 (both zero here), visible-environment flag at 92, the scene's pixel rectangle
+  from `scene_pixels` at 96, sampling `(8, 8, 0, 1.0 as bits)` at 112, and the
+  reflection bands at 128 (`ReflectionSettings::off().frame_words()`).
+- **Region record, 16 bytes**: that rectangle grown to whole `TRACE_TILE` (8x4) tiles.
+- **Placement table**: `placement_table`, one word per instance: the draw index with
+  tangent, single-sided and thin flags in bits 31, 30 and 29.
+- **Geometry arrays**: one buffer of current then previous model matrices (two
+  matrices per placement), one of normal transforms, and per-draw vertex, index and
+  tangent buffers padded to `TRACED_DRAWS` with a 48-byte zero buffer.
+- **Dispatches**: the trace over the hit image in `TRACE_TILE` groups; shading over
+  `max(region groups, clear blocks)` by `region rows + clear rows`.
+
+Still to read before building: the fresh-visibility records and tile size
+(`fresh_shadow_gpu.rs`), the TLAS instance layout (`hardware_shadow_gpu.rs`), and the
+material arrays (`prepare_primary_materials`).
+
 **Then, by how much of the default image each one changes:**
 
 1. **GI cache, hardware-ray variant** (`gi_cache.wgsl`, `gi_cells.wgsl`, `gi_api.wgsl`,
