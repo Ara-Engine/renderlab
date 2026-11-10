@@ -72,6 +72,8 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::EnvironmentDiffuse,
         Pass::SkinVertices,
         Pass::SkinClusters,
+        Pass::RasterSurface,
+        Pass::RasterSurfaceFour,
     ] {
         emit_spirv(pass, &path)?;
     }
@@ -108,3 +110,6 @@ mod environment_cases;
 
 #[path = "ara_backend/cases/skinning.rs"]
 mod skinning_cases;
+
+#[path = "ara_backend/cases/post_surface.rs"]
+mod post_surface_cases;

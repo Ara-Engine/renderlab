@@ -15,6 +15,10 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Camera velocity and linear depth from a single-sample raster depth image.
+    RasterSurface,
+    /// The same original kernel reading sample zero of a 4x raster depth image.
+    RasterSurfaceFour,
     /// Current/previous skinned vertices, normals and tangent frames.
     SkinVertices,
     /// Copy changed positions into retained source-cluster words.
@@ -51,6 +55,10 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::RasterSurface => include_str!("../../../shaders/post_raster_surface.wgsl").into(),
+            Self::RasterSurfaceFour => include_str!("../../../shaders/post_raster_surface.wgsl")
+                .replace("texture_depth_2d;", "texture_depth_multisampled_2d;")
+                .into(),
             Self::SkinVertices | Self::SkinClusters => {
                 include_str!("../../../shaders/skinning.wgsl").into()
             }
@@ -95,6 +103,9 @@ impl Pass {
             _ => POST.into(),
         }
     }
+    pub(super) fn surface(self) -> bool {
+        matches!(self, Self::RasterSurface | Self::RasterSurfaceFour)
+    }
     pub(super) fn skin(self) -> bool {
         matches!(self, Self::SkinVertices | Self::SkinClusters)
     }
@@ -129,6 +140,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::RasterSurface | Self::RasterSurfaceFour => "surface_raster",
             Self::SkinVertices => "skin_vertices",
             Self::SkinClusters => "skin_clusters",
             Self::EnvironmentSpecular => "at_environment_specular",

@@ -140,6 +140,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let entry = format!("ara_{}", pass.entry());
     let builtin = builtins.join(", ");
     source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     let return_call = if result_type == "void" {
@@ -188,6 +189,23 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     })
 }
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if pass.surface() {
+        return Ok(match name {
+            "scene_depth" => format!(
+                "((device {}*)top.textures)[top.root[0]].texture",
+                if matches!(pass, Pass::RasterSurfaceFour) {
+                    "AraDepthMsEntry"
+                } else {
+                    "AraDepthEntry"
+                }
+            ),
+            "frame" => buffer_argument(parameter, 1)?,
+            "surface" => {
+                "((device AraWriteImageEntry*)top.storage_images)[top.root[2]].texture".into()
+            }
+            _ => bail!("unmapped raster surface resource {name}"),
+        });
+    }
     if pass.skin() {
         let resource = super::SkinResource::from_name(name)
             .with_context(|| format!("unmapped skin resource {name}"))?;

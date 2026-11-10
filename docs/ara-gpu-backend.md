@@ -206,3 +206,15 @@ rewriting them silently. Descriptor alias repairs are scoped to generated variab
 IDs, not arbitrary matching binding numbers. All 18 exported stages validate.
 There are now 15 Renderlab entries plus display transfer; every Vulkan native run
 remains pending.
+
+## Raster post surface: sample-one and sample-zero MSAA variants
+
+The unchanged `surface_raster` entry now reconstructs linear depth and camera
+velocity from depth attachments. The shared adapters support depth2D/depth2DMS
+heap views; the original 4x variant reads sample zero. A 17×11 depth fixture
+contains three depth rectangles and sky, rendered on the GPU before compute,
+without a host wait between those submissions. Moving-camera and camera-cut
+references pass for both variants: max error 1.20e-7, cut velocities exactly zero.
+This is camera motion; object motion still belongs to the later primary-surface
+port. There are 16 original Renderlab entry points plus display transfer, and
+20 exported SPIR-V stages validate. Vulkan execution remains pending.
