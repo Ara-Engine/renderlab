@@ -7,8 +7,8 @@
 use super::*;
 use glam::DVec3;
 use renderlab::{
-    Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
-    backend_ara::forward::{ForwardObject, ForwardScene, render},
+    Camera, Light, Lighting, Mat4, MaterialDescriptor, PostSettings, Vec3, Vertex,
+    backend_ara::forward::{ForwardObject, ForwardScene, post_record, render},
 };
 const SIZE: [u32; 2] = [128, 96];
 const BASE: [f32; 4] = [0.18, 0.4, 0.7, 1.];
@@ -137,8 +137,10 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
                 lighting,
                 camera,
                 size: SIZE,
+                post: None,
             },
-        )?;
+        )?
+        .hdr;
         Ok(bytes
             .as_chunks::<2>()
             .0
@@ -260,6 +262,159 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
     println!(
         "forward frame: {samples} radiance samples within Renderlab's photometry tolerance; worst used {:.1}% of it",
         worst * 100.
+    );
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The frame's own HDR and motion surface, pushed through the scalar post replay, must
+/// give the image the GPU displayed: motion blur, six bloom levels, tone and transfer
+/// run in the renderer's order with its default settings.
+#[test]
+fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
+    let path = root("forward-display");
+    let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let size = [96u32, 64];
+    let vertices =
+        [[-4., -4., 0.], [4., -4., 0.], [4., 4., 0.], [-4., 4., 0.]].map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let settings = PostSettings::default();
+    // A glossy metal floor under a tilted sun: a highlight far above one for bloom.
+    let images = render(
+        &mut gpu,
+        &cache,
+        &ForwardScene {
+            objects: &[ForwardObject {
+                vertices: &vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+                transform: Mat4::IDENTITY,
+                material: MaterialDescriptor {
+                    base_color: BASE,
+                    metallic: 1.,
+                    roughness: 0.3,
+                    ..Default::default()
+                },
+            }],
+            lighting: &Lighting {
+                lights: vec![
+                    Light::Directional {
+                        travel: Vec3::new(-0.25, 0., -1.),
+                        lux: [1000.; 3],
+                    },
+                    Light::Point {
+                        position: Vec3::new(1.5, -1., 1.),
+                        candela: [60., 40., 20.],
+                        range: Some(6.),
+                        source_radius: 0.0,
+                    },
+                ],
+                environment: [20., 25., 40.],
+                exposure_stops: -8.,
+            },
+            camera: Camera::look_at(
+                Vec3::new(0., 0., 4.),
+                Vec3::ZERO,
+                Vec3::Y,
+                55f32.to_radians(),
+                0.1,
+                100.,
+            )?,
+            size,
+            post: Some(settings),
+        },
+    )?;
+    let image = |pixels| reference::Image { size, pixels };
+    let hdr = image(
+        images
+            .hdr
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f16::from_bits(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]])).to_f32()
+                })
+            })
+            .collect(),
+    );
+    let surface = images.surface.expect("motion blur is on by default");
+    let aux = image(
+        surface
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f32::from_le_bytes([p[c * 4], p[c * 4 + 1], p[c * 4 + 2], p[c * 4 + 3]])
+                })
+            })
+            .collect(),
+    );
+    let words = post_record(&settings, size[1]);
+    let tiles = reference::tile_max(&aux);
+    let blurred = reference::motion_blur(&hdr, &aux, &tiles, &words);
+    let mut levels = Vec::new();
+    let mut current = blurred.clone();
+    for _ in 0..6 {
+        current = reference::downsample(&current, current.size.map(|n| n.div_ceil(2)));
+        levels.push(current.clone());
+        if current.size == [1, 1] {
+            break;
+        }
+    }
+    let coarsest = levels.last().expect("bloom has a level");
+    let mut bloom = reference::upsample(coarsest, coarsest);
+    for level in levels[..levels.len() - 1].iter().rev() {
+        bloom = reference::upsample(level, &bloom);
+    }
+    let fixture = reference::Fixture {
+        hdr: hdr.clone(),
+        lut: (0..8u32)
+            .map(|i| [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| v as f32))
+            .collect(),
+        lut_size: 2,
+        settings: words,
+    };
+    let tone = reference::tone(&blurred, &bloom, &fixture);
+    // Tone agrees to 0.003 linear in the stage replays; the display adds UNORM rounding.
+    let encode = |linear: &reference::Image| reference::display(linear).pixels;
+    let shifted = |by: f32| {
+        encode(&image(
+            tone.pixels.iter().map(|p| p.map(|v| v + by)).collect(),
+        ))
+    };
+    let (low, high) = (shifted(-0.003), shifted(0.003));
+    let display = images.display.expect("post ran");
+    let mut brightest = 0f32;
+    let mut distinct = std::collections::BTreeSet::new();
+    for (i, actual) in display.as_chunks::<4>().0.iter().enumerate() {
+        distinct.insert(*actual);
+        brightest = brightest.max(hdr.pixels[i][0].max(hdr.pixels[i][1]).max(hdr.pixels[i][2]));
+        for channel in 0..3 {
+            let value = f32::from(actual[channel]) / 255.;
+            ensure!(
+                value >= low[i][channel] - 0.6 / 255. && value <= high[i][channel] + 0.6 / 255.,
+                "display pixel {i} channel {channel}: {value} outside [{}, {}]",
+                low[i][channel],
+                high[i][channel]
+            );
+        }
+        ensure!(actual[3] == 255, "display alpha");
+    }
+    ensure!(
+        brightest > 1.5 && distinct.len() > 64,
+        "fixture lost its highlight or its gradient: peak {brightest}, {} colours",
+        distinct.len()
+    );
+    println!(
+        "forward display: {} pixels inside the CPU post replay's bounds; HDR peak {brightest}, {} distinct display colours",
+        display.len() / 4,
+        distinct.len()
     );
     gpu.assert_clean()?;
     Ok(())

@@ -1093,11 +1093,35 @@ cargo +1.99.1 run --features backend-ara --example ara_frame -- --backend ara --
 cargo run --example ara_frame -- --compare out/wgpu out/ara
 ```
 
-Each run writes the raw `frame.rgba16f`, a PNG for looking at, and `frame.json` with a
-24x16 grid of mean linear RGB that can travel as text. On this Mac the Ara frame
+Each run writes the raw `frame.rgba16f`, the displayed `display.rgba8`, PNGs for looking
+at, and `frame.json` with 24x16 grids of mean linear RGB and mean display bytes that
+can travel as text. On this Mac the Ara frame
 renders at 960x640 under Metal API and shader validation with no nonfinite channel
 and an exact environment clear. **The wgpu frame has not been produced yet**: wgpu
 opens Vulkan only, and over MoltenVK 1.4.1 its device is lost during
 `Renderer::new_with_options`, so the reference must come from Linux or Windows. On
 non-macOS hosts `--backend ara` takes the SPIR-V path of the same cache, which has
 never executed.
+
+### The post tail on the same frame
+
+With `ForwardScene::post` set, the frame continues through `PostGpu::encode` and the
+tone stage in the renderer's order: raster motion surface, tile maximum, motion blur,
+the bloom pyramid, tone, then the display transfer to RGBA8. `PostSettings::record`
+now packs the 80-byte `Settings` record for both layers; `PostGpu::prepare` calls it
+instead of packing inline (the arithmetic is unchanged, the wgpu side compiles here
+but has not been run since the move). The frame is always the first after a cut:
+serial one, no previous camera matrix, the 2x2x2 identity LUT at strength zero. Depth
+of field is rejected rather than skipped.
+
+`forward_frame_display_matches_cpu_post_replay_of_its_hdr` reads back the frame's own
+HDR and motion surface, pushes them through the scalar post replay used by the stage
+tests (tile maximum, motion blur, six bloom levels, tone, sRGB transfer) and requires
+every displayed byte inside that replay's bounds: the tone stage's 0.003 linear
+allowance carried through the transfer, plus UNORM rounding. All 6,144 pixels pass, on
+a glossy metal floor whose highlight peaks at 27.7 with 572 distinct display colours.
+What this does not show: motion (the camera has no history), depth of field, a custom
+LUT, grain.
+
+The M5-A `display.png` is the first Renderlab image shown through Ara end to end, from
+scene data to display bytes, with no wgpu device and no CPU tone mapping.

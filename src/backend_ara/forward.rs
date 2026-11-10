@@ -5,18 +5,22 @@
 //! replayed alone. It covers what `Renderer::try_render_view(.., ViewMode::Lit)`
 //! encodes on an untraced frame with the atmosphere, sun and local shadows, GI,
 //! decals and transmission off: every such input is bound with the same "off"
-//! contents the wgpu renderer binds. [`render`] is one-shot; it owns nothing across
-//! frames.
+//! contents the wgpu renderer binds. With post settings it continues through
+//! `PostGpu::encode` and the tone stage: motion surface, tile maximum, motion blur,
+//! bloom, tone and the display transfer. [`render`] is one-shot; it owns nothing
+//! across frames, so the frame is always the first after a cut.
 use super::{
     atmosphere::AtmosphereParameters,
     bindings::{HeapBindings, Input},
+    bloom::Bloom,
     buffer::StorageBuffer,
     cache::ShaderCache,
     graph::Graph,
     image::Texture,
     light_cluster::{ClusterInputs, LightClusters},
     mesh::MeshGeometry,
-    post_surface::RasterDepth,
+    post::{FilterInputs, PostPasses, SettingsRecord, ToneInputs},
+    post_surface::{PostCameraFrame, RasterDepth, RasterPostSurface},
     shader::{InputKey, InputKind, Pass, Program, SampleType},
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
@@ -53,7 +57,26 @@ pub struct ForwardScene<'a> {
     pub camera: crate::Camera,
     /// Target extent in pixels.
     pub size: [u32; 2],
+    /// `None` stops at the exposed HDR target. Depth of field is not assembled yet.
+    pub post: Option<crate::PostSettings>,
 }
+
+/// Readbacks of one frame, each tightly packed in row order.
+pub struct ForwardImages {
+    /// The exposed linear HDR target as RGBA16F: `Renderer::try_capture_hdr`'s bytes.
+    pub hdr: Vec<u8>,
+    /// Output-space shutter velocity and linear depth as RGBA32F, when motion blur ran.
+    pub surface: Option<Vec<u8>>,
+    /// The displayed image as RGBA8 with the display transfer applied, when post ran.
+    pub display: Option<Vec<u8>>,
+}
+
+/// The post `Settings` record of the first frame after a cut at this output height,
+/// with the identity LUT the renderer starts with.
+pub fn post_record(settings: &crate::PostSettings, height: u32) -> [f32; 20] {
+    settings.record(1, height, LUT_SIDE, false)
+}
+const LUT_SIDE: u32 = 2;
 
 fn key(group: u32, binding: u32) -> InputKey {
     InputKey { group, binding }
@@ -74,13 +97,12 @@ pub fn standard_program() -> Result<Program> {
     )
 }
 
-/// Renders `scene` once and returns the exposed linear HDR target as tightly packed
-/// RGBA16F rows, the bytes `Renderer::try_capture_hdr` yields for the same frame.
+/// Renders `scene` once and reads back what it produced.
 pub fn render(
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<ForwardImages> {
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
         scene.objects.iter().all(|o| {
@@ -148,7 +170,7 @@ pub fn render(
     // Every other reflected input is a feature that is off in this frame. The wgpu
     // renderer binds zero-filled buffers and zero-initialised textures there.
     let mut buffers = BTreeMap::new();
-    let mut images = BTreeMap::new();
+    let mut inputs = BTreeMap::new();
     for spec in program.inputs() {
         match spec.kind {
             InputKind::Buffer { minimum, .. } => {
@@ -214,7 +236,7 @@ pub fn render(
                     image.image,
                     &bytes,
                 )?);
-                images.insert(spec.key, image);
+                inputs.insert(spec.key, image);
             }
             InputKind::Sampler { comparison } => {
                 ensure!(!comparison, "unexpected comparison sampler {}", spec.name)
@@ -258,7 +280,7 @@ pub fn render(
                     })
                 }
                 InputKind::Image { .. } if spec.key == key(3, 24) => Input::Image(&lists),
-                InputKind::Image { .. } => Input::Image(&images[&spec.key]),
+                InputKind::Image { .. } => Input::Image(&inputs[&spec.key]),
                 InputKind::Sampler { .. } => Input::Sampler(SamplerDesc::default()),
                 _ => bail!("forward frame cannot supply {}", spec.name),
             };
@@ -299,10 +321,142 @@ pub fn render(
         output.image,
         u64::from(size[0]) * u64::from(size[1]) * 8,
     )?;
+
+    // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
+    let mut post_images = Vec::new();
+    let mut post_buffers = Vec::new();
+    let mut reads = [None, None];
+    let mut tail = None;
+    if let Some(settings) = scene.post.filter(|s| s.enabled) {
+        settings.validate()?;
+        ensure!(
+            settings.depth_of_field.is_none(),
+            "forward frame does not assemble depth of field yet"
+        );
+        let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
+        let record = SettingsRecord::new(gpu, &post_record(&settings, size[1]))?;
+        graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
+        let lut = Texture::volume(gpu, LUT_SIDE, Format::Rgba16Float)?;
+        let identity: Vec<u8> = (0..LUT_SIDE.pow(3))
+            .flat_map(|i| {
+                [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| half::f16::from_f32(v as f32).to_bits())
+            })
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        post_buffers.push(transfer::upload(
+            gpu, &mut graph, &mut rec, lut.image, &identity,
+        )?);
+        let mut surface = None;
+        if settings.motion_blur {
+            let kernel = RasterPostSurface::new(gpu, cache)?;
+            let frame = PostCameraFrame::new(
+                gpu,
+                scene.camera,
+                None,
+                size,
+                settings.shutter_angle_degrees,
+                settings.max_motion_radius_px,
+            )?;
+            graph.import(Resource::Buffer(frame.record.buffer), Access::HostWrite);
+            let auxiliary = Texture::new(gpu, size, Format::Rgba32Float, true, false)?;
+            kernel.record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
+            let tiles = Texture::new(
+                gpu,
+                size.map(|n| n.div_ceil(16)),
+                Format::Rgba16Float,
+                true,
+                false,
+            )?;
+            passes.filter(
+                &mut graph,
+                &mut rec,
+                Pass::TileMax,
+                &FilterInputs {
+                    colour: &output,
+                    second: &output,
+                    auxiliary: &auxiliary,
+                    velocity_tiles: &output,
+                    settings: &record,
+                },
+                &tiles,
+            )?;
+            let blurred = Texture::new(gpu, size, Format::Rgba16Float, true, false)?;
+            passes.filter(
+                &mut graph,
+                &mut rec,
+                Pass::MotionBlur,
+                &FilterInputs {
+                    colour: &output,
+                    second: &output,
+                    auxiliary: &auxiliary,
+                    velocity_tiles: &tiles,
+                    settings: &record,
+                },
+                &blurred,
+            )?;
+            reads[0] = Some(transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                auxiliary.image,
+                u64::from(size[0]) * u64::from(size[1]) * 16,
+            )?);
+            surface = Some((kernel, frame, blurred));
+            post_images.extend([auxiliary, tiles]);
+        }
+        let colour = surface.as_ref().map_or(&output, |(_, _, blurred)| blurred);
+        let bloom = if settings.bloom > 0.0 {
+            let bloom = Bloom::new(gpu, size)?;
+            bloom.record(&passes, &mut graph, &mut rec, colour, &record)?;
+            Some(bloom)
+        } else {
+            None
+        };
+        let linear = Texture::new(gpu, size, Format::Rgba32Float, false, true)?;
+        passes.tone(
+            &mut graph,
+            &mut rec,
+            &ToneInputs {
+                colour,
+                bloom: bloom.as_ref().map_or(colour, Bloom::output),
+                lut: &lut,
+                settings: &record,
+            },
+            &linear,
+        )?;
+        let display = Texture::new(gpu, size, Format::Rgba8, false, true)?;
+        passes.display(&mut graph, &mut rec, &linear, &display)?;
+        reads[1] = Some(transfer::readback(
+            gpu,
+            &mut graph,
+            &mut rec,
+            display.image,
+            u64::from(size[0]) * u64::from(size[1]) * 4,
+        )?);
+        post_images.extend([lut, linear, display]);
+        post_buffers.push(record.buffer);
+        tail = Some((passes, bloom, surface));
+    }
+
     let point = gpu.submit(rec.finish(), &[])?;
     gpu.wait(point)?;
-    let pixels = gpu.read(read).context("HDR readback")?;
+    let images = ForwardImages {
+        hdr: gpu.read(read).context("HDR readback")?,
+        surface: reads[0].map(|b| gpu.read(b)).transpose()?,
+        display: reads[1].map(|b| gpu.read(b)).transpose()?,
+    };
 
+    if let Some((passes, bloom, surface)) = tail {
+        if let Some(bloom) = bloom {
+            bloom.retire(gpu)?;
+        }
+        if let Some((kernel, frame, blurred)) = surface {
+            kernel.retire(gpu)?;
+            frame.record.retire(gpu)?;
+            post_images.push(blurred);
+        }
+        passes.retire(gpu)?;
+    }
     for packet in packets {
         packet.retire(gpu, &mut graph)?;
     }
@@ -319,14 +473,23 @@ pub fn render(
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
     depth.retire(gpu, &mut graph)?;
-    for image in images.into_values().chain([lists, output]) {
+    for image in inputs
+        .into_values()
+        .chain(post_images)
+        .chain([lists, output])
+    {
         gpu.retire(Resource::Image(image.image))?;
     }
-    for buffer in staging.into_iter().chain([read]) {
+    for buffer in staging
+        .into_iter()
+        .chain(post_buffers)
+        .chain(reads.into_iter().flatten())
+        .chain([read])
+    {
         gpu.retire(Resource::Buffer(buffer))?;
     }
     pass.retire(gpu)?;
     clusters.retire(gpu)?;
     gpu.collect()?;
-    Ok(pixels)
+    Ok(images)
 }
