@@ -2888,10 +2888,24 @@ mod tests {
         }
         // Verify the shader ABI rather than only duplicating Rust's size arithmetic.
         let module = naga::front::wgsl::parse_str(&shader_source()).unwrap();
-        let frame = module.types.iter().find(|(_,t)| t.name.as_deref()==Some("VsmFrame")).unwrap().1;
-        let naga::TypeInner::Struct { members, span } = &frame.inner else { panic!("VsmFrame is not a struct") };
+        let frame = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("VsmFrame"))
+            .unwrap()
+            .1;
+        let naga::TypeInner::Struct { members, span } = &frame.inner else {
+            panic!("VsmFrame is not a struct")
+        };
         assert_eq!(*span as usize, FRAME_BYTES);
-        assert_eq!(members.iter().find(|m|m.name.as_deref()==Some("nsq")).unwrap().offset as u64, SAMPLING_OFFSET);
+        assert_eq!(
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some("nsq"))
+                .unwrap()
+                .offset as u64,
+            SAMPLING_OFFSET
+        );
         assert_eq!(FRAME_BYTES, 928 + 12 * crate::TRACED_DRAWS as usize);
         // P-NSQ: the sampling uvec4 is VsmFrame's last member, after N8e's.
         assert_eq!(SAMPLING_OFFSET, FRAME_BYTES as u64 - 16);

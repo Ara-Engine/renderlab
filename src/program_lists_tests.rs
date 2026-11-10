@@ -41,7 +41,8 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
         limits.max_buffer_size = a.max_buffer_size;
         limits.max_storage_buffer_binding_size = a.max_storage_buffer_binding_size;
         wgpu::DeviceDescriptor {
-            required_features: crate::RECEIVER_FEATURES
+            required_features: wgpu::Features::TIMESTAMP_QUERY
+                | crate::RECEIVER_FEATURES
                 | crate::VISIBILITY_FEATURES
                 | crate::VISIBILITY_RASTER_FEATURES
                 | crate::VIRTUAL_FEATURES,
@@ -55,7 +56,8 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
             Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
         );
         wgpu::DeviceDescriptor {
-            required_features: crate::RECEIVER_FEATURES
+            required_features: wgpu::Features::TIMESTAMP_QUERY
+                | crate::RECEIVER_FEATURES
                 | wgpu::Features::EXPERIMENTAL_RAY_QUERY
                 | crate::TRACED_FEATURES,
             required_limits: crate::traced_limits(wgpu::Limits {
@@ -446,7 +448,7 @@ fn render(
 }
 
 fn read_rgba(r: &Renderer, texture: &wgpu::Texture) -> Vec<u8> {
-    let tight = texture.width() * 4;
+    let tight = texture.width() * texture.format().block_copy_size(None).unwrap();
     let row = tight.div_ceil(256) * 256;
     let buffer = r.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("MP1 readback"),
@@ -808,5 +810,245 @@ fn gpu_mp1_mixed_programs() {
     assert_eq!(
         unmatched, 0,
         "mixed pixels must equal a single-program frame: {identity}"
+    );
+}
+
+/// Exercises the last draw, mixed program lists, glass reflection slots and VSM tables.
+#[test]
+#[ignore = "Vulkan GPU; RENDERLAB_ES1_PATH=rt/nonrt and ray-query acknowledgement for RT"]
+fn gpu_draws_above_64() {
+    let mut r = renderer();
+    r.set_reconstruction(crate::Reconstruction::off()).unwrap();
+    r.set_indirect(crate::IndirectSettings::off()).unwrap();
+    let custom = r
+        .try_create_program(&ProgramDescriptor {
+            label: "draw-limit visibility",
+            source: &CUSTOM.replace(
+                "return expose(s.albedo*lit/PI);",
+                "return vec3<f32>(1.0,0.0,0.0);",
+            ),
+        })
+        .unwrap();
+    let standard = r.standard_program().clone();
+    let mut shapes = vec![quad(
+        [
+            [-12.0, 0.0, -10.0],
+            [-12.0, 0.0, 10.0],
+            [12.0, 0.0, 10.0],
+            [12.0, 0.0, -10.0],
+        ],
+        [0.0, 1.0, 0.0],
+    )];
+    for i in 0..150 {
+        shapes.push(cube(
+            [
+                (i % 15) as f32 * 1.2 - 8.4,
+                0.45,
+                (i / 15) as f32 * 1.2 - 5.4,
+            ],
+            0.4,
+            [1.0; 4],
+        ));
+    }
+    shapes.push(cube([10.0, 0.7, 0.0], 0.6, [1.0; 4]));
+    let mut meshes = vec![];
+    let mut instances = vec![];
+    let mut materials = vec![];
+    for (i, (vertices, indices)) in shapes.iter().enumerate() {
+        meshes.push(loop {
+            if let Some(v) = r.try_upload_mesh(&MeshData { vertices, indices }).unwrap() {
+                break v;
+            }
+            r.test_drain("limit mesh");
+        });
+        instances.push(loop {
+            if let Some(v) = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap() {
+                break v;
+            }
+            r.test_drain("limit instances");
+        });
+        materials.push(loop {
+            if let Some(v) = r
+                .try_create_material(&MaterialDescriptor {
+                    program: Some(if i != 0 && i % 2 == 0 {
+                        &custom
+                    } else {
+                        &standard
+                    }),
+                    double_sided: true,
+                    roughness: 0.7,
+                    transparency: (i == 151).then_some(crate::Transparency {
+                        opacity: 0.15,
+                        ior: 1.5,
+                        thickness: 0.02,
+                    }),
+                    ..Default::default()
+                })
+                .unwrap()
+            {
+                break v;
+            }
+            r.test_drain("limit material");
+        });
+    }
+    let target = crate::tests::target(r.device(), 640, 480);
+    let camera = Camera::look_at(
+        Vec3::new(0.0, 23.0, 14.0),
+        Vec3::ZERO,
+        Vec3::Y,
+        0.9,
+        0.01,
+        100.0,
+    )
+    .unwrap();
+    let mut capture = |count: usize| {
+        for _ in 0..3 {
+            let mut draws: Vec<_> = meshes
+                .iter()
+                .zip(instances.iter_mut())
+                .zip(&materials)
+                .enumerate()
+                .filter(|(i, _)| *i < count || *i == 151)
+                .map(|(_, ((mesh, instances), material))| {
+                    Draw::new(mesh, instances).with_material(material)
+                })
+                .collect();
+            while r
+                .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("limit admission");
+            }
+            r.test_drain("limit frame");
+        }
+        let rgba = read_rgba(&r, &target);
+        let hit = read_rgba(
+            &r,
+            &r.primary
+                .as_ref()
+                .unwrap()
+                .targets
+                .as_ref()
+                .unwrap()
+                .hit
+                .texture,
+        );
+        (rgba, hit)
+    };
+    let (full, hit) = capture(151);
+    let mut coverage = [0usize; 152];
+    for h in hit.chunks_exact(16) {
+        let id = u32::from_le_bytes(h[..4].try_into().unwrap()) as usize;
+        if id < coverage.len() {
+            coverage[id] += 1;
+        }
+    }
+    for group in 64..151 {
+        assert!(
+            coverage[group + 1] > 4,
+            "group {group} missing: {} pixels",
+            coverage[group + 1]
+        );
+    }
+    // Hit records alone do not prove that a high batch reaches the right program list.
+    for group in (64..151).step_by(2) {
+        let red = full
+            .chunks_exact(4)
+            .zip(hit.chunks_exact(16))
+            .filter(|(c, h)| {
+                h[..4] == ((group + 1) as u32).to_le_bytes() && c[0] > 128 && c[1] < 8 && c[2] < 8
+            })
+            .count();
+        assert!(
+            red > 4,
+            "custom program not shaded for group {group}: {red}"
+        );
+    }
+    let (control, control_hit) = capture(64);
+    let changed_floor = full
+        .chunks_exact(4)
+        .zip(control.chunks_exact(4))
+        .zip(hit.chunks_exact(16).zip(control_hit.chunks_exact(16)))
+        .filter(|((a, b), (h, c))| {
+            h[..4] == 1u32.to_le_bytes()
+                && c[..4] == 1u32.to_le_bytes()
+                && a[..3]
+                    .iter()
+                    .zip(&b[..3])
+                    .any(|(a, b)| a.saturating_add(4) < *b)
+        })
+        .count();
+    assert!(
+        changed_floor > 100,
+        "high groups cast no floor shadows: {changed_floor}"
+    );
+    let out = PathBuf::from("target/draw-limit");
+    std::fs::create_dir_all(&out).unwrap();
+    let file =
+        std::fs::File::create(out.join(if nonrt() { "nonrt.png" } else { "rt.png" })).unwrap();
+    let mut encoder = png::Encoder::new(file, 640, 480);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&full)
+        .unwrap();
+    eprintln!(
+        "DRAW_LIMIT path={} high_groups=87 min_coverage={} changed_floor={changed_floor}",
+        if nonrt() { "NonRt" } else { "HardwareRt" },
+        coverage[65..152].iter().min().unwrap()
+    );
+}
+
+/// Small existing MP1 floor/eight-box scene; timestamp span, eight warmed samples.
+#[test]
+#[ignore = "Vulkan GPU; same acknowledgement and path selection as gpu_mp1_mixed_programs"]
+fn gpu_draw_limit_small_timing() {
+    let mut r = renderer();
+    let mut scene = Scene::new(&mut r);
+    let standard = r.standard_program().clone();
+    let materials: Vec<_> = (0..9)
+        .map(|_| material(&mut r, &standard, 0.6, 0.0))
+        .collect();
+    let target = crate::tests::target(r.device(), 640, 480);
+    let camera = Camera::look_at(
+        Vec3::new(0.0, 2.2, 5.5),
+        Vec3::new(0.0, 0.5, 0.0),
+        Vec3::Y,
+        0.8,
+        0.01,
+        100.0,
+    )
+    .unwrap();
+    let mut times = vec![];
+    for frame in 0..24 {
+        let mut draws: Vec<_> = scene
+            .meshes
+            .iter()
+            .zip(scene.instances.iter_mut())
+            .zip(&materials)
+            .take(9)
+            .map(|((m, i), a)| Draw::new(m, i).with_material(a))
+            .collect();
+        while r
+            .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+            .unwrap()
+            .is_none()
+        {
+            r.test_drain("timing admission");
+        }
+        r.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let samples = r.poll().unwrap().gpu;
+        if frame >= 16 {
+            times.extend(samples.iter().map(|s| s.render_span.as_secs_f64() * 1000.0));
+        }
+    }
+    assert_eq!(times.len(), 8);
+    eprintln!(
+        "DRAW_TIMING limit={} nonrt={} ms={times:?}",
+        crate::TRACED_DRAWS,
+        nonrt()
     );
 }
