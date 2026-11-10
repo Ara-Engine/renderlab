@@ -25,6 +25,8 @@ pub(crate) struct EnvironmentInner {
     pub hash: [u8; 32],
 }
 pub(crate) struct EnvironmentCube {
+    /// A cube texture's cube-array view (cube i is layers 6i..6i+5), as lighting group 3
+    /// binds it; the lobe table's plain 2D view.
     pub view: Owned<wgpu::TextureView>,
     pub _texture: Owned<wgpu::Texture>,
     pub _allocation: Allocation,
@@ -154,8 +156,8 @@ pub(crate) const BANK_SIZE: u32 = 32;
 
 /// P-SHOW2 (docs/p-show2.md): a legacy mip chain's levels narrower than BANK_SIZE, as
 /// equal-size array banks of BANK_SIZE faces. Each texel is the level's own exact
-/// cube-bilinear value (shaders/scene.wgsl `environment_bilinear`, seams and corners
-/// included) at the texel's centre direction. On 8- to 1-texel levels almost every shading
+/// cube-bilinear value (seams and corners included, as the shading's filtered cube
+/// lookup reads them) at the texel's centre direction. On 8- to 1-texel levels almost every shading
 /// lookup crossed a face edge into the slow cross-face path: Showcase's 16-texel Sky::Map
 /// cost +38 ms of glossy shading at 1080p. In the banks almost every lookup stays inside
 /// its face. Levels at least BANK_SIZE wide keep their exact mips. Returns the first banked
@@ -187,7 +189,8 @@ pub(crate) fn bank_legacy(levels: &[CubeLevel]) -> Option<(usize, Vec<Vec<u8>>)>
     Some((start, banks))
 }
 
-// CPU mirrors of shaders/scene.wgsl's face selection and exact cube-bilinear lookup.
+// CPU cube-bilinear lookup for the banks: WebGPU face selection, and three-face corners as
+// seamless cube filtering reads them.
 fn face_uv(d: [f32; 3]) -> (i32, [f32; 2]) {
     let a = d.map(f32::abs);
     if a[0] >= a[1] && a[0] >= a[2] {
