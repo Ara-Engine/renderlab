@@ -957,7 +957,8 @@ fn gpu_draws_above_64() {
             .chunks_exact(4)
             .zip(hit.chunks_exact(16))
             .filter(|(c, h)| {
-                h[..4] == ((group + 1) as u32).to_le_bytes() && c[0] > 128 && c[1] < 8 && c[2] < 8
+                // Linear red 1.0 displays near 127 through the filmic curve.
+                h[..4] == ((group + 1) as u32).to_le_bytes() && c[0] > 96 && c[1] < 8 && c[2] < 8
             })
             .count();
         assert!(
@@ -1002,53 +1003,107 @@ fn gpu_draws_above_64() {
     );
 }
 
-/// Small existing MP1 floor/eight-box scene; timestamp span, eight warmed samples.
+/// The limit's cost when unused: a floor and 8 or 62 boxes (9 and 63 groups, both under the
+/// old limit of 64), each a mesh-material group of its own. Prints the median of 16 warmed
+/// timestamp spans per scene; build at `TRACED_DRAWS` 64 and 256 to compare.
 #[test]
 #[ignore = "Vulkan GPU; same acknowledgement and path selection as gpu_mp1_mixed_programs"]
-fn gpu_draw_limit_small_timing() {
+fn gpu_draw_limit_timing() {
     let mut r = renderer();
-    let mut scene = Scene::new(&mut r);
     let standard = r.standard_program().clone();
-    let materials: Vec<_> = (0..9)
-        .map(|_| material(&mut r, &standard, 0.6, 0.0))
-        .collect();
     let target = crate::tests::target(r.device(), 640, 480);
     let camera = Camera::look_at(
-        Vec3::new(0.0, 2.2, 5.5),
+        Vec3::new(0.0, 9.0, 9.0),
         Vec3::new(0.0, 0.5, 0.0),
         Vec3::Y,
-        0.8,
+        0.9,
         0.01,
         100.0,
     )
     .unwrap();
-    let mut times = vec![];
-    for frame in 0..24 {
-        let mut draws: Vec<_> = scene
-            .meshes
-            .iter()
-            .zip(scene.instances.iter_mut())
-            .zip(&materials)
-            .take(9)
-            .map(|((m, i), a)| Draw::new(m, i).with_material(a))
+    for boxes in [8usize, 62] {
+        let mut shapes = vec![quad(
+            [
+                [-10.0, 0.0, -10.0],
+                [-10.0, 0.0, 10.0],
+                [10.0, 0.0, 10.0],
+                [10.0, 0.0, -10.0],
+            ],
+            [0.0, 1.0, 0.0],
+        )];
+        for i in 0..boxes {
+            let (x, z) = ((i % 8) as f32 - 3.5, (i / 8) as f32 - 3.5);
+            shapes.push(cube([x, 0.4, z], 0.35, [0.8, 0.8, 0.8, 1.0]));
+        }
+        let mut meshes = vec![];
+        let mut instances = vec![];
+        for (vertices, indices) in &shapes {
+            meshes.push(loop {
+                if let Some(v) = r.try_upload_mesh(&MeshData { vertices, indices }).unwrap() {
+                    break v;
+                }
+                r.test_drain("timing mesh");
+            });
+            instances.push(loop {
+                if let Some(v) = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap() {
+                    break v;
+                }
+                r.test_drain("timing instances");
+            });
+        }
+        let materials: Vec<_> = (0..shapes.len())
+            .map(|i| material(&mut r, &standard, 0.4 + 0.004 * i as f32, 0.0))
             .collect();
-        while r
-            .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
-            .unwrap()
-            .is_none()
-        {
-            r.test_drain("timing admission");
+        let mut times = vec![];
+        let mut passes = vec![];
+        for frame in 0..48 {
+            let mut draws: Vec<_> = meshes
+                .iter()
+                .zip(instances.iter_mut())
+                .zip(&materials)
+                .map(|((m, i), a)| Draw::new(m, i).with_material(a))
+                .collect();
+            while r
+                .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("timing admission");
+            }
+            r.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let samples = r.poll().unwrap().gpu;
+            if frame >= 32 {
+                for s in &samples {
+                    times.push(s.render_span.as_secs_f64() * 1000.0);
+                    let ms = |d: Option<std::time::Duration>| {
+                        d.map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+                    };
+                    passes.push([
+                        s.mesh_pass.as_secs_f64() * 1000.0,
+                        ms(s.receiver_pass),
+                        ms(s.shadow_generation),
+                    ]);
+                }
+            }
         }
-        r.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let samples = r.poll().unwrap().gpu;
-        if frame >= 16 {
-            times.extend(samples.iter().map(|s| s.render_span.as_secs_f64() * 1000.0));
-        }
+        assert_eq!(times.len(), 16);
+        times.sort_by(f64::total_cmp);
+        let pass_median = |k: usize| {
+            let mut v: Vec<f64> = passes.iter().map(|p| p[k]).collect();
+            v.sort_by(f64::total_cmp);
+            (v[7] + v[8]) / 2.0
+        };
+        eprintln!(
+            "DRAW_TIMING limit={} nonrt={} groups={} median_ms={:.3} min_ms={:.3} max_ms={:.3} shading_ms={:.3} rays_ms={:.3} shadows_ms={:.3}",
+            crate::TRACED_DRAWS,
+            nonrt(),
+            shapes.len(),
+            (times[7] + times[8]) / 2.0,
+            times[0],
+            times[15],
+            pass_median(0),
+            pass_median(1),
+            pass_median(2)
+        );
     }
-    assert_eq!(times.len(), 8);
-    eprintln!(
-        "DRAW_TIMING limit={} nonrt={} ms={times:?}",
-        crate::TRACED_DRAWS,
-        nonrt()
-    );
 }
