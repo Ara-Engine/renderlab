@@ -29,11 +29,12 @@ pub use crate::asset::{
 };
 pub use crate::cutout::{AlphaMask, CutoutMesh, cutout};
 pub use crate::{
-    AtmosphereMedium, Camera, ColourLut, Decal, DecalBlend, DecalTexture, DecalTextureKind,
-    DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, FrameId, FrameReport, HeightFog,
-    Light, Limits, LocalShadows, MAX_PARTICLES, Mat4, MeshData, PostSettings, ReflectionSettings,
-    ReloadError, ReloadReport, RenderScale, Renderer, Tonemapper, Transparency, Value, Vec3,
-    Vertex, VolumetricFog,
+    AtmosphereMedium, Camera, ColorKey, ColourLut, Decal, DecalBlend, DecalTexture,
+    DecalTextureKind, DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, Flipbook,
+    Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
+    MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
+    ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
+    Transparency, Value, Vec3, Vertex, VolumetricFog,
 };
 
 use crate::{

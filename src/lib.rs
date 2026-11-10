@@ -89,7 +89,8 @@ pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
 pub use transparency::{
-    Emitter, EmitterDescriptor, MAX_PARTICLES, Transparency, TransparencyStats,
+    ColorKey, Emitter, EmitterDescriptor, Flipbook, Forces, MAX_CURVE_KEYS, MAX_PARTICLES,
+    PlaneCollision, SizeKey, SpawnShape, SpriteAlignment, Transparency, TransparencyStats,
 };
 pub use wgpu;
 

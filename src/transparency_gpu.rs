@@ -14,7 +14,10 @@
 //! optional `transmittance` hook). Their sun visibility is the renderer's hardware ray on
 //! RT renderers and the shadow map otherwise; particles use the map on both.
 use super::*;
-use crate::transparency::{Emitter, EmitterDescriptor, EmitterShared, TransparencyStats};
+use crate::transparency::{
+    Emitter, EmitterDescriptor, EmitterShared, Forces, MAX_CURVE_KEYS, PlaneCollision, SpawnShape,
+    TransparencyStats,
+};
 use glam::Vec4;
 
 #[path = "transparency_reflection.rs"]
@@ -31,7 +34,10 @@ const SLOT: u64 = 256;
 /// The camera block at 0, then `TpFrame` at 256.
 const FRAME_OFFSET: u64 = 256;
 const FRAME_BYTES: u64 = 336;
-const EMITTER_BYTES: u64 = 160;
+/// WGSL `TpEmitter`: ten vec4s of TP1, then shape, velocity box, forces, collision,
+/// curve counts, the colour, emission and size curves, and the sprite's alignment and
+/// flipbook (`EmitterParams::uniform`).
+const EMITTER_BYTES: u64 = 512;
 const PARTICLE_BYTES: u64 = 48;
 
 fn glass_samples() -> u32 {
@@ -258,6 +264,10 @@ struct EmitterSlot {
     sorted: Owned<wgpu::Buffer>,
     spawned: u64,
     carry: f64,
+    /// Seconds of history the first frame spawns (`EmitterDescriptor::prewarm`), and the
+    /// burst it adds; both zero once spawned.
+    warm: f32,
+    burst: u32,
     _allocation: Allocation,
 }
 /// An emitter descriptor without its texture borrow.
@@ -265,17 +275,28 @@ struct EmitterSlot {
 struct EmitterParams {
     position: Vec3,
     spawn_radius: f32,
+    spawn_shape: SpawnShape,
     spawn_rate: f32,
     lifetime: [f32; 2],
     velocity: Vec3,
     velocity_spread: f32,
+    velocity_box: Vec3,
     acceleration: Vec3,
     drag: f32,
+    forces: Forces,
+    collision: Option<PlaneCollision>,
     size: [f32; 2],
     color: [[f32; 4]; 2],
     emission: [[f32; 3]; 2],
+    /// Curves copied out of the descriptor's borrows: key count, then (t, value) keys.
+    color_keys: (usize, [crate::transparency::ColorKey; MAX_CURVE_KEYS]),
+    size_keys: (usize, [crate::transparency::SizeKey; MAX_CURVE_KEYS]),
     fade: [f32; 2],
     soft_distance: f32,
+    flipbook: Option<crate::transparency::Flipbook>,
+    alignment: crate::transparency::SpriteAlignment,
+    aspect: f32,
+    random_rotation: bool,
     capacity: u32,
     seed: u32,
 }
@@ -284,17 +305,33 @@ impl EmitterParams {
         Self {
             position: d.position,
             spawn_radius: d.spawn_radius,
+            spawn_shape: d.spawn_shape,
             spawn_rate: d.spawn_rate,
             lifetime: d.lifetime,
             velocity: d.velocity,
             velocity_spread: d.velocity_spread,
+            velocity_box: d.velocity_box,
             acceleration: d.acceleration,
             drag: d.drag,
+            forces: d.forces,
+            collision: d.collision,
             size: d.size,
             color: d.color,
             emission: d.emission,
+            color_keys: (
+                d.color_keys.len(),
+                std::array::from_fn(|i| d.color_keys.get(i).copied().unwrap_or_default()),
+            ),
+            size_keys: (
+                d.size_keys.len(),
+                std::array::from_fn(|i| d.size_keys.get(i).copied().unwrap_or_default()),
+            ),
             fade: d.fade,
             soft_distance: d.soft_distance,
+            flipbook: d.flipbook,
+            alignment: d.alignment,
+            aspect: d.aspect,
+            random_rotation: d.random_rotation,
             capacity: d.capacity,
             seed: d.seed,
         }
@@ -302,18 +339,45 @@ impl EmitterParams {
     /// A world box every live particle stays inside.
     fn bounds(&self) -> (Vec3, Vec3) {
         let life = self.lifetime[1];
+        let shape = match self.spawn_shape {
+            SpawnShape::Sphere => 0.0,
+            SpawnShape::Box { half_extent } => half_extent.length(),
+            SpawnShape::Cone { axis } => axis.length(),
+        };
+        // Forces bound by their strength (curl's field is at most 2 per axis); a vortex
+        // or attractor is bounded by the distance it could carry a particle in a life.
+        let f = &self.forces;
+        let pull = 2.0 * 3f32.sqrt() * f.curl[1].abs()
+            + f.vortex_axis.length()
+                * (self.spawn_radius + shape + self.position.distance(f.vortex_center))
+            + f.attractor_strength[0].abs() / f.attractor_strength[1].max(1e-6).powf(1.5);
+        let largest = self.size_keys.1[..self.size_keys.0]
+            .iter()
+            .fold(self.size[0].max(self.size[1]), |m, k| m.max(k.size));
         let reach = self.spawn_radius
-            + (self.velocity.length() + self.velocity_spread) * life
-            + 0.5 * self.acceleration.length() * life * life
-            + 0.5 * self.size[0].max(self.size[1]);
+            + shape
+            + (self.velocity.length() + self.velocity_spread + self.velocity_box.length()) * life
+            + 0.5 * (self.acceleration.length() + pull) * life * life
+            + 0.5 * largest;
         (
             self.position - Vec3::splat(reach),
             self.position + Vec3::splat(reach),
         )
     }
-    fn uniform(&self, first: u32, spawned: u32, textured: bool) -> [u8; EMITTER_BYTES as usize] {
-        let mut f = [0f32; 40];
-        let v4 = |f: &mut [f32; 40], at: usize, v: [f32; 4]| f[at..at + 4].copy_from_slice(&v);
+    /// `window`: the span this step's spawns are spread over, seconds (0: the step).
+    /// `burst`: how many of this step's spawns (the last, youngest) are burst births,
+    /// aged within the step rather than across `window`.
+    fn uniform(
+        &self,
+        first: u32,
+        spawned: u32,
+        burst: u32,
+        textured: bool,
+        window: f32,
+    ) -> [u8; EMITTER_BYTES as usize] {
+        const FLOATS: usize = EMITTER_BYTES as usize / 4;
+        let mut f = [0f32; FLOATS];
+        let v4 = |f: &mut [f32; FLOATS], at: usize, v: [f32; 4]| f[at..at + 4].copy_from_slice(&v);
         v4(
             &mut f,
             0,
@@ -348,6 +412,88 @@ impl EmitterParams {
                 self.soft_distance,
                 sorted,
                 f32::from(u8::from(textured)),
+                window,
+            ],
+        );
+        // 40: shape (kind, then the box's half extents or the cone's height).
+        v4(
+            &mut f,
+            40,
+            match self.spawn_shape {
+                SpawnShape::Sphere => [0.0; 4],
+                SpawnShape::Box { half_extent } => {
+                    [1.0, half_extent.x, half_extent.y, half_extent.z]
+                }
+                SpawnShape::Cone { axis } => [2.0, axis.x, axis.y, axis.z],
+            },
+        );
+        let fo = &self.forces;
+        v4(&mut f, 44, self.velocity_box.extend(0.0).to_array());
+        v4(&mut f, 48, [fo.curl[0], fo.curl[1], burst as f32, 0.0]);
+        v4(&mut f, 52, fo.vortex_center.extend(0.0).to_array());
+        v4(&mut f, 56, fo.vortex_axis.extend(0.0).to_array());
+        v4(
+            &mut f,
+            60,
+            fo.attractor.extend(fo.attractor_strength[0]).to_array(),
+        );
+        let (normal, offset, restitution) = self.collision.map_or((Vec3::ZERO, 0.0, 0.0), |c| {
+            (c.normal.normalize(), c.offset, c.restitution)
+        });
+        v4(&mut f, 64, normal.extend(offset).to_array());
+        v4(
+            &mut f,
+            68,
+            [
+                restitution,
+                fo.attractor_strength[1],
+                self.color_keys.0 as f32,
+                self.size_keys.0 as f32,
+            ],
+        );
+        // 72: colour key times; 76: colours; 92: emissions; 108: size key times; 112: sizes.
+        let (colors, sizes) = (&self.color_keys.1, &self.size_keys.1);
+        v4(&mut f, 72, colors.map(|k| k.t));
+        for (i, k) in colors.iter().enumerate() {
+            v4(&mut f, 76 + 4 * i, k.color);
+            v4(
+                &mut f,
+                92 + 4 * i,
+                [k.emission[0], k.emission[1], k.emission[2], 0.0],
+            );
+        }
+        v4(&mut f, 108, sizes.map(|k| k.t));
+        v4(&mut f, 112, sizes.map(|k| k.size));
+        // 116: alignment (mode, stretch or the plane's unit normal); 120: flipbook.
+        use crate::transparency::SpriteAlignment;
+        v4(
+            &mut f,
+            116,
+            match self.alignment {
+                SpriteAlignment::Camera => [0.0; 4],
+                SpriteAlignment::Velocity { stretch } => [1.0, stretch, 0.0, 0.0],
+                SpriteAlignment::Plane { normal } => {
+                    let n = normal.normalize();
+                    [2.0, n.x, n.y, n.z]
+                }
+            },
+        );
+        v4(
+            &mut f,
+            120,
+            self.flipbook.map_or([1.0, 1.0, 0.0, 0.0], |b| {
+                let play = if b.over_life { 2.0 } else { 1.0 };
+                [b.grid[0] as f32, b.grid[1] as f32, b.fps, play]
+            }),
+        );
+        // 124: sprite aspect and random rotation.
+        v4(
+            &mut f,
+            124,
+            [
+                self.aspect,
+                f32::from(u8::from(self.random_rotation)),
+                0.0,
                 0.0,
             ],
         );
@@ -1098,10 +1244,11 @@ impl Renderer {
             )
         };
         // wgpu zero-initializes buffers: every slot starts dead (lifetime 0).
+        // COPY_SRC: tests read particles back.
         let particles = buffer(
             "TP1 particles",
             u64::from(d.capacity) * PARTICLE_BYTES,
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
         let sorted = buffer(
             "TP1 particle order",
@@ -1160,6 +1307,8 @@ impl Renderer {
             sorted,
             spawned: 0,
             carry: 0.0,
+            warm: d.prewarm,
+            burst: d.burst,
             _allocation: self.ledger.allocate(
                 AllocationKind::Target,
                 u64::from(d.capacity) * PARTICLE_BYTES + sorted_len * 4 + EMITTER_BYTES,
@@ -1590,16 +1739,33 @@ impl Renderer {
         // Emitters' spawns for this step.
         let step = f64::from(self.transparency.step);
         for e in &mut self.transparency.emitters {
-            e.carry += f64::from(e.params.spawn_rate) * step;
-            let spawned = (e.carry.floor() as u64).min(u64::from(e.params.capacity));
+            // A new emitter's first step spawns its prewarm span (no longer than a life:
+            // older particles would be dead), spread over that span, plus its burst.
+            // The burst is born this step; rate births fill the prewarm window (or the
+            // step). Past the ring's capacity only the newest births are kept: the
+            // window shrinks to the span they cover, and the spawn ordinal skips the
+            // older births as a running ring would have overwritten them.
+            let capacity = u64::from(e.params.capacity);
+            let burst = u64::from(e.burst).min(capacity);
+            let mut window = f64::from(e.warm.min(e.params.lifetime[1]));
+            e.carry += f64::from(e.params.spawn_rate) * if window > 0.0 { window } else { step };
+            let births = e.carry.floor() as u64;
             e.carry -= e.carry.floor();
+            let kept = births.min(capacity - burst);
+            if window > 0.0 && births > kept {
+                window *= kept as f64 / births as f64;
+                e.spawned += births - kept;
+            }
+            (e.warm, e.burst) = (0.0, 0);
             let first = e.spawned as u32;
+            let spawned = kept + burst;
             e.spawned += spawned;
             let textured = e.sprite.is_some();
             self.queue.write_buffer(
                 &e.uniform,
                 0,
-                &e.params.uniform(first, spawned as u32, textured),
+                &e.params
+                    .uniform(first, spawned as u32, burst as u32, textured, window as f32),
             );
         }
         // ---- GPU ----
