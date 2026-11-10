@@ -10,7 +10,6 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
     let source = hoist_directives(&adapt(pass)?);
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
-    let info = validate(&module)?;
     let entries: Vec<_> = if pass.raster() {
         vec![
             (naga::ShaderStage::Vertex, pass.vertex()),
@@ -22,18 +21,31 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
     entries
         .into_iter()
         .map(|(stage, entry)| {
+            // The cooked Vulkan ABI requires native main; retain the source name
+            // separately for diagnostics and artifact names, as on the PC replay.
+            let mut selected = module.clone();
+            selected
+                .entry_points
+                .iter_mut()
+                .find(|e| e.stage == stage && e.name == entry)
+                .context("selected SPIR-V entry missing")?
+                .name = "main".into();
+            let info = validate(&selected)?;
             let mut words = naga::back::spv::write_vec(
-                &module,
+                &selected,
                 &info,
                 &naga::back::spv::Options {
                     lang_version: (1, 5),
+                    // Keep Naga's existing unchecked SPIR-V policy: enabling
+                    // checks hits its descriptor-wrapper inference and unsigned
+                    // vector constant bugs. Metal checks are enabled separately.
                     flags: naga::back::spv::Options::default().flags
                         | naga::back::spv::WriterFlags::DEBUG,
                     ..Default::default()
                 },
                 Some(&naga::back::spv::PipelineOptions {
                     shader_stage: stage,
-                    entry_point: entry.into(),
+                    entry_point: "main".into(),
                 }),
             )?;
             // Naga 30 emits OpTypeRuntimeArray for descriptor binding arrays but does
@@ -72,27 +84,13 @@ fn adapt(pass: Pass) -> Result<String> {
     let source =
         naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())?;
     let original = parse(&source)?;
-    let mut body = String::new();
-    let mut binding = false;
-    for line in source.lines() {
-        if line.trim_start().starts_with("@group(") {
-            binding = true;
-        }
-        if binding {
-            if line.contains(';') {
-                binding = false;
-            }
-            continue;
-        }
-        body.push_str(line);
-        body.push('\n');
-    }
+    let body = strip_bindings(&source);
     if pass.indirect() {
         super::heap_interface::assert_contract(
             pass,
             &super::heap_interface::from_module(&original)?,
         )?;
-        return super::packet_spirv::adapt(&body, &original);
+        return super::packet_spirv::adapt(&source, &original);
     }
     if matches!(pass, Pass::MeshDiagnostic) {
         return mesh_interface(&body, &original);
@@ -147,6 +145,25 @@ var<immediate> ara_root:AraRoot;
 {out}
 "#
     ))
+}
+
+pub(super) fn strip_bindings(source: &str) -> String {
+    let mut body = String::new();
+    let mut binding = false;
+    for line in source.lines() {
+        if line.trim_start().starts_with("@group(") {
+            binding = true;
+        }
+        if binding {
+            if line.contains(';') {
+                binding = false;
+            }
+            continue;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    body
 }
 
 /// Naga 30 passes a loaded image value for binding-array elements although its
@@ -301,6 +318,11 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 .and_then(|n| n.parse::<u32>().ok())
             {
                 Some((1600 + n, 3))
+            } else if let Some(n) = name
+                .strip_prefix("ara_array_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((1900 + n, 1))
             } else if name == "ara_depths" {
                 Some((11, 5))
             } else if name == "ara_volume_outputs" {

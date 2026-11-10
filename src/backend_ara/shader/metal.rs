@@ -17,6 +17,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let info = validate(&module)?;
     let mut options = msl::Options {
         lang_version: pass.metal_version(),
+        bounds_check_policies: super::bounds_checks(),
         fake_missing_bindings: false,
         ..Default::default()
     };
@@ -65,6 +66,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let (mut source, translation) =
         msl::write_string(&module, &info, &options, &msl::PipelineOptions::default())?;
     repair_per_vertex_members(&mut source, &module)?;
+    super::buffer_arrays::adapt(&mut source, &module)?;
     let names = translation
         .entry_point_names
         .into_iter()
@@ -228,6 +230,9 @@ fn wrap(
             let slot = super::heap_interface::slot(ordinal);
             let call = match input.kind {
                 super::InputKind::Buffer { .. } => buffer_at(parameter, &slot)?,
+                super::InputKind::BufferArray { .. } => {
+                    super::buffer_arrays::argument(parameter, ordinal)?
+                }
                 super::InputKind::Sampler { comparison } => format!(
                     "top.{}[{slot}].state",
                     if comparison {
@@ -276,6 +281,23 @@ fn wrap(
                 .name
                 .as_deref()
                 .context("runtime buffer missing name")?;
+            if matches!(
+                module.types[global.ty].inner,
+                naga::TypeInner::BindingArray { .. }
+            ) {
+                let inputs = indirect
+                    .as_ref()
+                    .context("buffer arrays require an input packet")?;
+                let ordinal = super::heap_interface::ordinal(
+                    inputs,
+                    global.binding.context("array binding missing")?,
+                )?;
+                sizes.push(format!(
+                    "AraBufferSizes{{top.buffers,{}}}",
+                    super::buffer_arrays::slots(ordinal)
+                ));
+                continue;
+            }
             let slot = if let Some(inputs) = &indirect {
                 super::heap_interface::slot(super::heap_interface::ordinal(
                     inputs,

@@ -43,7 +43,7 @@ impl ShaderCache {
         state: RenderState,
     ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             pass.source(),
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
@@ -54,6 +54,8 @@ impl ShaderCache {
             include_str!("shader/heap_interface.rs"),
             include_str!("shader/packet_spirv.rs"),
             include_str!("shader/spv_layout.rs"),
+            include_str!("shader/array_access.rs"),
+            include_str!("shader/buffer_arrays.rs"),
             include_str!("cache.rs"),
             include_str!("../../Cargo.lock")
         );
@@ -183,8 +185,9 @@ pub fn emit_spirv(pass: Pass, dir: &Path) -> Result<Vec<CookedStage>> {
             _ => anyhow::bail!("unsupported shader stage"),
         };
         stages.push(CookedStage {
-            source_entry: stage.entry.clone(),
-            spirv_entry: stage.entry,
+            source_entry: stage.entry,
+            // The adapter renames the selected IR entry to the native ABI.
+            spirv_entry: "main".into(),
             stage: kind,
             spirv: name,
             dxil: String::new(),

@@ -572,3 +572,68 @@ without state mutation. Actual mixed-mip Vulkan execution remains pending.
 There are 31 original entries plus display transfer. All 21 focused tests pass,
 including Metal API/shader-validated replays and the pure barrier-plan check; all 39
 SPIR-V stages validate. Native Vulkan and full visibility raster/shading remain pending.
+
+## Fixed buffer arrays and software/hardware visibility raster
+
+The unchanged `visibility_buffer_sw.wgsl::raster` and
+`visibility_buffer_raster.wgsl::{vs,fs}` now run through Ara on Metal. Both use
+64 logical cluster-data buffers. `Input::Buffers` validates the source count and
+minimum element layout, retains every owner, and writes arbitrary heap indices
+into a tail of the existing persistent storage packet. Its input head word is an
+absolute word offset to that tail. Root constants remain 32 bytes. Repeated owners
+are allowed; identical shader-storage declarations deduplicate in the graph.
+Incompatible access aliases still fail.
+
+Naga's MSL buffer-array parameter becomes a lazy `AraBufferArray<Ptr>` value;
+its `operator[]` resolves one packet slot to a buffer pointer. The generated
+`.inner`, member accesses and local pointers stay intact. `AraBufferSizes` obtains
+per-element byte lengths from heap metadata on demand. No 64-pointer argument array
+is reconstructed. SPIR-V rewrites only the first indexed access rooted at each
+original array global, preserving downstream members, pointers and `arrayLength`.
+Typed runtime descriptor aliases still end at set0/binding1. Three pure tests cover
+nested/dynamic/constant indices, shadowed names, parentheses and mismatched spans.
+
+Metal index, data-buffer and image-load policies are now explicitly `Restrict`,
+matching wgpu's Metal checks. Earlier comments intended to preserve checks but
+Naga's defaults were actually unchecked. The Metal-only conformance probe proves
+unequal buffer lengths, a 16-byte prefix, scattered and repeated slots, restricted
+out-of-range data reads and shared writable atomic sums. SPIR-V retains its previous
+unchecked policy: enabling Naga30 checks fails descriptor-wrapper inference and
+emits an invalid signed constant in an unsigned-vector composite. Consequently this
+probe is not Vulkan evidence; native robustness and the complete Vulkan cohort
+remain pending on the PC.
+
+The raster replay queues direct and indirect draws of both paths before the first host wait. Its independent
+f64/i64 oracle checks all 256 pixel words and four allocation guards exactly:
+12 clusters, two actual data owners at logical slots3/37, mirror/translation,
+front/back rejection, depth and triangle-ID ties, degenerate triangles, partial and
+fully offscreen geometry, and three padded software workgroups. Hardware emits
+384 procedural vertices per cluster with GreaterEqual depth writes so equal-depth
+fragments reach the unsigned 64-bit maximum. Both constructors reject devices
+without the required unsigned buffer min/max capability. The fixed fixture has
+constant dyadic depth and no pixel centres on edges; varying depth and near-plane
+clipping remain unproven.
+
+There are 33 original renderer entries plus display transfer. All 27 focused tests
+pass with Metal API/shader validation; all 43 exported SPIR-V stages (including the
+adapter probe) validate for Vulkan1.3. Native Vulkan runs remain pending. The
+repository's unrelated lib-test target currently fails E0275 in
+`receiver_policy_tests.rs:396` on this Mac; the pure frontend tests also compile
+and pass inside the focused integration target.
+
+The consolidated buffer-array review found no must-fix defect. Its GPU-driven wiring
+findings are now covered: `ShaderRead` plus `Indirect` on one buffer merges to Ara's
+existing combined `Indirect` access, and hardware draws consume the original args
+record at byte16. The fixture first copies args on the GPU, then queues direct SW/HW
+and indirect SW/HW snapshots. The final hardware draw loads the initialized depth
+attachment; attempting that load before a producer is rejected. Short array counts
+and short element layouts are also rejected. A pure graph test checks both read
+orderings and transactional rejection of write/read aliases.
+
+Ara is now pinned to `c040cc1d5`, including both native backends and the complete
+joint test cohort. The Linux gate exposed Ara's requirement that SPIR-V exports native entry
+`main`. The adapter now renames the selected IR entry without changing WGSL.
+Every emitted stage's metadata records `main`; the export test reads `OpEntryPoint` from each binary
+and checks it against its metadata before structural validation. Native Vulkan
+execution of this Renderlab cohort still remains pending. No new Ara API or decision
+override was needed for the buffer-array or indirect-raster integration.

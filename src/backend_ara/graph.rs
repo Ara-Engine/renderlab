@@ -117,7 +117,8 @@ impl Graph {
         )
     }
     /// Validate exact aliases and batch RAW/WAR/WAW dependencies. Disjoint image
-    /// mips/layers can be read and written in one node; overlapping writes cannot.
+    /// mips/layers can be read and written in one node. Identical shader-storage
+    /// uses deduplicate; incompatible roles and overlapping attachment writes fail.
     /// Invalid declarations leave both the tracker and recorder unchanged.
     pub fn node_uses(&mut self, rec: &mut Recorder, uses: &[ResourceUse]) -> Result<()> {
         rec.barrier_ranges(self.plan(uses)?);
@@ -201,11 +202,23 @@ impl Graph {
             );
             let mut add = |cell| -> Result<()> {
                 let key = Key { resource, cell };
-                if let Some((_, old)) = unique.iter().find(|(k, _)| *k == key) {
-                    ensure!(
-                        *old == access && !access.writes(),
-                        "incompatible aliases in one node"
-                    );
+                if let Some((_, old)) = unique.iter_mut().find(|(k, _)| *k == key) {
+                    if matches!(resource, Resource::Buffer(_))
+                        && matches!(
+                            (*old, access),
+                            (Access::ShaderRead, Access::Indirect)
+                                | (Access::Indirect, Access::ShaderRead)
+                        )
+                    {
+                        // Both native backends already include shader reads in
+                        // Indirect. One GPU-produced args record can serve both.
+                        *old = Access::Indirect;
+                    } else {
+                        ensure!(
+                            *old == access && (!access.writes() || access == Access::Storage),
+                            "incompatible aliases in one node"
+                        );
+                    }
                 } else {
                     unique.push((key, access));
                 }

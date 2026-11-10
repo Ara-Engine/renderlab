@@ -21,6 +21,12 @@ impl Kernel {
             pass.indirect() && !pass.raster(),
             "entry needs a reflected compute packet"
         );
+        if pass == Pass::VisibilitySoftware {
+            ensure!(
+                gpu.info().buffer_int64_atomics,
+                "software visibility needs unsigned 64-bit buffer min/max atomics"
+            );
+        }
         let threads = pass.threads()?;
         Ok(Self {
             pipeline: cache.pipeline(gpu, pass, RenderState::default())?,

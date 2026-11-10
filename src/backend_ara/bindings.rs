@@ -14,6 +14,8 @@ use ara_gpu::{
 pub enum Input<'a> {
     /// Storage-backed data with the source WGSL layout.
     Buffer(&'a StorageBuffer),
+    /// Fixed logical array; elements may share owners or use scattered heap slots.
+    Buffers(&'a [&'a StorageBuffer]),
     /// Immutable sampled view, with its native dimension retained.
     Image(&'a Texture),
     /// Cached regular or comparison sampler description.
@@ -27,6 +29,8 @@ pub struct HeapBindings<'a> {
     pass: Pass,
 }
 impl<'a> HeapBindings<'a> {
+    /// Array heads contain buffer-absolute tail word offsets. Packing records
+    /// into an arena must relocate those offsets as well as the root byte offset.
     /// Validate the complete selected interface once; allocate only an ordinary
     /// storage record. Original group/binding numbers are logical source keys.
     pub fn new(gpu: &mut GpuDevice, pass: Pass, values: &[(InputKey, Input<'a>)]) -> Result<Self> {
@@ -39,9 +43,10 @@ impl<'a> HeapBindings<'a> {
             values.len() == layout.len(),
             "wrong number of selected shader inputs"
         );
-        let mut words = vec![layout.len() as u32, 0, 0, 0];
+        let mut words = vec![0; 4 + layout.len()];
+        words[0] = layout.len() as u32;
         let mut retained = Vec::new();
-        for required in &layout {
+        for (ordinal, required) in layout.iter().enumerate() {
             let mut matches = values.iter().filter(|(key, _)| *key == required.key);
             let value = matches
                 .next()
@@ -65,6 +70,22 @@ impl<'a> HeapBindings<'a> {
                         required.name
                     );
                     b.slot
+                }
+                (InputKind::BufferArray { count, minimum, .. }, Input::Buffers(buffers)) => {
+                    ensure!(
+                        buffers.len() == count as usize,
+                        "buffer array {} has the wrong length",
+                        required.name
+                    );
+                    ensure!(
+                        buffers.iter().all(|b| b.len >= u64::from(minimum)),
+                        "buffer array {} has a short element",
+                        required.name
+                    );
+                    let start = u32::try_from(words.len())
+                        .context("input packet exceeds 32-bit indexing")?;
+                    words.extend(buffers.iter().map(|b| b.slot));
+                    start
                 }
                 (InputKind::Image { dimension, sample }, Input::Image(t)) => {
                     ensure!(
@@ -122,7 +143,7 @@ impl<'a> HeapBindings<'a> {
                 }
                 _ => anyhow::bail!("input {} has the wrong resource kind", required.name),
             };
-            words.push(slot);
+            words[4 + ordinal] = slot;
             retained.push(value);
         }
         let record = StorageBuffer::new(gpu, bytemuck::cast_slice(&words))?;
@@ -141,7 +162,8 @@ impl<'a> HeapBindings<'a> {
     pub fn import(&self, graph: &mut Graph) {
         graph.import(Resource::Buffer(self.record.buffer), Access::HostWrite);
     }
-    /// Retained buffer at an original source key, for encoder range validation.
+    /// Retained scalar buffer at a source key, for encoder range validation.
+    /// Array keys return None; their elements remain retained in the packet.
     pub fn buffer(&self, key: InputKey) -> Option<&StorageBuffer> {
         self.layout
             .iter()
@@ -172,6 +194,19 @@ impl<'a> HeapBindings<'a> {
                         Access::ShaderRead
                     },
                 )),
+                Input::Buffers(buffers) => {
+                    let access =
+                        if matches!(spec.kind, InputKind::BufferArray { writable: true, .. }) {
+                            Access::Storage
+                        } else {
+                            Access::ShaderRead
+                        };
+                    uses.extend(
+                        buffers
+                            .iter()
+                            .map(|b| ResourceUse::Whole(Resource::Buffer(b.buffer), access)),
+                    );
+                }
                 Input::Image(t) => uses.push(t.usage(
                     if matches!(spec.kind, InputKind::StorageImage { .. }) {
                         Access::Storage

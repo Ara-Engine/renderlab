@@ -1,4 +1,6 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
+mod array_access;
+mod buffer_arrays;
 mod heap_interface;
 mod mesh_interface;
 mod metal;
@@ -23,6 +25,12 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Shared frontend conformance probe; not a Renderlab rendering pass.
+    BufferArrayProbe,
+    /// Original software raster of projected cluster triangles into packed visibility.
+    VisibilitySoftware,
+    /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
+    VisibilityHardware,
     /// Non-RT cluster cut, frustum and two-phase HZB classification.
     VisibilityCull,
     /// Cull output counters to indirect raster/pyramid/cull arguments.
@@ -93,6 +101,19 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
+            Self::VisibilityHardware => format!(
+                "{}\n{}",
+                include_str!("../../../shaders/visibility_buffer.wgsl"),
+                include_str!("../../../shaders/visibility_buffer_raster.wgsl")
+            )
+            .into(),
+            Self::VisibilitySoftware => format!(
+                "{}\n{}",
+                include_str!("../../../shaders/visibility_buffer.wgsl"),
+                include_str!("../../../shaders/visibility_buffer_sw.wgsl")
+            )
+            .into(),
             Self::VisibilityCull | Self::VisibilityFinish | Self::VisibilityReset => format!(
                 "{}\n{}",
                 include_str!("../../../shaders/visibility_buffer.wgsl"),
@@ -234,7 +255,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::Tone
+            Self::VisibilityHardware
+                | Self::Tone
                 | Self::Display
                 | Self::AtmosphereBackdrop
                 | Self::MeshDiagnostic
@@ -245,7 +267,10 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::MeshToon
+            Self::BufferArrayProbe
+                | Self::VisibilitySoftware
+                | Self::VisibilityHardware
+                | Self::MeshToon
                 | Self::ParticleUpdate
                 | Self::ParticleBillboard
                 | Self::HzbBase
@@ -315,6 +340,9 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::VisibilityHardware => "fs",
+            Self::VisibilitySoftware => "raster",
+            Self::BufferArrayProbe => "probe",
             Self::VisibilityCull => "cull",
             Self::VisibilityFinish => "finish",
             Self::VisibilityReset => "reset",
@@ -362,7 +390,7 @@ pub struct MetalProgram {
 pub struct SpirvStage {
     /// Native shader stage.
     pub stage: ShaderStage,
-    /// Naga's entry point name.
+    /// Selected WGSL source entry; the adapter renames the native IR entry to `main`.
     pub entry: String,
     /// Little-endian SPIR-V words.
     pub words: Vec<u32>,
@@ -418,4 +446,15 @@ fn transparency_section(name: &str) -> &'static str {
         .split_once(&end)
         .expect("embedded transparency section end")
         .0
+}
+
+// Match wgpu's Metal data checks. Resource-array indices remain caller-valid,
+// as in wgpu; heap-index records are validated when the packet is published.
+pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
+    naga::proc::BoundsCheckPolicies {
+        index: naga::proc::BoundsCheckPolicy::Restrict,
+        buffer: naga::proc::BoundsCheckPolicy::Restrict,
+        image_load: naga::proc::BoundsCheckPolicy::Restrict,
+        binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
+    }
 }

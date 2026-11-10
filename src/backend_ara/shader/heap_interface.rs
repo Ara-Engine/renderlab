@@ -30,6 +30,15 @@ pub enum InputKind {
         /// Whether shader stores are permitted.
         writable: bool,
     },
+    /// Fixed logical array whose elements are arbitrary published buffers.
+    BufferArray {
+        /// Number of source binding-array elements.
+        count: u32,
+        /// Smallest valid element binding in bytes.
+        minimum: u32,
+        /// Whether stores through an element are permitted.
+        writable: bool,
+    },
     /// Sampled image with an explicit view dimension and sample interpretation.
     Image {
         /// Shader view dimension, including single-layer array views.
@@ -77,63 +86,81 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
     let mut inputs = Vec::new();
     for (_, g) in module.global_variables.iter() {
         let Some(binding) = g.binding else { continue };
-        let kind = match g.space {
-            AddressSpace::Uniform => InputKind::Buffer {
-                minimum: layout[g.ty].size,
-                writable: false,
-            },
-            AddressSpace::Storage { access } => InputKind::Buffer {
-                minimum: layout[g.ty].size,
+        let kind = if let TypeInner::BindingArray { base, size } = module.types[g.ty].inner {
+            let naga::ArraySize::Constant(count) = size else {
+                bail!("source binding array needs a fixed element count");
+            };
+            let AddressSpace::Storage { access } = g.space else {
+                bail!("only storage buffer binding arrays are ported");
+            };
+            ensure!(
+                matches!(module.types[base].inner, TypeInner::Struct { .. }),
+                "binding-array elements must be storage structs"
+            );
+            InputKind::BufferArray {
+                count: count.get(),
+                minimum: layout[base].size,
                 writable: access.contains(naga::StorageAccess::STORE),
-            },
-            AddressSpace::Handle => match module.types[g.ty].inner {
-                TypeInner::Sampler { comparison } => InputKind::Sampler { comparison },
-                TypeInner::Image {
-                    dim,
-                    arrayed,
-                    class,
-                } => {
-                    let dimension = match (dim, arrayed) {
-                        (ImageDimension::D2, false) => ViewDimension::D2,
-                        (ImageDimension::D2, true) => ViewDimension::D2Array,
-                        (ImageDimension::D3, false) => ViewDimension::D3,
-                        _ => bail!("unported image dimension for {:?}", g.name),
-                    };
-                    if let ImageClass::Storage { format, access } = class {
-                        ensure!(
-                            access == naga::StorageAccess::STORE,
-                            "unported storage-image access"
-                        );
-                        inputs.push(ShaderInput {
-                            key: InputKey {
-                                group: binding.group,
-                                binding: binding.binding,
-                            },
-                            name: g.name.clone().context("resource missing name")?,
-                            kind: InputKind::StorageImage {
-                                dimension,
-                                format: storage_format(format)?,
-                            },
-                        });
-                        continue;
+            }
+        } else {
+            match g.space {
+                AddressSpace::Uniform => InputKind::Buffer {
+                    minimum: layout[g.ty].size,
+                    writable: false,
+                },
+                AddressSpace::Storage { access } => InputKind::Buffer {
+                    minimum: layout[g.ty].size,
+                    writable: access.contains(naga::StorageAccess::STORE),
+                },
+                AddressSpace::Handle => match module.types[g.ty].inner {
+                    TypeInner::Sampler { comparison } => InputKind::Sampler { comparison },
+                    TypeInner::Image {
+                        dim,
+                        arrayed,
+                        class,
+                    } => {
+                        let dimension = match (dim, arrayed) {
+                            (ImageDimension::D2, false) => ViewDimension::D2,
+                            (ImageDimension::D2, true) => ViewDimension::D2Array,
+                            (ImageDimension::D3, false) => ViewDimension::D3,
+                            _ => bail!("unported image dimension for {:?}", g.name),
+                        };
+                        if let ImageClass::Storage { format, access } = class {
+                            ensure!(
+                                access == naga::StorageAccess::STORE,
+                                "unported storage-image access"
+                            );
+                            inputs.push(ShaderInput {
+                                key: InputKey {
+                                    group: binding.group,
+                                    binding: binding.binding,
+                                },
+                                name: g.name.clone().context("resource missing name")?,
+                                kind: InputKind::StorageImage {
+                                    dimension,
+                                    format: storage_format(format)?,
+                                },
+                            });
+                            continue;
+                        }
+                        let sample = match class {
+                            ImageClass::Sampled {
+                                kind: ScalarKind::Float,
+                                multi: false,
+                            } => SampleType::Float,
+                            ImageClass::Sampled {
+                                kind: ScalarKind::Uint,
+                                multi: false,
+                            } => SampleType::Uint,
+                            ImageClass::Depth { multi: false } => SampleType::Depth,
+                            _ => bail!("unported image class for {:?}", g.name),
+                        };
+                        InputKind::Image { dimension, sample }
                     }
-                    let sample = match class {
-                        ImageClass::Sampled {
-                            kind: ScalarKind::Float,
-                            multi: false,
-                        } => SampleType::Float,
-                        ImageClass::Sampled {
-                            kind: ScalarKind::Uint,
-                            multi: false,
-                        } => SampleType::Uint,
-                        ImageClass::Depth { multi: false } => SampleType::Depth,
-                        _ => bail!("unported image class for {:?}", g.name),
-                    };
-                    InputKind::Image { dimension, sample }
-                }
-                _ => bail!("unported handle input {:?}", g.name),
-            },
-            _ => bail!("unported resource address space {:?}", g.space),
+                    _ => bail!("unported handle input {:?}", g.name),
+                },
+                _ => bail!("unported resource address space {:?}", g.space),
+            }
         };
         inputs.push(ShaderInput {
             key: InputKey {
@@ -182,6 +209,13 @@ pub(super) fn wgsl_type(module: &naga::Module, ty: naga::Handle<naga::Type>) -> 
         return Ok(name.clone());
     }
     let scalar = |kind: ScalarKind, width: u8| -> Result<&'static str> {
+        if width == 8 {
+            return Ok(match kind {
+                ScalarKind::Uint => "u64",
+                ScalarKind::Sint => "i64",
+                _ => bail!("unported 64-bit scalar kind"),
+            });
+        }
         ensure!(width == 4, "unported scalar width");
         Ok(match kind {
             ScalarKind::Float => "f32",
@@ -244,6 +278,8 @@ pub(super) fn storage_format(format: naga::StorageFormat) -> Result<Format> {
         naga::StorageFormat::Rgba16Float => Format::Rgba16Float,
         naga::StorageFormat::Rgba32Float => Format::Rgba32Float,
         naga::StorageFormat::R32Uint => Format::R32Uint,
+        naga::StorageFormat::Rg32Uint => Format::Rg32Uint,
+        naga::StorageFormat::Rgba32Uint => Format::Rgba32Uint,
         _ => bail!("unported storage-image format {format:?}"),
     })
 }
@@ -253,12 +289,16 @@ pub(super) fn storage_wgsl(format: Format) -> Result<&'static str> {
         Format::Rgba16Float => "rgba16float",
         Format::Rgba32Float => "rgba32float",
         Format::R32Uint => "r32uint",
+        Format::Rg32Uint => "rg32uint",
+        Format::Rgba32Uint => "rgba32uint",
         _ => bail!("unported storage-image format"),
     })
 }
 pub(super) fn storage_entry(dimension: ViewDimension, format: Format) -> Result<&'static str> {
     Ok(match (dimension, format) {
-        (ViewDimension::D2, Format::R32Uint) => "AraWriteUintImageEntry",
+        (ViewDimension::D2, Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint) => {
+            "AraWriteUintImageEntry"
+        }
         (ViewDimension::D2, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
             "AraWriteImageEntry"
         }

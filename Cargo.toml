@@ -17,7 +17,7 @@ members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
 # Temporary pin until Ara PR #5 merges; disabled in default wgpu builds.
-ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "168ae55e14095b9c677cdd17bb20c05ae5bd8104", optional = true }
+ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "c040cc1d5afabb08f50af0f50853f98fde5a477b", optional = true }
 anyhow = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 half = { version = "2.7", optional = true }
@@ -74,7 +74,7 @@ opt-level = 2
 opt-level = 2
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "168ae55e14095b9c677cdd17bb20c05ae5bd8104", optional = true }
+ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "c040cc1d5afabb08f50af0f50853f98fde5a477b", optional = true }
 
 [[example]]
 name = "ara_post"

@@ -3,12 +3,13 @@ use super::spirv::rewrite_globals;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
-pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
+pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
     use super::{InputKind, SampleType};
     use ara_gpu::texture::ViewDimension;
     let inputs = super::heap_interface::from_module(module)?;
     let mut names = BTreeMap::new();
     let mut declarations = String::new();
+    let mut arrays = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
         let slot = format!("ara_packet[ara_root.w0].values[(ara_root.w1 >> 2u) + {i}u]");
         match input.kind {
@@ -67,6 +68,32 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
                 );
                 names.insert(input.name.as_str(), replacement);
             }
+            InputKind::BufferArray { writable, .. } => {
+                let (handle, global) = module
+                    .global_variables
+                    .iter()
+                    .find(|(_, g)| {
+                        g.binding.is_some_and(|b| {
+                            b.group == input.key.group && b.binding == input.key.binding
+                        })
+                    })
+                    .context("packet source array missing")?;
+                let naga::TypeInner::BindingArray { base, .. } = module.types[global.ty].inner
+                else {
+                    anyhow::bail!("reflected binding array changed type");
+                };
+                let ty = super::heap_interface::wgsl_type(module, base)?;
+                declarations.push_str(&format!(
+                    "@group(0) @binding({}) var<storage,{}> ara_array_{i}:binding_array<{ty}>;\n",
+                    1900 + i,
+                    if writable { "read_write" } else { "read" }
+                ));
+                arrays.push(super::array_access::ArrayRewrite {
+                    global: handle,
+                    prefix: format!("ara_array_{i}[ara_packet[ara_root.w0].values[{slot} + u32("),
+                    suffix: ")]]".into(),
+                });
+            }
             InputKind::StorageImage { dimension, format } => {
                 let dim = match dimension {
                     ViewDimension::D2 => "2d",
@@ -119,7 +146,9 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
             }
         }
     }
-    let out = rewrite_globals(body, &names, module)?;
+    let rewritten = super::array_access::rewrite(source, module, &arrays)?;
+    let body = super::spirv::strip_bindings(&rewritten);
+    let out = rewrite_globals(&body, &names, module)?;
     Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};

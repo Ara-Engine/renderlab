@@ -166,5 +166,44 @@ fn image_barrier_plan_ranges_states_and_transactional_rejection() -> Result<()> 
         ),
         vec![(2, 1, Access::CopyDestination, Access::ShaderRead)]
     );
+    let shared = usage(other, 2, 1, Access::Storage);
+    assert_eq!(
+        cells(other, &graph.plan(&[shared, shared])?),
+        vec![(2, 1, Access::ShaderRead, Access::Storage)]
+    );
+    assert_eq!(
+        cells(other, &graph.plan(&[shared])?),
+        vec![(2, 1, Access::Storage, Access::Storage)]
+    );
+    Ok(())
+}
+
+#[test]
+fn shader_and_indirect_reads_share_one_buffer_state() -> Result<()> {
+    let mut arena = Arena::<ara_gpu::BufferKind, ()>::default();
+    let resource = Resource::Buffer(arena.insert(())?);
+    for accesses in [
+        [Access::ShaderRead, Access::Indirect],
+        [Access::Indirect, Access::ShaderRead],
+    ] {
+        let mut graph = Graph::default();
+        graph.import(resource, Access::CopyDestination);
+        let barriers = graph.plan(&accesses.map(|a| ResourceUse::Whole(resource, a)))?;
+        assert_eq!(barriers.len(), 1);
+        assert_eq!(barriers[0].barrier.before, Access::CopyDestination);
+        assert_eq!(barriers[0].barrier.after, Access::Indirect);
+        let b = graph.plan(&[ResourceUse::Whole(resource, Access::Storage)])?;
+        assert_eq!(b[0].barrier.before, Access::Indirect);
+        assert!(
+            graph
+                .plan(&[
+                    ResourceUse::Whole(resource, Access::Storage),
+                    ResourceUse::Whole(resource, Access::ShaderRead)
+                ])
+                .is_err()
+        );
+        let b = graph.plan(&[ResourceUse::Whole(resource, Access::ShaderRead)])?;
+        assert_eq!(b[0].barrier.before, Access::Storage);
+    }
     Ok(())
 }

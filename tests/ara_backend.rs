@@ -56,6 +56,9 @@ fn upload(
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
+        Pass::BufferArrayProbe,
+        Pass::VisibilitySoftware,
+        Pass::VisibilityHardware,
         Pass::VisibilityCull,
         Pass::VisibilityFinish,
         Pass::VisibilityReset,
@@ -90,7 +93,41 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::RasterSurface,
         Pass::RasterSurfaceFour,
     ] {
-        let stages = emit_spirv(pass, &path)?;
+        let stages = emit_spirv(pass, &path).map_err(|e| anyhow::anyhow!("{pass:?}: {e:#}"))?;
+        for stage in &stages {
+            let bytes = std::fs::read(path.join(&stage.spirv))?;
+            ensure!(
+                bytes.len() >= 20 && bytes.len() % 4 == 0,
+                "invalid SPIR-V length"
+            );
+            let words: Vec<_> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .collect();
+            let mut at = 5;
+            let mut entries = Vec::new();
+            while at < words.len() {
+                let n = (words[at] >> 16) as usize;
+                ensure!(n > 0 && at + n <= words.len(), "invalid SPIR-V instruction");
+                if words[at] & 0xffff == 15 {
+                    ensure!(n >= 4, "short OpEntryPoint");
+                    let name: Vec<_> = words[at + 3..at + n]
+                        .iter()
+                        .flat_map(|w| w.to_le_bytes())
+                        .take_while(|b| *b != 0)
+                        .collect();
+                    entries.push(String::from_utf8(name)?);
+                }
+                at += n;
+            }
+            ensure!(
+                entries == [stage.spirv_entry.clone()],
+                "{pass:?} native entry ABI mismatch: {entries:?} != {}",
+                stage.spirv_entry
+            );
+        }
         if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
             let sdk = std::path::PathBuf::from(sdk);
             let validator = if cfg!(windows) {
@@ -201,3 +238,15 @@ mod visibility_cull_reference;
 
 #[path = "ara_backend/cases/graph.rs"]
 mod graph_cases;
+
+#[cfg(target_os = "macos")]
+#[path = "ara_backend/cases/buffer_arrays.rs"]
+mod buffer_array_cases;
+// Compile the pure adapter tests here as well: the repository's unrelated lib-test
+// target currently hits an objc2 inference recursion error on this Mac.
+#[path = "../src/backend_ara/shader/array_access.rs"]
+mod array_access_tests;
+#[path = "ara_backend/cases/visibility_raster.rs"]
+mod visibility_raster_cases;
+#[path = "ara_backend/visibility_sw_reference.rs"]
+mod visibility_sw_reference;

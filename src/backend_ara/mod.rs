@@ -25,4 +25,5 @@ pub mod toon;
 pub mod transfer;
 pub mod transparency_depth;
 pub mod visibility_cull;
+pub mod visibility_raster;
 pub mod volumes;
