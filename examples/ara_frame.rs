@@ -8,7 +8,11 @@
 //! Metal. Both turn the same features off: local shadows always, and the atmosphere
 //! unless `--atmosphere` asks for the physical sky (sky and sun disk, sun
 //! transmittance, procedural environment, aerial perspective and height fog; no
-//! volumetric fog, which the Ara frame does not assemble yet).
+//! volumetric fog, which the Ara frame does not assemble yet). `--sun-shadows` adds
+//! ray-traced soft shadows for the sun (a 0.02 rad disk, one 40 m cascade); it needs
+//! ray queries on either layer, makes every material double-sided as hardware shadows
+//! require, and on wgpu takes the experimental ray-query acknowledgment
+//! `RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK`.
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -32,15 +36,20 @@ use std::{fs, path::Path};
 
 type Failure = Box<dyn std::error::Error>;
 const GRID: [usize; 2] = [24, 16];
+/// The fixture's first light is its sun: one cascade over the scene, a 0.02 rad disk.
+const SUN_SPLITS: [f32; 1] = [40.];
+const SUN_DISK: f32 = 0.02;
 
 fn main() -> Result<(), Failure> {
     let mut args = std::env::args().skip(1);
     let (mut backend, mut output, mut size) = (None, None, [960u32, 640]);
     let mut atmosphere = renderlab::Atmosphere::off();
+    let mut sun_shadows = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
+            "--sun-shadows" => sun_shadows = true,
             "--atmosphere" => {
                 atmosphere = renderlab::Atmosphere {
                     volumetric_fog: None,
@@ -61,10 +70,15 @@ fn main() -> Result<(), Failure> {
         }
     }
     let output = output.ok_or("--output DIR")?;
-    let fixture = lighting_fixture::Fixture::new();
+    let mut fixture = lighting_fixture::Fixture::new();
+    if sun_shadows {
+        for object in &mut fixture.objects {
+            object.double_sided = true;
+        }
+    }
     let (hdr, display) = match backend.as_deref() {
-        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere)?,
-        Some("ara") => ara_frame(&fixture, size, atmosphere, Path::new(&output))?,
+        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere, sun_shadows)?,
+        Some("ara") => ara_frame(&fixture, size, atmosphere, sun_shadows, Path::new(&output))?,
         _ => return Err("--backend wgpu|ara".into()),
     };
     write(
@@ -74,6 +88,7 @@ fn main() -> Result<(), Failure> {
         &display,
         backend.as_deref().unwrap_or_default(),
         atmosphere.active(),
+        sun_shadows,
     )
 }
 
@@ -84,6 +99,7 @@ fn wgpu_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
     atmosphere: renderlab::Atmosphere,
+    sun_shadows: bool,
 ) -> Result<Frame, Failure> {
     use renderlab::*;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -92,28 +108,73 @@ fn wgpu_frame(
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
     eprintln!("wgpu adapter: {:?}", adapter.get_info());
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let mut requested = wgpu::DeviceDescriptor {
         required_features: RECEIVER_FEATURES,
         ..Default::default()
-    }))?;
-    let mut r = Renderer::new_with_options(
-        device,
-        queue,
+    };
+    if sun_shadows {
+        if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref()
+            != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+        {
+            return Err("--sun-shadows on wgpu needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK".into());
+        }
+        requested.required_features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        requested.required_limits.max_blas_primitive_count = 2_000_000;
+        requested.required_limits.max_blas_geometry_count = 1;
+        requested.required_limits.max_tlas_instance_count = 4096;
+        requested
+            .required_limits
+            .max_acceleration_structures_per_shader_stage = 1;
+        // SAFETY: the acknowledgment above accepts wgpu's experimental ray-query
+        // contract for this device, which only this example's frame uses.
+        requested.experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
+    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&requested))?;
+    let options = RendererOptions {
+        samples: SampleCount::One,
+        anisotropy_clamp: 16,
+    };
+    let (format, prelude) = (
         wgpu::TextureFormat::Rgba8UnormSrgb,
-        Limits::default(),
-        RendererOptions {
-            samples: SampleCount::One,
-            anisotropy_clamp: 16,
-        },
         include_str!("../shaders/scene.wgsl"),
-    )?;
+    );
+    let mut r = if sun_shadows {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            format,
+            Limits::default(),
+            options,
+            HardwareShadowOptions {
+                max_estimated_bytes: Some(1 << 30),
+            },
+            prelude,
+        )?
+    } else {
+        Renderer::new_with_options(device, queue, format, Limits::default(), options, prelude)?
+    };
     // The frame the ara backend assembles today: everything else is a later level.
     r.set_atmosphere(atmosphere)?;
     r.set_local_shadows(LocalShadows {
         count: 0,
         ..Default::default()
     })?;
-    r.set_lighting(&fixture.lighting)?;
+    if sun_shadows {
+        let mut requests = vec![ShadowRequest::None; fixture.lighting.lights.len()];
+        requests[0] = ShadowRequest::Directional {
+            split_ends: SUN_SPLITS.to_vec(),
+        };
+        r.set_lighting_and_shadows(
+            &fixture.lighting,
+            &Shadows {
+                requests,
+                directional_disk_angle: SUN_DISK,
+                ..Default::default()
+            },
+        )?;
+    } else {
+        r.set_lighting(&fixture.lighting)?;
+    }
     let color = r.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("ara_frame output"),
         size: wgpu::Extent3d {
@@ -190,10 +251,19 @@ fn ara_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
     atmosphere: renderlab::Atmosphere,
+    sun_shadows: bool,
     output: &Path,
 ) -> Result<Frame, Failure> {
     use renderlab::backend_ara::{cache::ShaderCache, forward};
-    let mut gpu = ara_gpu::GpuDevice::new_raster(&[], output.join("device"))?;
+    let mut gpu = if sun_shadows {
+        ara_gpu::GpuDevice::new(&[], output.join("device"))?
+    } else {
+        ara_gpu::GpuDevice::new_raster(&[], output.join("device"))?
+    };
+    let shadows = forward::SunShadows {
+        split_ends: SUN_SPLITS.to_vec(),
+        disk_angle: SUN_DISK,
+    };
     let cache = ShaderCache::new(output.join("shaders"))?;
     let objects: Vec<_> = fixture
         .objects
@@ -220,6 +290,7 @@ fn ara_frame(
             camera: fixture.camera(0),
             size,
             atmosphere,
+            sun_shadows: sun_shadows.then_some(&shadows),
             post: Some(renderlab::PostSettings::default()),
         },
     )?;
@@ -231,6 +302,7 @@ fn ara_frame(
     _: &lighting_fixture::Fixture,
     _: [u32; 2],
     _: renderlab::Atmosphere,
+    _: bool,
     _: &Path,
 ) -> Result<Frame, Failure> {
     Err("--backend ara needs --features backend-ara".into())
@@ -269,6 +341,7 @@ fn write(
     display: &[u8],
     backend: &str,
     atmosphere: bool,
+    sun_shadows: bool,
 ) -> Result<(), Failure> {
     let pixels = size[0] as usize * size[1] as usize;
     if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
@@ -309,6 +382,7 @@ fn write(
         serde_json::to_vec_pretty(&serde_json::json!({
             "scene": "M5-A authored v1, pose 0, forward lit, local shadows off, default post",
             "atmosphere": if atmosphere { "physical sky without volumetric fog" } else { "off" },
+            "sun_shadows": if sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
             "backend": backend,
             "width": size[0],
             "height": size[1],
@@ -335,8 +409,8 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
     if ja["width"] != jb["width"] || ja["height"] != jb["height"] {
         return Err("frames differ in extent".into());
     }
-    if ja["atmosphere"] != jb["atmosphere"] {
-        return Err("frames differ in atmosphere setting".into());
+    if ja["atmosphere"] != jb["atmosphere"] || ja["sun_shadows"] != jb["sun_shadows"] {
+        return Err("frames differ in atmosphere or sun shadow setting".into());
     }
     println!(
         "{} ({}) against {} ({}), {}x{}",

@@ -1145,6 +1145,38 @@ environment and blue-weighted with it. The sky's own values rest on the stage re
 and on the cross-layer comparison, which is the only whole-image check of this level:
 `ara_frame --atmosphere` renders M5-A under the physical sky on either layer.
 
+### Ray-traced sun shadows on the same frame
+
+With `ForwardScene::sun_shadows` the frame is the one
+`Renderer::new_with_hardware_shadows` draws for a sun with a disk on an untraced
+frame: one bottom-level structure per object and a top-level scene with one instance
+per placement, the receiver prepass (entry 45) into world and normal targets with the
+frame's depth, 256-ray fresh visibility (entry 46) into an `R32Uint` image, and the
+lit pass composed on the fresh prelude, reading that image through group 0. It needs
+a ray-query device.
+
+The CPU half is shared with the wgpu renderer rather than copied.
+`shadow_gpu::plan_frame` is `ShadowState::plan` as a function of the settings and the
+previous orientations; the method now calls it. The backend plans the sun's views
+through it, runs `prepare_hardware_bias`, binds the packed view records, and writes
+each light's view range into its record as `upload_shadows` does. As with
+`PostSettings::record`, the wgpu side compiles here but has not run since the move.
+Casters must be double-sided, the renderer's own admission rule.
+
+`forward_frame_sun_shadow_has_the_predicted_umbra_and_penumbra` holds the result to
+geometry: a square occluder one unit above the floor under a sun 56 degrees off the
+normal with a 0.05 rad disk. Along the centre row 61 unshadowed pixels match the
+closed-form radiance within 2%, 13 umbra pixels are black, and the penumbra is a
+falling ramp that crosses one half at x = -2.003 where the occluder's edge projects
+to -2, spanning 0.260 floor units between 5% and 95% against a full geometric width
+of 0.327. Not covered: more than one cascade, a moving sun (no previous orientation),
+single-sided or thin casters, local-light shadows.
+
+`ara_frame --atmosphere --sun-shadows` renders M5-A with the sky and these shadows on
+either layer. On this Mac it runs at 960x640 under Metal API and shader validation;
+the picture has contact shadows under every sphere and both panels, tinted by the
+sky.
+
 ## Order for the engine's default paths
 
 `Engine` selects traced primary visibility on `HardwareRt` and the visibility buffer
@@ -1198,21 +1230,12 @@ Still to read before building: the fresh-visibility records and tile size
 (`fresh_shadow_gpu.rs`), the TLAS instance layout (`hardware_shadow_gpu.rs`), and the
 material arrays (`prepare_primary_materials`).
 
-**A nearer step: ray-traced sun shadows on the forward frame.** Entries 45 and 46
-as ported are the forward path's fresh variant (`fresh_shadow_gpu::shader_source`:
-a receiver raster prepass, then `fresh_compute` reading world and normal images at
-bindings 3 and 4), not the traced kernel module's `fresh_compute`. So the frame
-`Renderer::new_with_hardware_shadows` draws when the sun has a disk angle and the
-frame is not traced is also assembly work: TLAS, receiver raster into world and
-normal targets with the frame's depth, 256-ray visibility into an `R32Uint` image,
-then the lit pass composed on the fresh prelude with the camera and that image in
-group 0. It needs the CPU shadow frame as well: `ShadowState::plan` builds the
-directional views with `shadow_plan::directional_oriented` and packs one record per
-view (matrix, near, far, depth and normal bias, camera depth, texel size, the tangent
-of the disk angle), and `prepare_hardware_bias` adds the ray depth rate. `plan` reads
-only settings and the previous bases, so it can become a function both layers call.
-The traced frame above uses the same estimator with its coverage seam gated by the
-primary tiles and hit image, a variant that has not been replayed.
+**Done since this was written: ray-traced sun shadows on the forward frame** (the
+section above). Entries 45 and 46 as ported are the forward path's fresh variant
+(`fresh_shadow_gpu::shader_source`: a receiver raster prepass, then `fresh_compute`
+reading world and normal images at bindings 3 and 4). The traced frame uses the same
+estimator with its coverage seam gated by the primary tiles and hit image, a variant
+that has not been replayed.
 
 **Then, by how much of the default image each one changes:**
 

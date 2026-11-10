@@ -16,7 +16,7 @@ use lighting_gpu::LightingGpu;
 mod post_gpu;
 use post_gpu::PostGpu;
 #[path = "shadow_gpu.rs"]
-mod shadow_gpu;
+pub(crate) mod shadow_gpu;
 use sha2::{Digest, Sha256};
 use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
 #[path = "hardware_shadow_gpu.rs"]

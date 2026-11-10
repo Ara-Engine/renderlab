@@ -2,7 +2,7 @@
 #![cfg(feature = "backend-ara")]
 #[path = "ara_backend/reference.rs"]
 mod reference;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ara_gpu::{
     Access, Device, GpuDevice, Queue, Resource,
     commands::{Command, Recorder},
