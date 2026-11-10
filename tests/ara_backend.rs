@@ -66,6 +66,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::ReceiverRaster,
         Pass::FreshVisibility,
         Pass::ShadowRaster,
+        Pass::TransparencySunShadow,
         Pass::FallbackPresent,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,

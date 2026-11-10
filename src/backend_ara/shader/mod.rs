@@ -42,6 +42,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original vertex-only transparency sun-shadow depth raster.
+    TransparencySunShadow,
     /// Original source-sided shadow depth raster.
     ShadowRaster,
     /// Original fresh geometric ray-query shadow visibility.
@@ -140,6 +142,12 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::TransparencySunShadow => format!(
+                "{}{}",
+                transparency_section("TP_FRAME"),
+                transparency_section("TP_SHADOW")
+            )
+            .into(),
             Self::ShadowRaster => include_str!("../../../shaders/scene.wgsl").into(),
             Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(
                 crate::backend_ara::fresh_visibility::Mode::Exact,
@@ -356,7 +364,8 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::ShadowRaster
+            Self::TransparencySunShadow
+                | Self::ShadowRaster
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
@@ -379,7 +388,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::ShadowRaster
+            Self::TransparencySunShadow
+                | Self::ShadowRaster
                 | Self::FreshVisibility
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
@@ -419,8 +429,13 @@ impl Pass {
             (3, 0)
         }
     }
+    pub(super) fn vertex_only(self) -> bool {
+        matches!(self, Self::TransparencySunShadow)
+    }
     pub(super) fn vertex(self) -> &'static str {
-        if matches!(self, Self::ShadowRaster) {
+        if self.vertex_only() {
+            "tp_shadow_vs"
+        } else if matches!(self, Self::ShadowRaster) {
             "vs_shadow"
         } else if matches!(self, Self::TransparencySeed) {
             "tp_seed_vs"
@@ -466,6 +481,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::TransparencySunShadow => "tp_shadow_vs",
             Self::ShadowRaster => "fs_shadow",
             Self::FreshVisibility => "fresh_compute",
             Self::ReceiverRaster => "fs_receiver",
@@ -522,10 +538,23 @@ impl Pass {
 pub struct MetalProgram {
     /// Complete source except the caller's TopLevel ABI declaration.
     pub source: String,
-    /// Selected compute or fragment entry point.
-    pub entry: String,
-    /// Selected raster vertex entry; mesh variants read the heap through their wrapper.
-    pub vertex_entry: Option<String>,
+    /// Native pipeline shape, including a genuinely absent depth-only fragment stage.
+    pub entries: MetalEntries,
+}
+/// Native entry shapes accepted by the shared cooked-pipeline loader.
+pub enum MetalEntries {
+    /// One compute entry.
+    Compute {
+        /// Generated function name.
+        entry: String,
+    },
+    /// Ordinary raster or vertex-only depth raster.
+    Raster {
+        /// Generated vertex name.
+        vertex: String,
+        /// Generated fragment name; None means no fragment stage.
+        fragment: Option<String>,
+    },
 }
 /// One SPIR-V entry compiled against Ara's global descriptor bindings and roots.
 pub struct SpirvStage {
@@ -558,13 +587,20 @@ pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()
                 && entry.name == pass.vertex())
     });
     anyhow::ensure!(
-        module.entry_points.len() == if pass.raster() { 2 } else { 1 },
+        module.entry_points.len()
+            == if pass.raster() && !pass.vertex_only() {
+                2
+            } else {
+                1
+            },
         "selected shader stages missing"
     );
     anyhow::ensure!(
         module.entry_points.iter().any(|e| e.name == pass.entry()
             && e.stage
-                == if pass.raster() {
+                == if pass.vertex_only() {
+                    naga::ShaderStage::Vertex
+                } else if pass.raster() {
                     naga::ShaderStage::Fragment
                 } else {
                     naga::ShaderStage::Compute

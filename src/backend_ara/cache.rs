@@ -160,9 +160,15 @@ impl ShaderCache {
             tool("metallib", &["source.air", "-o", "source.metallib"], dir)?;
             std::fs::remove_file(dir.join("source.air"))?;
             let bytes = std::fs::read(dir.join("source.metallib"))?;
-            let entries: Vec<_> = match program.vertex_entry {
-                Some(vertex) => vec![(Stage::Vertex, vertex), (Stage::Fragment, program.entry)],
-                None => vec![(Stage::Compute, program.entry)],
+            let entries: Vec<_> = match program.entries {
+                shader::MetalEntries::Raster { vertex, fragment } => {
+                    let mut stages = vec![(Stage::Vertex, vertex)];
+                    if let Some(fragment) = fragment {
+                        stages.push((Stage::Fragment, fragment));
+                    }
+                    stages
+                }
+                shader::MetalEntries::Compute { entry } => vec![(Stage::Compute, entry)],
             };
             let mut stages = Vec::new();
             for (stage, entry) in entries {

@@ -1008,3 +1008,27 @@ this fixture. The independent review has no must-fix findings.
 All **40** focused tests pass with Metal API+shader validation and API-only
 validation. **64** standard SPIR-V stages plus five variants validate for Vulkan1.3;
 backend library/integration clippy has no diagnostics. Native Vulkan remains pending.
+
+## Vertex-only transparency sun shadow (entry 48)
+
+The original TP_SHADOW source contains only `tp_shadow_vs`. The frontend now keeps
+that shape through selection, MSL/SPIR-V and cached metadata. `MetalEntries`
+represents compute and raster with an optional fragment; the cache writes exactly
+one vertex stage. No fragment stub is inserted. This required one Ara Metal loader
+addition, now pinned at **b822fb343**, with the same portable cooked stage shape and
+no Vulkan-file or heap-ABI changes. Ara's native depth regression failed before
+admission support and now passes; full GPU/replay gates pass109 in both Metal modes.
+
+`ShadowRaster::transparency_sun` preserves Renderlab's original Less comparison,
+clear1, constant bias2 and slope bias2. It validates only the model table needed by
+this source; source-sided shadow maps retain their normal/material validation.
+Two native model rows, including a mirror, produce35 covered pixels each with exact
+misses. Flat-plane depth agrees with the CPU value plus a positive native precision
+bias bounded by2e-6; observed offsets are5.96e-8 and2.98e-8. Sloped/general casters
+and clipping remain unproven here. The test also reads the cached JSON to require
+one vertex stage and no fragment artifact.
+
+All **41** focused tests pass with Metal API+shader validation and API-only
+validation. **65** standard SPIR-V stages plus five variants validate for Vulkan1.3;
+backend library/integration clippy has no diagnostics. The scoped shape review has
+no must-fix findings. Native Vulkan remains pending. No decision override was added.

@@ -13,7 +13,9 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
     let source = hoist_directives(&adapt(pass, wgsl)?);
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
-    let entries: Vec<_> = if pass.raster() {
+    let entries: Vec<_> = if pass.vertex_only() {
+        vec![(naga::ShaderStage::Vertex, pass.vertex())]
+    } else if pass.raster() {
         vec![
             (naga::ShaderStage::Vertex, pass.vertex()),
             (naga::ShaderStage::Fragment, pass.entry()),

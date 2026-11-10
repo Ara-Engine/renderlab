@@ -19,33 +19,50 @@ use ara_gpu::{
 pub struct ShadowDraw<'a, 'resources> {
     /// Source vertex/index storage. Its separate per-instance slot stream is unused.
     pub geometry: &'a MeshGeometry,
-    /// ShadowView112B, model/normal tables and the material's sidedness record.
+    /// Family-specific shadow view/frame and model records; source-sided draws
+    /// also retain the normal table and material sidedness record.
     pub bindings: &'a HeapBindings<'resources>,
     /// First model/normal-table row, read as builtin(instance_index) by the source.
     pub first_instance: u32,
     /// Number of consecutive rows; noncontiguous rows require separate draws.
     pub instance_count: u32,
 }
-/// Persistent original vs_shadow/fs_shadow pipeline, reversed-depth Greater, no bias.
+/// Persistent original depth pipeline with family-specific comparison, clear and bias.
 pub struct ShadowRaster {
     pipeline: Pipeline,
+    pass: Pass,
+    clear: f32,
     contract: [u8; 32],
 }
 impl ShadowRaster {
     /// Compile the original depth-only state with its single 48-byte vertex stream.
     pub fn new(gpu: &mut GpuDevice, cache: &ShaderCache) -> Result<Self> {
-        let contract =
-            shader::packet_contract(Pass::ShadowRaster, &shader::inputs(Pass::ShadowRaster)?);
+        Self::family(gpu, cache, Pass::ShadowRaster)
+    }
+    /// Compile the original vertex-only TP sun map: Less, clear1, constant/slope bias2.
+    pub fn transparency_sun(gpu: &mut GpuDevice, cache: &ShaderCache) -> Result<Self> {
+        Self::family(gpu, cache, Pass::TransparencySunShadow)
+    }
+    fn family(gpu: &mut GpuDevice, cache: &ShaderCache, pass: Pass) -> Result<Self> {
+        let contract = shader::packet_contract(pass, &shader::inputs(pass)?);
         let mut state = mesh_state(Format::Rgba32Float);
         state.color_formats.clear();
         state.raster.vertex_layouts.truncate(1);
         state.raster.vertex_layouts[0].attributes.truncate(1);
+        let sun = pass == Pass::TransparencySunShadow;
+        if sun {
+            state.raster.depth_compare = ara_gpu::sampler::CompareOp::Less;
+            state.raster.depth_bias = 2.;
+            state.raster.depth_bias_slope = 2.;
+        }
         Ok(Self {
-            pipeline: cache.pipeline(gpu, Pass::ShadowRaster, state)?,
+            pipeline: cache.pipeline(gpu, pass, state)?,
+            pass,
+            clear: if sun { 1. } else { 0. },
             contract,
         })
     }
-    /// Clear selected mip/layer to zero, then retain depth winners across every draw.
+    /// Clear the selected mip/layer to its family's far depth, then retain winners.
     /// All ranges and contracts are checked before recording the first draw.
     pub fn record(
         &self,
@@ -65,8 +82,7 @@ impl ShadowRaster {
         );
         for draw in draws {
             ensure!(
-                draw.bindings.pass() == Pass::ShadowRaster
-                    && draw.bindings.contract() == self.contract,
+                draw.bindings.pass() == self.pass && draw.bindings.contract() == self.contract,
                 "incompatible shadow packet contract"
             );
             let end = draw
@@ -74,7 +90,11 @@ impl ShadowRaster {
                 .checked_add(draw.instance_count)
                 .filter(|_| draw.instance_count > 0)
                 .context("invalid shadow instance range")?;
-            for binding in [0, 1] {
+            for binding in 0..if self.pass == Pass::ShadowRaster {
+                2
+            } else {
+                1
+            } {
                 let buffer = draw
                     .bindings
                     .buffer(InputKey { group: 1, binding })
@@ -103,7 +123,7 @@ impl ShadowRaster {
                         mip: target.view.base_mip,
                         layer: target.view.base_layer,
                     },
-                    clear: (index == 0).then_some([0.; 4]),
+                    clear: (index == 0).then_some([self.clear; 4]),
                 }),
                 resolves: vec![],
                 size: target.size,

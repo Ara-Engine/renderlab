@@ -98,10 +98,18 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
         &mut source,
         &module,
         &names[at],
-        if pass.raster() { "fragment" } else { "kernel" },
+        if pass.vertex_only() {
+            "vertex"
+        } else if pass.raster() {
+            "fragment"
+        } else {
+            "kernel"
+        },
         pass,
     )?;
-    let vertex_entry = if let Some(i) = module
+    let vertex_entry = if pass.vertex_only() {
+        Some(entry.clone())
+    } else if let Some(i) = module
         .entry_points
         .iter()
         .position(|e| e.stage == naga::ShaderStage::Vertex)
@@ -121,6 +129,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
             | Pass::TransparencyGlass
             | Pass::ReceiverRaster
             | Pass::ShadowRaster
+            | Pass::TransparencySunShadow
     ) {
         // Ara reserves attributes0..10 for the converter ABI. Explicit streams
         // map WGSL locationN to native attribute11+N on every mesh shader.
@@ -133,8 +142,13 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
     }
     Ok(MetalProgram {
         source,
-        entry,
-        vertex_entry,
+        entries: match vertex_entry {
+            Some(vertex) => super::MetalEntries::Raster {
+                vertex,
+                fragment: (!pass.vertex_only()).then_some(entry),
+            },
+            None => super::MetalEntries::Compute { entry },
+        },
     })
 }
 fn wrap(
