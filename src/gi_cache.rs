@@ -2283,15 +2283,7 @@ impl Renderer {
             // searching the draws per placement made this loop quadratic in placements).
             for i in 0..bounds.len().max(previous.len()) {
                 let (a, b) = (previous.get(i), bounds.get(i));
-                // Software-ray (non-RT) frames still count every skinned placement as moved:
-                // their continuous relight hides the settled cache's flat-face blotches
-                // (docs/p-show.md, gaps). Scaffolding: drop it with that grain fix.
-                let deforming = if software {
-                    poses.get(i).copied().flatten().is_some()
-                } else {
-                    crate::renderer::skinning::deformed(&previous_poses, &poses, i)
-                };
-                if a == b && !deforming {
+                if a == b && !crate::renderer::skinning::deformed(&previous_poses, &poses, i) {
                     continue;
                 }
                 let mut swept = [
