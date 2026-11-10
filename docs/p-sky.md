@@ -10,7 +10,7 @@ Follow-through on [design-sky-map-cost.md](design-sky-map-cost.md), off the PC. 
 | Reflection rays look up the sky on misses only | **KEEP** | 58.2 → 57.0 ms |
 | Both, as shipped | | **65.5 → 57.4 ms. The map's premium over a constant sky drops from 16.5 to 8.5 ms on RT, and from 17.4 to 9.4 ms on non-RT.** |
 
-Images match main to within the hardware's filter-weight rounding (section 4). The constant sky is not slower. The physical atmosphere also lights through these lookups, so it gains as well.
+Images match main to within the hardware's filter-weight rounding (section 4). The constant sky is not slower. The physical atmosphere also lights through these lookups, so its frames get faster too (4.3–4.9 ms less shading in the game scene).
 
 ## 1. The reproducer
 
@@ -52,14 +52,19 @@ These are screen-only edits to the composed WGSL, applied before compilation fro
 ## 3. The fix
 
 1. **Filtered cube-array lookups.** The field already stores each roughness level as six consecutive array layers, which is a cube array.
-   - The lighting group gains cube-array views of the specular field (binding 11), its second bank (12) and the diffuse cube (13), and a bilinear sampler with nearest mips (14).
+   - The lighting group's diffuse cube, specular field and second bank (bindings 6, 7 and 9) are bound as cube-array views of the same textures, with a bilinear sampler and nearest levels (binding 11). The group's texture count is unchanged.
    - `environment_level` and `environment_diffuse_at` (shaders/scene.wgsl) now take one `textureSampleLevel` per level, in place of face selection, four loads and the seam path.
    - The texture unit's seamless cube filtering samples across face edges and corners. These are the same texels and the same bilinear blend that `environment_tap` computed, with the same r⁴ blend between knots.
    - Legacy mip chains, their banked narrow levels and the atmosphere's procedural chain take the same path.
-   - RGBA32F needs `FLOAT32_FILTERABLE` to filter, so the feature is now part of `RECEIVER_FEATURES`. The renderer already refuses a device without them. Desktop Vulkan drivers (NVIDIA, AMD, Intel, Mesa) and Metal all expose it.
+   - RGBA32F needs `FLOAT32_FILTERABLE` to filter, so the feature is now part of `RECEIVER_FEATURES`. Desktop Vulkan drivers (NVIDIA, AMD, Intel, Mesa) and Metal all expose it.
+   - **A device without it is refused at start, never drawn wrong.**
+     - `Capabilities::query` reports neither path as supported, because both feature sets include `RECEIVER_FEATURES`. The test `both_paths_require_filterable_f32_environments` pins this.
+     - `Engine::new` then returns `InvalidInput("adapter lacks this render path's features or limits")`.
+     - A caller that builds a `Renderer` itself gets `InvalidInput("receiver policy requires caller-enabled RECEIVER_FEATURES")` before any pipeline is made.
+     - Ara's bridge reports `ARA_RENDERLAB_UNAVAILABLE` and keeps its own renderer.
 2. **The sky is looked up on misses only.** This is in `rl_reflection_prepare` and in its software traversal template (src/program.rs). It returns the same values.
 
-Bindings 6, 7 and 9 become cube-array views of the same textures, and binding 11 is the sampler, so the lighting group's texture count is unchanged. The manual filter (`environment_bilinear`, `environment_tap`, `environment_remap`, the face helpers) had no caller left and is removed. The CPU bank for a legacy chain's narrow levels (`bank_legacy`) is unchanged.
+The manual filter (`environment_bilinear`, `environment_tap`, `environment_remap`, the face helpers) had no caller left and is removed. The CPU bank for a legacy chain's narrow levels (`bank_legacy`) is unchanged.
 
 ## 4. Images
 
@@ -120,8 +125,8 @@ The map premium falls from 16.5 to 8.5 ms on RT and from 17.4 to 9.4 ms on non-R
 
 P-SHOW2's Showcase RT shading is 25.1 ms with the map against 8.5 with the constant sky. Ara's integration thread measured about 30 against 12 ms for the frame.
 - The two changes remove what the Radeon says is the manual filter's overhead and the discarded miss lookups: about half the premium here, on both paths.
-- **I expect roughly 7–9 ms back on Showcase RT**, so the frame lands near 21–23 ms against 12. Non-RT should gain by about the same fraction of its premium.
-- The atmosphere sky should gain too (game scene, Ara's outdoor levels). A gain much smaller than this on NVIDIA would mean NVIDIA already hid the manual filter's divergence and RGBA32F filtering costs more there. The cost-only screens in section 2 would separate those.
+- **I expect roughly 7–9 ms back on Showcase RT**, so the frame lands near 21–23 ms against 12. Non-RT should drop by about the same fraction of its premium.
+- The atmosphere sky should get faster too (game scene, Ara's outdoor levels). A saving much smaller than this on NVIDIA would mean NVIDIA already hid the manual filter's divergence and RGBA32F filtering costs more there. The cost-only screens in section 2 would separate those.
 
 ## Process
 
