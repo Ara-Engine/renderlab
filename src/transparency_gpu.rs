@@ -37,7 +37,7 @@ const FRAME_BYTES: u64 = 336;
 /// WGSL `TpEmitter`: ten vec4s of TP1, then shape, velocity box, forces, collision,
 /// curve counts, the colour, emission and size curves, and the sprite's alignment and
 /// flipbook (`EmitterParams::uniform`).
-const EMITTER_BYTES: u64 = 496;
+const EMITTER_BYTES: u64 = 512;
 const PARTICLE_BYTES: u64 = 48;
 
 fn glass_samples() -> u32 {
@@ -295,6 +295,8 @@ struct EmitterParams {
     soft_distance: f32,
     flipbook: Option<crate::transparency::Flipbook>,
     alignment: crate::transparency::SpriteAlignment,
+    aspect: f32,
+    random_rotation: bool,
     capacity: u32,
     seed: u32,
 }
@@ -328,6 +330,8 @@ impl EmitterParams {
             soft_distance: d.soft_distance,
             flipbook: d.flipbook,
             alignment: d.alignment,
+            aspect: d.aspect,
+            random_rotation: d.random_rotation,
             capacity: d.capacity,
             seed: d.seed,
         }
@@ -475,8 +479,20 @@ impl EmitterParams {
             &mut f,
             120,
             self.flipbook.map_or([1.0, 1.0, 0.0, 0.0], |b| {
-                [b.grid[0] as f32, b.grid[1] as f32, b.fps, 1.0]
+                let play = if b.over_life { 2.0 } else { 1.0 };
+                [b.grid[0] as f32, b.grid[1] as f32, b.fps, play]
             }),
+        );
+        // 124: sprite aspect and random rotation.
+        v4(
+            &mut f,
+            124,
+            [
+                self.aspect,
+                f32::from(u8::from(self.random_rotation)),
+                0.0,
+                0.0,
+            ],
         );
         let mut bytes = [0u8; EMITTER_BYTES as usize];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(f) {

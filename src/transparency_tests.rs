@@ -1458,6 +1458,7 @@ fn gpu_emitter_shapes_prewarm_forces() {
             flipbook: Some(crate::Flipbook {
                 grid: [2, 2],
                 fps: 1.5,
+                over_life: false,
             }),
             alignment: crate::SpriteAlignment::Plane { normal: Vec3::Z },
             capacity: 1,

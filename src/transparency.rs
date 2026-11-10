@@ -119,8 +119,10 @@ pub enum SpriteAlignment {
 pub struct Flipbook {
     /// Columns and rows of frames, read left to right, top to bottom.
     pub grid: [u32; 2],
-    /// Frames per second of particle age; neighbouring frames cross-fade.
+    /// Frames per second of particle age, looping; neighbouring frames cross-fade.
     pub fps: f32,
+    /// Play the frames once over each particle's life instead (`fps` is then ignored).
+    pub over_life: bool,
 }
 
 /// Keys a colour or size curve holds at most.
@@ -200,6 +202,10 @@ pub struct EmitterDescriptor<'a> {
     /// The sprite as a sheet of frames played over each particle's life.
     pub flipbook: Option<Flipbook>,
     pub alignment: SpriteAlignment,
+    /// Sprite height over width (1: square), along the sprite's vertical axis.
+    pub aspect: f32,
+    /// Turn each particle's sprite by its own random angle (breaks up repeating smoke).
+    pub random_rotation: bool,
     /// Ring capacity, at most `MAX_PARTICLES`; spawning replaces the oldest particle.
     /// `spawn_rate * lifetime[1]` keeps every particle to the end of its life.
     pub capacity: u32,
@@ -236,6 +242,8 @@ impl Default for EmitterDescriptor<'_> {
             texture: None,
             flipbook: None,
             alignment: SpriteAlignment::Camera,
+            aspect: 1.0,
+            random_rotation: false,
             capacity: 256,
             seed: 1,
             prewarm: 0.0,
@@ -335,6 +343,7 @@ impl EmitterDescriptor<'_> {
                 normal.is_finite() && normal.length_squared() > 1e-12
             }
         };
+        let sprite = sprite && self.aspect.is_finite() && self.aspect > 0.0;
         if !(shape && forces && collision && curves && sprite)
             || !(self.prewarm.is_finite() && self.prewarm >= 0.0)
         {

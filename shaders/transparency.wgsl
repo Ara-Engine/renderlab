@@ -232,7 +232,9 @@ struct TpEmitter {
     size_t:vec4<f32>,
     size_keys:vec4<f32>,
     align:vec4<f32>,         // x 0 camera, 1 velocity (y stretch), 2 plane (yzw unit normal)
-    flipbook:vec4<f32>,      // x columns, y rows, z frames per second, w 1 when animated
+    flipbook:vec4<f32>,      // x columns, y rows, z frames per second, w 1 at that rate,
+                             // 2 once over each life (0: no flipbook)
+    sprite:vec4<f32>,        // x height over width, y 1 to turn each sprite randomly
 };
 // A curve's interpolation weights at life fraction t: the key below (index) and the share
 // of the next. Keys hold their end values outside their range.
@@ -472,6 +474,13 @@ struct TpBillboard {
         across=vec3<f32>(1.0+sign*n.x*n.x*b,sign*c,-sign*n.x)*(0.5*size);
         along=vec3<f32>(c,sign+n.y*n.y*b,-n.y)*(0.5*size);
     }
+    along*=tp_emitter.sprite.x;
+    if tp_emitter.sprite.y!=0.0 {
+        let angle=f32(tp_hash(slot*2654435761u+7u)>>8)/16777216.0*6.2831853;
+        let a=across;
+        across=a*cos(angle)+along*sin(angle);
+        along=along*cos(angle)-a*sin(angle);
+    }
     let world=p.position.xyz+across*corner.x+along*corner.y;
     out.position=tp.view_projection*vec4<f32>(world,1.0);
     let local=vec2<f32>(corner.x*0.5+0.5,0.5-corner.y*0.5);
@@ -481,9 +490,14 @@ struct TpBillboard {
     if tp_emitter.flipbook.w!=0.0 {
         let grid=tp_emitter.flipbook.xy;
         let frames=grid.x*grid.y;
-        let at=p.position.w*tp_emitter.flipbook.z;
-        let first=floor(at)%frames;
-        let next=(first+1.0)%frames;
+        var at=p.position.w*tp_emitter.flipbook.z;
+        var first=floor(at)%frames;
+        var next=(first+1.0)%frames;
+        if tp_emitter.flipbook.w==2.0 {
+            at=t*(frames-1.0);
+            first=min(floor(at),frames-1.0);
+            next=min(first+1.0,frames-1.0);
+        }
         let cell=vec2<f32>(1.0)/grid;
         out.uv=(vec2<f32>(first%grid.x,floor(first/grid.x))+local)*cell;
         out.uv_next=(vec2<f32>(next%grid.x,floor(next/grid.x))+local)*cell;
