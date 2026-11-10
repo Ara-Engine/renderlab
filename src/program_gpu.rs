@@ -132,8 +132,9 @@ impl ProgramPipelines {
 /// an A/B toggle) is then a cache hit instead of a driver compile. Once `LIMIT` pipelines
 /// have gone through it, the next transaction replaces it, dropping that history, which
 /// bounds its memory over a long editing session.
-/// Applications can persist it with `Renderer::set_program_cache_directory`; recent
-/// composed modules retain wgpu's validated naga IR in a separate bounded cache.
+/// Applications can persist it with `Renderer::set_program_cache_directory`, which saves
+/// it after each compiled batch; recent composed modules retain wgpu's validated naga IR
+/// in a separate bounded cache.
 pub(super) struct ProgramCache {
     cache: Option<wgpu::PipelineCache>,
     pipelines: u64,
@@ -176,66 +177,22 @@ impl ProgramCache {
             self.pipelines = 0;
         }
     }
+    /// Records a compiled batch of `pipelines` and saves a persistent cache, so a killed
+    /// process keeps every finished batch.
     pub fn count(&mut self, pipelines: u64) {
-        if self.cache.is_some() {
-            self.pipelines += pipelines;
+        if self.cache.is_none() {
+            return;
+        }
+        self.pipelines += pipelines;
+        if let (Some(path), Some(cache)) = (&self.path, &self.cache)
+            && pipelines > 0
+            && let Err(error) = crate::pipeline_compilation::write_cache(path, cache)
+        {
+            eprintln!("program_pipeline_cache_save_failed={error}");
         }
     }
     pub fn get(&self) -> Option<&wgpu::PipelineCache> {
         self.cache.as_ref()
-    }
-
-    fn persist(&self) -> std::io::Result<()> {
-        let (Some(path), Some(cache)) = (&self.path, &self.cache) else {
-            return Ok(());
-        };
-        let Some(data) = cache.get_data().filter(|d| d.len() <= CACHE_BYTES) else {
-            return Ok(());
-        };
-        let mut bytes = Sha256::digest(&data).to_vec();
-        bytes.extend(data);
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        // Same-directory replacement is atomic, including on Windows. Each process has
-        // its own temporary file; concurrent viewers may replace one another's cache.
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&temporary, bytes)?;
-        let result = std::fs::rename(&temporary, path);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
-    }
-}
-
-const CACHE_BYTES: usize = 64 * 1024 * 1024;
-
-fn cache_data(bytes: &[u8]) -> Option<&[u8]> {
-    let (hash, data) = bytes.split_at_checked(32)?;
-    (data.len() <= CACHE_BYTES && Sha256::digest(data).as_slice() == hash).then_some(data)
-}
-
-#[cfg(test)]
-mod cache_tests {
-    use super::*;
-    #[test]
-    fn cache_rejects_truncation_and_corruption() {
-        let data = b"opaque wgpu data";
-        let mut bytes = Sha256::digest(data).to_vec();
-        bytes.extend(data);
-        assert_eq!(cache_data(&bytes), Some(data.as_slice()));
-        assert!(cache_data(&bytes[..31]).is_none());
-        bytes[33] ^= 1;
-        assert!(cache_data(&bytes).is_none());
-    }
-}
-
-impl Drop for ProgramCache {
-    fn drop(&mut self) {
-        if self.pipelines > 0
-            && let Err(error) = self.persist()
-        {
-            eprintln!("program_pipeline_cache_save_failed={error}");
-        }
     }
 }
 
@@ -604,7 +561,7 @@ pub(super) fn standard_slot(
 impl Renderer {
     /// Enables a persistent cache in an application-owned directory. Configure before
     /// the first lit frame. Files include a checksum, wgpu version and adapter/driver
-    /// identity; damaged or obsolete files start empty. Saving happens on renderer drop.
+    /// identity; damaged or obsolete files start empty. Saving follows each compiled batch.
     pub fn set_program_cache_directory(
         &mut self,
         directory: &Path,
@@ -618,15 +575,8 @@ impl Renderer {
         };
         let driver = Sha256::digest(format!("{adapter:?}").as_bytes());
         let path = directory.join(format!("wgpu30-{key}-{driver:x}.bin"));
-        let bytes = match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.len() <= CACHE_BYTES as u64 + 32 => {
-                Some(std::fs::read(&path)?)
-            }
-            Ok(_) => None,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        let data = bytes.as_deref().and_then(cache_data);
+        let data = crate::pipeline_compilation::read_cache(&path)?;
+        let data = data.as_deref();
         // SAFETY: the application-owned file contains only wgpu 30 get_data() output.
         // Its checksum rejects partial/corrupt writes; wgpu validates its own header
         // and driver compatibility, falling back to an empty cache on stale data.
