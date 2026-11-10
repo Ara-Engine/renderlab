@@ -142,7 +142,7 @@ def build():
     try:
         with (WORK / "build.log").open("w") as log:
             code = sp.run(command, cwd=REPO, stdout=log, stderr=sp.STDOUT,
-                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2"}).returncode
+                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}).returncode
         if code == 0:
             BINARY.parent.mkdir(exist_ok=True)
             shutil.copy2(TARGET / "release/examples/p_yard_capture.exe", BINARY)

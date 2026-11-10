@@ -26,6 +26,7 @@ def run(step):
         return 0
     out.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH")}
+    env["TMP"] = env["TEMP"] = str(WORK / "tmp")  # root steer 2026-11-10: nothing on C:
     env["RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK"] = "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK"
     env["RENDERLAB_P_STILL"] = ",".join(knobs[0].split("+")) if knobs else ""
     if mode == "count":
