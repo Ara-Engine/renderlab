@@ -727,3 +727,15 @@ codes. Open:
 6. **RT speed.** 3.82 ms still / 4.26 moving against HW Lumen Epic's 4.50 / 4.57: 1.07-1.18x faster, about 2.5-2.8x off a 3x target (1.50 ms).
 
 Unreal flaws Renderlab already beats here: SW Lumen's sun leak through S4's thin walls, SW Lumen's broken S5 mirror, and Unreal's softer, flatter quarry texture and colour. Neither engine leaves a visible ghost trail on the door or mirror benches; Unreal's door edge shows a faint doubled strip mid-slide. A view with a moving object over a lit background, rather than the black exterior sky here, would stress trails harder; that bench is still missing.
+
+## M8 Showcase follow-through (P-SHOW2, 2026-11-10)
+
+[P-SHOW2](p-show2.md), Showcase at 1080p through Ara's bridge (`ede758f7a`, Sky::Map), with a named per-pass GPU timeline (`RENDERLAB_PASS_LOG`) and ablations (`RENDERLAB_ABLATE`).
+
+- **FIXED: main's non-RT regression on skinned scenes.** P-SHOW's relight switch made every frame a GI drain frame, at P-DEFECT's 4x gather budget. Deleted: non-RT still 55.2 → 33.1 ms (GI 20.5 → 0.9 ms), plinths clean still, moving and on cuts.
+- **HALF FIXED: Sky::Map cost.** A 16-texel legacy chain sent glossy and hit lookups through the cross-face slow path; narrow levels are now banked at load. RT still with the map 52.5 → 33.9 ms, image within 2 codes.
+  - **OPEN, top cost:** about 17 ms of RT shading still remains under any map (25.1 vs 8.5 ms constant sky), and the integration thread sees the same with full-size independent banks. Profile the per-ray environment lookups (RGBA32F, two levels, 16 strata, every hit).
+  - **OPEN:** the atmosphere's own GPU-made legacy chain is not banked; check its narrow levels' cost too.
+- **OPEN: aluminium ball (both paths).** The untraced half of a 0.42 metal's lobe uses sky visibility about the normal, so ground-facing reflections read as sky. A directional-visibility fix is built behind a screen switch (`t3/p-show2-screens`), unmeasured; screen it on `reflection_matched --stage --metal-balls` against the path tracer.
+- **OPEN: glossy at a lower rate.** Screens built (`RENDERLAB_GLOSSY_MAX`), not run. Time them after the map lookup cost, which dominates glossy under a sky.
+- **Unexplained:** Showcase RT constant-sky spans spread 16-20 ms across leases on this machine. Root's 11.0 → 13.3 ms was a release-against-dev comparison, not a regression P-SHOW2 could reproduce.

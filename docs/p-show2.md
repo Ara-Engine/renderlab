@@ -7,13 +7,14 @@ Unit P-SHOW2, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10, branch
 | Step | Verdict | Showcase (Ara span, still, constant sky) | Quarry vs Unreal Epic |
 |---|---|---|---|
 | 1. Named per-pass GPU timeline, ablation switches, harness pass medians | **MERGE** (`ec8b635`) | measurement only: zero cost when unset | unchanged (tooling) |
-| 2. Delete P-SHOW's non-RT relight scaffolding | **MERGE** (`a77f613`) | non-RT 55.2 → 33.1 ms (timeline 50.4 → 26.5; GI 20.5 → 0.9 ms); plinths clean | QUARRY_PLACEHOLDER |
+| 2. Delete P-SHOW's non-RT relight scaffolding | **MERGE** (`a77f613`) | non-RT 55.2 → 33.1 ms (timeline 50.4 → 26.5; GI 20.5 → 0.9 ms); 30.9 ms on the head; plinths clean | unchanged: non-RT 8.66 ms still, 2.15x slower than SW Lumen Epic (4.02) |
 | Regression on main (root steer 1) | **explained, fixed by step 2** | see section 2 | |
-| Sky::Map cost (root steer 2) | **located, not fixed** | RT shading 7.7 → 43.6 ms with the map; 38 ms is reflection rays' environment lookups | |
+| Sky map: bank a legacy chain's narrow levels at load | **MERGE** (`930e843` + `374265f`, one change; the second supersedes the first) | with the map sky: RT still 52.5 → 33.9 ms (shading 43.6 → 25.1); image within 2 codes of main | unchanged: RT 4.16 ms still, 1.08x faster than HW Lumen Epic (4.50) |
+| Sky map: the remaining ~17 ms | **OPEN** | RT shading with the map is still 25.1 ms against 8.5 on the constant sky | |
 | 3. Glossy at a lower rate | **NOT RUN** (time box, re-prioritized) | | |
 | 4. Aluminium ball | **cause found (both sides); Renderlab half built, not screened** | | |
 
-The main score is Showcase on the RTX 4070 SUPER at 1080p, Ara release build (Ara `ede758f7a`, the integration thread's Sky::Map bridge, patched to this tree). Its constant-sky switch `ARA_RENDERLAB_SKY=constant` gives the like-for-like rows. All rows are single captures (`ara capture --stability 60`: 16 settle frames, then the median of 60 live GPU samples) in one lease, `pshow2-e`, on a shared machine. The Ara span is `GpuSample::render_span`, and "timeline" is section 1's span.
+The main score is Showcase on the RTX 4070 SUPER at 1080p, Ara release build (Ara `ede758f7a`, the integration thread's Sky::Map bridge, patched to this tree). Its constant-sky switch `ARA_RENDERLAB_SKY=constant` gives the like-for-like rows. All rows are single captures (`ara capture --stability 60`: 16 settle frames, then the median of 60 live GPU samples) in leases `pshow2-e` (main's behaviour, through screen switches) and `pshow2-h` (the head, the careful restart), on a shared machine. The Ara span is `GpuSample::render_span`, and "timeline" is section 1's span.
 
 ## 1. Per-pass GPU timeline (step 1, MERGE)
 
@@ -78,7 +79,7 @@ Root's report (A, integration thread): from `71ea355` to `4652ea3`, constant sky
   - Mean luma moves by at most 0.7 codes. No blotches, stray white pixels or crawl.
   - P-DEFECT's 32,768-cell budget is what keeps the settled cache clean here (P-DEFECT section 3); P-SHOW's blotches were its 8,192-cell drain.
 
-## 3. Sky::Map: the top cost (root steer 2), located, not fixed
+## 3. Sky::Map: the top cost (root steer 2), half fixed
 
 **Measured (M)**, Showcase still, the integration thread's bridge preparing Ara's gradient sky into a `PreparedEnvironment` (LegacyMipChain, 16-texel faces), ms:
 
@@ -100,7 +101,31 @@ The map's cost is reflection rays' environment lookups: about 14 ms on misses an
 
 **Fixes.**
 - **Bridge, available now (sent to the integration thread).** Cook the sky with `renderlab_cook::environment::prepare_environment` (the IndependentRoughness layout). Every roughness level is stored at full face size in array banks, so lookups stay on the in-face path, and the sky gains its dominant lobes.
-- **Renderlab, next.** Make small faces never take the slow path, which would also cover the atmosphere's own legacy chain: either pad every face with a one-texel border copied across the seam at load (bilinear then never leaves a face, with the same texels the remap reads), or bank legacy levels at full size at load. Judge against the path-traced reference; neither changes the prefiltered content. Not built: no time was left in the box after the bisect.
+- **Renderlab: banked narrow levels, MERGE (`930e843` + `374265f`, C, M).** Root's steer: a renderer should not get 38 ms slower because a caller hands it a valid map in the common mip-chain layout.
+  - At `create_environment` (`try_upload_environment`), a legacy chain's levels narrower than 32 texels are resampled into 32-texel array banks in the second specular texture (`environment::bank_legacy`). Each texel is the level's own exact cube-bilinear value at its centre, through a CPU mirror of `environment_bilinear`, seams and corners included. Wider levels keep their mips unchanged.
+  - The shader reads banked levels from those banks (`environment_level`, `environment_bank_start`). The uniform marks the layout as levels + 0.5.
+  - Cost: at most about 0.9 MiB per chain, plus a CPU resample at load. The atmosphere's own GPU-made chain is untouched.
+  - Test: `environment::bank_tests::legacy_chains_bank_their_narrow_levels`. A level linear in texel coordinates reads back exactly inside every face, a constant stays constant, wide levels stay mips, and a chain without narrow levels is not banked. Recorded in [api.md](api.md) under `create_environment`.
+  - Lib: **207 passed, 0 failed, 164 ignored** (release test binary of the head, inside lease `pshow2-h`; main had 206).
+
+| Showcase, map sky (head `374265f`, lease `pshow2-h`) | Ara span | shading |
+|---|---:|---:|
+| RT still, main (`pshow2-e`) | 52.48 | 43.60 |
+| **RT still, banked** | **33.89** | **25.10** |
+| RT moving, banked | 33.14 | 27.77 |
+| non-RT still, main (`pshow2-e`) | 64.53 | 53.18 |
+| non-RT moving, banked | 45.68 | 34.88 |
+| RT constant sky (head) | 19.74 | 8.50 |
+| non-RT constant sky (head) | 30.91 | 20.85 |
+
+  - **Images (M, inspected).** RT still, main against banked: whole frame mean 0.19 codes, max 2, no pixel over 8 (`crops/sky-balls.png`, balls and stage at x2). Moving frame 30 on both paths (`crops/sky-move.png`): clean reflections on the balls and turntable, no stray white pixels, and RT and non-RT agree.
+  - The non-RT map still timed out on its first, cold-pipeline run, as did the warm-up; both are 120 s player timeouts while every pipeline recompiled for the changed shader text. Non-RT therefore has moving numbers only. Against main's non-RT map still (64.5), the banked moving frame is 45.7 ms.
+- **Still open: about 17 ms of RT shading under a map** (25.1 against 8.5 ms on the constant sky). The integration thread measured about the same with the full-size independent layout (A: 23.8 against 8.9 ms). So it is not the face-edge path; it is the lookups' own cost at every glossy ray and hit. Candidates:
+  - RGBA32F texels: half precision halves the bytes;
+  - full-size faces at high roughness in the independent layout: about 25 MB of banks;
+  - two levels and eight loads per lookup on every one of 16 strata.
+
+  The next unit should profile it with Nsight on the hit and miss lookups.
 
 ## 4. Showcase's brushed aluminium ball reads matte white (both paths)
 
@@ -119,15 +144,26 @@ The screens were written and built (lease plans `ab`, `c`), but the root steers 
 
 ## Quarry rows (root steer: ratio against Unreal Epic)
 
-QUARRYTABLE_PLACEHOLDER
+Matched quarry, 1080p, GPU p50, one visit per path in lease `pshow2-h`, the head's `p_yard_capture` example run with `tools/p-yard/rl.py`'s command line (manifest, `quarry`, path, out, `timing`). rl.py itself writes into P-YARD2's evidence folder, so the binary was called directly. Unreal from [p-yard.md](p-yard.md) (P-YARD2).
+
+| Path | State | Renderlab head | P-YARD2 Renderlab | Unreal Epic | Ratio vs Epic |
+|---|---|---:|---:|---:|---|
+| RT | still | 4.16 | 3.82 | 4.50 (HW Lumen) | 1.08x faster |
+| RT | moving | 4.32 | 4.26 | 4.57 | 1.06x faster |
+| RT | cut | 12.70 | 12.6 | ~4.5 | 2.8x slower |
+| non-RT | still | 8.66 | 8.65 | 4.02 (SW Lumen) | 2.15x slower |
+| non-RT | moving | 10.74 | 10.57 | 4.12 | 2.61x slower |
+| non-RT | cut | 43.34 | 43.1 | ~4.1 | 10.5x slower |
+
+None of this unit's commits move the quarry; the quarry has no skinned mesh and draws the atmosphere's own chain, which is not banked. The differences are within P-YARD2's visit spread (RT still visits 3.33 and 4.30).
 
 ## Process
 
 - **Hardware:** RTX 4070 SUPER (12,282 MiB), NVIDIA 617.14, Ryzen 7 7800X3D, Windows 11; shared machine (Ara units building and capturing between leases; the integration thread's captures ran just before ours).
 - **Build identity:**
   - Showcase screens: Ara `ede758f7a` (detached worktree, `renderlab` patched to this tree) built at this branch plus the screen commits (`t3/p-show2-screens` `91bf40d` plus the miss-lookup switch), release, 275 s.
-  - Merge candidate: `a77f613`; lib and quarry binaries built from it.
-  - The merged code equals the screen binary with every switch unset: the switches only rewrite shader text, or bypass a branch, when set.
+  - Head `374265f` (careful restart): one build session of Ara release, the lib test binary (release) and `p_yard_capture` (release), 743 s, at 20 GiB free.
+  - Lease E's main-behaviour rows come from the screen binary with every switch unset. The switches only rewrite shader text, or bypass a branch, when set.
 - **Builds:** build slot plus stillkit mutex, two jobs, one at a time:
   - Ara cold 631 s;
   - Ara incremental 46 s and 275 s;
@@ -137,8 +173,10 @@ QUARRYTABLE_PLACEHOLDER
   - `pshow2-a`: 17 runs, all failed. The timeline's resolve offsets were 384-byte strides; `QUERY_RESOLVE_BUFFER_ALIGNMENT` is 256. Fixed (64 marks a frame, 512 bytes, checked at compile time).
   - `pshow2-a2` and `pshow2-ab`: withdrawn before admission for the root steers.
   - `pshow2-e`: 22 runs, about 11 min.
-  - `pshow2-f`: quarry and lib.
-- **Time:** about 1 h 30 min of code and analysis; about 25 min of GPU leases; about 1 h 45 min queued behind Ara builds and captures (ara-vk, ara-wscene, ara-integration, p-still).
+  - `pshow2-f`: withdrawn before admission, for the 15:02 admission rules and the machine stop.
+  - `pshow2-h` (careful restart, only unit): lib, 7 Showcase captures, 2 quarry visits; 12.3 min, at 19-20 GiB free.
+- **Time:** about 2 h of code and analysis; about 37 min of GPU leases; about 2 h 30 min queued behind Ara builds and captures, the 15:02 rule change and the machine stop.
+- **Runners:** `tools/build.py` checks admission first and then takes the stillkit mutex and slot without waiting (the 15:02 rule). It starts at 10 GiB free and stops its build tree below 5 GiB. Leases start at 10 GiB and abort at 5 GiB. Every line posted to the schedule starts with the free RAM.
 - **Evidence:** `D:/Coding/renderlab-work/p-show2/`:
   - `showcase/captures/*.json`, with `renderlab_passes` and per-frame `*.passes.jsonl`;
   - `e-summary.txt`;
