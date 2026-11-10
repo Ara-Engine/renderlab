@@ -11,10 +11,10 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
-    let entries: Vec<_> = if matches!(pass, Pass::Tone | Pass::Display) {
+    let entries: Vec<_> = if pass.raster() {
         vec![
-            (naga::ShaderStage::Vertex, "vs"),
-            (naga::ShaderStage::Fragment, "fs"),
+            (naga::ShaderStage::Vertex, pass.vertex()),
+            (naga::ShaderStage::Fragment, pass.entry()),
         ]
     } else {
         vec![(naga::ShaderStage::Compute, pass.entry())]
@@ -264,6 +264,9 @@ fn atmosphere_interface(body: &str, pass: Pass, original: &naga::Module) -> Resu
         ("atmosphere_transmittance", "ara_textures[ara_root.w1]"),
         ("atmosphere_multiscatter", "ara_textures[ara_root.w2]"),
         ("at_skyview", "ara_textures[ara_root.w3]"),
+        ("atmosphere_skyview", "ara_textures[ara_root.w3]"),
+        ("atmosphere_volume", "ara_luts[ara_root.w7]"),
+        ("dfg_sampler", "ara_samplers[ara_root.w5]"),
         ("at_transmittance_out", "ara_outputs[ara_root.w4]"),
         ("at_multiscatter_out", "ara_outputs[ara_root.w4]"),
         ("at_skyview_out", "ara_outputs[ara_root.w4]"),

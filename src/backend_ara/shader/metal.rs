@@ -62,11 +62,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let open = name_at + name.len();
     let close = matching_paren(&source, open)?;
     let prefix = source[start..name_at].to_string();
-    let stage = if matches!(pass, Pass::Tone | Pass::Display) {
-        "fragment"
-    } else {
-        "kernel"
-    };
+    let stage = if pass.raster() { "fragment" } else { "kernel" };
     let stage_at = prefix
         .find(&format!("{stage} "))
         .context("entry stage qualifier missing")?;
@@ -216,19 +212,22 @@ fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
             "atmosphere" => buffer_argument(parameter, 0)?,
             "atmosphere_transmittance" => "top.textures[top.root[1]].texture".into(),
             "atmosphere_multiscatter" => "top.textures[top.root[2]].texture".into(),
-            "at_skyview" => "top.textures[top.root[3]].texture".into(),
+            "at_skyview" | "atmosphere_skyview" => "top.textures[top.root[3]].texture".into(),
             "at_transmittance_out" | "at_multiscatter_out" | "at_skyview_out" => {
                 "((device AraWriteImageEntry*)top.storage_images)[top.root[4]].texture".into()
             }
             "at_volume_out" | "at_scatter_out" => {
                 "((device AraWriteVolumeEntry*)top.storage_images)[top.root[4]].texture".into()
             }
+            "atmosphere_volume" => {
+                "((device AraVolumeEntry*)top.textures)[top.root[7]].texture".into()
+            }
             "at_history" => "((device AraVolumeEntry*)top.textures)[top.root[6]].texture".into(),
             "at_scatter" => "((device AraVolumeEntry*)top.textures)[top.root[7]].texture".into(),
             "at_specular_out" | "at_diffuse_out" => {
                 "((device AraWriteCubeImageEntry*)top.storage_images)[top.root[4]].texture".into()
             }
-            "atmosphere_sampler" => "top.samplers[top.root[5]].state".into(),
+            "atmosphere_sampler" | "dfg_sampler" => "top.samplers[top.root[5]].state".into(),
             _ => bail!("unmapped atmosphere resource {name}"),
         });
     }

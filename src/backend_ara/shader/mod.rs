@@ -27,6 +27,8 @@ pub enum Pass {
     EnvironmentSpecular,
     /// Cosine-weighted diffuse irradiance of the procedural sky.
     EnvironmentDiffuse,
+    /// Fullscreen exposed sky, sun disk and fog backdrop.
+    AtmosphereBackdrop,
     /// Thirty-two cumulative aerial perspective slices.
     AtmosphereAerial,
     /// Sixty-four cumulative fog slices from resolved visibility/extinction.
@@ -59,6 +61,12 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::AtmosphereBackdrop => format!(
+                "{}{}",
+                crate::atmosphere::api_source(),
+                include_str!("../../../shaders/atmosphere_sky.wgsl")
+            )
+            .into(),
             Self::RasterSurface => include_str!("../../../shaders/post_raster_surface.wgsl").into(),
             Self::RasterSurfaceFour => include_str!("../../../shaders/post_raster_surface.wgsl")
                 .replace("texture_depth_2d;", "texture_depth_multisampled_2d;")
@@ -139,6 +147,16 @@ impl Pass {
             _ => POST.into(),
         }
     }
+    pub(super) fn raster(self) -> bool {
+        matches!(self, Self::Tone | Self::Display | Self::AtmosphereBackdrop)
+    }
+    pub(super) fn vertex(self) -> &'static str {
+        if matches!(self, Self::AtmosphereBackdrop) {
+            "vs_sky"
+        } else {
+            "vs"
+        }
+    }
     pub(super) fn surface(self) -> bool {
         matches!(self, Self::RasterSurface | Self::RasterSurfaceFour)
     }
@@ -152,6 +170,7 @@ impl Pass {
         matches!(
             self,
             Self::EnvironmentSpecular
+                | Self::AtmosphereBackdrop
                 | Self::AtmosphereAerial
                 | Self::AtmosphereFogIntegrate
                 | Self::EnvironmentDiffuse
@@ -184,6 +203,7 @@ impl Pass {
             Self::EnvironmentSpecular => "at_environment_specular",
             Self::EnvironmentDiffuse => "at_environment_diffuse",
             Self::LightCluster => "lc_build",
+            Self::AtmosphereBackdrop => "fs_sky",
             Self::AtmosphereAerial => "at_aerial_volume",
             Self::AtmosphereFogIntegrate => "at_fog_integrate",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
@@ -233,9 +253,7 @@ fn validate(module: &naga::Module) -> anyhow::Result<naga::valid::ModuleInfo> {
 /// while avoiding duplicate native entry kernels and their unused interfaces.
 pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()> {
     module.entry_points.retain(|entry| {
-        entry.name == pass.entry()
-            || (matches!(pass, Pass::Tone | Pass::Display)
-                && entry.stage == naga::ShaderStage::Vertex)
+        entry.name == pass.entry() || (pass.raster() && entry.stage == naga::ShaderStage::Vertex)
     });
     anyhow::ensure!(!module.entry_points.is_empty(), "selected entry missing");
     validate(module)?;

@@ -14,6 +14,7 @@ pub struct AtmosphereParameters {
     /// Storage record to declare and retire.
     pub record: StorageBuffer,
     pub(crate) grid: Option<[u32; 2]>,
+    pub(crate) viewport: Option<[u32; 2]>,
 }
 impl AtmosphereParameters {
     /// Validate physical settings; the LUTs are per unit extraterrestrial sun illuminance.
@@ -27,6 +28,7 @@ impl AtmosphereParameters {
         Ok(Self {
             record: StorageBuffer::new(gpu, bytemuck::cast_slice(&values))?,
             grid: None,
+            viewport: None,
         })
     }
     /// Camera-volume record with the original fog settings and unjittered matrices.
@@ -85,6 +87,7 @@ impl AtmosphereParameters {
         Ok(Self {
             record: StorageBuffer::new(gpu, bytemuck::cast_slice(&values))?,
             grid: Some(grid),
+            viewport: Some(viewport),
         })
     }
     fn medium_values(

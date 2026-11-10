@@ -235,3 +235,20 @@ write preserves all aerial slices. The full9-test replay suite passes with Metal
 API/shader validation; all22 SPIR-V stages validate. This brings the port to18
 original Renderlab entries plus display transfer. Visibility injection and fog
 history remain for the later shadow/temporal phase; Vulkan execution is pending.
+
+## Raster sky backdrop
+
+`vs_sky`/`fs_sky` now use the same heap-only fullscreen path. Source composition
+calls Renderlab's existing `atmosphere::api_source`, including its DFG sampler
+alias; no shader arithmetic changes. The shared frontend selects the actual
+vertex/fragment entry names instead of assuming `vs`/`fs`.
+
+The replay renders all eight sun-disk/height-fog/volume-fog combinations against
+an independent scalar oracle, using a translated low-altitude camera, an offset
+sun at the centre, a nonuniform sky LUT and packed3D fog. All pixels pass
+`abs(gpu-reference)/max(1,abs(reference)) <=0.0005`; observed maximum0.000210286.
+The peak sun texel's absolute difference is0.518 in much larger linear radiance,
+so an absolute-only display-range tolerance would be inappropriate. All10 replay
+tests pass with Metal API/shader validation and all24 SPIR-V stages validate.
+There are19 original Renderlab entry points plus display transfer. This is a
+backdrop leaf, not complete opaque scene/lighting integration; Vulkan is pending.

@@ -15,7 +15,7 @@ pub struct Texture {
     pub size: [u32; 2],
     /// Texel representation.
     pub format: Format,
-    /// Parent shape retained for validating dimensions and subresource views.
+    /// Published view shape; all views retain the parent resource identity.
     pub shape: ImageShape,
     pub(crate) sampled: u32,
     pub(crate) storage: Option<u32>,
