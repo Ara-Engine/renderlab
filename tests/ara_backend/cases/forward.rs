@@ -583,6 +583,139 @@ fn hardware_soft_shading_reflects_the_scene_and_fresh_counts() -> Result<()> {
         program.inputs()
     );
     program.msl()?;
+    // Its reflection code declares `let camera = primary_ray(..)` under the `camera`
+    // global; the SPIR-V path renames that local before rewriting globals by name.
+    validate_spirv(&program, "hardware-soft-shading")
+}
+
+/// The traced frame's form of the fresh estimator: the forward form's interface plus
+/// the primary hit image and tile flags that gate its coverage.
+#[test]
+fn traced_fresh_visibility_reflects_its_primary_gates() -> Result<()> {
+    use renderlab::backend_ara::shader::{InputKey, InputKind};
+    let program = renderlab::backend_ara::fresh_visibility::traced_program()?;
+    let keys: Vec<_> = program
+        .inputs()
+        .iter()
+        .map(|i| (i.key.group, i.key.binding))
+        .collect();
+    ensure!(
+        keys == [
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 7),
+            (0, 21),
+            (3, 0),
+            (3, 1),
+            (3, 5)
+        ] && matches!(
+            program.inputs()[0],
+            renderlab::backend_ara::shader::ShaderInput {
+                key: InputKey { .. },
+                kind: InputKind::AccelerationStructure,
+                ..
+            }
+        ),
+        "traced fresh interface changed: {:?}",
+        program.inputs()
+    );
+    ensure!(
+        program.threads()? == [32, 1, 1],
+        "traced fresh workgroup changed"
+    );
+    program.msl()?;
+    validate_spirv(&program, "traced-fresh")
+}
+
+fn validate_spirv(program: &renderlab::backend_ara::shader::Program, label: &str) -> Result<()> {
+    let export = root(label);
+    std::fs::create_dir_all(&export)?;
+    let stages = renderlab::backend_ara::cache::emit_spirv_program(program, &export)?;
+    ensure!(!stages.is_empty(), "{label} emitted no SPIR-V stage");
+    for stage in &stages {
+        let bytes = std::fs::read(export.join(&stage.spirv))?;
+        let words: Vec<_> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
+        assert_nonuniform_sampled_images(&words)?;
+    }
+    if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
+        let sdk = std::path::PathBuf::from(sdk);
+        let validator = [sdk.join("bin/spirv-val"), sdk.join("Bin/spirv-val.exe")]
+            .into_iter()
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| "spirv-val".into());
+        for stage in &stages {
+            let output = std::process::Command::new(&validator)
+                .args(["--target-env", "vulkan1.3"])
+                .arg(export.join(&stage.spirv))
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "{label} SPIR-V: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The rename behind that: WGSL scoping, case by case.
+#[test]
+fn locals_shadowing_a_resource_global_are_renamed_within_their_scope() -> Result<()> {
+    use renderlab::backend_ara::shader::local_shadows::rename;
+    let globals = std::collections::BTreeSet::from(["camera", "lights"]);
+    let source = "\
+@group(0) @binding(0) var<uniform> camera: Camera;
+struct Ray { camera: f32, origin: vec3<f32> }
+// let camera in a comment stays
+fn uses_global() -> f32 { return camera.exposure; }
+fn parameter(camera: Ray, other: f32) -> f32 { return camera.camera + other; }
+fn block() -> f32 {
+    let before = camera.exposure;
+    {
+        let camera = make(camera.exposure);
+        var<function> lights: f32 = camera.origin.x;
+        lights = lights + camera.camera;
+    }
+    return before + camera.exposure;
+}
+fn later() -> f32 { let camera = 1.0; return camera; }
+";
+    let expected = "\
+@group(0) @binding(0) var<uniform> camera: Camera;
+struct Ray { camera: f32, origin: vec3<f32> }
+// let camera in a comment stays
+fn uses_global() -> f32 { return camera.exposure; }
+fn parameter(camera_ara_local: Ray, other: f32) -> f32 { return camera_ara_local.camera + other; }
+fn block() -> f32 {
+    let before = camera.exposure;
+    {
+        let camera_ara_local = make(camera.exposure);
+        var<function> lights_ara_local: f32 = camera_ara_local.origin.x;
+        lights_ara_local = lights_ara_local + camera_ara_local.camera;
+    }
+    return before + camera.exposure;
+}
+fn later() -> f32 { let camera_ara_local = 1.0; return camera_ara_local; }
+";
+    let renamed = rename(source, &globals)?;
+    ensure!(renamed == expected, "unexpected rename:\n{renamed}");
+    ensure!(
+        rename(
+            "fn f() { for (var camera = 0; camera < 1; camera++) {} }",
+            &globals
+        )
+        .is_err(),
+        "a loop-scoped shadow must be rejected, not guessed"
+    );
+    let untouched = "fn f(a: f32) -> f32 { let b = a; return b; }";
+    ensure!(rename(untouched, &globals)? == untouched, "identity lost");
     Ok(())
 }
 

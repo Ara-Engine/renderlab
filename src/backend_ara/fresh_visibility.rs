@@ -97,3 +97,12 @@ impl Visibility {
         self.kernel.retire(gpu)
     }
 }
+/// The estimator as a traced frame composes it (`primary_ray_gpu::shader_sources`):
+/// the same `fresh_compute`, with coverage gated on the primary tiles and hit image
+/// its camera trace wrote. Reflected and compiled natively on Metal; not yet executed
+/// against a reference.
+pub fn traced_program() -> Result<Program> {
+    let [_, soft] =
+        crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
+    Program::new(Pass::FreshVisibility, soft)
+}

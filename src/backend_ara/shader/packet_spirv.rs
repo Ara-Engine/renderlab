@@ -8,6 +8,16 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
     lower(source, module, &inputs, false)
 }
 pub(super) fn adapt_ray_source(source: &str, inputs: &[super::ShaderInput]) -> Result<String> {
+    // This path rewrites the original text, so a local named like a resource global
+    // (`let camera = ...`) must get its own name before anything is rewritten.
+    let resources: Vec<String> = super::parse(source)?
+        .global_variables
+        .iter()
+        .filter(|(_, g)| g.binding.is_some())
+        .filter_map(|(_, g)| g.name.clone())
+        .collect();
+    let source =
+        &super::local_shadows::rename(source, &resources.iter().map(String::as_str).collect())?;
     let original = super::parse(source)?;
     let moved = super::ray_source::relocate_groups(source, &original)?;
     let module = super::parse(&moved)?;

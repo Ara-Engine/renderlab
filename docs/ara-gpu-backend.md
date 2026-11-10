@@ -1201,9 +1201,16 @@ local-light shadow rays). Those are two variants of ported entries, not a new fa
 reflects 39 inputs (the lit interface, the 256-element geometry and material arrays,
 the scene and the fresh counts) and compiles to a native Metal pipeline on a
 ray-query device in about 37 s. It has not executed against a reference. Its SPIR-V
-emission fails today (`resource global is shadowed locally: "camera"`): the compacted
-WGSL re-emission rejects a local that shadows the camera global, which the Vulkan
-side has to resolve before this variant can run there.
+emission failed at first (`resource global is shadowed locally: "camera"`): ray-query
+modules are rewritten in their original text, and `reflections.wgsl` declares
+`let camera = primary_ray(..)` under the `camera` global. `shader::local_shadows`
+now renames such locals within their WGSL scope (parameters over their body, `let`,
+`var` and `const` from the end of their statement to the end of their block) before
+the rewrite; a loop-scoped shadow is rejected rather than guessed. With it the
+variant emits SPIR-V that passes `spirv-val` for Vulkan 1.3 and the NonUniform audit.
+`fresh_visibility::traced_program` is the other variant: it reflects the forward
+interface plus the primary hit image and tile flags, compiles natively in under a
+second, and its SPIR-V validates. Neither has executed against a reference yet.
 With it, this frame is assembly work like the forward frame, and it is the first
 picture comparable with an engine render: correct soft sun shadows, sky, glass.
 Apple silicon has ray queries, so this is also the path a Mac would run.

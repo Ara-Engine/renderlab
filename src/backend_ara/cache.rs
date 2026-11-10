@@ -69,7 +69,7 @@ impl ShaderCache {
         state: RenderState,
     ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             wgsl,
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
@@ -86,6 +86,7 @@ impl ShaderCache {
             include_str!("shader/buffer_arrays.rs"),
             include_str!("shader/handle_arrays.rs"),
             include_str!("shader/program.rs"),
+            include_str!("shader/local_shadows.rs"),
             include_str!("shader/ray_source.rs"),
             include_str!("cache.rs"),
             include_str!("../../Cargo.lock")

@@ -3,6 +3,8 @@ mod array_access;
 mod buffer_arrays;
 mod handle_arrays;
 mod heap_interface;
+/// Renames locals that shadow a resource global before the textual heap rewrite.
+pub mod local_shadows;
 mod mesh_interface;
 mod metal;
 mod packet_spirv;
