@@ -9,6 +9,7 @@ mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
 mod spirv;
+mod spv_layout;
 pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;
@@ -22,6 +23,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Original spawn, drag/gravity integration and incident particle lighting.
+    ParticleUpdate,
     /// Original programmable toon forward shading, with all optional resource inputs.
     MeshToon,
     /// Opaque raster depth to transparency view-space distance, preserving misses.
@@ -76,6 +79,17 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::ParticleUpdate => format!(
+                "{}{}{}{}{}{}{}",
+                include_str!("../../../shaders/scene.wgsl"),
+                crate::renderer::transparency_gpu::transmission_shadow::api_source(),
+                crate::atmosphere::api_source(),
+                transparency_section("TP_FRAME"),
+                transparency_section("TP_SUN"),
+                transparency_section("TP_PARTICLES"),
+                transparency_section("TP_PARTICLES_SIM")
+            )
+            .into(),
             Self::MeshToon => crate::program::compose(
                 include_str!("../../../shaders/scene.wgsl"),
                 include_str!("../../../shaders/programs/toon.wgsl"),
@@ -196,10 +210,14 @@ impl Pass {
         )
     }
     pub(super) fn indirect(self) -> bool {
-        matches!(self, Self::MeshToon)
+        matches!(self, Self::MeshToon | Self::ParticleUpdate)
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
-        if self.indirect() { (4, 0) } else { (3, 0) }
+        if matches!(self, Self::MeshToon) {
+            (4, 0)
+        } else {
+            (3, 0)
+        }
     }
     pub(super) fn vertex(self) -> &'static str {
         if matches!(self, Self::AtmosphereBackdrop) {
@@ -251,6 +269,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ParticleUpdate => "tp_particles_update",
             Self::MeshToon => "fs_lit",
             Self::TransparencyDepth => "tp_depth_raster",
             Self::MeshDiagnostic => "fs",

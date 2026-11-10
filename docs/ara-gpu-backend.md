@@ -407,14 +407,42 @@ Shared adaptations added for this interface:
 - SPIR-V's compacted WGSL re-emission uses inferred local types because explicit
   `frexp` result annotations use an internal type name that WGSL cannot parse.
   Module directives are hoisted ahead of the heap declarations.
-- Fixed read-only buffer structs get distinct host block types with the original
-  member sizes. Field reads stay direct; whole-value reads reconstruct the source
-  value field by field, keeping storage layout decorations out of function-local
-  copied materials. Runtime-sized structs stay direct. Unexpected shared explicit
-  layouts fail rather than silently changing buffer offsets.
+- Typed buffer wrappers retain source layouts and direct field reads. The initial
+  field-by-field material loader was replaced by the shared physical/logical
+  SPIR-V type split described below, which also handles mutable particle records.
 
 There are now23 original Renderlab entry points plus display transfer. All15
 replay tests pass with Metal API/shader validation, and all30 exported stages
 pass spirv-val for Vulkan1.3. SPIR-V execution remains pending for the complete
 cohort. In addition, this lit raster path needs PC-owned Ara feature negotiation
 for `VK_KHR_fragment_shader_barycentric`; no Vulkan backend files were edited here.
+
+
+## Particle simulation and shared physical/value type separation
+
+`tp_particles_update` runs from the same production prelude, transmission,
+atmosphere and particle sections as the wgpu compositor. Its ten selected inputs
+use the reflected packet and `Kernel` encoder, including a real comparison sampler
+and writable particle storage. Shader group sizes are reflected once at pipeline
+creation. The graph sees the particle record as a read/write storage dependency.
+
+A fixed17-slot emitter uses20 allocated records: wrapped spawn counter0xfffffffe,
+five births across the capacity wrap, random position/velocity/lifetime, drag and
+gravity, already dead/never alive particles, exact-boundary expiry, and three tail
+sentinels. Two directional lights, an ignored point light, nonunit camera exposure
+and distinct frame sun illuminance prove that incident particle lighting stays
+unexposed and comes from the light table. Maximum component error is5.97e-8
+(tolerance2e-5); untouched records and just-expired light words match exactly.
+Shadow/transmission and prepared-environment branches are initialized but disabled.
+
+Mutable local `TpParticle` exposed naga30's reuse of physical buffer structs for
+Function values. One shared SPIR-V stage now clones physical composite types only
+where internal memory shares their explicit layout, preserves offsets/strides on
+those physical types and bridges whole loads/stores using SPIR-V1.4
+`OpCopyLogical`. Internal values retain the original logical types without layout
+metadata. This also replaces the initial WGSL material-value loader; field reads
+and shader math remain unchanged. Unexpected pointer/value origins are rejected.
+
+There are24 original entries plus display. All16 native replays pass with Metal
+API/shader validation; all31 SPIR-V stages validate for Vulkan1.3. Native Vulkan
+execution, including these type-copy bridges, remains pending on the PC.

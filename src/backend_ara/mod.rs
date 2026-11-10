@@ -9,6 +9,7 @@ pub mod cache;
 pub mod environment;
 pub mod graph;
 pub mod image;
+pub mod kernel;
 pub mod light_cluster;
 pub mod mesh;
 pub mod particles;

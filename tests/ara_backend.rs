@@ -56,6 +56,7 @@ fn upload(
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
+        Pass::ParticleUpdate,
         Pass::MeshToon,
         Pass::TransparencyDepth,
         Pass::MeshDiagnostic,
@@ -167,3 +168,8 @@ mod transparency_depth_cases;
 mod volume_cases;
 #[path = "ara_backend/volumes.rs"]
 mod volume_reference;
+
+#[path = "ara_backend/cases/particle_update.rs"]
+mod particle_update_cases;
+#[path = "ara_backend/particle_update.rs"]
+mod particle_update_reference;

@@ -1,5 +1,5 @@
 //! One reflected heap packet lowered to runtime descriptor arrays.
-use super::spirv::rewrite_global_uses;
+use super::spirv::rewrite_globals;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
@@ -9,7 +9,6 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
     let inputs = super::heap_interface::from_module(module)?;
     let mut names = BTreeMap::new();
     let mut declarations = String::new();
-    let mut values = BTreeMap::new();
     for (i, input) in inputs.iter().enumerate() {
         let slot = format!("ara_packet[ara_root.w0].values[(ara_root.w1 >> 2u) + {i}u]");
         match input.kind {
@@ -29,7 +28,6 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
                 ) && module.types[global.ty]
                     .inner
                     .is_dynamically_sized(&module.types);
-                let mut load = None;
                 let (ty, array) = if let naga::TypeInner::Array { base, size, .. } =
                     module.types[global.ty].inner
                 {
@@ -46,33 +44,6 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
                     (ty, true)
                 } else if unsized_struct {
                     (super::heap_interface::wgsl_type(module, global.ty)?, false)
-                } else if let naga::TypeInner::Struct { ref members, span } =
-                    module.types[global.ty].inner
-                    && !writable
-                {
-                    // Buffer layout and ordinary copied values need distinct SPIR-V
-                    // struct types. Reconstruct the source value field by field;
-                    // @size retains every original offset and trailing byte.
-                    let ty = format!("AraBufferType{i}");
-                    let payload = super::heap_interface::wgsl_type(module, global.ty)?;
-                    let mut fields = String::new();
-                    let mut values = Vec::new();
-                    for (j, m) in members.iter().enumerate() {
-                        let name = m.name.as_deref().context("buffer member missing name")?;
-                        let next = members.get(j + 1).map_or(span, |n| n.offset);
-                        let size = next
-                            .checked_sub(m.offset)
-                            .context("invalid buffer member offset")?;
-                        let member_ty = super::heap_interface::wgsl_type(module, m.ty)?;
-                        fields.push_str(&format!("@size({size}) {name}:{member_ty},"));
-                        values.push(format!("ara_buffer_{i}[index].{name}"));
-                    }
-                    declarations.push_str(&format!("struct {ty} {{{fields}}};\n"));
-                    load = Some(format!(
-                        "fn ara_load_{i}(index:u32)->{payload} {{return {payload}({});}}\n",
-                        values.join(",")
-                    ));
-                    (ty, false)
                 } else {
                     let payload = super::heap_interface::wgsl_type(module, global.ty)?;
                     let ty = format!("AraBufferType{i}");
@@ -84,22 +55,16 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
                     400 + i,
                     if writable { "read_write" } else { "read" }
                 ));
-                let replacement = if let Some(load) = load {
-                    declarations.push_str(&load);
-                    values.insert(input.name.as_str(), format!("ara_load_{i}({slot})"));
-                    format!("ara_buffer_{i}[{slot}]")
-                } else {
-                    format!(
-                        "ara_buffer_{i}[{slot}]{}",
-                        if array {
-                            ".values"
-                        } else if unsized_struct {
-                            ""
-                        } else {
-                            ".value"
-                        }
-                    )
-                };
+                let replacement = format!(
+                    "ara_buffer_{i}[{slot}]{}",
+                    if array {
+                        ".values"
+                    } else if unsized_struct {
+                        ""
+                    } else {
+                        ".value"
+                    }
+                );
                 names.insert(input.name.as_str(), replacement);
             }
             InputKind::Sampler { comparison } => {
@@ -145,7 +110,7 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
             }
         }
     }
-    let out = rewrite_global_uses(body, &names, &values, module)?;
+    let out = rewrite_globals(body, &names, module)?;
     Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};

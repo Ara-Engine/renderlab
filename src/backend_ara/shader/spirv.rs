@@ -53,7 +53,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
             remap_heap_aliases(&mut words)?;
             validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
-            repair_internal_layouts(&mut words)?;
+            super::spv_layout::repair(&mut words)?;
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),
@@ -231,68 +231,6 @@ struct AraLights {{values:array<Light>,}};
 {out}
 "#
     ))
-}
-
-// Naga 30 decorates internal arrays/structs with explicit layout, although Vulkan
-// forbids that on Workgroup/Function memory without its optional layout features.
-// Strip only types exclusive to internal memory. Shared explicit layouts must be
-// split by the WGSL adapter before emission; reject them rather than corrupt an ABI.
-fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
-    let mut types = BTreeMap::<u32, Vec<u32>>::new();
-    let mut wg = Vec::new();
-    let mut others = Vec::new();
-    let mut at = 5;
-    while at < words.len() {
-        let count = (words[at] >> 16) as usize;
-        match words[at] & 0xffff {
-            28 | 29 => {
-                types.insert(words[at + 1], vec![words[at + 2]]);
-            }
-            30 => {
-                types.insert(words[at + 1], words[at + 2..at + count].to_vec());
-            }
-            32 => {
-                if !matches!(words[at + 2], 2 | 9 | 12 | 5349) {
-                    wg.push(words[at + 3]);
-                } else {
-                    others.push(words[at + 3]);
-                }
-            }
-            _ => {}
-        }
-        at += count;
-    }
-    fn walk(roots: Vec<u32>, types: &BTreeMap<u32, Vec<u32>>) -> std::collections::BTreeSet<u32> {
-        let mut pending = roots;
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if seen.insert(id)
-                && let Some(children) = types.get(&id)
-            {
-                pending.extend(children);
-            }
-        }
-        seen
-    }
-    let wg = walk(wg, &types);
-    let others = walk(others, &types);
-    at = 5;
-    while at < words.len() {
-        let count = (words[at] >> 16) as usize;
-        let array_stride = words[at] & 0xffff == 71 && count == 4 && words[at + 2] == 6;
-        let member_layout =
-            words[at] & 0xffff == 72 && count >= 4 && matches!(words[at + 3], 4 | 5 | 7 | 35);
-        if (array_stride || member_layout) && wg.contains(&words[at + 1]) {
-            ensure!(
-                !others.contains(&words[at + 1]),
-                "explicit layout is shared by buffer and internal memory; split the source value type"
-            );
-            words.drain(at..at + count);
-        } else {
-            at += count;
-        }
-    }
-    Ok(())
 }
 
 fn atmosphere_interface(body: &str, pass: Pass, original: &naga::Module) -> Result<String> {
@@ -480,17 +418,9 @@ var<immediate> ara_root:AraRoot;
 
 /// Rewrite only globals registered by naga. Field selections/declarations keep
 /// their names; a local shadow is rejected explicitly rather than silently changed.
-fn rewrite_globals<S: AsRef<str>>(
+pub(super) fn rewrite_globals<S: AsRef<str>>(
     body: &str,
     names: &BTreeMap<&str, S>,
-    original: &naga::Module,
-) -> Result<String> {
-    rewrite_global_uses(body, names, &BTreeMap::new(), original)
-}
-pub(super) fn rewrite_global_uses<S: AsRef<str>>(
-    body: &str,
-    names: &BTreeMap<&str, S>,
-    values: &BTreeMap<&str, String>,
     original: &naga::Module,
 ) -> Result<String> {
     let globals: std::collections::BTreeSet<_> = original
@@ -541,17 +471,12 @@ pub(super) fn rewrite_global_uses<S: AsRef<str>>(
             let member = body[..start].trim_end().ends_with('.');
             let declaration = body[at..].trim_start().starts_with(':');
             if !member && !declaration && globals.contains(word) {
-                let field_access = body[at..].trim_start().starts_with('.');
-                if !field_access && let Some(value) = values.get(word) {
-                    out.push_str(value);
-                } else {
-                    out.push_str(
-                        names
-                            .get(word)
-                            .expect("registered resource global")
-                            .as_ref(),
-                    );
-                }
+                out.push_str(
+                    names
+                        .get(word)
+                        .expect("registered resource global")
+                        .as_ref(),
+                );
             } else {
                 out.push_str(word);
             }
