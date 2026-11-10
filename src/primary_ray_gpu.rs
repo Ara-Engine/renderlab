@@ -201,7 +201,7 @@ pub(crate) fn edge_check_source(kernels: &str) -> String {
 /// Heads of every program's traced shading modules, indexed by `Shading`: Hard (inline
 /// `hard_shadow` rays) and Soft (fresh counts). `program::compose` appends the API, the
 /// program and the shading entry.
-pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
     let mut heads = heads(wgsl)?;
     // Hard shading reuses the exact epsilon published by its camera-hit pass.
     // Keep this engine helper separate from every user's shading program.

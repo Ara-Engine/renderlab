@@ -35,3 +35,16 @@ pub(crate) fn source(material: &str, list: bool) -> Result<String> {
     };
     Ok(composed.source)
 }
+/// The tiled entry as `HardwareRt` composes it for soft sun shadows: the hardware
+/// soft head, which reads the fresh visibility counts and declares the scene for
+/// local-light shadow rays. It needs a ray-query device. Compiled natively on Metal
+/// with the standard program; not yet executed against a reference.
+pub fn hardware_soft_program(material: &str) -> Result<Program> {
+    let [_, head] =
+        crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
+    let parameters = crate::program::declares_parameters(material);
+    Program::new(
+        Pass::PrimaryShadeTiles,
+        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source,
+    )
+}

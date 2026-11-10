@@ -1162,8 +1162,14 @@ shading does not yet in the form this frame needs: entries 38-39 were replayed w
 the **non-RT hard head** (`non_rt_sources`, where `hard_shadow` returns one and no
 scene is declared), and this frame composes the same program on the **hardware soft
 head** (`heads()[1]`: it reads the fresh counts and declares the scene for
-local-light shadow rays). That is one new variant of a ported entry, with ray
-queries already supported by the adapter in three other passes, not a new family.
+local-light shadow rays). That is one new variant of a ported entry, not a new family.
+`primary_shade::hardware_soft_program` composes it: with the standard program it
+reflects 39 inputs (the lit interface, the 256-element geometry and material arrays,
+the scene and the fresh counts) and compiles to a native Metal pipeline on a
+ray-query device in about 37 s. It has not executed against a reference. Its SPIR-V
+emission fails today (`resource global is shadowed locally: "camera"`): the compacted
+WGSL re-emission rejects a local that shadows the camera global, which the Vulkan
+side has to resolve before this variant can run there.
 With it, this frame is assembly work like the forward frame, and it is the first
 picture comparable with an engine render: correct soft sun shadows, sky, glass.
 Apple silicon has ray queries, so this is also the path a Mac would run.

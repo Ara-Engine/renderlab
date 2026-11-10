@@ -554,3 +554,31 @@ fn forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky() -> Result<(
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// The shading variant the smallest engine-path frame needs: the standard program on
+/// the hardware soft head reflects the scene and the fresh counts beside the lit
+/// interface, and the Metal adapter accepts it. Compiling it natively takes about
+/// half a minute, so that stays out of this suite until a frame replays it.
+#[test]
+fn hardware_soft_shading_reflects_the_scene_and_fresh_counts() -> Result<()> {
+    use renderlab::backend_ara::shader::{InputKey, InputKind};
+    let program =
+        renderlab::backend_ara::primary_shade::hardware_soft_program(renderlab::STANDARD_PROGRAM)?;
+    let kind = |group, binding| {
+        program
+            .inputs()
+            .iter()
+            .find(|i| i.key == InputKey { group, binding })
+            .map(|i| i.kind)
+    };
+    ensure!(
+        matches!(kind(0, 2), Some(InputKind::AccelerationStructure))
+            && matches!(kind(0, 6), Some(InputKind::Image { .. }))
+            && matches!(kind(0, 18), Some(InputKind::StorageImage { .. }))
+            && matches!(kind(3, 24), Some(InputKind::Image { .. })),
+        "hardware soft shading interface changed: {:?}",
+        program.inputs()
+    );
+    program.msl()?;
+    Ok(())
+}
