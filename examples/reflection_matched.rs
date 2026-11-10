@@ -27,6 +27,10 @@
 //! P-SHOW2 (docs/p-show2.md): `--metal-balls` adds Showcase's brushed aluminium (base 0.91,
 //! roughness 0.42, metallic 1) and copper (roughness 0.3) balls on the turntable, in the
 //! reference too.
+//! Sky-map cost (docs/design-sky-map-cost.md): `--sky map` lights the scene with Showcase's
+//! gradient sky as a prepared `Sky::Map` (support/gradient_sky.rs; `--sky-face N` sets the
+//! field's face size, default 64 as Ara's bridge prepares it), and `--sky map-flat` with the
+//! same layout holding its mean radiance.
 //!
 //! ```text
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK //!     cargo run --example reflection_matched -- --path nonrt --reference 16384 --write-frames 47 --out REF
@@ -38,6 +42,8 @@ mod diag;
 #[path = "../support/environment_controls.rs"]
 #[allow(dead_code)]
 mod environment_controls;
+#[path = "../support/gradient_sky.rs"]
+mod gradient_sky;
 #[path = "../support/limits.rs"]
 mod policy;
 
@@ -65,6 +71,9 @@ struct Args {
     temporal: bool,
     scale: RenderScale,
     uniform_sky: bool,
+    /// `--sky map` (Some(false)) or `map-flat` (Some(true)): support/gradient_sky.rs.
+    sky_map: Option<bool>,
+    sky_face: u32,
     volumetric_fog: Option<bool>,
     sun_speed: f32,
     sun_after: u32,
@@ -97,6 +106,8 @@ impl Args {
             temporal: true,
             scale: RenderScale::Native,
             uniform_sky: false,
+            sky_map: None,
+            sky_face: 64,
             volumetric_fog: None,
             sun_speed: 0.0,
             sun_after: 0,
@@ -146,14 +157,20 @@ impl Args {
                 "--reload-probe" => a.reload_probe = true,
                 "--no-gi" => a.gi = false,
                 "--sky" => {
-                    a.uniform_sky = match value()?.as_str() {
-                        "atmosphere" => false,
-                        "uniform" => true,
+                    (a.uniform_sky, a.sky_map) = match value()?.as_str() {
+                        "atmosphere" => (false, None),
+                        "uniform" => (true, None),
+                        "map" => (false, Some(false)),
+                        "map-flat" => (false, Some(true)),
                         other => {
-                            return Err(format!("--sky atmosphere|uniform, not {other}").into());
+                            return Err(format!(
+                                "--sky atmosphere|uniform|map|map-flat, not {other}"
+                            )
+                            .into());
                         }
                     }
                 }
+                "--sky-face" => a.sky_face = value()?.parse()?,
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
@@ -414,6 +431,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // constant blue sky for comparison.
             if args.uniform_sky || args.matched {
                 engine.set_sky(Sky::Uniform(UNIFORM_SKY))?;
+            } else if let Some(flat) = args.sky_map {
+                let map =
+                    engine.create_environment(&gradient_sky::prepare(args.sky_face, flat)?)?;
+                engine.set_sky(Sky::Map {
+                    map,
+                    rotation_y: 0.0,
+                    intensity: 1.0,
+                    background: Background::Sky,
+                })?;
             }
             Vec3::ZERO
         }
