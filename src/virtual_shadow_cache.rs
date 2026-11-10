@@ -179,7 +179,7 @@ impl SurfaceCache {
             &[Some(&insert_layout), None, None, Some(lighting)],
         );
         let module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8n surface cache"),
                 source: wgpu::ShaderSource::Wgsl(surface_source().into()),
             }),
@@ -429,6 +429,7 @@ impl SurfaceCache {
         arrays: &wgpu::BindGroup,
         records: &wgpu::BindGroup,
         lighting: &wgpu::BindGroup,
+        gather: Option<(&wgpu::ComputePipeline, &wgpu::BindGroup)>,
     ) {
         let p = self.pipelines.as_ref().unwrap();
         let [width, height] = r.size;
@@ -465,10 +466,17 @@ impl SurfaceCache {
         pass.set_pipeline(&p.sort);
         pass.set_bind_group(0, &*groups[0], &[]);
         pass.dispatch_workgroups_indirect(&self.dispatch, 16);
-        pass.set_pipeline(&p.missed);
-        pass.set_bind_group(0, queued, &[]);
-        pass.set_bind_group(1, arrays, &[]);
-        pass.set_bind_group(2, records, &[]);
+        // P-S4B: on a gather frame (src/sunvis_s4.rs) the occluder gather decides the queue.
+        if let Some((pipeline, occluders)) = gather {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, queued, &[]);
+            pass.set_bind_group(2, occluders, &[]);
+        } else {
+            pass.set_pipeline(&p.missed);
+            pass.set_bind_group(0, queued, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, records, &[]);
+        }
         pass.set_bind_group(3, lighting, &[]);
         pass.dispatch_workgroups_indirect(&self.dispatch, 0);
         pass.set_pipeline(&p.claim);

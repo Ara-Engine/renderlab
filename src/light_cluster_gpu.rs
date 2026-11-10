@@ -111,7 +111,7 @@ impl Atlas {
         let bytes = u64::from(layers) * 4 * u64::from(size).pow(2)
             + uniforms.as_ref().map_or(0, |u| u.size());
         let clear = (slots > 0).then(|| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("LC3 tile clear"),
                 source: wgpu::ShaderSource::Wgsl(
                     include_str!("../shaders/local_light_clear.wgsl").into(),
@@ -276,7 +276,7 @@ impl LightClusters {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("LC1 light clusters"),
             source: wgpu::ShaderSource::Wgsl(format!("{}{}", lc::constants(), lc::KERNEL).into()),
         });

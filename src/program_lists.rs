@@ -215,7 +215,7 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = self
             .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("program tile binning"),
                 source: wgpu::ShaderSource::Wgsl(
                     include_str!("../shaders/program_bins.wgsl").into(),

@@ -687,7 +687,7 @@ impl Renderer {
             ],
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("footprint verification"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });

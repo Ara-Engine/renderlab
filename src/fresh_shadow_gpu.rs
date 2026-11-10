@@ -221,7 +221,7 @@ impl FreshState {
         source: &str,
     ) -> FreshPipelines {
         let shader = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("fresh receivers and visibility compute"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             }),

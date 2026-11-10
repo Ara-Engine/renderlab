@@ -78,6 +78,9 @@ pub struct EngineDescriptor {
     /// shader edit can reuse driver compilation. Includes first-use engine kernels.
     /// None retains only the in-memory program cache; cache I/O failures fall back to empty.
     pub pipeline_cache: Option<PathBuf>,
+    /// Retain runtime bounds, loop and ray-query checks in engine-owned shaders.
+    /// User programs always retain checks. Environment: RENDERLAB_ENGINE_SHADER_CHECKS.
+    pub checked_engine_shaders: bool,
 }
 impl Default for EngineDescriptor {
     fn default() -> Self {
@@ -94,6 +97,7 @@ impl Default for EngineDescriptor {
             settings: Settings::default(),
             texture_anisotropy: 1,
             pipeline_cache: None,
+            checked_engine_shaders: false,
         }
     }
 }
@@ -242,11 +246,19 @@ pub struct Engine {
     events: Events,
 }
 
+/// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
+/// External adapters should use these flags too; explicit wgpu environment overrides apply.
+pub fn instance_flags() -> wgpu::InstanceFlags {
+    wgpu::InstanceFlags::default()
+        .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+        .with_env()
+}
+
 /// A Vulkan adapter for offscreen use (no surface), preferring a discrete GPU.
 pub fn headless_adapter() -> Result<wgpu::Adapter, Error> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::from_env_or_default(),
+        flags: instance_flags(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -279,12 +291,13 @@ impl Engine {
         let format = descriptor.output_format;
         // PC1: load the shared driver cache before any renderer pipeline is built.
         let info = adapter.get_info();
-        let device = crate::pipeline_compilation::PipelineDevice::new(
+        let device = crate::pipeline_compilation::PipelineDevice::with_shader_checks(
             device,
             descriptor
                 .pipeline_cache
                 .as_deref()
                 .map(|directory| (directory, &info)),
+            descriptor.checked_engine_shaders,
         );
         let mut renderer = crate::Renderer::new_configured(
             device,

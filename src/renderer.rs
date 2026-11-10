@@ -152,7 +152,7 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = self
             .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("test hardware lit pair"),
                 source: wgpu::ShaderSource::Wgsl(composed.into()),
             });
@@ -711,6 +711,7 @@ impl Renderer {
         hardware: Option<HardwareShadowOptions>,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        device.check_custom_prelude(wgsl);
         if !device.features().contains(crate::RECEIVER_FEATURES) {
             return Err(Error::InvalidInput(
                 "receiver policy requires caller-enabled RECEIVER_FEATURES",
@@ -1203,7 +1204,7 @@ impl Renderer {
         source: &str,
     ) -> Pipelines {
         let shader = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("live mesh shader"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             }),
@@ -1304,6 +1305,7 @@ impl Renderer {
     /// the transaction, concurrently with the engine pipelines; the others compile when a
     /// frame first needs them. Any rejection keeps them all.
     pub fn reload(&mut self, wgsl: &str) -> Result<ReloadReport, ReloadError> {
+        self.device.check_custom_prelude(wgsl);
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
