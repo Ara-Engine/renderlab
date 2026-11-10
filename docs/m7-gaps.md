@@ -794,3 +794,17 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
 - **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
 - **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
+||||||| f64c82e
+
+## M8 sky-map cost off the PC (Linux bridge thread, Radeon 760M, 2026-11-11)
+
+- **The sky-map cost reproduces on RADV, inside Renderlab's environment lookups.**
+  - Showcase on hardware RT takes 150.0 ms with a constant sky and 172.7 ms with an image map; 21.5 of the 22.7 ms difference is in the shading pass.
+  - Cube size (64, 32 or 16) changes nothing, and the bridge prepares and sets the sky once in 180 frames.
+  - The Linux thread owns the Renderlab-side investigation, working from docs/design-sky-map-cost.md. Root reviews its PR and times it on the RTX card before merging.
+- **Start-up on the Radeon at 901c1d2.** Warm time is nearly all the capture's 49 settle frames on that GPU.
+
+  | Path | Fully cold | Warm |
+  |---|---|---|
+  | RT | 30.2 s | 15.7 s |
+  | non-RT | 33.9 s | 19.6 s |
