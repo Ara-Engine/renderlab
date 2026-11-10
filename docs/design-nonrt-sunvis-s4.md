@@ -34,6 +34,25 @@ memory, not on work.**
   - Moving and still frames: unchanged, because they keep the march.
   - Quarry cut, in the second build: 9.4 ms down to about 3-6 ms. Until then it is unchanged.
 
+**Build 1 measured (P-S4B, [p-s4b.md](p-s4b.md), parked).**
+- Its per-direction test is a boolean plane/edge-plane half-space predicate over plane records, not
+  `vsm_hits_sheared` and not barycentric weights: the US 8,471,853 contract.
+- Game timing cut, 1080p: 26.7-27.3 ms down to 8.3-8.8 ms. Per-pixel counts equal RT on 99.994% of
+  pixels.
+- But the 960x540 game quality cuts got slower: 3.4 to 5.9 ms with the original sun, 5.3 to 16.7 ms
+  with the wide sun. It needs a per-frame cost choice before it can be the default.
+
+**Per-frame choice (P-S4C, [p-s4c.md](p-s4c.md)).**
+- S4 runs on frames of 8 or more batches whose screen has at least `0.75 M x sqrt(disk / 0.00465)`
+  pixels (`sunvis_s4::chosen`). That threshold fits the measured break-even on four cuts.
+- The 1080p game cut runs S4: 26.54 to 8.41 ms. The 960x540 cuts and the wide sun's 1080p cut keep
+  the march, at main's cost.
+- Cost split of S4's cut (1080p game): traversal 2.6 ms, classification 2.4 ms, per-direction tests
+  4.0 ms. On the wide sun at 960x540 the tests are 13 ms. Traversal is not the bottleneck.
+- S4 on every frame costs 8.1 ms on a 1080p still frame (march: 2.8 ms) and 10.5 ms moving (5.6 ms),
+  so the march still serves those frames. [p-s4c.md](p-s4c.md#retiring-the-march) lists what S4
+  needs to replace it everywhere and delete it. Until then the patent flag on the march stays open.
+
 ## 1. Patent mapping (primary claim text)
 
 The claims were read from Google Patents pages, not from summaries. They were fetched on 2026-11-10 and
