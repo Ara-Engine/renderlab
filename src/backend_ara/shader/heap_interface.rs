@@ -21,7 +21,7 @@ pub enum SampleType {
     Depth,
 }
 /// Runtime validation of each heap publication's native interpretation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
     /// Storage-backed data, retaining the source layout and minimum byte size.
     Buffer {
@@ -189,4 +189,19 @@ pub(super) fn wgsl_type(module: &naga::Module, ty: naga::Handle<naga::Type>) -> 
         ),
         _ => bail!("unnamed input element type is not supported"),
     })
+}
+
+// Each backend reflects independently after transformations. Check the original
+// sorted contract before emitting code, so a frontend change cannot reorder data.
+pub(super) fn assert_contract(pass: super::Pass, actual: &[ShaderInput]) -> Result<()> {
+    let expected = inputs(pass)?;
+    ensure!(
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .zip(actual)
+                .all(|(a, b)| a.key == b.key && a.kind == b.kind),
+        "selected shader input contract changed during lowering"
+    );
+    Ok(())
 }

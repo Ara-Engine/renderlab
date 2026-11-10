@@ -21,7 +21,11 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         ..Default::default()
     };
     let indirect = if pass.indirect() {
-        Some(super::heap_interface::from_module(&module)?)
+        Some({
+            let inputs = super::heap_interface::from_module(&module)?;
+            super::heap_interface::assert_contract(pass, &inputs)?;
+            inputs
+        })
     } else {
         None
     };
@@ -87,7 +91,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         .iter()
         .position(|e| e.stage == naga::ShaderStage::Vertex)
     {
-        if matches!(pass, Pass::MeshDiagnostic | Pass::MeshToon) {
+        if pass.indirect() || matches!(pass, Pass::MeshDiagnostic) {
             Some(wrap(&mut source, &module, &names[i], "vertex", pass)?)
         } else {
             Some(names[i].clone())

@@ -12,6 +12,7 @@ pub mod image;
 pub mod kernel;
 pub mod light_cluster;
 pub mod mesh;
+pub mod particle_billboard;
 pub mod particles;
 pub mod post;
 pub mod post_surface;

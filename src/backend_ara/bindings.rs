@@ -75,7 +75,14 @@ impl<'a> HeapBindings<'a> {
                     let actual = match t.format {
                         Format::Depth16Unorm | Format::Depth32Float => SampleType::Depth,
                         Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint => SampleType::Uint,
-                        _ => SampleType::Float,
+                        Format::Rgba8
+                        | Format::Rgba8Srgb
+                        | Format::Rgba32Float
+                        | Format::Rgba16Float
+                        | Format::Rgb10A2
+                        | Format::R32Float
+                        | Format::R16Float
+                        | Format::Rg16Float => SampleType::Float,
                     };
                     ensure!(
                         actual == sample,
@@ -112,6 +119,21 @@ impl<'a> HeapBindings<'a> {
     /// Import the packet's initialization once; input producer states stay intact.
     pub fn import(&self, graph: &mut Graph) {
         graph.import(Resource::Buffer(self.record.buffer), Access::HostWrite);
+    }
+    /// Retained buffer at an original source key, for encoder range validation.
+    pub fn buffer(&self, key: InputKey) -> Option<&StorageBuffer> {
+        self.layout
+            .iter()
+            .zip(&self.values)
+            .find_map(|(spec, value)| {
+                if spec.key == key
+                    && let Input::Buffer(buffer) = value
+                {
+                    Some(*buffer)
+                } else {
+                    None
+                }
+            })
     }
     /// Every reachable input and packet use, for union with a whole raster batch.
     pub fn uses(&self) -> Vec<(Resource, Access)> {

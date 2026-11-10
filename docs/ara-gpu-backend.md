@@ -228,11 +228,11 @@ SPIR-V aliases that view onto storage binding3 by generated variable identity.
 The camera record retains the original432-byte layout, flags, fog parameters,
 matrices and integer grid. No sun-visibility stub or temporal replacement is linked.
 
-A translated camera and fixed3×2×64 visibility/extinction stream feed independent
+A translated camera and fixed 3×2×64 visibility/extinction stream feed independent
 scalar references. Both native stages differ by at most0.000488282, below0.002;
 the aerial write preserves the initialized fog region, and the subsequent fog
 write preserves all aerial slices. The full9-test replay suite passes with Metal
-API/shader validation; all22 SPIR-V stages validate. This brings the port to18
+API/shader validation; all 22 SPIR-V stages validate. This brings the port to 18
 original Renderlab entries plus display transfer. Visibility injection and fog
 history remain for the later shadow/temporal phase; Vulkan execution is pending.
 
@@ -247,10 +247,10 @@ The replay renders all eight sun-disk/height-fog/volume-fog combinations against
 an independent scalar oracle, using a translated low-altitude camera, an offset
 sun at the centre, a nonuniform sky LUT and packed3D fog. All pixels pass
 `abs(gpu-reference)/max(1,abs(reference)) <=0.0005`; observed maximum0.000210286.
-The peak sun texel's absolute difference is0.518 in much larger linear radiance,
-so an absolute-only display-range tolerance would be inappropriate. All10 replay
-tests pass with Metal API/shader validation and all24 SPIR-V stages validate.
-There are19 original Renderlab entry points plus display transfer. This is a
+The peak sun texel's absolute difference is 0.518 in much larger linear radiance,
+so an absolute-only display-range tolerance would be inappropriate. All 10 replay
+tests pass with Metal API/shader validation and all 24 SPIR-V stages validate.
+There are 19 original Renderlab entry points plus display transfer. This is a
 backdrop leaf, not complete opaque scene/lighting integration; Vulkan is pending.
 
 ## Particle depth sorting
@@ -295,11 +295,11 @@ missing a future name-based alias repair can no longer pass silently. Entry
 selection retains exactly the chosen vertex and fragment. The particle replay
 also reloads a cached pipeline without changing its artifact. The export test
 invokes spirv-val automatically when VULKAN_SDK is set; manual validation remains
-available otherwise. All12 native replays pass after these changes.
+available otherwise. All 12 native replays pass after these changes.
 
 Remaining proof limits include jittered camera reconstruction, per-sample-different
 4x depth and optional skinning branches. The next diagnostic mesh port preserves
-the original unlit/diagnostic vs/fs. Complete lit forward needs native Metal4
+the original unlit/diagnostic vs/fs. Complete lit forward needs native Metal 4
 per-vertex interpolation and Vulkan fragment-shader-barycentric feature negotiation;
 the latter is a pending PC-owned Ara backend change, not a root-constant model gap.
 
@@ -327,18 +327,18 @@ The independent scalar raster oracle covers an indexed mesh, three deliberately
 reordered instances (including a mirror and nonuniform affine shear), varying
 clip-W, per-vertex color/UV/normal, two sampled textures, all four view modes and
 both sidedness settings. All eight outputs have exact pixel coverage. Maximum
-color error is0.000699282 (tolerance0.001); normal mode1.20e-7; depth5.97e-8
-(tolerance1e-6). The fixture keeps every vertex inside the clip volume and its
-edges away from sample centres; clipping and4x mesh raster remain unproven.
+color error is 0.000699282 (tolerance 0.001); normal mode1.20e-7; depth5.97e-8
+(tolerance 1e-6). The fixture keeps every vertex inside the clip volume and its
+edges away from sample centres; clipping and 4x mesh raster remain unproven.
 An optional ARA_BACKEND_CAPTURE=1 writes inspected PNGs under Cargo target;
 only these inspection artifacts receive CPU display conversion. Numeric checks
-compare actual GPU linear outputs and depth. All13 native replay tests pass.
+compare actual GPU linear outputs and depth. All 13 native replay tests pass.
 
-There are21 original Renderlab entries plus display transfer. This is the original
+There are 21 original Renderlab entries plus display transfer. This is the original
 unlit/diagnostic path; lit forward has not been replaced by a simplified shader.
-Its Metal4 per-vertex and pending Vulkan barycentric requirements remain above.
-All native Vulkan runs remain pending. Shared disk space recovered to161GiB;
-the backend still uses one3.6GiB build tree and11MiB of replay artifacts.
+Its Metal 4 per-vertex and pending Vulkan barycentric requirements remain above.
+All native Vulkan runs remain pending. Shared disk space recovered to 161GiB;
+the backend still uses one3.6GiB build tree and 11MiB of replay artifacts.
 
 ## Transparency raster-depth conversion
 
@@ -346,9 +346,9 @@ the backend still uses one3.6GiB build tree and11MiB of replay artifacts.
 TP_DEPTH_RASTER sections. It reuses the depth-input heap adapter with a scalar
 R32Float storage output. A rendered 17×11 depth fixture is consumed in a later
 graphics submission without an intervening CPU wait. View distances differ from
-an independent reversed-Z projection formula by at most5.67e-7 (tolerance1e-5),
-and all nine background pixels retain the exact1e30 miss sentinel. All14 native
-replay tests pass; all28 SPIR-V stages validate. There are22 original entries
+an independent reversed-Z projection formula by at most5.67e-7 (tolerance 1e-5),
+and all nine background pixels retain the exact1e30 miss sentinel. All 14 native
+replay tests pass; all 28 SPIR-V stages validate. There are 22 original entries
 plus display. The original conversion is single-sample; transparency composition,
 particle simulation/billboards and native Vulkan remain pending.
 
@@ -370,7 +370,7 @@ states as well as GPU records.
 AtmosphereSun supplies actual unexposed RGB illuminance and camera exposure,
 using the original f64 product/clamp when packing. The eight sky flag cases now
 exercise illuminance[2,1,0.5] and exposure0.75; maximum normalized error0.000272602
-against the scalar reference, within0.0005. Unit-illuminance LUT constructors retain
+against the scalar reference, within 0.0005. Unit-illuminance LUT constructors retain
 their existing behavior. The second Opus review found no blocking code defect;
 documentation now explicitly separates Metal proof from structural-only validation
 of compacted/re-emitted SPIR-V. The complete native Vulkan cohort remains required.
@@ -379,7 +379,7 @@ of compacted/re-emitted SPIR-V. The complete native Vulkan cohort remains requir
 ## Programmable lit toon and a reflected input packet
 
 The production composer now builds the original `toon.wgsl` program on
-`scene.wgsl` and executes `vs`/`fs_lit` unchanged on Metal4. Its 22 reachable
+`scene.wgsl` and executes `vs`/`fs_lit` unchanged on Metal 4. Its 22 reachable
 inputs become one persistent storage packet, sorted by original group/binding.
 Two roots name the packet and byte offset; no native per-pass sets or uniform
 buffers are introduced. `HeapBindings` validates every buffer size, image sample
@@ -391,8 +391,8 @@ explicit arrays, including depth arrays.
 The independent CPU raster/shading replay covers three reordered instances,
 mirroring, affine normals, varying clip-W, textured vertex color, sidedness,
 smooth/flat normals, banded direct light, ambient fill and rim lighting. All four
-outputs have exact coverage; maximum absolute color error is0.000164450 against
-a0.003 allowance. Optional shadows, clustered lighting, decals and atmosphere
+outputs have exact coverage; maximum absolute color error is 0.000164450 against
+a 0.003 allowance. Optional shadows, clustered lighting, decals and atmosphere
 remain real source branches with valid initialized descriptors but are disabled
 in this fixture. Per-vertex interpolation is compiled/linked; this fixture does
 not independently observe the shadow receiver's three-vertex payload values.
@@ -401,7 +401,7 @@ Shared adaptations added for this interface:
 
 - MSL uses reflected ordinal slots for buffers, images and both sampler heaps;
   runtime-array lengths still come from descriptor byte metadata.
-- Naga30's Metal4 per-vertex input field is declared as `vertices` but read using
+- Naga30's Metal 4 per-vertex input field is declared as `vertices` but read using
   the containing `triangle` argument name. The adapter checks and repairs exactly
   three `metal::vertex_index` extractions to the declared field, preserving order.
 - SPIR-V's compacted WGSL re-emission uses inferred local types because explicit
@@ -411,9 +411,9 @@ Shared adaptations added for this interface:
   field-by-field material loader was replaced by the shared physical/logical
   SPIR-V type split described below, which also handles mutable particle records.
 
-There are now23 original Renderlab entry points plus display transfer. All15
-replay tests pass with Metal API/shader validation, and all30 exported stages
-pass spirv-val for Vulkan1.3. SPIR-V execution remains pending for the complete
+There are now 23 original Renderlab entry points plus display transfer. All 15
+replay tests pass with Metal API/shader validation, and all 30 exported stages
+pass spirv-val for Vulkan 1.3. SPIR-V execution remains pending for the complete
 cohort. In addition, this lit raster path needs PC-owned Ara feature negotiation
 for `VK_KHR_fragment_shader_barycentric`; no Vulkan backend files were edited here.
 
@@ -426,16 +426,16 @@ use the reflected packet and `Kernel` encoder, including a real comparison sampl
 and writable particle storage. Shader group sizes are reflected once at pipeline
 creation. The graph sees the particle record as a read/write storage dependency.
 
-A fixed17-slot emitter uses20 allocated records: wrapped spawn counter0xfffffffe,
+A fixed 17-slot emitter uses20 allocated records: wrapped spawn counter0xfffffffe,
 five births across the capacity wrap, random position/velocity/lifetime, drag and
 gravity, already dead/never alive particles, exact-boundary expiry, and three tail
 sentinels. Two directional lights, an ignored point light, nonunit camera exposure
 and distinct frame sun illuminance prove that incident particle lighting stays
-unexposed and comes from the light table. Maximum component error is5.97e-8
-(tolerance2e-5); untouched records and just-expired light words match exactly.
+unexposed and comes from the light table. Maximum component error is 5.97e-8
+(tolerance 2e-5); untouched records and just-expired light words match exactly.
 Shadow/transmission and prepared-environment branches are initialized but disabled.
 
-Mutable local `TpParticle` exposed naga30's reuse of physical buffer structs for
+Mutable local `TpParticle` exposed naga 30's reuse of physical buffer structs for
 Function values. One shared SPIR-V stage now clones physical composite types only
 where internal memory shares their explicit layout, preserves offsets/strides on
 those physical types and bridges whole loads/stores using SPIR-V1.4
@@ -443,6 +443,35 @@ those physical types and bridges whole loads/stores using SPIR-V1.4
 metadata. This also replaces the initial WGSL material-value loader; field reads
 and shader math remain unchanged. Unexpected pointer/value origins are rejected.
 
-There are24 original entries plus display. All16 native replays pass with Metal
-API/shader validation; all31 SPIR-V stages validate for Vulkan1.3. Native Vulkan
+There are 24 original entries plus display. All 16 native replays pass with Metal
+API/shader validation; all 31 SPIR-V stages validate for Vulkan 1.3. Native Vulkan
 execution, including these type-copy bridges, remains pending on the PC.
+
+
+## Sorted particle billboard composition
+
+The original `tp_particle_vs`/`tp_particle_fs` stages now read a twelve-input heap
+packet and emit six procedural vertices per sorted rank. Both stages use the same
+entry shim; the vertex stage receives vertex/instance IDs and synthetic runtime
+buffer lengths. `ParticleBillboard` declares all emitter inputs before one ordered
+raster batch and uses the original premultiplied source-over blend.
+
+A fixed 24×20 orthographic replay covers three overlapping live billboards, dead
+and padded ranks, birth/death color and size fades, emission/exposure, hard opaque
+depth rejection, soft intersections, and procedural radial versus textured shapes.
+The CPU reference rounds each blend store to RGBA16Float. Both variants differ by
+at most0.000976563 (allowance0.003). One procedural pixel is exactly the clear word
+on Metal while the reference changes its red channel by one half ULP; clear-boundary
+differences are separately bounded to one half ULP. This is numeric image proof,
+not a claim of exact fragment coverage. Atmosphere inputs are valid but disabled;
+perspective billboards and active fog remain unproven.
+
+The packet review found no must-fix defect. Both shader backends now assert their
+reflected keys and kinds match the original input contract before emission. Sample
+classes use an exhaustive format match; the native toon replay rejects short buffers,
+wrong dimensions/sample classes/sampler heaps and duplicate keys. Float filterability
+is still a caller/device-format requirement; WGSL reflection does not encode it.
+Multi-material toon batch/load behavior is implemented but not independently replayed.
+
+There are 25 original entries plus display transfer,17 native replay tests, and 33
+validated SPIR-V stages. Native Vulkan remains pending for the entire cohort.

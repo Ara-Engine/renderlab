@@ -23,6 +23,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Original sorted procedural or textured particle billboard composition.
+    ParticleBillboard,
     /// Original spawn, drag/gravity integration and incident particle lighting.
     ParticleUpdate,
     /// Original programmable toon forward shading, with all optional resource inputs.
@@ -79,7 +81,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::ParticleUpdate => format!(
+            Self::ParticleUpdate | Self::ParticleBillboard => format!(
                 "{}{}{}{}{}{}{}",
                 include_str!("../../../shaders/scene.wgsl"),
                 crate::renderer::transparency_gpu::transmission_shadow::api_source(),
@@ -87,7 +89,11 @@ impl Pass {
                 transparency_section("TP_FRAME"),
                 transparency_section("TP_SUN"),
                 transparency_section("TP_PARTICLES"),
-                transparency_section("TP_PARTICLES_SIM")
+                transparency_section(if matches!(self, Self::ParticleUpdate) {
+                    "TP_PARTICLES_SIM"
+                } else {
+                    "TP_PARTICLES_DRAW"
+                })
             )
             .into(),
             Self::MeshToon => crate::program::compose(
@@ -207,10 +213,14 @@ impl Pass {
                 | Self::AtmosphereBackdrop
                 | Self::MeshDiagnostic
                 | Self::MeshToon
+                | Self::ParticleBillboard
         )
     }
     pub(super) fn indirect(self) -> bool {
-        matches!(self, Self::MeshToon | Self::ParticleUpdate)
+        matches!(
+            self,
+            Self::MeshToon | Self::ParticleUpdate | Self::ParticleBillboard
+        )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
         if matches!(self, Self::MeshToon) {
@@ -220,7 +230,9 @@ impl Pass {
         }
     }
     pub(super) fn vertex(self) -> &'static str {
-        if matches!(self, Self::AtmosphereBackdrop) {
+        if matches!(self, Self::ParticleBillboard) {
+            "tp_particle_vs"
+        } else if matches!(self, Self::AtmosphereBackdrop) {
             "vs_sky"
         } else {
             "vs"
@@ -269,6 +281,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ParticleBillboard => "tp_particle_fs",
             Self::ParticleUpdate => "tp_particles_update",
             Self::MeshToon => "fs_lit",
             Self::TransparencyDepth => "tp_depth_raster",

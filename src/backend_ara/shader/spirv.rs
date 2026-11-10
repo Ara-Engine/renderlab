@@ -88,6 +88,10 @@ fn adapt(pass: Pass) -> Result<String> {
         body.push('\n');
     }
     if pass.indirect() {
+        super::heap_interface::assert_contract(
+            pass,
+            &super::heap_interface::from_module(&original)?,
+        )?;
         return super::packet_spirv::adapt(&body, &original);
     }
     if matches!(pass, Pass::MeshDiagnostic) {

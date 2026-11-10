@@ -267,6 +267,47 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
                 };
                 values.push((spec.key, input));
             }
+            if sided == 0 && flat == 0 {
+                // Reuse the real selected interface to check rejection before publication.
+                for (target, replacement, message) in [
+                    (key(0, 0), Input::Buffer(param), "too short"),
+                    (
+                        key(3, 4),
+                        Input::Image(&images[&key(3, 24)]),
+                        "view dimension",
+                    ),
+                    (key(2, 1), Input::Image(&images[&key(3, 24)]), "sample type"),
+                    (
+                        key(2, 2),
+                        Input::Sampler(SamplerDesc {
+                            compare: Some(ara_gpu::sampler::CompareOp::LessEqual),
+                            ..Default::default()
+                        }),
+                        "wrong heap",
+                    ),
+                ] {
+                    let mut bad = values.clone();
+                    bad.iter_mut()
+                        .find(|(k, _)| *k == target)
+                        .expect("selected key")
+                        .1 = replacement;
+                    let result = HeapBindings::new(&mut gpu, Pass::MeshToon, &bad);
+                    ensure!(
+                        result
+                            .err()
+                            .is_some_and(|e| e.to_string().contains(message)),
+                        "wrong rejection for {target:?}"
+                    );
+                }
+                let mut duplicate = values.clone();
+                duplicate[1].0 = duplicate[0].0;
+                ensure!(
+                    HeapBindings::new(&mut gpu, Pass::MeshToon, &duplicate)
+                        .err()
+                        .is_some_and(|e| e.to_string().contains("duplicate")),
+                    "duplicate packet key accepted"
+                );
+            }
             let packet = HeapBindings::new(&mut gpu, Pass::MeshToon, &values)?;
             packet.import(&mut graph);
             pass.record(

@@ -88,7 +88,7 @@ impl Texture {
         }
         result
     }
-    /// Publish an explicit2D-array view, including a single-layer array.
+    /// Publish an explicit 2D-array view, including a single-layer array.
     pub fn array(
         gpu: &mut GpuDevice,
         size: [u32; 2],
