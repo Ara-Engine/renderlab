@@ -321,18 +321,22 @@ fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i3
     let e=environment_tap(tex,i32(face.x),p+vec2<i32>(1,1),size,mip,bank);
     return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
 }
+// A legacy chain's level count; a banked chain (src/environment.rs bank_legacy) adds 0.5.
+fn environment_legacy_levels() -> f32 { return floor(lighting.map.w); }
 fn environment_level(d:vec3<f32>, level:i32) -> vec3<f32> {
     let legacy=lighting.map.w>0.0;
+    let banked=legacy && fract(lighting.map.w)>0.0;
     let second=!legacy && level>=42;
-    let mip=select(0,level,legacy);
-    let bank=select((level-select(0,42,second))*6,0,legacy);
+    let mip=select(0,level,legacy && !banked);
+    let bank=select((level-select(0,42,second))*6,select(0,level*6,banked),legacy);
     if second { return environment_bilinear(environment_specular_second,d,mip,bank); }
     return environment_bilinear(environment_specular,d,mip,bank);
 }
 fn environment_legacy_lod(d:vec3<f32>, lod:f32) -> vec3<f32> {
-    let x=clamp(lod,0.0,lighting.map.w-1.0);
+    let n=environment_legacy_levels();
+    let x=clamp(lod,0.0,n-1.0);
     let lo=i32(floor(x));
-    let hi=min(lo+1,i32(lighting.map.w)-1);
+    let hi=min(lo+1,i32(n)-1);
     var values:array<vec3<f32>,2>;
     for (var i=0; i<2; i++) { values[i]=environment_level(d,select(lo,hi,i==1)); }
     return values[0]*(1.0-fract(x))+values[1]*fract(x);
@@ -346,9 +350,10 @@ fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
     var t=0.0;
     var single=false;
     if lighting.map.w>0.0 {
-        let x=clamp(r*(lighting.map.w-1.0),0.0,lighting.map.w-1.0);
+        let n=environment_legacy_levels();
+        let x=clamp(r*(n-1.0),0.0,n-1.0);
         lo=i32(floor(x));
-        hi=min(lo+1,i32(lighting.map.w)-1);
+        hi=min(lo+1,i32(n)-1);
         t=fract(x);
     } else if r>=1.0 {
         single=true;
