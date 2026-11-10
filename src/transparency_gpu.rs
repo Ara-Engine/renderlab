@@ -26,7 +26,7 @@ const SHADER: &str = include_str!("../shaders/transparency.wgsl");
 /// Square sun shadow map of the transparent receivers' footprint.
 const SHADOW_SIZE: u32 = 2048;
 /// Transparent draws per frame: one 256-byte dynamic slot each.
-const MAX_TRANSPARENT_DRAWS: usize = 64;
+const MAX_TRANSPARENT_DRAWS: usize = crate::TRACED_DRAWS as usize;
 const SLOT: u64 = 256;
 /// The camera block at 0, then `TpFrame` at 256.
 const FRAME_OFFSET: u64 = 256;
@@ -1574,7 +1574,7 @@ impl Renderer {
         items.sort_by(|a, b| b.0.total_cmp(&a.0));
         if transparent.len() > MAX_TRANSPARENT_DRAWS {
             return Err(Error::InvalidInput(
-                "more than 64 transparent draws in one frame",
+                "more than TRACED_DRAWS transparent draws in one frame",
             ));
         }
         let mut draw_slots = vec![0u8; SLOT as usize * transparent.len().max(1)];

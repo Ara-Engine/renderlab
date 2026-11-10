@@ -1068,7 +1068,7 @@ impl Renderer {
                 + u64::from(slots))
                 * 4;
             let outgoing_bytes = u64::from(slots) * 16;
-            let draws_bytes = u64::from(TRACED_DRAWS) * 16;
+            let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
             let raw_slots = if self.gi.settings.filter != 0 {
                 slots
             } else {
@@ -2243,7 +2243,9 @@ impl Renderer {
         // Per draw (batch), its stable id, first placement and instance count, which cell
         // shading and hardware setup map cells' materials through (G2). MP1: in mixed
         // frames the fourth word selects the draw's cell program (`mixed_cell_entry`).
-        let mut table = vec![0u32; TRACED_DRAWS as usize * 4];
+        let mut table = vec![0u32; (TRACED_DRAWS as usize + 1) * 4];
+        // The final vec4 carries the active count, preserving per-batch indexing.
+        table[TRACED_DRAWS as usize * 4] = draws.len().min(TRACED_DRAWS as usize) as u32;
         let mut first = 0u32;
         let mixed = self.gi.mixed_active;
         for (b, d) in draws.iter().enumerate().take(TRACED_DRAWS as usize) {

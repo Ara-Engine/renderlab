@@ -16,6 +16,14 @@ const LIST_TILE: [u32; 2] = [4, 4];
 /// WGSL `RlList`: slot, list base, capacity, flags, then the slot of each of the
 /// `TRACED_DRAWS` batches.
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
+/// Standalone binning shares the composed shading draw-table ABI.
+fn bin_source() -> String {
+    format!(
+        "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
+        include_str!("../shaders/program_bins.wgsl")
+    )
+}
+
 /// Indirect arguments per slot: x, y, z and a pad word.
 const ARGS_BYTES: u64 = 16;
 
@@ -217,9 +225,7 @@ impl Renderer {
             .device
             .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("program tile binning"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../shaders/program_bins.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(bin_source().into()),
             });
         let state = self.primary.as_ref().unwrap();
         let pipeline = self.ledger.own(
@@ -451,7 +457,7 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
         };
-        validate("bins", include_str!("../shaders/program_bins.wgsl"));
+        validate("bins", &bin_source());
         let prelude = include_str!("../shaders/scene.wgsl");
         let heads = shading_heads(prelude).unwrap();
         for (label, program) in [

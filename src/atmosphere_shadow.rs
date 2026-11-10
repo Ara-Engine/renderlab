@@ -18,7 +18,8 @@ pub(crate) fn atmosphere_source() -> String {
         .unwrap()
         .replace("@binding(0)", "@binding(21)");
     format!(
-        "{definitions}{}",
+        "const PRIMARY_BATCHES:u32={}u;\n{definitions}{}",
+        crate::TRACED_DRAWS,
         include_str!("../shaders/atmosphere_shadow_virtual.wgsl")
     )
 }

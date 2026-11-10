@@ -63,11 +63,11 @@ struct VsmFrame {
     rects:array<vec4<f32>,VSM_MAX_RECTS>,
     srects:array<vec4<f32>,VSM_MAX_RECTS>,
     // Per traced batch, the first word of its triangles in vsm_horizons (N8b).
-    horizon:array<vec4<u32>,16>,
+    horizon:array<vec4<u32>,PRIMARY_BATCHES/4>,
     // N8h: per traced batch (two per vec4), its first walk record in the draw list's record
     // numbering and its recorded triangles: primitives below the count have records, the
     // others (appended LOD triangles under WalkRecords::Source) read the chains.
-    records:array<vec4<u32>,32>,
+    records:array<vec4<u32>,PRIMARY_BATCHES/2>,
     // N8e: x directions evaluated (1-8, the first of the eight); y the rolling refresh (block
     // a in bits 0-3, b in 4-7, this frame's tile in the block in 8-11 and 12-15, bit 16 set on
     // a rolling frame); z the walk cap (0: none); w bit 0 on a rolling frame that moved casters
