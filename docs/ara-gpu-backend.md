@@ -1218,11 +1218,26 @@ x = -2.003 over the predicted width. Compared with the mesh pass it is identical
 all 36,864 channels of the 128x96 frame. Both unproven variants named below have
 therefore executed and agree with a frame that is itself checked against wgpu.
 
-Limits of this first traced frame: post is rejected (its motion surface comes from
-hit records, entry 35, not yet chained), every pixel of the fixture is covered so
-miss shading and the sky are unexercised, one draw per object with default textures,
-no tangents, no previous-frame motion, and no wgpu traced reference yet
-(`ara_frame` has no traced level; the wgpu side needs a `HardwareRt` engine device).
+`traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post` adds a frame the
+geometry only partly covers, with the uniform environment and with the physical sky,
+through bloom and tone to display bytes (motion blur off: its surface on a traced
+frame comes from hit records, entry 35, not chained yet). Misses show the identical
+background in both families, sky included; 11 and 25 of 12,288 pixels differ at all,
+by at most 1.4%, all in the penumbra; displays agree within one level.
+
+`ara_frame --traced` renders M5-A this way on either layer: on wgpu it is the
+renderer's traced primary visibility with `SoftShadows::Exact` and GI, temporal
+reconstruction and reflections off. On this Mac the traced M5-A frame with the sky
+differs from the mesh-pass frame in 22,588 of 614,400 HDR pixels, 84 by more than 1%
+and 4 by more than 5%, the worst at the floor's left silhouette where the mesh pass
+shadows a pixel the traced frame does not; 613,421 displayed pixels are identical.
+The two families are different algorithms at silhouettes in the wgpu renderer too
+(a rasterised receiver against a ray hit), so the reference for those pixels is the
+wgpu traced frame, which has not been produced yet.
+
+Limits of this first traced frame: no motion blur, one draw per object with default
+textures, no tangents, no previous-frame motion, no local-light shadow rays exercised
+(no local shadows are requested), and no wgpu traced reference yet.
 
 ## Order for the engine's default paths
 

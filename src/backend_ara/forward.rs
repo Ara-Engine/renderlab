@@ -328,9 +328,13 @@ pub fn render(
     );
     let size = scene.size;
     let deferred_path = scene.primary == Primary::Traced;
+    // Post's motion surface on a traced frame comes from hit records (entry 35), which
+    // this frame does not chain yet; bloom and tone need nothing from the frame family.
     ensure!(
-        !deferred_path || (scene.sun_shadows.is_some() && scene.post.is_none()),
-        "a traced frame needs sun shadows, and post is not assembled for it yet"
+        !deferred_path
+            || (scene.sun_shadows.is_some()
+                && scene.post.is_none_or(|p| !p.enabled || !p.motion_blur)),
+        "a traced frame needs sun shadows, and its post runs without motion blur for now"
     );
     let program = if deferred_path {
         primary_shade::hardware_soft_program(crate::program::STANDARD_PROGRAM)?

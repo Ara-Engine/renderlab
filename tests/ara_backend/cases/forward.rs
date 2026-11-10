@@ -927,3 +927,152 @@ fn sun_shadow_has_the_predicted_umbra_and_penumbra_on_both_frame_families() -> R
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// The two frame families on a frame the geometry only partly covers, with the uniform
+/// environment and with the physical sky, through bloom and tone to display bytes.
+/// Misses must show the same background, covered pixels the same radiance except
+/// where the estimator's receivers differ by a ray or two in a penumbra.
+#[test]
+fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<()> {
+    use renderlab::backend_ara::forward::{Primary, SunShadows};
+    let path = root("forward-traced-misses");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    let quad = |half: f32| {
+        [
+            [-half, -half, 0.],
+            [half, -half, 0.],
+            [half, half, 0.],
+            [-half, half, 0.],
+        ]
+        .map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        })
+    };
+    let (floor, occluder) = (quad(1.5), quad(0.4));
+    let material = || MaterialDescriptor {
+        base_color: BASE,
+        metallic: 0.,
+        roughness: 0.6,
+        double_sided: true,
+        ..Default::default()
+    };
+    // Motion blur's surface on a traced frame comes from hit records, not chained yet.
+    let post = PostSettings {
+        motion_blur: false,
+        ..Default::default()
+    };
+    for (label, atmosphere) in [
+        ("uniform environment", renderlab::Atmosphere::off()),
+        (
+            "physical sky",
+            renderlab::Atmosphere {
+                volumetric_fog: None,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let mut frame = |primary: Primary| -> Result<(Vec<f32>, Vec<u8>)> {
+            let images = render(
+                &mut gpu,
+                &cache,
+                &ForwardScene {
+                    objects: &[
+                        ForwardObject {
+                            vertices: &floor,
+                            indices: &[0, 1, 2, 0, 2, 3],
+                            transform: Mat4::IDENTITY,
+                            material: material(),
+                        },
+                        ForwardObject {
+                            vertices: &occluder,
+                            indices: &[0, 1, 2, 0, 2, 3],
+                            transform: Mat4::from_translation(Vec3::Z),
+                            material: material(),
+                        },
+                    ],
+                    lighting: &Lighting {
+                        lights: vec![Light::Directional {
+                            travel: Vec3::new(-0.6, -0.3, -1.),
+                            lux: [1000.; 3],
+                        }],
+                        environment: [30., 40., 60.],
+                        exposure_stops: -8.,
+                    },
+                    camera,
+                    size: SIZE,
+                    atmosphere,
+                    sun_shadows: Some(&SunShadows {
+                        split_ends: vec![8.],
+                        disk_angle: 0.03,
+                    }),
+                    primary,
+                    post: Some(post),
+                },
+            )?;
+            Ok((
+                images
+                    .hdr
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
+                    .collect(),
+                images.display.context("post ran")?,
+            ))
+        };
+        let (traced, traced_display) = frame(Primary::Traced)?;
+        let (raster, raster_display) = frame(Primary::Raster)?;
+        let (mut worst, mut differing) = (0f32, 0);
+        for (a, b) in raster
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(traced.as_chunks::<4>().0)
+        {
+            let pixel = (0..3)
+                .map(|c| (a[c] - b[c]).abs() / a[c].abs().max(b[c].abs()).max(1e-3))
+                .fold(0f32, f32::max);
+            worst = worst.max(pixel);
+            differing += usize::from(pixel > 0.);
+        }
+        // The frame's corners are misses in both families.
+        ensure!(
+            raster[..3] == traced[..3] && raster[..3].iter().all(|v| *v > 0.),
+            "{label}: backgrounds differ: raster {:?} traced {:?}",
+            &raster[..3],
+            &traced[..3]
+        );
+        ensure!(
+            worst <= 0.03 && differing * 100 <= raster.len() / 4,
+            "{label}: {differing} pixels differ, worst by {worst}"
+        );
+        let levels = raster_display
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(traced_display.as_chunks::<4>().0)
+            .map(|(a, b)| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        ensure!(levels <= 2, "{label}: displays differ by {levels} levels");
+        println!(
+            "traced against mesh pass, {label}: {differing} of {} pixels differ, worst by {:.2}%; displays within {levels} level(s)",
+            raster.len() / 4,
+            worst * 100.
+        );
+    }
+    gpu.assert_clean()?;
+    Ok(())
+}

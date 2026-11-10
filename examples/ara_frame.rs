@@ -13,6 +13,12 @@
 //! ray queries on either layer, makes every material double-sided as hardware shadows
 //! require, and on wgpu takes the experimental ray-query acknowledgment
 //! `RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK`.
+//! `--traced` implies `--sun-shadows` and draws the frame with camera rays and
+//! deferred shading instead of the mesh pass: the renderer's traced primary
+//! visibility with `SoftShadows::Exact` and GI, temporal reconstruction and
+//! reflections off, which is `HardwareRt` at `Quality::Reference`. Motion blur is off
+//! at this level on both layers (the Ara frame does not chain its hit-based motion
+//! surface yet); bloom, tone and the rest of post are on.
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -45,11 +51,13 @@ fn main() -> Result<(), Failure> {
     let (mut backend, mut output, mut size) = (None, None, [960u32, 640]);
     let mut atmosphere = renderlab::Atmosphere::off();
     let mut sun_shadows = false;
+    let mut traced = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
             "--sun-shadows" => sun_shadows = true,
+            "--traced" => (sun_shadows, traced) = (true, true),
             "--atmosphere" => {
                 atmosphere = renderlab::Atmosphere {
                     volumetric_fog: None,
@@ -77,8 +85,15 @@ fn main() -> Result<(), Failure> {
         }
     }
     let (hdr, display) = match backend.as_deref() {
-        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere, sun_shadows)?,
-        Some("ara") => ara_frame(&fixture, size, atmosphere, sun_shadows, Path::new(&output))?,
+        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere, sun_shadows, traced)?,
+        Some("ara") => ara_frame(
+            &fixture,
+            size,
+            atmosphere,
+            sun_shadows,
+            traced,
+            Path::new(&output),
+        )?,
         _ => return Err("--backend wgpu|ara".into()),
     };
     write(
@@ -87,9 +102,16 @@ fn main() -> Result<(), Failure> {
         &hdr,
         &display,
         backend.as_deref().unwrap_or_default(),
-        atmosphere.active(),
-        sun_shadows,
+        [atmosphere.active(), sun_shadows, traced],
     )
+}
+
+/// Post at the traced level: the defaults without motion blur, on both layers.
+fn traced_post() -> renderlab::PostSettings {
+    renderlab::PostSettings {
+        motion_blur: false,
+        ..Default::default()
+    }
 }
 
 /// The exposed HDR target and the displayed image of one frame.
@@ -100,6 +122,7 @@ fn wgpu_frame(
     size: [u32; 2],
     atmosphere: renderlab::Atmosphere,
     sun_shadows: bool,
+    traced: bool,
 ) -> Result<Frame, Failure> {
     use renderlab::*;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -129,6 +152,10 @@ fn wgpu_frame(
         // contract for this device, which only this example's frame uses.
         requested.experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
     }
+    if traced {
+        requested.required_features |= TRACED_FEATURES;
+        requested.required_limits = traced_limits(requested.required_limits);
+    }
     let (device, queue) = pollster::block_on(adapter.request_device(&requested))?;
     let options = RendererOptions {
         samples: SampleCount::One,
@@ -153,6 +180,14 @@ fn wgpu_frame(
     } else {
         Renderer::new_with_options(device, queue, format, Limits::default(), options, prelude)?
     };
+    if traced {
+        r.set_primary_visibility(PrimaryVisibility::Traced)?;
+        r.set_soft_shadows(SoftShadows::Exact);
+        r.set_indirect(IndirectSettings::off())?;
+        r.set_reconstruction(Reconstruction::off())?;
+        r.set_reflections(ReflectionSettings::off())?;
+        r.set_post_settings(traced_post())?;
+    }
     // The frame the ara backend assembles today: everything else is a later level.
     r.set_atmosphere(atmosphere)?;
     r.set_local_shadows(LocalShadows {
@@ -252,6 +287,7 @@ fn ara_frame(
     size: [u32; 2],
     atmosphere: renderlab::Atmosphere,
     sun_shadows: bool,
+    traced: bool,
     output: &Path,
 ) -> Result<Frame, Failure> {
     use renderlab::backend_ara::{cache::ShaderCache, forward};
@@ -291,8 +327,16 @@ fn ara_frame(
             size,
             atmosphere,
             sun_shadows: sun_shadows.then_some(&shadows),
-            primary: forward::Primary::Raster,
-            post: Some(renderlab::PostSettings::default()),
+            primary: if traced {
+                forward::Primary::Traced
+            } else {
+                forward::Primary::Raster
+            },
+            post: Some(if traced {
+                traced_post()
+            } else {
+                renderlab::PostSettings::default()
+            }),
         },
     )?;
     gpu.assert_clean()?;
@@ -303,6 +347,7 @@ fn ara_frame(
     _: &lighting_fixture::Fixture,
     _: [u32; 2],
     _: renderlab::Atmosphere,
+    _: bool,
     _: bool,
     _: &Path,
 ) -> Result<Frame, Failure> {
@@ -341,8 +386,7 @@ fn write(
     bytes: &[u8],
     display: &[u8],
     backend: &str,
-    atmosphere: bool,
-    sun_shadows: bool,
+    [atmosphere, sun_shadows, traced]: [bool; 3],
 ) -> Result<(), Failure> {
     let pixels = size[0] as usize * size[1] as usize;
     if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
@@ -381,7 +425,8 @@ fn write(
     fs::write(
         dir.join("frame.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "scene": "M5-A authored v1, pose 0, forward lit, local shadows off, default post",
+            "scene": "M5-A authored v1, pose 0, local shadows off, default post",
+            "primary": if traced { "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur" } else { "mesh pass" },
             "atmosphere": if atmosphere { "physical sky without volumetric fog" } else { "off" },
             "sun_shadows": if sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
             "backend": backend,
@@ -410,8 +455,13 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
     if ja["width"] != jb["width"] || ja["height"] != jb["height"] {
         return Err("frames differ in extent".into());
     }
-    if ja["atmosphere"] != jb["atmosphere"] || ja["sun_shadows"] != jb["sun_shadows"] {
-        return Err("frames differ in atmosphere or sun shadow setting".into());
+    // Frames written before the traced level existed have no "primary" key.
+    let primary = |j: &serde_json::Value| j["primary"].as_str().unwrap_or("mesh pass").to_owned();
+    if ja["atmosphere"] != jb["atmosphere"]
+        || ja["sun_shadows"] != jb["sun_shadows"]
+        || primary(&ja) != primary(&jb)
+    {
+        return Err("frames differ in atmosphere, sun shadow or primary setting".into());
     }
     println!(
         "{} ({}) against {} ({}), {}x{}",
