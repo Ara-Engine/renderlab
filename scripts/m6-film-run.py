@@ -222,7 +222,14 @@ def main():
         implicit.mkdir(exist_ok=True)
         env.update(CARGO_BUILD_JOBS="2", OPENBLAS_NUM_THREADS="2", OMP_NUM_THREADS="2", NUMBA_NUM_THREADS="2",
                    RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
-                   VK_LAYER_PATH="C:/VulkanSDK/1.4.363.0/Bin", VK_IMPLICIT_LAYER_PATH=str(implicit), VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
+                   VK_IMPLICIT_LAYER_PATH=str(implicit))
+        # The Khronos validation layer is for correctness batches only (--fast-check, or
+        # RENDERLAB_LEASE_VALIDATION=1). Timing leases run without it, as a shipping build does:
+        # P-PIPE (2026-11-10) found it forced on every leased child since F0.
+        if a.fast_check or os.environ.get("RENDERLAB_LEASE_VALIDATION") == "1":
+            env.update(VK_LAYER_PATH="C:/VulkanSDK/1.4.363.0/Bin", VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
+        else:
+            env.pop("VK_INSTANCE_LAYERS", None)
         env.pop("VK_LOADER_LAYERS_DISABLE", None)
         if a.manifest:
             env["RENDERLAB_PRIMARY_MANIFEST"] = str(a.manifest.resolve())
