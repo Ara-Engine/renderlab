@@ -1,6 +1,8 @@
 //! Content-addressed native artifacts; production pipeline loading stays in ara-gpu.
 use super::shader::{self, Pass};
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::{Context, ensure};
 use ara_gpu::{
     GpuDevice, Pipeline,
     cooked::{self, CookedPipeline, CookedStage, RenderState, Stage},
@@ -41,16 +43,14 @@ impl ShaderCache {
         state: RenderState,
     ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}",
+            "{}{}{}{}{}{}{}",
             pass.source(),
             include_str!("shader/metal.rs"),
-            format!(
-                "{}{}{}{}",
-                include_str!("shader/spirv.rs"),
-                include_str!("shader/mod.rs"),
-                include_str!("cache.rs"),
-                include_str!("../../Cargo.lock")
-            )
+            include_str!("shader/spirv.rs"),
+            include_str!("shader/mod.rs"),
+            include_str!("shader/skin_interface.rs"),
+            include_str!("cache.rs"),
+            include_str!("../../Cargo.lock")
         );
         let key = format!(
             "{:x}",

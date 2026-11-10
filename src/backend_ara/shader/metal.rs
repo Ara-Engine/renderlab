@@ -153,14 +153,18 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
             .inner
             .needs_host_buffer_byte_size(&module.types)
         {
-            let root = buffer_root(
-                pass,
-                global
-                    .name
-                    .as_deref()
-                    .context("runtime buffer missing name")?,
-            )?;
-            sizes.push(format!("uint(top.buffers[top.root[{root}]].metadata)"));
+            let name = global
+                .name
+                .as_deref()
+                .context("runtime buffer missing name")?;
+            let slot = if pass.skin() {
+                super::SkinResource::from_name(name)
+                    .context("skin size buffer mapping missing")?
+                    .metal_slot()
+            } else {
+                format!("top.root[{}]", buffer_root(pass, name)?)
+            };
+            sizes.push(format!("uint(top.buffers[{slot}].metadata)"));
         }
     }
     let size_init = if calls.iter().any(|v| v == "ara_sizes") {
@@ -184,6 +188,11 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     })
 }
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if pass.skin() {
+        let resource = super::SkinResource::from_name(name)
+            .with_context(|| format!("unmapped skin resource {name}"))?;
+        return buffer_at(parameter, &resource.metal_slot());
+    }
     if pass.atmosphere() {
         return Ok(match name {
             "atmosphere" => buffer_argument(parameter, 0)?,
@@ -263,6 +272,9 @@ fn split_args(args: &str) -> Vec<&str> {
 }
 
 fn buffer_argument(parameter: &str, root: u32) -> Result<String> {
+    buffer_at(parameter, &format!("top.root[{root}]"))
+}
+fn buffer_at(parameter: &str, slot: &str) -> Result<String> {
     let (ty, _) = parameter
         .rsplit_once(' ')
         .context("buffer parameter type missing")?;
@@ -273,13 +285,11 @@ fn buffer_argument(parameter: &str, root: u32) -> Result<String> {
     );
     if let Some(value) = ty.strip_suffix('&') {
         Ok(format!(
-            "*reinterpret_cast<{}*>(top.buffers[top.root[{root}]].data)",
+            "*reinterpret_cast<{}*>(top.buffers[{slot}].data)",
             value.trim()
         ))
     } else if ty.ends_with('*') {
-        Ok(format!(
-            "reinterpret_cast<{ty}>(top.buffers[top.root[{root}]].data)"
-        ))
+        Ok(format!("reinterpret_cast<{ty}>(top.buffers[{slot}].data)"))
     } else {
         bail!("unexpected storage parameter {parameter}")
     }

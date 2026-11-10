@@ -1,6 +1,8 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
 mod metal;
+mod skin_interface;
 mod spirv;
+pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;
 pub use naga::ShaderStage;
@@ -13,6 +15,10 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Current/previous skinned vertices, normals and tangent frames.
+    SkinVertices,
+    /// Copy changed positions into retained source-cluster words.
+    SkinClusters,
     /// GGX specular prefilter of the procedural sky, one array mip.
     EnvironmentSpecular,
     /// Cosine-weighted diffuse irradiance of the procedural sky.
@@ -45,6 +51,9 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::SkinVertices | Self::SkinClusters => {
+                include_str!("../../../shaders/skinning.wgsl").into()
+            }
             Self::EnvironmentSpecular | Self::EnvironmentDiffuse => {
                 let kernels = include_str!("../../../shaders/atmosphere.wgsl");
                 let head = kernels
@@ -86,6 +95,9 @@ impl Pass {
             _ => POST.into(),
         }
     }
+    pub(super) fn skin(self) -> bool {
+        matches!(self, Self::SkinVertices | Self::SkinClusters)
+    }
     pub(super) fn environment(self) -> bool {
         matches!(self, Self::EnvironmentSpecular | Self::EnvironmentDiffuse)
     }
@@ -117,6 +129,8 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::SkinVertices => "skin_vertices",
+            Self::SkinClusters => "skin_clusters",
             Self::EnvironmentSpecular => "at_environment_specular",
             Self::EnvironmentDiffuse => "at_environment_diffuse",
             Self::LightCluster => "lc_build",

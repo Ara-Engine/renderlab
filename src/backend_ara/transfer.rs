@@ -53,3 +53,32 @@ pub fn readback(
     graph.node(rec, &[(Resource::Buffer(buffer), Access::HostRead)])?;
     Ok(buffer)
 }
+
+/// Snapshot a buffer range on the GPU before a later submission overwrites it.
+/// The returned host buffer is readable after its submission completes.
+pub fn readback_buffer(
+    gpu: &mut GpuDevice,
+    graph: &mut Graph,
+    rec: &mut Recorder,
+    source: Buffer,
+    offset: u64,
+    len: u64,
+) -> Result<Buffer> {
+    let destination = gpu.create_readback_buffer(len)?;
+    graph.node(
+        rec,
+        &[
+            (Resource::Buffer(source), Access::CopySource),
+            (Resource::Buffer(destination), Access::CopyDestination),
+        ],
+    )?;
+    rec.push(Command::CopyBufferRange {
+        source,
+        source_offset: offset,
+        destination,
+        destination_offset: 0,
+        size: len,
+    });
+    graph.node(rec, &[(Resource::Buffer(destination), Access::HostRead)])?;
+    Ok(destination)
+}

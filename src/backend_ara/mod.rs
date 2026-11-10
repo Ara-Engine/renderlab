@@ -11,4 +11,5 @@ pub mod image;
 pub mod light_cluster;
 pub mod post;
 pub mod shader;
+pub mod skinning;
 pub mod transfer;

@@ -2,6 +2,7 @@
 use anyhow::{Result, ensure};
 use ara_gpu::{Buffer, Device, GpuDevice, Resource, vk};
 /// One published storage allocation; explicit retirement belongs to its owner.
+#[derive(Debug)]
 pub struct StorageBuffer {
     /// Arena identity, for graph edges and readback.
     pub buffer: Buffer,
@@ -12,6 +13,14 @@ pub struct StorageBuffer {
 impl StorageBuffer {
     /// Upload a nonempty, four-byte-aligned record outside frame encoding.
     pub fn new(gpu: &mut GpuDevice, bytes: &[u8]) -> Result<Self> {
+        Self::with_usage(gpu, bytes, vk::BufferUsageFlags::empty())
+    }
+    /// Add vertex/AS roles to a storage record; AS roles require an RT-enabled device.
+    pub fn with_usage(
+        gpu: &mut GpuDevice,
+        bytes: &[u8],
+        extra: vk::BufferUsageFlags,
+    ) -> Result<Self> {
         ensure!(
             !bytes.is_empty() && bytes.len().is_multiple_of(4),
             "storage records need aligned bytes"
@@ -20,7 +29,8 @@ impl StorageBuffer {
             bytes.len() as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC
-                | vk::BufferUsageFlags::TRANSFER_DST,
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | extra,
             true,
         )?;
         let result = (|| -> Result<u32> {

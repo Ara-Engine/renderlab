@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 /// is aliased onto sampled binding 5 in the emitted decorations, because naga's
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
-    let source = adapt(pass);
+    let source = adapt(pass)?;
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
@@ -27,6 +27,8 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
                 &info,
                 &naga::back::spv::Options {
                     lang_version: (1, 5),
+                    flags: naga::back::spv::Options::default().flags
+                        | naga::back::spv::WriterFlags::DEBUG,
                     ..Default::default()
                 },
                 Some(&naga::back::spv::PipelineOptions {
@@ -48,23 +50,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
             if !runtime_descriptors {
                 words.splice(capability_end..capability_end, [(2 << 16) | 17, 5302]);
             }
-            let mut at = 5;
-            while at < words.len() {
-                let count = (words[at] >> 16) as usize;
-                ensure!(
-                    count > 0 && at + count <= words.len(),
-                    "invalid SPIR-V instruction"
-                );
-                // OpDecorate target Binding(33) 7 -> 5; no other decorations are touched.
-                if words[at] & 0xffff == 71
-                    && count == 4
-                    && words[at + 2] == 33
-                    && matches!(words[at + 3], 7 | 8)
-                {
-                    words[at + 3] = if words[at + 3] == 8 { 1 } else { 5 };
-                }
-                at += count;
-            }
+            remap_heap_aliases(&mut words)?;
             repair_image_arguments(&mut words)?;
             repair_internal_layouts(&mut words)?;
             Ok(SpirvStage {
@@ -75,20 +61,24 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
         })
         .collect()
 }
-fn adapt(pass: Pass) -> String {
+fn adapt(pass: Pass) -> Result<String> {
     let source = pass.source();
+    let original = parse(source.as_ref())?;
     let body = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("@group("))
         .collect::<Vec<_>>()
         .join("\n");
+    if pass.skin() {
+        return skin_interface(&body, &original);
+    }
     if matches!(pass, Pass::LightCluster) {
-        return cluster_interface(&body);
+        return cluster_interface(&body, &original);
     }
     if pass.atmosphere() {
-        return atmosphere_interface(&body, pass);
+        return atmosphere_interface(&body, pass, &original);
     }
-    let mut names = BTreeMap::from([
+    let names = BTreeMap::from([
         ("input_colour", "ara_textures[ara_root.w0]"),
         ("colour", "ara_textures[ara_root.w0]"),
         ("second_colour", "ara_textures[ara_root.w1]"),
@@ -100,38 +90,8 @@ fn adapt(pass: Pass) -> String {
         ("linear_sampler", "ara_samplers[ara_root.w6]"),
         ("lut", "ara_luts[ara_root.w7]"),
     ]);
-    // Only replace globals actually declared by this module: `colour` is a local
-    // in the filter module but a resource in the tone module.
-    if matches!(pass, Pass::Tone | Pass::Display) {
-        names.retain(|name, _| {
-            matches!(
-                *name,
-                "colour" | "bloom" | "lut" | "settings" | "linear_sampler"
-            )
-        });
-    } else {
-        names.retain(|name, _| !matches!(*name, "colour" | "bloom" | "lut"));
-    }
-    let mut out = String::new();
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut String| {
-        if let Some(replacement) = names.get(word.as_str()) {
-            out.push_str(replacement);
-        } else {
-            out.push_str(word);
-        }
-        word.clear();
-    };
-    for c in body.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            word.push(c);
-        } else {
-            flush(&mut word, &mut out);
-            out.push(c);
-        }
-    }
-    flush(&mut word, &mut out);
-    format!(
+    let out = rewrite_globals(body.as_ref(), &names, &original)?;
+    Ok(format!(
         r#"
 enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
@@ -143,7 +103,7 @@ var<immediate> ara_root:AraRoot;
 @group(0) @binding(7) var ara_luts:binding_array<texture_3d<f32>>;
 {out}
 "#
-    )
+    ))
 }
 
 /// Naga 30 passes a loaded image value for binding-array elements although its
@@ -214,32 +174,14 @@ fn repair_image_arguments(words: &mut [u32]) -> Result<()> {
     Ok(())
 }
 
-fn cluster_interface(body: &str) -> String {
+fn cluster_interface(body: &str, original: &naga::Module) -> Result<String> {
     let names = BTreeMap::from([
         ("lights", "ara_lights[ara_root.w0].values"),
         ("clusters", "ara_clusters[ara_root.w1]"),
         ("frame", "ara_frames[ara_root.w2]"),
     ]);
-    let mut out = String::new();
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut String| {
-        if let Some(v) = names.get(word.as_str()) {
-            out.push_str(v);
-        } else {
-            out.push_str(word);
-        }
-        word.clear();
-    };
-    for c in body.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            word.push(c);
-        } else {
-            flush(&mut word, &mut out);
-            out.push(c);
-        }
-    }
-    flush(&mut word, &mut out);
-    format!(
+    let out = rewrite_globals(body, &names, original)?;
+    Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
@@ -249,7 +191,7 @@ struct AraLights {{values:array<Light>,}};
 @group(0) @binding(3) var ara_clusters:binding_array<texture_storage_2d<r32uint,write>>;
 {out}
 "#
-    )
+    ))
 }
 
 // Naga 30 decorates internal arrays/structs with explicit layout, although Vulkan
@@ -284,10 +226,10 @@ fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
         let mut pending = roots;
         let mut seen = std::collections::BTreeSet::new();
         while let Some(id) = pending.pop() {
-            if seen.insert(id) {
-                if let Some(children) = types.get(&id) {
-                    pending.extend(children);
-                }
+            if seen.insert(id)
+                && let Some(children) = types.get(&id)
+            {
+                pending.extend(children);
             }
         }
         seen
@@ -313,7 +255,7 @@ fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
     Ok(())
 }
 
-fn atmosphere_interface(body: &str, pass: Pass) -> String {
+fn atmosphere_interface(body: &str, pass: Pass, original: &naga::Module) -> Result<String> {
     let names = BTreeMap::from([
         ("atmosphere", "ara_atmospheres[ara_root.w0]"),
         ("atmosphere_transmittance", "ara_textures[ara_root.w1]"),
@@ -326,31 +268,13 @@ fn atmosphere_interface(body: &str, pass: Pass) -> String {
         ("at_specular_out", "ara_outputs[ara_root.w4]"),
         ("at_diffuse_out", "ara_outputs[ara_root.w4]"),
     ]);
-    let mut out = String::new();
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut String| {
-        if let Some(v) = names.get(word.as_str()) {
-            out.push_str(v);
-        } else {
-            out.push_str(word);
-        }
-        word.clear();
-    };
-    for c in body.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            word.push(c);
-        } else {
-            flush(&mut word, &mut out);
-            out.push(c);
-        }
-    }
-    flush(&mut word, &mut out);
+    let out = rewrite_globals(body, &names, original)?;
     let output = if pass.environment() {
         "texture_storage_2d_array<rgba32float,write>"
     } else {
         "texture_storage_2d<rgba16float,write>"
     };
-    format!(
+    Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
@@ -360,5 +284,172 @@ var<immediate> ara_root:AraRoot;
 @group(0) @binding(2) var ara_samplers:binding_array<sampler>;
 {out}
 "#
-    )
+    ))
+}
+
+// Scope descriptor aliases to their generated variable identities, rather than
+// rewriting arbitrary variables merely because a binding number happens to match.
+fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
+    let mut aliases = BTreeMap::new();
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        ensure!(
+            count > 0 && at + count <= words.len(),
+            "invalid SPIR-V instruction"
+        );
+        if words[at] & 0xffff == 5 && count >= 3 {
+            let bytes: Vec<_> = words[at + 2..at + count]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .take_while(|b| *b != 0)
+                .collect();
+            let name = std::str::from_utf8(&bytes)?;
+            let remap = if name == "ara_luts" {
+                Some((7, 5))
+            } else if name == "ara_frames" {
+                Some((8, 1))
+            } else if let Some(name) = name.strip_prefix("ara_skin_") {
+                super::SkinResource::from_name(name).map(|r| (100 + r as u32, 1))
+            } else {
+                None
+            };
+            if let Some(remap) = remap {
+                aliases.insert(words[at + 1], remap);
+            }
+        }
+        at += count;
+    }
+    at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        if words[at] & 0xffff == 71
+            && count == 4
+            && words[at + 2] == 33
+            && let Some(&(before, after)) = aliases.get(&words[at + 1])
+        {
+            ensure!(words[at + 3] == before, "unexpected heap alias binding");
+            words[at + 3] = after;
+        }
+        at += count;
+    }
+    Ok(())
+}
+fn skin_interface(body: &str, original: &naga::Module) -> Result<String> {
+    use super::SkinResource;
+    let mut names = BTreeMap::new();
+    let mut declarations = String::new();
+    for resource in SkinResource::ALL {
+        let name = resource.name();
+        names.insert(
+            name,
+            format!(
+                "ara_skin_{name}[{}]{}",
+                resource.spirv_slot(),
+                if matches!(resource, SkinResource::Params) {
+                    ""
+                } else {
+                    ".values"
+                }
+            ),
+        );
+        declarations.push_str(&format!(
+            "@group(0) @binding({}) var<storage,{}> ara_skin_{name}:binding_array<{}>;\n",
+            100 + resource as u32,
+            if resource.writes() {
+                "read_write"
+            } else {
+                "read"
+            },
+            resource.ty()
+        ));
+    }
+    let out = rewrite_globals(body, &names, original)?;
+    Ok(format!(
+        r#"enable wgpu_binding_array;
+struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
+var<immediate> ara_root:AraRoot;
+struct AraFloats {{values:array<f32>,}};
+struct AraWords {{values:array<u32>,}};
+struct AraInfluences {{values:array<Influence>,}};
+struct AraMatrices {{values:array<mat4x4<f32>>,}};
+struct AraTangents {{values:array<vec4<f32>>,}};
+struct AraMappings {{values:array<vec2<u32>>,}};
+@group(0) @binding(1) var<storage,read> ara_skin_table:binding_array<AraWords>;
+{declarations}
+{out}
+"#
+    ))
+}
+
+/// Rewrite only globals registered by naga. Field selections/declarations keep
+/// their names; a local shadow is rejected explicitly rather than silently changed.
+fn rewrite_globals<S: AsRef<str>>(
+    body: &str,
+    names: &BTreeMap<&str, S>,
+    original: &naga::Module,
+) -> Result<String> {
+    let globals: std::collections::BTreeSet<_> = original
+        .global_variables
+        .iter()
+        .filter_map(|(_, g)| g.name.as_deref())
+        .filter(|n| names.contains_key(n))
+        .collect();
+    for function in original
+        .functions
+        .iter()
+        .map(|(_, f)| f)
+        .chain(original.entry_points.iter().map(|e| &e.function))
+    {
+        let shadow = function
+            .arguments
+            .iter()
+            .filter_map(|a| a.name.as_deref())
+            .chain(
+                function
+                    .local_variables
+                    .iter()
+                    .filter_map(|(_, v)| v.name.as_deref()),
+            )
+            .chain(function.named_expressions.values().map(String::as_str))
+            .find(|n| globals.contains(n));
+        ensure!(
+            shadow.is_none(),
+            "resource global is shadowed locally: {:?}",
+            shadow
+        );
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    while at < body.len() {
+        let c = body[at..]
+            .chars()
+            .next()
+            .expect("at stays on character boundaries");
+        if c.is_ascii_alphanumeric() || c == '_' {
+            let start = at;
+            while at < body.len()
+                && (body.as_bytes()[at].is_ascii_alphanumeric() || body.as_bytes()[at] == b'_')
+            {
+                at += 1;
+            }
+            let word = &body[start..at];
+            let member = body[..start].trim_end().ends_with('.');
+            let declaration = body[at..].trim_start().starts_with(':');
+            if !member && !declaration && globals.contains(word) {
+                out.push_str(
+                    names
+                        .get(word)
+                        .expect("registered resource global")
+                        .as_ref(),
+                );
+            } else {
+                out.push_str(word);
+            }
+        } else {
+            out.push(c);
+            at += c.len_utf8();
+        }
+    }
+    Ok(out)
 }

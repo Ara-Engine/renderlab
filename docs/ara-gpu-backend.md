@@ -177,3 +177,32 @@ change. Vulkan execution, including writable array-view descriptors, remains pen
 
 There are now 13 Renderlab pass entry points plus the new display transfer. Shadowed
 fog and temporal history are still reserved for the later shadow/temporal phase.
+
+## Skinning: two more entry points, using an indirect record
+
+`skin_vertices` and `skin_clusters` now run unchanged through the same frontend.
+Ten resource bindings exceed eight direct roots, so one padded storage record holds
+ten heap indices. Root words 0/1 carry the record buffer and byte offset; the test
+uses a nonzero offset. The typed semantic table is shared by the host packet and
+both shader adapters. Runtime-array sizes still come from the selected buffer's
+metadata on Metal, preserving bounds checks through the indirection. Vulkan uses
+typed aliases of the same storage heap, scoped by generated variable identity.
+
+The native replay uses an independently written scalar oracle for nine vertices,
+six affine joints, two poses, reflected/nonuniform scales, four-joint weights,
+rank-two and zero-linear blends, tangent handedness, and padded/out-of-order cluster
+mappings. Maximum vertex/tangent differences were 1.20e-7 / 5.97e-8 by pose. UV/color,
+previous pose, mapped cluster position bits and untouched sentinels are exact.
+Both poses and their GPU snapshots are submitted before the first host wait;
+palette/flag changes use ordered UpdateBuffer commands, not host overwrites.
+BLAS refit/visibility integration remains later work; optional AS usage requires
+an RT-enabled device. The leaf uses coherent records initially; geometry page
+consolidation/private uploads remain a scene-upload integration task.
+
+Skinning exposed field names equal to global names (`Params.vertices`, for example).
+The shared SPIR-V rewrite now takes its resource names from naga's parsed globals,
+leaves members and field declarations intact, and rejects local shadows rather than
+rewriting them silently. Descriptor alias repairs are scoped to generated variable
+IDs, not arbitrary matching binding numbers. All 18 exported stages validate.
+There are now 15 Renderlab entries plus display transfer; every Vulkan native run
+remains pending.
