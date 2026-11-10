@@ -4,7 +4,8 @@
 //! `p_nsq_screen SCENE.json OUT VARIANT...`, each VARIANT `name:key=value,...` with keys
 //! `path` (nonrt|rt), `rot` (0|1: TR1's per-frame direction rotation), `budget`
 //! (cold/reset/active/held rays), `cap` (walk cap), `trunc` (0|1), `steps` (walk steps), `march`
-//! (march samples), `fb` (first-step block mode), `lookup` (surface|exact) and `tr1` (0|1).
+//! (march samples), `fb` (first-step block mode), `lookup` (surface|exact), `tr1` (0|1) and
+//! `gather` (0|1: P-S4B's occluder gather on cut frames, docs/p-s4b.md).
 //! `P_NSQ_FRAMES` lists the frames to capture (default: the scene's capture flags).
 #[allow(dead_code)]
 #[path = "../tools/ara1/scene.rs"]
@@ -38,6 +39,7 @@ struct Variant {
     first_block: Option<u32>,
     lookup: Option<renderlab::VirtualLookup>,
     tr1: bool,
+    gather: Option<bool>,
 }
 
 fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
@@ -54,6 +56,7 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
         first_block: None,
         lookup: None,
         tr1: true,
+        gather: None,
     };
     for pair in keys.split(',').filter(|p| !p.is_empty()) {
         let (k, value) = pair.split_once('=').ok_or("key=value")?;
@@ -67,6 +70,7 @@ fn parse(text: &str) -> Result<Variant, Box<dyn std::error::Error>> {
             }
             "rot" => v.rotate = value == "1",
             "tr1" => v.tr1 = value == "1",
+            "gather" => v.gather = Some(value == "1"),
             "cap" => v.cap = Some(value.parse()?),
             "trunc" => v.trunc = Some(value == "1"),
             "steps" => v.steps = Some(value.parse()?),
@@ -202,6 +206,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(first_block) = v.first_block {
                 s.first_block = first_block;
             }
+            if let Some(gather) = v.gather {
+                s.occluder_gather = gather;
+            }
             r.set_virtual_shadow_settings(s)?;
         }
         let mut rows = Vec::new();
@@ -231,7 +238,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             rows.push(
                 json!({"index":index,"phase":frame.phase,"frame_id":report.frame.0,
-                "shadow_rays":engine.renderer().reconstruction_shadow_rays()}),
+                "shadow_rays":engine.renderer().reconstruction_shadow_rays(),
+                "gather":engine.renderer().virtual_shadow_stats().occluder_gather_frame}),
             );
             for g in engine.poll()?.gpu {
                 gpu.push(json!({"frame_id":g.frame.0,

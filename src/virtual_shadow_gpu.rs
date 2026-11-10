@@ -26,6 +26,8 @@
 use super::*;
 use crate::pipeline_compilation::PipelineDevice;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
+#[path = "sunvis_s4.rs"]
+mod sunvis_s4;
 #[path = "virtual_shadow_cache.rs"]
 mod surface_cache;
 use surface_cache::SurfaceCache;
@@ -162,6 +164,12 @@ pub struct VirtualShadowSettings {
     /// undecided (32; N8b used 8); each coarser level doubles it, up to four times. Walks that
     /// locate their triangle sooner stop sooner, so a larger budget costs only long walks.
     pub walk_steps: u32,
+    /// P-S4B (docs/p-s4b.md): on Surface frames of 8 or more direction batches (cuts and
+    /// history restarts), each queued pixel's directions are decided by S4's occluder-centric
+    /// gather instead of the march: every direction's exact hit test over every triangle in its
+    /// cone, on game-class scenes whose GI keeps full-detail geometry (src/sunvis_s4.rs). Other
+    /// frames and scenes keep the march.
+    pub occluder_gather: bool,
 }
 
 /// The per-pixel decision of `SoftShadows::Virtual` (`VirtualShadowSettings::lookup`).
@@ -218,6 +226,7 @@ impl Default for VirtualShadowSettings {
             lookup: VirtualLookup::Surface,
             truncated_walks_block: true,
             walk_steps: 32,
+            occluder_gather: true,
         }
     }
 }
@@ -270,6 +279,10 @@ pub struct VirtualShadowStats {
     pub bytes: u64,
     /// Whether this frame ran the request, compaction and raster passes.
     pub page_work: bool,
+    /// P-S4B: the scene qualifies for the occluder gather (its records are resident), and this
+    /// frame ran it.
+    pub occluder_gather_ready: bool,
+    pub occluder_gather_frame: bool,
 }
 
 struct Pipelines {
@@ -511,6 +524,8 @@ pub(super) struct VirtualState {
     /// N8n: the surface cache while `VirtualLookup::Surface` is the lookup; kept across resets,
     /// which retire its cells.
     surface: Option<SurfaceCache>,
+    /// P-S4B: the occluder gather while the Surface lookup and `occluder_gather` are on.
+    s4: Option<sunvis_s4::S4>,
 }
 /// Screen constants with this prefix belong to the map lookup's module, the others to the
 /// exact one.
@@ -1115,6 +1130,7 @@ impl VirtualState {
             queue_layout,
             hybrid_module: None,
             surface: None,
+            s4: None,
         }
     }
 
@@ -1407,6 +1423,12 @@ impl Renderer {
         self.queue
             .write_buffer(&r.frame, SAMPLING_OFFSET, &batches.to_ne_bytes());
         self.uploads.shadows += 4;
+        // P-S4B: the occluder gather serves frames of 8 or more batches.
+        let state = self.virtual_shadows.as_mut().unwrap();
+        if let Some(s4) = state.s4.as_mut() {
+            s4.frame = state.stats.occluder_gather_ready && batches >= sunvis_s4::MIN_BATCHES;
+            state.stats.occluder_gather_frame = s4.frame;
+        }
     }
 
     /// Restart virtual shadows from the current scene, camera, sun and settings. The next
@@ -1536,6 +1558,38 @@ impl Renderer {
                 &self.lighting.bindings,
             ));
         }
+        // P-S4B: the gather's geometry follows the draws; whether this frame runs it waits for
+        // TR1's budget (prepare_virtual_sampling).
+        if s.lookup != VirtualLookup::Surface || !s.occluder_gather {
+            state.s4 = None;
+        } else {
+            let s4 = state.s4.get_or_insert_with(|| {
+                sunvis_s4::S4::new(
+                    &self.device,
+                    &self.ledger,
+                    &state.layouts.lookup,
+                    &self.lighting.bindings,
+                )
+            });
+            s4.frame = false;
+        }
+        if let Some(mut s4) = self.virtual_shadows.as_mut().unwrap().s4.take() {
+            let ready = s4.prepare(
+                &self.device,
+                &self.queue,
+                &self.ledger,
+                draws,
+                |mesh| self.exact_indirect_geometry(mesh),
+                -travel,
+            );
+            self.virtual_shadows.as_mut().unwrap().s4 = Some(s4);
+            self.virtual_shadows
+                .as_mut()
+                .unwrap()
+                .stats
+                .occluder_gather_ready = ready;
+        }
+        let state = self.virtual_shadows.as_mut().unwrap();
         // N8e: the map keeps the sun direction it was rasterized for while the sun stays
         // within `sun_hysteresis` of it; the march and page requests then widen their cone by
         // that angle (the lookup's directions are always the current sun's).
@@ -2023,6 +2077,8 @@ impl Renderer {
             clusters: cluster_count,
             bytes: state.stats.bytes,
             page_work: true,
+            occluder_gather_ready: state.stats.occluder_gather_ready,
+            occluder_gather_frame: false,
         };
         let created = state.ensure_resources(
             &self.device,
@@ -2151,6 +2207,9 @@ impl Renderer {
                 &state.lookup_layout,
                 &constants,
             );
+            if let Some(s4) = state.s4.as_mut() {
+                s4.ensure_pipeline(&self.device, &self.ledger, &constants);
+            }
         }
         let casters = state.casters.as_ref().unwrap();
         // Compare the uploaded view-projection's bits on the CPU: projection jitter,
@@ -2575,6 +2634,7 @@ impl Renderer {
                 arrays,
                 &state.horizons.as_ref().unwrap().record_array,
                 self.lighting.bind(),
+                state.s4.as_ref().and_then(|s| s.dispatch()),
             );
             return;
         }

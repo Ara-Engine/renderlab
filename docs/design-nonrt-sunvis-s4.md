@@ -34,6 +34,14 @@ memory, not on work.**
   - Moving and still frames: unchanged, because they keep the march.
   - Quarry cut, in the second build: 9.4 ms down to about 3-6 ms. Until then it is unchanged.
 
+**Build 1 measured (P-S4B, [p-s4b.md](p-s4b.md), parked).**
+- Its per-direction test is a boolean plane/edge-plane half-space predicate over plane records, not
+  `vsm_hits_sheared` and not barycentric weights: the US 8,471,853 contract.
+- Game timing cut, 1080p: 26.7-27.3 ms down to 8.3-8.8 ms. Per-pixel counts equal RT on 99.994% of
+  pixels.
+- But the 960x540 game quality cuts got slower: 3.4 to 5.9 ms with the original sun, 5.3 to 16.7 ms
+  with the wide sun. It needs a per-frame cost choice before it can be the default.
+
 ## 1. Patent mapping (primary claim text)
 
 The claims were read from Google Patents pages, not from summaries. They were fetched on 2026-11-10 and

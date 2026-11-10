@@ -1178,7 +1178,20 @@ impl Renderer {
         indices: &[u32],
     ) -> Result<(), Error> {
         let bvh = gi_bvh::build(positions, indices)?;
-        self.set_indirect_bvh(mesh, bvh, 0)
+        let mut blas = Blas::new(bvh, 0)?;
+        blas.exact = true;
+        self.set_indirect_blas(mesh, blas)
+    }
+    /// P-S4B: `mesh`'s software geometry when it is the mesh's own full-detail triangles
+    /// (`Blas::exact`).
+    pub(super) fn exact_indirect_geometry(&self, mesh: &Mesh) -> Option<&Blas> {
+        let key: &wgpu::Buffer = &mesh.vertex;
+        self.gi
+            .meshes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, b)| &**b)
+            .filter(|b| b.exact)
     }
     /// Software-ray geometry from a cooked cluster BVH (an R0c sidecar), traced at the
     /// given level: one complete cut.

@@ -44,6 +44,10 @@ pub(crate) struct Blas {
     pub lo: [f32; 3],
     pub hi: [f32; 3],
     pub near: Vec<NearMasks>,
+    /// P-S4B: built from the drawn mesh's own positions and indices at full detail
+    /// (`set_indirect_geometry`), so its triangles are the render triangles that sun visibility
+    /// may test exactly (src/sunvis_s4.rs).
+    pub exact: bool,
 }
 impl Blas {
     /// Level `level` of `bvh` (a zero-error regular build has one).
@@ -60,6 +64,7 @@ impl Blas {
             lo,
             hi,
             near: vec![],
+            exact: false,
         })
     }
     fn words(&self) -> usize {
