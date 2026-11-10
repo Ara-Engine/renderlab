@@ -1157,12 +1157,14 @@ temporal reconstruction and reflections off encodes: TLAS build, camera trace wi
 receivers (entries 40-41), fresh exact sun visibility (46), programmable primary
 shading, then atmosphere, transparency and post. `Quality::Reference` selects
 `SoftShadows::Exact`, which takes the fresh-visibility branch rather than the
-Interactive trace. The trace and the fresh visibility replay on Metal today. The
-shading does not yet in the form this frame needs: entries 38-39 were replayed with
+Interactive trace. The trace replays on Metal today. The fresh visibility replays in
+its forward form; the traced form is the same estimator with its coverage seam gated
+on the primary tiles and hit image (`shader_sources`), a small unproven variant. The
+shading does not yet run in the form this frame needs: entries 38-39 were replayed with
 the **non-RT hard head** (`non_rt_sources`, where `hard_shadow` returns one and no
 scene is declared), and this frame composes the same program on the **hardware soft
 head** (`heads()[1]`: it reads the fresh counts and declares the scene for
-local-light shadow rays). That is one new variant of a ported entry, not a new family.
+local-light shadow rays). Those are two variants of ported entries, not a new family.
 `primary_shade::hardware_soft_program` composes it: with the standard program it
 reflects 39 inputs (the lit interface, the 256-element geometry and material arrays,
 the scene and the fresh counts) and compiles to a native Metal pipeline on a
@@ -1209,8 +1211,8 @@ directional views with `shadow_plan::directional_oriented` and packs one record 
 view (matrix, near, far, depth and normal bias, camera depth, texel size, the tangent
 of the disk angle), and `prepare_hardware_bias` adds the ray depth rate. `plan` reads
 only settings and the previous bases, so it can become a function both layers call.
-The traced frame above uses a different `fresh_compute` (the soft kernel module,
-gated by the primary tiles and hit image), which has not been replayed.
+The traced frame above uses the same estimator with its coverage seam gated by the
+primary tiles and hit image, a variant that has not been replayed.
 
 **Then, by how much of the default image each one changes:**
 
