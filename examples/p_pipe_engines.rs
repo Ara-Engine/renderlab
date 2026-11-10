@@ -2,9 +2,12 @@
 //! one process, sharing one `EngineDescriptor::pipeline_cache` directory, each drawing a
 //! small sun-lit scene to its first captured image.
 //!
-//!     p_pipe_engines rt|nonrt CACHE_DIR ENGINES [--forget] [--abort-after SECONDS]
+//!     p_pipe_engines rt|nonrt CACHE_DIR ENGINES [--sequential] [--forget] [--abort-after SECONDS]
 //!
-//! `--forget` leaks the engines instead of dropping them, so nothing is saved on drop.
+//! ENGINES is 1 or 2: each engine holds a full device and its compiled set. With
+//! `--sequential` the second engine starts only after the first has shown its image;
+//! otherwise both start at once. Pipelines compiling at once are bounded process-wide by
+//! the engine (`RENDERLAB_PIPELINE_COMPILES`). `--forget` leaks the engines instead of dropping them, so nothing is saved on drop.
 //! `--abort-after` aborts the process (no destructors) that many seconds after start, as a
 //! killed player would. Prints one JSON line: seconds to first image and the image hash
 //! per engine, then the cache files.
@@ -110,7 +113,8 @@ fn first_image(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().skip(1).collect();
-    let usage = "p_pipe_engines rt|nonrt CACHE_DIR ENGINES [--forget] [--abort-after SECONDS]";
+    let usage =
+        "p_pipe_engines rt|nonrt CACHE_DIR 1|2 [--sequential] [--forget] [--abort-after SECONDS]";
     let [path, cache, count, rest @ ..] = args.as_slice() else {
         return Err(usage.into());
     };
@@ -127,6 +131,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let cache = PathBuf::from(cache);
     let count: usize = count.parse()?;
+    if !(1..=2).contains(&count) {
+        return Err("at most two engines in one process".into());
+    }
+    let sequential = rest.iter().any(|a| a == "--sequential");
     let forget = rest.iter().any(|a| a == "--forget");
     if let Some(i) = rest.iter().position(|a| a == "--abort-after") {
         let seconds: f64 = rest.get(i + 1).ok_or(usage)?.parse()?;
@@ -137,22 +145,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let start = Instant::now();
-    let barrier = Arc::new(Barrier::new(count));
-    let threads: Vec<_> = (0..count)
-        .map(|_| {
-            let (barrier, cache) = (barrier.clone(), cache.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                first_image(path, &cache, start)
-            })
-        })
-        .collect();
     let mut engines = vec![];
     let mut results = vec![];
-    for thread in threads {
-        let (seconds, hash, engine) = thread.join().unwrap().map_err(|e| e.to_string())?;
+    let mut record = |(seconds, hash, engine): (f64, String, Engine)| {
         results.push(serde_json::json!({"first_image_seconds": seconds, "rgba8_sha256": hash}));
         engines.push(engine);
+    };
+    if sequential {
+        for _ in 0..count {
+            record(first_image(path, &cache, start).map_err(|e| e.to_string())?);
+        }
+    } else {
+        let barrier = Arc::new(Barrier::new(count));
+        let threads: Vec<_> = (0..count)
+            .map(|_| {
+                let (barrier, cache) = (barrier.clone(), cache.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    first_image(path, &cache, start)
+                })
+            })
+            .collect();
+        for thread in threads {
+            record(thread.join().unwrap().map_err(|e| e.to_string())?);
+        }
     }
     if forget {
         std::mem::forget(engines);
@@ -170,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         serde_json::json!({"path": format!("{path:?}"), "engines": results, "forget": forget,
+            "sequential": sequential,
             "total_seconds": start.elapsed().as_secs_f64(), "cache_files": files})
     );
     Ok(())

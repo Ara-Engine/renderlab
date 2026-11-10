@@ -147,7 +147,8 @@ impl PipelineDevice {
             timings.push(timing);
         }
     }
-    /// Creates a pipeline, then lets the shared disk cache save if `cache` is it.
+    /// Creates a pipeline within the process-wide compile limit, then lets the shared
+    /// disk cache save if `cache` is it. Timing excludes the wait for a compile slot.
     fn pipeline<T>(
         &self,
         kind: &'static str,
@@ -155,9 +156,11 @@ impl PipelineDevice {
         cache: Option<&wgpu::PipelineCache>,
         compile: impl FnOnce() -> T,
     ) -> T {
+        let slot = CompileSlot::acquire();
         let start = Instant::now();
         let result = compile();
         let duration = start.elapsed();
+        drop(slot);
         if self.compilation.profile {
             self.record(kind, label, duration);
         }
@@ -212,6 +215,43 @@ impl PipelineDevice {
         self.pipeline("render", desc.label, desc.cache, || {
             self.raw.create_render_pipeline(&desc)
         })
+    }
+}
+
+/// One of the process's pipeline-compile slots, held while a driver compiles.
+///
+/// P-PIPE: every engine and reload worker in the process shares the limit, so callers
+/// that fan out one thread per pipeline (`program_gpu::in_parallel`) cannot run
+/// unbounded native compiles at once. Each NVIDIA compile of a large shading kernel
+/// holds its own compiler memory; unbounded, a cold start of two RT engines reached
+/// 18 GB private. `RENDERLAB_PIPELINE_COMPILES` sets the limit (default 4, at least 1).
+struct CompileSlot;
+static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+impl CompileSlot {
+    fn limit() -> usize {
+        static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *LIMIT.get_or_init(|| {
+            std::env::var("RENDERLAB_PIPELINE_COMPILES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4usize)
+                .max(1)
+        })
+    }
+    fn acquire() -> Self {
+        let (busy, freed) = &SLOTS;
+        let mut busy = freed
+            .wait_while(busy.lock().unwrap(), |busy| *busy >= Self::limit())
+            .unwrap();
+        *busy += 1;
+        Self
+    }
+}
+impl Drop for CompileSlot {
+    fn drop(&mut self) {
+        let (busy, freed) = &SLOTS;
+        *busy.lock().unwrap() -= 1;
+        freed.notify_one();
     }
 }
 
@@ -351,6 +391,23 @@ mod tests {
         assert_ne!(cache_path(directory, &info).unwrap(), original);
         info.backend = wgpu::Backend::Gl;
         assert!(cache_path(directory, &info).is_none());
+    }
+    #[test]
+    fn compile_slots_bound_concurrent_compiles() {
+        use std::sync::atomic::AtomicUsize;
+        let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for _ in 0..4 * CompileSlot::limit() {
+                s.spawn(|| {
+                    let _slot = CompileSlot::acquire();
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(5));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(peak.into_inner() <= CompileSlot::limit());
     }
     #[test]
     fn rejects_corrupt_truncated_and_oversize_cache() {
