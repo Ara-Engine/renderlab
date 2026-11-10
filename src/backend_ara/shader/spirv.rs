@@ -64,7 +64,8 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
 }
 fn adapt(pass: Pass) -> Result<String> {
     // Select before interface adaptation: unreferenced program/shadow bindings
-    // must not leak into a leaf's heap contract. WGSL re-emission preserves IR math.
+    // must not leak into a leaf's heap contract. Re-emission is structurally validated;
+    // native Vulkan replay of the complete cohort is still required.
     let mut module = parse(pass.source().as_ref())?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;

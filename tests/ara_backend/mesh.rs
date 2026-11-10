@@ -235,7 +235,7 @@ pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
     result
 }
 
-fn normal_record(model: Mat4) -> [f32; 16] {
+pub fn normal_record(model: Mat4) -> [f32; 16] {
     let linear = Mat3::from_mat4(model);
     let inverse_transpose = linear.inverse().transpose();
     let scale = inverse_transpose

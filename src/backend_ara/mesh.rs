@@ -45,17 +45,7 @@ impl MeshGeometry {
                 && slots.iter().all(|s| (*s as usize) < models.len()),
             "invalid mesh instance slots"
         );
-        let mut normals = Vec::new();
-        let mut matrices = Vec::new();
-        for m in models {
-            let n = crate::normal::NormalTransform::new(*m);
-            ensure!(
-                m.is_finite() && n.valid(),
-                "unsupported affine mesh transform"
-            );
-            normals.extend(n.bytes());
-            matrices.extend(bytemuck::cast_slice::<f32, u8>(&m.to_cols_array()));
-        }
+        let (matrices, normals) = pack_models(models)?;
         let vertex_bytes: Vec<u8> = vertices
             .iter()
             .flat_map(|v| {
@@ -105,6 +95,48 @@ impl MeshGeometry {
             graph.import(Resource::Buffer(b.buffer), Access::HostWrite);
         }
     }
+    /// Queue a bounded model/normal-table range after prior draws. Geometry,
+    /// slots and heap identities remain stable while earlier frames are in flight.
+    pub fn update_models(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        first: u32,
+        models: &[crate::Mat4],
+    ) -> Result<()> {
+        ensure!(
+            !models.is_empty()
+                && u64::from(first)
+                    .checked_add(models.len() as u64)
+                    .is_some_and(|end| end <= self.buffers[3].len / 64),
+            "model update range is outside the table"
+        );
+        let (matrices, normals) = pack_models(models)?;
+        graph.node(
+            rec,
+            &[
+                (
+                    Resource::Buffer(self.buffers[3].buffer),
+                    Access::CopyDestination,
+                ),
+                (
+                    Resource::Buffer(self.buffers[4].buffer),
+                    Access::CopyDestination,
+                ),
+            ],
+        )?;
+        for (buffer, bytes) in [
+            (self.buffers[3].buffer, matrices),
+            (self.buffers[4].buffer, normals),
+        ] {
+            rec.push(Command::UpdateBuffer {
+                destination: buffer,
+                offset: u64::from(first) * 64,
+                bytes,
+            });
+        }
+        Ok(())
+    }
     /// Retire after submitting the last referenced draw.
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         for b in self.buffers {
@@ -129,6 +161,11 @@ impl DiagnosticCamera {
         Ok(Self {
             record: StorageBuffer::new(gpu, bytemuck::cast_slice(&words))?,
         })
+    }
+    /// Retire the camera record and its graph state after the last submission.
+    pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
+        graph.forget(Resource::Buffer(self.record.buffer));
+        self.record.retire(gpu)
     }
 }
 /// Original material factor record; sampled textures are explicit draw inputs.
@@ -162,6 +199,11 @@ impl DiagnosticMaterial {
         Ok(Self {
             record: StorageBuffer::new(gpu, &desc.bytes())?,
         })
+    }
+    /// Retire the material record and its graph state after the last submission.
+    pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
+        graph.forget(Resource::Buffer(self.record.buffer));
+        self.record.retire(gpu)
     }
 }
 /// One complete diagnostic draw's owned inputs, borrowed for recording.
@@ -353,4 +395,19 @@ impl DiagnosticMesh {
         gpu.retire_pipeline(self.pipeline)?;
         Ok(())
     }
+}
+
+fn pack_models(models: &[crate::Mat4]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut normals = Vec::new();
+    let mut matrices = Vec::new();
+    for m in models {
+        let n = crate::normal::NormalTransform::new(*m);
+        ensure!(
+            m.is_finite() && n.valid(),
+            "unsupported affine mesh transform"
+        );
+        normals.extend(n.bytes());
+        matrices.extend(bytemuck::cast_slice::<f32, u8>(&m.to_cols_array()));
+    }
+    Ok((matrices, normals))
 }

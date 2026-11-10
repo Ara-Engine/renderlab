@@ -245,7 +245,7 @@ fn wrap(
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
     if matches!(pass, Pass::MeshDiagnostic) {
         use super::MeshResource as R;
-        let r = R::from_name(name).with_context(|| format!("unmapped mesh resource{name}"))?;
+        let r = R::from_name(name).with_context(|| format!("unmapped mesh resource {name}"))?;
         let root = r as u32;
         return if r.buffer_type().is_some() {
             buffer_argument(parameter, root)

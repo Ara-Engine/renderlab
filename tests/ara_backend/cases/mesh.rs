@@ -53,69 +53,81 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
             &half_bytes(&fixture.mr.pixels),
         )?,
     ];
-    let mut records = Vec::new();
+    let mut cameras = Vec::new();
+    let mut materials = Vec::new();
     let mut snapshots = Vec::new();
-    for double_sided in [false, true] {
-        fixture.material.double_sided = double_sided;
-        let material = DiagnosticMaterial::new(
-            &mut gpu,
-            fixture.material.base_color,
-            fixture.material.metallic,
-            fixture.material.roughness,
-            double_sided,
-        )?;
-        // The backend reuses Renderlab's material writer; compare its actual ABI bytes.
-        ensure!(
-            gpu.read(material.record.buffer)?
-                == bytemuck::cast_slice::<u32, u8>(&fixture.material.words()),
-            "material ABI differs"
-        );
-        graph.import(Resource::Buffer(material.record.buffer), Access::HostWrite);
-        for mode in 0..4 {
-            let camera = DiagnosticCamera::new(&mut gpu, fixture.view_projection, mode)?;
-            graph.import(Resource::Buffer(camera.record.buffer), Access::HostWrite);
-            pass.record(
-                &mut graph,
-                &mut rec,
-                &DiagnosticInputs {
-                    geometry: &geometry,
-                    camera: &camera,
-                    material: &material,
-                    base: &base,
-                    metallic_roughness: &mr,
-                },
-                &output,
-                &depth,
-                fixture.background,
-            )?;
-            let read = renderlab::backend_ara::transfer::readback(
-                &mut gpu,
-                &mut graph,
-                &mut rec,
-                output.image,
-                u64::from(fixture.viewport[0] * fixture.viewport[1] * 16),
-            )?;
-            let depth_read = renderlab::backend_ara::transfer::readback(
-                &mut gpu,
-                &mut graph,
-                &mut rec,
-                depth.image(),
-                u64::from(fixture.viewport[0] * fixture.viewport[1] * 4),
-            )?;
-            snapshots.push((
-                double_sided,
-                mode,
-                read,
-                depth_read,
-                mesh_reference::rasterize(&fixture, mode),
-            ));
-            records.push(camera.record);
+    let mut last = None;
+    for pose in 0..2 {
+        if pose == 1 {
+            fixture.models[1] = renderlab::Mat4::from_scale(renderlab::Vec3::splat(0.8));
+            fixture.normals[1] = mesh_reference::normal_record(fixture.models[1]);
+            geometry.update_models(&mut graph, &mut rec, 1, &fixture.models[1..2])?;
         }
-        records.push(material.record);
+        for double_sided in [false, true] {
+            fixture.material.double_sided = double_sided;
+            let material = DiagnosticMaterial::new(
+                &mut gpu,
+                fixture.material.base_color,
+                fixture.material.metallic,
+                fixture.material.roughness,
+                double_sided,
+            )?;
+            // The backend reuses Renderlab's material writer; compare its actual ABI bytes.
+            ensure!(
+                gpu.read(material.record.buffer)?
+                    == bytemuck::cast_slice::<u32, u8>(&fixture.material.words()),
+                "material ABI differs"
+            );
+            graph.import(Resource::Buffer(material.record.buffer), Access::HostWrite);
+            for mode in 0..4 {
+                let camera = DiagnosticCamera::new(&mut gpu, fixture.view_projection, mode)?;
+                graph.import(Resource::Buffer(camera.record.buffer), Access::HostWrite);
+                pass.record(
+                    &mut graph,
+                    &mut rec,
+                    &DiagnosticInputs {
+                        geometry: &geometry,
+                        camera: &camera,
+                        material: &material,
+                        base: &base,
+                        metallic_roughness: &mr,
+                    },
+                    &output,
+                    &depth,
+                    fixture.background,
+                )?;
+                let read = renderlab::backend_ara::transfer::readback(
+                    &mut gpu,
+                    &mut graph,
+                    &mut rec,
+                    output.image,
+                    u64::from(fixture.viewport[0] * fixture.viewport[1] * 16),
+                )?;
+                let depth_read = renderlab::backend_ara::transfer::readback(
+                    &mut gpu,
+                    &mut graph,
+                    &mut rec,
+                    depth.image(),
+                    u64::from(fixture.viewport[0] * fixture.viewport[1] * 4),
+                )?;
+                snapshots.push((
+                    pose,
+                    double_sided,
+                    mode,
+                    read,
+                    depth_read,
+                    mesh_reference::rasterize(&fixture, mode),
+                ));
+                cameras.push(camera);
+            }
+            materials.push(material);
+        }
+        last = Some(gpu.submit(rec.finish(), &[])?);
+        rec = gpu.begin(Queue::Graphics);
     }
-    let point = gpu.submit(rec.finish(), &[])?;
-    gpu.wait(point)?;
-    for (sided, mode, read, depth_read, expected) in snapshots {
+    // Both geometry poses and all snapshots are submitted before this first wait.
+    gpu.wait(last.expect("two geometry submissions"))?;
+    for (pose, sided, mode, read, depth_read, expected) in snapshots {
         let bytes = gpu.read(read)?;
         let actual: Vec<_> = bytes
             .as_chunks::<4>()
@@ -138,7 +150,7 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
                 coverage += 1;
             }
             for (a, b) in a.iter().zip(b) {
-                ensure!(a.is_finite(), "nonfinite mesh at{i}");
+                ensure!(a.is_finite(), "nonfinite mesh at {i}");
                 max = max.max((a - b).abs());
             }
         }
@@ -157,7 +169,7 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
                 .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
                 .collect();
             let mut encoder = png::Encoder::new(
-                std::fs::File::create(path.join(format!("mesh-sided-{sided}.png")))?,
+                std::fs::File::create(path.join(format!("mesh-pose-{pose}-sided-{sided}.png")))?,
                 fixture.viewport[0],
                 fixture.viewport[1],
             );
@@ -168,10 +180,10 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
             println!("mesh inspection artifact: {}", path.display());
         }
         println!(
-            "mesh double_sided={sided} mode {mode}: max error {max}, coverage mismatches {coverage}"
+            "mesh pose {pose} double_sided={sided} mode {mode}: max error {max}, coverage mismatches {coverage}"
         );
         ensure!(coverage == 0, "mesh coverage differs");
-        ensure!(max <= 0.001, "mesh shading differs by{max}");
+        ensure!(max <= 0.001, "mesh shading differs by {max}");
         let bytes = gpu.read(depth_read)?;
         let mut depth_error = 0f32;
         for (a, b) in bytes
@@ -187,12 +199,15 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
         println!("mesh depth: max error {depth_error}");
         ensure!(
             depth_error <= 1e-6,
-            "mesh reversed depth differs by{depth_error}"
+            "mesh reversed depth differs by {depth_error}"
         );
         retire.extend([read, depth_read]);
     }
-    for r in records {
-        r.retire(&mut gpu)?;
+    for r in cameras {
+        r.retire(&mut gpu, &mut graph)?;
+    }
+    for r in materials {
+        r.retire(&mut gpu, &mut graph)?;
     }
     geometry.retire(&mut gpu, &mut graph)?;
     depth.retire(&mut gpu, &mut graph)?;

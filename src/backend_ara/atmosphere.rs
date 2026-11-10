@@ -9,6 +9,16 @@ use ara_gpu::{
     cooked::RenderState,
     descriptors::Format,
 };
+/// Physical sun illuminance and camera exposure for exposed sky/volume application.
+#[derive(Clone, Copy)]
+pub struct AtmosphereSun {
+    /// World direction toward the sun, normalized when packed.
+    pub toward_sun: crate::Vec3,
+    /// Nonnegative, unexposed RGB illuminance outside the atmosphere.
+    pub illuminance: [f32; 3],
+    /// Nonnegative camera exposure; illuminance multiplication uses the original f64 clamp.
+    pub exposure: f32,
+}
 /// Static medium/sun/camera-altitude parameters in the existing 432-byte ABI.
 pub struct AtmosphereParameters {
     /// Storage record to declare and retire.
@@ -41,6 +51,35 @@ impl AtmosphereParameters {
         viewport: [u32; 2],
         grid: [u32; 2],
     ) -> Result<Self> {
+        Self::for_camera_with_sun(
+            gpu,
+            settings,
+            AtmosphereSun {
+                toward_sun,
+                illuminance: [1.; 3],
+                exposure: 1.,
+            },
+            camera,
+            viewport,
+            grid,
+        )
+    }
+    /// Pack actual sun illuminance and exposure using Renderlab's original ABI.
+    pub fn for_camera_with_sun(
+        gpu: &mut GpuDevice,
+        settings: crate::Atmosphere,
+        sun: AtmosphereSun,
+        camera: crate::Camera,
+        viewport: [u32; 2],
+        grid: [u32; 2],
+    ) -> Result<Self> {
+        ensure!(
+            sun.illuminance
+                .into_iter()
+                .chain([sun.exposure])
+                .all(|v| v.is_finite() && v >= 0.),
+            "invalid atmosphere illuminance/exposure"
+        );
         settings.validate()?;
         ensure!(
             viewport.into_iter().chain(grid).all(|n| n > 0),
@@ -48,7 +87,12 @@ impl AtmosphereParameters {
         );
         let eye = camera.view().inverse().w_axis.truncate();
         let altitude = (eye.y - settings.medium.ground_height) * 1e-3;
-        let mut values = Self::medium_values(settings.medium, toward_sun, altitude)?;
+        let mut values = Self::medium_values(settings.medium, sun.toward_sun, altitude)?;
+        values[28..31].copy_from_slice(
+            &sun.illuminance
+                .map(|v| (f64::from(v) * f64::from(sun.exposure)).min(f64::from(f32::MAX)) as f32),
+        );
+        values[31] = sun.exposure;
         values[32..35].copy_from_slice(&eye.to_array());
         let flags = u32::from(settings.sky)
             | (u32::from(settings.sky && settings.sun_disk) * 2)
@@ -89,6 +133,11 @@ impl AtmosphereParameters {
             grid: Some(grid),
             viewport: Some(viewport),
         })
+    }
+    /// Retire the record and its scheduled graph state after the last submission.
+    pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
+        graph.forget(Resource::Buffer(self.record.buffer));
+        self.record.retire(gpu)
     }
     fn medium_values(
         medium: crate::AtmosphereMedium,

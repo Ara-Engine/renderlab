@@ -1,7 +1,7 @@
 //! Raster backdrop replay across all sun/height/volume flag combinations.
 use super::*;
 use renderlab::backend_ara::{
-    atmosphere::{AtmosphereParameters, AtmosphereTargets},
+    atmosphere::{AtmosphereParameters, AtmosphereSun, AtmosphereTargets},
     sky::SkyPass,
 };
 #[test]
@@ -74,8 +74,18 @@ fn raster_sky_sun_and_fog_native_replay_against_cpu() -> Result<()> {
     let mut records = Vec::new();
     let mut snapshots = Vec::new();
     for settings in sky_reference::settings_cases(renderlab::Atmosphere::default()) {
-        let params =
-            AtmosphereParameters::for_camera(&mut gpu, settings, sun, camera, viewport, grid)?;
+        let params = AtmosphereParameters::for_camera_with_sun(
+            &mut gpu,
+            settings,
+            AtmosphereSun {
+                toward_sun: sun,
+                illuminance: [2., 1., 0.5],
+                exposure: 0.75,
+            },
+            camera,
+            viewport,
+            grid,
+        )?;
         graph.import(Resource::Buffer(params.record.buffer), Access::HostWrite);
         pass.record(&mut graph, &mut rec, &params, &luts, &packed, &output)?;
         let read = renderlab::backend_ara::transfer::readback(
@@ -88,7 +98,14 @@ fn raster_sky_sun_and_fog_native_replay_against_cpu() -> Result<()> {
         snapshots.push((
             read,
             sky_reference::render(
-                &model, &trans, &sky, &volume, settings, camera, viewport, [1.; 3],
+                &model,
+                &trans,
+                &sky,
+                &volume,
+                settings,
+                camera,
+                viewport,
+                [1.5, 0.75, 0.375],
             ),
         ));
         records.push(params);
@@ -116,7 +133,7 @@ fn raster_sky_sun_and_fog_native_replay_against_cpu() -> Result<()> {
     }
     pass.retire(&mut gpu)?;
     for p in records {
-        p.record.retire(&mut gpu)?;
+        p.retire(&mut gpu, &mut graph)?;
     }
     for t in [
         luts.transmittance,

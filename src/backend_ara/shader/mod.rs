@@ -259,7 +259,7 @@ pub struct MetalProgram {
     pub source: String,
     /// Selected compute or fragment entry point.
     pub entry: String,
-    /// Fullscreen vertex entry, present for fullscreen raster passes.
+    /// Selected raster vertex entry; mesh variants read the heap through their wrapper.
     pub vertex_entry: Option<String>,
 }
 /// One SPIR-V entry compiled against Ara's global descriptor bindings and roots.

@@ -315,7 +315,10 @@ two textures and two regular samplers fit the eight roots directly. Normal and
 material packing reuse Renderlab's existing writers.
 
 The SPIR-V frontend now selects and compacts original IR before interface
-adaptation, re-emitting equivalent WGSL through naga. This removes unreachable
+adaptation, re-emitting WGSL through naga with intended equivalent semantics.
+This SPIR-V path is structurally validated only: the Metal path translates the
+original IR directly. The PC must replay the complete Vulkan cohort after this
+change, including single-sided mesh outputs, before claiming native equivalence. This removes unreachable
 program/shadow resources rather than supplying fake bindings. Typed heap
 preambles include only the records still required after compaction. The entire
 27-stage cohort passes spirv-val after this shared change.
@@ -354,3 +357,20 @@ Ara git dependency to its local ara-gpu package. This unifies Rust package ident
 so Renderlab borrows the existing device; compiling git and path copies together
 would produce distinct device types. This is an engine-integration dependency
 step, not another GPU device or descriptor-set model.
+
+## Moving models and exposed sky records
+
+Mesh model/normal ranges now update through ordered GPU commands while geometry,
+slots and heap identities stay stable. A nonzero-row update changes a mirrored
+instance into a nearer positive-scale instance. Two submissions, 16 mode/sided
+snapshots and both poses precede the first CPU wait; coverage stays exact, maximum
+color error0.000699282 and depth5.97e-8. Camera/material retirement now removes graph
+states as well as GPU records.
+
+AtmosphereSun supplies actual unexposed RGB illuminance and camera exposure,
+using the original f64 product/clamp when packing. The eight sky flag cases now
+exercise illuminance[2,1,0.5] and exposure0.75; maximum normalized error0.000272602
+against the scalar reference, within0.0005. Unit-illuminance LUT constructors retain
+their existing behavior. The second Opus review found no blocking code defect;
+documentation now explicitly separates Metal proof from structural-only validation
+of compacted/re-emitted SPIR-V. The complete native Vulkan cohort remains required.
