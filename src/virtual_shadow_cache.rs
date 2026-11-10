@@ -489,8 +489,7 @@ impl SurfaceCache {
 
     /// Tests: the last frame's counters (probed receivers, hits, cells the caster test retired,
     /// sun refreshes, cells found but not shown, certified walks past the largest margin, fill
-    /// claims; `VSC_STATS` only) and its queued walks.
-    #[cfg(test)]
+    /// claims; `VSC_STATS` only) and its queued walks (word 5 of the result, always valid).
     pub(super) fn read_stats(
         &self,
         device: &wgpu::Device,
@@ -526,6 +525,18 @@ impl SurfaceCache {
             word(5),
             word(6),
         ]
+    }
+}
+
+impl Renderer {
+    /// P-STILL measurement (docs/p-still.md): the last frame's queued surface-cache walks.
+    /// Blocks until the GPU is idle.
+    #[doc(hidden)]
+    pub fn p_still_surface_walks(&mut self) -> Option<u32> {
+        let state = self.virtual_shadows.as_ref()?;
+        let surface = state.surface.as_ref()?;
+        let r = state.resources.as_ref()?;
+        Some(surface.read_stats(&self.device, &self.queue, r)[5])
     }
 }
 

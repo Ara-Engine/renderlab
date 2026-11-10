@@ -354,6 +354,16 @@ pub(in crate::renderer) fn sample_offset(k: u64) -> [f32; 2] {
     let j = u32::from(SEQUENCE[k - 1]);
     [j + SHIFT[0], GENERATOR * j + SHIFT[1]].map(|v| ((v & 0xff) as f32 + 0.5) / 256.0 - 0.5)
 }
+/// P-STILL measurement knobs (docs/p-still.md): `RENDERLAB_P_STILL` is a comma list of
+/// `nojitter` (offset 0, the jitter attribution baseline) and `gi-jittered` (GI idleness keyed
+/// on the jittered camera, main before P-STILL). Unset in every shipping run.
+pub(crate) fn p_still(flag: &str) -> bool {
+    static FLAGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FLAGS
+        .get_or_init(|| std::env::var("RENDERLAB_P_STILL").unwrap_or_default())
+        .split(',')
+        .any(|f| f == flag)
+}
 /// Interactive's direction rotation for sample k: directions 8 (k mod 32) onward.
 pub(in crate::renderer) fn rotation(k: u64) -> u32 {
     8 * (k & 31) as u32

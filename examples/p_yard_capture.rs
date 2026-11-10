@@ -8,6 +8,8 @@
 //! `capture` writes each `capture` frame's post-reconstruction HDR (the Tonemap input, as
 //! Unreal's native decode) as raw RGBA f16 `hdr-NNNN.bin`; `timing` reads nothing back.
 //! Both write `engine.json` with every frame's GPU render span.
+#[path = "../tools/p-still/count.rs"]
+mod p_still;
 use renderlab::{asset, engine::*};
 use serde::Deserialize;
 use serde_json::json;
@@ -249,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         angular_radius: sun.angular_radius,
     }))?;
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
+    let mut counts = p_still::Counts::start(&mut engine);
     let mut rows = Vec::new();
     let mut gpu = Vec::new();
     let mut hdr_info = None;
@@ -300,6 +303,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::yield_now();
             }
         }
+        if let Some(c) = counts.as_mut() {
+            c.frame(&mut engine, index, &frame.state)?;
+        }
         rows.push(
             json!({"index":index,"state":frame.state,"cut":frame.cut,"frame_id":report.frame.0,
             "triangles":report.scene.triangles,"cpu_submit_ms":cpu_ms,"cpu_service_ms":service_ms}),
@@ -314,7 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "engine":"renderlab","scene":name,"path":path,"mode":mode,"size":spec.size,
             "adapter":engine.adapter_info().name,"debug_build":cfg!(debug_assertions),
             "scene_ready_ms":ready_ms,"settings":format!("{:?}",engine.settings()),
-            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,
+            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts.map(p_still::Counts::finish),
             "timing_scope":"GPU render span: first pass to present end, GPU timestamps; one frame in flight",
         }))?,
     )?;

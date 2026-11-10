@@ -3,6 +3,8 @@
 mod allocation;
 #[path = "../tools/ara1/scene.rs"]
 mod scene;
+#[path = "../tools/p-still/count.rs"]
+mod p_still;
 use renderlab::{asset, engine::*};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -198,6 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut first_image_ms = None;
+    let mut counts = p_still::Counts::start(&mut engine);
     let mut rows = Vec::new();
     let mut gpu = Vec::new();
     for (index, frame) in spec.frames.iter().enumerate() {
@@ -255,6 +258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::thread::yield_now();
                 }
             }
+        }
+        if let Some(c) = counts.as_mut() {
+            c.frame(&mut engine, index, &frame.phase)?;
         }
         // P-NRT: render()'s own CPU breakdown, to attribute the CPU share of service time.
         let c = &report.cpu;
@@ -317,7 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "scene_ready_ms":ready_ms,"startup_to_readback_ms":first_image_ms,
             "settings":format!("{:?}",engine.settings()),"frames":rows,"gpu":gpu,
             "startup_minimal":spec.startup_minimal,"effective_indirect":format!("{:?}",engine.renderer().indirect()),
-            "shader_reload":reload,"synchronous":spec.synchronous,
+            "shader_reload":reload,"synchronous":spec.synchronous,"counts":counts.map(p_still::Counts::finish),
             "timing_scope":"CPU submit is render() only; CPU service includes explicit GPU drain, excluding image readback/encoding; GPU span excludes uploads and readbacks",
             "excluded_effects":spec.notes,
         }))?,

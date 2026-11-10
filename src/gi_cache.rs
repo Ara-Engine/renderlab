@@ -2471,13 +2471,22 @@ impl Renderer {
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
+        // P-STILL (docs/p-still.md): a still view is the unjittered camera and the target
+        // size, decided on the CPU from their bits. TR1's sub-pixel jitter (and the jittered
+        // `scene_pixels` rectangle, which follows from the camera, the hashed placements
+        // and the size) is sampling, not change; keyed on it, a still view never idled.
+        let still = if super::primary_ray_gpu::temporal_reconstruction::p_still("gi-jittered") {
+            (*camera, region.map(u32::to_le_bytes).concat())
+        } else {
+            (camera.unjittered(), size.map(u32::to_le_bytes).concat())
+        };
         let idle_key: [u8; 32] = {
             let mut h = Sha256::new();
-            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(matrix_bytes(still.0.matrix(size[0], size[1])));
             h.update(&self.gi.arrays.as_ref().unwrap().instances);
             h.update(environment);
             h.update(format!("{s:?}").as_bytes());
-            h.update(region.map(u32::to_le_bytes).concat());
+            h.update(&still.1);
             // SK1: a fixed camera and placement can still contain animated geometry.
             for d in draws {
                 if let Some(s) = &d.mesh.skin {
@@ -2498,10 +2507,10 @@ impl Renderer {
         // do not age toward eviction while nothing is probed.
         let view_key: [u8; 32] = {
             let mut h = Sha256::new();
-            h.update(matrix_bytes(camera.matrix(size[0], size[1])));
+            h.update(matrix_bytes(still.0.matrix(size[0], size[1])));
             h.update(&self.gi.arrays.as_ref().unwrap().instances);
             h.update(format!("{s:?}").as_bytes());
-            h.update(region.map(u32::to_le_bytes).concat());
+            h.update(&still.1);
             h.finalize().into()
         };
         if self.gi.view_key == Some(view_key) && !clear {
