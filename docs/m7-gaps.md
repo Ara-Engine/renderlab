@@ -518,6 +518,14 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 
 ## Startup
 
+P-PREVIEW ([p-preview.md](p-preview.md)) adds an opt-in two-stage SPIR-V
+preprocessing experiment to the existing program watcher, including a same-source
+full-pipeline promotion that preserves temporal history. Release compilation and
+200 CPU library tests pass. **Still open:** fresh-edit latency on both paths,
+preview/full HDR and inspected-image correctness, full-swap timing and hitch.
+GPU verification is queued behind Ara and P-SHOW; no preview default is promoted.
+Engine-prelude reloads still use the existing synchronous transaction.
+
 P-SHC2 ([p-shc2.md](p-shc2.md)) has **no production structural split** and
 does not meet the 1–2 s first-new-shader target. Its compile-only buffered-input
 screen leaves 11.04 s RT / 16.93 s non-RT of native compilation after removing GI
