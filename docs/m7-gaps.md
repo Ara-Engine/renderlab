@@ -234,6 +234,11 @@ settings and the old recorded gates remain available.
   evidence, not prices for the new GI/AT1/TR1 default. Unreal/film parity and
   a combined 2x advantage are not certified by this unit.
 - **P-RTS (M8, [p-rts.md](p-rts.md)): RT first-cut and moving shadow cost is still open.**
+  - **P-RTS2 release follow-up ([p-rts2.md](p-rts2.md)): parked, DON'T MERGE.**
+    Earlier in-disk and 1.5x-cone variants still need the S2 0.04-rad moving-fringe
+    visual screen against current main and the film reference, including cold/cut.
+    Their historical numeric misses alone do not reject them under the clarified
+    visible-image bar. No default change or new speed claim is accepted for v0.1.1.
   Penumbra listing (16 probes per receiver, then the budget only at listed edge pixels)
   cuts the game first cut from 21.6 to 5.6 ms. It keeps ARA1's eight non-quarry scenes
   byte-identical, and the quarry has one pixel off by one code that scores better. But it
