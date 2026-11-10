@@ -20,6 +20,8 @@ mod library;
 pub enum CompilePolicy {
     #[default]
     Optimized,
+    /// SPIRV-Tools preprocessing for a transient, faster-to-compile edit.
+    SpirvPreview,
     Preview,
     /// Retains helper call boundaries as a compiler hint. Original IR is always
     /// used by Optimized; no WGSL helper body is changed.
@@ -515,7 +517,16 @@ unsafe extern "system" fn create_shader(
     };
     let source = unsafe { &*info };
     let mut copy = *source;
-    let edited = if matches!(
+    let edited = if SCOPE.get().policy == CompilePolicy::SpirvPreview {
+        let words = unsafe { std::slice::from_raw_parts(source.p_code, source.code_size / 4) };
+        match preview_spirv(words) {
+            Ok(words) => Some(words),
+            Err(error) => {
+                eprintln!("spirv_preview_failed={error}");
+                None
+            }
+        }
+    } else if matches!(
         SCOPE.get().policy,
         CompilePolicy::PreviewNoInline | CompilePolicy::PreviewHelpers
     ) {
@@ -553,6 +564,65 @@ unsafe extern "system" fn create_shader(
             );
     }
     result
+}
+// External SDK tool: no optimizer library or extra native build in the renderer.
+// Pipes keep temporary shader files out of the user's tree. Only this scoped
+// preview policy changes SPIR-V; the upgrade compiles the original naga output.
+fn preview_spirv(words: &[u32]) -> Result<Vec<u32>, String> {
+    let started = Instant::now();
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let executable = std::env::var_os("RENDERLAB_SPIRV_OPT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("VULKAN_SDK")
+                .map(|p| std::path::PathBuf::from(p).join("Bin/spirv-opt.exe"))
+        })
+        .unwrap_or_else(|| "spirv-opt".into());
+    let mut command = Command::new(executable);
+    command.args(["--skip-validation", "--target-env=vulkan1.3"]);
+    // Measurement scaffolding: select one pass family without rebuilding.
+    let passes = std::env::var("RENDERLAB_PREVIEW_PASSES").unwrap_or_else(|_| "-O".into());
+    command
+        .args(passes.split_whitespace())
+        .args(["-o", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut stdin = child.stdin.take().unwrap();
+    // Drain output concurrently: SPIRV-Tools may fill stdout before consuming all
+    // input, and a synchronous write + wait would deadlock on larger modules.
+    let output = std::thread::scope(|scope| {
+        let write = scope.spawn(move || stdin.write_all(&bytes));
+        let output = child.wait_with_output().map_err(|e| e.to_string());
+        write.join().unwrap().map_err(|e| e.to_string())?;
+        output
+    })?;
+    if !output.status.success() || output.stdout.len() % 4 != 0 {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let result: Vec<_> = output
+        .stdout
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    if result.first() != Some(&0x07230203) {
+        return Err("optimizer returned invalid SPIR-V".into());
+    }
+    eprintln!(
+        "spirv_preview ms={:.3} input_bytes={} output_bytes={} passes={passes:?}",
+        started.elapsed().as_secs_f64() * 1e3,
+        words.len() * 4,
+        result.len() * 4
+    );
+    Ok(result)
 }
 fn no_inline(source: &[u32], helpers_only: bool, boundaries: Boundaries) -> Option<Vec<u32>> {
     if source.len() < 5 {

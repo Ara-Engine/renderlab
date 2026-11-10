@@ -602,6 +602,12 @@ fn gpu_shc_mixed_reload() {
     std::fs::write(&file, crate::STANDARD_PROGRAM).unwrap();
     let mut watch = crate::program_watch::ShaderWatch::programs_only();
     watch.watch_program(&standard, &file, crate::STANDARD_PROGRAM);
+    let preview = std::env::var_os("RENDERLAB_PREVIEW").is_some();
+    if preview {
+        watch
+            .set_preview_policy(Some(crate::shader_compiler::CompilePolicy::SpirvPreview))
+            .unwrap();
+    }
     let edit_start = std::time::Instant::now();
     std::fs::write(&file, &source).unwrap();
     assert!(watch.poll_async(&mut r).is_empty());
@@ -625,17 +631,67 @@ fn gpu_shc_mixed_reload() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     let created = r.pipelines.created;
-    let updated = render(&mut r, &mut scene, &refs, false, 1).0;
+    let (updated, rgba) = render(&mut r, &mut scene, &refs, false, 1);
     let image_seconds = edit_start.elapsed().as_secs_f64();
+    if let Some(out) = &out {
+        save_png(&out.join("preview.png"), &rgba);
+    }
     assert_ne!(updated, before);
     assert_eq!(
         r.pipelines.created, created,
         "publication left first-frame compile work"
     );
+    let mut swap_seconds = image_seconds;
+    let mut swap_poll_ms = 0.0f64;
+    let mut max_preview_frame_ms = 0.0f64;
+    let preview_revision = r.revision;
+    if preview {
+        loop {
+            let poll = std::time::Instant::now();
+            let events = watch.poll_async(&mut r);
+            let poll_ms = poll.elapsed().as_secs_f64() * 1e3;
+            if !events.is_empty() {
+                for e in events {
+                    e.result.unwrap();
+                }
+                swap_seconds = edit_start.elapsed().as_secs_f64();
+                swap_poll_ms = poll_ms;
+                assert_eq!(
+                    r.revision, preview_revision,
+                    "promotion reset shader history"
+                );
+                break;
+            }
+            assert!(edit_start.elapsed().as_secs() < 240);
+            let start = std::time::Instant::now();
+            render(&mut r, &mut scene, &refs, false, 1);
+            max_preview_frame_ms = max_preview_frame_ms.max(start.elapsed().as_secs_f64() * 1e3);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    let start = std::time::Instant::now();
+    let (full, rgba) = render(&mut r, &mut scene, &refs, false, 1);
+    let swap_frame_ms = start.elapsed().as_secs_f64() * 1e3;
+    if let Some(out) = &out {
+        save_png(&out.join("full.png"), &rgba);
+    }
+    let mut different_channels = 0;
+    let mut max_abs = 0.0f32;
+    for (a, b) in updated.chunks_exact(2).zip(full.chunks_exact(2)) {
+        if a != b {
+            different_channels += 1;
+        }
+        max_abs = max_abs.max(
+            (crate::decode_f16(u16::from_le_bytes(a.try_into().unwrap()))
+                - crate::decode_f16(u16::from_le_bytes(b.try_into().unwrap())))
+            .abs(),
+        );
+    }
+    assert!(finite(&updated) && finite(&full));
     r.reload_program(&standard, &source).unwrap();
     assert_eq!(
         render(&mut r, &mut scene, &refs, false, 1).0,
-        updated,
+        full,
         "background output differs from synchronous output"
     );
     r.reload_program(&standard, crate::STANDARD_PROGRAM)
@@ -643,6 +699,10 @@ fn gpu_shc_mixed_reload() {
     assert_eq!(render(&mut r, &mut scene, &refs, false, 1).0, before);
     std::fs::remove_file(&file).unwrap();
     let row = serde_json::json!({"path":if nonrt(){"nonrt"}else{"rt"},
+        "source_sha256":format!("{:x}",Sha256::digest(source.as_bytes())),
+        "preview":preview,"passes":std::env::var("RENDERLAB_PREVIEW_PASSES").ok(),
+        "full_swap_seconds":swap_seconds,"swap_poll_ms":swap_poll_ms,"swap_frame_readback_ms":swap_frame_ms,
+        "max_preview_frame_readback_ms":max_preview_frame_ms,"preview_full_different_channels":different_channels,"preview_full_max_abs":max_abs,
         "publish_seconds":published_seconds,"edit_to_readback_seconds":image_seconds,
         "old_frames":active_frames,"max_old_frame_readback_ms":max_frame_ms,
         "background_equals_sync_hdr":true,"restore_equals_baseline_hdr":true});

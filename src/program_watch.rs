@@ -178,17 +178,19 @@ impl ShaderWatch {
     /// Opt-in, transient development output. Configure while idle on a device made
     /// by shader_compiler::request_device. A preview is presented for at least one
     /// submitted frame before its optimized replacement starts. Temporal frames
-    /// always use optimized pipelines. Normal/release callers keep the default None.
+    /// always use optimized pipelines. SpirvPreview also supports optimized builds
+    /// for measuring edit latency; ordinary callers keep the default None.
     pub fn set_preview_policy(
         &mut self,
         policy: Option<CompilePolicy>,
     ) -> Result<(), crate::Error> {
         if policy.is_some()
-            && (!cfg!(debug_assertions)
+            && ((!cfg!(debug_assertions) && policy != Some(CompilePolicy::SpirvPreview))
                 || !matches!(
                     policy,
                     Some(
-                        CompilePolicy::Preview
+                        CompilePolicy::SpirvPreview
+                            | CompilePolicy::Preview
                             | CompilePolicy::PreviewHelpers
                             | CompilePolicy::PreviewNoInline
                             | CompilePolicy::LibraryFast
@@ -196,7 +198,7 @@ impl ShaderWatch {
                 ))
         {
             return Err(crate::Error::InvalidInput(
-                "shader preview requires a development build and a preview policy",
+                "shader preview requires a supported policy; native hint policies require a development build",
             ));
         }
         if self.pending.is_some() || self.files.iter().any(|f| f.optimization.is_some()) {

@@ -470,7 +470,13 @@ impl Renderer {
         if let Some(fault) = self.fault.get() {
             return Err(ReloadError::Fault(fault.clone()));
         }
-        let report = self.install_program(
+        // A same-source preview promotion changes compilation, not shading. Keep
+        // temporal history keyed to the edited source, avoiding a second reset.
+        let promotion = self.program_source_matches(&reload.program, &reload.source)
+            && self.program_slot(reload.program.id()).preview
+            && reload.policy == crate::shader_compiler::CompilePolicy::Optimized;
+        let revision = self.revision;
+        let mut report = self.install_program(
             &reload.program,
             &reload.source,
             compiled,
@@ -478,6 +484,10 @@ impl Renderer {
             built,
             compile,
         );
+        if promotion {
+            self.revision = revision;
+            report.revision = revision;
+        }
         self.pipelines.created += lists.len() as u64;
         self.program_cache.count(lists.len() as u64);
         let slot = self
@@ -499,7 +509,8 @@ impl Renderer {
             .unwrap()
             .preview = matches!(
             reload.policy,
-            crate::shader_compiler::CompilePolicy::Preview
+            crate::shader_compiler::CompilePolicy::SpirvPreview
+                | crate::shader_compiler::CompilePolicy::Preview
                 | crate::shader_compiler::CompilePolicy::PreviewHelpers
                 | crate::shader_compiler::CompilePolicy::PreviewNoInline
                 | crate::shader_compiler::CompilePolicy::LibraryFast
