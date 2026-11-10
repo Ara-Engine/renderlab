@@ -63,13 +63,35 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
         .collect()
 }
 fn adapt(pass: Pass) -> Result<String> {
-    let source = pass.source();
-    let original = parse(source.as_ref())?;
-    let body = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("@group("))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Select before interface adaptation: unreferenced program/shadow bindings
+    // must not leak into a leaf's heap contract. WGSL re-emission preserves IR math.
+    let mut module = parse(pass.source().as_ref())?;
+    super::select(&mut module, pass)?;
+    let info = validate(&module)?;
+    let source = naga::back::wgsl::write_string(
+        &module,
+        &info,
+        naga::back::wgsl::WriterFlags::EXPLICIT_TYPES,
+    )?;
+    let original = parse(&source)?;
+    let mut body = String::new();
+    let mut binding = false;
+    for line in source.lines() {
+        if line.trim_start().starts_with("@group(") {
+            binding = true;
+        }
+        if binding {
+            if line.contains(';') {
+                binding = false;
+            }
+            continue;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    if matches!(pass, Pass::MeshDiagnostic) {
+        return mesh_interface(&body, &original);
+    }
     if matches!(pass, Pass::ParticleSort) {
         return particle_interface(&body, &original);
     }
@@ -98,6 +120,15 @@ fn adapt(pass: Pass) -> Result<String> {
         ("lut", "ara_luts[ara_root.w7]"),
     ]);
     let out = rewrite_globals(body.as_ref(), &names, &original)?;
+    let settings = if original
+        .global_variables
+        .iter()
+        .any(|(_, g)| g.name.as_deref() == Some("settings"))
+    {
+        "@group(0) @binding(1) var<storage,read> ara_settings:binding_array<Settings>;"
+    } else {
+        ""
+    };
     Ok(format!(
         r#"
 enable wgpu_binding_array;
@@ -106,7 +137,7 @@ var<immediate> ara_root:AraRoot;
 @group(0) @binding(5) var ara_textures:binding_array<texture_2d<f32>>;
 @group(0) @binding(3) var ara_outputs:binding_array<texture_storage_2d<rgba16float,write>>;
 @group(0) @binding(2) var ara_samplers:binding_array<sampler>;
-@group(0) @binding(1) var<storage,read> ara_settings:binding_array<Settings>;
+{settings}
 @group(0) @binding(7) var ara_luts:binding_array<texture_3d<f32>>;
 {out}
 "#
@@ -329,6 +360,8 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 Some((7, 5))
             } else if name == "ara_frames" {
                 Some((8, 1))
+            } else if let Some(name) = name.strip_prefix("ara_mesh_") {
+                super::MeshResource::from_name(name).map(|r| (300 + r as u32, 1))
             } else if let Some(name) = name.strip_prefix("ara_particle_") {
                 super::ParticleResource::from_name(name).map(|r| (200 + r as u32, 1))
             } else if let Some(name) = name.strip_prefix("ara_skin_") {
@@ -361,8 +394,19 @@ fn skin_interface(body: &str, original: &naga::Module) -> Result<String> {
     use super::SkinResource;
     let mut names = BTreeMap::new();
     let mut declarations = String::new();
+    let mut wrappers = std::collections::BTreeSet::from(["AraWords"]);
     for resource in SkinResource::ALL {
         let name = resource.name();
+        if !original
+            .global_variables
+            .iter()
+            .any(|(_, g)| g.name.as_deref() == Some(name))
+        {
+            continue;
+        }
+        if !matches!(resource, SkinResource::Params) {
+            wrappers.insert(resource.ty());
+        }
         names.insert(
             name,
             format!(
@@ -387,16 +431,24 @@ fn skin_interface(body: &str, original: &naga::Module) -> Result<String> {
         ));
     }
     let out = rewrite_globals(body, &names, original)?;
+    let mut types = String::new();
+    for (ty, element) in [
+        ("AraFloats", "f32"),
+        ("AraWords", "u32"),
+        ("AraInfluences", "Influence"),
+        ("AraMatrices", "mat4x4<f32>"),
+        ("AraTangents", "vec4<f32>"),
+        ("AraMappings", "vec2<u32>"),
+    ] {
+        if wrappers.contains(ty) {
+            types.push_str(&format!("struct {ty} {{values:array<{element}>,}};\n"));
+        }
+    }
     Ok(format!(
         r#"enable wgpu_binding_array;
 struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
 var<immediate> ara_root:AraRoot;
-struct AraFloats {{values:array<f32>,}};
-struct AraWords {{values:array<u32>,}};
-struct AraInfluences {{values:array<Influence>,}};
-struct AraMatrices {{values:array<mat4x4<f32>>,}};
-struct AraTangents {{values:array<vec4<f32>>,}};
-struct AraMappings {{values:array<vec2<u32>>,}};
+{types}
 @group(0) @binding(1) var<storage,read> ara_skin_table:binding_array<AraWords>;
 {declarations}
 {out}
@@ -563,4 +615,52 @@ fn validate_heap_bindings(words: &[u32]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn mesh_interface(body: &str, original: &naga::Module) -> Result<String> {
+    use super::MeshResource as R;
+    let mut names = BTreeMap::new();
+    let mut declarations = String::new();
+    for r in R::ALL {
+        let name = r.name();
+        let root = r as u32;
+        if let Some(ty) = r.buffer_type() {
+            names.insert(
+                name,
+                format!(
+                    "ara_mesh_{name}[ara_root.w{root}]{}",
+                    if r.array() { ".values" } else { "" }
+                ),
+            );
+            declarations.push_str(&format!(
+                "@group(0) @binding({}) var<storage,read> ara_mesh_{name}:binding_array<{ty}>;\n",
+                300 + root
+            ));
+        } else {
+            names.insert(
+                name,
+                format!(
+                    "{}[ara_root.w{root}]",
+                    if matches!(r, R::BaseSampler | R::MrSampler) {
+                        "ara_samplers"
+                    } else {
+                        "ara_textures"
+                    }
+                ),
+            );
+        }
+    }
+    let out = rewrite_globals(body, &names, original)?;
+    Ok(format!(
+        r#"enable wgpu_binding_array;
+struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
+var<immediate> ara_root:AraRoot;
+struct AraMatrices {{values:array<mat4x4<f32>>,}};
+struct AraNormals {{values:array<NormalTransform>,}};
+@group(0) @binding(5) var ara_textures:binding_array<texture_2d<f32>>;
+@group(0) @binding(2) var ara_samplers:binding_array<sampler>;
+{declarations}
+{out}
+"#
+    ))
 }

@@ -17,3 +17,5 @@ pub mod skinning;
 pub mod sky;
 pub mod transfer;
 pub mod volumes;
+
+pub mod mesh;

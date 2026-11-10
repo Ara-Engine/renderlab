@@ -43,13 +43,14 @@ impl ShaderCache {
         state: RenderState,
     ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}",
             pass.source(),
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
             include_str!("shader/mod.rs"),
             include_str!("shader/skin_interface.rs"),
             include_str!("shader/particle_interface.rs"),
+            include_str!("shader/mesh_interface.rs"),
             include_str!("cache.rs"),
             include_str!("../../Cargo.lock")
         );

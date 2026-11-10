@@ -6,7 +6,7 @@ publish = false
 
 [features]
 backend-ara-window = ["backend-ara", "dep:ara-window"]
-backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:serde_json", "naga/msl-out", "naga/spv-out", "wgpu/vulkan-portability"]
+backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:serde_json", "naga/msl-out", "naga/spv-out", "naga/wgsl-out", "wgpu/vulkan-portability"]
 selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
 selection-profile = ["renderlab-asset/selection-profile"]

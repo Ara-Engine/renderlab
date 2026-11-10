@@ -55,14 +55,59 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         .iter()
         .position(|e| e.name == pass.entry())
         .context("selected entry not emitted")?;
-    let name = &names[at];
+    source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraWriteVolumeEntry {ulong unused; texture3d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
+    let entry = wrap(
+        &mut source,
+        &module,
+        &names[at],
+        if pass.raster() { "fragment" } else { "kernel" },
+        pass,
+    )?;
+    let vertex_entry = if let Some(i) = module
+        .entry_points
+        .iter()
+        .position(|e| e.stage == naga::ShaderStage::Vertex)
+    {
+        if matches!(pass, Pass::MeshDiagnostic) {
+            Some(wrap(&mut source, &module, &names[i], "vertex", pass)?)
+        } else {
+            Some(names[i].clone())
+        }
+    } else {
+        None
+    };
+    if matches!(pass, Pass::MeshDiagnostic) {
+        // Ara reserves attributes0..10 for the converter ABI. Explicit streams
+        // map WGSL locationN to native attribute11+N on every mesh shader.
+        for location in (0..16u32).rev() {
+            source = source.replace(
+                &format!("[[attribute({location})]]"),
+                &format!("[[attribute({})]]", 11 + location),
+            );
+        }
+    }
+    Ok(MetalProgram {
+        source,
+        entry,
+        vertex_entry,
+    })
+}
+fn wrap(
+    source: &mut String,
+    module: &naga::Module,
+    name: &str,
+    stage: &str,
+    pass: Pass,
+) -> Result<String> {
     let needle = format!("{name}(");
     let name_at = source.find(&needle).context("entry signature missing")?;
     let start = source[..name_at].rfind('\n').map_or(0, |i| i + 1);
     let open = name_at + name.len();
-    let close = matching_paren(&source, open)?;
+    let close = matching_paren(source, open)?;
     let prefix = source[start..name_at].to_string();
-    let stage = if pass.raster() { "fragment" } else { "kernel" };
     let stage_at = prefix
         .find(&format!("{stage} "))
         .context("entry stage qualifier missing")?;
@@ -100,27 +145,47 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         } else if attribute.contains("thread_position_in_grid") {
             (
                 "ara_id".to_owned(),
-                Some("uint3 ara_id [[thread_position_in_grid]]"),
+                Some("uint3 ara_id [[thread_position_in_grid]]".to_string()),
             )
         } else if attribute.contains("thread_position_in_threadgroup") {
             (
                 "ara_local".to_owned(),
-                Some("uint3 ara_local [[thread_position_in_threadgroup]]"),
+                Some("uint3 ara_local [[thread_position_in_threadgroup]]".to_string()),
             )
         } else if attribute.contains("threadgroup_position_in_grid") {
             (
                 "ara_group".to_owned(),
-                Some("uint3 ara_group [[threadgroup_position_in_grid]]"),
+                Some("uint3 ara_group [[threadgroup_position_in_grid]]".to_string()),
             )
         } else if attribute.contains("thread_index_in_threadgroup") {
             (
                 "ara_lane".to_owned(),
-                Some("uint ara_lane [[thread_index_in_threadgroup]]"),
+                Some("uint ara_lane [[thread_index_in_threadgroup]]".to_string()),
+            )
+        } else if attribute.contains("stage_in") {
+            (
+                identifier.to_owned(),
+                Some(format!("{parameter} [[stage_in]]")),
+            )
+        } else if attribute.contains("front_facing") {
+            (
+                "ara_front".into(),
+                Some("bool ara_front [[front_facing]]".into()),
+            )
+        } else if attribute.contains("vertex_id") {
+            (
+                "ara_vertex".into(),
+                Some("uint ara_vertex [[vertex_id]]".into()),
+            )
+        } else if attribute.contains("instance_id") {
+            (
+                "ara_instance".into(),
+                Some("uint ara_instance [[instance_id]]".into()),
             )
         } else if attribute.contains("position") {
             (
                 "ara_position".to_owned(),
-                Some("float4 ara_position [[position]]"),
+                Some("float4 ara_position [[position]]".to_string()),
             )
         } else {
             (resource(identifier, parameter, pass)?, None)
@@ -133,12 +198,10 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     }
     let ordinary = format!("{result_type} {name}({})", plain.join(", "));
     source.replace_range(start..close + 1, &ordinary);
-    let entry = format!("ara_{}", pass.entry());
-    let builtin = builtins.join(", ");
-    source.push_str("\nstruct AraWriteImageEntry {ulong unused; texture2d<float, access::write> texture; ulong metadata;};\nstruct AraWriteVolumeEntry {ulong unused; texture3d<float, access::write> texture; ulong metadata;};\nstruct AraVolumeEntry {ulong unused; texture3d<float> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
-    source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
+    let entry = format!("ara_{name}");
+    let mut signature = vec![String::from("constant TopLevel& top [[buffer(2)]]")];
+    signature.extend(builtins);
+    let signature = signature.join(", ");
     let return_call = if result_type == "void" {
         format!("{name}({});", calls.join(", "))
     } else {
@@ -171,20 +234,27 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     };
     // Synthetic lengths are thread-local values read from immutable heap metadata,
     // not another native constant-buffer binding. Preserve naga's bounds checks.
-    source = source.replace("constant _mslBufferSizes&", "thread const _mslBufferSizes&");
-    source.push_str(&format!("{stage} {result_type} {entry}(constant TopLevel& top [[buffer(2)]], {builtin}) {{ {} {size_init} {return_call} }}\n",workgroups.join(" ")));
-    let vertex_entry = module
-        .entry_points
-        .iter()
-        .position(|e| e.stage == naga::ShaderStage::Vertex)
-        .map(|i| names[i].clone());
-    Ok(MetalProgram {
-        source,
-        entry,
-        vertex_entry,
-    })
+    *source = source.replace("constant _mslBufferSizes&", "thread const _mslBufferSizes&");
+    source.push_str(&format!(
+        "{stage} {result_type} {entry}({signature}) {{ {} {size_init} {return_call} }}\n",
+        workgroups.join(" ")
+    ));
+    Ok(entry)
 }
+
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if matches!(pass, Pass::MeshDiagnostic) {
+        use super::MeshResource as R;
+        let r = R::from_name(name).with_context(|| format!("unmapped mesh resource{name}"))?;
+        let root = r as u32;
+        return if r.buffer_type().is_some() {
+            buffer_argument(parameter, root)
+        } else if matches!(r, R::BaseSampler | R::MrSampler) {
+            Ok(format!("top.samplers[top.root[{root}]].state"))
+        } else {
+            Ok(format!("top.textures[top.root[{root}]].texture"))
+        };
+    }
     if matches!(pass, Pass::ParticleSort) {
         let resource = super::ParticleResource::from_name(name)
             .with_context(|| format!("unmapped particle resource {name}"))?;
@@ -322,6 +392,9 @@ fn buffer_at(parameter: &str, slot: &str) -> Result<String> {
     }
 }
 fn buffer_root(pass: Pass, name: &str) -> Result<u32> {
+    if matches!(pass, Pass::MeshDiagnostic) {
+        return Ok(super::MeshResource::from_name(name).context("mesh runtime buffer")? as u32);
+    }
     if matches!(pass, Pass::ParticleSort) {
         return Ok(
             super::ParticleResource::from_name(name).context("particle runtime buffer")? as u32,

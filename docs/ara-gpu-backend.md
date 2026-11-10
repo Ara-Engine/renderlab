@@ -302,3 +302,37 @@ Remaining proof limits include jittered camera reconstruction, per-sample-differ
 the original unlit/diagnostic vs/fs. Complete lit forward needs native Metal4
 per-vertex interpolation and Vulkan fragment-shader-barycentric feature negotiation;
 the latter is a pending PC-owned Ara backend change, not a root-constant model gap.
+
+## Indexed, instanced diagnostic mesh draw
+
+The unchanged `scene.wgsl::vs`/`fs` now run through Ara, including transformed
+normals, texture sampling, source-winding fragment rejection, diagnostic modes
+and reversed-Z depth. Explicit streams retain Renderlab's 48-byte vertex layout
+and 4-byte instance-slot layout. The Metal adapter wraps both stages and maps
+WGSL locations to Ara's reserved native attributes11+location. Stage input and
+front-facing builtins pass through unchanged. Camera/models/normals/material,
+two textures and two regular samplers fit the eight roots directly. Normal and
+material packing reuse Renderlab's existing writers.
+
+The SPIR-V frontend now selects and compacts original IR before interface
+adaptation, re-emitting equivalent WGSL through naga. This removes unreachable
+program/shadow resources rather than supplying fake bindings. Typed heap
+preambles include only the records still required after compaction. The entire
+27-stage cohort passes spirv-val after this shared change.
+
+The independent scalar raster oracle covers an indexed mesh, three deliberately
+reordered instances (including a mirror and nonuniform affine shear), varying
+clip-W, per-vertex color/UV/normal, two sampled textures, all four view modes and
+both sidedness settings. All eight outputs have exact pixel coverage. Maximum
+color error is0.000699282 (tolerance0.001); normal mode1.20e-7; depth5.97e-8
+(tolerance1e-6). The fixture keeps every vertex inside the clip volume and its
+edges away from sample centres; clipping and4x mesh raster remain unproven.
+An optional ARA_BACKEND_CAPTURE=1 writes inspected PNGs under Cargo target;
+only these inspection artifacts receive CPU display conversion. Numeric checks
+compare actual GPU linear outputs and depth. All13 native replay tests pass.
+
+There are21 original Renderlab entries plus display transfer. This is the original
+unlit/diagnostic path; lit forward has not been replaced by a simplified shader.
+Its Metal4 per-vertex and pending Vulkan barycentric requirements remain above.
+All native Vulkan runs remain pending. Shared disk space recovered to161GiB;
+the backend still uses one3.6GiB build tree and11MiB of replay artifacts.

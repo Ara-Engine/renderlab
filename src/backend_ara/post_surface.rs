@@ -28,7 +28,7 @@ impl RasterDepth {
                 sampled: true,
                 storage: false,
                 attachment: true,
-                copy_source: false,
+                copy_source: samples == SampleCount::One,
                 copy_destination: false,
             },
             shape: ImageShape {
@@ -52,6 +52,14 @@ impl RasterDepth {
     /// Attachment identity for the renderer's main raster pass.
     pub fn image(&self) -> Image {
         self.image
+    }
+    /// Attachment width and height.
+    pub fn size(&self) -> [u32; 2] {
+        self.size
+    }
+    /// Backed attachment sample count.
+    pub fn samples(&self) -> SampleCount {
+        self.samples
     }
     /// Retire after all submitted raster/auxiliary uses and remove its scheduled state.
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {

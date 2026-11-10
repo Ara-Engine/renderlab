@@ -1,5 +1,7 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
+mod mesh_interface;
 mod metal;
+pub(crate) use mesh_interface::MeshResource;
 mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
@@ -17,6 +19,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy)]
 pub enum Pass {
+    /// Original indexed, instanced unlit/diagnostic mesh draw.
+    MeshDiagnostic,
     /// Far-to-near2048-key workgroup particle ordering.
     ParticleSort,
     /// Camera velocity and linear depth from a single-sample raster depth image.
@@ -65,6 +69,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::MeshDiagnostic => include_str!("../../../shaders/scene.wgsl").into(),
             Self::ParticleSort => {
                 let source = include_str!("../../../shaders/transparency.wgsl");
                 let section = |name: &str| {
@@ -172,7 +177,10 @@ impl Pass {
         }
     }
     pub(super) fn raster(self) -> bool {
-        matches!(self, Self::Tone | Self::Display | Self::AtmosphereBackdrop)
+        matches!(
+            self,
+            Self::Tone | Self::Display | Self::AtmosphereBackdrop | Self::MeshDiagnostic
+        )
     }
     pub(super) fn vertex(self) -> &'static str {
         if matches!(self, Self::AtmosphereBackdrop) {
@@ -221,6 +229,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::MeshDiagnostic => "fs",
             Self::ParticleSort => "tp_particles_sort",
             Self::RasterSurface | Self::RasterSurfaceFour => "surface_raster",
             Self::SkinVertices => "skin_vertices",
@@ -283,7 +292,20 @@ pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()
                 && entry.stage == naga::ShaderStage::Vertex
                 && entry.name == pass.vertex())
     });
-    anyhow::ensure!(!module.entry_points.is_empty(), "selected entry missing");
+    anyhow::ensure!(
+        module.entry_points.len() == if pass.raster() { 2 } else { 1 },
+        "selected shader stages missing"
+    );
+    anyhow::ensure!(
+        module.entry_points.iter().any(|e| e.name == pass.entry()
+            && e.stage
+                == if pass.raster() {
+                    naga::ShaderStage::Fragment
+                } else {
+                    naga::ShaderStage::Compute
+                }),
+        "selected entry has the wrong stage"
+    );
     validate(module)?;
     naga::compact::compact(module, naga::compact::KeepUnused::No);
     Ok(())

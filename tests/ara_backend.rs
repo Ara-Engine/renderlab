@@ -56,6 +56,7 @@ fn upload(
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
+        Pass::MeshDiagnostic,
         Pass::ParticleSort,
         Pass::Downsample,
         Pass::Upsample,
@@ -142,6 +143,10 @@ mod skinning_cases;
 #[path = "ara_backend/cases/post_surface.rs"]
 mod post_surface_cases;
 
+#[path = "ara_backend/cases/mesh.rs"]
+mod mesh_cases;
+#[path = "ara_backend/mesh.rs"]
+mod mesh_reference;
 #[path = "ara_backend/cases/particles.rs"]
 mod particle_cases;
 #[path = "ara_backend/cases/post_runtime.rs"]
