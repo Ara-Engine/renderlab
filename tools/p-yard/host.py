@@ -91,7 +91,8 @@ def ready(r, label):
         why.append("build slot held")
     if sample["compilers"]:
         why.append("foreign compiler")
-    if sample["available_mbytes"] < 8192:
+    # P_YARD_MIN_MIB: the admission bar (root order 2026-11-10 15:02: 6 GiB for builds and short leases).
+    if sample["available_mbytes"] < float(os.environ.get("P_YARD_MIN_MIB", 8192)):
         why.append(f"available {sample['available_mbytes']:.0f} MiB")
     if shutil.disk_usage("D:/").free < 5e9:
         why.append("D: below 5 GB")
@@ -107,9 +108,10 @@ def wait_ready(r, label, minutes=90):
         why = ready(r, label)
         if not why:
             return
-        if why != last:
+        shown = [w if not w.startswith("available") else "RAM" for w in why]
+        if shown != last:
             print(time.strftime("%H:%M:%S"), label, "waiting:", why, flush=True)
-            last = why
+            last = shown
         if time.monotonic() > deadline:
             raise SystemExit("admission expired: " + repr(why))
         time.sleep(.25)
