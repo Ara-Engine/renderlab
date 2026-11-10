@@ -946,7 +946,7 @@ impl VirtualState {
             &[Some(&layouts.map), None, None, Some(lighting)],
         );
         let map_module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8k map-only sun visibility"),
                 source: wgpu::ShaderSource::Wgsl(map_source().into()),
             }),
@@ -981,7 +981,7 @@ impl VirtualState {
         let queue_args = map_compute("vmap_queue_args", &queue_layout, &[]);
         let map = map_compute("vmap_lookup", &map_layout, &[]);
         let record_module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
                 source: wgpu::ShaderSource::Wgsl(records_source().into()),
             }),
@@ -999,7 +999,7 @@ impl VirtualState {
             ResourceKind::ComputePipeline,
         );
         let module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8 virtual sun shadows"),
                 source: wgpu::ShaderSource::Wgsl(shader_source().into()),
             }),
@@ -2117,7 +2117,7 @@ impl Renderer {
             let module = state.hybrid_module.get_or_insert_with(|| {
                 self.ledger.own(
                     self.device
-                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                             label: Some("N8k hybrid exact lookup"),
                             source: wgpu::ShaderSource::Wgsl(hybrid_source().into()),
                         }),

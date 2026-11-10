@@ -467,9 +467,9 @@ impl View {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             flags: if options.validate {
-                wgpu::InstanceFlags::debugging()
+                (wgpu::InstanceFlags::debugging().difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)).with_env()
             } else {
-                wgpu::InstanceFlags::default()
+                renderlab::engine::instance_flags()
             },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });

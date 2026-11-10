@@ -80,6 +80,7 @@ loop {
 | `settings` | `Settings::default()` | initial frame settings |
 | `texture_anisotropy` | 1 | anisotropic filtering, 1-16, fixed for the engine's lifetime |
 | `pipeline_cache` | `None` | directory for the persistent shared pipeline cache (kernels and programs; loaded before initialization) |
+| `checked_engine_shaders` | `false` | enable runtime checks for engine shaders; user programs always retain checks; see [P-FREE controls](#shader-runtime-checks-p-free) |
 
 **Windowed games.** Create the surface on your own `wgpu::Instance`, request an adapter compatible with it, create the engine on that adapter, and configure the surface with `engine.device()` and `engine.output_format()`. Each frame, call `engine.render_to(&surface_texture.texture, &camera)` and then `engine.present(surface_texture)`. Resizing the window only means reconfiguring the surface: the engine follows the target's extent, and the camera's aspect follows the target.
 
@@ -379,6 +380,7 @@ New handles follow the `Id<T>` pattern, new settings are new fields with default
 | `Sun::default().illuminance` is 120,000 lux (outside the atmosphere) | AT1 | under `Uniform`/`Map` skies, set the illuminance that reaches the ground |
 | `Settings::default()`: GI and TR1 on, aerial perspective, height fog and volumetric fog on | G2b, TR1b, AT1, VF1 | set the fields off explicitly to reproduce older frames |
 | `Settings` gained `render_scale`, `aerial_perspective`, `height_fog`, `volumetric_fog` | TR1b, AT1 | none for `..Default::default()` constructions |
+| `EngineDescriptor` gained `checked_engine_shaders`; `engine::instance_flags()` disables indirect validation by default | P-FREE | none with `..Default::default()`; use checked mode and `WGPU_VALIDATION_INDIRECT_CALL=1` to restore the previous checks |
 | Soft sun plus local lights renders (was rejected) | LC1 | none |
 | `Settings::local_shadows` follows LC3: default/max count 128; `resolution` is the maximum atlas face size; positive count enables all contributing RT locals | LC3 | names/signatures unchanged; set `count: 4` for the old map budget, `count: 0` to disable |
 | `Light::Point`/`Spot` gained `source_radius` | LC2 | add `source_radius: 0.0` to light literals for hard shadows |
@@ -424,3 +426,29 @@ reload check, use it with `--no-gi --no-temporal`. Optional
 `RENDERLAB_STARTUP_PROFILE_DRIVER=1` uses the existing instrumented Vulkan device to
 separate native driver compilation from the pipeline API's SPIR-V and validation work;
 use those rows as diagnostics, not as timings of the ordinary device.
+
+## Shader runtime checks (P-FREE)
+
+`EngineDescriptor::checked_engine_shaders` defaults to `false`. Engine-owned WGSL
+modules use `create_shader_module_trusted` with `ShaderRuntimeChecks::unchecked()`.
+WGSL parsing, static validation, error scopes and transactional shader reload remain
+in place. Set the option to `true` for development validation. The process override
+`RENDERLAB_ENGINE_SHADER_CHECKS=checked` (or `1`) enables checks; `unchecked` (or `0`)
+disables them. Other values preserve the descriptor setting. The policy is fixed
+when the engine is created and shared by background compilation workers. Supplying
+or reloading a custom low-level prelude latches checked compilation on for future
+modules on that renderer, including background workers; the environment override
+cannot disable this protection.
+
+User-authored programs, edited standard programs, transparent program compositions
+and programmable reflection probes always retain runtime checks. Only the exact
+bundled standard program source is engine-owned. No setting disables checks for
+arbitrary user programs.
+
+`engine::instance_flags()` disables wgpu indirect-call validation by default because
+the engine generates bounded indirect arguments. `headless_adapter()` and the viewer
+use it. When supplying your own adapter, use these flags when creating its instance;
+wgpu cannot change this policy after adapter creation. Explicit wgpu environment
+settings still apply: `WGPU_VALIDATION_INDIRECT_CALL=1` restores indirect validation.
+
+Workgroup memory zero-initialisation remains enabled. P-FREE does not expose a setting to disable it.

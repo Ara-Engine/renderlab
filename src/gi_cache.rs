@@ -1625,7 +1625,7 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("indirect cache cell shading"),
                     source: wgpu::ShaderSource::Wgsl(composed.source.into()),
                 }),
@@ -1779,7 +1779,7 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("indirect cache kernels"),
                     source: wgpu::ShaderSource::Wgsl(kernel_source(software, directions).into()),
                 }),

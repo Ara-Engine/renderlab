@@ -223,6 +223,7 @@ impl Renderer {
                     &label,
                     &text,
                 )?;
+                let engine_owned = text == STANDARD_PROGRAM;
                 let glass_worker = glass_recipe.map(|recipe| {
                     let device = device.clone();
                     let ledger = ledger.clone();
@@ -230,10 +231,17 @@ impl Renderer {
                     scope.spawn(move || {
                         let scopes = OperationScopes::new(&device);
                         let module = ledger.own(
-                            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                                label: Some("background glass reflection"),
-                                source: wgpu::ShaderSource::Wgsl(recipe.source.into()),
-                            }),
+                            {
+                                let descriptor = wgpu::ShaderModuleDescriptor {
+                                    label: Some("background glass reflection"),
+                                    source: wgpu::ShaderSource::Wgsl(recipe.source.into()),
+                                };
+                                if engine_owned {
+                                    device.create_engine_shader_module(descriptor)
+                                } else {
+                                    device.create_shader_module(descriptor)
+                                }
+                            },
                             ResourceKind::ShaderModule,
                         );
                         let pipeline = crate::shader_compiler::with_policy(policy, || {
@@ -345,7 +353,7 @@ impl Renderer {
                         program::declares_parameters(&text),
                     );
                     let scopes = OperationScopes::new(&device);
-                    let module = module(&abi, &label, &composed);
+                    let module = module(&abi, &label, &composed, engine_owned);
                     if let Some(error) = scopes.finish() {
                         return Err(scope_error(&label, error, &[composed]));
                     }

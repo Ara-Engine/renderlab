@@ -122,7 +122,7 @@ fn pipeline(
     source: &str,
     entry: &str,
 ) -> Owned<wgpu::ComputePipeline> {
-    let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+    let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
@@ -304,7 +304,7 @@ impl PostGpu {
                 bind_group_layouts: &[Some(&tone_layout)],
                 immediate_size: 0,
             });
-        let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post tone"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post_tone.wgsl").into()),
         });
