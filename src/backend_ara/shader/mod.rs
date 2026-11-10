@@ -38,6 +38,10 @@ pub enum Pass {
     HandleArrayProbe,
     /// Original diagnostic closest-hit query, not a production rendering pass.
     PrimaryRayProbe,
+    /// Original primary camera trace with portable mesh-position reads.
+    PrimaryTrace,
+    /// Original camera trace publishing exact receiver world and normals.
+    PrimaryTraceReceivers,
     /// Original single-program deferred shading of primary tiles.
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
@@ -124,6 +128,11 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::PrimaryTrace | Self::PrimaryTraceReceivers => {
+                crate::backend_ara::primary_trace::source()
+                    .expect("original primary trace seams remain valid")
+                    .into()
+            }
             Self::PrimaryRayProbe => include_str!("../../../shaders/primary_ray_probe.wgsl").into(),
             Self::PrimaryShadeTiles | Self::PrimaryShadeList => {
                 crate::backend_ara::primary_shade::source(
@@ -333,7 +342,9 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::PrimaryRayProbe
+            Self::PrimaryTrace
+                | Self::PrimaryTraceReceivers
+                | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
                 | Self::HandleArrayProbe
@@ -403,6 +414,8 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::PrimaryTrace => "primary_trace",
+            Self::PrimaryTraceReceivers => "primary_trace_receivers",
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",

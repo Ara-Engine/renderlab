@@ -32,15 +32,19 @@ impl Kernel {
                 "software visibility needs unsigned 64-bit buffer min/max atomics"
             );
         }
+        let layout = super::shader::inputs(pass)?;
         ensure!(
-            pass != Pass::PrimaryRayProbe || gpu.info().ray_tracing,
-            "ray probe requires a ray-query device"
+            !layout
+                .iter()
+                .any(|i| i.kind == super::shader::InputKind::AccelerationStructure)
+                || gpu.info().ray_tracing,
+            "ray-query kernel requires a ray-query device"
         );
         let threads = pass.threads()?;
         Ok(Self {
             pipeline: cache.pipeline(gpu, pass, RenderState::default())?,
             pass,
-            contract: super::shader::packet_contract(pass, &super::shader::inputs(pass)?),
+            contract: super::shader::packet_contract(pass, &layout),
             threads,
         })
     }

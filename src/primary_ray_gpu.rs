@@ -92,7 +92,7 @@ pub(crate) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), E
 
 /// The engine's trace and visibility kernel modules: hard (camera rays and exact
 /// receivers) and soft (traced fresh visibility and the fused Interactive pass).
-pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
     let [hard, soft] = heads(wgsl)?;
     if soft.matches(COVERAGE_SEAM).count() != 1 {
         return Err(Error::InvalidInput(

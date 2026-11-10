@@ -59,6 +59,8 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::BufferArrayProbe,
         Pass::HandleArrayProbe,
         Pass::PrimaryRayProbe,
+        Pass::PrimaryTrace,
+        Pass::PrimaryTraceReceivers,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
         Pass::VisibilityResolve,
@@ -325,3 +327,8 @@ fn assert_nonuniform_sampled_images(words: &[u32]) -> Result<()> {
 mod primary_ray_cases;
 #[path = "ara_backend/primary_ray_reference.rs"]
 mod primary_ray_reference;
+
+#[path = "ara_backend/cases/primary_trace.rs"]
+mod primary_trace_cases;
+#[path = "ara_backend/primary_trace_reference.rs"]
+mod primary_trace_reference;

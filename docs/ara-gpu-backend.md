@@ -820,3 +820,36 @@ filtered material mips and the moving lighting algorithms remain unproven.
 Checkpoint: 34 focused tests pass in both Metal validation modes; 51 standard
 SPIR-V stages plus authored-workgroup and world-output variants validate. Backend
 library and integration clippy is clean; legacy wgpu diagnostics remain.
+
+## Production primary tracing (entries 40–41)
+
+`primary_trace::Entry::{Trace,Receivers}` composes the original hardware camera
+trace source. A checked compatibility step replaces exactly two candidate-position
+intrinsics and one committed-position intrinsic with the existing
+`primary_triangle_vertices` helper. It resolves the instance custom ID through
+`primary_placements` to the batch, then gathers the three indexed object-space
+positions from that batch's vertex buffer. Two query types and one AS declaration
+lose the vertex-return qualifier; traversal, confirmation, culling, repair and
+receiver arithmetic remain unchanged. AS builds and fetches consume the same
+retained 48-byte vertex records and primitive ordering.
+
+Two genuinely different BLAS owners (3/37), sparse placement IDs (4/9), shuffled
+TLAS order, reordered corners, mirror/shear, and a camera translated to X=64 make
+wrong-owner or cached-position fetches observable. Both original entries pass
+forced-opaque and single-sided candidate-confirmation modes. Across four queued
+submissions, IDs, crop misses, coverage and untouched records are exact; receiver
+world/normals/barycentrics match the f64 reference within 2e-5 and nonfloor epsilon
+is 1/8192 within 1e-9. Trace leaves world/normal images untouched; receivers leave
+the epsilon image untouched. Empty tiles preserve stale hit records as designed.
+
+This fixture keeps hits outside the edge-repair strip. Direct near-edge repair
+traversal, AS refit paired with deformation, ties and degenerate geometry remain
+unproven here. The earlier arithmetic-only geometric-check replay covers its own
+canonicalization/fallback queue cases. The existing wgpu source factory gains only
+crate visibility; source algorithms are not edited.
+
+Checkpoint: 41 original entries plus display, 35 focused tests in both Metal
+validation modes, 53 standard SPIR-V stages plus two authored/override variants
+validated. Native Vulkan remains pending. No new backend clippy diagnostics.
+The quiet CPU timing guard again refused the run at 17.98% foreign CPU load
+(threshold 10%); no timing sample was accepted or added.
