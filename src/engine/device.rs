@@ -88,7 +88,9 @@ fn rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
     crate::traced_limits(wgpu::Limits {
         max_blas_primitive_count: adapter.max_blas_primitive_count,
         max_blas_geometry_count: 1,
-        max_tlas_instance_count: 4096.min(adapter.max_tlas_instance_count),
+        // Real levels place tens of thousands of instances (foliage); the hardware
+        // shadow path rejects more than 2^24 itself.
+        max_tlas_instance_count: adapter.max_tlas_instance_count.min(1 << 24),
         max_acceleration_structures_per_shader_stage: 1,
         ..large_buffers(adapter)
     })
