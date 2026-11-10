@@ -41,6 +41,17 @@ pub struct FilterInputs<'a> {
     /// Validated shared settings record.
     pub settings: &'a SettingsRecord,
 }
+/// Sampled resources and settings for the fullscreen tone stage.
+pub struct ToneInputs<'a> {
+    /// Linear HDR image.
+    pub colour: &'a Texture,
+    /// Final bloom level.
+    pub bloom: &'a Texture,
+    /// Three-dimensional colour LUT.
+    pub lut: &'a Texture,
+    /// Shared 80-byte settings record.
+    pub settings: &'a SettingsRecord,
+}
 /// Persistent pipelines and one immutable linear clamp sampler.
 pub struct PostPasses {
     downsample: Pipeline,
@@ -139,12 +150,15 @@ impl PostPasses {
         &self,
         graph: &mut Graph,
         rec: &mut Recorder,
-        colour: &Texture,
-        bloom: &Texture,
-        lut: &Texture,
-        settings: &SettingsRecord,
+        inputs: &ToneInputs<'_>,
         output: &Texture,
     ) -> Result<()> {
+        let ToneInputs {
+            colour,
+            bloom,
+            lut,
+            settings,
+        } = *inputs;
         ensure!(
             output.format == self.output_format && output.size == colour.size,
             "tone output shape/format mismatch"

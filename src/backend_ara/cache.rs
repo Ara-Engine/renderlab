@@ -40,18 +40,17 @@ impl ShaderCache {
         pass: Pass,
         state: RenderState,
     ) -> Result<Pipeline> {
+        let source = format!(
+            "{}{}{}",
+            pass.source(),
+            include_str!("shader/metal.rs"),
+            include_str!("shader/spirv.rs")
+        );
         let key = format!(
             "{:x}",
             Sha256::digest(format!(
-                "renderlab-ara-v1:{}:{}:{:?}:{}:{}:{}",
-                format!(
-                    "{}{}{}",
-                    pass.source(),
-                    include_str!("shader/metal.rs"),
-                    include_str!("shader/spirv.rs")
-                ),
+                "renderlab-ara-v1:{source}:{}:{state:?}:{}:{}:{}",
                 pass.entry(),
-                state,
                 self.compiler,
                 include_str!("shader/abi.metal"),
                 cooked::binding_layout_hash()

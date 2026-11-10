@@ -19,6 +19,21 @@ pub struct Texture {
     pub(crate) storage: Option<u32>,
 }
 impl Texture {
+    /// Allocate a sampled single-mip 3D colour LUT.
+    pub fn volume(gpu: &mut GpuDevice, side: u32, format: Format) -> Result<Self> {
+        Self::shaped(
+            gpu,
+            [side; 2],
+            format,
+            false,
+            false,
+            ImageShape {
+                dimension: ara_gpu::texture::TextureDimension::D3,
+                depth: side,
+                ..Default::default()
+            },
+        )
+    }
     /// Allocate a single-level post image with copy and sampled access.
     pub fn new(
         gpu: &mut GpuDevice,
