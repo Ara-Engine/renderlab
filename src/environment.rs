@@ -260,6 +260,87 @@ fn cube_bilinear(level: &CubeLevel, d: [f32; 3]) -> [f32; 3] {
     })
 }
 
+/// How an uploaded map's texels are stored (P-SKY2, docs/p-sky.md). Half floats halve
+/// every lookup's texel bytes, which on the Radeon 760M is most of the shading cost a
+/// filtered lookup has left. A map is stored in half floats only when it already fits
+/// half precision's normal range as given (every nonzero texel from 2^-14 to 65504 in
+/// its own units), so each value moves by at most 2^-11 of itself and none is flushed or
+/// clipped; anything wider (a captured sun over dark ground) stays f32. No scale is
+/// applied, so the lighting's intensity, the lobe table and every consumer are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    F32,
+    F16,
+}
+impl Encoding {
+    /// The encoding for `data`'s diffuse and specular texels.
+    pub fn choose(data: &PreparedEnvironment) -> Self {
+        let fits = data
+            .specular_radiance()
+            .iter()
+            .chain([data.diffuse_irradiance()])
+            .flat_map(|level| level.texels().iter().flatten())
+            .all(|&v| v == 0.0 || (HALF_MIN_NORMAL..=HALF_MAX).contains(&v));
+        if fits { Self::F16 } else { Self::F32 }
+    }
+    pub fn format(self) -> wgpu::TextureFormat {
+        match self {
+            Self::F32 => wgpu::TextureFormat::Rgba32Float,
+            Self::F16 => wgpu::TextureFormat::Rgba16Float,
+        }
+    }
+    pub fn texel_bytes(self) -> u32 {
+        match self {
+            Self::F32 => 16,
+            Self::F16 => 8,
+        }
+    }
+    /// `level`'s texels as RGBA in this encoding (alpha 1).
+    pub fn pack(self, level: &CubeLevel) -> Vec<u8> {
+        match self {
+            Self::F32 => pack_level(level),
+            Self::F16 => level
+                .texels()
+                .iter()
+                .flat_map(|rgb| rgb.into_iter().chain([&1.0]))
+                .flat_map(|&v| f16_bits(v).to_ne_bytes())
+                .collect(),
+        }
+    }
+    /// Packed RGBA32F bytes (`bank_legacy`'s banks) in this encoding.
+    pub fn repack(self, rgba32: Vec<u8>) -> Vec<u8> {
+        match self {
+            Self::F32 => rgba32,
+            Self::F16 => rgba32
+                .chunks_exact(4)
+                .flat_map(|b| f16_bits(f32::from_ne_bytes([b[0], b[1], b[2], b[3]])).to_ne_bytes())
+                .collect(),
+        }
+    }
+}
+const HALF_MAX: f32 = 65504.0;
+const HALF_MIN_NORMAL: f32 = 6.103_515_6e-5;
+
+/// IEEE half bits of `v`, rounded to nearest even. `v` is zero or a normal half
+/// (`Encoding::choose` guarantees it, and bilinear banks stay inside their texels'
+/// range); anything else saturates or flushes to zero.
+fn f16_bits(v: f32) -> u16 {
+    if !(v >= HALF_MIN_NORMAL) {
+        return 0;
+    }
+    if v >= HALF_MAX {
+        return 0x7bff;
+    }
+    let bits = v.to_bits();
+    let exponent = (bits >> 23) as i32 - 127 + 15;
+    let mantissa = bits & 0x7f_ffff;
+    let half = ((exponent as u32) << 10) | (mantissa >> 13);
+    let rest = mantissa & 0x1fff;
+    // A carry out of the mantissa correctly bumps the exponent.
+    let rounded = half + u32::from(rest > 0x1000 || (rest == 0x1000 && half & 1 == 1));
+    rounded.min(0x7bff) as u16
+}
+
 pub(crate) fn pack_level(level: &CubeLevel) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(level.texels().len() * 16);
     for rgb in level.texels() {
@@ -268,6 +349,55 @@ pub(crate) fn pack_level(level: &CubeLevel) -> Vec<u8> {
         }
     }
     bytes
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use renderlab_asset::environment::{FieldGenerator, Limits, Metadata, RadianceUnits};
+
+    fn prepared(values: [f32; 2]) -> PreparedEnvironment {
+        let cube = |v: f32| {
+            let mut texels = vec![[v; 3]; 6];
+            texels[0] = [values[0]; 3];
+            CubeLevel::new(1, texels, Limits::default()).unwrap()
+        };
+        PreparedEnvironment::new_independent(
+            Metadata {
+                units: RadianceUnits::CandelasPerSquareMetre,
+                rotation_y_radians: 0.0,
+                source_radiance_scale: 1.0,
+                generator_hash: [0; 32],
+            },
+            cube(values[1]),
+            (0..65).map(|_| cube(values[1])).collect(),
+            renderlab_asset::environment::roughness_knots(),
+            FieldGenerator::F64HostF32GpuV1,
+            Limits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn half_bits_round_to_nearest_even() {
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert_eq!(f16_bits(65504.0), 0x7bff);
+        assert_eq!(f16_bits(HALF_MIN_NORMAL), 0x0400);
+        assert_eq!(f16_bits(1.0 + 2f32.powi(-11)), 0x3c00, "a tie rounds to even");
+        assert_eq!(f16_bits(1.0 + 3.0 * 2f32.powi(-11)), 0x3c02);
+        assert_eq!(f16_bits(2.0 - 2f32.powi(-12)), 0x4000, "a carry bumps the exponent");
+        assert_eq!(f16_bits(0.0), 0);
+    }
+
+    /// Half floats only when every nonzero texel is a normal half as given: a sky's
+    /// few hundred cd/m² is, a captured sun or a texel below 2^-14 is not.
+    #[test]
+    fn maps_take_half_floats_only_when_lossless_in_range() {
+        assert_eq!(Encoding::choose(&prepared([600.0, 200.0])), Encoding::F16);
+        assert_eq!(Encoding::choose(&prepared([0.0, 0.0])), Encoding::F16);
+        assert_eq!(Encoding::choose(&prepared([1.6e9, 1e3])), Encoding::F32);
+        assert_eq!(Encoding::choose(&prepared([600.0, 1e-5])), Encoding::F32);
+    }
 }
 
 #[cfg(test)]
