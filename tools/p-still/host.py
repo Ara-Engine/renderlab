@@ -111,7 +111,7 @@ def wait_ready(r, label, minutes=90):
 
 def build():
     r = runner()
-    command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture"]
+    command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture", "--example", "ara1_capture"]
     WORK.mkdir(parents=True, exist_ok=True)
     post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=8 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
@@ -146,6 +146,7 @@ def build():
         if code == 0:
             BINARY.parent.mkdir(exist_ok=True)
             shutil.copy2(TARGET / "release/examples/p_yard_capture.exe", BINARY)
+            shutil.copy2(TARGET / "release/examples/ara1_capture.exe", BINARY.parent / "ara1_capture.exe")
             commit = sp.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
             dirty = sp.check_output(["git", "status", "--porcelain", "--", "src", "shaders", "crates", "Cargo.toml", "Cargo.lock"],
                                     cwd=REPO, text=True).strip()
