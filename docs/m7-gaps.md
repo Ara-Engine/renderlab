@@ -700,3 +700,16 @@ codes. Open:
   speck fix. Fade-band-only scaling saved nothing.
 - **Standing scene:** `tools/showcase/showcase.py` drives Ara's player against a Renderlab
   checkout; the content is fetched by Ara's own sample tool, not committed here.
+
+## M8 Showcase defects (P-DEFECT, 2026-11-10)
+
+[P-DEFECT](p-defect.md) addressed the three defects Ara's integration reported on Showcase, reproduced on our matched stage scene (`reflection_matched --stage --glass-balls`) against its 16k-spp path trace.
+
+- **FIXED: white pixels in glossy reflections (both paths).** Caustic paths: a glossy ray reaching a near-mirror hit's sun highlight got that hit's exact delta-light lobe. Reflection hits now shade with every `brdf` lobe widened by the ray's cone (GGX alpha² + 8 spread²), which keeps the highlight's energy. Turntable white pixels: at the cut 12 → 4 (frame 0) and 15 → 2 (frame 1), held 24 → 2, on both paths. The glow the reference shows returns (mean luma 87.2 → 89.3 against the reference's 90.8). The game scene's spinning glossy crate has no speckle. Cost within noise.
+  - **Programmability constraint:** programs that evaluate their own lobe instead of `brdf` get exact (unregularized) hits.
+  - **OPEN:** just after a cut the glow carries fine grain for a few frames, as the reference's own grain does.
+  - **OPEN:** unverified on Showcase itself (no Ara build this unit).
+- **FIXED on our scenes: non-RT GI blotches after cuts.** Non-RT gathered 8,192 cells a frame against RT's 32,768, so bounce drained for about 100 frames after a cut. One budget of 32,768 on both paths: clean by frame 8 on the matched scene, and settled holds match RT. Cost about +0.4-0.8 ms per drain frame at 720p.
+  - **OPEN:** P-SHOW's software-ray relight scaffolding in `gi_cache.rs` stays until one Showcase non-RT still with it removed shows clean plinths. That removal is the measured 43 → 31 ms.
+- **OPEN: stair-stepped glass rim (both paths).** The thin-slab screen-space refraction magnifies the opaque image near a sphere's rim, so its pixel steps show as stairs. RT adds a dotted rim: one mirror ray per pixel, no glass history. Centroid varyings, a footprint-filtered lookup and a glass reflection lobe floor (`t3/p-defect-glass`) were not visibly better and are not merged. Next: traced thick refraction through the back face on both paths, replacing the screen copy.
+- **OPEN: glossy method change.** Lower-rate tracing with energy-keeping, firefly-robust reconstruction: proposal and patent mapping in p-defect.md section 5. Re-screen P-SHOW's 4-strata variant on top of the regularization first.

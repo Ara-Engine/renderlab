@@ -169,6 +169,16 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
     // illegal opaque null for loop-local/conditionally initialized query variables.
     rl_reflection_hit=true;
+    // Path regularization (P-DEFECT, docs/p-defect.md): hits see their lights through this
+    // ray's cone, of half-angle `spread`, which moves a hit's half-vector by up to spread/2.
+    // The lobe widens by a half-vector slope disk of radius 4 x spread (per-axis slope
+    // variance 4 spread^2, GGX alpha^2 8 spread^2): a glossy stratum's cone is about a quarter
+    // of its lobe, so a hit's highlight then spans about all of the pixel's strata and a
+    // moving or just-cut glossy surface sees a smooth reflected highlight. Narrower disks
+    // left grain on moving glossy objects (radius 2 spread: about four strata). The reflected
+    // highlight widens by about sqrt(2) of the receiver's own lobe; its energy is unchanged.
+    // Mirror rays from flat receivers stay near exact.
+    rl_hit_variance=8.0*spread*spread;
     for(var k=0u;k<count;k+=1u) {
         var d=reflect(-v,n);
         if !mirror {
@@ -191,6 +201,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         valid+=1u;
     }
     rl_reflection_hit=false;
+    rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}
     rl_specular=vec4<f32>(sum/f32(valid),traced);

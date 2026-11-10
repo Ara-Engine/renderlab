@@ -58,6 +58,8 @@ impl Diag {
                     }
                 }
                 "gi-level-blend" => indirect.level_blend = v.parse()?,
+                "gi-gather-cells" => indirect.gather_cells = v.parse()?,
+                "gi-gather-stride" => indirect.gather_stride = v.parse()?,
                 key if key.starts_with("tr-") => {
                     let r = d.reconstruction.get_or_insert_with(Reconstruction::default);
                     match key {

@@ -49,12 +49,14 @@ const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
 const GATHER_GROUPS: u32 = 4096;
-/// The default per-frame gather budgets (`IndirectSettings::gather_cells` 0), in cells: about
-/// 4 ms of a cut frame's gathers at G2b's measured per-cell costs (4 px cells, every blocked
-/// direction: about 0.13 us a cell with hardware rays and 0.4 us with software rays on the
-/// quarry; docs/m7-g2b.md). Moving frames gather fewer cells than this, so only cuts spread.
-const GATHER_CELLS_HARDWARE: u32 = 32768;
-const GATHER_CELLS_SOFTWARE: u32 = 8192;
+/// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
+/// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
+/// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
+/// cells than this, so only cuts spread. Software rays had a quarter of the hardware budget,
+/// so non-RT bounce took about 100 frames to settle after a cut and lit flat faces showed
+/// blotches for the first 8-16+ frames (Ara's Showcase). P-DEFECT gave them the hardware
+/// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
+const GATHER_CELLS: u32 = 32768;
 /// The per-path budgets of new cells (`IndirectSettings::claim_cells` 0, opt-in): about 3 ms of
 /// query points and rays a cut frame at G2b's measured costs (2 px cells: about 60 ns a new
 /// cell with hardware rays, 140 ns with software rays; docs/m7-g2b.md).
@@ -226,7 +228,7 @@ pub struct IndirectSettings {
     /// cell), a frame gathers those in one fixed slot group (slot % P == frame % P, P the
     /// smallest power of two up to 64 that brings the queue under this count) and the rest
     /// wait, so the cut's bounce work is bounded per frame rather than finished in the fewest
-    /// frames. 0 picks the per-path budget (GATHER_CELLS_HARDWARE, GATHER_CELLS_SOFTWARE);
+    /// frames. 0 picks the default budget (GATHER_CELLS);
     /// u32::MAX gathers every queued cell each frame.
     pub gather_cells: u32,
     /// Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k % S == 0 of
@@ -2213,8 +2215,7 @@ impl Renderer {
         header[18] = layout.shade;
         header[19] = s.gathers;
         header[20] = match s.gather_cells {
-            0 if software => GATHER_CELLS_SOFTWARE,
-            0 => GATHER_CELLS_HARDWARE,
+            0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
         };

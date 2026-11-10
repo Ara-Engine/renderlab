@@ -70,6 +70,8 @@ fn shader() -> String {
         source.push_str(&function(scene, name));
         source.push('\n');
     }
+    // P-DEFECT's hit regularization; this frozen probe never sets it, so its lobes stay exact.
+    source.push_str("var<private> rl_hit_variance:f32;\n");
     source.push_str(
         "struct LightSample {index:u32,direction:vec3<f32>,attenuation:f32,intensity:vec3<f32>};\n",
     );
