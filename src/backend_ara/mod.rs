@@ -37,3 +37,6 @@ pub mod volumes;
 
 /// Depth-winning geometric receivers for the fresh visibility path.
 pub mod receiver_raster;
+
+/// Fresh directional shadow queries from geometric receiver images.
+pub mod fresh_visibility;

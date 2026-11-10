@@ -64,6 +64,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::TransparencySeed,
         Pass::TransparencyGlass,
         Pass::ReceiverRaster,
+        Pass::FreshVisibility,
         Pass::FallbackPresent,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
@@ -349,3 +350,8 @@ mod transparency_glass_reference;
 mod receiver_raster_cases;
 #[path = "ara_backend/receiver_raster_reference.rs"]
 mod receiver_raster_reference;
+
+#[path = "ara_backend/cases/fresh_visibility.rs"]
+mod fresh_visibility_cases;
+#[path = "ara_backend/fresh_visibility_reference.rs"]
+mod fresh_visibility_reference;

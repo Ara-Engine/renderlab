@@ -42,6 +42,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// Original fresh geometric ray-query shadow visibility.
+    FreshVisibility,
     /// Original depth-winning geometric shadow receiver prepass.
     ReceiverRaster,
     /// Original transparency multisample background seed.
@@ -136,6 +138,11 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(
+                crate::backend_ara::fresh_visibility::Mode::Exact,
+            )
+            .expect("embedded fresh visibility composition")
+            .into(),
             Self::ReceiverRaster => crate::renderer::fresh_shadow_gpu::shader_source(include_str!(
                 "../../../shaders/scene.wgsl"
             ))
@@ -368,7 +375,8 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::ReceiverRaster
+            Self::FreshVisibility
+                | Self::ReceiverRaster
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
                 | Self::FallbackPresent
@@ -451,6 +459,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::FreshVisibility => "fresh_compute",
             Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",
             Self::TransparencySeed => "tp_seed_fs",

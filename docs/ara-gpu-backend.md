@@ -953,3 +953,32 @@ without a sustained breach; GPU peak0.64%. Evidence stays in Ara's ignored
 `target/ara-gpu/barrier-timing-review.{json,log}` and
 `target/ara-dev/gpu-load/90104-1794339026238.json`. The numbers are also on Ara PR#5;
 its head remains0b4308e18, so this measurement does not change the Vulkan gate target.
+
+## Fresh shadow visibility queries (entry 46)
+
+`fresh_visibility::Visibility` runs the original `fresh_compute` over world/normal
+receiver images and a retained TLAS. Exact mode traces256 directions with eight
+lanes per pixel in2×2 tiles. Interactive mode specializes only the existing
+`FRESH_DIRECTIONS` override to8, using one lane per pixel in8×4 tiles; both retain
+the0..256 count contract. Dispatch dimensions are derived from the selected tile
+shape, rather than treating the32-thread workgroup as32 adjacent pixels.
+
+The7×5 fixture compares all35 counts exactly in six queued variants: zero-angle
+and finite-angle light, both budgets, and disabled shadowing. The finite-angle
+case includes14 penumbra receivers in each mode. Uncovered/out-of-cascade/out-of-box
+pixels overwrite sentinels with256. A receiver pair close to the blocker observes
+the original opaque/thin origin bias as0 versus256. A built decoy TLAS occupies
+the first publication, making a literal-zero AS lookup observable.
+
+The oracle preserves f32 hash/Kronecker coordinates, then uses an f64 cone and
+independent two-sided triangle-segment intersections. Sampled rays remain away
+from the blocker's external silhouette; no approximate count tolerance is needed.
+Multiple cascades, arbitrary projection/instance transforms and tangent rays are
+outside this bounded fixture. No new naga repair or original shader edit was
+needed; the shared ray-query packet path serves both modes.
+
+All **39** focused tests pass with Metal API+shader validation and API-only
+validation. **62** standard SPIR-V stages plus five authored/override variants
+validate for Vulkan1.3, including the eight-direction specialization. The scoped
+independent review has no must-fix findings, and backend library/integration clippy
+has no diagnostics. Native Vulkan remains pending.
