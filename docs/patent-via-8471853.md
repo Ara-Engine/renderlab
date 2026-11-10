@@ -202,3 +202,130 @@ cross-checked status, assignment and fee events with the freshly retrieved Googl
 Source inspected at the baseline above; P-S3Q's concurrent lookup changes require re-charting if
 they alter these operations. Only this report and one P-S4 gap-status line are changed.
 No build, Cargo command, GPU/window work, benchmark or image capture was performed.
+
+## Divisional US 8,605,088
+
+P-VIA2, 2026-11-10. Source baseline `8d9ce93b9af5f41f16cfc7c0609ed6a0583b9308`
+(the parent report on main); branch `t3/p-via2`. This section supersedes the earlier
+"unreviewed divisional" limitation. No renderer changes or performance claims.
+
+**One independent claim: claim 1. Shipping Surface march: AT RISK. Proposed complete
+S4 BVH gather with boolean half-space segment/triangle tests: CLEAR of this claim's
+literal combination, conditional on removing coordinate weights and reconstructed depth.**
+The S4 document as currently written still specifies the old weighted hit helper and keeps
+the march on moving/still frames; that partial deployment is not family clearance.
+
+### Primary text, retrieval and status
+
+The initial direct [Google Patents grant page](https://patents.google.com/patent/US8605088B2/en)
+fetches failed (web tool: Internal Error; shell: automated-query rejection). FreePatentsOnline
+full text returned 403; Patent Center did not load through the web tool. The USPTO ppubs
+[grant PDF endpoint](https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/8605088)
+returned incomplete bytes, not usable claim evidence. Retrieval then **succeeded** by opening
+the [published application](https://patents.google.com/patent/US20120287132A1/en) and following
+its "Other versions" link to the granted B2 page. Read all nine granted claims there.
+
+Also downloaded the primary [issued grant PDF](https://patentimages.storage.googleapis.com/46/af/f7/58bea39edb44bd/US8605088.pdf)
+linked by that page: 12 pages, nine claims, claims on printed column 8 (PDF page 12).
+Extracted its text and visually inspected the complete claim column using the PDF skill.
+Local evidence: `D:/Coding/renderlab-work/p-via/US8605088-google.pdf`,
+`US8605088-grant.txt`, and `US8605088-claims.png`. PDF SHA-256:
+`95d59b320e44fa67d88d43fc6f6fdf87497c9f1a5b1400da7b1a8ee66a541291`.
+Failed HTML/PDF downloads are not authoritative snapshots.
+
+| Item | Retrieved result |
+|---|---|
+| Title / assignee | Method for reconstructing geometry mapping; VIA Technologies Inc. |
+| Application / family | US13/559,223, filed 2012-07-26; divisional of US12/287,546 (US8471853B2); provisional priority 2007-10-26. No further child listed in the retrieved family rows. |
+| Grant | 2013-12-10; US8605088B2. |
+| Status / expiry | Google reports **Active; anticipated expiration 2028-10-10**. The grant cover reports **0 days** term adjustment. Do not copy the parent's adjusted 2032-04-25 expiry to this divisional. |
+| Grant status event | STCF, 2013-11-20, patented case. |
+| 4th-year fee | FPAY, **2017-05-25**. |
+| 8th-year fee | MAFP/M1552, **2021-05-28**, large entity. |
+| 12th-year fee | MAFP/M1553, **2025-01-14**, large entity. |
+| Lapse | No lapse/reinstatement event in the retrieved table; all three installments recorded paid. Treat as maintained, not abandoned. |
+
+Status and fee events come from the grant page's Info/timeline/Legal Events, cross-checked
+against the same application's Google page. These are database-reported status/expiry facts,
+not a certified USPTO register search. The issued PDF confirms the identity and zero adjustment.
+
+### Granted independent claim 1
+
+Transcription checked against column 8 of the issued PDF:
+
+> 1. A method for reconstructing geometry mapping of a rasterized area, comprising:
+>
+> finding a testing pixel within the rasterized area;
+>
+> finding an occluding point corresponding to the testing pixel in a geometry shadow map of the rasterized area;
+>
+> determining weight values of the occluding point by multiplying the (x, y) coordinate values of the testing pixel with an inverse function of vertices of a triangle occluding the testing pixel in the rasterized area;
+>
+> determining a depth value of the occluding point by multiplying the weight values with z coordinate values of the vertices of the occluding triangle; and
+>
+> comparing the depth value of the occluding point with the depth value of the testing pixel so as to determine whether the testing pixel is drawn in light or in shadow,
+>
+> wherein the vertices of the triangle occluding the testing pixel are saved in the geometry shadow map.
+
+Claims 2–9 depend on 1, directly or through 2/4. There is no independent apparatus claim.
+The A1 has **ten** claims and broader weight language: it is not interchangeable with this grant.
+The B2 expressly requires the inverse-function multiplication, weighted depth multiplication,
+and saving the triangle vertices in the geometry shadow map. The abstract omits those narrowing
+details. Claim 9 further specifies decomposition of a matrix inverse into ALU instructions;
+claim 1 should not silently be narrowed to a literal matrix-inverse instruction.
+
+### Claim 1 chart: current shipping march and proposed replacement
+
+Line numbers below refer to the source baseline above. `VS` means `shaders/virtual_shadow.wgsl`;
+`GPU` means `src/virtual_shadow_gpu.rs`; `S4` means `docs/design-nonrt-sunvis-s4.md`.
+S4 is charted as the **requested refined replacement contract** (BVH gather plus boolean
+half-space segment/triangle test), not as already implemented code.
+
+| Claim 1 requirement | Shipping Surface march: evidence and reading | Refined S4: evidence and missing element |
+|---|---|---|
+| Method reconstructs geometry mapping of a rasterized area | Present in substance: light-space triangle rasterization `VS:341`–388, top/peel map writes `VS:318`–338. Rust supplies the light basis/range `GPU:688`–697, `:1554`–1607, `:1733`–1738. | Screen receivers and geometry exist (`S4:175`–195), but candidate selection is BVH cone gather, not reconstruction of a geometry shadow map. Do not rely on the preamble alone for clearance. |
+| Find testing pixel within area | Present: Surface is default `GPU:218`; receiver queries ultimately produce a pixel count `VS:1422`–1446. The base shader is loaded at `GPU:587`–600. | Present: queued receivers in screen tiles (`S4:178`–184). This is retained functionality. |
+| Find corresponding occluding point in a geometry shadow map | Candidate map ID read `VS:1174`–1196, triangle walk `:1025`–1044. **At risk:** `aim=q.xy`, `ray=q.z` at `:1005`–1006 identify a displaced march sample, not necessarily the original receiver's light-view projection. | **Absent in the proposed query:** BVH candidates (`S4:181`–192) and segment occupancy, no geometry-map point lookup. A retained camera visibility buffer is not this light-view occluder map. |
+| Determine point weights by multiplying pixel xy with an inverse function of triangle vertices | Algebraically present: projected triangle area `VS:1031`, signed subareas `:1034`–1036, normalization denominator in `:1039`. For nondegenerate triangles, `w/sum(w)` is `[aim.x aim.y 1] M^-1` with M defined in the parent chart. **At risk:** inverse-function wording/construction; avoiding an explicit inverse instruction is insufficient. | **Absent by contract:** boolean plane/edge-side segment predicates do not compute coordinate weights or multiply pixel xy by an inverse vertex function. BVH gather alone does not supply this break; the intersection routine must also change. |
+| Determine occluder depth by multiplying weights with vertex z | Present: `height=dot(w,vec3(la.z,lb.z,lc.z))/sum(w)` at `VS:1039`. Sunward height is a reversed/affine depth convention, not an exclusion. | **Absent by contract:** no weighted vertex-z interpolation and no reconstructed light-view occluder depth. Only a boolean intersection result is returned. |
+| Compare occluder depth and testing-pixel depth to decide light/shadow | Present for located non-own interior candidates: `gap=height-ray`, `VS:1075`–1084; those flags influence blocking/refinement at `:1223`–1235, then counts `:1433`–1437. **At risk:** whether the displaced sample and indirect contribution meet the claimed relationship to the testing pixel. | **Absent as claimed:** segment bounds and epsilon tests are geometric predicates, not comparison of a weight-reconstructed occluder depth against testing-pixel depth. The final shadow decision remains, via active/blocked direction counts (`S4:170`–176, `:205`). |
+| Triangle vertices saved in geometry shadow map | **At risk; strongest literal storage distinction.** The texel stores packed height + ID (`VS:324`–338), not nine vertex components. ID resolves to separate vertex walk records (`:489`–496), read at `:1025`–1027. Under a narrow same-map-storage reading this element is missing; under a logical map plus indexed backing-store reading it may be present. Rust's light-space bounds/uniform setup does not itself store per-texel vertices (`GPU:1554`–1607, `:1727`–1756). | **Absent:** ordinary BVH leaf geometry/plane records are not vertices saved in a geometry shadow map. No light-view triangle-map fetch participates in the proposed replacement. |
+
+**Claim 1, shipping march: AT RISK.** The weight and depth computation substantially matches;
+the unresolved map-storage, inverse-function and testing-pixel relationships prevent a firm
+"reads on" verdict. Do not promote the storage distinction to reliable clearance without
+claim construction/prosecution review. Unlike the parent's claim 1, this grant does not expressly
+recite front-face extraction or the full nested consistency test; their absence would not clear it.
+Cache reuse (`GPU:2219`–2240) does not remove the method used on cache misses; the Surface cache
+calls `vsm_walk_batches` at `shaders/virtual_shadow_cache.wgsl:427`.
+
+**Claim 1, refined complete S4 replacement: CLEAR of the literal combination.** Missing elements
+are the geometry-map occluding-point lookup and saved vertices, inverse-function coordinate weights,
+weighted reconstructed depth, and its claimed depth comparison. This is an engineering literal
+chart, not a freedom-to-operate opinion or an equivalents determination. Claims 2–9 inherit these
+missing elements; none restores coverage of that replacement independently.
+
+### S4 implementation boundary that must survive the handoff
+
+The checked-in design at `S4:168`, `:202`–203 says to reuse `vsm_hits_sheared` unchanged. That helper
+returns a bool but internally computes `u,v,w` at `VS:675`–679 and a weighted intersection
+parameter at `:681`. **A boolean return type is not evidence of a weight-free algorithm.**
+The refined half-space test requested for P-VIA2 must replace that arithmetic as well as the
+point-location march. The published design's sheared helper still has the BVH/no-geometry-map
+distinction, but does not earn the additional weight/depth breaks claimed for the refinement.
+This report records that refinement without changing S4's design or renderer code.
+
+Further, `S4:207` keeps today's march for moving/still frames. Cut-only adoption therefore
+leaves the shipping claim-1 exposure reachable on other frames; clearing that route requires
+complete replacement with no old-march fallback. Do not describe either a cut-only deployment
+or a renamed barycentric helper as the cleared complete design.
+
+Patent policy remains design-around first with unchanged final-image quality requirements;
+this claim reading authorizes no lower-quality default or patented-method fallback. No quality,
+timing, numerical robustness or byte-identity result was established by this unit. Re-chart the
+actual retained implementation, including preprocessing, fallbacks and helper arithmetic.
+
+Verification: read the parent report from main and both requested memory notes; read every B2
+claim in the primary grant and inspected PDF column 8; inspected the current shader/Rust call
+chain and S4 design. Only this appended section and the P-S4 patent-status sentence change.
+No builds, Cargo commands, GPU/window work, benchmarks or desktop captures were performed.
