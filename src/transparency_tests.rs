@@ -1229,11 +1229,15 @@ fn read_particles(r: &Renderer, emitter: usize) -> Vec<([f32; 4], [f32; 4])> {
         .unwrap();
     let data = slice.get_mapped_range().unwrap();
     let floats: Vec<f32> = data
-        .chunks_exact(4)
-        .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
         .collect();
     floats
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .map(|p| ([p[0], p[1], p[2], p[3]], [p[4], p[5], p[6], p[7]]))
         .collect()
 }
