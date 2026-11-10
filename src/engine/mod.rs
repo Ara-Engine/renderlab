@@ -355,6 +355,13 @@ impl Engine {
     pub fn device(&self) -> &wgpu::Device {
         self.renderer.device()
     }
+    /// The engine's queue, for a host's own work on the engine's device after a frame,
+    /// such as copying the output into a texture the host shares with another device.
+    /// Submissions run in order with the engine's own; submit nothing the engine's
+    /// frames depend on.
+    pub fn queue(&self) -> &wgpu::Queue {
+        self.renderer.queue()
+    }
     pub fn output_format(&self) -> wgpu::TextureFormat {
         self.format
     }

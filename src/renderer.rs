@@ -3818,6 +3818,10 @@ impl Renderer {
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
+    /// The queue the renderer submits its frames on.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
     pub fn present(&self, frame: wgpu::SurfaceTexture) -> Result<(), Error> {
         self.check_fault()?;
         self.queue.present(frame);

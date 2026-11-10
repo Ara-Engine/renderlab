@@ -272,6 +272,7 @@ fn view_dependence(s: Surface, input: SurfaceInput) -> ViewDependence  // ViewDe
 | `cut()` | the next frame starts without history: a camera cut or teleport |
 | `poll()` | completed frames and GPU pass timings since the last poll (nonblocking) |
 | `capture()` | blocking RGBA8 readback of the engine's output |
+| `queue()` | the engine's `wgpu::Queue`, for a host's own submissions on the engine's device after a frame (for example copying `output()` into a texture shared with another device) |
 
 `Camera::look_at(eye, target, up, fov_y, near, far)` is right-handed with reversed finite depth. Its aspect follows the target. `render` returns a `FrameReport`: diagnostic counters for the frame, including the path that resolved it.
 
@@ -385,6 +386,7 @@ New handles follow the `Id<T>` pattern, new settings are new fields with default
 | `MaterialDesc` gained `thin` and `transparency` | TP1 | none for `..Default::default()` constructions |
 | `Settings` gained `local_shadows`, `post`, `reflections`; post and volumetric fog are on by default | LC1, PP1, R1n, VF1 | `post: PostSettings { enabled: false, .. }` and `volumetric_fog: None` reproduce older frames |
 | New calls: skinned meshes, emitters, `set_colour_lut`, `Sun::at`/`at_hour`; new `EmitterId`, `SkinnedHandles` | SK1, TP1, PP1, AT2 | additions only |
+| New call: `Engine::queue()` (and `Renderer::queue()`) | Ara integration | addition only |
 
 ## Example
 
