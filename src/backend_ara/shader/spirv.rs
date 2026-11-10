@@ -65,6 +65,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
             if !runtime_descriptors {
                 words.splice(capability_end..capability_end, [(2 << 16) | 17, 5302]);
             }
+            super::spv_acceleration::repair(&mut words)?;
             super::spv_nonuniform::repair(&mut words)?;
             remap_heap_aliases(&mut words)?;
             validate_heap_bindings(&words)?;
@@ -84,6 +85,15 @@ fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
     // native Vulkan replay of the complete cohort is still required.
     let mut module = parse(wgsl)?;
     super::select(&mut module, pass)?;
+    if module
+        .types
+        .iter()
+        .any(|(_, ty)| matches!(ty.inner, naga::TypeInner::RayQuery { .. }))
+    {
+        ensure!(pass.indirect(), "ray queries need a reflected heap packet");
+        let inputs = super::heap_interface::from_module(&module)?;
+        return super::packet_spirv::adapt_ray_source(wgsl, &inputs);
+    }
     let info = validate(&module)?;
     let source =
         naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())?;
@@ -319,6 +329,11 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 .collect();
             let name = std::str::from_utf8(&bytes)?;
             let remap = if let Some(n) = name
+                .strip_prefix("ara_acceleration_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((2200 + n, 4))
+            } else if let Some(n) = name
                 .strip_prefix("ara_storage_")
                 .and_then(|n| n.parse::<u32>().ok())
             {
@@ -613,7 +628,7 @@ fn validate_heap_bindings(words: &[u32]) -> Result<()> {
     }
     for (id, binding) in bindings {
         ensure!(
-            sets.get(&id) == Some(&0) && [1, 2, 3, 5, 6].contains(&binding),
+            sets.get(&id) == Some(&0) && [1, 2, 3, 4, 5, 6].contains(&binding),
             "shader resource{id} did not map into Ara's global heap: set{:?} binding{binding}",
             sets.get(&id)
         );

@@ -4,24 +4,38 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
 pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
+    let inputs = super::heap_interface::from_module(module)?;
+    lower(source, module, &inputs, false)
+}
+pub(super) fn adapt_ray_source(source: &str, inputs: &[super::ShaderInput]) -> Result<String> {
+    let original = super::parse(source)?;
+    let moved = super::ray_source::relocate_groups(source, &original)?;
+    let module = super::parse(&moved)?;
+    lower(&moved, &module, inputs, true)
+}
+fn lower(
+    source: &str,
+    module: &naga::Module,
+    inputs: &[super::ShaderInput],
+    preserve_declarations: bool,
+) -> Result<String> {
     use super::{InputKind, SampleType};
     use ara_gpu::texture::ViewDimension;
-    let inputs = super::heap_interface::from_module(module)?;
     let mut names = BTreeMap::new();
     let mut declarations = String::new();
     let mut arrays = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
         let slot = format!("ara_packet[ara_root.w0].values[(ara_root.w1 >> 2u) + {i}u]");
         match input.kind {
+            InputKind::AccelerationStructure => {
+                declarations.push_str(&format!("@group(0) @binding({}) var ara_acceleration_{i}:binding_array<acceleration_structure>;\n",2200+i));
+                names.insert(input.name.as_str(), format!("ara_acceleration_{i}[0u]"));
+            }
             InputKind::Buffer { writable, .. } => {
                 let (_, global) = module
                     .global_variables
                     .iter()
-                    .find(|(_, g)| {
-                        g.binding.is_some_and(|b| {
-                            b.group == input.key.group && b.binding == input.key.binding
-                        })
-                    })
+                    .find(|(_, g)| g.name.as_deref() == Some(input.name.as_str()))
                     .context("packet source buffer missing")?;
                 let unsized_struct = matches!(
                     module.types[global.ty].inner,
@@ -72,11 +86,7 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
                 let (handle, global) = module
                     .global_variables
                     .iter()
-                    .find(|(_, g)| {
-                        g.binding.is_some_and(|b| {
-                            b.group == input.key.group && b.binding == input.key.binding
-                        })
-                    })
+                    .find(|(_, g)| g.name.as_deref() == Some(input.name.as_str()))
                     .context("packet source array missing")?;
                 let naga::TypeInner::BindingArray { base, .. } = module.types[global.ty].inner
                 else {
@@ -163,7 +173,11 @@ pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
         }
     }
     let rewritten = super::array_access::rewrite(source, module, &arrays)?;
-    let body = super::spirv::strip_bindings(&rewritten);
+    let body = if preserve_declarations {
+        rewritten
+    } else {
+        super::spirv::strip_bindings(&rewritten)
+    };
     let out = rewrite_globals(&body, &names, module)?;
     Ok(format!(
         r#"enable wgpu_binding_array;
@@ -186,10 +200,7 @@ fn array_rewrite(
     let (global, _) = module
         .global_variables
         .iter()
-        .find(|(_, g)| {
-            g.binding
-                .is_some_and(|b| b.group == input.key.group && b.binding == input.key.binding)
-        })
+        .find(|(_, g)| g.name.as_deref() == Some(input.name.as_str()))
         .context("packet handle array missing")?;
     Ok(super::array_access::ArrayRewrite {
         global,

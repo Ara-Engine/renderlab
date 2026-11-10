@@ -751,7 +751,8 @@ its Surface/Parameters definitions and surface/shade hooks. `shader::Program`
 reflects that caller-owned source; `Kernel::from_program` and
 `HeapBindings::for_program` retain matching packet identities after the source
 is dropped. The native cache, workgroup reflection and SPIR-V export all consume
-that same source. Incompatible default/custom packets fail before recording.
+that same source. All kernels and packets retain an ABI identity derived from source keys and kinds.
+Compatible default/custom packets interoperate; incompatible layouts fail before recording.
 The array conformance replay also changes an authored workgroup size from 4 to 2
 and proves its native dispatch and exported SPIR-V.
 
@@ -783,3 +784,39 @@ Checkpoint: 39 original entries plus display are proven. All 33 focused tests pa
 in both Metal validation modes. Fifty standard stages plus the authored-workgroup
 stage pass Vulkan 1.3 validation, native-entry and NonUniform binary audits.
 Focused backend library/integration clippy reports no new diagnostics.
+
+## Ray-query scene packets (diagnostic probe)
+
+`acceleration::Scene` owns a published TLAS and `Input::Scene` retains it in a
+packet with an AsRead graph use. Metal reads the converter-compatible TLAS header
+from the acceleration table's GPU pointer. The packet head stores its normal
+heap index; roots remain `[packet_slot,16,0,0,0,0,0,0]`.
+
+The original diagnostic `primary_probe` runs in both default and WRITE_WORLD
+modes on Metal. A shared two-triangle BLAS is instanced twice with translation,
+reflection and shear, distinct custom IDs 3/37 and masks. Across 187 pixels the
+independent f64 reference checks exact custom/primitive IDs, 123 exact misses,
+and barycentrics/depth/world within 2e-5. A built decoy TLAS occupies the first
+heap slot so an accidental constant-zero descriptor cannot pass. Both snapshots
+are submitted before the first wait; disabled world writes preserve raw canaries.
+This diagnostic does not increase the 39-production-entry count.
+
+Naga 30 cannot re-emit ray-query WGSL, and its analyzer panics on dynamic AS
+binding-array indices. The shared SPIR-V route preserves original ray-query
+source, relocates old binding groups until IR compaction removes them, and emits
+constant descriptor-index markers. A checked binary pass replaces only those
+markers with actual packet-head loads. It validates naga's root/packet type
+shapes and leaves the same heap packet and 32-byte root API on both backends.
+SPIR-V validates; native Vulkan execution remains pending.
+
+The authored-shading review found a proof gap: its material initially matched
+the conformance default. They now have observably different MR coefficients;
+runtime shading rejects implicit conformance materials and requires caller WGSL.
+The authored probe's exported LocalSize is audited as 2×1×1. Contract identities
+now omit source names and origins, with positive default/authored interoperability
+and negative tests using a genuinely different source key. Normal/tangent values,
+filtered material mips and the moving lighting algorithms remain unproven.
+
+Checkpoint: 34 focused tests pass in both Metal validation modes; 51 standard
+SPIR-V stages plus authored-workgroup and world-output variants validate. Backend
+library and integration clippy is clean; legacy wgpu diagnostics remain.

@@ -1,6 +1,7 @@
 //! Opt-in ara-gpu backend. The existing wgpu renderer remains the default.
 //!
 //! WGSL algorithms are shared; this tree owns heap adaptation, recording and replay.
+pub mod acceleration;
 pub mod atmosphere;
 pub mod bindings;
 pub mod bloom;

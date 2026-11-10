@@ -12,6 +12,8 @@ use ara_gpu::{
 /// Borrowed published input, retained by a packet until it is retired.
 #[derive(Clone, Copy)]
 pub enum Input<'a> {
+    /// Published scene retained until every referencing list is submitted.
+    Scene(&'a super::acceleration::Scene),
     /// Storage-backed data with the source WGSL layout.
     Buffer(&'a StorageBuffer),
     /// Fixed logical array; elements may share owners or use scattered heap slots.
@@ -31,7 +33,7 @@ pub struct HeapBindings<'a> {
     values: Vec<Input<'a>>,
     layout: Vec<ShaderInput>,
     pass: Pass,
-    contract: Option<[u8; 32]>,
+    contract: [u8; 32],
 }
 impl<'a> HeapBindings<'a> {
     /// Array heads contain buffer-absolute tail word offsets. Packing records
@@ -43,7 +45,11 @@ impl<'a> HeapBindings<'a> {
             pass.indirect(),
             "shader does not use an indirect input packet"
         );
-        Self::with_layout(gpu, pass, shader::inputs(pass)?, None, values)
+        ensure!(
+            !pass.program_only(),
+            "shading requires caller material WGSL via Entry::program"
+        );
+        Self::with_layout(gpu, pass, shader::inputs(pass)?, values)
     }
     /// Build a packet for caller-authored WGSL. The reflected contract is retained
     /// by value, so source code can be dropped after pipeline/packet construction.
@@ -52,21 +58,15 @@ impl<'a> HeapBindings<'a> {
         program: &shader::Program,
         values: &[(InputKey, Input<'a>)],
     ) -> Result<Self> {
-        Self::with_layout(
-            gpu,
-            program.pass(),
-            program.inputs().to_vec(),
-            Some(program.contract()),
-            values,
-        )
+        Self::with_layout(gpu, program.pass(), program.inputs().to_vec(), values)
     }
     fn with_layout(
         gpu: &mut GpuDevice,
         pass: Pass,
         layout: Vec<ShaderInput>,
-        contract: Option<[u8; 32]>,
         values: &[(InputKey, Input<'a>)],
     ) -> Result<Self> {
+        let contract = shader::packet_contract(pass, &layout);
         ensure!(
             values.len() == layout.len(),
             "wrong number of selected shader inputs"
@@ -91,6 +91,7 @@ impl<'a> HeapBindings<'a> {
                 required.key
             );
             let slot = match (required.kind, value) {
+                (InputKind::AccelerationStructure, Input::Scene(scene)) => scene.slot,
                 (InputKind::Buffer { minimum, .. }, Input::Buffer(b)) => {
                     ensure!(
                         b.len >= u64::from(minimum),
@@ -202,7 +203,7 @@ impl<'a> HeapBindings<'a> {
             contract,
         })
     }
-    pub(crate) fn contract(&self) -> Option<[u8; 32]> {
+    pub(crate) fn contract(&self) -> [u8; 32] {
         self.contract
     }
     /// Selected shader family, to reject an incompatible pipeline packet.
@@ -237,6 +238,10 @@ impl<'a> HeapBindings<'a> {
         )];
         for (value, spec) in self.values.iter().zip(&self.layout) {
             match value {
+                Input::Scene(scene) => uses.push(ResourceUse::Whole(
+                    Resource::AccelerationStructure(scene.acceleration),
+                    Access::AsRead,
+                )),
                 Input::Buffer(b) => uses.push(ResourceUse::Whole(
                     Resource::Buffer(b.buffer),
                     if matches!(spec.kind, InputKind::Buffer { writable: true, .. }) {

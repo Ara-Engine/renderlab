@@ -22,7 +22,7 @@ impl Program {
         let source = source.into();
         let inputs = super::heap_interface::from_source(pass, &source)?;
         let threads = super::threads_source(pass, &source)?;
-        let contract = Sha256::digest(format!("{pass:?}:{inputs:?}")).into();
+        let contract = contract(pass, &inputs);
         Ok(Self {
             pass,
             source,
@@ -57,4 +57,13 @@ impl Program {
     pub(crate) fn contract(&self) -> [u8; 32] {
         self.contract
     }
+}
+
+pub(crate) fn contract(pass: Pass, inputs: &[ShaderInput]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(format!("{pass:?}"));
+    for input in inputs {
+        hash.update(format!("{:?}:{:?};", input.key, input.kind));
+    }
+    hash.finalize().into()
 }

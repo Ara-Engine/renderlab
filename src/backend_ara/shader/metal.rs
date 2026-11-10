@@ -86,6 +86,13 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
     aux.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\n");
+    if module
+        .types
+        .iter()
+        .any(|(_, ty)| matches!(ty.inner, naga::TypeInner::AccelerationStructure { .. }))
+    {
+        aux.push_str("\n#include <metal_raytracing>\nstruct AraASHeader {metal::raytracing::instance_acceleration_structure scene; device uint* contributions;};\n");
+    }
     source = aux + &source;
     let entry = wrap(
         &mut source,
@@ -235,6 +242,9 @@ fn wrap(
                 .context("indirect native argument out of range")?;
             let slot = super::heap_interface::slot(ordinal);
             let call = match input.kind {
+                super::InputKind::AccelerationStructure => format!(
+                    "reinterpret_cast<device AraASHeader*>(top.accelerations[{slot}].data)->scene"
+                ),
                 super::InputKind::Buffer { .. } => buffer_at(parameter, &slot)?,
                 super::InputKind::BufferArray { .. } => {
                     super::buffer_arrays::argument(parameter, ordinal)?

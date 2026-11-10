@@ -7,13 +7,16 @@ mod mesh_interface;
 mod metal;
 mod packet_spirv;
 mod program;
+mod ray_source;
 pub use heap_interface::{InputKey, InputKind, SampleType, ShaderInput, inputs};
 pub(crate) use mesh_interface::MeshResource;
 pub use program::Program;
+pub(crate) use program::contract as packet_contract;
 mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
 mod spirv;
+mod spv_acceleration;
 mod spv_layout;
 mod spv_nonuniform;
 pub(crate) use skin_interface::SkinResource;
@@ -33,6 +36,8 @@ pub enum Pass {
     BufferArrayProbe,
     /// Shared sampled-handle array conformance probe; not a rendering pass.
     HandleArrayProbe,
+    /// Original diagnostic closest-hit query, not a production rendering pass.
+    PrimaryRayProbe,
     /// Original single-program deferred shading of primary tiles.
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
@@ -119,6 +124,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::PrimaryRayProbe => include_str!("../../../shaders/primary_ray_probe.wgsl").into(),
             Self::PrimaryShadeTiles | Self::PrimaryShadeList => {
                 crate::backend_ara::primary_shade::source(
                     include_str!("../shaders/traced_material.wgsl"),
@@ -321,10 +327,14 @@ impl Pass {
                 | Self::ParticleBillboard
         )
     }
+    pub(crate) fn program_only(self) -> bool {
+        matches!(self, Self::PrimaryShadeTiles | Self::PrimaryShadeList)
+    }
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::PrimaryShadeTiles
+            Self::PrimaryRayProbe
+                | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
                 | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
@@ -393,6 +403,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",
             Self::PrimaryCheck => "primary_check_interactive",

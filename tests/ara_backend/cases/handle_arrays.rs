@@ -75,6 +75,19 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
             .map(|w| u32::from_le_bytes(*w))
             .collect();
         assert_nonuniform_sampled_images(&words)?;
+        let mut at = 5;
+        let mut local_size = None;
+        while at < words.len() {
+            let n = (words[at] >> 16) as usize;
+            if words[at] & 0xffff == 16 && n == 6 && words[at + 2] == 17 {
+                local_size = Some(&words[at + 3..at + 6]);
+            }
+            at += n;
+        }
+        ensure!(
+            local_size == Some(&[2, 1, 1][..]),
+            "authored SPIR-V lost workgroup size"
+        );
     }
     if let Ok(sdk) = std::env::var("VULKAN_SDK") {
         let validator =
@@ -230,22 +243,32 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
         "wrong comparison heap accepted"
     );
     let packets = [
-        HeapBindings::new(&mut gpu, Pass::HandleArrayProbe, &values(0))?,
-        HeapBindings::for_program(&mut gpu, &authored, &values(1))?,
+        HeapBindings::for_program(&mut gpu, &authored, &values(0))?,
+        HeapBindings::new(&mut gpu, Pass::HandleArrayProbe, &values(1))?,
     ];
+    let other_program = Program::new(
+        Pass::HandleArrayProbe,
+        include_str!("../../../src/backend_ara/shaders/handle_array_probe.wgsl")
+            .replace("@binding(4)", "@binding(9)"),
+    )?;
+    let mut other_values = values(0);
+    other_values[4].0 = key(9);
+    let incompatible = HeapBindings::for_program(&mut gpu, &other_program, &other_values)?;
     drop(authored);
+    drop(other_program);
     ensure!(
         authored_kernel
-            .record(&mut graph, &mut rec, &packets[0], [4, 1, 1])
+            .record(&mut graph, &mut rec, &incompatible, [4, 1, 1])
             .is_err(),
-        "default packet accepted by authored pipeline"
+        "incompatible packet accepted"
     );
     ensure!(
         kernel
-            .record(&mut graph, &mut rec, &packets[1], [4, 1, 1])
+            .record(&mut graph, &mut rec, &incompatible, [4, 1, 1])
             .is_err(),
-        "authored packet accepted by default pipeline"
+        "incompatible default packet accepted"
     );
+    incompatible.retire(&mut gpu, &mut graph)?;
     let mut reads = Vec::new();
     let mut last = None;
     for (frame, packet) in packets.iter().enumerate() {

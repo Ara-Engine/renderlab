@@ -29,6 +29,14 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
     let path = root("primary-shade");
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
+    ensure!(
+        Kernel::new(&mut gpu, &cache, Pass::PrimaryShadeTiles).is_err(),
+        "conformance material silently used at runtime"
+    );
+    ensure!(
+        HeapBindings::new(&mut gpu, Pass::PrimaryShadeList, &[]).is_err(),
+        "program-only packet accepted"
+    );
     // Caller-authored text, not the Pass family's built-in replay material.
     let program = Entry::Tiles.program(primary_shade_reference::PROGRAM)?;
     let list_program = Entry::List.program(primary_shade_reference::PROGRAM)?;
@@ -107,6 +115,7 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
             continue;
         }
         match spec.kind {
+            InputKind::AccelerationStructure => anyhow::bail!("unexpected AS in non-RT shading"),
             InputKind::Image { dimension, sample } => {
                 let format = match sample {
                     SampleType::Float => Format::Rgba16Float,
@@ -216,6 +225,9 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
                 Ok((
                     spec.key,
                     match spec.kind {
+                        InputKind::AccelerationStructure => {
+                            anyhow::bail!("unexpected AS in non-RT shading")
+                        }
                         InputKind::Buffer { .. } => Input::Buffer(if spec.key == key(0, 38) {
                             &list_records[list.expect("list entry")]
                         } else {

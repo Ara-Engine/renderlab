@@ -12,12 +12,16 @@ use ara_gpu::{
 pub struct Kernel {
     pipeline: Pipeline,
     pass: Pass,
-    contract: Option<[u8; 32]>,
+    contract: [u8; 32],
     threads: [u32; 3],
 }
 impl Kernel {
     /// Compile the original selected compute entry; cache its source workgroup size.
     pub fn new(gpu: &mut GpuDevice, cache: &ShaderCache, pass: Pass) -> Result<Self> {
+        ensure!(
+            !pass.program_only(),
+            "shading requires caller material WGSL via Entry::program"
+        );
         ensure!(
             pass.indirect() && !pass.raster(),
             "entry needs a reflected compute packet"
@@ -28,11 +32,15 @@ impl Kernel {
                 "software visibility needs unsigned 64-bit buffer min/max atomics"
             );
         }
+        ensure!(
+            pass != Pass::PrimaryRayProbe || gpu.info().ray_tracing,
+            "ray probe requires a ray-query device"
+        );
         let threads = pass.threads()?;
         Ok(Self {
             pipeline: cache.pipeline(gpu, pass, RenderState::default())?,
             pass,
-            contract: None,
+            contract: super::shader::packet_contract(pass, &super::shader::inputs(pass)?),
             threads,
         })
     }
@@ -46,10 +54,18 @@ impl Kernel {
             program.pass() != Pass::VisibilitySoftware || gpu.info().buffer_int64_atomics,
             "software visibility needs unsigned 64-bit buffer min/max atomics"
         );
+        ensure!(
+            !program
+                .inputs()
+                .iter()
+                .any(|i| i.kind == super::shader::InputKind::AccelerationStructure)
+                || gpu.info().ray_tracing,
+            "ray-query program requires a ray-query device"
+        );
         Ok(Self {
             pipeline: cache.program(gpu, program)?,
             pass: program.pass(),
-            contract: Some(program.contract()),
+            contract: program.contract(),
             threads: program.threads(),
         })
     }

@@ -23,6 +23,8 @@ pub enum SampleType {
 /// Runtime validation of each heap publication's native interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
+    /// Top-level acceleration structure for ray queries.
+    AccelerationStructure,
     /// Storage-backed data, retaining the source layout and minimum byte size.
     Buffer {
         /// Smallest valid source binding in bytes.
@@ -149,6 +151,9 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                     writable: access.contains(naga::StorageAccess::STORE),
                 },
                 AddressSpace::Handle => match module.types[g.ty].inner {
+                    TypeInner::AccelerationStructure {
+                        vertex_return: false,
+                    } => InputKind::AccelerationStructure,
                     TypeInner::Sampler { comparison } => InputKind::Sampler { comparison },
                     TypeInner::Image {
                         dim,
