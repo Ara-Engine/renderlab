@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
+backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:serde_json", "naga/msl-out", "naga/spv-out", "wgpu/vulkan-portability"]
 selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
 selection-profile = ["renderlab-asset/selection-profile"]
@@ -14,6 +15,12 @@ resolver = "3"
 members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
+# Temporary pin until Ara PR #5 merges; disabled in default wgpu builds.
+ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "8240cb06761dcc1a0e0842ce8279337c2e3ee8f9", optional = true }
+anyhow = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+half = { version = "2.7", optional = true }
+bytemuck = { version = "1.24", optional = true }
 renderlab-asset = { path = "crates/asset" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"] }
 pollster = "0.4"
