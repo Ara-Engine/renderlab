@@ -291,6 +291,7 @@ fn ara_frame(
             size,
             atmosphere,
             sun_shadows: sun_shadows.then_some(&shadows),
+            primary: forward::Primary::Raster,
             post: Some(renderlab::PostSettings::default()),
         },
     )?;

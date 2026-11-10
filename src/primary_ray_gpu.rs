@@ -259,7 +259,7 @@ pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
 /// rectangle of every conservative world bound projected through `matrix`, 2 px
 /// outward. A ray outside it misses every triangle; traced frames skip those rays.
 /// Bounds reaching behind the eye, or a nonfinite projection, give the image.
-pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
+pub(crate) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
     let matrix = matrix.as_dmat4();
     let (mut lower, mut upper) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
     for b in bounds {

@@ -405,7 +405,7 @@ impl DiagnosticMesh {
     }
 }
 
-fn pack_models(models: &[crate::Mat4]) -> Result<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn pack_models(models: &[crate::Mat4]) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut normals = Vec::new();
     let mut matrices = Vec::new();
     for m in models {

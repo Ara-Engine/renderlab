@@ -139,6 +139,7 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
                 size: SIZE,
                 atmosphere: renderlab::Atmosphere::off(),
                 sun_shadows: None,
+                primary: renderlab::backend_ara::forward::Primary::Raster,
                 post: None,
             },
         )?
@@ -329,6 +330,7 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
             size,
             atmosphere: renderlab::Atmosphere::off(),
             sun_shadows: None,
+            primary: renderlab::backend_ara::forward::Primary::Raster,
             post: Some(settings),
         },
     )?;
@@ -483,6 +485,7 @@ fn forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky() -> Result<(
                 size: SIZE,
                 atmosphere,
                 sun_shadows: None,
+                primary: renderlab::backend_ara::forward::Primary::Raster,
                 post: None,
             },
         )?
@@ -723,9 +726,13 @@ fn later() -> f32 { let camera_ara_local = 1.0; return camera_ara_local; }
 /// above the floor under a tilted sun with a disk. The floor is unshadowed radiance
 /// outside the shadow, black in the umbra, and crosses a penumbra of the width the
 /// disk angle predicts, centred where the occluder's edge projects.
+///
+/// Both frame families draw it: the mesh pass with the receiver prepass, and the
+/// traced frame (camera rays, the gated estimator, shading on the hardware soft head),
+/// which must also agree with the mesh pass pixel for pixel.
 #[test]
-fn forward_frame_sun_shadow_has_the_predicted_umbra_and_penumbra() -> Result<()> {
-    use renderlab::backend_ara::forward::SunShadows;
+fn sun_shadow_has_the_predicted_umbra_and_penumbra_on_both_frame_families() -> Result<()> {
+    use renderlab::backend_ara::forward::{Primary, SunShadows};
     let path = root("forward-sun-shadow");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
@@ -761,49 +768,52 @@ fn forward_frame_sun_shadow_has_the_predicted_umbra_and_penumbra() -> Result<()>
     };
     let travel = Vec3::new(-1.5, 0., -1.);
     let disk = 0.05f32;
-    let bytes = render(
-        &mut gpu,
-        &cache,
-        &ForwardScene {
-            objects: &[
-                ForwardObject {
-                    vertices: &floor,
-                    indices: &[0, 1, 2, 0, 2, 3],
-                    transform: Mat4::IDENTITY,
-                    material: material(),
+    let mut frame = |primary: Primary| -> Result<Vec<f32>> {
+        let bytes = render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                objects: &[
+                    ForwardObject {
+                        vertices: &floor,
+                        indices: &[0, 1, 2, 0, 2, 3],
+                        transform: Mat4::IDENTITY,
+                        material: material(),
+                    },
+                    ForwardObject {
+                        vertices: &occluder,
+                        indices: &[0, 1, 2, 0, 2, 3],
+                        transform: Mat4::from_translation(Vec3::Z),
+                        material: material(),
+                    },
+                ],
+                lighting: &Lighting {
+                    lights: vec![Light::Directional {
+                        travel,
+                        lux: [1000.; 3],
+                    }],
+                    exposure_stops: -8.,
+                    ..Default::default()
                 },
-                ForwardObject {
-                    vertices: &occluder,
-                    indices: &[0, 1, 2, 0, 2, 3],
-                    transform: Mat4::from_translation(Vec3::Z),
-                    material: material(),
-                },
-            ],
-            lighting: &Lighting {
-                lights: vec![Light::Directional {
-                    travel,
-                    lux: [1000.; 3],
-                }],
-                exposure_stops: -8.,
-                ..Default::default()
+                camera,
+                size: SIZE,
+                atmosphere: renderlab::Atmosphere::off(),
+                sun_shadows: Some(&SunShadows {
+                    split_ends: vec![8.],
+                    disk_angle: disk,
+                }),
+                primary,
+                post: None,
             },
-            camera,
-            size: SIZE,
-            atmosphere: renderlab::Atmosphere::off(),
-            sun_shadows: Some(&SunShadows {
-                split_ends: vec![8.],
-                disk_angle: disk,
-            }),
-            post: None,
-        },
-    )?
-    .hdr;
-    let image: Vec<f32> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
-        .collect();
+        )?
+        .hdr;
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
+            .collect())
+    };
     // Along the centre row the occluder's x = -0.5 edge projects to x = -2 on the floor
     // and its x = +0.5 edge to x = -1; the occluder itself hides the floor inside
     // |x| < 2/3. A disk of half-angle t around a sun at angle a from the normal spreads
@@ -814,66 +824,105 @@ fn forward_frame_sun_shadow_has_the_predicted_umbra_and_penumbra() -> Result<()>
     let base = DVec3::from_array([BASE[0], BASE[1], BASE[2]].map(f64::from));
     let angle = 1.5f64.atan();
     let width = (angle + f64::from(disk)).tan() - (angle - f64::from(disk)).tan();
-    let (mut lit, mut umbra, mut edge) = (0, 0, vec![]);
-    for x in 0..128 {
-        let wx = world_x(x);
-        let p = DVec3::new(wx, world_x(64) * 0., 0.);
+    let unshadowed = |x: usize| {
+        let p = DVec3::new(world_x(x), 0., 0.);
         let v = (DVec3::new(0., 0., 4.) - p).normalize();
-        let unshadowed = brdf(DVec3::Z, v, toward, base, 0., 1.) * 1000. / 256.;
-        let actual = f64::from(image[(48 * 128 + x) * 4 + 1]);
-        let fraction = actual / unshadowed[1];
-        // Distances to the two projected edges, with a pixel of slack.
-        let (far, near) = ((wx + 2.).abs(), (wx + 1.).abs());
-        let slack = 0.5 * width + 0.06;
-        if wx.abs() < 0.72 {
-            continue; // the occluder, seen from above
-        } else if wx < -2. - slack || (wx > -1. + slack) {
+        (brdf(DVec3::Z, v, toward, base, 0., 1.) * 1000. / 256.)[1]
+    };
+    let check = |image: &[f32], family: &str| -> Result<()> {
+        let (mut lit, mut umbra, mut edge) = (0, 0, vec![]);
+        for x in 0..128 {
+            let wx = world_x(x);
+            let fraction = f64::from(image[(48 * 128 + x) * 4 + 1]) / unshadowed(x);
+            // Distances to the two projected edges, with a pixel of slack.
+            let (far, near) = ((wx + 2.).abs(), (wx + 1.).abs());
+            let slack = 0.5 * width + 0.06;
+            if wx.abs() < 0.72 {
+                continue; // the occluder, seen from above
+            } else if wx < -2. - slack || (wx > -1. + slack) {
+                ensure!(
+                    (fraction - 1.).abs() <= 0.02,
+                    "{family}: lit floor at x={wx:.3} has fraction {fraction:.4}"
+                );
+                lit += 1;
+            } else if wx > -2. + slack && wx < -1. - slack {
+                ensure!(
+                    fraction.abs() <= 0.005,
+                    "{family}: umbra at x={wx:.3} has fraction {fraction:.4}"
+                );
+                umbra += 1;
+            } else if far < near {
+                edge.push((wx, fraction));
+            }
+        }
+        ensure!(
+            lit > 20 && umbra > 8 && edge.len() > 6,
+            "{family}: fixture lost a region: {lit} {umbra} {}",
+            edge.len()
+        );
+        // The far edge: fully lit beyond it, falling to zero inside, half way at the edge.
+        let mut previous = f64::INFINITY;
+        for &(wx, fraction) in &edge {
             ensure!(
-                (fraction - 1.).abs() <= 0.02,
-                "lit floor at x={wx:.3} has fraction {fraction:.4}"
+                (-0.01..=1.02).contains(&fraction) && fraction <= previous + 0.08,
+                "{family}: penumbra is not a falling ramp at x={wx:.3}: {fraction:.4} after {previous:.4}"
             );
-            lit += 1;
-        } else if wx > -2. + slack && wx < -1. - slack {
+            previous = fraction;
+        }
+        // Where the ramp crosses one half, by linear interpolation between its neighbours.
+        let crossing = edge
+            .windows(2)
+            .find(|w| w[0].1 >= 0.5 && w[1].1 < 0.5)
+            .map(|w| w[0].0 + (w[0].1 - 0.5) / (w[0].1 - w[1].1) * (w[1].0 - w[0].0))
+            .context("penumbra never crosses one half")?;
+        let partial = edge
+            .iter()
+            .filter(|(_, f)| (0.05..0.95).contains(f))
+            .count() as f64;
+        let measured = partial * (world_x(1) - world_x(0));
+        ensure!(
+            (crossing + 2.).abs() < 0.05 && measured > 0.5 * width && measured < 1.3 * width,
+            "{family}: penumbra crosses half at x={crossing:.3} (expected -2) and spans {measured:.3} (disk predicts {width:.3})"
+        );
+        println!(
+            "{family} sun shadow: {lit} lit and {umbra} umbra pixels exact; penumbra crosses half at x={crossing:.3}, spans {measured:.3} of a predicted {width:.3}"
+        );
+        Ok(())
+    };
+    // Traced first, on a device that has drawn nothing: its target cannot hold an
+    // earlier frame's pixels if the shading were to write none.
+    let traced = frame(Primary::Traced)?;
+    check(&traced, "traced")?;
+    let raster = frame(Primary::Raster)?;
+    check(&raster, "raster")?;
+    // The two families shade the same receivers with the same program: every pixel
+    // agrees to the photometry tolerance, plus four rays of 256 where the estimator's
+    // receivers differ in their last bits.
+    let (mut worst, mut differing) = (0f64, 0);
+    for (i, (a, b)) in raster
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(traced.as_chunks::<4>().0)
+        .enumerate()
+    {
+        let full = unshadowed(i % 128);
+        for channel in 0..3 {
+            let (a, b) = (f64::from(a[channel]), f64::from(b[channel]));
+            let error = (a - b).abs();
             ensure!(
-                fraction.abs() <= 0.005,
-                "umbra at x={wx:.3} has fraction {fraction:.4}"
+                error <= 0.002 + 0.01 * a.max(b) + full * 4. / 256.,
+                "families differ at pixel ({}, {}) channel {channel}: raster {a} traced {b}",
+                i % 128,
+                i / 128
             );
-            umbra += 1;
-        } else if far < near {
-            edge.push((wx, fraction));
+            worst = worst.max(error);
+            differing += usize::from(a != b);
         }
     }
-    ensure!(
-        lit > 20 && umbra > 8 && edge.len() > 6,
-        "fixture lost a region: {lit} {umbra} {}",
-        edge.len()
-    );
-    // The far edge: fully lit beyond it, falling to zero inside, half way at the edge.
-    let mut previous = f64::INFINITY;
-    for &(wx, fraction) in &edge {
-        ensure!(
-            (-0.01..=1.02).contains(&fraction) && fraction <= previous + 0.08,
-            "penumbra is not a falling ramp at x={wx:.3}: {fraction:.4} after {previous:.4}"
-        );
-        previous = fraction;
-    }
-    // Where the ramp crosses one half, by linear interpolation between its neighbours.
-    let crossing = edge
-        .windows(2)
-        .find(|w| w[0].1 >= 0.5 && w[1].1 < 0.5)
-        .map(|w| w[0].0 + (w[0].1 - 0.5) / (w[0].1 - w[1].1) * (w[1].0 - w[0].0))
-        .context("penumbra never crosses one half")?;
-    let partial = edge
-        .iter()
-        .filter(|(_, f)| (0.05..0.95).contains(f))
-        .count() as f64;
-    let measured = partial * (world_x(1) - world_x(0));
-    ensure!(
-        (crossing + 2.).abs() < 0.05 && measured > 0.5 * width && measured < 1.3 * width,
-        "penumbra crosses half at x={crossing:.3} (expected -2) and spans {measured:.3} (disk predicts {width:.3})"
-    );
     println!(
-        "forward sun shadow: {lit} lit and {umbra} umbra pixels exact; penumbra crosses half at x={crossing:.3}, spans {measured:.3} of a predicted {width:.3}"
+        "raster and traced frames: worst channel difference {worst:.5}; {differing} of {} channels differ at all",
+        raster.len() / 4 * 3
     );
     gpu.assert_clean()?;
     Ok(())

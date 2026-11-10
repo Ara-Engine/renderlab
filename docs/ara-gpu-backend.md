@@ -1196,6 +1196,34 @@ either layer. On this Mac it runs at 960x640 under Metal API and shader validati
 the picture has contact shadows under every sphere and both panels, tinted by the
 sky.
 
+### The traced frame: the engine's reference path, minus post
+
+`ForwardScene::primary = Primary::Traced` draws the same scene the way `HardwareRt`
+does at `Quality::Reference` with GI, temporal reconstruction and reflections off:
+the camera trace with receivers (entry 41), the fresh estimator in its traced form
+(coverage gated on the primary tiles and hit image), then the standard program on the
+hardware soft head, which reads the visible-ray counts and the hit records and writes
+the HDR target from compute. The frame assembles what `Renderer::prepare_primary`
+publishes: the 144-byte frame record, the tile-aligned region, the placement table,
+current and previous placement matrices and normal transforms, and the per-draw
+vertex, index, tangent and material arrays padded to `TRACED_DRAWS`. It shares the
+scene's acceleration structures, the shadow frame, the lighting group and the
+atmosphere inputs with the mesh-pass family.
+
+`sun_shadow_has_the_predicted_umbra_and_penumbra_on_both_frame_families` runs the
+shadow fixture through both families. The traced frame, rendered first on a device
+that has drawn nothing, meets the same geometry on its own: 61 unshadowed pixels
+within 2% of closed form, 13 umbra pixels black, the penumbra crossing one half at
+x = -2.003 over the predicted width. Compared with the mesh pass it is identical in
+all 36,864 channels of the 128x96 frame. Both unproven variants named below have
+therefore executed and agree with a frame that is itself checked against wgpu.
+
+Limits of this first traced frame: post is rejected (its motion surface comes from
+hit records, entry 35, not yet chained), every pixel of the fixture is covered so
+miss shading and the sky are unexercised, one draw per object with default textures,
+no tangents, no previous-frame motion, and no wgpu traced reference yet
+(`ara_frame` has no traced level; the wgpu side needs a `HardwareRt` engine device).
+
 ## Order for the engine's default paths
 
 `Engine` selects traced primary visibility on `HardwareRt` and the visibility buffer
@@ -1203,39 +1231,35 @@ on `NonRt`, with GI, temporal reconstruction and reflections on. Read against
 `Renderer::submit_frame`, the families split into what is already ported and only
 needs assembling, and what the default image needs in addition.
 
-**Smallest engine-path frame.** `HardwareRt` at `Quality::Reference` with GI,
-temporal reconstruction and reflections off encodes: TLAS build, camera trace with
-receivers (entries 40-41), fresh exact sun visibility (46), programmable primary
-shading, then atmosphere, transparency and post. `Quality::Reference` selects
+**Smallest engine-path frame: built** (the traced frame above). `HardwareRt` at
+`Quality::Reference` with GI, temporal reconstruction and reflections off encodes:
+TLAS build, camera trace with receivers, fresh exact sun visibility, programmable
+primary shading, then atmosphere, transparency and post. `Quality::Reference` selects
 `SoftShadows::Exact`, which takes the fresh-visibility branch rather than the
-Interactive trace. The trace replays on Metal today. The fresh visibility replays in
-its forward form; the traced form is the same estimator with its coverage seam gated
-on the primary tiles and hit image (`shader_sources`), a small unproven variant. The
-shading does not yet run in the form this frame needs: entries 38-39 were replayed with
-the **non-RT hard head** (`non_rt_sources`, where `hard_shadow` returns one and no
-scene is declared), and this frame composes the same program on the **hardware soft
-head** (`heads()[1]`: it reads the fresh counts and declares the scene for
-local-light shadow rays). Those are two variants of ported entries, not a new family.
-`primary_shade::hardware_soft_program` composes it: with the standard program it
-reflects 39 inputs (the lit interface, the 256-element geometry and material arrays,
-the scene and the fresh counts) and compiles to a native Metal pipeline on a
-ray-query device in about 37 s. It has not executed against a reference. Its SPIR-V
-emission failed at first (`resource global is shadowed locally: "camera"`): ray-query
-modules are rewritten in their original text, and `reflections.wgsl` declares
-`let camera = primary_ray(..)` under the `camera` global. `shader::local_shadows`
-now renames such locals within their WGSL scope (parameters over their body, `let`,
-`var` and `const` from the end of their statement to the end of their block) before
-the rewrite; a loop-scoped shadow is rejected rather than guessed. With it the
-variant emits SPIR-V that passes `spirv-val` for Vulkan 1.3 and the NonUniform audit.
-`fresh_visibility::traced_program` is the other variant: it reflects the forward
-interface plus the primary hit image and tile flags, compiles natively in under a
-second, and its SPIR-V validates. Neither has executed against a reference yet.
-With it, this frame is assembly work like the forward frame, and it is the first
-picture comparable with an engine render: correct soft sun shadows, sky, glass.
-Apple silicon has ray queries, so this is also the path a Mac would run.
+Interactive trace. It needed no new family, only two variants of ported entries, and
+both now execute:
 
-What that assembly has to reproduce from `Renderer::prepare_primary`, read from the
-source and not yet built:
+- **Fresh visibility in its traced form** (`fresh_visibility::traced_program`, from
+  `shader_sources`): the estimator of entry 46 with its coverage seam gated on the
+  primary tiles and hit image. Entries 45 and 46 as first ported are the forward
+  path's variant, a receiver raster prepass feeding `fresh_compute`.
+- **Shading on the hardware soft head** (`primary_shade::hardware_soft_program`,
+  `heads()[1]`): it reads the fresh counts and declares the scene for local-light
+  shadow rays. Entries 38-39 were replayed on the non-RT hard head, where
+  `hard_shadow` returns one and no scene is declared. With the standard program it
+  reflects 39 inputs: the lit interface, the 256-element geometry and material
+  arrays, the scene and the fresh counts.
+
+The second one's SPIR-V emission failed at first (`resource global is shadowed
+locally: "camera"`): ray-query modules are rewritten in their original text, and
+`reflections.wgsl` declares `let camera = primary_ray(..)` under the `camera` global.
+`shader::local_shadows` now renames such locals within their WGSL scope (parameters
+over their body; `let`, `var` and `const` from the end of their statement to the end
+of their block) before the rewrite, and rejects a loop-scoped shadow rather than
+guess. Both variants emit SPIR-V that passes `spirv-val` for Vulkan 1.3 and the
+NonUniform audit. Neither has run on a Vulkan device.
+
+What the assembly reproduces from `Renderer::prepare_primary`:
 
 - **Frame record, 144 bytes** (`primary_frame`): inverse view-projection at 0, the
   exposed clear RGBA (`lit_clear`, alpha one) at 64, a word at 80 set when any
@@ -1249,19 +1273,13 @@ source and not yet built:
 - **Geometry arrays**: one buffer of current then previous model matrices (two
   matrices per placement), one of normal transforms, and per-draw vertex, index and
   tangent buffers padded to `TRACED_DRAWS` with a 48-byte zero buffer.
-- **Dispatches**: the trace over the hit image in `TRACE_TILE` groups; shading over
-  `max(region groups, clear blocks)` by `region rows + clear rows`.
+- **Dispatches**: the trace over the hit image in `TRACE_TILE` groups; the estimator
+  in 2x2 receiver tiles; shading over `max(region groups, clear blocks)` by
+  `region rows + clear rows`.
 
-Still to read before building: the fresh-visibility records and tile size
-(`fresh_shadow_gpu.rs`), the TLAS instance layout (`hardware_shadow_gpu.rs`), and the
-material arrays (`prepare_primary_materials`).
-
-**Done since this was written: ray-traced sun shadows on the forward frame** (the
-section above). Entries 45 and 46 as ported are the forward path's fresh variant
-(`fresh_shadow_gpu::shader_source`: a receiver raster prepass, then `fresh_compute`
-reading world and normal images at bindings 3 and 4). The traced frame uses the same
-estimator with its coverage seam gated by the primary tiles and hit image, a variant
-that has not been replayed.
+What stands between it and a picture comparable with an engine render: post on the
+traced frame (the hit-based motion surface, entry 35), miss shading with the sky, and
+a wgpu traced reference to compare with.
 
 **Then, by how much of the default image each one changes:**
 

@@ -23,13 +23,15 @@ use super::{
     buffer::StorageBuffer,
     cache::ShaderCache,
     environment::EnvironmentPasses,
-    fresh_visibility::{Mode, Visibility},
+    fresh_visibility::{self, Mode, Visibility},
     graph::Graph,
     image::Texture,
+    kernel::Kernel,
     light_cluster::{ClusterInputs, LightClusters},
     mesh::MeshGeometry,
     post::{FilterInputs, PostPasses, SettingsRecord, ToneInputs},
     post_surface::{PostCameraFrame, RasterDepth, RasterPostSurface},
+    primary_shade, primary_trace,
     receiver_raster::{ReceiverDraw, ReceiverTargets, Receivers},
     shader::{self, InputKey, InputKind, Pass, Program, SampleType, ShaderInput},
     sky::SkyPass,
@@ -75,8 +77,21 @@ pub struct ForwardScene<'a> {
     pub atmosphere: crate::Atmosphere,
     /// Ray-traced soft shadows for the first directional light; needs a ray-query device.
     pub sun_shadows: Option<&'a SunShadows>,
+    /// How primary visibility is resolved. `Traced` needs `sun_shadows` and no post yet.
+    pub primary: Primary,
     /// `None` stops at the exposed HDR target. Depth of field is not assembled yet.
     pub post: Option<crate::PostSettings>,
+}
+
+/// Which of the renderer's frame families draws the scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Primary {
+    /// The mesh pass: what an untraced `ViewMode::Lit` frame encodes.
+    Raster,
+    /// Camera rays and deferred shading, as `HardwareRt` at `Quality::Reference` with
+    /// GI, temporal reconstruction and reflections off: the camera trace with
+    /// receivers, the gated fresh estimator, then shading on the hardware soft head.
+    Traced,
 }
 
 /// The sun's shadow request, as `Shadows` carries it for a directional light.
@@ -123,8 +138,46 @@ struct Traced {
     program: Program,
 }
 
+/// What a traced frame adds to the scene and receivers: `Renderer::prepare_primary`'s
+/// records and targets, and the three kernels.
+struct Deferred {
+    trace: Kernel,
+    trace_program: Program,
+    fresh: Kernel,
+    fresh_program: Program,
+    shade: Kernel,
+    /// Hit records, one tile flag per trace group, and receiver precision.
+    hit: Texture,
+    tiles: Texture,
+    epsilon: Texture,
+    frame: StorageBuffer,
+    region: StorageBuffer,
+    placements: StorageBuffer,
+    /// Current then previous model matrices, and the normal transforms, per placement.
+    models: StorageBuffer,
+    normals: StorageBuffer,
+    /// Pads the per-draw arrays, as the renderer's 48-byte absent buffer does.
+    absent: StorageBuffer,
+    /// Dispatch groups of the trace, the estimator and the shading.
+    groups: [[u32; 2]; 3],
+}
+
+/// The per-draw arrays of a traced frame, padded to `TRACED_DRAWS`.
+#[derive(Default)]
+struct Arrays<'a> {
+    vertices: Vec<&'a StorageBuffer>,
+    indices: Vec<&'a StorageBuffer>,
+    absent: Vec<&'a StorageBuffer>,
+    materials: Vec<&'a StorageBuffer>,
+    samplers: Vec<SamplerDesc>,
+    textures: BTreeMap<InputKey, Vec<&'a Texture>>,
+}
+
 /// Everything a packet of this frame can name, borrowed for the packets' lifetime.
 struct Shared<'a> {
+    output: &'a Texture,
+    deferred: Option<&'a Deferred>,
+    arrays: &'a Arrays<'a>,
     camera: &'a StorageBuffer,
     lighting: &'a StorageBuffer,
     clusters: &'a ClusterInputs,
@@ -143,14 +196,24 @@ impl<'a> Shared<'a> {
         object: Option<(&'a MeshGeometry, &'a StorageBuffer)>,
     ) -> Result<Input<'a>> {
         let per_object = || object.with_context(|| format!("{} needs an object", spec.name));
+        let deferred = || self.deferred.context("not a traced frame");
         Ok(match (spec.kind, spec.key.group, spec.key.binding) {
             (InputKind::AccelerationStructure, ..) => {
                 Input::Scene(&self.traced.context("no scene in this frame")?.scene)
             }
             (InputKind::Buffer { .. }, group, binding) => Input::Buffer(match (group, binding) {
                 (0, 0) => self.camera,
-                (1, 0) => per_object()?.0.models(),
-                (1, 1) => per_object()?.0.normals(),
+                (0, 10) => &deferred()?.frame,
+                (0, 22) => &deferred()?.region,
+                (1, 0) => match object {
+                    Some((geometry, _)) => geometry.models(),
+                    None => &deferred()?.models,
+                },
+                (1, 1) => match object {
+                    Some((geometry, _)) => geometry.normals(),
+                    None => &deferred()?.normals,
+                },
+                (1, 5) => &deferred()?.placements,
                 (2, 0) => per_object()?.1,
                 (3, 0) => self.lighting,
                 (3, 1) => &self.clusters.lights,
@@ -159,16 +222,31 @@ impl<'a> Shared<'a> {
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 _ => &self.buffers[&spec.key],
             }),
+            (InputKind::BufferArray { .. }, group, binding) => {
+                Input::Buffers(match (group, binding) {
+                    (1, 2) => &self.arrays.vertices,
+                    (1, 3) => &self.arrays.indices,
+                    (2, 10) => &self.arrays.materials,
+                    _ => &self.arrays.absent,
+                })
+            }
+            (InputKind::ImageArray { .. }, ..) => Input::Images(
+                self.arrays
+                    .textures
+                    .get(&spec.key)
+                    .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
+            ),
+            (InputKind::SamplerArray { .. }, ..) => Input::Samplers(&self.arrays.samplers),
             (InputKind::Image { .. } | InputKind::StorageImage { .. }, group, binding) => {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
-                    _ => provided(self.sky, self.traced, spec.key)
+                    (0, 18) => self.output,
+                    _ => provided(self.sky, self.traced, self.deferred, spec.key)
                         .or_else(|| self.images.get(&spec.key))
                         .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
                 })
             }
             (InputKind::Sampler { .. }, ..) => Input::Sampler(SamplerDesc::default()),
-            _ => bail!("forward frame cannot supply {}", spec.name),
         })
     }
 }
@@ -176,11 +254,15 @@ impl<'a> Shared<'a> {
 fn provided<'a>(
     sky: Option<&'a Sky>,
     traced: Option<&'a Traced>,
+    deferred: Option<&'a Deferred>,
     key: InputKey,
 ) -> Option<&'a Texture> {
     match (key.group, key.binding) {
-        (0, 3) => traced.map(|t| &t.world),
-        (0, 4) => traced.map(|t| &t.normal),
+        (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
+        (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
+        (0, 23) => deferred.map(|d| &d.epsilon),
+        (0, 3) | (0, 16) => traced.map(|t| &t.world),
+        (0, 4) | (0, 17) => traced.map(|t| &t.normal),
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
         (3, 51) => sky.map(|s| &s.luts.transmittance),
         (3, 52) => sky.map(|s| &s.luts.sky),
@@ -245,8 +327,33 @@ pub fn render(
         "forward frame binds the default textures and the standard program only"
     );
     let size = scene.size;
-    let program = standard_program(scene.sun_shadows.is_some())?;
-    let pass = ToonPass::program(gpu, cache, &program, Format::Rgba16Float)?;
+    let deferred_path = scene.primary == Primary::Traced;
+    ensure!(
+        !deferred_path || (scene.sun_shadows.is_some() && scene.post.is_none()),
+        "a traced frame needs sun shadows, and post is not assembled for it yet"
+    );
+    let program = if deferred_path {
+        primary_shade::hardware_soft_program(crate::program::STANDARD_PROGRAM)?
+    } else {
+        standard_program(scene.sun_shadows.is_some())?
+    };
+    let pass = if deferred_path {
+        None
+    } else {
+        Some(ToonPass::program(
+            gpu,
+            cache,
+            &program,
+            Format::Rgba16Float,
+        )?)
+    };
+    let mut bounds = Vec::new();
+    for object in scene.objects {
+        let local =
+            crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
+                .context("empty mesh")?;
+        bounds.push(shadow_gpu::world_bounds(local, object.transform)?);
+    }
     let clusters = LightClusters::new(gpu, cache)?;
     let mut graph = Graph::default();
     let mut rec = gpu.begin(Queue::Graphics);
@@ -291,14 +398,6 @@ pub fn render(
                 scene.objects.iter().all(|o| o.material.double_sided),
                 "hardware shadows currently require opaque double-sided materials"
             );
-            let mut bounds = Vec::new();
-            for object in scene.objects {
-                let local = crate::visibility::Aabb::from_positions(
-                    object.vertices.iter().map(|v| v.position),
-                )
-                .context("empty mesh")?;
-                bounds.push(shadow_gpu::world_bounds(local, object.transform)?);
-            }
             let mut frame = shadow_gpu::plan_frame(
                 &shadows,
                 &[],
@@ -530,8 +629,8 @@ pub fn render(
             Some(Traced {
                 meshes,
                 scene: tlas,
-                world: Texture::new(gpu, size, Format::Rgba32Float, false, true)?,
-                normal: Texture::new(gpu, size, Format::Rgba32Float, false, true)?,
+                world: Texture::new(gpu, size, Format::Rgba32Float, deferred_path, true)?,
+                normal: Texture::new(gpu, size, Format::Rgba32Float, deferred_path, true)?,
                 visibility: Texture::new(gpu, size, Format::R32Uint, true, false)?,
                 records,
                 receivers: Receivers::new(gpu, cache)?,
@@ -544,10 +643,108 @@ pub fn render(
 
     // Every other reflected input, of any program this frame runs, is a feature that is
     // off. The wgpu renderer binds zero-filled buffers and zero-initialised textures there.
+    // `Renderer::lit_clear`: the uniform environment, exposed, in f64. The sky
+    // backdrop replaces it on every pixel when the atmosphere draws one.
+    let clear = packed
+        .environment
+        .map(|v| (f64::from(v) * f64::from(packed.exposure)).min(65504.0) as f32);
+    // `Renderer::prepare_primary`: the frame and region records, the placement table,
+    // the placement transforms and the targets of a traced frame.
+    let deferred = if deferred_path {
+        let trace_program = primary_trace::Entry::Receivers.program()?;
+        let fresh_program = fresh_visibility::traced_program()?;
+        let matrix = scene.camera.matrix(size[0], size[1]);
+        let inverse = matrix.inverse();
+        ensure!(inverse.is_finite(), "traced camera inverse is nonfinite");
+        let rect = crate::renderer::primary_ray_gpu::scene_pixels(&bounds, matrix, size);
+        let lo = [rect[0] / 8 * 8, rect[1] / 4 * 4];
+        let region = [
+            lo[0],
+            lo[1],
+            lo[0] + (rect[2] - lo[0]).div_ceil(8) * 8,
+            lo[1] + (rect[3] - lo[1]).div_ceil(4) * 4,
+        ];
+        let placements = crate::primary_ray::placement_table(
+            scene
+                .objects
+                .iter()
+                .map(|o| (1, false, !o.material.double_sided, o.material.thin)),
+        )?;
+        let mut frame = [0u8; 144];
+        frame[..64].copy_from_slice(&crate::mesh::matrix_bytes(inverse));
+        frame[64..80].copy_from_slice(bytemuck::cast_slice(&[clear[0], clear[1], clear[2], 1.]));
+        let sided = placements.iter().any(|p| p & (1 << 30) != 0);
+        frame[80..84].copy_from_slice(&u32::from(sided).to_ne_bytes());
+        frame[96..112].copy_from_slice(bytemuck::cast_slice(&rect));
+        frame[112..116].copy_from_slice(&8u32.to_ne_bytes());
+        frame[116..120].copy_from_slice(&8u32.to_ne_bytes());
+        frame[124..128].copy_from_slice(&1f32.to_bits().to_ne_bytes());
+        for (dst, value) in frame[128..144]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(crate::ReflectionSettings::off().frame_words())
+        {
+            *dst = value.to_ne_bytes();
+        }
+        let transforms: Vec<_> = scene.objects.iter().map(|o| o.transform).collect();
+        let (matrices, normal_bytes) = super::mesh::pack_models(&transforms)?;
+        let frame = StorageBuffer::new(gpu, &frame)?;
+        let region_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&region))?;
+        let placement_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&placements))?;
+        // No history on a first frame: the previous matrices are the current ones.
+        let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &matrices].concat())?;
+        let normals = StorageBuffer::new(gpu, &normal_bytes)?;
+        let absent = StorageBuffer::new(gpu, &[0; 48])?;
+        for buffer in [
+            &frame,
+            &region_buffer,
+            &placement_buffer,
+            &models,
+            &normals,
+            &absent,
+        ] {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+        }
+        let trace_groups = [size[0].div_ceil(8), size[1].div_ceil(4)];
+        Some(Deferred {
+            trace: Kernel::from_program(gpu, cache, &trace_program)?,
+            fresh: Kernel::from_program(gpu, cache, &fresh_program)?,
+            shade: Kernel::from_program(gpu, cache, &program)?,
+            trace_program,
+            fresh_program,
+            hit: Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+            tiles: Texture::new(gpu, trace_groups, Format::R32Uint, true, false)?,
+            epsilon: Texture::new(gpu, size, Format::R32Float, true, false)?,
+            frame,
+            region: region_buffer,
+            placements: placement_buffer,
+            models,
+            normals,
+            absent,
+            groups: [
+                trace_groups,
+                [size[0].div_ceil(2), size[1].div_ceil(2)],
+                [
+                    (region[2] - region[0])
+                        .div_ceil(8)
+                        .max(size[0].div_ceil(16)),
+                    (region[3] - region[1]).div_ceil(4) + size[1].div_ceil(16),
+                ],
+            ],
+        })
+    } else {
+        None
+    };
+
     let mut specs = program.inputs().to_vec();
     if let Some(traced) = &traced {
         specs.extend(shader::inputs(Pass::ReceiverRaster)?);
         specs.extend(traced.program.inputs().iter().cloned());
+    }
+    if let Some(deferred) = &deferred {
+        specs.extend(deferred.trace_program.inputs().iter().cloned());
+        specs.extend(deferred.fresh_program.inputs().iter().cloned());
     }
     let mut buffers = BTreeMap::new();
     let mut inputs = BTreeMap::new();
@@ -566,6 +763,8 @@ pub fn render(
                 ]
                 .contains(&spec.key)
                     || (spec.key == key(3, 5) && traced.is_some())
+                    || (deferred.is_some()
+                        && [key(0, 10), key(0, 22), key(1, 5)].contains(&spec.key))
                     || buffers.contains_key(&spec.key)
                 {
                     continue;
@@ -574,9 +773,13 @@ pub fn render(
                 graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
                 buffers.insert(spec.key, buffer);
             }
-            InputKind::Image { dimension, sample } => {
+            InputKind::Image { dimension, sample }
+            | InputKind::ImageArray {
+                dimension, sample, ..
+            } => {
                 if spec.key == key(3, 24)
-                    || provided(sky.as_ref(), traced.as_ref(), spec.key).is_some()
+                    || provided(sky.as_ref(), traced.as_ref(), deferred.as_ref(), spec.key)
+                        .is_some()
                     || inputs.contains_key(&spec.key)
                 {
                     continue;
@@ -588,9 +791,9 @@ pub fn render(
                 };
                 // The defaults `Renderer::new_configured` creates, and the prepared DFG.
                 let (format, extent, bytes) = match (spec.key.group, spec.key.binding) {
-                    (2, 1) => (Format::Rgba8Srgb, [1, 1, 1], vec![255; 4]),
-                    (2, 3) => (Format::Rgba8, [1, 1, 1], vec![255; 4]),
-                    (2, 5) => (Format::Rgba8, [1, 1, 1], vec![128, 128, 255, 255]),
+                    (2, 1 | 11) => (Format::Rgba8Srgb, [1, 1, 1], vec![255; 4]),
+                    (2, 3 | 13) => (Format::Rgba8, [1, 1, 1], vec![255; 4]),
+                    (2, 5 | 15) => (Format::Rgba8, [1, 1, 1], vec![128, 128, 255, 255]),
                     (3, 2) => (
                         Format::Rg16Float,
                         [crate::lighting::DFG_SIZE, crate::lighting::DFG_SIZE, 1],
@@ -628,6 +831,8 @@ pub fn render(
             }
             InputKind::AccelerationStructure | InputKind::StorageImage { .. }
                 if traced.is_some() => {}
+            InputKind::BufferArray { .. } | InputKind::SamplerArray { .. }
+                if deferred.is_some() => {}
             _ => bail!("forward frame cannot supply {}", spec.name),
         }
     }
@@ -635,20 +840,54 @@ pub fn render(
     let mut geometries = Vec::new();
     let mut materials = Vec::new();
     for object in scene.objects {
-        let geometry = MeshGeometry::new(
-            gpu,
-            object.vertices,
-            object.indices,
-            &[0],
-            &[object.transform],
-        )?;
-        geometry.import(&mut graph);
+        if !deferred_path {
+            let geometry = MeshGeometry::new(
+                gpu,
+                object.vertices,
+                object.indices,
+                &[0],
+                &[object.transform],
+            )?;
+            geometry.import(&mut graph);
+            geometries.push(geometry);
+        }
         let material = StorageBuffer::new(gpu, &object.material.bytes())?;
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
-        geometries.push(geometry);
         materials.push(material);
     }
+    let output = Texture::new(gpu, size, Format::Rgba16Float, deferred_path, true)?;
+    let depth = RasterDepth::new(gpu, size, SampleCount::One)?;
+    let mut arrays = Arrays::default();
+    if let (Some(deferred), Some(traced)) = (&deferred, &traced) {
+        let draws = crate::TRACED_DRAWS as usize;
+        ensure!(
+            materials.len() <= draws,
+            "traced frames hold TRACED_DRAWS draws"
+        );
+        arrays.vertices = (0..draws)
+            .map(|i| traced.meshes.get(i).map_or(&deferred.absent, |m| &m.0))
+            .collect();
+        arrays.indices = (0..draws)
+            .map(|i| traced.meshes.get(i).map_or(&deferred.absent, |m| &m.1))
+            .collect();
+        arrays.absent = vec![&deferred.absent; draws];
+        // The renderer pads with its default material; padded slots are never read.
+        arrays.materials = (0..draws)
+            .map(|i| materials.get(i).unwrap_or(&materials[0]))
+            .collect();
+        arrays.samplers = vec![SamplerDesc::default(); draws];
+        for spec in &specs {
+            if let InputKind::ImageArray { .. } = spec.kind {
+                arrays
+                    .textures
+                    .insert(spec.key, vec![&inputs[&spec.key]; draws]);
+            }
+        }
+    }
     let shared = Shared {
+        output: &output,
+        deferred: deferred.as_ref(),
+        arrays: &arrays,
         camera: &camera,
         lighting: &lighting,
         clusters: &cluster_inputs,
@@ -659,6 +898,7 @@ pub fn render(
         buffers: &buffers,
         images: &inputs,
     };
+    // One lit packet per object on the raster path (none when traced: no geometries).
     let mut packets = Vec::new();
     for object in geometries.iter().zip(&materials) {
         let values = program
@@ -672,7 +912,7 @@ pub fn render(
     }
     // The receiver prepass draws every object; the estimator runs once over the frame.
     let mut shadow_packets = Vec::new();
-    if let Some(traced) = &traced {
+    if let Some(traced) = traced.as_ref().filter(|_| !deferred_path) {
         let layout = shader::inputs(Pass::ReceiverRaster)?;
         for object in geometries.iter().zip(&materials) {
             let values = layout
@@ -694,18 +934,45 @@ pub fn render(
         shadow_packets.push(packet);
     }
 
-    let output = Texture::new(gpu, size, Format::Rgba16Float, false, true)?;
-    let depth = RasterDepth::new(gpu, size, SampleCount::One)?;
+    // The traced frame's three packets: none of them belongs to one object.
+    let mut deferred_packets = Vec::new();
+    if let Some(deferred) = &deferred {
+        for stage in [&deferred.trace_program, &deferred.fresh_program, &program] {
+            let values = stage
+                .inputs()
+                .iter()
+                .map(|spec| Ok((spec.key, shared.input(spec, None)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, stage, &values)?;
+            packet.import(&mut graph);
+            deferred_packets.push(packet);
+        }
+        // `encode_primary_visibility`, `encode_primary_fresh`, `encode_primary_shading`.
+        let threads = [
+            deferred.trace_program.threads()?,
+            deferred.fresh_program.threads()?,
+            program.threads()?,
+        ];
+        for (((kernel, packet), groups), threads) in
+            [&deferred.trace, &deferred.fresh, &deferred.shade]
+                .into_iter()
+                .zip(&deferred_packets)
+                .zip(deferred.groups)
+                .zip(threads)
+        {
+            kernel.record(
+                &mut graph,
+                &mut rec,
+                packet,
+                [groups[0] * threads[0], groups[1] * threads[1], 1],
+            )?;
+        }
+    }
     let draws: Vec<_> = geometries
         .iter()
         .zip(&packets)
         .map(|(geometry, bindings)| ToonDraw { geometry, bindings })
         .collect();
-    // `Renderer::lit_clear`: the uniform environment, exposed, in f64. The sky
-    // backdrop replaces it on every pixel when the atmosphere draws one.
-    let clear = packed
-        .environment
-        .map(|v| (f64::from(v) * f64::from(packed.exposure)).min(65504.0) as f32);
     // `Renderer::encode_fresh`: receivers with the frame's depth, then visibility.
     if let (Some(traced), Some((estimate, receivers))) = (&traced, shadow_packets.split_last()) {
         let draws: Vec<_> = geometries
@@ -725,7 +992,7 @@ pub fn render(
         )?;
         traced.kernel.record(&mut graph, &mut rec, estimate)?;
     }
-    let backdrop = match sky.as_ref().filter(|_| settings.sky) {
+    let backdrop = match sky.as_ref().filter(|_| settings.sky && !deferred_path) {
         Some(sky) => {
             let backdrop = SkyPass::new(gpu, cache, Format::Rgba16Float)?;
             backdrop.record(
@@ -740,19 +1007,21 @@ pub fn render(
         }
         None => None,
     };
-    pass.record(
-        &mut graph,
-        &mut rec,
-        &draws,
-        &MeshAttachments {
-            color: &output,
-            depth: &depth,
-            clear_color: backdrop
-                .is_none()
-                .then_some([clear[0], clear[1], clear[2], 1.0]),
-            clear_depth: Some(0.0),
-        },
-    )?;
+    if let Some(pass) = &pass {
+        pass.record(
+            &mut graph,
+            &mut rec,
+            &draws,
+            &MeshAttachments {
+                color: &output,
+                depth: &depth,
+                clear_color: backdrop
+                    .is_none()
+                    .then_some([clear[0], clear[1], clear[2], 1.0]),
+                clear_depth: Some(0.0),
+            },
+        )?;
+    }
     drop(draws);
     let read = transfer::readback(
         gpu,
@@ -897,8 +1166,28 @@ pub fn render(
         }
         passes.retire(gpu)?;
     }
-    for packet in packets.into_iter().chain(shadow_packets) {
+    for packet in packets
+        .into_iter()
+        .chain(shadow_packets)
+        .chain(deferred_packets)
+    {
         packet.retire(gpu, &mut graph)?;
+    }
+    if let Some(deferred) = deferred {
+        for kernel in [deferred.trace, deferred.fresh, deferred.shade] {
+            kernel.retire(gpu)?;
+        }
+        for buffer in [
+            deferred.frame,
+            deferred.region,
+            deferred.placements,
+            deferred.models,
+            deferred.normals,
+            deferred.absent,
+        ] {
+            buffer.retire(gpu)?;
+        }
+        post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
     }
     if let Some(traced) = traced {
         traced.receivers.retire(gpu)?;
@@ -962,7 +1251,9 @@ pub fn render(
     {
         gpu.retire(Resource::Buffer(buffer))?;
     }
-    pass.retire(gpu)?;
+    if let Some(pass) = pass {
+        pass.retire(gpu)?;
+    }
     clusters.retire(gpu)?;
     gpu.collect()?;
     Ok(images)
