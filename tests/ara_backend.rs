@@ -79,7 +79,31 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::RasterSurface,
         Pass::RasterSurfaceFour,
     ] {
-        emit_spirv(pass, &path)?;
+        let stages = emit_spirv(pass, &path)?;
+        if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
+            let sdk = std::path::PathBuf::from(sdk);
+            let validator = if cfg!(windows) {
+                sdk.join("Bin/spirv-val.exe")
+            } else {
+                sdk.join("bin/spirv-val")
+            };
+            let validator = if validator.is_file() {
+                validator
+            } else {
+                std::path::PathBuf::from("spirv-val")
+            };
+            for stage in stages {
+                let output = std::process::Command::new(&validator)
+                    .args(["--target-env", "vulkan1.3"])
+                    .arg(path.join(stage.spirv))
+                    .output()?;
+                ensure!(
+                    output.status.success(),
+                    "spirv-val failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
     println!("SPIR-V output: {}", path.display());
     Ok(())

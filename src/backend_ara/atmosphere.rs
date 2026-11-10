@@ -218,6 +218,23 @@ impl AtmospherePasses {
             Pass::AtmosphereAmbient => (3, &targets.transmittance, [1, 1]),
             _ => anyhow::bail!("not an atmosphere LUT stage"),
         };
+        for target in [&targets.transmittance, &targets.multiscatter, &targets.sky] {
+            ensure!(
+                target.format == Format::Rgba16Float
+                    && target.shape.dimension == ara_gpu::texture::TextureDimension::D2
+                    && target.shape.layers == 1
+                    && target.shape.samples == ara_gpu::texture::SampleCount::One
+                    && target.shape.mip_levels == 1,
+                "LUTs require single-level2D RGBA16Float views"
+            );
+        }
+        ensure!(
+            targets.transmittance.size == [256, 65] && targets.multiscatter.size == [32, 32],
+            "LUT extent does not match the original shader ABI"
+        );
+        let storage = output
+            .storage
+            .ok_or_else(|| anyhow::anyhow!("LUT output lacks a storage view"))?;
         let mut uses = vec![
             (Resource::Buffer(params.record.buffer), Access::ShaderRead),
             (Resource::Image(output.image), Access::Storage),
@@ -246,7 +263,7 @@ impl AtmospherePasses {
                 targets.transmittance.sampled,
                 targets.multiscatter.sampled,
                 targets.sky.sampled,
-                output.storage.expect("owned LUT target is storage"),
+                storage,
                 self.sampler,
                 0,
                 0,

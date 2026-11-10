@@ -20,6 +20,25 @@ fn atmosphere_lut_chain_native_replay_against_cpu() -> Result<()> {
     let passes = AtmospherePasses::new(&mut gpu, &cache)?;
     let targets = AtmosphereTargets::new(&mut gpu)?;
     let params = AtmosphereParameters::new(&mut gpu, model.medium, model.sun, model.altitude)?;
+    let invalid = Texture::new(&mut gpu, [256, 65], Format::Rgba16Float, false, false)?;
+    let invalid_targets = AtmosphereTargets {
+        transmittance: invalid,
+        multiscatter: targets.multiscatter,
+        sky: targets.sky,
+    };
+    ensure!(
+        passes
+            .record(
+                &mut Graph::default(),
+                &mut gpu.begin(Queue::Graphics),
+                Pass::AtmosphereTransmittance,
+                &params,
+                &invalid_targets
+            )
+            .is_err(),
+        "missing LUT storage view was accepted"
+    );
+    gpu.retire(Resource::Image(invalid.image))?;
     let mut graph = Graph::default();
     graph.import(Resource::Buffer(params.record.buffer), Access::HostWrite);
     let mut rec = gpu.begin(Queue::Graphics);

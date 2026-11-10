@@ -278,7 +278,10 @@ fn validate(module: &naga::Module) -> anyhow::Result<naga::valid::ModuleInfo> {
 /// while avoiding duplicate native entry kernels and their unused interfaces.
 pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()> {
     module.entry_points.retain(|entry| {
-        entry.name == pass.entry() || (pass.raster() && entry.stage == naga::ShaderStage::Vertex)
+        entry.name == pass.entry()
+            || (pass.raster()
+                && entry.stage == naga::ShaderStage::Vertex
+                && entry.name == pass.vertex())
     });
     anyhow::ensure!(!module.entry_points.is_empty(), "selected entry missing");
     validate(module)?;

@@ -51,6 +51,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
                 words.splice(capability_end..capability_end, [(2 << 16) | 17, 5302]);
             }
             remap_heap_aliases(&mut words)?;
+            validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
             repair_internal_layouts(&mut words)?;
             Ok(SpirvStage {
@@ -530,4 +531,36 @@ struct AraWords {{values:array<u32>,}};
 {out}
 "#
     ))
+}
+
+// Fail at export when a future name change prevents an alias repair. SPIR-V
+// validation alone cannot know Ara's descriptor-set layout.
+fn validate_heap_bindings(words: &[u32]) -> Result<()> {
+    let mut sets = BTreeMap::new();
+    let mut bindings = BTreeMap::new();
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        ensure!(
+            count > 0 && at + count <= words.len(),
+            "invalid SPIR-V instruction"
+        );
+        if words[at] & 0xffff == 71 && count == 4 {
+            if words[at + 2] == 33 {
+                bindings.insert(words[at + 1], words[at + 3]);
+            }
+            if words[at + 2] == 34 {
+                sets.insert(words[at + 1], words[at + 3]);
+            }
+        }
+        at += count;
+    }
+    for (id, binding) in bindings {
+        ensure!(
+            sets.get(&id) == Some(&0) && [1, 2, 3, 5, 6].contains(&binding),
+            "shader resource{id} did not map into Ara's global heap: set{:?} binding{binding}",
+            sets.get(&id)
+        );
+    }
+    Ok(())
 }

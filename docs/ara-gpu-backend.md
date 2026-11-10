@@ -29,7 +29,7 @@ ShaderCache invokes metal/metallib on cache misses and passes hashed native arti
 to Ara's unchanged cooked loader. The caller supplies the cache path; no user-profile
 writes, Slang or MSC. A failed compile does not replace an existing PostPasses object.
 
-## Proven Renderlab pass families: 6 (plus display transfer)
+## Initial post replay (six Renderlab entries plus display transfer)
 
 | Pass | Metal CPU-reference replay | Vulkan |
 |---|---|---|
@@ -43,7 +43,7 @@ writes, Slang or MSC. A failed compile does not replace an existing PostPasses o
 
 Run `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 cargo +1.99.1 test -p renderlab --features backend-ara --test ara_backend -- --nocapture --test-threads=1`.
 This executes actual cached native metallibs through Ara's normal loader and
-compares all six bloom/tone/display outputs with independent scalar references (tolerance 0.003;
+compares the initial bloom/tone/display outputs with independent scalar references (tolerance 0.003;
 half-precision bloom stores). The same public encoders and test run on Vulkan.
 
 The shader adapters are shared in one module, not repeated in each pass:
@@ -284,3 +284,21 @@ including its coarsest self-tent: max error 0.002929688 (tolerance 0.004).
 All 12 replay tests pass with Metal API/shader validation. Native Vulkan remains
 pending. Strict native float flags apply to every pass; no performance claim is
 made for this development configuration.
+
+## Consolidated review checkpoint
+
+Opus5.5 reviewed fa4b1a7 read-only and found no blocking defect. Follow-up checks
+now reject missing LUT storage views, incorrect LUT extents/formats, non-array
+environment outputs and specular dimensions that would alter roughness steps.
+The final SPIR-V exporter verifies every descriptor maps to Ara's actual heap;
+missing a future name-based alias repair can no longer pass silently. Entry
+selection retains exactly the chosen vertex and fragment. The particle replay
+also reloads a cached pipeline without changing its artifact. The export test
+invokes spirv-val automatically when VULKAN_SDK is set; manual validation remains
+available otherwise. All12 native replays pass after these changes.
+
+Remaining proof limits include jittered camera reconstruction, per-sample-different
+4x depth and optional skinning branches. The next diagnostic mesh port preserves
+the original unlit/diagnostic vs/fs. Complete lit forward needs native Metal4
+per-vertex interpolation and Vulkan fragment-shader-barycentric feature negotiation;
+the latter is a pending PC-owned Ara backend change, not a root-constant model gap.

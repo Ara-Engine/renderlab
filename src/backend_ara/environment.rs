@@ -60,8 +60,17 @@ impl EnvironmentPasses {
             _ => anyhow::bail!("not an environment pass"),
         };
         ensure!(
-            output.format == Format::Rgba32Float && output.size[0] == output.size[1],
+            output.format == Format::Rgba32Float
+                && output.size[0] == output.size[1]
+                && output.shape.dimension == ara_gpu::texture::TextureDimension::D2
+                && output.shape.layers == 6
+                && output.shape.mip_levels == 1
+                && output.shape.samples == ara_gpu::texture::SampleCount::One,
             "environment output must be a square RGBA32Float array view"
+        );
+        ensure!(
+            i != 0 || [128, 64, 32, 16, 8].contains(&output.size[0]),
+            "specular mip extent would change the original roughness steps"
         );
         let storage = output
             .storage

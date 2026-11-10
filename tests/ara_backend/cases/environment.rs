@@ -19,6 +19,36 @@ fn environment_array_mips_native_replay_against_cpu() -> Result<()> {
     let input = Texture::new(&mut gpu, sky.size, Format::Rgba16Float, false, false)?;
     let (specular, mips) = Texture::cube_chain(&mut gpu, 128, 5)?;
     let (diffuse, view) = Texture::cube_chain(&mut gpu, 16, 1)?;
+    let invalid = Texture::new(&mut gpu, [16, 16], Format::Rgba32Float, true, false)?;
+    ensure!(
+        passes
+            .record(
+                &mut Graph::default(),
+                &mut gpu.begin(Queue::Graphics),
+                Pass::EnvironmentDiffuse,
+                &params,
+                &input,
+                &invalid
+            )
+            .is_err(),
+        "non-array environment view was accepted"
+    );
+    gpu.retire(Resource::Image(invalid.image))?;
+    let (invalid, mip) = Texture::cube_chain(&mut gpu, 4, 1)?;
+    ensure!(
+        passes
+            .record(
+                &mut Graph::default(),
+                &mut gpu.begin(Queue::Graphics),
+                Pass::EnvironmentSpecular,
+                &params,
+                &input,
+                &mip[0]
+            )
+            .is_err(),
+        "wrong specular roughness extent was accepted"
+    );
+    gpu.retire(Resource::Image(invalid.image))?;
     let mut graph = Graph::default();
     graph.import(Resource::Buffer(params.record.buffer), Access::HostWrite);
     let mut rec = gpu.begin(Queue::Graphics);

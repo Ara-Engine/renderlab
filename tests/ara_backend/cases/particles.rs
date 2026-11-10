@@ -6,7 +6,19 @@ fn particle_depth_sort_native_replay_against_cpu() -> Result<()> {
     let path = root("particles");
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
+    let first = ParticleSort::new(&mut gpu, &cache)?;
+    let artifact = std::fs::read_dir(path.join("shaders"))?
+        .next()
+        .expect("one cached shader")?
+        .path()
+        .join("pipeline.json");
+    let before = std::fs::metadata(&artifact)?.modified()?;
     let pass = ParticleSort::new(&mut gpu, &cache)?;
+    ensure!(
+        std::fs::metadata(&artifact)?.modified()? == before,
+        "cache hit replaced the artifact"
+    );
+    first.retire(&mut gpu)?;
     let eye = renderlab::Vec3::new(2., 3., 4.);
     let target = renderlab::Vec3::new(-1., 2., -8.);
     let camera = renderlab::Camera::look_at(eye, target, renderlab::Vec3::Y, 1., 0.1, 1e4)?;
