@@ -19,7 +19,7 @@ pub struct Fixture {
     /// Exact Renderlab Settings ABI: five vec4 values.
     pub settings: [f32; 20],
 }
-fn half(v: [f32; 4]) -> [f32; 4] {
+pub(super) fn half(v: [f32; 4]) -> [f32; 4] {
     v.map(|x| f16::from_f32(x).to_f32())
 }
 /// Deterministic 17x11 HDR gradient with an impulse and a nonidentity four-cube LUT.
@@ -64,7 +64,7 @@ fn load(image: &Image, x: i32, y: i32) -> [f32; 4] {
 fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     std::array::from_fn(|i| a[i] * (1. - t) + b[i] * t)
 }
-fn sample(image: &Image, uv: [f32; 2]) -> [f32; 4] {
+pub(super) fn sample(image: &Image, uv: [f32; 2]) -> [f32; 4] {
     let x = uv[0] * image.size[0] as f32 - 0.5;
     let y = uv[1] * image.size[1] as f32 - 0.5;
     let ix = x.floor() as i32;

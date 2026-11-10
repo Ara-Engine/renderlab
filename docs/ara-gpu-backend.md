@@ -120,3 +120,39 @@ opt-in backend build (existing wgpu HAL and Ara); do not exchange their native t
 
 This migration was explicitly authorized by Islam on 2026-11-10. Earlier statements
 that Ara integration is deferred describe the previous phase, not this branch's scope.
+
+## Atmosphere LUTs: four more entry points
+
+The selected source is the unchanged common definitions and LUT section of
+`shaders/atmosphere.wgsl`, ending before the aerial/fog kernels. No visibility stub
+or history implementation is substituted. Native Metal replays cover the complete
+Earth-default transmittance (256×64 plus reserved ambient row), multiscatter (32×32),
+sky-view (192×108) and ambient mean, with an independent scalar integration chain:
+
+| LUT entry | Maximum absolute component error |
+|---|---:|
+| `at_transmittance_lut` | 0.00048828125 |
+| `at_multiscatter_lut` | 0.000061035156 |
+| `at_skyview_lut` | 0.00012207031 |
+| `at_ambient_mean` | 0.000061035156 |
+
+The native compiler now uses `-fno-fast-math -ffp-contract=off`. The initial default
+Metal optimization changed a sphere-root branch on the exact top LUT boundary,
+producing zero instead of one transmittance. Strict settings removed that mismatch
+without changing the WGSL or widening reference tolerances. Vulkan's handling of
+this boundary is explicitly pending along with its native run.
+
+The shared frontend selects/compacts only the requested entry (plus fullscreen
+vertex where needed) before native output. This removes unused entry interfaces and
+avoids recompiling unrelated kernels into each selected native library. Workgroup
+sizes are still derived from the selected original WGSL entry. MSL parameters and
+SPIR-V descriptor arrays follow one atmosphere-root convention: parameter buffer,
+transmittance, multiscatter, sky-view, output, sampler. Shadowed fog/history and
+procedural environment kernels remain later ports, not substitutes in this slice.
+
+The sky integrator also exposed naga's explicit Offset decorations on function-local
+`AtSegment`. The internal-layout repair now handles both workgroup arrays and
+function/private structs, removing only layout decorations on types exclusive to
+internal memory; any type shared with an external buffer ABI is rejected. All 14
+exported stages pass spirv-val for Vulkan 1.3. Integration test artifacts now follow
+Cargo's `CARGO_TARGET_TMPDIR`, including the configured bulk-output drive on PC.

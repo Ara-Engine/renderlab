@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
     let source = adapt(pass);
-    let module = parse(&source)?;
+    let mut module = parse(&source)?;
+    super::select(&mut module, pass)?;
     let info = validate(&module)?;
     let entries: Vec<_> = if matches!(pass, Pass::Tone | Pass::Display) {
         vec![
@@ -65,7 +66,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
                 at += count;
             }
             repair_image_arguments(&mut words)?;
-            strip_workgroup_array_strides(&mut words)?;
+            repair_internal_layouts(&mut words)?;
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),
@@ -83,6 +84,9 @@ fn adapt(pass: Pass) -> String {
         .join("\n");
     if matches!(pass, Pass::LightCluster) {
         return cluster_interface(&body);
+    }
+    if pass.atmosphere() {
+        return atmosphere_interface(&body);
     }
     let mut names = BTreeMap::from([
         ("input_colour", "ara_textures[ara_root.w0]"),
@@ -248,10 +252,10 @@ struct AraLights {{values:array<Light>,}};
     )
 }
 
-// Naga 30 decorates workgroup arrays with ArrayStride although explicit workgroup
-// layout is not enabled. Strip only workgroup-exclusive arrays; shared ABI types
-// must fail rather than changing storage-buffer layouts.
-fn strip_workgroup_array_strides(words: &mut Vec<u32>) -> Result<()> {
+// Naga 30 decorates internal arrays/structs with explicit layout, although Vulkan
+// forbids that on Workgroup/Function memory without its optional layout features.
+// Strip only types exclusive to internal memory; reject shared external ABI types.
+fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
     let mut types = BTreeMap::<u32, Vec<u32>>::new();
     let mut wg = Vec::new();
     let mut others = Vec::new();
@@ -266,7 +270,7 @@ fn strip_workgroup_array_strides(words: &mut Vec<u32>) -> Result<()> {
                 types.insert(words[at + 1], words[at + 2..at + count].to_vec());
             }
             32 => {
-                if words[at + 2] == 4 {
+                if !matches!(words[at + 2], 2 | 9 | 12 | 5349) {
                     wg.push(words[at + 3]);
                 } else {
                     others.push(words[at + 3]);
@@ -293,14 +297,13 @@ fn strip_workgroup_array_strides(words: &mut Vec<u32>) -> Result<()> {
     at = 5;
     while at < words.len() {
         let count = (words[at] >> 16) as usize;
-        if words[at] & 0xffff == 71
-            && count == 4
-            && words[at + 2] == 6
-            && wg.contains(&words[at + 1])
-        {
+        let array_stride = words[at] & 0xffff == 71 && count == 4 && words[at + 2] == 6;
+        let member_layout =
+            words[at] & 0xffff == 72 && count >= 4 && matches!(words[at + 3], 4 | 5 | 7 | 35);
+        if (array_stride || member_layout) && wg.contains(&words[at + 1]) {
             ensure!(
                 !others.contains(&words[at + 1]),
-                "workgroup array layout is also used by a storage/uniform ABI"
+                "internal-memory layout type also belongs to a storage/uniform ABI"
             );
             words.drain(at..at + count);
         } else {
@@ -308,4 +311,47 @@ fn strip_workgroup_array_strides(words: &mut Vec<u32>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn atmosphere_interface(body: &str) -> String {
+    let names = BTreeMap::from([
+        ("atmosphere", "ara_atmospheres[ara_root.w0]"),
+        ("atmosphere_transmittance", "ara_textures[ara_root.w1]"),
+        ("atmosphere_multiscatter", "ara_textures[ara_root.w2]"),
+        ("at_skyview", "ara_textures[ara_root.w3]"),
+        ("at_transmittance_out", "ara_outputs[ara_root.w4]"),
+        ("at_multiscatter_out", "ara_outputs[ara_root.w4]"),
+        ("at_skyview_out", "ara_outputs[ara_root.w4]"),
+        ("atmosphere_sampler", "ara_samplers[ara_root.w5]"),
+    ]);
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if let Some(v) = names.get(word.as_str()) {
+            out.push_str(v);
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in body.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    format!(
+        r#"enable wgpu_binding_array;
+struct AraRoot {{w0:u32,w1:u32,w2:u32,w3:u32,w4:u32,w5:u32,w6:u32,w7:u32,}};
+var<immediate> ara_root:AraRoot;
+@group(0) @binding(1) var<storage,read> ara_atmospheres:binding_array<AtmosphereUniform>;
+@group(0) @binding(5) var ara_textures:binding_array<texture_2d<f32>>;
+@group(0) @binding(3) var ara_outputs:binding_array<texture_storage_2d<rgba16float,write>>;
+@group(0) @binding(2) var ara_samplers:binding_array<sampler>;
+{out}
+"#
+    )
 }

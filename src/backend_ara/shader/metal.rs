@@ -13,6 +13,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
             };
         }
     }
+    super::select(&mut module, pass)?;
     let info = validate(&module)?;
     let mut options = msl::Options {
         lang_version: (3, 0),
@@ -182,6 +183,19 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     })
 }
 fn resource(name: &str, parameter: &str, pass: Pass) -> Result<String> {
+    if pass.atmosphere() {
+        return Ok(match name {
+            "atmosphere" => buffer_argument(parameter, 0)?,
+            "atmosphere_transmittance" => "top.textures[top.root[1]].texture".into(),
+            "atmosphere_multiscatter" => "top.textures[top.root[2]].texture".into(),
+            "at_skyview" => "top.textures[top.root[3]].texture".into(),
+            "at_transmittance_out" | "at_multiscatter_out" | "at_skyview_out" => {
+                "((device AraWriteImageEntry*)top.storage_images)[top.root[4]].texture".into()
+            }
+            "atmosphere_sampler" => "top.samplers[top.root[5]].state".into(),
+            _ => bail!("unmapped atmosphere resource {name}"),
+        });
+    }
     if matches!(pass, Pass::LightCluster) {
         return Ok(match name {
             "lights" => buffer_argument(parameter, 0)?,

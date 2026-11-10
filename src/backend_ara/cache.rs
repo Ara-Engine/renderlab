@@ -97,7 +97,15 @@ impl ShaderCache {
             std::fs::write(dir.join("source.metal"), source)?;
             tool(
                 "metal",
-                &["-std=metal3.0", "-c", "source.metal", "-o", "source.air"],
+                &[
+                    "-std=metal3.0",
+                    "-fno-fast-math",
+                    "-ffp-contract=off",
+                    "-c",
+                    "source.metal",
+                    "-o",
+                    "source.air",
+                ],
                 dir,
             )?;
             tool("metallib", &["source.air", "-o", "source.metallib"], dir)?;
