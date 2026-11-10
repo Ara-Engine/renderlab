@@ -231,6 +231,8 @@ struct TpEmitter {
     emission_keys:array<vec4<f32>,4>,
     size_t:vec4<f32>,
     size_keys:vec4<f32>,
+    align:vec4<f32>,         // x 0 camera, 1 velocity (y stretch), 2 plane (yzw unit normal)
+    flipbook:vec4<f32>,      // x columns, y rows, z frames per second, w 1 when animated
 };
 // A curve's interpolation weights at life fraction t: the key below (index) and the share
 // of the next. Keys hold their end values outside their range.
@@ -428,6 +430,9 @@ struct TpBillboard {
     @location(3) depth:f32,
     @location(4) @interpolate(flat) emission:vec3<f32>,
     @location(5) world:vec3<f32>,
+    // The flipbook's two neighbouring frames (uv) and the second's weight.
+    @location(6) uv_next:vec2<f32>,
+    @location(7) @interpolate(flat) blend:f32,
 };
 @vertex fn tp_particle_vs(@builtin(vertex_index) vertex:u32, @builtin(instance_index) rank:u32) -> TpBillboard {
     var out:TpBillboard;
@@ -448,9 +453,42 @@ struct TpBillboard {
         let i=u32(w.x);
         size=mix(tp_emitter.size_keys[i],tp_emitter.size_keys[min(i+1u,size_keys-1u)],w.y);
     }
-    let world=p.position.xyz+(tp.right.xyz*corner.x+tp.up.xyz*corner.y)*(0.5*size);
+    // The sprite's horizontal and vertical axes, each scaled to half its extent.
+    var across=tp.right.xyz*(0.5*size);
+    var along=tp.up.xyz*(0.5*size);
+    if tp_emitter.align.x==1.0 {
+        let v=p.velocity.xyz-dot(p.velocity.xyz,tp.forward.xyz)*tp.forward.xyz;
+        let length2=dot(v,v);
+        if length2>1e-12 {
+            let dir=v*inverseSqrt(length2);
+            along=dir*(0.5*size*tp_emitter.align.y);
+            across=normalize(cross(tp.forward.xyz,dir))*(0.5*size);
+        }
+    } else if tp_emitter.align.x==2.0 {
+        let n=tp_emitter.align.yzw;
+        let sign=select(-1.0,1.0,n.z>=0.0);
+        let b=-1.0/(sign+n.z);
+        let c=n.x*n.y*b;
+        across=vec3<f32>(1.0+sign*n.x*n.x*b,sign*c,-sign*n.x)*(0.5*size);
+        along=vec3<f32>(c,sign+n.y*n.y*b,-n.y)*(0.5*size);
+    }
+    let world=p.position.xyz+across*corner.x+along*corner.y;
     out.position=tp.view_projection*vec4<f32>(world,1.0);
-    out.uv=corner*0.5+vec2<f32>(0.5);
+    let local=vec2<f32>(corner.x*0.5+0.5,0.5-corner.y*0.5);
+    out.uv=local;
+    out.uv_next=local;
+    out.blend=0.0;
+    if tp_emitter.flipbook.w!=0.0 {
+        let grid=tp_emitter.flipbook.xy;
+        let frames=grid.x*grid.y;
+        let at=p.position.w*tp_emitter.flipbook.z;
+        let first=floor(at)%frames;
+        let next=(first+1.0)%frames;
+        let cell=vec2<f32>(1.0)/grid;
+        out.uv=(vec2<f32>(first%grid.x,floor(first/grid.x))+local)*cell;
+        out.uv_next=(vec2<f32>(next%grid.x,floor(next/grid.x))+local)*cell;
+        out.blend=fract(at);
+    }
     var color=mix(tp_emitter.color0,tp_emitter.color1,t);
     var emitted=mix(tp_emitter.emission0.rgb,tp_emitter.emission1.rgb,t);
     let color_keys=u32(tp_emitter.curves.z);
@@ -481,7 +519,8 @@ struct TpBillboard {
     var shape=1.0;
     var tint=vec3<f32>(1.0);
     if tp_emitter.misc.z!=0.0 {
-        let sprite=textureSampleLevel(tp_sprite,tp_sampler,input.uv,0.0);
+        let sprite=mix(textureSampleLevel(tp_sprite,tp_sampler,input.uv,0.0),
+            textureSampleLevel(tp_sprite,tp_sampler,input.uv_next,0.0),input.blend);
         shape=sprite.a; tint=sprite.rgb;
     } else {
         let r=length(input.uv*2.0-vec2<f32>(1.0));

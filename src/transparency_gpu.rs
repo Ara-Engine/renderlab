@@ -35,8 +35,9 @@ const SLOT: u64 = 256;
 const FRAME_OFFSET: u64 = 256;
 const FRAME_BYTES: u64 = 336;
 /// WGSL `TpEmitter`: ten vec4s of TP1, then shape, velocity box, forces, collision,
-/// curve counts, and the colour, emission and size curves (`EmitterParams::uniform`).
-const EMITTER_BYTES: u64 = 464;
+/// curve counts, the colour, emission and size curves, and the sprite's alignment and
+/// flipbook (`EmitterParams::uniform`).
+const EMITTER_BYTES: u64 = 496;
 const PARTICLE_BYTES: u64 = 48;
 
 fn glass_samples() -> u32 {
@@ -292,6 +293,8 @@ struct EmitterParams {
     size_keys: (usize, [crate::transparency::SizeKey; MAX_CURVE_KEYS]),
     fade: [f32; 2],
     soft_distance: f32,
+    flipbook: Option<crate::transparency::Flipbook>,
+    alignment: crate::transparency::SpriteAlignment,
     capacity: u32,
     seed: u32,
 }
@@ -323,6 +326,8 @@ impl EmitterParams {
             ),
             fade: d.fade,
             soft_distance: d.soft_distance,
+            flipbook: d.flipbook,
+            alignment: d.alignment,
             capacity: d.capacity,
             seed: d.seed,
         }
@@ -452,6 +457,27 @@ impl EmitterParams {
         }
         v4(&mut f, 108, sizes.map(|k| k.t));
         v4(&mut f, 112, sizes.map(|k| k.size));
+        // 116: alignment (mode, stretch or the plane's unit normal); 120: flipbook.
+        use crate::transparency::SpriteAlignment;
+        v4(
+            &mut f,
+            116,
+            match self.alignment {
+                SpriteAlignment::Camera => [0.0; 4],
+                SpriteAlignment::Velocity { stretch } => [1.0, stretch, 0.0, 0.0],
+                SpriteAlignment::Plane { normal } => {
+                    let n = normal.normalize();
+                    [2.0, n.x, n.y, n.z]
+                }
+            },
+        );
+        v4(
+            &mut f,
+            120,
+            self.flipbook.map_or([1.0, 1.0, 0.0, 0.0], |b| {
+                [b.grid[0] as f32, b.grid[1] as f32, b.fps, 1.0]
+            }),
+        );
         let mut bytes = [0u8; EMITTER_BYTES as usize];
         for (dst, v) in bytes.chunks_exact_mut(4).zip(f) {
             dst.copy_from_slice(&v.to_ne_bytes());

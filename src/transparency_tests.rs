@@ -1416,6 +1416,54 @@ fn gpu_emitter_shapes_prewarm_forces() {
             ..base
         })
         .unwrap();
+    // 4: streaks stretched four times along their sideways velocity.
+    let streaks = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(-1.2, -1.5, 2.2),
+            spawn_radius: 0.2,
+            spawn_rate: 40.0,
+            lifetime: [1.0, 1.0],
+            velocity: Vec3::new(1.5, 0.0, 0.0),
+            size: [0.05; 2],
+            alignment: crate::SpriteAlignment::Velocity { stretch: 4.0 },
+            prewarm: 1.0,
+            ..base
+        })
+        .unwrap();
+    // 5: a 2x2 flipbook of rings lying on the floor: frame k is a ring of radius (k+1)/4.
+    let rings = {
+        let (size, cell) = (128u32, 64u32);
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let frame = (y / cell) * 2 + x / cell;
+                let p = [x % cell, y % cell].map(|c| (c as f32 + 0.5) / cell as f32 * 2.0 - 1.0);
+                let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+                let ring = (-((r - (frame + 1) as f32 * 0.22) / 0.06).powi(2)).exp();
+                let i = ((y * size + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, (ring * 255.0) as u8]);
+            }
+        }
+        upload_texture(&mut r, crate::asset::TextureRole::BaseColorSrgb, size, rgba)
+    };
+    let ripple = r
+        .try_create_emitter(&EmitterDescriptor {
+            position: Vec3::new(1.2, -1.8, 0.02),
+            spawn_radius: 0.0,
+            burst: 1,
+            lifetime: [100.0, 100.0],
+            size: [1.6; 2],
+            emission: [glow([0.2, 0.6, 1.0]); 2],
+            texture: Some(&rings),
+            flipbook: Some(crate::Flipbook {
+                grid: [2, 2],
+                fps: 1.5,
+            }),
+            alignment: crate::SpriteAlignment::Plane { normal: Vec3::Z },
+            capacity: 1,
+            ..base
+        })
+        .unwrap();
     let camera = Camera::look_at(
         Vec3::new(0., -7., 3.),
         Vec3::new(0., 0.5, 0.8),
@@ -1496,5 +1544,5 @@ fn gpu_emitter_shapes_prewarm_forces() {
         height,
         &read_texture(&r, &target, 4),
     );
-    drop((falling, cone, curves, vortex));
+    drop((falling, cone, curves, vortex, streaks, ripple));
 }

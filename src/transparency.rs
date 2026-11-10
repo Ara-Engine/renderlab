@@ -100,6 +100,29 @@ pub struct SizeKey {
     pub size: f32,
 }
 
+/// How an emitter's billboards are oriented (`EmitterDescriptor::alignment`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SpriteAlignment {
+    /// Facing the camera, upright on screen.
+    #[default]
+    Camera,
+    /// Facing the camera, the sprite's vertical axis along the particle's velocity as
+    /// seen on screen, `stretch` (at least 1) times as long as it is wide.
+    Velocity { stretch: f32 },
+    /// Lying in the plane through the particle perpendicular to `normal` (nonzero), as a
+    /// ripple on the ground.
+    Plane { normal: Vec3 },
+}
+
+/// A sprite that is a sheet of animation frames (`EmitterDescriptor::flipbook`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flipbook {
+    /// Columns and rows of frames, read left to right, top to bottom.
+    pub grid: [u32; 2],
+    /// Frames per second of particle age; neighbouring frames cross-fade.
+    pub fps: f32,
+}
+
 /// Keys a colour or size curve holds at most.
 pub const MAX_CURVE_KEYS: usize = 4;
 
@@ -174,6 +197,9 @@ pub struct EmitterDescriptor<'a> {
     pub soft_distance: f32,
     /// Optional sprite: rgb multiplies colour, alpha multiplies opacity.
     pub texture: Option<&'a Texture>,
+    /// The sprite as a sheet of frames played over each particle's life.
+    pub flipbook: Option<Flipbook>,
+    pub alignment: SpriteAlignment,
     /// Ring capacity, at most `MAX_PARTICLES`; spawning replaces the oldest particle.
     /// `spawn_rate * lifetime[1]` keeps every particle to the end of its life.
     pub capacity: u32,
@@ -208,6 +234,8 @@ impl Default for EmitterDescriptor<'_> {
             fade: [0.1, 0.4],
             soft_distance: 0.3,
             texture: None,
+            flipbook: None,
+            alignment: SpriteAlignment::Camera,
             capacity: 256,
             seed: 1,
             prewarm: 0.0,
@@ -295,11 +323,23 @@ impl EmitterDescriptor<'_> {
                 .size_keys
                 .iter()
                 .all(|k| k.size.is_finite() && k.size >= 0.0);
-        if !(shape && forces && collision && curves)
+        let sprite = self.flipbook.is_none_or(|f| {
+            (1..=64).contains(&f.grid[0])
+                && (1..=64).contains(&f.grid[1])
+                && f.fps.is_finite()
+                && f.fps >= 0.0
+        }) && match self.alignment {
+            SpriteAlignment::Camera => true,
+            SpriteAlignment::Velocity { stretch } => stretch.is_finite() && stretch >= 1.0,
+            SpriteAlignment::Plane { normal } => {
+                normal.is_finite() && normal.length_squared() > 1e-12
+            }
+        };
+        if !(shape && forces && collision && curves && sprite)
             || !(self.prewarm.is_finite() && self.prewarm >= 0.0)
         {
             return Err(crate::Error::InvalidInput(
-                "emitter shape, forces, collision, prewarm and curves need finite values: nonnegative extents and frequency, a nonzero collision normal, restitution in [0,1], positive attractor softening, and at most MAX_CURVE_KEYS keys at increasing times in [0,1]",
+                "emitter shape, forces, collision, prewarm, curves and sprite need finite values: a 1..=64 flipbook grid, a stretch of at least 1, a nonzero plane normal, nonnegative extents and frequency, a nonzero collision normal, restitution in [0,1], positive attractor softening, and at most MAX_CURVE_KEYS keys at increasing times in [0,1]",
             ));
         }
         if !finite
