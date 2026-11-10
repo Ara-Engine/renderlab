@@ -1095,13 +1095,32 @@ cargo run --example ara_frame -- --compare out/wgpu out/ara
 
 Each run writes the raw `frame.rgba16f`, the displayed `display.rgba8`, PNGs for looking
 at, and `frame.json` with 24x16 grids of mean linear RGB and mean display bytes that
-can travel as text. On this Mac the Ara frame
-renders at 960x640 under Metal API and shader validation with no nonfinite channel
-and an exact environment clear. **The wgpu frame has not been produced yet**: wgpu
-opens Vulkan only, and over MoltenVK 1.4.1 its device is lost during
-`Renderer::new_with_options`, so the reference must come from Linux or Windows. On
-non-macOS hosts `--backend ara` takes the SPIR-V path of the same cache, which has
-never executed.
+can travel as text. wgpu cannot produce its side on this Mac: it opens Vulkan only,
+and over MoltenVK 1.4.1 its device is lost during `Renderer::new_with_options`.
+
+### Cross-layer result: wgpu on Vulkan against Ara on Metal
+
+Reference: wgpu at e5be1b3 on an AMD Radeon 760M (RADV PHOENIX, Mesa 26.0.8, Vulkan
+1.4.335), dev profile. Ara: this Mac's M5 Pro on Metal 4 under API and shader
+validation, at eff8d75 (the frame code is unchanged since e5be1b3). M5-A, pose 0,
+960x640, 614,400 pixels. HDR error is relative to the brighter of the two values,
+floored at 0.001; display error is in 8-bit levels.
+
+| Level | HDR max | HDR mean | HDR pixels over 1% | Display identical | Display worst |
+|---|---:|---:|---:|---:|---:|
+| Forward lit, default post | 0.29% | 0.00028% | 0 | 92.6% | 1 level |
+| + physical atmosphere | 0.30% | 0.050% | 0 | 91.2% | 1 level |
+| + ray-traced sun shadows | 1.58% | 0.051% | 1 | 91.0% | 1 level |
+
+No displayed pixel differs by more than one level at any level, and no HDR pixel by
+more than 5%. The single pixel over 1% is at (425, 331), on a shadow edge. With the
+atmosphere on, the mean rises to 0.05% and one grid cell's display mean differs by a
+full level: a small systematic difference in the sky and its lighting between the two
+GPUs' arithmetic, far below a display step per pixel. The two layers share no shader
+compiler, no API and no GPU vendor here, so this is the first evidence that the
+WGSL-through-naga path on Ara draws what wgpu draws for whole frames, not only for
+single passes. It covers the levels above and nothing else: one scene, one pose, one
+frame after a cut.
 
 ### The post tail on the same frame
 
