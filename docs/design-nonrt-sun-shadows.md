@@ -206,3 +206,5 @@ The shipping legacy Surface walk remains **AT RISK** under [P-VIA / P-VIA2](pate
 3. Preserve geometry/guard pages across camera cuts; retain current cold and unsupported-frame selection before extra work, with its VIA exposure named.
 4. Reject first on missed wide-sun fringes, contact leaks or a routing halo; then judge paired full sequences and total shadow/frame cost.
 5. Estimated settled quarry cost is 1.25–4.05 ms against P-STILL's measured 4.2 ms; moving/cut gains and the guard's selectivity remain unmeasured.
+
+PR: [Renderlab #14](https://github.com/Ara-Engine/renderlab/pull/14).
