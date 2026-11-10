@@ -112,6 +112,9 @@ const IDLE_AFTER: u32 = 8;
 /// software refill completes visibility by frame 4, then each cell gathers `gathers` times (and
 /// once more if its hits had no value yet), and so do the hit cells its first gather made.
 const IDLE_AFTER_BOUNCE: u32 = 16;
+/// P-STILL `gi-drain`: read-back cache frames in a row with no work after which a capped
+/// gather budget counts as drained (gi_drain.rs).
+const DRAIN_QUIET: u32 = 8;
 /// Slot groups a changing environment map spreads its re-integration over: on frames where
 /// the map changed again (a rotating sky), each frame re-integrates the slots with
 /// (slot + phase) % ENVIRONMENT_PERIOD == 0, a fixed rotation (W2), and it keeps going for
@@ -775,6 +778,8 @@ pub(super) struct GiState {
     light_streak: bool,
     relight_catchup: u32,
     relight_phase: u32,
+    /// P-STILL knob `gi-drain` (docs/p-still.md): lagged counters that tell a drained cache.
+    drain: Option<super::gi_drain::Drain>,
 }
 
 impl GiState {
@@ -831,6 +836,7 @@ impl GiState {
             light_streak: false,
             relight_catchup: 0,
             relight_phase: 0,
+            drain: None,
         }
     }
     /// The table shading binds (lighting group 3, binding 20).
@@ -2466,6 +2472,18 @@ impl Renderer {
             (region[3] - region[1]).div_ceil(probe_tile()),
         ];
         let clear = std::mem::take(&mut self.gi.pending_clear);
+        let drain_knob = super::primary_ray_gpu::temporal_reconstruction::p_still("gi-drain");
+        if drain_knob {
+            let drain = self
+                .gi
+                .drain
+                .get_or_insert_with(|| super::gi_drain::Drain::new(&self.device, COUNTER_WORDS * 4));
+            drain.poll();
+            if clear {
+                drain.reset();
+            }
+        }
+        let drained = self.gi.drain.as_ref().is_some_and(|d| d.quiet >= DRAIN_QUIET);
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
@@ -2519,6 +2537,7 @@ impl Renderer {
         let idle_after = match (bounce, s.gather_cells) {
             (false, _) => IDLE_AFTER,
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
+            (true, _) if drained => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
         if self.gi.idle_frames >= idle_after && flags == 0 && !busy {
@@ -2869,6 +2888,9 @@ impl GiState {
                     pass.dispatch_workgroups(LIGHT_GROUPS, 1, 1);
                 }
             }
+        }
+        if let Some(drain) = self.drain.as_mut() {
+            drain.record(encoder, &r.work);
         }
         if let Some(profile) = self.profile.as_mut() {
             let slot = profile.written % PROFILE_RING;
