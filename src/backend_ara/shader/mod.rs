@@ -23,6 +23,8 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Mixed-program tile lists and indirect dispatch arguments.
+    ProgramBins,
     /// Base reversed-Z minimum depth from the visibility buffer.
     HzbBase,
     /// Minimum reduction from the previous image mip.
@@ -85,6 +87,7 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::ProgramBins => include_str!("../../../shaders/program_bins.wgsl").into(),
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
@@ -231,6 +234,7 @@ impl Pass {
                 | Self::ParticleBillboard
                 | Self::HzbBase
                 | Self::HzbReduce
+                | Self::ProgramBins
         )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
@@ -292,6 +296,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::ProgramBins => "program_bins",
             Self::HzbBase => "base",
             Self::HzbReduce => "reduce",
             Self::ParticleBillboard => "tp_particle_fs",

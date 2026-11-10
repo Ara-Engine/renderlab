@@ -56,6 +56,7 @@ fn upload(
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
     for pass in [
+        Pass::ProgramBins,
         Pass::HzbBase,
         Pass::HzbReduce,
         Pass::ParticleBillboard,
@@ -184,3 +185,8 @@ mod particle_draw_reference;
 
 #[path = "ara_backend/cases/hzb.rs"]
 mod hzb_cases;
+
+#[path = "ara_backend/cases/program_bins.rs"]
+mod program_bins_cases;
+#[path = "ara_backend/program_bins.rs"]
+mod program_bins_reference;

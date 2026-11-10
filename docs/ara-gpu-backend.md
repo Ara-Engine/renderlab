@@ -511,3 +511,28 @@ Native Vulkan, including mixed mip layouts, remains pending.
 The shared SPIR-V repair's independent review found no must-fix issue. Unknown
 store-pointer origins now fail explicitly, matching load handling; header and
 unsupported grouped-decoration checks also fail before rewriting.
+
+
+## Mixed-program tile bins and GPU counter reset
+
+The original `program_bins` kernel now produces per-program tile lists and indirect
+arguments through seven reflected inputs. Runtime arrays of atomic32-bit values
+use the common buffer adapter; the existing workgroup scratch path retains the
+source's shared atomic mask and barriers. `ProgramBins` resets argument words and
+only each list's count header with ordered Ara fill commands, preserving unused
+list storage, then dispatches the original4×4 kernel. Dispatch metadata must match
+the supplied source RlList/region records, as documented by BinDispatch.
+
+The independent23×19 fixture spans five program slots, offset/widened region
+[8,4,28,24], mixed programs in one tile, different placements sharing a program,
+misses, uncovered stale hit records, out-of-image region pixels and four clear
+blocks. Slot4 exists only in stale or outside-region records and stays empty.
+Two submissions reuse the same counter storage before the first CPU wait. Both
+produce exact counts[20,12,12,12,0], encoded tile sets, indirect arguments and
+untouched trailing sentinels. Concurrent atomic append order is intentionally
+unspecified, so the reference checks sets plus duplicate absence rather than byte
+order. The65535-workgroup argument-row rollover is outside this fixture.
+
+There are28 original entries plus display transfer. All19 replays pass with Metal
+API/shader validation; all36 SPIR-V stages validate. Native Vulkan execution and
+consumption of these arguments by deferred shading remain pending.

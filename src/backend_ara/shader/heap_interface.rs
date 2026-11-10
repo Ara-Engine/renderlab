@@ -198,6 +198,13 @@ pub(super) fn wgsl_type(module: &naga::Module, ty: naga::Handle<naga::Type>) -> 
         } => {
             format!("array<{},{}>", wgsl_type(module, base)?, n.get())
         }
+        TypeInner::Atomic(s) => {
+            ensure!(
+                matches!(s.kind, ScalarKind::Uint | ScalarKind::Sint),
+                "unported atomic scalar"
+            );
+            format!("atomic<{}>", scalar(s.kind, s.width)?)
+        }
         TypeInner::Scalar(s) => scalar(s.kind, s.width)?.into(),
         TypeInner::Vector { size, scalar: s } => {
             format!("vec{}<{}>", size as u32, scalar(s.kind, s.width)?)
