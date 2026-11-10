@@ -432,6 +432,11 @@ impl Renderer {
     pub fn set_visible_environment(&mut self, visible: bool) {
         self.environment.visible = visible;
     }
+    /// The visible sky's radiance scale in place of the lighting's `intensity` (None: the
+    /// same as the lighting, the default), for a sky that lights more or less than it looks.
+    pub fn set_visible_environment_scale(&mut self, scale: Option<f32>) {
+        self.environment.visible_scale = scale.map(|s| s.max(0.0));
+    }
     /// Atomic CPU selection. None restores the automatic sky (procedural atmosphere when
     /// enabled, otherwise Lighting::environment). Admitted frames publish changes.
     /// The renderer retains the selected map; parameter edits never clone or reupload its pixels.

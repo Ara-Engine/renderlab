@@ -917,11 +917,18 @@ impl Engine {
                 map,
                 rotation_y,
                 intensity,
-                ..
+                background,
             } => {
                 if !rotation_y.is_finite() || !intensity.is_finite() || intensity < 0.0 {
                     return Err(Error::InvalidInput(
                         "sky rotation must be finite and intensity finite and nonnegative",
+                    ));
+                }
+                if let Background::ScaledSky(scale) = background
+                    && !(scale.is_finite() && scale >= 0.0)
+                {
+                    return Err(Error::InvalidInput(
+                        "sky background scale must be finite and nonnegative",
                     ));
                 }
                 let parameters = EnvironmentParameters {
@@ -934,13 +941,19 @@ impl Engine {
         self.renderer
             .set_lighting_and_shadows(&lighting, &shadows)?;
         self.renderer.set_environment(map, parameters)?;
+        let background = match self.sky {
+            Sky::Map { background, .. } => Some(background),
+            _ => None,
+        };
         self.renderer.set_visible_environment(matches!(
-            self.sky,
-            Sky::Map {
-                background: Background::Sky,
-                ..
-            }
+            background,
+            Some(Background::Sky | Background::ScaledSky(_))
         ));
+        self.renderer
+            .set_visible_environment_scale(match background {
+                Some(Background::ScaledSky(scale)) => Some(scale),
+                _ => None,
+            });
         self.renderer.set_atmosphere(atmosphere)
     }
 
