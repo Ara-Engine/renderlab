@@ -9,6 +9,7 @@
         count       per-frame GI/shadow counters (P-STILL's count.rs)
         bin=NAME    run bin/NAME.exe instead of bin/p_yard_capture.exe
         scene=NAME  another manifest scene (s4-door, s5-cube); default quarry
+        clip        the clip manifest (p-flicker/manifest-clip.json: every walk frame 160-223 captured)
       MODE: capture | timing
     Output: D:/Coding/renderlab-work/p-flicker/runs/NAME-PATH (finished steps are skipped).
 """
@@ -41,6 +42,7 @@ def run(step):
     env["RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK"] = "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK"
     binary = WORK / "bin/p_yard_capture.exe"
     scene = "quarry"
+    manifest = MANIFEST
     for o in options:
         if o == "layer":
             env.update(LAYER)
@@ -48,6 +50,8 @@ def run(step):
             env["RENDERLAB_PASS_LOG"] = str(out / "passes.jsonl")
         elif o == "count":
             env["RENDERLAB_P_STILL_COUNT"] = "1"
+        elif o == "clip":
+            manifest = WORK / "manifest-clip.json"
         elif o.startswith("scene="):
             scene = o[6:]
         elif o.startswith("bin="):
@@ -59,7 +63,7 @@ def run(step):
             raise SystemExit("unknown option " + o)
     start = time.monotonic()
     with (out / "stdout.log").open("w") as log:
-        command = [str(binary), str(MANIFEST), scene, path, str(out), mode]
+        command = [str(binary), str(manifest), scene, path, str(out), mode]
         code, stopped = host.run_guarded(command, stdout=log, stderr=subprocess.STDOUT, env=env,
                                          creationflags=subprocess.CREATE_NO_WINDOW)
     (out / "process.json").write_text(json.dumps(dict(step=step, exit_code=code, seconds=time.monotonic() - start,

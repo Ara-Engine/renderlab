@@ -45,6 +45,28 @@ One lease (`pflk-l2`), one binary, the quarry yardstick manifest. `passes` runs 
 | still CPU submit ms | 0.67 | 2.15 / 1.93 | 1.40 | 3.74 / 3.45 |
 | moving CPU submit ms | 0.91 | 2.25 / 2.02 | 1.47 | 4.22 / 3.49 |
 
+**Which numbers had the layer (C, from each runner's code and lease records).** Before `901c1d2`, `m6-film-run.py` set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` on every leased child. A unit's numbers were affected unless its own runner removed the variable.
+
+| Harness | Layer | Evidence |
+|---|---|---|
+| P-YARD2 `tools/p-yard/rl.py` (the Unreal yardstick, Renderlab side) | **off** | removes `VK_INSTANCE_LAYERS`, `VK_LAYER_PATH` |
+| Unreal, every run (`tools/p-yard/ue.py`, `scripts/m7-u0*.py`) | n/a | `-dx12 -sm6`; Vulkan layers cannot load |
+| P-STILL `tools/p-still/run.py` | off | as rl.py |
+| ARA1 `tools/ara1/capture.py` (both engines, release profile) | off | removes the layer unless `--validate`, since `697bc97` (2026-11-09 05:36) |
+| P-FREE (`gpu-layer-bench/tools/plan.py`) | off | removes `VK_INSTANCE_LAYERS`, `VK_LAYER_ENABLES` |
+| P-NRT `tools/p-nrt/plan.py`, P-RTS `ab.py`/`final.py`, P-SHC2, P-LTS4, P-RETIME, P-MEM retime | off | each removes it |
+| **P-NSQ, P-NSQ2, P-NSQ3** (`D:/Coding/renderlab-work/p-nsq*/tools/plan.py` running `p_nsq_screen` and ARA1 binaries) | **on** | `env = dict(os.environ, ...)`; leases `l1`... run under n8-run (P-NSQ with `--fast-check`) |
+
+- **Ratios against Unreal: none change.** Every Unreal ratio quoted since P-YARD2 comes from layer-free runs on both sides.
+- **P-NSQ1-3's timings:**
+  - their non-RT GPU pass times stand, because the layer moved no non-RT pass by more than 0.07 ms;
+  - their CPU submit and any short RT spans read high.
+- **The RT still correction:**
+  - I posted "RT still 3.35 vs 3.82 (P-STILL key; 1.34x faster, was 1.18x)" in the interim note. That attribution was wrong.
+  - P-YARD2's 3.82 ms is the median of a bimodal pair of visits, 3.33 and 4.30, likely wallpaper contention.
+  - P-STILL measured 3.35 on the yardstick before and after its change, with byte-identical frames.
+  - So RT still was 3.35 ms all along: 1.34x faster than HW Lumen Epic, not 1.18x. Nothing in the code changed it, and the layer did not cause it.
+
 Per pass (sum of named stages): RT still 3.40 → 4.31, all in the `visibility` stage (+0.93), which is where the frame waits on the slower CPU encode. RT moving gains 0.07, and non-RT still/moving gain at most 0.07 (`gi_gather` +0.02-0.06). No GPU pass got slower.
 
 ## 2. Flicker split
@@ -67,7 +89,24 @@ Cells are RMS codes / share. Non-RT with GI off scored 4.395 on the earlier pair
 - **Edges and silhouettes** carry 4%. TR1b's edge work already took them to TSR parity.
 - **What is left** is the reconstructed texture itself. It shimmers as it moves, in proportion to its contrast.
 
-Heat map of mean squared residual per pixel (RT, `D:/Coding/renderlab-work/p-flicker/sheets/energy-base-cap-rt.png`; no-jitter alongside): the energy covers every textured face and is brightest on the sunlit gravel at the left, with no isolated specks.
+Heat map of mean squared residual per pixel (RT, `D:/Coding/renderlab-work/p-flicker/sheets/energy-base-cap-rt.png`; no-jitter alongside): averaged over the walk, the energy covers every textured face and is brightest on the sunlit gravel at the left.
+
+**Single-pixel flashes (M, from the saved frames).** Frame by frame, the steps look different from that average. In the step sheet (`sheets/test-base-steps.png`: |frame t − frame t−1| × 4 for RT, non-RT and the reference, frames 161-164, crop 600,560 240x140 at 2x), Renderlab's steps carry scattered single bright pixels on the rock, on both paths, that the reference's step lacks. There are also a few short horizontal streaks. The reference step is broader and fills the fine gravel more evenly.
+
+| RT walk pairs | energy share |
+|---|---:|
+| pixels with residual > 10 codes | 55% |
+| > 20 codes | 25% |
+| > 40 codes | 8% (5% without jitter, 6% with GI off) |
+
+- **Count.** 1,200-2,800 pixels a frame are above 20 codes. Half brighten and half darken.
+- **Flashes.** At those pixels the next pair's residual correlates at −0.3 to −0.65, so they are mostly one-frame flashes: the pixel jumps and comes back.
+- **Where.** They are slightly enriched in contacts (10-16% against 7% of pixels), not on edges (4%), and on brighter sunlit rock (median 83 against 76 codes).
+- **Budget.** Removing the >20-code flashes alone would take RT to about 3.8. Unreal is at 3.68.
+- **Cause, two candidates; the saved frames cannot separate them.**
+  - Sparse bright HDR samples (sun glints off the normal-mapped rock) entering at weight 1/16.
+  - Pixels switching between Catmull-Rom (window 16) and the bilinear fallback (window about 3-5 at f ≈ 0.5) when one outer tap fails a geometric test on the 13 M-triangle scan.
+  - The screen's `cr=0` capture (bilinear everywhere, no switching) separates them.
 
 ## 3. Cause and candidate
 
@@ -86,6 +125,18 @@ Heat map of mean squared residual per pixel (RT, `D:/Coding/renderlab-work/p-fli
 | Keys a = -0.75 kernel, window 16 | - / 1.888 / 3.137 / - | - / 2.468 / 2.277 / - |
 | Lanczos-2 kernel, window 16 | - / 1.955 / 3.440 / - | - / 2.524 / 2.472 / - |
 
+With sampling noise added to each frame's sample (Gaussian, codes), the trade appears:
+
+| per-sample noise σ | flicker at 0.37 px/frame: main / budget 1 / budget 2 | at 1.3 px/frame: main / 1 / 2 |
+|---:|---|---|
+| 0 | 1.96 / **1.66** / 1.81 | 3.43 / **2.36** / 2.95 |
+| 2 | 1.97 / **1.72** / 1.83 | 3.45 / **2.45** / 2.98 |
+| 5 | 2.00 / 2.00 / **1.92** | 3.54 / **2.92** / 3.15 |
+| 10 | **2.12** / 2.79 / 2.20 | 3.82 / 4.23 / **3.79** |
+| 20 | **2.54** / 4.76 / 3.12 | **4.76** / 7.48 / 5.45 |
+
+A budget of 1 wins only where the fresh sample is clean, such as sunlit texture. Where it is noisy (penumbrae, GI cell borders), the shorter window lets that noise through. A budget of 2 keeps most of the texture gain and is roughly neutral at σ = 10. In 2-D, `sum f(1-f)` reaches 0.5 on diagonal motion, so a given budget cuts the window up to twice as hard as in this 1-D model. The screen therefore runs budgets 1, 2 and 4, and checks penumbrae and the S4 walls by eye. Sizing the budget from a per-pixel noise estimate is not an option: a colour-variance confidence is P-B/P-D's element. A sun-visibility-aware cap would bake a lighting-model assumption into TR1, against programmable shading.
+
 Longer windows are worse and shorter ones better. A sharper kernel helps a little; capping the window by the fraction helps most. The model has no lighting noise, so a shorter window is free there. On the quarry it may expose sampling noise (penumbrae, GI cell edges), which only the GPU screen can show.
 
 **The change (code on this branch, default off).**
@@ -98,7 +149,7 @@ Longer windows are worse and shorter ones better. A sharper kernel helps a littl
 
 ## 4. GPU screen
 
-**Pending.** Planned lease `pflk-l3` (one binary, `sharp_blur_budget` 0 / 0.5 / 1 / 2):
+**Pending.** Planned lease `pflk-l3` (one binary, `sharp_blur_budget` 0 / 1 / 2 / 4):
 - the quarry yardstick on both paths: flicker, full-frame error still/moving/cut, timing;
 - the S4 door and S5 mirror benches at K = 0 and 1 on both paths, for ghosting and grain, judged by eye;
 - Unreal HW/SW Epic quarry recaptures (`tools/p-flicker/ue.py`) for side-by-side clips and the per-contrast split against Unreal. P-YARD2's Unreal captures were deleted after scoring, so P-YARD2's scores and timings are reused, but its pixels are gone.

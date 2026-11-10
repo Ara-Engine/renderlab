@@ -780,3 +780,17 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **OPEN, product defect: loading the quarry peaks at 8.0-8.5 GB of private memory.** On main it reaches 8.5 GB within 16 s of start. The P-PIPE branch hits 8.0 GB at 48 s even warm, with almost no compiling, so this isn't the shader compiler. A player's machine has to load the scene too.
   - **Short follow-up:** find whether the peak comes from scene preparation, upload staging or duplicate copies of the 13 M-triangle scan, then cut it.
   - **Until then:** full-quarry leases run with the named `--quarry-lease` runner setting. It sets a 12 GiB watchdog child cap and starts only at 14 GiB available. The 8 GiB machine floor still applies and is still what kills the lease.
+
+## M8 motion flicker cause (P-FLICKER, 2026-11-10)
+
+[P-FLICKER](p-flicker.md) split the yardstick's motion flicker (4.39 RT / 4.44 non-RT against Unreal Epic's 3.68-3.69). It updates item 1 of the P-YARD2 list above.
+
+- **OPEN: the quarry flicker is TR1's moving texture, not lighting.**
+  - 96% of the residual energy is on surface interiors, rising with texture contrast: 9.5 codes RMS where the reference changes by 20+ codes per pixel, 2.3 on flat areas.
+  - GI off moves it by 0.03 and reflections off by nothing; the two paths differ by 0.05; no jitter reaches only 4.15.
+  - Cause (code and a 1-D replay): the Catmull-Rom history fetch keeps a fixed 16-frame window. Its fraction-dependent softening changes every frame and accumulates, so texture shimmers. Bilinear is already capped by T1b's blur budget.
+  - Candidate, default off: `Reconstruction::sharp_blur_budget`. The GPU screen (budgets 1, 2, 4 on both paths, S4/S5 ghost checks) was deferred while Islam played.
+  - The model warns that a budget of 1 lets per-sample noise through in penumbrae, and that 2 is the safer start.
+- **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
+- **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
+- **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
