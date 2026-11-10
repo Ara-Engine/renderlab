@@ -725,6 +725,8 @@ pub(super) struct GiState {
     packed: Option<Packed>,
     /// Last frame's world bounds per placement, for moved-caster boxes.
     bounds: Vec<[f32; 6]>,
+    /// Last frame's skinned poses per placement (`skinning::placement_poses`).
+    poses: Vec<crate::renderer::skinning::PlacementPose>,
     environment: Option<[u8; 32]>,
     frame: u32,
     pending_clear: bool,
@@ -798,6 +800,7 @@ impl GiState {
             world: None,
             packed: None,
             bounds: vec![],
+            poses: vec![],
             environment: None,
             frame: 0,
             pending_clear: false,
@@ -2271,17 +2274,22 @@ impl Renderer {
         }
         let mut boxes: Vec<[f32; 6]> = vec![];
         let previous = std::mem::take(&mut self.gi.bounds);
+        let poses = crate::renderer::skinning::placement_poses(draws);
+        let previous_poses = std::mem::replace(&mut self.gi.poses, poses.clone());
         if !previous.is_empty() {
-            // A skinned caster can change within identical aggregate bounds. One flag per
-            // placement, in `bounds` order, collected once (P-GI: searching the draws per
-            // placement made this loop quadratic in placements).
-            let deforming: Vec<bool> = draws
-                .iter()
-                .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
-                .collect();
+            // A skinned caster can change within identical aggregate bounds; P-SHOW: only a
+            // new pose does (one per placement, in `bounds` order, collected once; P-GI:
+            // searching the draws per placement made this loop quadratic in placements).
             for i in 0..bounds.len().max(previous.len()) {
                 let (a, b) = (previous.get(i), bounds.get(i));
-                let deforming = deforming.get(i).copied().unwrap_or(false);
+                // Software-ray (non-RT) frames still count every skinned placement as moved:
+                // their continuous relight hides the settled cache's flat-face blotches
+                // (docs/p-show.md, gaps). Scaffolding: drop it with that grain fix.
+                let deforming = if software {
+                    poses.get(i).copied().flatten().is_some()
+                } else {
+                    crate::renderer::skinning::deformed(&previous_poses, &poses, i)
+                };
                 if a == b && !deforming {
                     continue;
                 }

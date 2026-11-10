@@ -479,6 +479,8 @@ struct Cache {
     heights: Option<[f64; 2]>,
     models: Vec<[u32; 16]>,
     bounds: Vec<crate::shadow_plan::Bounds>,
+    /// Skinned poses per placement (`skinning::placement_poses`).
+    poses: Vec<crate::renderer::skinning::PlacementPose>,
 }
 pub(super) struct VirtualState {
     pub settings: VirtualShadowSettings,
@@ -1622,6 +1624,7 @@ impl Renderer {
             }
         }
         let placements = models.len();
+        let poses = crate::renderer::skinning::placement_poses(draws);
         // Light-space xy rectangle of a box, relative to the eye.
         let rect = |b: &crate::shadow_plan::Bounds| {
             let mut lo = glam::DVec2::INFINITY;
@@ -1712,14 +1715,13 @@ impl Renderer {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
         } else {
-            // SK1: deformation invalidates caster pages even at a fixed model matrix. One flag
-            // per placement, in placement order (collected once: P-NRT's O(placements^2) find).
-            let deforming: Vec<bool> = draws
-                .iter()
-                .flat_map(|d| std::iter::repeat_n(d.mesh.skin.is_some(), d.instances.len()))
-                .collect();
+            // SK1: deformation invalidates caster pages even at a fixed model matrix; P-SHOW:
+            // only a new pose deforms (per placement, in placement order, collected once:
+            // P-NRT's O(placements^2) find).
             for (p, model) in models.iter().enumerate() {
-                if *model != cache.models[p] || deforming.get(p).copied().unwrap_or(false) {
+                if *model != cache.models[p]
+                    || crate::renderer::skinning::deformed(&cache.poses, &poses, p)
+                {
                     let [a0, a1] = rect(&cache.bounds[p]);
                     let [b0, b1] = rect(&bounds[p]);
                     rects.push([a0.min(b0), a1.max(b1)]);
@@ -1736,6 +1738,7 @@ impl Renderer {
         }
         cache.models = models;
         cache.bounds = bounds;
+        cache.poses = poses;
         let pages = i64::from(s.pages);
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         let mut level_bytes = [0u8; MAX_LEVELS * 32];

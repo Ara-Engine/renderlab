@@ -491,6 +491,35 @@ impl Renderer {
     }
 }
 
+/// One placement's pose: its skinned mesh (by vertex buffer) and that mesh's pose revision.
+/// None for a rigid placement.
+pub(crate) type PlacementPose = Option<(usize, u64)>;
+
+/// Per placement, in draw order then instance slot: its `PlacementPose`.
+pub(crate) fn placement_poses(draws: &[PreparedDraw<'_>]) -> Vec<PlacementPose> {
+    draws
+        .iter()
+        .flat_map(|d| {
+            let pose = d
+                .mesh
+                .skin
+                .as_ref()
+                .map(|s| (Arc::as_ptr(&d.mesh.vertex) as usize, s.revision));
+            std::iter::repeat_n(pose, d.instances.len())
+        })
+        .collect()
+}
+
+/// P-SHOW: whether placement `i` deformed since the previous frame's `placement_poses`. A
+/// skinned placement deforms when its mesh or pose revision differs from the previous
+/// frame's at the same placement, or when the placement list changed length. An unchanged
+/// pose leaves the mesh's positions unchanged (`set_joint_palette` bumps the revision only
+/// on a new palette), so caches keyed on it stay valid.
+pub(crate) fn deformed(previous: &[PlacementPose], current: &[PlacementPose], i: usize) -> bool {
+    let now = current.get(i).copied().flatten();
+    now.is_some() && (previous.len() != current.len() || previous.get(i).copied().flatten() != now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +549,21 @@ mod tests {
             &[Mat4::IDENTITY, Mat4::from_translation(Vec3::X * 4.)],
         );
         assert_eq!(p, [[4., 2., 3.]]);
+    }
+
+    #[test]
+    fn placements_deform_only_on_a_new_pose() {
+        let rigid = None;
+        let posed = Some((7usize, 3u64));
+        let previous = [rigid, posed];
+        // Same mesh and revision: no deformation; rigid placements never deform here.
+        assert!(!deformed(&previous, &[rigid, posed], 0));
+        assert!(!deformed(&previous, &[rigid, posed], 1));
+        // A new revision, or another mesh at the placement, deforms.
+        assert!(deformed(&previous, &[rigid, Some((7, 4))], 1));
+        assert!(deformed(&previous, &[rigid, Some((8, 3))], 1));
+        // A changed placement list counts every skinned placement as deforming.
+        assert!(deformed(&previous, &[rigid, posed, rigid], 1));
+        assert!(deformed(&[], &[posed], 0));
     }
 }

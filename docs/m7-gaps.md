@@ -679,3 +679,24 @@ phase remains variable (7.4641 -> 8.4665 ms pooled medians in this small cohort)
 These are disclosed measurements, not a new visual defect or an Unreal victory.
 The owned Cargo target cleanup is blocked by automatic approval policy; see the
 unit report for the exact path and handoff.
+
+## M8 Ara Showcase through the bridge (P-SHOW, 2026-11-10)
+
+[P-SHOW](p-show.md): Showcase (Ara's sample scene, drawn through Ara's bridge) cost 22-28 ms RT and
+43 ms non-RT at 1080p against Ara Epic's 3.0 ms. The GI cache and the non-RT virtual shadow cache
+counted every skinned placement as a moved caster on every frame, even when its pose held, so a
+scene with any skinned mesh never settled. Fixed by comparing pose revisions: RT 23.6-27.8 to
+13.2-14.0 ms (still, moving and cut alike), non-RT shadow compute -1.2 ms; images within a few
+codes. Open:
+
+- **Non-RT GI still churns on skinned scenes (scaffolding).** Software-ray frames keep the old rule
+  because the settled cache shows blocky GI cells on flat white faces, which the churn averaged
+  away. Remove the switch in `gi_cache.rs` with the non-RT grain fix: about -12 to -16 ms on Showcase.
+- **Animated characters relight one eighth of every GI cell per frame** (about 13 ms RT on
+  Showcase while a pose changes). A relight bounded to cells whose gathers can see the moved
+  caster's swept box is the next lever.
+- **Non-RT glossy shading is 18 ms of Showcase's 21 ms shading pass.** Reflectance-weighted strata
+  saved 12 ms but brightened the white glossy specks on the dark turntable; retry after the
+  speck fix. Fade-band-only scaling saved nothing.
+- **Standing scene:** `tools/showcase/showcase.py` drives Ara's player against a Renderlab
+  checkout; the content is fetched by Ara's own sample tool, not committed here.
