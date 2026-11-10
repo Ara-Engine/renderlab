@@ -1,7 +1,7 @@
 """P-STILL Renderlab runs with the release adapter (host.py build), inside this unit's lease.
 
     py -3 -B tools/p-still/run.py STEP...   STEP: NAME:MANIFEST:SCENE:MODE:PATH[:KNOBS]
-      MANIFEST: count (D:/.../p-still/manifest-count.json) or yard (tools/p-yard/manifest.json)
+      MANIFEST: count (D:/.../p-still/manifest-count.json), yard (tools/p-yard/manifest.json) or game
       MODE: capture | timing | count (timing plus per-frame cache counts)
       KNOBS: '+'-separated RENDERLAB_P_STILL flags (nojitter, norotate, gi-stable, vsm-stable)
 """
@@ -20,7 +20,7 @@ MANIFESTS = {"count": WORK / "manifest-count.json", "yard": HERE.parent / "p-yar
 
 def run(step):
     name, manifest, scene, mode, path, *knobs = step.split(":")
-    out = WORK / "runs" / name / path
+    out = WORK / "runs" / f"{name}-{path}"  # parent holds the shared program-cache/PATH
     if (out / "engine.json").exists():
         print("done", step, flush=True)
         return 0
@@ -32,8 +32,12 @@ def run(step):
         env["RENDERLAB_P_STILL_COUNT"] = "1"
     start = time.monotonic()
     with (out / "stdout.log").open("w") as log:
-        code = subprocess.run([str(BINARY), str(MANIFESTS[manifest]), scene, path, str(out),
-                               "capture" if mode == "capture" else "timing"],
+        if manifest == "game":  # ARA1's game-base, long still (SCENE unused)
+            command = [str(WORK / "bin/ara1_capture.exe"), str(WORK / "game-count.json"), path, str(out)]
+        else:
+            command = [str(BINARY), str(MANIFESTS[manifest]), scene, path, str(out),
+                       "capture" if mode == "capture" else "timing"]
+        code = subprocess.run(command,
                               stdout=log, stderr=subprocess.STDOUT, env=env, timeout=600,
                               creationflags=subprocess.CREATE_NO_WINDOW).returncode
     (out / "process.json").write_text(json.dumps(dict(step=step, exit_code=code, seconds=time.monotonic() - start,
