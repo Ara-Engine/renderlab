@@ -31,6 +31,8 @@ pub enum Pass {
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
     VisibilityHardware,
+    /// Original packed visibility hit to source-triangle receiver resolution.
+    VisibilityResolve,
     /// Non-RT cluster cut, frustum and two-phase HZB classification.
     VisibilityCull,
     /// Cull output counters to indirect raster/pyramid/cull arguments.
@@ -102,6 +104,11 @@ impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
+            Self::VisibilityResolve => crate::renderer::visibility_buffer::resolve_source(
+                include_str!("../../../shaders/scene.wgsl"),
+            )
+            .expect("embedded visibility resolve composition")
+            .into(),
             Self::VisibilityHardware => format!(
                 "{}\n{}",
                 include_str!("../../../shaders/visibility_buffer.wgsl"),
@@ -269,6 +276,7 @@ impl Pass {
             self,
             Self::BufferArrayProbe
                 | Self::VisibilitySoftware
+                | Self::VisibilityResolve
                 | Self::VisibilityHardware
                 | Self::MeshToon
                 | Self::ParticleUpdate
@@ -324,7 +332,8 @@ impl Pass {
         )
     }
     pub(crate) fn threads(self) -> anyhow::Result<[u32; 3]> {
-        let module = parse(self.source().as_ref())?;
+        let mut module = parse(self.source().as_ref())?;
+        select(&mut module, self)?;
         let entry = module
             .entry_points
             .iter()
@@ -340,6 +349,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::VisibilityResolve => "resolve",
             Self::VisibilityHardware => "fs",
             Self::VisibilitySoftware => "raster",
             Self::BufferArrayProbe => "probe",
@@ -432,6 +442,18 @@ pub(super) fn select(module: &mut naga::Module, pass: Pass) -> anyhow::Result<()
     );
     validate(module)?;
     naga::compact::compact(module, naga::compact::KeepUnused::No);
+    if !module.overrides.is_empty() {
+        // Match creation without explicit wgpu pipeline constants. Both native
+        // backends see the same evaluated defaults, including workgroup sizes.
+        let info = validate(module)?;
+        let (resolved, _) = naga::back::pipeline_constants::process_overrides(
+            module,
+            &info,
+            None,
+            &naga::back::PipelineConstants::default(),
+        )?;
+        *module = resolved.into_owned();
+    }
     Ok(())
 }
 

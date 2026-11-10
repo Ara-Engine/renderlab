@@ -5,7 +5,8 @@ struct Counters { data: array<atomic<u32>> };
 @group(0) @binding(1) var<storage,read_write> output: array<u32>;
 @group(0) @binding(2) var<storage,read_write> writes: binding_array<Counters,4>;
 fn fetch(which: u32, at: u32) -> u32 { return reads[which].data[at]; }
-@compute @workgroup_size(4)
+override PROBE_THREADS: u32 = 4u;
+@compute @workgroup_size(PROBE_THREADS)
 fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if i >= 4u { return; }

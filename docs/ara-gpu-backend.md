@@ -637,3 +637,27 @@ Every emitted stage's metadata records `main`; the export test reads `OpEntryPoi
 and checks it against its metadata before structural validation. Native Vulkan
 execution of this Renderlab cohort still remains pending. No new Ara API or decision
 override was needed for the buffer-array or indirect-raster integration.
+
+## Visibility receiver resolve (entry 34)
+
+`visibility_buffer_resolve.wgsl::resolve` now uses the original ray-free source
+composer, shared through a crate-visibility change on that existing factory. The
+selected WGSL body stays unchanged. Shared selection now evaluates WGSL override
+defaults with naga before either native backend; it resolves workgroup sizes through
+the same step. The buffer-array probe uses an overridden default group size to
+exercise that path. This preserves defaults `WRITE_RECEIVERS=true` and `LOD_LIFT=0`;
+non-default specialization is not claimed by this checkpoint.
+
+An independent f64 plane/barycentric oracle checks a 10×9 image and 2×3 coverage
+image, with four hits, two logical owners at 3/37, linear and TABLE primitive IDs,
+a mirrored thin placement, scene bounds, covered misses, wholly uncovered tiles,
+partial edge tiles and allocation/image canaries. The encoded visibility depth is
+deliberately unrelated to the source triangle plane. Both queued submissions rebuild
+receivers from source positions, consume only in-scene hit words, and preserve stale
+outputs where the original kernel skips stores. Maximum barycentric/world errors
+are 1.94e-7/1.79e-7; normals, IDs, epsilon bits, thin sign, coverage and untouched
+regions match exactly. Adjacency/edge repair and nonzero LOD lift remain unproven.
+
+After merging Renderlab main 7bd8b9a, all 28 focused tests pass under Metal API/shader
+validation, and all 44 exported SPIR-V stages validate with matching native entry
+metadata. Native Vulkan remains pending. There are 34 original entries plus display.

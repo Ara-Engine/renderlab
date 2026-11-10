@@ -59,6 +59,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::BufferArrayProbe,
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
+        Pass::VisibilityResolve,
         Pass::VisibilityCull,
         Pass::VisibilityFinish,
         Pass::VisibilityReset,
@@ -250,3 +251,8 @@ mod array_access_tests;
 mod visibility_raster_cases;
 #[path = "ara_backend/visibility_sw_reference.rs"]
 mod visibility_sw_reference;
+
+#[path = "ara_backend/cases/visibility_resolve.rs"]
+mod visibility_resolve_cases;
+#[path = "ara_backend/visibility_resolve_reference.rs"]
+mod visibility_resolve_reference;
