@@ -588,6 +588,8 @@ pub struct Renderer {
     scratch: Vec<u8>,
     slots: [Slot; FLIGHTS],
     timing: Option<Timing>,
+    /// Named stage timings for measurement (`RENDERLAB_PASS_LOG`, src/pass_timeline.rs).
+    pass_timeline: Option<crate::pass_timeline::PassTimeline>,
     timing_status: TimingStatus,
     timing_failures: u64,
     timed_frames: u64,
@@ -1035,6 +1037,7 @@ impl Renderer {
         // The standard program has modules only; its pipelines compile at first draw.
         let created = pipeline.count();
         let (standard, slot) = program_gpu::standard_slot(&identity, standard);
+        let pass_timeline = crate::pass_timeline::PassTimeline::from_env(&device, &queue);
         let mut renderer = Self {
             device,
             queue,
@@ -1103,6 +1106,7 @@ impl Renderer {
             camera_shadow: None,
             scratch: Vec::new(),
             slots,
+            pass_timeline,
             timing,
             timing_status: if enabled {
                 TimingStatus::Enabled
@@ -3180,11 +3184,24 @@ impl Renderer {
             .as_ref()
             .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
         let timed = self.timing_status == TimingStatus::Enabled;
+        // The timeline moves out while marks are encoded, so they never borrow `self`.
+        let mut marks = self.pass_timeline.take();
+        if let Some(t) = &mut marks {
+            t.begin();
+        }
+        let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            if let Some(t) = &mut marks {
+                t.mark(encoder, name);
+            }
+        };
+        mark(&mut encoder, "skinning");
         self.encode_skinning(&mut encoder, draws, hardware_build);
         if let Some(frame) = &local_lights {
+            mark(&mut encoder, "light_clusters");
             self.encode_light_clusters(&mut encoder, frame, draws);
         }
         if hardware_build {
+            mark(&mut encoder, "tlas");
             let start = Instant::now();
             self.hardware_shadows
                 .as_ref()
@@ -3193,6 +3210,7 @@ impl Renderer {
             cpu.shadow_encode += start.elapsed();
         }
         if let Some(frame) = shadow_frame.as_ref().filter(|_| !hardware_shadowed) {
+            mark(&mut encoder, "sun_shadow");
             let shadow_start = Instant::now();
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
@@ -3200,12 +3218,15 @@ impl Renderer {
         // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
         if lit {
             // TP2: all opaque paths and GI shading read this independent caster map.
+            mark(&mut encoder, "transmission");
             self.encode_transmission(&mut encoder, transparent);
         }
         if lit && !virtual_frame {
+            mark(&mut encoder, "atmosphere");
             self.encode_atmosphere(&mut encoder, scene_generation);
         }
         if fresh {
+            mark(&mut encoder, "sun_shadow");
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
         if traced {
@@ -3226,6 +3247,7 @@ impl Renderer {
                     })
             };
             let p = self.pipeline.primary.as_ref().unwrap();
+            mark(&mut encoder, "visibility");
             if temporal {
                 self.encode_film(&mut encoder, stamps(6), stamps(0));
             } else {
@@ -3245,8 +3267,10 @@ impl Renderer {
                     } else {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
+                    mark(&mut encoder, "sun_shadow");
                     self.encode_virtual(&mut encoder, stamps(8));
                     // VF1 samples the freshly generated Virtual depth pages.
+                    mark(&mut encoder, "atmosphere");
                     self.encode_atmosphere(&mut encoder, scene_generation);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
@@ -3255,6 +3279,7 @@ impl Renderer {
                         self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     }
                     if soft {
+                        mark(&mut encoder, "sun_shadow");
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
@@ -3286,10 +3311,12 @@ impl Renderer {
                     },
                 );
                 self.gi
-                    .encode(&mut encoder, self.lighting.kernel_bind(), shade);
+                    .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                mark(&mut encoder, "shading");
                 self.encode_primary_shading(&mut encoder, shading, stamps(0));
             }
             if reconstructed {
+                mark(&mut encoder, "tr1");
                 self.encode_reconstruction(&mut encoder, stamps(4));
             }
         }
@@ -3317,6 +3344,7 @@ impl Renderer {
                 .iter()
                 .map(|d| self.sampling_group(d.material))
                 .collect();
+            mark(&mut encoder, "mesh");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3433,6 +3461,7 @@ impl Renderer {
         // TP1: transparent draws and particles, after opaque shading and reconstruction.
         // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
         if lit && self.upscale.is_none() {
+            mark(&mut encoder, "transparency");
             self.encode_transparency(&mut encoder, draws, transparent, traced)?;
         }
         // TR1b upscaling: present writes the caller's target, not the internal one.
@@ -3441,6 +3470,7 @@ impl Renderer {
                 .attachment(u.output.create_view(&Default::default()))
         });
         if lit && self.lighting.hdr.is_some() {
+            mark(&mut encoder, "post");
             self.encode_hdr_present(
                 &mut encoder,
                 output_view.as_ref().unwrap_or(&view),
@@ -3453,6 +3483,9 @@ impl Renderer {
                         end_of_pass_write_index: Some(slot as u32 * 10 + 3),
                     }),
             );
+        }
+        if let Some(t) = &mut marks {
+            t.finish(&mut encoder);
         }
         let mapped = if timed {
             let timing = self.timing.as_ref().unwrap();
@@ -3521,6 +3554,10 @@ impl Renderer {
         let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
         let submitted_at = Instant::now();
         let index = self.queue.submit([commands]);
+        if let Some(mut t) = marks {
+            t.submitted();
+            self.pass_timeline = Some(t);
+        }
         let submit = submitted_at.elapsed() + early_submit;
         self.submissions += 1;
         if lit {
@@ -3810,6 +3847,9 @@ impl Renderer {
     /// Nonblocking progress and bounded event delivery, including while the viewer is suspended.
     pub fn poll(&mut self) -> Result<Events, Error> {
         let duration = self.collect()?;
+        if let Some(t) = &mut self.pass_timeline {
+            t.collect();
+        }
         Ok(self.events.drain(duration))
     }
     /// Drain opt-in CPU compilation timings (`RENDERLAB_STARTUP_PROFILE=1`).
