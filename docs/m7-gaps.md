@@ -796,7 +796,7 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **Sky-map cost halved (P-SKY, [p-sky.md](p-sky.md)), from the Linux thread's PR.**
   - Cause: every environment lookup ran a manual cube filter: face selection, four loads per level, and a seam path that diverges whole waves. It ran at every glossy-ray miss, every reflection hit and the primary. Every hit also ran a discarded miss lookup.
   - Fix: filtered cube-array lookups (`FLOAT32_FILTERABLE` joins `RECEIVER_FEATURES`) and a miss-only sky lookup.
-  - Radeon 760M, 1080p: the Showcase-like map premium goes from 16.5 to 8.5 ms on RT and from 17.4 to 9.4 ms on non-RT. The game scene's atmosphere sky gains 4.3–4.9 ms.
+  - Radeon 760M, 1080p: the Showcase-like map premium goes from 16.5 to 8.5 ms on RT and from 17.4 to 9.4 ms on non-RT. The game scene with its atmosphere sky is 4.3–4.9 ms faster: it lights through the same lookups.
   - **Still open:** the remaining 8.5 ms is the lookups' own sampling (misses 2.1, hits 3.8, primary 0.9). A half-precision field measured −1.5 ms but needs a range and quality gate before it can ship.
 - **OPEN: the non-RT moving game scene hangs RADV's gfx ring** (Radeon 760M, Mesa).
   - `game_scene --path nonrt` on the camera path, 1080p. The kernel charges the ring timeouts to that process, on main `ac7f46a` and on the P-SKY branch alike.
