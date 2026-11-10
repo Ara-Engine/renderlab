@@ -123,7 +123,7 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
 /// but has no traversal types, builtins or lighting estimator in its module.
-pub(super) fn edge_check_source(kernels: &str) -> String {
+pub(crate) fn edge_check_source(kernels: &str) -> String {
     use std::collections::{BTreeMap, BTreeSet};
     let kernels = kernels.replace("\r\n", "\n");
     let mut functions = BTreeMap::new();

@@ -62,6 +62,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::VisibilityResolve,
         Pass::PostPrimarySurface,
         Pass::TransparencyHitDepth,
+        Pass::PrimaryCheck,
         Pass::VisibilityCull,
         Pass::VisibilityFinish,
         Pass::VisibilityReset,
@@ -268,3 +269,8 @@ mod post_primary_reference;
 mod transparency_hit_depth_cases;
 #[path = "ara_backend/transparency_hit_depth_reference.rs"]
 mod transparency_hit_depth_reference;
+
+#[path = "ara_backend/cases/primary_check.rs"]
+mod primary_check_cases;
+#[path = "ara_backend/primary_check_reference.rs"]
+mod primary_check_reference;

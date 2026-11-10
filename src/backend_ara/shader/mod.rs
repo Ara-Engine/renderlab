@@ -37,6 +37,8 @@ pub enum Pass {
     PostPrimarySurface,
     /// Opaque hit geometry to the transparency pass's signed view distance.
     TransparencyHitDepth,
+    /// Ray-free near-edge geometric check and retry-queue construction.
+    PrimaryCheck,
     /// Non-RT cluster cut, frustum and two-phase HZB classification.
     VisibilityCull,
     /// Cull output counters to indirect raster/pyramid/cull arguments.
@@ -108,6 +110,16 @@ impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
+            Self::PrimaryCheck => {
+                let [head, _] = crate::renderer::primary_ray_gpu::non_rt_heads(include_str!(
+                    "../../../shaders/scene.wgsl"
+                ))
+                .expect("embedded primary arithmetic head");
+                crate::renderer::primary_ray_gpu::edge_check_source(
+                    &(head + include_str!("../../../shaders/primary_trace.wgsl")),
+                )
+                .into()
+            }
             Self::TransparencyHitDepth => {
                 crate::renderer::transparency_gpu::hit_depth_source().into()
             }
@@ -298,6 +310,7 @@ impl Pass {
                 | Self::VisibilityResolve
                 | Self::PostPrimarySurface
                 | Self::TransparencyHitDepth
+                | Self::PrimaryCheck
                 | Self::VisibilityHardware
                 | Self::MeshToon
                 | Self::ParticleUpdate
@@ -370,6 +383,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::PrimaryCheck => "primary_check_interactive",
             Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",
             Self::VisibilityResolve => "resolve",

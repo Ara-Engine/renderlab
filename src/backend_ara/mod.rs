@@ -17,6 +17,7 @@ pub mod particle_billboard;
 pub mod particles;
 pub mod post;
 pub mod post_surface;
+pub mod primary_check;
 pub mod program_bins;
 pub mod shader;
 pub mod skinning;

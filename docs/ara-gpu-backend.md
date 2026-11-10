@@ -697,3 +697,20 @@ the 12/12/23/35 miss values are exactly 1e30. Tiny positive and negative distanc
 remain near ±0.0005 rather than clamping to 0.001. All 30 focused Metal tests and 46
 SPIR-V stages pass; native Vulkan remains pending. There are 36 original entries
 plus display transfer.
+
+## Primary geometry check (entry 37)
+
+The original arithmetic-only `primary_check_interactive` composition runs on the
+heap packet, including its two 64-element mesh buffer arrays. `PrimaryCheck`
+resets only the retry queue header, then records direct or GPU-indirect work
+using the production 256-column grid. It does not read queue counts on the CPU.
+
+The independent fixture checks six active repairs, two mesh owners and padded
+invocations. Coplanar overlap canonicalizes the primitive and barycentrics exactly;
+missing adjacency sets fallback flags and appends the exact semantic retry set.
+Two submissions precede the first CPU wait. Queue headers, untouched repairs and
+canaries compare word-for-word on Metal with API/shader validation. Concave-fold
+and inset-probe branches remain unproven. Native Vulkan is pending.
+
+Checkpoint: all 31 focused tests pass with API/shader validation and API-only;
+47 exported SPIR-V stages validate for Vulkan 1.3. No backend clippy diagnostics.
