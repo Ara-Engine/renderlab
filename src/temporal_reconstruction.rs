@@ -37,7 +37,7 @@ pub struct Reconstruction {
     /// P-FLICKER (docs/p-flicker.md): Catmull-Rom resampling also blurs, by an amount that
     /// changes with the fetch fraction f every frame, so a fixed `sharp_window` shimmers on
     /// moving texture. A positive budget caps that window at `1 + sharp_blur_budget / sum
-    /// f(1 - f)`, as `blur_budget` does for bilinear. Zero keeps the fixed window.
+    /// f(1 - f)`, as `blur_budget` does for bilinear (default 2). Zero keeps the fixed window.
     pub sharp_blur_budget: f32,
     /// Window of a moving silhouette's occluder coverage, which the occluder's motion
     /// carries; still silhouettes use `window`.
@@ -126,7 +126,8 @@ impl Default for Reconstruction {
             window: 256.0,
             blur_budget: 1.0,
             sharp_window: 16.0,
-            sharp_blur_budget: 0.0,
+            // P-FLICKER (docs/p-flicker.md): quarry flicker 4.39 -> 4.32 RT, 4.44 -> 4.38 non-RT.
+            sharp_blur_budget: 2.0,
             coverage_window: 16.0,
             start_window: 4.0,
             start_radius: 1.0,
