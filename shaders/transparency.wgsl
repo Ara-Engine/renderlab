@@ -126,13 +126,11 @@ const TP_TRACE_TILE=vec2<u32>(8u,4u);
 @group(0) @binding(38) var tp_reflected:texture_2d<f32>;
 struct TpDraw { thickness:f32, pad0:f32, pad1:f32, pad2:f32 };
 @group(0) @binding(37) var<uniform> tp_draw:TpDraw;
-// The opaque light behind a thin slab at `world`: entry refraction through the shading
-// normal, exit through the flat back face, continued to the opaque depth behind. The
-// shifted point is sampled from the colour behind this draw; samples of something nearer
-// than the slab fall back to the unshifted pixel.
-fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, depth:f32, ior:f32) -> vec3<f32> {
-    let here=(vec2<f32>(pixel)+vec2<f32>(0.5))*tp.size.zw;
-    let opaque=textureLoad(tp_depth,pixel,0).x;
+// Where the opaque light behind a thin slab at `world` is seen, as a uv of the colour behind
+// this draw: entry refraction through the shading normal, exit through the flat back face,
+// continued to the opaque depth `opaque` behind the pixel. Samples of something nearer than
+// the slab (or off screen) fall back to the unshifted `here`.
+fn tp_shift(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, here:vec2<f32>, opaque:f32, depth:f32, ior:f32) -> vec2<f32> {
     let d=normalize(world-tp.eye.xyz);
     var ng=geometric; if dot(ng,d)>0.0 { ng=-ng; }
     var ns=shading; if dot(ns,ng)<0.0 { ns=-ns; }
@@ -158,7 +156,40 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
             }
         }
     }
-    return textureSampleLevel(tp_color,tp_sampler,uv,0.0).rgb;
+    return uv;
+}
+// The light behind the slab over this pixel's footprint (P-DEFECT, docs/p-defect.md). Near a
+// curved surface's rim the refraction shift changes by many pixels across one pixel, so a
+// single lookup aliased the background it compresses there, and its fallback switched pixel by
+// pixel: a stair-stepped band inside the rim. Where the shift's footprint exceeds a pixel, up
+// to 4x4 stratified sub-pixel positions (`world`, `shading` moved along their one-pixel
+// derivatives) each take their own shift, applied at this pixel's centre so an unshifted
+// background stays sharp. Elsewhere it is the single centre lookup.
+fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2<i32>, depth:f32, ior:f32,
+             world_dx:vec3<f32>, world_dy:vec3<f32>, normal_dx:vec3<f32>, normal_dy:vec3<f32>) -> vec3<f32> {
+    let here=(vec2<f32>(pixel)+vec2<f32>(0.5))*tp.size.zw;
+    let opaque=textureLoad(tp_depth,pixel,0).x;
+    let uv=tp_shift(world,shading,geometric,here,opaque,depth,ior);
+    let step=tp.size.zw;
+    let hx=here+vec2<f32>(step.x,0.0);
+    let hy=here+vec2<f32>(0.0,step.y);
+    let sx=tp_shift(world+world_dx,unit_normal(shading+normal_dx),geometric,hx,opaque,depth,ior)-hx;
+    let sy=tp_shift(world+world_dy,unit_normal(shading+normal_dy),geometric,hy,opaque,depth,ior)-hy;
+    let s0=uv-here;
+    let footprint=vec2<f32>(length((sx-s0)*tp.size.xy),length((sy-s0)*tp.size.xy));
+    let n=vec2<u32>(clamp(ceil(footprint),vec2<f32>(1.0),vec2<f32>(4.0)));
+    if n.x*n.y==1u { return textureSampleLevel(tp_color,tp_sampler,uv,0.0).rgb; }
+    var sum=vec3<f32>(0.0);
+    for(var y=0u;y<n.y;y+=1u) {
+        for(var x=0u;x<n.x;x+=1u) {
+            let o=(vec2<f32>(f32(x),f32(y))+vec2<f32>(0.5))/vec2<f32>(n)-vec2<f32>(0.5);
+            let h=here+o*step;
+            let w=world+world_dx*o.x+world_dy*o.y;
+            let ns=unit_normal(shading+normal_dx*o.x+normal_dy*o.y);
+            sum+=textureSampleLevel(tp_color,tp_sampler,here+(tp_shift(w,ns,geometric,h,opaque,depth,ior)-h),0.0).rgb;
+        }
+    }
+    return sum/f32(n.x*n.y);
 }
 @fragment fn fs_transparent(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {
     let source_front=front==(input.winding>0.0);
@@ -179,7 +210,8 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
     rl_indirect_prepare(surface_input);
     let lit=rl_finite(shade(surface_output,surface_input));
-    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));
+    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material),
+        surface_input.world_dx,surface_input.world_dy,surface_input.normal_dx,surface_input.normal_dy);
     // AT1 fog and aerial perspective over the surface's own light, and the share of the
     // path's in-scattering that the light behind (already fogged up to the eye) carries:
     // atmosphere_surface(c, p) = c t + s, so fully clear glass leaves `behind` unchanged.

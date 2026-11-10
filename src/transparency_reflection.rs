@@ -62,12 +62,16 @@ fn rl_glass_parameter_batch(batch:u32)->u32 {
     if p.w==0.0 {textureStore(primary_hdr,id.xy,vec4<f32>(0.0));return;}
     let lobe=textureLoad(tp_reflection_normal,vec2<i32>(id.xy),0);
     let n=unit_normal(lobe.xyz);
-    let geometric=unit_normal(textureLoad(tp_reflection_geometric,vec2<i32>(id.xy),0).xyz);
+    let g=textureLoad(tp_reflection_geometric,vec2<i32>(id.xy),0);
+    let geometric=unit_normal(g.xyz);
     let receiver=Receiver(p.xyz,geometric,vec2<i32>(id.xy),0u,p.w,true);
     let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),geometric,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
         vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),true,lighting.eye,id.xy,primary_materials[0].value,receiver,decal_none());
     rl_indirect_open();
-    rl_reflection_prepare(SpecularLobe(n,lobe.w,1.0),input,0u,id.xy,size);
+    // P-DEFECT: glass has no history, so a mirror lobe traced one ray at the pixel centre
+    // and a curved rim, whose reflection turns by up to g.w across the pixel, aliased into
+    // dots. Its lobe is at least as wide as that footprint (a half-vector spread of g.w/4).
+    rl_reflection_prepare(SpecularLobe(n,max(lobe.w,0.25*g.w),1.0),input,0u,id.xy,size);
     textureStore(primary_hdr,id.xy,rl_specular);
 }
 "#);

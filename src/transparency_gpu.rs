@@ -69,6 +69,35 @@ const MAP_SHADOW: &str = "fn hard_shadow(light:Light, receiver:Receiver, l:vec3<
     return tp_sun_visibility(receiver.world);
 }";
 
+/// The prelude's interpolated varyings (shaders/scene.wgsl `VertexOutput` and `RasterInput`)
+/// with centroid interpolation, which both stages must declare alike.
+fn centroid_varyings(source: &str) -> String {
+    let mut source = source.replace("\r\n", "\n");
+    for name in ["VertexOutput", "RasterInput"] {
+        let start = source
+            .find(&format!("struct {name} {{"))
+            .expect("varying struct seam moved");
+        let end = start + source[start..].find("};").unwrap();
+        let mut block = source[start..end].to_owned();
+        for (location, field) in [
+            (0, "color"),
+            (1, "uv"),
+            (2, "normal"),
+            (4, "world"),
+            (5, "tangent"),
+        ] {
+            let from = format!("@location({location}) {field}:");
+            assert_eq!(block.matches(&from).count(), 1, "{name}.{field} seam moved");
+            block = block.replace(
+                &from,
+                &format!("@location({location}) @interpolate(perspective,centroid) {field}:"),
+            );
+        }
+        source.replace_range(start..end, &block);
+    }
+    source
+}
+
 /// A transparent material's module: its program composed on `head` (the hardware prelude
 /// on RT renderers; otherwise the prelude with the map's sun visibility), then the pass's
 /// entry with the program's composite.
@@ -80,6 +109,13 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
     };
     let mut composed =
         crate::program::compose(&head, program, crate::program::Stage::Raster, parameters);
+    // P-DEFECT (docs/p-defect.md): TP2's four coverage samples shade once per pixel. At the
+    // pixel centre, a silhouette fragment whose centre misses the glass read its attributes
+    // extrapolated past the edge (a sphere's normal past grazing), so the rim's Fresnel,
+    // highlight and refraction flipped pixel by pixel: a stair-stepped rim. Centroid
+    // interpolation evaluates them inside the covered samples; single-sample passes (the
+    // lobe pass) are unchanged, since a fragment exists only where its centre is covered.
+    composed.source = centroid_varyings(&composed.source);
     // TP2: transparent receivers create no cache cells. Searching unrelated opaque
     // cells cost ~0.95 ms on the quarry; use the open environment, as R1 hit shading does.
     #[cfg(not(test))]
@@ -132,14 +168,16 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
             .replace("TP_SURFACE", surface)
             .replace("TP_TRANSMIT", transmit)
     );
-    // TP2: a material's own lobe is rasterized separately from its final composite.
+    // TP2: a material's own lobe is rasterized separately from its final composite. Its
+    // geometric output's w is the pixel's reflected-direction spread (twice the normal's
+    // one-pixel change), which the glass reflection filters over (P-DEFECT).
     let glass = section("TP_GLASS");
     let body = &glass[glass.find("    let source_front=").unwrap()
         ..glass
             .find("    rl_indirect_prepare(surface_input);")
             .unwrap()];
     let lobe = if crate::program::declares_reflection(program) {
-        "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha),vec4<f32>(surface_input.receiver.geometric,0.0));"
+        "let lobe=reflection_lobe(surface_output,surface_input);\nif lobe.weight<=0.0 {discard;}\nlet curvature=2.0*max(length(surface_input.normal_dx),length(surface_input.normal_dy))/max(length(surface_input.normal),1e-30);\nreturn TpLobeOutput(vec4<f32>(input.world,surface_input.receiver.epsilon),vec4<f32>(lobe.normal,lobe.alpha),vec4<f32>(surface_input.receiver.geometric,curvature));"
     } else {
         "return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0));"
     };
@@ -150,12 +188,29 @@ fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String
         replace_function(
             &source,
             "specular_incident",
-            "fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }",
+            GLASS_SPECULAR_INCIDENT,
         )
     } else {
         source
     }
 }
+/// Glass reads the traced lobe of its own pixel (TP2). The lobe pass is single-sample, so a
+/// silhouette fragment whose pixel centre misses the glass has none: it takes the mean of its
+/// traced 4-neighbours' (P-DEFECT), where it read the untraced estimate beside traced ones.
+const GLASS_SPECULAR_INCIDENT: &str = "fn specular_incident(input:SurfaceInput)->vec4<f32> {
+    if tp.misc.w==0.0 {return vec4<f32>(0.0);}
+    let p=vec2<i32>(input.pixel);
+    let own=textureLoad(tp_reflected,p,0);
+    if own.w>0.0 {return own;}
+    let last=vec2<i32>(textureDimensions(tp_reflected))-vec2<i32>(1);
+    let a=textureLoad(tp_reflected,clamp(p+vec2<i32>(1,0),vec2<i32>(0),last),0);
+    let b=textureLoad(tp_reflected,clamp(p-vec2<i32>(1,0),vec2<i32>(0),last),0);
+    let c=textureLoad(tp_reflected,clamp(p+vec2<i32>(0,1),vec2<i32>(0),last),0);
+    let d=textureLoad(tp_reflected,clamp(p-vec2<i32>(0,1),vec2<i32>(0),last),0);
+    let w=vec4<f32>(vec4<bool>(a.w>0.0,b.w>0.0,c.w>0.0,d.w>0.0));
+    let count=dot(w,vec4<f32>(1.0));
+    return select(own,(a*w.x+b*w.y+c*w.z+d*w.w)/max(count,1.0),count>0.0);
+}";
 /// The particle simulation and draw modules, after `prelude` for its environment helpers
 /// and AT1's camera fog and aerial perspective.
 fn particle_sources(prelude: &str) -> [String; 2] {

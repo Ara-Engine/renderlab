@@ -393,6 +393,14 @@ fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
     let exponent=clamp(a.exp+b.exp+e.exp+i.exp,vec3<i32>(-126),vec3<i32>(21));
     return min(ldexp(a.fract*b.fract*e.fract*i.fract,exponent),vec3<f32>(65504.0));
 }
+// P-DEFECT path regularization (docs/p-defect.md): the GGX alpha^2 that shading a reflection
+// hit adds to every `brdf` lobe, from the reflection ray's cone (reflections.wgsl sets it
+// around its hit shading). A glossy ray stands for a cone of directions, so a hit's light
+// highlight is seen through that cone: widening the hit's normalized lobe by it keeps the
+// highlight's energy but spreads it over the cone, where an exact lobe left a tiny, very
+// bright target that one ray in hundreds struck (white pixels). 0 elsewhere: camera
+// receivers evaluate the exact lobe.
+var<private> rl_hit_variance:f32;
 fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32) -> vec3<f32> {
     let nl=max(dot(n,l),0.0);
     let nv=max(dot(n,v),1e-7);
@@ -401,7 +409,7 @@ fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:
     let nh=max(dot(n,h),0.0);
     let vh=clamp(dot(v,h),0.0,1.0);
     let alpha=max(rough*rough,1e-4);
-    let a2=alpha*alpha;
+    let a2=min(alpha*alpha+rl_hit_variance,1.0);
     // |N x H|^2 + alpha^2 (N dot H)^2 preserves the peak at alpha=1e-4 in f32.
     let c=cross(n,h);
     let denom=max(dot(c,c)+a2*nh*nh,1e-20);
