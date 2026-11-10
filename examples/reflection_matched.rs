@@ -24,6 +24,9 @@
 //! dielectric turntable (Ara Showcase's: base 0.06, roughness 0.35) under the chrome and gold
 //! spheres, in the reference too; `--glass-balls` adds Showcase's clear and tinted glass balls
 //! (opacity 0, IOR 1.5, 0.6 m slab), which the path tracer cannot render.
+//! P-SHOW2 (docs/p-show2.md): `--metal-balls` adds Showcase's brushed aluminium (base 0.91,
+//! roughness 0.42, metallic 1) and copper (roughness 0.3) balls on the turntable, in the
+//! reference too.
 //!
 //! ```text
 //! RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK //!     cargo run --example reflection_matched -- --path nonrt --reference 16384 --write-frames 47 --out REF
@@ -78,6 +81,7 @@ struct Args {
     diag: Vec<(String, String)>,
     stage: bool,
     glass_balls: bool,
+    metal_balls: bool,
 }
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
@@ -113,6 +117,7 @@ impl Args {
             diag: Vec::new(),
             stage: false,
             glass_balls: false,
+            metal_balls: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -163,6 +168,7 @@ impl Args {
                 "--hour" => a.hour = Some(value()?.parse()?),
                 "--stage" => a.stage = true,
                 "--glass-balls" => a.glass_balls = true,
+                "--metal-balls" => a.metal_balls = true,
                 "--diag" => {
                     let v = value()?;
                     let (key, setting) = v.split_once('=').ok_or("--diag KEY=VALUE")?;
@@ -486,6 +492,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             turntable,
             boxed(at(0.3, 0.01, 6.0), Vec3::new(7.0, 0.02, 4.0)),
         )?;
+    }
+    if args.metal_balls {
+        // Showcase's flat metal balls (Ara samples, showcase.rs), resting on the turntable.
+        for (center, size, base, roughness) in [
+            (at(0.8, 0.52, 6.6), 1.0, [0.91, 0.92, 0.92], 0.42),
+            (at(-2.3, 0.42, 7.2), 0.8, [0.95, 0.64, 0.54], 0.3),
+        ] {
+            let metal = material(&mut engine, base, 1.0, roughness)?;
+            spawn(&mut engine, &mut placed, sphere, metal, boxed(center, Vec3::splat(size)))?;
+        }
     }
     if args.glass_balls {
         for (center, base) in [

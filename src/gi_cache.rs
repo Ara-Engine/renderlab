@@ -2710,16 +2710,19 @@ pub(super) struct ShadeGroups<'a> {
 impl GiState {
     /// The cache passes, after the primaries' hit records and before shading. `lighting`
     /// is lighting's kernel group (the header-only table at binding 20); `shade` the groups
-    /// cell shading runs the frame's program on (G2).
+    /// cell shading runs the frame's program on (G2). `mark` names the stages for the pass
+    /// timeline (src/pass_timeline.rs).
     pub fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         lighting: &wgpu::BindGroup,
         shade: Option<ShadeGroups<'_>>,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         let Some(plan) = self.plan.take() else {
             return;
         };
+        mark(encoder, "gi_probe");
         let r = self.resources.as_ref().unwrap();
         let p = self.pipelines.as_ref().unwrap();
         let g = self.groups.as_ref().unwrap();
@@ -2790,10 +2793,12 @@ impl GiState {
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
+        mark(encoder, "gi_gather");
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
         }
+        mark(encoder, "gi_claim");
         if traced || profiling {
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
@@ -2804,6 +2809,7 @@ impl GiState {
             }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
+        mark(encoder, "gi_update");
         if plan.scan || profiling {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
@@ -2817,6 +2823,7 @@ impl GiState {
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }
+        mark(encoder, "gi_integrate");
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
             main_pass(
@@ -2840,6 +2847,7 @@ impl GiState {
             );
         }
         // Light visibility at the cells to shade, then the program's cell shading (G2).
+        mark(encoder, "gi_cell_shading");
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([LIGHT_GROUPS, 1]);
             main_pass(encoder, "indirect cache light", &p.light, b + 1, grid);
