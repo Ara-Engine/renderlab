@@ -256,29 +256,17 @@ pub fn instance_flags() -> wgpu::InstanceFlags {
 }
 
 /// A Vulkan adapter for offscreen use (no surface), preferring a discrete GPU.
-///
-/// The instance and adapter are created once per process and shared by every engine
-/// (an adapter opens any number of devices). Enumerating physical devices while
-/// another engine renders is unsafe on some Vulkan loaders: 1.4.341 unloads rescanned
-/// drivers inside `vkEnumeratePhysicalDevices`, and a concurrent call on another
-/// device then faults in the loader. A game opening a second view must not do that.
 pub fn headless_adapter() -> Result<wgpu::Adapter, Error> {
-    static ADAPTER: std::sync::OnceLock<Option<wgpu::Adapter>> = std::sync::OnceLock::new();
-    ADAPTER
-        .get_or_init(|| {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                flags: instance_flags(),
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            }))
-            .ok()
-        })
-        .clone()
-        .ok_or(Error::InvalidInput("no Vulkan adapter"))
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: instance_flags(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .map_err(|_| Error::InvalidInput("no Vulkan adapter"))
 }
 
 impl Engine {
