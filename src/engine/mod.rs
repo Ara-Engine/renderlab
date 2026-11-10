@@ -248,9 +248,14 @@ pub struct Engine {
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
 /// External adapters should use these flags too; explicit wgpu environment overrides apply.
+///
+/// Debug object names (`InstanceFlags::DEBUG`) are opt-in with `WGPU_DEBUG=1` (capture
+/// tools), not a default of debug builds: with several devices alive, naming objects
+/// through the Vulkan validation layer segfaulted inside Ubuntu's 1.4.341 loader
+/// running the SDK's 1.4.363 layer (4 of 10 concurrent runs; 0 of 10 without names).
 pub fn instance_flags() -> wgpu::InstanceFlags {
     wgpu::InstanceFlags::default()
-        .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+        .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL | wgpu::InstanceFlags::DEBUG)
         .with_env()
 }
 
