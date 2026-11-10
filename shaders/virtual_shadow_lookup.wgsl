@@ -34,8 +34,8 @@ struct VsmFrame {
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
     rects:array<vec4<f32>,VSM_MAX_RECTS>,
     srects:array<vec4<f32>,VSM_MAX_RECTS>,
-    horizon:array<vec4<u32>,16>,
-    records:array<vec4<u32>,32>,
+    horizon:array<vec4<u32>,PRIMARY_BATCHES/4>,
+    records:array<vec4<u32>,PRIMARY_BATCHES/2>,
     n8e:vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;

@@ -5,7 +5,7 @@
 // the clear blocks outside primary_region. Each pixel is written by exactly one dispatch.
 // Single-program frames never compose this entry: they keep primary_shade_tiles.
 // Must match program_bins.wgsl RlList and primary_ray_gpu.rs ProgramLists.
-struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,16> };
+struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,PRIMARY_BATCHES/4> };
 // This dispatch's slot (a dynamic offset per slot) and every draw's slot.
 @group(0) @binding(38) var<uniform> rl_list:RlList;
 // Per slot at base: the list's length, then its entries.

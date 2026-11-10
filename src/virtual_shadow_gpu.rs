@@ -40,9 +40,15 @@ pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
-/// screen rectangles, the 64 per-batch horizon offsets and (first record, recorded) pairs,
+/// screen rectangles, the TRACED_DRAWS per-batch horizon offsets and (first record, recorded) pairs,
 /// N8e's uvec4 and P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`).
-const FRAME_BYTES: usize = 6 * 16 + 2 * 16 + MAX_LEVELS * 32 + 2 * MAX_RECTS * 16 + 768 + 16 + 16;
+const FRAME_BYTES: usize = 6 * 16
+    + 2 * 16
+    + MAX_LEVELS * 32
+    + 2 * MAX_RECTS * 16
+    + 12 * crate::TRACED_DRAWS as usize
+    + 16
+    + 16;
 /// `VsmFrame::nsq`: direction batches and the frame's sequence rotation (docs/p-nsq.md).
 const SAMPLING_OFFSET: u64 = (FRAME_BYTES - 16) as u64;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
@@ -2067,11 +2073,11 @@ impl Renderer {
         }
         // Each batch's first horizon word, then (N8h) its first record and recorded triangles.
         let h = state.horizons.as_ref().unwrap();
-        for b in 0..64 {
+        for b in 0..crate::TRACED_DRAWS as usize {
             let offset = h.offsets.get(b).copied().unwrap_or(0);
             frame.extend_from_slice(&offset.to_ne_bytes());
         }
-        for b in 0..64 {
+        for b in 0..crate::TRACED_DRAWS as usize {
             for value in h.records.get(b).copied().unwrap_or([0, 0]) {
                 frame.extend_from_slice(&value.to_ne_bytes());
             }
@@ -2880,9 +2886,29 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         }
-        assert_eq!(FRAME_BYTES, 1696);
+        // Verify the shader ABI rather than only duplicating Rust's size arithmetic.
+        let module = naga::front::wgsl::parse_str(&shader_source()).unwrap();
+        let frame = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("VsmFrame"))
+            .unwrap()
+            .1;
+        let naga::TypeInner::Struct { members, span } = &frame.inner else {
+            panic!("VsmFrame is not a struct")
+        };
+        assert_eq!(*span as usize, FRAME_BYTES);
+        assert_eq!(
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some("nsq"))
+                .unwrap()
+                .offset as u64,
+            SAMPLING_OFFSET
+        );
+        assert_eq!(FRAME_BYTES, 928 + 12 * crate::TRACED_DRAWS as usize);
         // P-NSQ: the sampling uvec4 is VsmFrame's last member, after N8e's.
-        assert_eq!(SAMPLING_OFFSET, 1680);
+        assert_eq!(SAMPLING_OFFSET, FRAME_BYTES as u64 - 16);
         let source = shader_source();
         let n8e = source.find("    n8e:vec4<u32>,").unwrap();
         let nsq = source.find("    nsq:vec4<u32>,").unwrap();

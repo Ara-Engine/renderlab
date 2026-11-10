@@ -991,7 +991,10 @@ mod tests {
 
     #[test]
     fn default_traced_shading_has_no_residency_code() {
-        let head = format!("const PRIMARY_BATCHES:u32=64u;\n{PRELUDE}");
+        let head = format!(
+            "const PRIMARY_BATCHES:u32={}u;\n{PRELUDE}",
+            crate::TRACED_DRAWS
+        );
         let plain = compose(&head, STANDARD_PROGRAM, Stage::Traced, false).source;
         let streamed = compose(&head, STANDARD_PROGRAM, Stage::TracedStreamed, false).source;
         assert!(plain.contains(TRACED_API));

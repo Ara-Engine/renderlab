@@ -63,7 +63,7 @@ fn gs_vertex(tangent:bool,batch:u32,input:VertexInput,index:u32)->VertexOutput {
 fn gs_placement(identity:u32) -> u32 {
     let id=identity>>16u;
     let inst=identity&0xffffu;
-    for(var b=0u;b<PRIMARY_BATCHES;b+=1u) {
+    for(var b=0u;b<gi_shade_draws[PRIMARY_BATCHES].x;b+=1u) {
         let d=gi_shade_draws[b];
         if d.x==id && inst<d.z { return d.y+inst; }
     }
