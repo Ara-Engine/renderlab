@@ -5,7 +5,10 @@ use naga::back::msl;
 
 /// Translate original WGSL and adapt only its entry interface to Ara's global heap.
 pub fn msl(pass: Pass) -> Result<MetalProgram> {
-    let mut module = parse(pass.source().as_ref())?;
+    from_source(pass, pass.source().as_ref())
+}
+pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
+    let mut module = parse(wgsl)?;
     for (_, global) in module.global_variables.iter_mut() {
         if global.space == naga::AddressSpace::Uniform {
             global.space = naga::AddressSpace::Storage {
@@ -24,7 +27,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     let indirect = if pass.indirect() {
         Some({
             let inputs = super::heap_interface::from_module(&module)?;
-            super::heap_interface::assert_contract(pass, &inputs)?;
+            super::heap_interface::assert_source_contract(pass, wgsl, &inputs)?;
             inputs
         })
     } else {

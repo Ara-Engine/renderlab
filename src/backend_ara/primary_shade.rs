@@ -1,0 +1,37 @@
+//! Original non-RT deferred shading entries, composed with caller material WGSL.
+use super::shader::{Pass, Program};
+use anyhow::Result;
+/// Dispatch family for one program's deferred primary shading.
+#[derive(Clone, Copy)]
+pub enum Entry {
+    /// A single material program shades the full primary region and clear blocks.
+    Tiles,
+    /// A material program shades its GPU-built per-program tile list.
+    List,
+}
+impl Entry {
+    /// Compose and reflect the same non-RT program API and entry as wgpu uses.
+    /// Programs keep their Surface/Parameters definitions and material hooks.
+    pub fn program(self, material: &str) -> Result<Program> {
+        let list = matches!(self, Self::List);
+        Program::new(
+            if list {
+                Pass::PrimaryShadeList
+            } else {
+                Pass::PrimaryShadeTiles
+            },
+            source(material, list)?,
+        )
+    }
+}
+pub(crate) fn source(material: &str, list: bool) -> Result<String> {
+    let (_, [head, _]) =
+        crate::renderer::primary_ray_gpu::non_rt_sources(include_str!("../../shaders/scene.wgsl"))?;
+    let parameters = crate::program::declares_parameters(material);
+    let composed = if list {
+        crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
+    } else {
+        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters)
+    };
+    Ok(composed.source)
+}

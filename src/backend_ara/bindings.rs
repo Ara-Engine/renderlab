@@ -31,6 +31,7 @@ pub struct HeapBindings<'a> {
     values: Vec<Input<'a>>,
     layout: Vec<ShaderInput>,
     pass: Pass,
+    contract: Option<[u8; 32]>,
 }
 impl<'a> HeapBindings<'a> {
     /// Array heads contain buffer-absolute tail word offsets. Packing records
@@ -42,7 +43,30 @@ impl<'a> HeapBindings<'a> {
             pass.indirect(),
             "shader does not use an indirect input packet"
         );
-        let layout = shader::inputs(pass)?;
+        Self::with_layout(gpu, pass, shader::inputs(pass)?, None, values)
+    }
+    /// Build a packet for caller-authored WGSL. The reflected contract is retained
+    /// by value, so source code can be dropped after pipeline/packet construction.
+    pub fn for_program(
+        gpu: &mut GpuDevice,
+        program: &shader::Program,
+        values: &[(InputKey, Input<'a>)],
+    ) -> Result<Self> {
+        Self::with_layout(
+            gpu,
+            program.pass(),
+            program.inputs().to_vec(),
+            Some(program.contract()),
+            values,
+        )
+    }
+    fn with_layout(
+        gpu: &mut GpuDevice,
+        pass: Pass,
+        layout: Vec<ShaderInput>,
+        contract: Option<[u8; 32]>,
+        values: &[(InputKey, Input<'a>)],
+    ) -> Result<Self> {
         ensure!(
             values.len() == layout.len(),
             "wrong number of selected shader inputs"
@@ -175,7 +199,11 @@ impl<'a> HeapBindings<'a> {
             values: retained,
             layout,
             pass,
+            contract,
         })
+    }
+    pub(crate) fn contract(&self) -> Option<[u8; 32]> {
+        self.contract
     }
     /// Selected shader family, to reject an incompatible pipeline packet.
     pub fn pass(&self) -> Pass {

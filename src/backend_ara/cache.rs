@@ -42,9 +42,27 @@ impl ShaderCache {
         pass: Pass,
         state: RenderState,
     ) -> Result<Pipeline> {
+        self.pipeline_source(gpu, pass, pass.source().as_ref(), state)
+    }
+    /// Compile a caller-authored compute program through the same native cache.
+    pub fn program(&self, gpu: &mut GpuDevice, program: &shader::Program) -> Result<Pipeline> {
+        self.pipeline_source(
+            gpu,
+            program.pass(),
+            program.source(),
+            RenderState::default(),
+        )
+    }
+    fn pipeline_source(
+        &self,
+        gpu: &mut GpuDevice,
+        pass: Pass,
+        wgsl: &str,
+        state: RenderState,
+    ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-            pass.source(),
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            wgsl,
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
             include_str!("shader/mod.rs"),
@@ -54,9 +72,11 @@ impl ShaderCache {
             include_str!("shader/heap_interface.rs"),
             include_str!("shader/packet_spirv.rs"),
             include_str!("shader/spv_layout.rs"),
+            include_str!("shader/spv_nonuniform.rs"),
             include_str!("shader/array_access.rs"),
             include_str!("shader/buffer_arrays.rs"),
             include_str!("shader/handle_arrays.rs"),
+            include_str!("shader/program.rs"),
             include_str!("cache.rs"),
             include_str!("../../Cargo.lock")
         );
@@ -76,7 +96,7 @@ impl ShaderCache {
                 .root
                 .join(format!(".{}-{}-{}", key, std::process::id(), next()));
             std::fs::create_dir(&scratch)?;
-            let result = self.emit(pass, state, &scratch, &key);
+            let result = self.emit(pass, wgsl, state, &scratch, &key);
             if let Err(e) = result {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(e);
@@ -96,11 +116,18 @@ impl ShaderCache {
             serde_json::from_slice(&std::fs::read(path.join("pipeline.json"))?)?;
         Ok(gpu.create_pipeline(&meta, &path)?)
     }
-    fn emit(&self, pass: Pass, state: RenderState, dir: &Path, key: &str) -> Result<()> {
+    fn emit(
+        &self,
+        pass: Pass,
+        wgsl: &str,
+        state: RenderState,
+        dir: &Path,
+        key: &str,
+    ) -> Result<()> {
         #[cfg(target_os = "macos")]
         let stages = {
             use ara_gpu::cooked::CookedMetalStage;
-            let program = shader::msl(pass)?;
+            let program = shader::msl_source(pass, wgsl)?;
             let source = format!("{}{}", include_str!("shader/abi.metal"), program.source);
             std::fs::write(dir.join("source.metal"), source)?;
             tool(
@@ -131,7 +158,7 @@ impl ShaderCache {
             for (stage, entry) in entries {
                 let reflection = format!("{entry}.json");
                 let value = if stage == Stage::Compute {
-                    serde_json::json!({"EntryPoint":entry,"state":{"tg_size":pass.threads()?}})
+                    serde_json::json!({"EntryPoint":entry,"state":{"tg_size":shader::threads_source(pass, wgsl)?}})
                 } else {
                     serde_json::json!({"EntryPoint":entry,"state":{}})
                 };
@@ -156,7 +183,7 @@ impl ShaderCache {
             stages
         };
         #[cfg(not(target_os = "macos"))]
-        let stages = emit_spirv(pass, dir)?;
+        let stages = emit_spirv_source(pass, shader::spirv_source(pass, wgsl)?, dir)?;
         cooked::write_json(
             &dir.join("pipeline.json"),
             &CookedPipeline {
@@ -173,9 +200,20 @@ impl ShaderCache {
 }
 /// Emit the portable stages for Windows validation and replay, without Slang.
 pub fn emit_spirv(pass: Pass, dir: &Path) -> Result<Vec<CookedStage>> {
+    emit_spirv_source(pass, shader::spirv(pass)?, dir)
+}
+/// Export a caller-authored program for the native Vulkan gate.
+pub fn emit_spirv_program(program: &shader::Program, dir: &Path) -> Result<Vec<CookedStage>> {
+    emit_spirv_source(program.pass(), program.spirv()?, dir)
+}
+fn emit_spirv_source(
+    pass: Pass,
+    source: Vec<shader::SpirvStage>,
+    dir: &Path,
+) -> Result<Vec<CookedStage>> {
     std::fs::create_dir_all(dir)?;
     let mut stages = Vec::new();
-    for stage in shader::spirv(pass)? {
+    for stage in source {
         let name = format!("{pass:?}-{}.spv", stage.entry);
         let bytes: Vec<_> = stage.words.iter().flat_map(|w| w.to_le_bytes()).collect();
         std::fs::write(dir.join(&name), &bytes)?;

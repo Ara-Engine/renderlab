@@ -6,13 +6,16 @@ mod heap_interface;
 mod mesh_interface;
 mod metal;
 mod packet_spirv;
+mod program;
 pub use heap_interface::{InputKey, InputKind, SampleType, ShaderInput, inputs};
 pub(crate) use mesh_interface::MeshResource;
+pub use program::Program;
 mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
 mod spirv;
 mod spv_layout;
+mod spv_nonuniform;
 pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;
@@ -30,6 +33,10 @@ pub enum Pass {
     BufferArrayProbe,
     /// Shared sampled-handle array conformance probe; not a rendering pass.
     HandleArrayProbe,
+    /// Original single-program deferred shading of primary tiles.
+    PrimaryShadeTiles,
+    /// Original mixed-program deferred shading of listed primary tiles.
+    PrimaryShadeList,
     /// Original software raster of projected cluster triangles into packed visibility.
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
@@ -112,6 +119,14 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::PrimaryShadeTiles | Self::PrimaryShadeList => {
+                crate::backend_ara::primary_shade::source(
+                    include_str!("../shaders/traced_material.wgsl"),
+                    matches!(self, Self::PrimaryShadeList),
+                )
+                .expect("original traced composition remains valid")
+                .into()
+            }
             Self::HandleArrayProbe => include_str!("../shaders/handle_array_probe.wgsl").into(),
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
             Self::PrimaryCheck => {
@@ -309,7 +324,9 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::HandleArrayProbe
+            Self::PrimaryShadeTiles
+                | Self::PrimaryShadeList
+                | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
                 | Self::VisibilitySoftware
                 | Self::VisibilityResolve
@@ -371,23 +388,13 @@ impl Pass {
         )
     }
     pub(crate) fn threads(self) -> anyhow::Result<[u32; 3]> {
-        let mut module = parse(self.source().as_ref())?;
-        select(&mut module, self)?;
-        let entry = module
-            .entry_points
-            .iter()
-            .find(|entry| entry.name == self.entry())
-            .ok_or_else(|| anyhow::anyhow!("selected WGSL entry missing"))?;
-        anyhow::ensure!(
-            entry.stage == naga::ShaderStage::Compute
-                && entry.workgroup_size.iter().all(|v| *v > 0),
-            "selected pass is not a concrete compute entry"
-        );
-        Ok(entry.workgroup_size)
+        threads_source(self, self.source().as_ref())
     }
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::PrimaryShadeTiles => "primary_shade_tiles",
+            Self::PrimaryShadeList => "primary_shade_list",
             Self::PrimaryCheck => "primary_check_interactive",
             Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",
@@ -521,4 +528,23 @@ pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
         image_load: naga::proc::BoundsCheckPolicy::Restrict,
         binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use metal::from_source as msl_source;
+#[cfg(not(target_os = "macos"))]
+pub(crate) use spirv::from_source as spirv_source;
+pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
+    let mut module = parse(source)?;
+    select(&mut module, pass)?;
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == pass.entry())
+        .ok_or_else(|| anyhow::anyhow!("selected WGSL entry missing"))?;
+    anyhow::ensure!(
+        entry.stage == naga::ShaderStage::Compute && entry.workgroup_size.iter().all(|v| *v > 0),
+        "selected pass is not a concrete compute entry"
+    );
+    Ok(entry.workgroup_size)
 }

@@ -64,6 +64,8 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::PostPrimarySurface,
         Pass::TransparencyHitDepth,
         Pass::PrimaryCheck,
+        Pass::PrimaryShadeTiles,
+        Pass::PrimaryShadeList,
         Pass::VisibilityCull,
         Pass::VisibilityFinish,
         Pass::VisibilityReset,
@@ -111,6 +113,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
                 .iter()
                 .map(|b| u32::from_le_bytes(*b))
                 .collect();
+            assert_nonuniform_sampled_images(&words)?;
             let mut at = 5;
             let mut entries = Vec::new();
             while at < words.len() {
@@ -278,3 +281,41 @@ mod primary_check_reference;
 
 #[path = "ara_backend/cases/handle_arrays.rs"]
 mod handle_array_cases;
+
+#[path = "ara_backend/cases/primary_shade.rs"]
+mod primary_shade_cases;
+#[path = "ara_backend/primary_shade_reference.rs"]
+mod primary_shade_reference;
+
+// Inspect the final operand consumed by sampling; spirv-val does not enforce this
+// semantic descriptor-indexing rule. Independent from the production repair pass.
+fn assert_nonuniform_sampled_images(words: &[u32]) -> Result<()> {
+    let mut decorations = std::collections::BTreeSet::new();
+    let mut combined = Vec::new();
+    let mut at = 5;
+    while at < words.len() {
+        let n = (words[at] >> 16) as usize;
+        ensure!(n > 0 && at + n <= words.len(), "invalid SPIR-V instruction");
+        match words[at] & 0xffff {
+            71 if n == 3 && words[at + 2] == 5300 => {
+                decorations.insert(words[at + 1]);
+            }
+            86 => {
+                ensure!(n == 5, "short sampled image");
+                combined.push(&words[at + 1..at + n]);
+            }
+            _ => {}
+        }
+        at += n;
+    }
+    for values in combined {
+        if decorations.contains(&values[2]) || decorations.contains(&values[3]) {
+            ensure!(
+                decorations.contains(&values[1]),
+                "sampled image {} lost divergent image/sampler identity",
+                values[1]
+            );
+        }
+    }
+    Ok(())
+}

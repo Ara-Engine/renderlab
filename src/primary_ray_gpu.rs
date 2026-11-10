@@ -81,7 +81,7 @@ pub(crate) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     Ok([hard, soft].map(|body| format!("enable wgpu_binding_array;\n{before}\n{body}\n{after}\n{hash}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}", include_str!("../shaders/primary_rays.wgsl"))))
 }
 
-pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
+pub(crate) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
     let heads = non_rt_heads(wgsl)?;
     let kernels = heads.clone().map(|h| format!("{h}\noverride FRESH_DIRECTIONS:u32=256u;\n@compute @workgroup_size(1) fn primary_trace() {{}}\n@compute @workgroup_size(1) fn primary_trace_receivers() {{}}\n@compute @workgroup_size(1) fn primary_trace_interactive() {{}}\n@compute @workgroup_size(1) fn fresh_compute() {{}}"));
     // M7-R1n: non-RT shading heads declare the software reflection geometry.

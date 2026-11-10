@@ -87,7 +87,10 @@ pub struct ShaderInput {
 }
 /// Reflect only the selected entry pair; unused program interfaces are omitted.
 pub fn inputs(pass: super::Pass) -> Result<Vec<ShaderInput>> {
-    let mut module = super::parse(pass.source().as_ref())?;
+    from_source(pass, pass.source().as_ref())
+}
+pub(super) fn from_source(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
+    let mut module = super::parse(source)?;
     super::select(&mut module, pass)?;
     from_module(&module)
 }
@@ -323,8 +326,12 @@ pub(super) fn wgsl_type(module: &naga::Module, ty: naga::Handle<naga::Type>) -> 
 
 // Each backend reflects independently after transformations. Check the original
 // sorted contract before emitting code, so a frontend change cannot reorder data.
-pub(super) fn assert_contract(pass: super::Pass, actual: &[ShaderInput]) -> Result<()> {
-    let expected = inputs(pass)?;
+pub(super) fn assert_source_contract(
+    pass: super::Pass,
+    source: &str,
+    actual: &[ShaderInput],
+) -> Result<()> {
+    let expected = from_source(pass, source)?;
     ensure!(
         expected.len() == actual.len()
             && expected

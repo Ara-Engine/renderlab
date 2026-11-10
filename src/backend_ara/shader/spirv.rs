@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 /// is aliased onto sampled binding 5 in the emitted decorations, because naga's
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
-    let source = hoist_directives(&adapt(pass)?);
+    from_source(pass, pass.source().as_ref())
+}
+pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
+    let source = hoist_directives(&adapt(pass, wgsl)?);
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
     let entries: Vec<_> = if pass.raster() {
@@ -62,6 +65,7 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
             if !runtime_descriptors {
                 words.splice(capability_end..capability_end, [(2 << 16) | 17, 5302]);
             }
+            super::spv_nonuniform::repair(&mut words)?;
             remap_heap_aliases(&mut words)?;
             validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
@@ -74,11 +78,11 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
         })
         .collect()
 }
-fn adapt(pass: Pass) -> Result<String> {
+fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
     // Select before interface adaptation: unreferenced program/shadow bindings
     // must not leak into a leaf's heap contract. Re-emission is structurally validated;
     // native Vulkan replay of the complete cohort is still required.
-    let mut module = parse(pass.source().as_ref())?;
+    let mut module = parse(wgsl)?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
     let source =
@@ -86,8 +90,9 @@ fn adapt(pass: Pass) -> Result<String> {
     let original = parse(&source)?;
     let body = strip_bindings(&source);
     if pass.indirect() {
-        super::heap_interface::assert_contract(
+        super::heap_interface::assert_source_contract(
             pass,
+            wgsl,
             &super::heap_interface::from_module(&original)?,
         )?;
         return super::packet_spirv::adapt(&source, &original);

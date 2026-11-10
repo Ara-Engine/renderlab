@@ -12,6 +12,7 @@ use ara_gpu::{
 pub struct Kernel {
     pipeline: Pipeline,
     pass: Pass,
+    contract: Option<[u8; 32]>,
     threads: [u32; 3],
 }
 impl Kernel {
@@ -31,7 +32,25 @@ impl Kernel {
         Ok(Self {
             pipeline: cache.pipeline(gpu, pass, RenderState::default())?,
             pass,
+            contract: None,
             threads,
+        })
+    }
+    /// Compile caller-authored WGSL prepared against this entry's packet family.
+    pub fn from_program(
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        program: &super::shader::Program,
+    ) -> Result<Self> {
+        ensure!(
+            program.pass() != Pass::VisibilitySoftware || gpu.info().buffer_int64_atomics,
+            "software visibility needs unsigned 64-bit buffer min/max atomics"
+        );
+        Ok(Self {
+            pipeline: cache.program(gpu, program)?,
+            pass: program.pass(),
+            contract: Some(program.contract()),
+            threads: program.threads(),
         })
     }
     /// Dispatch enough groups for a nonzero logical extent. The original shader
@@ -44,7 +63,9 @@ impl Kernel {
         extent: [u32; 3],
     ) -> Result<()> {
         ensure!(
-            inputs.pass() == self.pass && extent.iter().all(|n| *n > 0),
+            inputs.pass() == self.pass
+                && inputs.contract() == self.contract
+                && extent.iter().all(|n| *n > 0),
             "invalid kernel packet or extent"
         );
         graph.node_uses(rec, &inputs.uses())?;
@@ -67,6 +88,7 @@ impl Kernel {
     ) -> Result<()> {
         ensure!(
             inputs.pass() == self.pass
+                && inputs.contract() == self.contract
                 && offset.is_multiple_of(4)
                 && offset
                     .checked_add(12)

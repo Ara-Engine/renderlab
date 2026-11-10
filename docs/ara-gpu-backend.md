@@ -742,3 +742,44 @@ and shader validation. Native Vulkan is pending. Array/3D/uint image proxy forms
 are supported by reflection but not yet claimed as native-proven by this probe;
 storage-image binding arrays are explicitly unsupported. Binding-array indices
 retain Naga's unchecked policy and must be within their logical source count.
+
+## Programmable primary shading (entries 38–39)
+
+`primary_shade::Entry::{Tiles,List}.program(material_wgsl)` uses the original
+non-RT shading heads and `program::compose` / `compose_list`. The material owns
+its Surface/Parameters definitions and surface/shade hooks. `shader::Program`
+reflects that caller-owned source; `Kernel::from_program` and
+`HeapBindings::for_program` retain matching packet identities after the source
+is dropped. The native cache, workgroup reflection and SPIR-V export all consume
+that same source. Incompatible default/custom packets fail before recording.
+The array conformance replay also changes an authored workgroup size from 4 to 2
+and proves its native dispatch and exported SPIR-V.
+
+The original tiled and tile-list entries run against a 19×9 hit image, partial
+region, uncovered stale records, misses and two batch owners 3/37. Five 64-element
+geometry/material/parameter arrays and six image/sampler arrays stay in packet
+tails, including two-layer normal maps sampled at layer 1. The independent f64
+reference evaluates barycentric UV/color interpolation, transforms, material
+texture lookups and per-owner parameters. All 171 pixels compare within
+0.00048828125. Program-zero and program-one lists reproduce the full tiled image;
+the first list preserves exactly 36 other-program sentinel pixels. GPU-resident
+indirect buffers drive the lists; all three snapshots are queued before waiting.
+
+The shader algorithms were unchanged. Defaults disable atmosphere, decals and
+local lighting in this fixture; their original controls and valid fallback inputs
+remain. Analytic derivative values, filtered/mip material sampling and moving
+GI/reflection/shadow/temporal algorithms are not proven here. Native Vulkan is
+pending. The production non-RT source factory gains only crate visibility.
+
+Review found Naga 30 omits NonUniform on combined OpSampledImage results although
+its divergent image/sampler inputs are decorated. A shared word-level pass now
+propagates that resource identity, with an independent audit of every exported
+stage in addition to spirv-val. See [Khronos descriptor-indexing guidance](https://docs.vulkan.org/samples/latest/samples/extensions/descriptor_indexing/README.html).
+The query probe now uses four distinct extents and differing mip counts, so the
+CPU checks detect a wrong heap slot. Storage-image array rejection also runs in
+the integration target. The blocked legacy lib-test target is not relied upon.
+
+Checkpoint: 39 original entries plus display are proven. All 33 focused tests pass
+in both Metal validation modes. Fifty standard stages plus the authored-workgroup
+stage pass Vulkan 1.3 validation, native-entry and NonUniform binary audits.
+Focused backend library/integration clippy reports no new diagnostics.

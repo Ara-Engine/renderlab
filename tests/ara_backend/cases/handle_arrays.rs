@@ -5,7 +5,7 @@ use renderlab::backend_ara::{
     bindings::{HeapBindings, Input},
     buffer::StorageBuffer,
     kernel::Kernel,
-    shader::InputKey,
+    shader::{InputKey, Program},
     transfer::readback_buffer,
 };
 fn key(binding: u32) -> InputKey {
@@ -41,11 +41,68 @@ fn sample(data: &[[f32; 4]], uv: [f32; 2], sampler: SamplerDesc) -> [f32; 4] {
 }
 #[test]
 fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
+    let unsupported = Program::new(
+        Pass::HandleArrayProbe,
+        r#"
+        enable wgpu_binding_array;
+        @group(0) @binding(0) var images: binding_array<texture_storage_2d<rgba16float,write>,4>;
+        @compute @workgroup_size(1) fn probe() { textureStore(images[0],vec2(0),vec4(1.0)); }
+    "#,
+    );
+    ensure!(unsupported.is_err(), "storage-image binding array accepted");
     let path = root("handle-arrays");
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let kernel = Kernel::new(&mut gpu, &cache, Pass::HandleArrayProbe)?;
+    let authored = Program::new(
+        Pass::HandleArrayProbe,
+        include_str!("../../../src/backend_ara/shaders/handle_array_probe.wgsl")
+            .replace("@workgroup_size(4)", "@workgroup_size(2)"),
+    )?;
+    ensure!(
+        authored.threads() == [2, 1, 1],
+        "authored workgroup size ignored"
+    );
+    let authored_kernel = Kernel::from_program(&mut gpu, &cache, &authored)?;
+    let export = path.join("authored-spirv");
+    let stages = renderlab::backend_ara::cache::emit_spirv_program(&authored, &export)?;
+    for stage in &stages {
+        let bytes = std::fs::read(export.join(&stage.spirv))?;
+        let words: Vec<_> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect();
+        assert_nonuniform_sampled_images(&words)?;
+    }
+    if let Ok(sdk) = std::env::var("VULKAN_SDK") {
+        let validator =
+            std::path::Path::new(&sdk)
+                .join("bin")
+                .join(if cfg!(target_os = "windows") {
+                    "spirv-val.exe"
+                } else {
+                    "spirv-val"
+                });
+        if validator.is_file() {
+            for stage in stages {
+                let output = std::process::Command::new(&validator)
+                    .args(["--target-env", "vulkan1.3"])
+                    .arg(export.join(stage.spirv))
+                    .output()?;
+                ensure!(
+                    output.status.success(),
+                    "authored SPIR-V: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
     let mut textures = Vec::new();
+    let mut query_images = Vec::new();
+    let query_sizes = [[1, 1], [2, 1], [1, 2], [2, 2]];
+    let query_levels = [1, 2, 1, 2];
     let mut depths = Vec::new();
     let mut staging = Vec::new();
     let pixels: Vec<Vec<[f32; 4]>> = (0..4)
@@ -59,6 +116,23 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
     let mut graph = Graph::default();
     let mut rec = gpu.begin(Queue::Graphics);
     for i in 0..4 {
+        let (query, _) = Texture::mip_chain(
+            &mut gpu,
+            query_sizes[i],
+            query_levels[i],
+            Format::Rgba16Float,
+        )?;
+        let bytes = (0..query_levels[i])
+            .map(|m| (query_sizes[i][0] >> m).max(1) * (query_sizes[i][1] >> m).max(1) * 8)
+            .sum::<u32>();
+        staging.push(upload(
+            &mut gpu,
+            &mut graph,
+            &mut rec,
+            query.image,
+            &vec![0; bytes as usize],
+        )?);
+        query_images.push(query);
         let t = Texture::new(&mut gpu, [2, 2], Format::Rgba16Float, false, false)?;
         staging.push(upload(
             &mut gpu,
@@ -115,6 +189,7 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
     let image_maps = [[2, 0, 3, 2], [3, 2, 0, 3]];
     let depth_maps = [[1, 3, 0, 1], [2, 0, 3, 2]];
     let image_refs = image_maps.map(|m| m.map(|i| &textures[i]));
+    let query_refs = image_maps.map(|m| m.map(|i| &query_images[i]));
     let depth_refs = depth_maps.map(|m| m.map(|i| &depths[i]));
     let sampler_sets = [filters, [filters[3], filters[1], filters[0], filters[3]]];
     let comparison_sets = [
@@ -133,6 +208,7 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
             (key(2), Input::Images(&depth_refs[frame])),
             (key(3), Input::Samplers(&comparison_sets[frame])),
             (key(4), Input::Buffer(&output)),
+            (key(5), Input::Images(&query_refs[frame])),
         ]
     };
     let mut bad = values(0);
@@ -155,13 +231,31 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
     );
     let packets = [
         HeapBindings::new(&mut gpu, Pass::HandleArrayProbe, &values(0))?,
-        HeapBindings::new(&mut gpu, Pass::HandleArrayProbe, &values(1))?,
+        HeapBindings::for_program(&mut gpu, &authored, &values(1))?,
     ];
+    drop(authored);
+    ensure!(
+        authored_kernel
+            .record(&mut graph, &mut rec, &packets[0], [4, 1, 1])
+            .is_err(),
+        "default packet accepted by authored pipeline"
+    );
+    ensure!(
+        kernel
+            .record(&mut graph, &mut rec, &packets[1], [4, 1, 1])
+            .is_err(),
+        "authored packet accepted by default pipeline"
+    );
     let mut reads = Vec::new();
     let mut last = None;
-    for packet in &packets {
+    for (frame, packet) in packets.iter().enumerate() {
         packet.import(&mut graph);
-        kernel.record(&mut graph, &mut rec, packet, [4, 1, 1])?;
+        let active = if frame == 0 {
+            &kernel
+        } else {
+            &authored_kernel
+        };
+        active.record(&mut graph, &mut rec, packet, [4, 1, 1])?;
         reads.push(readback_buffer(
             &mut gpu,
             &mut graph,
@@ -211,7 +305,13 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
                 _ => unreachable!("fixture comparator"),
             };
             expected.extend([u8::from(pass) as f32; 4]);
-            expected.extend([2., 2., 1., 0.]);
+            let q = image_maps[frame][i];
+            expected.extend([
+                query_sizes[q][0] as f32,
+                query_sizes[q][1] as f32,
+                query_levels[q] as f32,
+                0.,
+            ]);
         }
         let error = actual
             .iter()
@@ -231,8 +331,9 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
         packet.retire(&mut gpu, &mut graph)?;
     }
     kernel.retire(&mut gpu)?;
+    authored_kernel.retire(&mut gpu)?;
     output.retire(&mut gpu)?;
-    for t in textures.into_iter().chain(depths) {
+    for t in textures.into_iter().chain(depths).chain(query_images) {
         gpu.retire(Resource::Image(t.image))?;
     }
     for b in staging {
