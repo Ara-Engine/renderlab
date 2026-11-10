@@ -6,9 +6,10 @@ another unit, **I** inference.
 
 ## Result
 
-**MERGE** the skinned-pose fix. On Showcase, RT frames get about **1.9x faster**: still 23.6-27.8
-to 13.2-14.0 ms; moving 26.1 to 14.0-15.8; cut 27.9 to 14.2-15.9. Non-RT frames get 1.1-1.2 ms
-faster. Images are unchanged within a few codes, inspected still, moving and on cuts.
+**MERGE** the skinned-pose fix. On Showcase, RT frames get about **1.9x faster**: still 25.4-28.8
+to 13.7-14.8 ms, moving 28.6 to 16.0, and cut 27.4 to 13.8 (per-pass span medians). Non-RT frames
+get 1.2-1.6 ms faster in shadow compute. Images are unchanged within a few codes, inspected still,
+moving and on cuts.
 
 - **Cause (M).** The GI cache and the non-RT virtual shadow cache treated every skinned placement as
   a moved caster on every frame, whether or not its pose had changed. Showcase holds two skinned
@@ -16,7 +17,9 @@ faster. Images are unchanged within a few codes, inspected still, moving and on 
   - GI re-traced their swept boxes and relit one eighth of every cell (`RELIGHT_PERIOD`) per frame,
     forever. That is 13-17 ms of GI passes, outside shading, on both paths.
   - The shadow cache re-rendered their caster pages: about 1.2 ms of non-RT shadow compute.
-  - Our own scenes (game, PBR, quarry) settle their caches when nothing moves. Showcase never did.
+  - ARA1's game, PBR and quarry scenes have no skinned mesh, so their caches settle when nothing
+    moves; Showcase's never did. (I) The game example's Fox would have paid the same cost
+    whenever it stood still; it was not timed here.
 - **Fix.** A placement deforms only when its skinned mesh or its pose revision changed since the
   previous frame (`skinning::deformed`). `set_joint_palette` bumps the revision only on a new
   palette, so an unchanged pose leaves the mesh's positions, and every cache built from them, valid.
@@ -98,18 +101,42 @@ script for the bridge path is in the evidence folder (`trace.sh`), unused.
 
 ## After (M)
 
-One lease, shipping-equivalent binary (the cache fix; see the confirmation run below), against the
-baseline binary in the same lease.
+Per-pass span medians, P-SHOW against the baseline binary. Baselines come from leases
+`pshow-verify-1` and `pshow-final-1`; the P-SHOW runs from `pshow-final-1` (its binary also
+carried a fade-band ray change that measured as noise and was dropped; the committed code is
+confirmed below).
 
-| Phase | Path | Baseline ms | P-SHOW ms |
-|---|---|---:|---:|
-| still | RT | 23.62 / 27.81 | 13.19 / 14.05 / 13.68 |
-| moving | RT | 26.11 | 14.04 / 15.75 |
-| cut | RT | 27.87 | 14.23 / 15.89 |
-| still | non-RT | 43.43 | 42.0-44.7 (shadow compute 3.55 → 2.3-2.4) |
+| Phase | Path | Baseline span | P-SHOW span | Baseline GI etc. | P-SHOW GI etc. |
+|---|---|---:|---:|---:|---:|
+| still | RT | 25.42 / 27.81 | 14.05 / 13.68 | 16.28 / 17.93 | 5.10 / 4.39 |
+| moving | RT | 28.63 | 16.01 | 16.13 | 1.80 |
+| cut | RT | 27.39 | 13.77 | 17.26 | 4.70 |
+| still | non-RT | 44.35 | 44.72 / 45.63 | 19.09 | 20.33 / 20.27 |
+| moving | non-RT | 44.02 | 43.83 | 18.15 | 19.53 |
 
-The second non-RT lease ran with heavy contention (its baseline repeat read 58 ms), so non-RT is
-compared by pass: shadow compute -1.2 ms, everything else unchanged by design.
+Non-RT shadow compute: still 3.55 → 2.32-2.42 ms, moving 6.53 → 5.22, cut 3.98 → 2.35. Non-RT GI
+and shading are unchanged by design. `pshow-final-1` was contended on non-RT (its baseline repeat
+read 62.8 ms), so non-RT is compared by pass.
+
+### Confirmation with the committed code (M)
+
+The table above came from a binary that also carried the dropped fade-band ray change, which is
+within noise. One more lease with the committed code and the baseline binary is below. It was
+contended (wall medians 50-70 ms on non-RT), so the comparison uses per-pass medians.
+
+| Run | Span | Shading | Shadow compute | GI etc. |
+|---|---:|---:|---:|---:|
+| RT still, baseline / P-SHOW / repeat | 28.84 / 14.38 / 14.76 | 8.62 / 8.33 / 8.46 | - | 18.47 / 4.49 / 4.59 |
+| RT moving, baseline / P-SHOW | 28.63 / 20.98 | 8.53 / 12.65 | - | 16.13 / 2.44 |
+| RT cut, baseline / P-SHOW | 27.39 / 16.27 | 8.74 / 8.91 | - | 17.26 / 5.55 |
+| non-RT still, baseline / P-SHOW repeat | 49.14 / 47.06 | 24.96 / 23.54 | 3.65 / 2.33 | 19.70 / 20.15 |
+
+The P-SHOW moving run's higher shading and receiver times are contention: neither pass changed.
+Images against the baseline: RT still max 12 codes (0.002 % over 8), moving frame 59 max 25, cut
+frame 7 max 3; non-RT still max 45 (0.001 %), moving max 26, cut max 125 on 0.001 %.
+
+**Lib tests:** `cargo test -p renderlab --lib` (dev test binary, run inside lease `pshow-ship-1`):
+206 passed, 0 failed, 164 ignored. That is main's 205 plus `placements_deform_only_on_a_new_pose`.
 
 ### Images (M, inspected)
 

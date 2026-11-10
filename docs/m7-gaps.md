@@ -685,8 +685,8 @@ unit report for the exact path and handoff.
 [P-SHOW](p-show.md): Showcase (Ara's sample scene, drawn through Ara's bridge) cost 22-28 ms RT and
 43 ms non-RT at 1080p against Ara Epic's 3.0 ms. The GI cache and the non-RT virtual shadow cache
 counted every skinned placement as a moved caster on every frame, even when its pose held, so a
-scene with any skinned mesh never settled. Fixed by comparing pose revisions: RT 23.6-27.8 to
-13.2-14.0 ms (still, moving and cut alike), non-RT shadow compute -1.2 ms; images within a few
+scene with any skinned mesh never settled. Fixed by comparing pose revisions: RT 25.4-28.8 to
+13.7-16.0 ms (still, moving and cut), non-RT shadow compute -1.2 to -1.6 ms; images within a few
 codes. Open:
 
 - **Non-RT GI still churns on skinned scenes (scaffolding).** Software-ray frames keep the old rule
