@@ -823,7 +823,7 @@ impl PrimaryState {
         shading: &str,
     ) -> [wgpu::ComputePipeline; 3] {
         let [kernels, shading] = [kernels, shading].map(|source| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("test-only F0/R1 film reference"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             })
@@ -1230,7 +1230,7 @@ impl PrimaryState {
     ) -> PrimaryPipelines {
         let [hard, soft] = sources.each_ref().map(|source| {
             ledger.own(
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("traced primary visibility and deferred shading"),
                     source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
                 }),
@@ -1254,7 +1254,7 @@ impl PrimaryState {
         let deferred = modern || sources[1].contains("fn primary_trace_interactive_deferred(");
         let check = modern.then(|| {
             ledger.own(
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("primary arithmetic edge checks; no traversal"),
                     source: wgpu::ShaderSource::Wgsl(edge_check_source(&sources[1]).into()),
                 }),
@@ -1324,7 +1324,7 @@ impl PrimaryState {
         ledger: &Ledger,
         source: &str,
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("temporal film trace"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
@@ -1466,7 +1466,7 @@ impl PrimaryState {
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
     ) -> [Owned<wgpu::ComputePipeline>; 2] {
-        let list = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let list = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("P-RTS penumbra list"),
             source: wgpu::ShaderSource::Wgsl(temporal_reconstruction::PENUMBRA_LIST.into()),
         });

@@ -1,5 +1,6 @@
 //! PC1: device-owned pipeline cache and opt-in startup profiling. Descriptors and
 //! shader sources are unchanged; wgpu still validates and compiles every edit.
+//! Engine-owned shaders share one runtime-check policy; user programs stay checked.
 use sha2::{Digest, Sha256};
 use std::{
     ops::Deref,
@@ -23,6 +24,7 @@ struct Compilation {
     cache: Option<wgpu::PipelineCache>,
     path: Option<PathBuf>,
     profile: bool,
+    checked_shaders: std::sync::atomic::AtomicBool,
     timings: Mutex<Vec<CompilationTiming>>,
 }
 
@@ -46,6 +48,13 @@ impl From<wgpu::Device> for PipelineDevice {
 }
 impl PipelineDevice {
     pub fn new(raw: wgpu::Device, disk: Option<(&Path, &wgpu::AdapterInfo)>) -> Self {
+        Self::with_shader_checks(raw, disk, false)
+    }
+    pub fn with_shader_checks(
+        raw: wgpu::Device,
+        disk: Option<(&Path, &wgpu::AdapterInfo)>,
+        checked: bool,
+    ) -> Self {
         let started = Instant::now();
         let path = disk.and_then(|(directory, adapter)| cache_path(directory, adapter));
         let bytes = path
@@ -80,8 +89,19 @@ impl PipelineDevice {
                 cache,
                 path,
                 profile,
+                checked_shaders: std::sync::atomic::AtomicBool::new(engine_shader_checks(checked)),
                 timings: Mutex::new(timings),
             }),
+        }
+    }
+    /// Custom preludes can feed any engine shading stage. Latch checks on for this
+    /// device and its reload workers before compiling one; existing trusted modules
+    /// still contain only the bundled source.
+    pub fn check_custom_prelude(&self, source: &str) {
+        if source != include_str!("../shaders/scene.wgsl") {
+            self.compilation
+                .checked_shaders
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
     pub fn pipeline_cache(&self) -> Option<&wgpu::PipelineCache> {
@@ -113,12 +133,27 @@ impl PipelineDevice {
         }
         result
     }
+    pub fn create_engine_shader_module(
+        &self,
+        desc: wgpu::ShaderModuleDescriptor<'_>,
+    ) -> wgpu::ShaderModule {
+        self.timed("module", desc.label, || {
+            shader_module(
+                &self.raw,
+                desc.clone(),
+                self.compilation
+                    .checked_shaders
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+    }
+    /// User-authored code always retains runtime checks, including reload workers.
     pub fn create_shader_module(
         &self,
         desc: wgpu::ShaderModuleDescriptor<'_>,
     ) -> wgpu::ShaderModule {
         self.timed("module", desc.label, || {
-            self.raw.create_shader_module(desc.clone())
+            shader_module(&self.raw, desc.clone(), true)
         })
     }
     pub fn create_compute_pipeline(
@@ -145,6 +180,37 @@ impl PipelineDevice {
             self.raw.create_render_pipeline(&desc)
         })
     }
+}
+
+/// Resolves once when the device facade is created, so reloads use the same policy.
+pub(crate) fn engine_shader_checks(default: bool) -> bool {
+    match std::env::var("RENDERLAB_ENGINE_SHADER_CHECKS").as_deref() {
+        Ok("checked" | "1") => true,
+        Ok("unchecked" | "0") => false,
+        _ => default,
+    }
+}
+/// The only runtime-check switch. WGSL parsing and static validation remain enabled.
+fn shader_module(
+    device: &wgpu::Device,
+    desc: wgpu::ShaderModuleDescriptor<'_>,
+    checked: bool,
+) -> wgpu::ShaderModule {
+    let checks = if checked {
+        wgpu::ShaderRuntimeChecks::checked()
+    } else {
+        wgpu::ShaderRuntimeChecks::unchecked()
+    };
+    // SAFETY: unchecked is used only for engine-owned shaders: bounded dispatches,
+    // explicit buffer bounds and terminating loops are the engine's responsibility.
+    // User-authored compositions always select checked, even in unchecked mode.
+    unsafe { device.create_shader_module_trusted(desc, checks) }
+}
+pub(crate) fn create_engine_shader_module(
+    device: &wgpu::Device,
+    desc: wgpu::ShaderModuleDescriptor<'_>,
+) -> wgpu::ShaderModule {
+    shader_module(device, desc, engine_shader_checks(false))
 }
 
 fn cache_path(directory: &Path, adapter: &wgpu::AdapterInfo) -> Option<PathBuf> {

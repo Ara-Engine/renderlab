@@ -745,7 +745,7 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let (device, ledger) = (&self.device, &self.ledger);
         let module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("AT1 atmosphere kernels"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             }),
@@ -764,7 +764,7 @@ impl Renderer {
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
         let temporal = k("at_fog_temporal");
         let inject_virtual = (!hardware).then(|| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!("{COMMON}{KERNELS}{}", Self::atmosphere_shadow_source()).into(),
@@ -824,7 +824,7 @@ impl Renderer {
             ),
         ];
         let sky_module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("AT1 raster sky"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!("{}{SKY}", crate::atmosphere::api_source()).into(),

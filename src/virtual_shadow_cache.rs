@@ -179,7 +179,7 @@ impl SurfaceCache {
             &[Some(&insert_layout), None, None, Some(lighting)],
         );
         let module = ledger.own(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8n surface cache"),
                 source: wgpu::ShaderSource::Wgsl(surface_source().into()),
             }),

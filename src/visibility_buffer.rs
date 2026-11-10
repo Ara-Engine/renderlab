@@ -875,7 +875,7 @@ impl VisibilityBuffer {
                        entry: &str,
                        groups: &[Option<&wgpu::BindGroupLayout>],
                        constants: &[(&str, f64)]| {
-            let module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(entry),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
@@ -912,7 +912,7 @@ impl VisibilityBuffer {
             ],
             &[],
         );
-        let shader = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("N1c hardware ID raster"),
             source: wgpu::ShaderSource::Wgsl(
                 stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),

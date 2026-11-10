@@ -285,7 +285,7 @@ impl Renderer {
         }
         let module = self
             .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("SK1 skinning"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/skinning.wgsl").into()),
             });

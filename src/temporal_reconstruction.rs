@@ -515,7 +515,7 @@ impl PrimaryState {
         resolve: &str,
         trace: Option<(&str, &PrimaryPipelines)>,
     ) -> Pipelines {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("temporal reconstruction"),
             source: wgpu::ShaderSource::Wgsl(resolve.into()),
         });
@@ -531,7 +531,7 @@ impl PrimaryState {
             ResourceKind::ComputePipeline,
         );
         let trace = trace.map(|(source, production)| {
-            let soft = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let soft = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("temporal reconstruction Interactive trace"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });

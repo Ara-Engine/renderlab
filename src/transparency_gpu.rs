@@ -446,7 +446,7 @@ impl Renderer {
     fn tp_module(&self, label: &str, source: &str) -> Owned<wgpu::ShaderModule> {
         self.ledger.own(
             self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 }),
@@ -971,7 +971,21 @@ impl Renderer {
     ) -> Result<GlassPipelines, Error> {
         let slot = self.program_slot(program);
         let scopes = OperationScopes::new(&self.device);
-        let module = self.tp_module(&format!("TP1 transparent {}", slot.label), source);
+        let module = self.ledger.own(
+            {
+                let label = format!("TP1 transparent {}", slot.label);
+                let descriptor = wgpu::ShaderModuleDescriptor {
+                    label: Some(&label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                };
+                if slot.source == crate::program::STANDARD_PROGRAM {
+                    self.device.create_engine_shader_module(descriptor)
+                } else {
+                    self.device.create_shader_module(descriptor)
+                }
+            },
+            ResourceKind::ShaderModule,
+        );
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
         let make = |tangent: bool, lobe: bool| {
