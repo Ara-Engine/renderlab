@@ -296,6 +296,32 @@ pub(crate) fn atmosphere(sky: Sky, settings: &Settings) -> Atmosphere {
     }
 }
 
+/// Measurement ablations (P-SHOW2, docs/p-show2.md): `RENDERLAB_ABLATE` lists features
+/// to switch off whatever the embedder asks for, comma-separated: `gi`, `reflections`,
+/// `local_shadows`, `media` (aerial perspective, height and volumetric fog), `post`, `tr1`.
+/// Lets a harness split a fused pass's cost without changing the embedder.
+pub(crate) fn ablated(mut s: Settings) -> Settings {
+    let Ok(list) = std::env::var("RENDERLAB_ABLATE") else {
+        return s;
+    };
+    for feature in list.split(',').map(str::trim) {
+        match feature {
+            "gi" => s.global_illumination = false,
+            "reflections" => s.reflections = crate::ReflectionSettings::off(),
+            "local_shadows" => s.local_shadows.count = 0,
+            "media" => {
+                s.aerial_perspective = false;
+                s.height_fog = None;
+                s.volumetric_fog = None;
+            }
+            "post" => s.post.enabled = false,
+            "tr1" => s.temporal_reconstruction = false,
+            _ => {}
+        }
+    }
+    s
+}
+
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {

@@ -28,6 +28,7 @@ mod material;
 mod mesh;
 mod normal;
 mod observe;
+mod pass_timeline;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;

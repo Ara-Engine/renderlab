@@ -547,6 +547,7 @@ impl Renderer {
                 specular_second: None,
                 lobes: None,
                 independent: false,
+                banked: false,
                 levels: ENVIRONMENT_LEVELS,
                 // World axes: cancel the caller's yaw.
                 yaw: -self.environment.parameters.rotation_y_radians,

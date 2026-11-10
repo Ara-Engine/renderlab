@@ -345,7 +345,7 @@ impl Engine {
             sun: None,
             lights: Vec::new(),
             sky: Sky::default(),
-            settings: descriptor.settings,
+            settings: settings::ablated(descriptor.settings),
             events: Events::default(),
         };
         settings::apply(&mut engine.renderer, path, &engine.settings)?;
@@ -881,6 +881,7 @@ impl Engine {
         self.sky
     }
     pub fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
+        let settings = settings::ablated(settings);
         if settings == self.settings {
             return Ok(());
         }

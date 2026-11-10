@@ -103,6 +103,10 @@ loop {
 | `create_emitter(&EmitterDescriptor, sprite)` | `EmitterId` | a GPU particle emitter (see [Glass, foliage and particles](#glass-foliage-and-particles)) |
 | `remove_*(id)` | | meshes and materials only once no object uses them; materials keep their own textures and program alive |
 
+`create_environment` takes both `PreparedEnvironment` layouts, at the same shading cost:
+- **independent-roughness (RLE2):** what `renderlab_cook::environment::prepare_environment` makes. It is the better field: it also separates the sky's dominant lobes.
+- **legacy mip chain (RLE1, `PreparedEnvironment::new`):** each level is half the size of the one before. Levels narrower than 32 texels are resampled at load into 32-texel banks, each texel the level's own exact cube-bilinear value at its centre, so glossy and rough lookups stay inside one cube face. Wider levels are used as given, and a chain adds at most about 1 MiB. Before this (P-SHOW2, [p-show2.md](p-show2.md)), a 16-texel chain cost Showcase about 38 ms of glossy shading at 1080p.
+
 `MaterialDesc::default()` is an untextured, double-sided, white dielectric (metallic 0, roughness 0.5) on the standard program. Keep `double_sided: true` for now: both paths' shadowed primaries currently need double-sided materials. `thin: true` lets shadow rays leave either side, for leaves and cards. `transparency: Some(Transparency { opacity, ior, thickness })` makes the material glass (below).
 
 ## Objects
