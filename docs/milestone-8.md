@@ -4,13 +4,13 @@ Islam, 2026-11-09, after reviewing the ARA1 comparison ([m7-ara1-report.md](m7-a
 
 ## Quality bar
 
-These rules are hard:
+Islam clarified the bar on 2026-11-10: "Look all I care about is visual fidelity that looks better than unreal's and solves all unreal's issues like ghosting and all of that, at the same time it has at least 3x the performance or so, all of these numbers are like we are working towards and commit as we go, it does not mean we ignore something that makes us 1.5x faster just because it does not achieve 3x we use 1.5x until we figure out the next one and so on". The rules below replace the 2026-11-09 version, which had required byte identity and equal-or-better scores on every crop. He never asked for those.
 
-- Every measured aspect keeps its current image quality against the path-traced references, on both paths: still, moving and on cuts.
-- A pure optimisation must be byte-identical.
-- Any other change must be equal or better on every crop and population in the ARA1 harness and the existing fixtures.
-- No quality setting is lowered or capped to buy time. The 16-ray glossy budget and the 128-light shadow budget stay unless an alternative matches them.
-- An idea that needs a quality trade is recorded and dropped.
+- The gate is the visible image, still, moving and on cuts, on both paths, judged against Unreal with its full feature set. The path-traced references guide that judgement; they are not a per-crop pass/fail. A visible regression blocks a change.
+- Unreal's visible flaws, such as ghosting, are targets to beat and need explicit test cases.
+- Speed targets (about 3x Unreal; the ARA1 targets below) are directions, not floors. Keep any change that is faster and not visibly worse, then keep going.
+- Byte identity is still the cheapest proof that nothing changed, so use it when a change is meant to be exact. When it isn't, inspect the images and record ARA1 scores.
+- No quality setting is lowered or capped to buy time. The 16-ray glossy budget and the 128-light shadow budget stay unless an alternative looks as good.
 
 ## Targets
 
