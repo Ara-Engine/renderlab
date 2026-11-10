@@ -139,23 +139,126 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     if all(first>=vec2<i32>(0)) && all(first+vec2<i32>(3)<vec2<i32>(extent)) {
         let atlas=vec2<f32>(textureDimensions(rl_local_depth));
         let tile=rl_light_frame.tiles[slot];
-        var left=vec4<f32>(0.0);
-        var right=vec4<f32>(0.0);
+        // Fixed components keep the 4x4 PCF block in registers. Preserve the
+        // original row-major comparisons and accumulation (including each weight).
         var gathered=0.0;
-        for(var j=0;j<4;j+=1) {
-            if (j&1)==0 {
-                let centre=(vec2<f32>(first+vec2<i32>(0,j))+tile.xy+vec2<f32>(1.0))/atlas;
-                left=textureGather(rl_local_depth,dfg_sampler,centre,i32(layer%6u));
-                right=textureGather(rl_local_depth,dfg_sampler,centre+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
-            }
-            let row=select(vec4<f32>(left.w,left.z,right.w,right.z),vec4<f32>(left.x,left.y,right.x,right.y),(j&1)!=0);
-            for(var i=0;i<4;i+=1) {
-                let coordinate=origin+vec2<i32>(i-1,j-1);
-                let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-                let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
-                let visibility=select(0.0,1.0,reference>=row[i]);
-                gathered+=visibility*rl_pcf_weight(i,f.x)*rl_pcf_weight(j,f.y);
-            }
+        let centre0=(vec2<f32>(first+vec2<i32>(0,0))+tile.xy+vec2<f32>(1.0))/atlas;
+        let left0=textureGather(rl_local_depth,dfg_sampler,centre0,i32(layer%6u));
+        let right0=textureGather(rl_local_depth,dfg_sampler,centre0+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
+        {
+            let coordinate=origin+vec2<i32>(0-1,0-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left0.w);
+            gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(0,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(1-1,0-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left0.z);
+            gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(0,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(2-1,0-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right0.w);
+            gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(0,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(3-1,0-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right0.z);
+            gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(0,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(0-1,1-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left0.x);
+            gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(1,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(1-1,1-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left0.y);
+            gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(1,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(2-1,1-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right0.x);
+            gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(1,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(3-1,1-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right0.y);
+            gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(1,f.y);
+        }
+        let centre2=(vec2<f32>(first+vec2<i32>(0,2))+tile.xy+vec2<f32>(1.0))/atlas;
+        let left2=textureGather(rl_local_depth,dfg_sampler,centre2,i32(layer%6u));
+        let right2=textureGather(rl_local_depth,dfg_sampler,centre2+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
+        {
+            let coordinate=origin+vec2<i32>(0-1,2-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left2.w);
+            gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(2,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(1-1,2-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left2.z);
+            gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(2,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(2-1,2-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right2.w);
+            gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(2,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(3-1,2-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right2.z);
+            gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(2,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(0-1,3-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left2.x);
+            gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(3,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(1-1,3-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=left2.y);
+            gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(3,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(2-1,3-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right2.x);
+            gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(3,f.y);
+        }
+        {
+            let coordinate=origin+vec2<i32>(3-1,3-1);
+            let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let visibility=select(0.0,1.0,reference>=right2.y);
+            gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(3,f.y);
         }
         return gathered/9.0;
     }
