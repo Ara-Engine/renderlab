@@ -3938,3 +3938,7 @@ mod skinning_tests;
 #[cfg(test)]
 #[path = "light_cluster_tests.rs"]
 mod light_cluster_tests;
+
+#[cfg(test)]
+#[path = "../tools/shader_compile_structure.rs"]
+mod shader_compile_structure;

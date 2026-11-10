@@ -44,6 +44,39 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+fn kernel_source(hardware: bool) -> String {
+    format!(
+        "{}{COMMON}{KERNELS}{}",
+        if hardware {
+            "enable wgpu_ray_query;\n"
+        } else {
+            ""
+        },
+        if hardware {
+            HARDWARE_VISIBILITY
+        } else {
+            MAP_VISIBILITY
+        },
+    )
+}
+
+fn virtual_kernel_source() -> String {
+    format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source())
+}
+
+fn sky_source() -> String {
+    format!("{}{SKY}", crate::atmosphere::api_source())
+}
+
+#[cfg(test)]
+pub(super) fn compile_structure_sources(hardware: bool) -> Vec<(&'static str, String)> {
+    let mut sources = vec![("kernels", kernel_source(hardware)), ("sky", sky_source())];
+    if !hardware {
+        sources.push(("virtual-injection", virtual_kernel_source()));
+    }
+    sources
+}
+
 #[derive(PartialEq)]
 struct VisibilityKey {
     virtual_map: bool,
@@ -730,19 +763,7 @@ impl Renderer {
             return Ok(());
         }
         let hardware = self.hardware_shadows.is_some();
-        let source = format!(
-            "{}{COMMON}{KERNELS}{}",
-            if hardware {
-                "enable wgpu_ray_query;\n"
-            } else {
-                ""
-            },
-            if hardware {
-                HARDWARE_VISIBILITY
-            } else {
-                MAP_VISIBILITY
-            }
-        );
+        let source = kernel_source(hardware);
         let scopes = OperationScopes::new(&self.device);
         let (device, ledger) = (&self.device, &self.ledger);
         let module = ledger.own(
@@ -767,9 +788,7 @@ impl Renderer {
         let inject_virtual = (!hardware).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!("{COMMON}{KERNELS}{}", Self::atmosphere_shadow_source()).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(virtual_kernel_source().into()),
             });
             kernel(device, ledger, &module, "at_fog_inject")
         });
@@ -827,9 +846,7 @@ impl Renderer {
         let sky_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("AT1 raster sky"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!("{}{SKY}", crate::atmosphere::api_source()).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(sky_source().into()),
             }),
             ResourceKind::ShaderModule,
         );

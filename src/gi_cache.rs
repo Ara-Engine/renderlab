@@ -901,6 +901,38 @@ pub(super) fn kernel_source(software: bool, directions: u32) -> String {
     )
 }
 
+/// Shared source composition for the production cell pipeline and CPU source census.
+fn cell_shading_source(
+    head: &str,
+    source: &str,
+    directions: u32,
+    mixed: Option<u64>,
+) -> crate::program::Composed {
+    let parameters = crate::program::declares_parameters(source);
+    let mut composed =
+        crate::program::compose(head, source, crate::program::Stage::Cell, parameters);
+    // Cell shading reads cold records too: retain the tracing kernel's packed layout.
+    let line = "const GI_DIRECTIONS:u32=64u;";
+    assert_eq!(composed.source.matches(line).count(), 1);
+    composed.source = composed
+        .source
+        .replace(line, &format!("const GI_DIRECTIONS:u32={directions}u;"));
+    if let Some(id) = mixed {
+        composed.source = mixed_cell_entry(&composed.source, id);
+    }
+    composed
+}
+
+#[cfg(test)]
+pub(super) fn compile_structure_cell_source(
+    head: &str,
+    program: &str,
+    directions: u32,
+    mixed: bool,
+) -> String {
+    cell_shading_source(head, program, directions, mixed.then_some(0)).source
+}
+
 /// Each fixed direction's eight nearest directions of the unrotated set (the kernels'
 /// gi_local_direction, in f64), nearest first with ties to the lower index, as 8-bit
 /// indices four to a word, padded to 256 words (128 directions).
@@ -1626,20 +1658,12 @@ impl Renderer {
         } else {
             super::primary_ray_gpu::non_rt_sources(&self.source)?.1
         };
-        let parameters = crate::program::declares_parameters(&source);
-        let mut composed =
-            crate::program::compose(&heads[1], &source, crate::program::Stage::Cell, parameters);
-        // P-MEM: cell shading reads cold material/light records too. Its cached pipeline
-        // must use the same packed layout as this direction count's tracing kernels.
-        let line = "const GI_DIRECTIONS:u32=64u;";
-        assert_eq!(composed.source.matches(line).count(), 1);
-        composed.source = composed.source.replace(
-            line,
-            &format!("const GI_DIRECTIONS:u32={}u;", self.gi.settings.directions),
+        let composed = cell_shading_source(
+            &heads[1],
+            &source,
+            self.gi.settings.directions,
+            mixed.then_some(id),
         );
-        if mixed {
-            composed.source = mixed_cell_entry(&composed.source, id);
-        }
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
