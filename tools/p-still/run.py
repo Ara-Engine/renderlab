@@ -12,6 +12,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import host  # noqa: E402  (run_guarded: the 5 GiB stop)
+
 HERE = Path(__file__).resolve().parent
 WORK = Path("D:/Coding/renderlab-work/p-still")
 BINARY = WORK / "bin/p_yard_capture.exe"
@@ -38,12 +41,15 @@ def run(step):
         else:
             command = [str(BINARY), str(MANIFESTS[manifest]), scene, path, str(out),
                        "capture" if mode == "capture" else "timing"]
-        code = subprocess.run(command,
-                              stdout=log, stderr=subprocess.STDOUT, env=env, timeout=600,
-                              creationflags=subprocess.CREATE_NO_WINDOW).returncode
+        code, stopped = host.run_guarded(command, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                         creationflags=subprocess.CREATE_NO_WINDOW)
     (out / "process.json").write_text(json.dumps(dict(step=step, exit_code=code, seconds=time.monotonic() - start,
                                                       binary=str(BINARY))))
-    print(step, "exit", code, f"{time.monotonic() - start:.1f} s", flush=True)
+    print(step, "exit", code, "STOPPED below 5 GiB" if stopped else "", f"{time.monotonic() - start:.1f} s", flush=True)
+    if stopped:
+        import shutil
+        shutil.rmtree(out)  # incomplete; rerun on requeue
+        raise SystemExit(75)
     return code
 
 

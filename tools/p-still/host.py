@@ -24,7 +24,34 @@ TARGET = WORK / "target"
 BINARY = WORK / "bin/p_yard_capture.exe"
 
 
+def free_gib():
+    """Available physical memory (GlobalMemoryStatusEx: no process snapshot, cheap under pressure)."""
+    import ctypes
+
+    class Status(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+            (n, ctypes.c_ulonglong) for n in ("total", "avail", "page_total", "page_avail", "virt_total", "virt_avail", "ext")]
+    st = Status()
+    st.length = ctypes.sizeof(Status)
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+    return st.avail / 2**30
+
+
+def run_guarded(command, floor_gib=5.0, **kwargs):
+    """Run COMMAND; stop its process tree if available RAM falls below FLOOR_GIB (root budget
+    2026-11-10). Returns (exit code, stopped)."""
+    proc = sp.Popen(command, **kwargs)
+    while proc.poll() is None:
+        if free_gib() < floor_gib:
+            sp.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+            proc.wait()
+            return proc.returncode, True
+        time.sleep(1)
+    return proc.returncode, False
+
+
 def post(line):
+    line = f"{free_gib():.1f} GiB free | " + line  # root budget 2026-11-10: every line starts with free RAM
     with SCHEDULE.open("a", encoding="utf-8") as f:
         f.write("\n" + line + "\n")
     print(line, flush=True)
@@ -74,8 +101,9 @@ def runner():
 
 # Root order 2026-11-10T15:02: builds and short leases start at 6 GiB available; this unit's
 # full-quarry leases keep 7 GiB (quarry runs tripped the 2 GiB runtime guard below that).
-BUILD_MIB = 6144
-LEASE_MIB = 7168
+# Root budget 2026-11-10 (sole unit): start builds and leases at 10 GiB, stop below 5 GiB.
+BUILD_MIB = 10240
+LEASE_MIB = 10240
 
 
 def ready(r, label):
@@ -119,7 +147,7 @@ def build():
     r = runner()
     command = ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture", "--example", "ara1_capture"]
     WORK.mkdir(parents=True, exist_ok=True)
-    post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=6 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
+    post(f"[{OWNER} request] owner={OWNER} adapter: one Cargo command, atomic build slot + stillkit mutex; >=10 GiB start, stop <5 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.restype = ctypes.c_void_p
@@ -144,11 +172,11 @@ def build():
     token = uuid.uuid4().hex
     (BUILD_SLOT / "owner.json").write_text(json.dumps(dict(owner=OWNER, token=token, pid=os.getpid(), utc=r.utc(), command=command)))
     start = time.monotonic()
-    code = 1
+    code, stopped = 1, False
     try:
         with (WORK / "build.log").open("w") as log:
-            code = sp.run(command, cwd=REPO, stdout=log, stderr=sp.STDOUT,
-                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}).returncode
+            code, stopped = run_guarded(command, cwd=REPO, stdout=log, stderr=sp.STDOUT,
+                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")})
         if code == 0:
             BINARY.parent.mkdir(exist_ok=True)
             shutil.copy2(TARGET / "release/examples/p_yard_capture.exe", BINARY)
@@ -166,7 +194,7 @@ def build():
             (BUILD_SLOT / "owner.json").unlink()
             BUILD_SLOT.rmdir()
         kernel.ReleaseMutex(mutex)
-        post(f"{OWNER} adapter window released {r.utc()} (build exit {code}, {time.monotonic() - start:.0f} s; no owned build remains).")
+        post(f"{OWNER} adapter window released {r.utc()} (build exit {code}{', stopped below 5 GiB' if stopped else ''}, {time.monotonic() - start:.0f} s; no owned build remains).")
     print((WORK / "build.log").read_text(errors="replace")[-3000:])
     return code
 
@@ -175,11 +203,19 @@ def lease(label, minutes, command):
     """Wait for admission, then run COMMAND under scripts/n8-run.py's guarded lease."""
     assert 0 < minutes <= 15
     r = runner()
+    requeues = 0
     while True:
         wait_ready(r, label)
         env = os.environ | {"N8_OWNER": OWNER, "N8_OUT": str(WORK / "lease")}
         code = sp.run(["py", "-3", "-B", str(REPO / "scripts/n8-run.py"), "--label", label, "--minutes", str(minutes),
                        "--fast-check", "--", *command], cwd=REPO, env=env).returncode
+        # run.py stops its own capture process below 5 GiB and exits 75; n8-run's finally has
+        # released the lease by then. Requeue behind admission; finished steps are skipped.
+        if code == 75 and requeues < 2:
+            requeues += 1
+            post(f"{OWNER} {label} window released {r.utc()} (stopped by its owner: available RAM below 5 GiB; requeued behind 10 GiB admission).")
+            label = label + "q"
+            continue
         if code != 3:
             return code
         label = label + "r"  # a deferral leaves the label's log; retry under a new one
