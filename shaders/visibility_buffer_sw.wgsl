@@ -10,7 +10,7 @@ struct Args {sw_x:u32,sw_y:u32,sw_z:u32,sw_count:u32};
 @group(0) @binding(5) var<storage,read> args:Args;
 @group(0) @binding(8) var<storage,read_write> visibility:array<atomic<u64>>;
 // Its own group: wgpu forbids binding arrays beside uniform buffers.
-@group(2) @binding(8) var<storage,read> cluster_data:binding_array<U32s,64>;
+@group(2) @binding(8) var<storage,read> cluster_data:binding_array<U32s,PRIMARY_BATCHES>;
 // Pixel x, y (y down) and NDC depth.
 var<workgroup> screen:array<vec3<f32>,128>;
 var<workgroup> wg_cluster:u32;

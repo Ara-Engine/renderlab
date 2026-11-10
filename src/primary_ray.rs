@@ -59,7 +59,7 @@ pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
 }
 
 /// Draws one traced frame can bind: descriptor-indexed geometry and material slots.
-pub const TRACED_DRAWS: u32 = 64;
+pub const TRACED_DRAWS: u32 = 256;
 /// Device features traced visibility needs in addition to hardware ray queries.
 /// Hit-vertex return also marks every acceleration structure such a renderer builds.
 pub const TRACED_FEATURES: wgpu::Features =
