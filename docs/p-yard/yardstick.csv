@@ -1,0 +1,41 @@
+config,label,engine,path,state,gpu_ms_p50,gpu_ms_visit_range,rms_full_L0,rms_full_L4,rms_full_noise_subtracted_L0,rms_image_L0,rms_edge_L0,flicker_L0,scored_frames
+ue-hw-c,UE HW Lumen Cinematic,Unreal,RT,still,6.5771,6.563 to 6.591,8.5104,12.0908,8.5078,3.4911,10.667,,1
+ue-hw-c,UE HW Lumen Cinematic,Unreal,RT,moving,6.667,6.656 to 6.678,9.1136,13.094,9.104,3.7489,11.7148,3.6553,60
+ue-hw-c,UE HW Lumen Cinematic,Unreal,RT,cut,6.6181,6.571 to 6.665,9.7681,14.6688,9.7585,3.9936,13.9535,,1
+ue-hw-c,UE HW Lumen Cinematic,Unreal,RT,recover,6.5311,6.522 to 6.540,9.241,13.9193,9.2309,3.7488,11.664,,31
+ue-hw-e,UE HW Lumen Epic,Unreal,RT,still,4.5018,4.493 to 4.510,8.3936,11.6188,8.391,3.4438,11.275,,1
+ue-hw-e,UE HW Lumen Epic,Unreal,RT,moving,4.5748,4.554 to 4.596,8.9408,12.6346,8.931,3.6782,12.2083,3.6802,60
+ue-hw-e,UE HW Lumen Epic,Unreal,RT,cut,4.5248,4.477 to 4.572,9.5679,14.2553,9.5581,3.9117,14.2808,,1
+ue-hw-e,UE HW Lumen Epic,Unreal,RT,recover,4.4762,4.467 to 4.485,9.067,13.5482,9.0567,3.6791,12.137,,31
+ue-hw-h,UE HW Lumen High,Unreal,RT,still,4.1312,4.121 to 4.141,9.1755,13.0651,9.1731,3.7684,12.1284,,1
+ue-hw-h,UE HW Lumen High,Unreal,RT,moving,4.2237,4.214 to 4.233,9.8709,14.078,9.8621,4.0605,12.9719,3.7823,60
+ue-hw-h,UE HW Lumen High,Unreal,RT,cut,4.248,4.223 to 4.273,10.4925,15.5266,10.4836,4.2849,14.8816,,1
+ue-hw-h,UE HW Lumen High,Unreal,RT,recover,4.1127,4.099 to 4.127,10.0091,14.9327,9.9998,4.0647,13.2083,,31
+ue-low,UE Low,Unreal,non-RT,still,3.0999,3.096 to 3.104,10.6691,15.0036,10.6671,4.3739,15.9088,,1
+ue-low,UE Low,Unreal,non-RT,moving,3.165,3.158 to 3.172,10.8302,15.5112,10.8222,4.4465,16.268,3.3442,60
+ue-low,UE Low,Unreal,non-RT,cut,3.2265,3.146 to 3.307,11.6224,17.4411,11.6144,4.728,18.2206,,1
+ue-low,UE Low,Unreal,non-RT,recover,3.0979,3.087 to 3.109,11.4892,17.2347,11.4811,4.6556,17.3171,,31
+ue-med,UE Medium,Unreal,non-RT,still,3.1221,3.118 to 3.126,10.6159,15.2064,10.6139,4.3492,16.3732,,1
+ue-med,UE Medium,Unreal,non-RT,moving,3.183,3.178 to 3.188,10.907,15.8886,10.8991,4.4769,16.7955,3.3738,60
+ue-med,UE Medium,Unreal,non-RT,cut,3.2832,3.179 to 3.387,11.8844,18.0203,11.8765,4.8374,19.1474,,1
+ue-med,UE Medium,Unreal,non-RT,recover,3.1241,3.119 to 3.129,11.7443,17.7883,11.7364,4.7569,18.1396,,31
+ue-sw-c,UE SW Lumen Cinematic,Unreal,non-RT,still,6.0859,6.073 to 6.099,9.6266,14.6114,9.6243,3.9464,13.8317,,1
+ue-sw-c,UE SW Lumen Cinematic,Unreal,non-RT,moving,6.1687,6.169 to 6.169,10.2819,15.7275,10.2735,4.2254,14.7885,3.6627,60
+ue-sw-c,UE SW Lumen Cinematic,Unreal,non-RT,cut,6.1657,6.165 to 6.166,11.1857,17.8566,11.1773,4.5618,16.9586,,1
+ue-sw-c,UE SW Lumen Cinematic,Unreal,non-RT,recover,6.0625,6.056 to 6.069,10.7725,17.337,10.7638,4.3665,15.3075,,31
+ue-sw-e,UE SW Lumen Epic,Unreal,non-RT,still,4.0202,4.014 to 4.026,9.3155,13.9953,9.3131,3.8199,13.83,,1
+ue-sw-e,UE SW Lumen Epic,Unreal,non-RT,moving,4.118,4.105 to 4.131,9.9022,15.0611,9.8935,4.0703,14.6535,3.6859,60
+ue-sw-e,UE SW Lumen Epic,Unreal,non-RT,cut,4.1067,4.088 to 4.125,10.7622,17.1819,10.7535,4.3909,16.7442,,1
+ue-sw-e,UE SW Lumen Epic,Unreal,non-RT,recover,4.0386,4.034 to 4.043,10.3353,16.6452,10.3263,4.1906,15.0991,,31
+ue-sw-h,UE SW Lumen High,Unreal,non-RT,still,3.768,3.766 to 3.770,9.9441,15.0355,9.942,4.0814,14.2711,,1
+ue-sw-h,UE SW Lumen High,Unreal,non-RT,moving,3.8529,3.850 to 3.856,10.6317,16.097,10.6235,4.3706,14.9779,3.786,60
+ue-sw-h,UE SW Lumen High,Unreal,non-RT,cut,3.8687,3.863 to 3.874,11.4944,18.1445,11.4863,4.6864,17.0084,,1
+ue-sw-h,UE SW Lumen High,Unreal,non-RT,recover,3.7761,3.768 to 3.785,11.0602,17.6587,11.0518,4.4879,15.6132,,31
+rl-nonrt,Renderlab non-RT,Renderlab,non-RT,still,8.65,8.608 to 8.692,7.2973,9.3291,7.2943,2.9885,11.1924,,1
+rl-nonrt,Renderlab non-RT,Renderlab,non-RT,moving,10.5669,10.557 to 10.577,7.7248,9.8556,7.7136,3.1847,11.9546,4.4384,60
+rl-nonrt,Renderlab non-RT,Renderlab,non-RT,cut,43.1114,41.797 to 44.426,8.2598,11.2306,8.2485,3.4168,15.0181,,1
+rl-nonrt,Renderlab non-RT,Renderlab,non-RT,recover,8.706,8.515 to 8.898,7.5253,10.3152,7.5129,3.057,11.5211,,31
+rl-rt,Renderlab RT,Renderlab,RT,still,3.8152,3.333 to 4.297,6.6301,8.7414,6.6268,2.7149,10.5163,,1
+rl-rt,Renderlab RT,Renderlab,RT,moving,4.2619,4.234 to 4.290,7.237,9.4834,7.225,2.9868,11.5578,4.3917,60
+rl-rt,Renderlab RT,Renderlab,RT,cut,12.6019,12.564 to 12.639,7.7114,10.7345,7.6993,3.2004,14.7202,,1
+rl-rt,Renderlab RT,Renderlab,RT,recover,3.5272,3.521 to 3.534,6.9394,9.8144,6.9259,2.8211,11.0463,,31
